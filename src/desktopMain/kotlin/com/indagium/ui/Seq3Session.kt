@@ -379,7 +379,18 @@ class Seq3Session(
         replace(id) { current ->
             // A freshly generated document's title is empty (Seq3Generator never invents one); keep
             // whatever the user already typed rather than blanking it on every regenerate.
-            current.copy(document = fresh.copy(title = current.document.title.ifBlank { fresh.title }), generating = false)
+            val document = fresh.copy(title = current.document.title.ifBlank { fresh.title })
+            val tab = current.sourceTabId?.let(appState::tab)
+            val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+            val libraryItemId = tab?.let {
+                saveToLibrary(current, it, encodeSeq3Note(document, current.dialect, exportMode = exportMode))?.id
+            }
+            current.copy(
+                document = document,
+                generating = false,
+                libraryItemId = libraryItemId ?: current.libraryItemId,
+                exportMode = exportMode,
+            )
         }
         syncLiveLinkedNote(id)
     }
@@ -475,12 +486,27 @@ class Seq3Session(
 
     // ── Dirty flag / explicit note save ─────────────────────────────────────────────────────────
     //
-    // Diagram edits intentionally remain in the in-memory workspace. This is separate from
-    // AppState's annotation autosave: opening or editing a diagram must never create or rewrite a
-    // note until the user explicitly presses the title-strip note action.
+    // Diagram edits remain outside AppState's annotation autosave: opening or editing a diagram
+    // never creates or rewrites a note until the user explicitly presses the title-strip note
+    // action. The separate diagram-library draft is synchronized by [autoSaveDraftToLibrary].
     private fun markDirty(id: String) {
         replace(id) { it.copy(dirty = true) }
+        autoSaveDraftToLibrary(id)
         syncLiveLinkedNote(id)
+    }
+
+    /** Keeps the diagram library useful as a real draft library. A workspace gets a record as soon
+     * as its first generation lands, and every later document/title edit refreshes that same
+     * record. This is deliberately independent from [confirm], which is still the explicit note
+     * action and may or may not be used for a given diagram. */
+    private fun autoSaveDraftToLibrary(id: String) {
+        val current = session(id) ?: return
+        val tab = current.sourceTabId?.let(appState::tab) ?: return
+        if (current.document.lifelines.isEmpty()) return
+        val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+        val encoded = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
+        val item = saveToLibrary(current, tab, encoded) ?: return
+        replace(id) { it.copy(libraryItemId = item.id, exportMode = exportMode) }
     }
 
     // ── Confirm: write the document into a note ─────────────────────────────────────────────────
@@ -493,10 +519,9 @@ class Seq3Session(
      * appending a second note. Returns null (writing nothing) when the source tab is closed
      * (matches v1/v2: confirming requires a live tab) or the document has no lifelines yet.
      *
-     * Also keeps [DiagramLibraryStore] in sync ([Seq3WorkspaceSession.libraryItemId]): unlike v1/v2,
-     * v3's own workspace has no separate "save draft"/"attach" affordances (the design spec never
-     * mentions a library), so this is the one place a confirmed diagram becomes reachable from
-     * AnnotationPanel's "Diagram library" Notes-column section for quick re-opening.
+     * Also refreshes the library record ([Seq3WorkspaceSession.libraryItemId]). Library drafts are
+     * already created by generation and updated by edits; confirm additionally writes the note and
+     * preserves the existing explicit attachment semantics.
      */
     fun confirm(id: String): String? {
         val current = session(id) ?: return null
@@ -540,7 +565,7 @@ class Seq3Session(
     private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab, encodedNote: String): DiagramLibraryItem? {
         val title = current.document.title.ifBlank { "Untitled diagram" }
         val snapshot = DiagramLibrarySnapshot(encodedNote)
-        val saved = if (current.libraryItemId == null) {
+        val saved = if (current.libraryItemId == null || libraryStore.get(current.libraryItemId) == null) {
             libraryStore.create(title, "", sourceIdentity(tab), snapshot)
         } else {
             libraryStore.update(current.libraryItemId) { item ->

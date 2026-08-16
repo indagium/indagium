@@ -30,7 +30,6 @@ import com.indagium.diagram3.DEFAULT_SEQ3_REPEAT_THRESHOLD
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3InsertionPosition
-import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
@@ -75,8 +74,6 @@ private fun Seq3InspectorBody(state: AppState, session: Seq3WorkspaceSession, me
             Spacer(Modifier.height(10.dp))
             Seq3InspectorLabelField(state, session, message)
             Spacer(Modifier.height(12.dp))
-            Seq3InspectorKindControl(state, session, message)
-            Spacer(Modifier.height(12.dp))
             Seq3InspectorPlacementControls(state, session, message)
             Spacer(Modifier.height(12.dp))
             Seq3InspectorRepeatsControl(state, session, message)
@@ -96,7 +93,7 @@ private fun Seq3InspectorPlacementControls(state: AppState, session: Seq3Workspa
     var timestamp by remember(message.id, message.primaryRawTimestamp) { mutableStateOf(message.primaryRawTimestamp) }
     val messages = session.document.messages
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Seq3FieldLabel("Timestamp / position")
+        Seq3FieldLabel(if (message.isCustom) "Timestamp / position" else "Timestamp")
         InlineField(
             value = timestamp,
             onValue = { timestamp = it },
@@ -114,29 +111,31 @@ private fun Seq3InspectorPlacementControls(state: AppState, session: Seq3Workspa
                 )
             },
         )
-        Seq3DropdownButton(label = "Move message…", modifier = Modifier.fillMaxWidth(), menuWidth = 330.dp) { close ->
-            Seq3DropdownMenuItem("At start") {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.Start))
-                close()
-            }
-            Seq3DropdownMenuItem("At end") {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.End))
-                close()
-            }
-            messages.filter { it.id != message.id }.forEachIndexed { index, candidate ->
-                Seq3DropdownMenuItem("Before ${index + 1}: ${candidate.labelTemplate}") {
-                    state.seq3Sessions.applyCommand(
-                        session.id,
-                        Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.BeforeMessage(candidate.id)),
-                    )
+        if (message.isCustom) {
+            Seq3DropdownButton(label = "Move message…", modifier = Modifier.fillMaxWidth(), menuWidth = 330.dp) { close ->
+                Seq3DropdownMenuItem("At start") {
+                    state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.Start))
                     close()
                 }
-                Seq3DropdownMenuItem("After ${index + 1}: ${candidate.labelTemplate}") {
-                    state.seq3Sessions.applyCommand(
-                        session.id,
-                        Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.AfterMessage(candidate.id)),
-                    )
+                Seq3DropdownMenuItem("At end") {
+                    state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.End))
                     close()
+                }
+                messages.filter { it.id != message.id }.forEachIndexed { index, candidate ->
+                    Seq3DropdownMenuItem("Before ${index + 1}: ${candidate.labelTemplate}") {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.BeforeMessage(candidate.id)),
+                        )
+                        close()
+                    }
+                    Seq3DropdownMenuItem("After ${index + 1}: ${candidate.labelTemplate}") {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.MoveMessage(message.id, Seq3InsertionPosition.AfterMessage(candidate.id)),
+                        )
+                        close()
+                    }
                 }
             }
         }
@@ -182,23 +181,6 @@ private fun Seq3InspectorLabelField(state: AppState, session: Seq3WorkspaceSessi
                 if (text.isNotBlank()) {
                     state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetLabel(text)))
                 }
-            },
-        )
-    }
-}
-
-private val KIND_LABELS = listOf("call", "return", "async", "self", "note")
-
-@Composable
-private fun Seq3InspectorKindControl(state: AppState, session: Seq3WorkspaceSession, message: Seq3Message) {
-    Column {
-        Seq3FieldLabel("Kind")
-        SegmentedControl(
-            options = KIND_LABELS,
-            selectedIndices = setOf(Seq3Kind.entries.indexOf(message.kind)),
-            fillWidth = true,
-            onToggle = { index ->
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetKind(Seq3Kind.entries[index])))
             },
         )
     }

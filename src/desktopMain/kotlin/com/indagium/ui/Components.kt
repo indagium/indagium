@@ -130,17 +130,11 @@ fun HoverBox(
 ) {
     var hovered by remember { mutableStateOf(false) }
     Box(
-        // Keep the click target outside the caller's layout modifiers. In Compose, placing
-        // clickable after padding/size makes the decoration visible but leaves only the inner
-        // content as the effective hit target. HoverBox is used for compact buttons, dropdowns,
-        // and menu rows throughout the log and diagram views, so the whole visual surface must
-        // be interactive.
-        modifier = Modifier
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .then(modifier)
+        modifier = modifier
             .background(if ((hovered && hoverEnabled) || forceHover) hoverBg else baseBg)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         content = content,
     )
 }

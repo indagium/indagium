@@ -9,6 +9,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3RegenDecision
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.reviewSeq3Regeneration
 import com.indagium.diagram3.undoSeq3Command
@@ -101,6 +102,35 @@ class Seq3CommandsTest {
         assertTrue(result.applied)
         assertEquals(listOf(message("m1", "A", "B", 1), replacement), result.document.messages)
         assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
+    fun replaceMessageRetainsTargetIdWhenFreshReplacementUsesAnotherId() {
+        val doc = baseDocument()
+        val replacement = message("m2", "A", "B", 99)
+        val result = applySeq3Command(doc, Seq3Command.ReplaceMessage("m1", replacement))
+
+        assertTrue(result.applied)
+        assertEquals(listOf("m1", "m2"), result.document.messages.map { it.id })
+        assertEquals(2, result.document.messages.map { it.id }.toSet().size)
+    }
+
+    @Test
+    fun occurrenceVisibilityChangesOnlyTheRequestedOccurrence() {
+        val doc = baseDocument().copy(
+            messages = listOf(
+                baseDocument().messages.first().copy(occurrences = listOf(occ(1), occ(2))),
+            ),
+        )
+        val result = applySeq3Command(
+            doc,
+            Seq3Command.SetOccurrenceVisibility("m1", 1, Seq3Visibility.HIDDEN),
+        )
+
+        assertTrue(result.applied)
+        val occurrences = result.document.messages.single().occurrences
+        assertEquals(Seq3Visibility.HIDDEN, occurrences.first { it.entryId == 1 }.visibility)
+        assertEquals(Seq3Visibility.VISIBLE, occurrences.first { it.entryId == 2 }.visibility)
     }
 
     @Test

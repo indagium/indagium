@@ -43,6 +43,7 @@ class Seq3CodecTest {
             level = 'E',
             text = "push deviceKey=abc123",
             captureValues = mapOf("deviceKey" to "abc123"),
+            visibility = Seq3Visibility.HIDDEN,
         )
         val message = Seq3Message(
             id = "m1",

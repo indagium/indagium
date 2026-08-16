@@ -561,6 +561,88 @@ fun updateSeq3MessageTimestamp(
     return Seq3MessageEditResult.Updated(updated)
 }
 
+/** Changes visibility for one evidence row only. Parent message visibility remains separate, so
+ * hiding a single occurrence never hides its siblings and hiding the parent still hides all of
+ * the message's canvas output. */
+fun setSeq3OccurrenceVisibility(
+    document: Seq3Document,
+    messageId: String,
+    entryId: Int,
+    visibility: Seq3Visibility,
+): Seq3MessageEditResult {
+    val message = document.messages.firstOrNull { it.id == messageId }
+        ?: return Seq3MessageEditResult.Rejected("Unknown message")
+    if (message.occurrences.none { it.entryId == entryId }) {
+        return Seq3MessageEditResult.Rejected("Unknown occurrence")
+    }
+    val updated = document.copy(
+        messages = document.messages.map { current ->
+            if (current.id != messageId) current else current.copy(
+                occurrences = current.occurrences.map { occurrence ->
+                    if (occurrence.entryId == entryId) occurrence.copy(visibility = visibility) else occurrence
+                },
+            )
+        },
+    )
+    return Seq3MessageEditResult.Updated(updated)
+}
+
+/** Splits one real log occurrence out of a repeated message. The extracted message keeps the
+ *  source pattern, endpoints, kind and label, but receives its own stable id and is inserted in
+ *  chronological queue position using that occurrence's timestamp. Unknown timestamps sort
+ *  after known ones, matching the queue's existing ordering convention. */
+fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: Int): Seq3MessageEditResult {
+    val sourceIndex = document.messages.indexOfFirst { it.id == messageId }
+    if (sourceIndex < 0) return Seq3MessageEditResult.Rejected("Unknown message")
+    val source = document.messages[sourceIndex]
+    if (source.occurrences.size <= 1) return Seq3MessageEditResult.Rejected("The message has no repeated occurrence to move")
+    val occurrence = source.occurrences.firstOrNull { it.entryId == entryId }
+        ?: return Seq3MessageEditResult.Rejected("Unknown occurrence")
+    val remainingOccurrences = source.occurrences.filterNot { it.entryId == entryId }
+    val newMessageId = nextSeq3MessageId(document)
+    val extracted = source.copy(
+        id = newMessageId,
+        occurrences = listOf(occurrence),
+        authoring = Seq3Authoring.EDITED,
+        orderPin = null,
+        manualTimestampMillis = null,
+        manualRawTimestamp = "",
+    )
+    val updatedSource = source.copy(
+        occurrences = remainingOccurrences,
+        authoring = Seq3Authoring.EDITED,
+        orderPin = null,
+    )
+    val remainingMessages = document.messages.toMutableList().apply { removeAt(sourceIndex) }
+    fun entryIdOf(message: Seq3Message): Int = message.occurrences.firstOrNull()?.entryId ?: Int.MAX_VALUE
+    fun comesAfter(left: Seq3Message, right: Seq3Message): Boolean {
+        val leftTimestamp = left.primaryTimestampMillis ?: Long.MAX_VALUE
+        val rightTimestamp = right.primaryTimestampMillis ?: Long.MAX_VALUE
+        return leftTimestamp > rightTimestamp ||
+            (leftTimestamp == rightTimestamp && entryIdOf(left) > entryIdOf(right))
+    }
+    fun insertChronologically(message: Seq3Message) {
+        val index = remainingMessages.indexOfFirst { comesAfter(it, message) }
+            .takeIf { it >= 0 } ?: remainingMessages.size
+        remainingMessages.add(index, message)
+    }
+    insertChronologically(updatedSource)
+    insertChronologically(extracted)
+
+    fun repoint(ids: List<String>): List<String> = if (messageId !in ids) {
+        ids
+    } else {
+        (ids + newMessageId).distinct().sortedBy { remainingMessages.indexOfFirst { message -> message.id == it } }
+    }
+    return Seq3MessageEditResult.Updated(
+        document.copy(
+            messages = remainingMessages,
+            fragments = document.fragments.map { it.copy(messageIds = repoint(it.messageIds)) },
+            notes = document.notes.map { it.copy(messageIds = repoint(it.messageIds)) },
+        ),
+    )
+}
+
 /** Parses the same clock format used by log rows. Unknown/free-form text remains displayable as
  *  [Seq3Message.manualRawTimestamp], but does not participate in chronological sorting. */
 fun parseSeq3Timestamp(rawTimestamp: String): Long? =
@@ -572,6 +654,9 @@ fun parseSeq3Timestamp(rawTimestamp: String): Long? =
 fun moveSeq3Message(document: Seq3Document, messageId: String, position: Seq3InsertionPosition): Seq3MessageEditResult {
     val currentIndex = document.messages.indexOfFirst { it.id == messageId }
     if (currentIndex < 0) return Seq3MessageEditResult.Rejected("Unknown message")
+    if (!document.messages[currentIndex].isCustom) {
+        return Seq3MessageEditResult.Rejected("Only custom messages can be moved")
+    }
     val remaining = document.messages.toMutableList().apply { removeAt(currentIndex) }
     val insertionIndex = resolveSeq3InsertionIndex(remaining, position)
         ?: return Seq3MessageEditResult.Rejected("Invalid message insertion position")

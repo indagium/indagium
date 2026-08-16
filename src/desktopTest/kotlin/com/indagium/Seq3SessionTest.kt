@@ -455,6 +455,20 @@ class Seq3SessionTest {
     }
 
     @Test
+    fun generatedDiagramIsAutoSavedToLibraryBeforeAnyNoteIsAttached() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        val libraryId = session.libraryItemId
+        assertNotNull(libraryId)
+        val item = state.seq3Sessions.libraryForTab(state.tab("log")!!).single { it.id == libraryId }
+        assertTrue(item.attachments.isEmpty(), "auto-save must not imply note attachment")
+        assertEquals(session.document, item.parsed?.document)
+    }
+
+    @Test
     fun confirmReturnsNullBeforeAnyGenerationHasCompleted() {
         val state = state()
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!

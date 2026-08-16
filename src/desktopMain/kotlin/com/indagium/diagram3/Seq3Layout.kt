@@ -419,24 +419,26 @@ private fun emissionTimestamp(message: Seq3Message, occurrenceTimestampMillis: L
     message.manualTimestampMillis ?: occurrenceTimestampMillis
 
 private fun expandForLayout(message: Seq3Message): List<Emission> {
+    val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+    if (message.occurrences.isNotEmpty() && visibleOccurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
-        val occ = message.occurrences.firstOrNull()
+        val occ = visibleOccurrences.firstOrNull()
         return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, message.primaryTimestampMillis))
     }
     if (message.toLifelineId == null) {
-        val occ = message.occurrences.firstOrNull()
+        val occ = visibleOccurrences.firstOrNull()
         return listOf(
             Emission.Stub(
                 message.id,
                 message.fromLifelineId,
                 message.labelTemplate,
-                message.occurrences.size.coerceAtLeast(1),
+                visibleOccurrences.size.coerceAtLeast(1),
                 occ?.entryId,
                 message.primaryTimestampMillis,
             ),
         )
     }
-    val occurrences = message.occurrences
+    val occurrences = visibleOccurrences
     val isSelf = message.kind == Seq3Kind.SELF
 
     fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?): Emission = if (isSelf) {

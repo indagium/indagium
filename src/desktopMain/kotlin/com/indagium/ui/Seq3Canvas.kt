@@ -66,9 +66,11 @@ import com.indagium.diagram3.Seq3LifelineColumn
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3RowGeometry
+import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.Seq3Kind
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -100,7 +102,13 @@ private const val PERCENT = 100
 internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
     val tc = tc()
     val document = session.document
-    val layout = remember(document) { Seq3RenderCache.layout(document) }
+    // Selecting an expanded queue occurrence must be observable even when that message is
+    // currently collapsed on the canvas. This is a view-only expansion: the saved document keeps
+    // its repeat policy, while the selected occurrence gets a real row to emphasize temporarily.
+    val layoutDocument = remember(document, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId) {
+        seq3CanvasDocumentForSelection(document, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId)
+    }
+    val layout = remember(layoutDocument) { Seq3RenderCache.layout(layoutDocument) }
     Column(modifier.fillMaxSize().background(tc.bg)) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (layout.lifelines.isEmpty()) {
@@ -113,6 +121,23 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
         }
         Seq3CanvasStatusBar(state, session, document)
     }
+}
+
+private fun seq3CanvasDocumentForSelection(
+    document: Seq3Document,
+    selectedMessageId: String?,
+    selectedEntryId: Int?,
+): Seq3Document {
+    if (selectedMessageId == null || selectedEntryId == null) return document
+    val message = document.messages.firstOrNull { it.id == selectedMessageId } ?: return document
+    if (message.occurrences.none { it.entryId == selectedEntryId }) return document
+    if (message.occurrences.size <= 1 || message.kind == Seq3Kind.NOTE || message.toLifelineId == null) return document
+    if (message.repeat == Seq3Repeat.EVERY) return document
+    return document.copy(
+        messages = document.messages.map { current ->
+            if (current.id == selectedMessageId) current.copy(repeat = Seq3Repeat.EVERY) else current
+        },
+    )
 }
 
 @Composable
@@ -241,7 +266,15 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                             ),
                     ) {
                         Canvas(Modifier.size(layout.width.dp, layout.height.dp)) {
-                            drawSeq3Diagram(layout, tc, view.hoveredMessageId, view.selection.selectedIds, dragPreview)
+                            drawSeq3Diagram(
+                                layout,
+                                tc,
+                                view.hoveredMessageId,
+                                view.selection.selectedIds,
+                                view.selectedOccurrenceMessageId,
+                                view.selectedOccurrenceEntryId,
+                                dragPreview,
+                            )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(fragment) }
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
@@ -422,6 +455,8 @@ private fun DrawScope.drawSeq3Diagram(
     tc: ThemeColors,
     hoveredMessageId: String?,
     selectedIds: Set<String>,
+    selectedOccurrenceMessageId: String?,
+    selectedOccurrenceEntryId: Int?,
     dragPreview: Seq3EndpointDragPreview? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
@@ -446,10 +481,16 @@ private fun DrawScope.drawSeq3Diagram(
         )
     }
     layout.rows.forEach { row ->
-        val emphasized = row.messageId == hoveredMessageId || row.messageId in selectedIds
+        val emphasized = seq3RowIsEmphasized(
+            row,
+            hoveredMessageId,
+            selectedIds,
+            selectedOccurrenceMessageId,
+            selectedOccurrenceEntryId,
+        )
         val arrowColor = if (emphasized) tc.ac else tc.ts
         when (row) {
-            is Seq3ArrowRow -> drawSeq3Arrow(row.fromX, row.toX, row.y, arrowColor, if (emphasized) 2.dp.toPx() else 1.5.dp.toPx())
+            is Seq3ArrowRow -> drawSeq3Arrow(row, arrowColor, if (emphasized) 2.dp.toPx() else 1.5.dp.toPx())
             is Seq3SelfLoopRow -> drawSeq3SelfLoop(row, arrowColor)
             is Seq3UnresolvedStubRow -> drawLine(
                 color = tc.warn,
@@ -500,11 +541,11 @@ private const val NOTE_FILL_ALPHA = 0.20f
 private const val ARROWHEAD_LEN_DP = 8f
 private const val ARROWHEAD_HALF_DP = 4f
 
-private fun DrawScope.drawSeq3Arrow(fromX: Double, toX: Double, y: Double, color: Color, strokeWidth: Float) {
-    val start = Offset(fromX.dp.toPx(), y.dp.toPx())
-    val end = Offset(toX.dp.toPx(), y.dp.toPx())
+private fun DrawScope.drawSeq3Arrow(row: Seq3ArrowRow, color: Color, strokeWidth: Float) {
+    val start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx())
+    val end = Offset(row.toX.dp.toPx(), row.y.dp.toPx())
     drawLine(color, start, end, strokeWidth = strokeWidth)
-    val dir = if (toX >= fromX) 1f else -1f
+    val dir = if (row.toX >= row.fromX) 1f else -1f
     val headLen = ARROWHEAD_LEN_DP.dp.toPx()
     val headHalf = ARROWHEAD_HALF_DP.dp.toPx()
     val backX = end.x - dir * headLen
@@ -545,7 +586,13 @@ private fun DrawScope.drawSeq3SelfLoop(row: Seq3SelfLoopRow, color: Color) {
 @Composable
 private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, row: Seq3RowGeometry) {
     val tc = tc()
-    val emphasized = row.messageId == view.hoveredMessageId || row.messageId in view.selection.selectedIds
+    val emphasized = seq3RowIsEmphasized(
+        row,
+        view.hoveredMessageId,
+        view.selection.selectedIds,
+        view.selectedOccurrenceMessageId,
+        view.selectedOccurrenceEntryId,
+    )
     val labelColor = if (emphasized) tc.ac else tc.tx
     when (row) {
         is Seq3ArrowRow -> {
@@ -576,6 +623,22 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
             Modifier.offset(row.box.x.dp, row.box.y.dp).size(row.box.width.dp, row.box.height.dp),
             contentAlignment = Alignment.Center,
         ) { AppText("⋮ ×${row.elidedCount}", color = tc.td, fontSize = 9.sp) }
+    }
+}
+
+private fun seq3RowIsEmphasized(
+    row: Seq3RowGeometry,
+    hoveredMessageId: String?,
+    selectedIds: Set<String>,
+    selectedOccurrenceMessageId: String?,
+    selectedOccurrenceEntryId: Int?,
+): Boolean {
+    if (row.messageId == hoveredMessageId) return true
+    if (row.messageId !in selectedIds) return false
+    return if (selectedOccurrenceMessageId == null) {
+        true
+    } else {
+        row.messageId == selectedOccurrenceMessageId && row.occurrenceEntryId == selectedOccurrenceEntryId
     }
 }
 
