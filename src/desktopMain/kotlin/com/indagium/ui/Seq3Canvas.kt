@@ -34,6 +34,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -260,7 +261,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                         Modifier.size(layout.width.dp, layout.height.dp)
                             .graphicsLayer(scaleX = zoom, scaleY = zoom, transformOrigin = TransformOrigin(0f, 0f))
                             .then(
-                                seq3CanvasGestureModifier(state, session, view, document, layout, density, hScroll, vScroll) {
+                                seq3CanvasGestureModifier(state, session, view, layout, density, hScroll, vScroll) {
                                     dragPreview = it
                                 },
                             ),
@@ -310,14 +311,25 @@ private fun seq3CanvasGestureModifier(
     state: AppState,
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
-    document: Seq3Document,
     layout: Seq3Layout,
     density: Float,
     hScroll: ScrollState,
     vScroll: ScrollState,
     onDragPreview: (Seq3EndpointDragPreview?) -> Unit,
-): Modifier = Modifier
-    .pointerInput(session.id, document, layout, density) {
+): Modifier {
+    // Keep the pointer coroutine alive while the document/layout recomposes. A drop command changes
+    // both values synchronously; keying the coroutine by them can cancel the release before it
+    // clears the transient drag preview and makes the next gesture start in a stale state.
+    val currentState = rememberUpdatedState(state)
+    val currentSession = rememberUpdatedState(session)
+    val currentView = rememberUpdatedState(view)
+    val currentLayout = rememberUpdatedState(layout)
+    val currentDensity = rememberUpdatedState(density)
+    val currentHScroll = rememberUpdatedState(hScroll)
+    val currentVScroll = rememberUpdatedState(vScroll)
+    val currentDragPreviewCallback = rememberUpdatedState(onDragPreview)
+
+    return Modifier.pointerInput(session.id) {
         awaitPointerEventScope {
             var dragEndpoint: Seq3DragEndpoint? = null
             var downPosition: Offset? = null
@@ -329,22 +341,32 @@ private fun seq3CanvasGestureModifier(
             // or LAZILY on a primary-button drag once it (a) exceeds the click-vs-drag slop
             // threshold already used for row clicks and (b) started on truly empty background — no
             // row, no endpoint — so a plain click/drag on real content keeps meaning what it always
-            // meant. `lastPanPosition` is the previous frame's raw pointer position; every Move
-            // converts its own delta from the graphicsLayer's already-inverse-transformed LOCAL
-            // pixel space back to real screen pixels (multiplying by `view.zoom`, the same factor
-            // Compose divided out — see this file's own header on why hit-testing works in
-            // unit-less coordinates regardless of zoom) before handing it to `dispatchRawDelta`, so
-            // wheel-scroll, scrollbar-drag, and pan-drag all agree on the SAME ScrollState.
+            // meant. The pan anchor is kept in viewport pixels, not the diagram node's local
+            // pixels: scrolling moves that node under a stationary cursor, so raw local deltas
+            // would alternate direction and make the whole diagram flicker. `panViewportPosition`
+            // puts each event back into the stable viewport basis before handing its delta to
+            // `dispatchRawDelta`, so wheel-scroll, scrollbar-drag, and pan-drag all agree on the
+            // SAME ScrollState.
             var panning = false
             var pressWasMiddle = false
             var lastPanPosition: Offset? = null
+            var primaryPanEligible = false
+            fun panViewportPosition(position: Offset): Offset {
+                val zoom = currentView.value.zoom
+                return Offset(
+                    position.x * zoom - currentHScroll.value.value,
+                    position.y * zoom - currentVScroll.value.value,
+                )
+            }
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull() ?: continue
+                val activeLayout = currentLayout.value
+                val activeDensity = currentDensity.value
                 // Pointer deltas are in PIXELS (CLAUDE.md's own gotcha) — divide by density to get
                 // back to the layout's own unit-less coordinates (1 unit == 1 dp) before hit-testing.
-                val xUnits = (change.position.x / density).toDouble()
-                val yUnits = (change.position.y / density).toDouble()
+                val xUnits = (change.position.x / activeDensity).toDouble()
+                val yUnits = (change.position.y / activeDensity).toDouble()
                 when (event.type) {
                     PointerEventType.Press -> {
                         val isMiddle = event.buttons.isTertiaryPressed
@@ -352,12 +374,24 @@ private fun seq3CanvasGestureModifier(
                             downPosition = change.position
                             moved = false
                             pressWasMiddle = isMiddle
-                            dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(layout, xUnits, yUnits)
+                            primaryPanEligible = !isMiddle && seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
+                            dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
+                            // The surrounding scroll modifiers must not take ownership of a
+                            // primary drag before this canvas has decided whether it is an
+                            // endpoint drag, a background pan, or a click. If an endpoint hit is
+                            // missed at a low zoom, competing scroll gestures move the coordinate
+                            // basis underneath the pointer and make the diagram visibly jump.
+                            if (!isMiddle) change.consume()
                             when {
-                                dragEndpoint != null -> change.consume()
+                                dragEndpoint != null -> {
+                                    currentDragPreviewCallback.value(
+                                        seq3DragPreview(activeLayout, dragEndpoint, xUnits),
+                                    )
+                                    change.consume()
+                                }
                                 isMiddle -> {
                                     panning = true
-                                    lastPanPosition = change.position
+                                    lastPanPosition = panViewportPosition(change.position)
                                     change.consume()
                                 }
                             }
@@ -370,47 +404,52 @@ private fun seq3CanvasGestureModifier(
                         when {
                             drag != null -> {
                                 change.consume()
-                                onDragPreview(seq3DragPreview(layout, drag, xUnits))
+                                currentDragPreviewCallback.value(seq3DragPreview(activeLayout, drag, xUnits))
                             }
                             panning -> {
                                 val last = lastPanPosition
                                 if (last != null) {
-                                    val zoom = view.zoom
-                                    hScroll.dispatchRawDelta(-(change.position.x - last.x) * zoom)
-                                    vScroll.dispatchRawDelta(-(change.position.y - last.y) * zoom)
+                                    val current = panViewportPosition(change.position)
+                                    currentHScroll.value.dispatchRawDelta(-(current.x - last.x))
+                                    currentVScroll.value.dispatchRawDelta(-(current.y - last.y))
+                                    lastPanPosition = current
                                 }
-                                lastPanPosition = change.position
                                 change.consume()
                             }
-                            down != null && !pressWasMiddle && moved && seq3IsEmptyCanvasBackground(layout, xUnits, yUnits) -> {
+                            down != null && !pressWasMiddle && moved && primaryPanEligible -> {
                                 panning = true
-                                lastPanPosition = change.position
+                                lastPanPosition = panViewportPosition(change.position)
                                 change.consume()
                             }
-                            downPosition == null -> view.hoveredMessageId = seq3RowAt(layout, xUnits, yUnits)?.messageId
+                            downPosition == null -> view.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
                         }
                     }
                     PointerEventType.Release -> {
                         val drag = dragEndpoint
                         when {
                             drag != null -> {
-                                seq3NearestLifelineId(layout, xUnits)?.let { targetLifelineId ->
+                                // Clear transient UI state before the command can trigger a
+                                // document/layout recomposition and invalidate this pointer pass.
+                                currentDragPreviewCallback.value(null)
+                                dragEndpoint = null
+                                seq3NearestLifelineId(activeLayout, xUnits)?.let { targetLifelineId ->
                                     val action = if (drag.side == Seq3EndpointSide.FROM) {
                                         Seq3BulkAction.SetFrom(targetLifelineId)
                                     } else {
                                         Seq3BulkAction.SetTo(targetLifelineId)
                                     }
-                                    state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(drag.messageId), action))
+                                    currentState.value.seq3Sessions.applyCommand(
+                                        currentSession.value.id,
+                                        Seq3Command.Bulk(setOf(drag.messageId), action),
+                                    )
                                 }
-                                dragEndpoint = null
-                                onDragPreview(null)
                             }
                             panning -> {
                                 panning = false
                                 lastPanPosition = null
                             }
                             !moved && !pressWasMiddle -> {
-                                val hitRow = seq3RowAt(layout, xUnits, yUnits)
+                                val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
                                 if (hitRow != null) seq3HandleCanvasRowClick(view, hitRow) { now, id ->
                                     val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
                                     lastClickTimeMs = now
@@ -421,6 +460,7 @@ private fun seq3CanvasGestureModifier(
                         }
                         downPosition = null
                         pressWasMiddle = false
+                        primaryPanEligible = false
                     }
                     PointerEventType.Exit -> view.hoveredMessageId = null
                     else -> Unit
@@ -428,6 +468,7 @@ private fun seq3CanvasGestureModifier(
             }
         }
     }
+}
 
 private fun seq3HandleCanvasRowClick(
     view: Seq3ViewState,
@@ -483,6 +524,9 @@ private fun DrawScope.drawSeq3Diagram(
         )
     }
     layout.rows.forEach { row ->
+        val draggingMessage = dragPreview?.messageId == row.messageId
+        val draggingOccurrenceEntryId = dragPreview?.occurrenceEntryId
+        val draggingRow = draggingMessage && (draggingOccurrenceEntryId == null || draggingOccurrenceEntryId == row.occurrenceEntryId)
         val emphasized = seq3RowIsEmphasized(
             row,
             hoveredMessageId,
@@ -491,17 +535,30 @@ private fun DrawScope.drawSeq3Diagram(
             selectedOccurrenceMessageId,
             selectedOccurrenceEntryId,
         )
-        val arrowColor = if (emphasized) tc.ac else tc.ts
+        val arrowColor = when {
+            draggingRow -> tc.ac
+            draggingMessage -> tc.ts.copy(alpha = 0.45f)
+            emphasized -> tc.ac
+            else -> tc.ts
+        }
         when (row) {
-            is Seq3ArrowRow -> drawSeq3Arrow(row, arrowColor, if (emphasized) 2.dp.toPx() else 1.5.dp.toPx())
-            is Seq3SelfLoopRow -> drawSeq3SelfLoop(row, arrowColor)
-            is Seq3UnresolvedStubRow -> drawLine(
-                color = tc.warn,
-                start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx()),
-                end = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()),
-                strokeWidth = 1.5.dp.toPx(),
-                pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
-            )
+            is Seq3ArrowRow -> if (!draggingRow) {
+                drawSeq3Arrow(
+                    row,
+                    arrowColor,
+                    if (emphasized) 2.dp.toPx() else 1.5.dp.toPx(),
+                )
+            }
+            is Seq3SelfLoopRow -> if (!draggingRow) drawSeq3SelfLoop(row, arrowColor)
+            is Seq3UnresolvedStubRow -> if (!draggingRow) {
+                drawLine(
+                    color = tc.warn,
+                    start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx()),
+                    end = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()),
+                    strokeWidth = 1.5.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
+                )
+            }
             is Seq3MessageNoteRow -> {
                 val topLeft = Offset(row.box.x.dp.toPx(), row.box.y.dp.toPx())
                 val size = Size(row.box.width.dp.toPx(), row.box.height.dp.toPx())
@@ -512,10 +569,9 @@ private fun DrawScope.drawSeq3Diagram(
         }
     }
     // Live feedback while an arrow-endpoint drag is in progress (item 13, phase-5 post-ship plan) —
-    // drawn LAST so it sits on top of every row it might cross. The candidate lifeline gets a wash
-    // the same width as its own header chip (no new magic width), and the preview line uses the
-    // arrow-color the endpoint would render in once resolved, so the eye reads it as "this is where
-    // the arrow is about to land," not as a fourth kind of decoration.
+    // drawn LAST so it sits on top of every row it might cross. The dragged row is omitted above,
+    // so this is the one visible line for that message and it follows the cursor in either
+    // direction instead of leaving a stationary dotted copy at the old endpoint.
     if (dragPreview != null) {
         dragPreview.candidateLifelineId
             ?.let { id -> layout.lifelines.firstOrNull { it.lifelineId == id } }
@@ -527,13 +583,7 @@ private fun DrawScope.drawSeq3Diagram(
                     size = Size(column.header.width.dp.toPx(), (column.lifelineBottom - column.lifelineTop).dp.toPx()),
                 )
             }
-        drawLine(
-            color = tc.ac,
-            start = Offset(dragPreview.anchorX.dp.toPx(), dragPreview.y.dp.toPx()),
-            end = Offset(dragPreview.cursorX.dp.toPx(), dragPreview.y.dp.toPx()),
-            strokeWidth = 2.dp.toPx(),
-            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())),
-        )
+        drawSeq3DragPreview(dragPreview, tc.ac, strokeWidth = 2.dp.toPx())
     }
 }
 
@@ -556,6 +606,34 @@ private fun DrawScope.drawSeq3Arrow(row: Seq3ArrowRow, color: Color, strokeWidth
         moveTo(end.x, end.y)
         lineTo(backX, end.y - headHalf)
         lineTo(backX, end.y + headHalf)
+        close()
+    }
+    drawPath(head, color)
+}
+
+private fun DrawScope.drawSeq3DragPreview(
+    preview: Seq3EndpointDragPreview,
+    color: Color,
+    strokeWidth: Float,
+) {
+    val fixedX = preview.anchorX.dp.toPx()
+    val movingX = preview.cursorX.dp.toPx()
+    val y = preview.y.dp.toPx()
+    val startX = if (preview.side == Seq3EndpointSide.FROM) movingX else fixedX
+    val endX = if (preview.side == Seq3EndpointSide.FROM) fixedX else movingX
+    drawLine(color, Offset(startX, y), Offset(endX, y), strokeWidth = strokeWidth)
+
+    // The arrowhead belongs to the target end. When FROM moves, the fixed end is the target;
+    // when TO moves, the cursor is the target. This keeps the preview a normal arrow even when
+    // the cursor crosses the fixed endpoint and reverses its horizontal direction.
+    val direction = if (endX >= startX) 1f else -1f
+    val headLen = ARROWHEAD_LEN_DP.dp.toPx()
+    val headHalf = ARROWHEAD_HALF_DP.dp.toPx()
+    val backX = endX - direction * headLen
+    val head = Path().apply {
+        moveTo(endX, y)
+        lineTo(backX, y - headHalf)
+        lineTo(backX, y + headHalf)
         close()
     }
     drawPath(head, color)
@@ -721,6 +799,9 @@ private fun Seq3LifelineChip(
     density: Float,
 ) {
     val tc = tc()
+    val currentDocument = rememberUpdatedState(document)
+    val currentLayout = rememberUpdatedState(layout)
+    val currentColumn = rememberUpdatedState(column)
     var dragPx by remember(column.lifelineId) { mutableStateOf(0f) }
     var renaming by remember(column.lifelineId) { mutableStateOf(false) }
     var renameText by remember(column.lifelineId) { mutableStateOf(column.label) }
@@ -733,18 +814,27 @@ private fun Seq3LifelineChip(
                 .size(column.header.width.dp, column.header.height.dp)
                 .background(if (selected) tc.abg else tc.p2, RoundedCornerShape(4.dp))
                 .border(1.dp, if (selected) tc.ac else tc.br, RoundedCornerShape(4.dp))
-                .pointerInput(session.id, column.lifelineId, layout, density) {
+                .pointerInput(session.id, column.lifelineId) {
                     detectDragGestures(
                         onDragStart = { view.selectedLifelineId = column.lifelineId },
                         onDrag = { change, dragAmount -> change.consume(); dragPx += dragAmount.x },
                         onDragEnd = {
-                            val order = document.lifelines.sortedBy { it.ordinal }.map { it.id }
-                            val orderedColumns = layout.lifelines.sortedWith(compareBy { order.indexOf(it.lifelineId) })
-                            val dropXUnits = column.header.x + dragPx / density + column.header.width / 2
-                            val targetIndex = seq3LifelineDropIndex(orderedColumns.map { it.centerX }, dropXUnits)
-                            val reordered = seq3ReorderLifelineIds(order, column.lifelineId, targetIndex)
-                            if (reordered != order) state.seq3Sessions.applyCommand(session.id, Seq3Command.ReorderLifelines(reordered))
+                            val activeDocument = currentDocument.value
+                            val activeLayout = currentLayout.value
+                            val activeColumn = currentColumn.value
+                            val order = activeDocument.lifelines.sortedBy { it.ordinal }.map { it.id }
+                            val orderedColumns = activeLayout.lifelines.sortedWith(compareBy { order.indexOf(it.lifelineId) })
+                            val dropXUnits = activeColumn.header.x + dragPx / density + activeColumn.header.width / 2
+                            // The insertion point is measured among the columns that will remain
+                            // after the dragged column is removed. Including the dragged column
+                            // shifts every right-side target by one slot.
+                            val targetIndex = seq3LifelineDropIndex(
+                                orderedColumns.filterNot { it.lifelineId == activeColumn.lifelineId }.map { it.centerX },
+                                dropXUnits,
+                            )
+                            val reordered = seq3ReorderLifelineIds(order, activeColumn.lifelineId, targetIndex)
                             dragPx = 0f
+                            if (reordered != order) state.seq3Sessions.applyCommand(session.id, Seq3Command.ReorderLifelines(reordered))
                         },
                         onDragCancel = { dragPx = 0f },
                     )
@@ -796,12 +886,18 @@ private fun Seq3LifelineChip(
 
 // ── Pure helpers — testable without a composition (Seq3CanvasTest) ─────────────────────────────
 
-internal const val SEQ3_ROW_HIT_Y_TOLERANCE = 16.0
-internal const val SEQ3_ENDPOINT_HIT_TOLERANCE_X = 24.0
+internal const val SEQ3_ROW_HIT_Y_TOLERANCE = 18.0
+internal const val SEQ3_ROW_HIT_X_TOLERANCE = 24.0
+internal const val SEQ3_ENDPOINT_HIT_TOLERANCE_X = 36.0
 
 internal enum class Seq3EndpointSide { FROM, TO }
 
-internal data class Seq3DragEndpoint(val messageId: String, val side: Seq3EndpointSide)
+internal data class Seq3DragEndpoint(
+    val messageId: String,
+    val side: Seq3EndpointSide,
+    /** Stable row identity for repeated occurrences; null keeps compatibility for one-row/custom messages. */
+    val occurrenceEntryId: Int? = null,
+)
 
 internal fun seq3PointInBox(box: Seq3Box, x: Double, y: Double): Boolean =
     x in box.x..(box.x + box.width) && y in box.y..(box.y + box.height)
@@ -811,11 +907,19 @@ internal fun seq3PointInBox(box: Seq3Box, x: Double, y: Double): Boolean =
  *  but over the UNIT-LESS layout directly (this file never re-derives pixel geometry from a
  *  rasterized image, per this phase's second absolute rule). */
 internal fun seq3RowAt(layout: Seq3Layout, x: Double, y: Double, yTolerance: Double = SEQ3_ROW_HIT_Y_TOLERANCE): Seq3RowGeometry? =
-    layout.rows.filter { kotlin.math.abs(it.y - y) <= yTolerance }.minByOrNull { seq3RowXDistance(it, x) }
+    layout.rows
+        .filter { kotlin.math.abs(it.y - y) <= yTolerance && seq3RowXDistance(it, x) <= SEQ3_ROW_HIT_X_TOLERANCE }
+        .minByOrNull { seq3RowXDistance(it, x) }
 
 private fun seq3RowXDistance(row: Seq3RowGeometry, x: Double): Double = when (row) {
-    is Seq3ArrowRow -> if (x in min(row.fromX, row.toX)..max(row.fromX, row.toX)) 0.0 else min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - row.toX))
-    is Seq3SelfLoopRow -> kotlin.math.abs(x - (row.x + row.loopWidth / 2))
+    is Seq3ArrowRow -> min(
+        if (x in min(row.fromX, row.toX)..max(row.fromX, row.toX)) 0.0 else min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - row.toX)),
+        distanceToBox(row.labelBox, x),
+    )
+    is Seq3SelfLoopRow -> min(
+        if (x in row.x..(row.x + row.loopWidth)) 0.0 else kotlin.math.abs(x - (row.x + row.loopWidth / 2)),
+        distanceToBox(row.labelBox, x),
+    )
     is Seq3UnresolvedStubRow -> {
         val rightEdge = row.dropPill.x + row.dropPill.width
         if (x in row.fromX..rightEdge) 0.0 else min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - rightEdge))
@@ -825,6 +929,12 @@ private fun seq3RowXDistance(row: Seq3RowGeometry, x: Double): Double = when (ro
         if (x in row.box.x..rightEdge) 0.0 else min(kotlin.math.abs(x - row.box.x), kotlin.math.abs(x - rightEdge))
     }
     is Seq3ElisionRow -> kotlin.math.abs(x - (row.box.x + row.box.width / 2))
+}
+
+private fun distanceToBox(box: Seq3Box, x: Double): Double = when {
+    x < box.x -> box.x - x
+    x > box.x + box.width -> x - (box.x + box.width)
+    else -> 0.0
 }
 
 /** Which end of [row] a press near ([x], [y]) grabs, or null outside [xTolerance]/[yTolerance] of
@@ -846,22 +956,56 @@ internal fun seq3ArrowEndpointAt(
     }
 }
 
+internal const val SEQ3_SELF_ENDPOINT_HIT_TOLERANCE = 28.0
+
+/** A self-loop has no horizontal arrow endpoint at the row's y position. Its target arrowhead is at the
+ * bottom-left corner of the loop, while the source remains at the top-left corner. */
+internal fun seq3SelfLoopEndpointAt(
+    row: Seq3SelfLoopRow,
+    x: Double,
+    y: Double,
+    tolerance: Double = SEQ3_SELF_ENDPOINT_HIT_TOLERANCE,
+): Seq3EndpointSide? {
+    val fromDistance = kotlin.math.hypot(x - row.x, y - row.y)
+    val toDistance = kotlin.math.hypot(x - row.x, y - row.loopBottomY)
+    return when {
+        fromDistance <= tolerance && fromDistance <= toDistance -> Seq3EndpointSide.FROM
+        toDistance <= tolerance -> Seq3EndpointSide.TO
+        else -> null
+    }
+}
+
 /** Resolves a press at ([x], [y]) to an endpoint-drag start: either an existing arrow's FROM/TO
  *  handle, or an unresolved stub's whole line/pill (always the TO side — a stub has no target
  *  yet). Null anywhere else on the canvas, which lets the caller fall through to a plain click. */
 internal fun seq3ResolveDragEndpoint(layout: Seq3Layout, x: Double, y: Double): Seq3DragEndpoint? {
-    layout.rows.forEach { row ->
+    data class Candidate(val endpoint: Seq3DragEndpoint, val distance: Double)
+    val candidates = layout.rows.mapNotNull { row ->
         when (row) {
-            is Seq3ArrowRow -> seq3ArrowEndpointAt(row, x, y)?.let { return Seq3DragEndpoint(row.messageId, it) }
+            is Seq3ArrowRow -> seq3ArrowEndpointAt(row, x, y)?.let {
+                Candidate(
+                    Seq3DragEndpoint(row.messageId, it, row.occurrenceEntryId),
+                    min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - row.toX)) + kotlin.math.abs(y - row.y),
+                )
+            }
+            is Seq3SelfLoopRow -> seq3SelfLoopEndpointAt(row, x, y)?.let {
+                Candidate(
+                    Seq3DragEndpoint(row.messageId, it, row.occurrenceEntryId),
+                    min(kotlin.math.hypot(x - row.x, y - row.y), kotlin.math.hypot(x - row.x, y - row.loopBottomY)),
+                )
+            }
             is Seq3UnresolvedStubRow -> {
                 val onStub = kotlin.math.abs(y - row.y) <= SEQ3_ROW_HIT_Y_TOLERANCE &&
                     (x in row.fromX..(row.dropPill.x + row.dropPill.width) || seq3PointInBox(row.dropPill, x, y))
-                if (onStub) return Seq3DragEndpoint(row.messageId, Seq3EndpointSide.TO)
+                if (onStub) Candidate(
+                    Seq3DragEndpoint(row.messageId, Seq3EndpointSide.TO, row.occurrenceEntryId),
+                    kotlin.math.abs(y - row.y),
+                ) else null
             }
-            else -> Unit
+            else -> null
         }
-    }
-    return null
+    }.sortedBy { it.distance }
+    return candidates.firstOrNull()?.endpoint
 }
 
 /** "Dragging its head onto a lifeline resolves it" (spec §04) — always resolves to the nearest
@@ -875,23 +1019,37 @@ internal fun seq3NearestLifelineId(layout: Seq3Layout, x: Double): String? =
  *  plan). A drag that starts ON content keeps meaning whatever it already means there (select,
  *  resolve an endpoint); only genuinely empty background pans. */
 internal fun seq3IsEmptyCanvasBackground(layout: Seq3Layout, x: Double, y: Double): Boolean =
-    seq3RowAt(layout, x, y) == null && seq3ResolveDragEndpoint(layout, x, y) == null
+    seq3RowAt(layout, x, y) == null &&
+        seq3ResolveDragEndpoint(layout, x, y) == null &&
+        layout.lifelines.none { seq3PointInBox(it.header, x, y) }
 
 /** Live feedback while dragging an arrow endpoint (item 13, phase-5 post-ship plan): the FIXED end
  *  of [endpoint]'s row (the one NOT being dragged), its shared y, the live cursor x, and whichever
  *  lifeline the cursor is nearest right now — reusing [seq3NearestLifelineId], the exact function
- *  [Release] already uses to resolve the drop, so the highlighted column during the drag and the
+ *  release path already uses to resolve the drop, so the highlighted column during the drag and the
  *  column that actually gets applied on release can never disagree. Null when [endpoint]'s row can
  *  no longer be found (the document changed under an in-flight drag) or isn't a row this kind of
  *  preview applies to. */
 internal fun seq3DragPreview(layout: Seq3Layout, endpoint: Seq3DragEndpoint, cursorX: Double): Seq3EndpointDragPreview? {
-    val row = layout.rows.firstOrNull { it.messageId == endpoint.messageId } ?: return null
+    val row = layout.rows.firstOrNull {
+        it.messageId == endpoint.messageId &&
+            (endpoint.occurrenceEntryId == null || it.occurrenceEntryId == endpoint.occurrenceEntryId)
+    } ?: return null
     val (anchorX, y) = when (row) {
         is Seq3ArrowRow -> (if (endpoint.side == Seq3EndpointSide.FROM) row.toX else row.fromX) to row.y
+        is Seq3SelfLoopRow -> row.x to row.y
         is Seq3UnresolvedStubRow -> row.fromX to row.y
         else -> return null
     }
-    return Seq3EndpointDragPreview(anchorX, y, cursorX, seq3NearestLifelineId(layout, cursorX))
+    return Seq3EndpointDragPreview(
+        anchorX = anchorX,
+        y = y,
+        cursorX = cursorX,
+        candidateLifelineId = seq3NearestLifelineId(layout, cursorX),
+        messageId = endpoint.messageId,
+        occurrenceEntryId = row.occurrenceEntryId,
+        side = endpoint.side,
+    )
 }
 
 internal data class Seq3EndpointDragPreview(
@@ -899,6 +1057,9 @@ internal data class Seq3EndpointDragPreview(
     val y: Double,
     val cursorX: Double,
     val candidateLifelineId: String?,
+    val messageId: String = "",
+    val occurrenceEntryId: Int? = null,
+    val side: Seq3EndpointSide = Seq3EndpointSide.TO,
 )
 
 /** Moves [draggedId] to [targetIndex] within [order], clamped to a valid index. A caller passes
@@ -913,9 +1074,11 @@ internal fun seq3ReorderLifelineIds(order: List<String>, draggedId: String, targ
 
 /** The insertion index for a drop at [dropX] among [centers] (one lifeline column's `centerX`
  *  each, in the SAME order the caller will pass to [seq3ReorderLifelineIds]) — the first column
- *  whose center is to the right of the drop point, or the end of the list if none is. */
+ *  whose center is at or to the right of the drop point, or the end of the list if none is.
+ *  Callers pass centers with the dragged column removed, so the returned index is directly
+ *  usable after removal. */
 internal fun seq3LifelineDropIndex(centers: List<Double>, dropX: Double): Int =
-    centers.indexOfFirst { dropX < it }.let { if (it < 0) centers.size else it }
+    centers.indexOfFirst { dropX <= it }.let { if (it < 0) centers.size else it }
 
 /** The genuine complement of [seq3FitWidthZoom] (item 5, phase-5 post-ship plan) — scales so the
  *  diagram's full HEIGHT fits the viewport; width may then need horizontal scrolling. Renamed from
