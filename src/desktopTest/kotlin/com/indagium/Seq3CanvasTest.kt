@@ -26,6 +26,7 @@ import com.indagium.ui.seq3IsEmptyCanvasBackground
 import com.indagium.ui.seq3LifelineDropIndex
 import com.indagium.ui.seq3NearestLifelineId
 import com.indagium.ui.seq3PointInBox
+import com.indagium.ui.seq3PointerPxToLayoutUnits
 import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
@@ -413,5 +414,12 @@ class Seq3CanvasTest {
     fun zoomPercentLabelRoundsToTheNearestPercent() {
         assertEquals("86%", seq3ZoomPercentLabel(0.864f))
         assertEquals("100%", seq3ZoomPercentLabel(1f))
+    }
+
+    @Test
+    fun pointerCoordinatesUndoDensityAndCanvasZoomBeforeHitTesting() {
+        assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 400f, density = 2f, zoom = 2f))
+        assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 158f, density = 2f, zoom = 0.79f), absoluteTolerance = 0.0001)
+        assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 178f, density = 2f, zoom = 0.89f), absoluteTolerance = 0.0001)
     }
 }
