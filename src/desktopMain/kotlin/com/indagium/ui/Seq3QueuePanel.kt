@@ -61,6 +61,7 @@ import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3FilterCounts
+import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
 import com.indagium.model.LogEntry
@@ -112,7 +113,7 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     val document = session.document
     val counts = seq3FilterCounts(document)
     val hasSelectableMessageSelection = view.selection.selectedIds.any { id ->
-        document.messages.firstOrNull { it.id == id }?.occurrences?.size == 1
+        document.messages.any { it.id == id }
     }
     val rows = remember(document, view.filter, view.textFilter, view.sort) {
         seq3QueueRows(document, view.filter, view.textFilter, view.sort)
@@ -781,6 +782,18 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
             Box(Modifier.weight(1f).pointerInput(fragment.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
                 AppText(fragment.label, color = tc.tx, fontSize = 10.sp, maxLines = 1)
             }
+            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 18.dp)
+            SquareIconButton(
+                "×",
+                fontSize = 11.sp,
+                onClick = {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteFragment(fragment.id)),
+                    )
+                },
+                size = 18.dp,
+            )
         }
     }
 }
@@ -806,6 +819,18 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, no
             Box(Modifier.weight(1f).pointerInput(note.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
                 AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 1)
             }
+            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 18.dp)
+            SquareIconButton(
+                "×",
+                fontSize = 11.sp,
+                onClick = {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.id)),
+                    )
+                },
+                size = 18.dp,
+            )
         }
     }
 }
@@ -822,7 +847,7 @@ private fun Seq3QueueRow(
     visibleIds: List<String>,
 ) {
     val tc = tc()
-    val selected = message.occurrences.size == 1 && message.id in view.selection.selectedIds
+    val selected = message.id in view.selection.selectedIds
     val needsTarget = message.state == Seq3State.NEEDS_TARGET
     val hidden = message.visibility == Seq3Visibility.HIDDEN
     val hovered = view.hoveredMessageId == message.id
@@ -859,9 +884,6 @@ private fun Seq3QueueRow(
     ) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (message.occurrences.size > 1) {
-                // A repeated row is an evidence group, not one ordinary message. It can be
-                // expanded and its individual occurrences can be checked, but the group itself
-                // has no message-level checkbox.
                 Seq3OccurrenceToggle(
                     expanded = message.id in view.expandedOccurrenceMessageIds,
                     modifier = Modifier.padding(top = 2.dp),
@@ -878,6 +900,8 @@ private fun Seq3QueueRow(
                     Seq3RowCheckbox(checked = selected) {
                         // Checkbox selection is independent from inspector/occurrence focus.
                         view.selection = seq3Select(visibleIds, view.selection, message.id, additive = true)
+                        view.selectionFromMarquee = false
+                        view.selectedCanvasRows = emptySet()
                         view.selectedOccurrenceMessageId = null
                         view.selectedOccurrenceEntryId = null
                         runCatching { view.focusRequester.requestFocus() }
@@ -900,9 +924,18 @@ private fun Seq3QueueRow(
                                 val now = System.currentTimeMillis()
                                 val doubleClick = now - lastBodyClickMs <= SEQ3_QUEUE_DOUBLE_CLICK_WINDOW_MS
                                 lastBodyClickMs = now
-                                // A body press opens the inspector only. Bulk selection is
-                                // exclusively checkbox-driven, so an empty checkbox can never
-                                // cause the selection action bar to appear.
+                                val modifiers = event.keyboardModifiers
+                                val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                                view.selection = seq3Select(
+                                    visibleIds,
+                                    view.selection,
+                                    message.id,
+                                    additive = additive,
+                                    range = modifiers.isShiftPressed,
+                                )
+                                view.selectionFromMarquee = false
+                                view.selectedCanvasRows = emptySet()
+                                view.selectedOccurrenceIds = emptySet()
                                 view.selectedOccurrenceMessageId = null
                                 view.selectedOccurrenceEntryId = null
                                 view.inspectorMessageId = message.id
@@ -1023,6 +1056,8 @@ private fun Seq3OccurrenceSubRow(
     ) {
         Seq3RowCheckbox(checked) {
             view.selectedOccurrenceIds = if (checked) view.selectedOccurrenceIds - key else view.selectedOccurrenceIds + key
+            view.selectionFromMarquee = false
+            view.selectedCanvasRows = emptySet()
             view.selectedOccurrenceMessageId = message.id
             view.selectedOccurrenceEntryId = entryId
             view.inspectorMessageId = message.id
@@ -1040,6 +1075,8 @@ private fun Seq3OccurrenceSubRow(
                             // message. The occurrence checkbox is the explicit occurrence-level
                             // selection control.
                             view.selectedOccurrenceMessageId = message.id
+                            view.selectionFromMarquee = false
+                            view.selectedCanvasRows = emptySet()
                             view.selectedOccurrenceEntryId = entryId
                             view.inspectorMessageId = message.id
                             runCatching { view.focusRequester.requestFocus() }
@@ -1381,6 +1418,7 @@ private fun Seq3OccurrenceSelectionActionBar(
     val canMoveOut = selected.isNotEmpty() && selected.groupBy { it.messageId }.all { (messageId, refs) ->
         document.messages.firstOrNull { it.id == messageId }?.let { refs.size < it.occurrences.size } == true
     }
+    val selectedMessageIds = selected.map { it.messageId }.toSet()
 
     fun clearSelection() {
         view.selectedOccurrenceIds = emptySet()
@@ -1408,6 +1446,14 @@ private fun Seq3OccurrenceSelectionActionBar(
                 clearSelection()
             }
         }
+        Seq3ActionBarButton("Note") {
+            seq3AddNote(state, session, view, document, selectedMessageIds)
+        }
+        if (view.selectionFromMarquee || seq3MessageIdsAreContiguous(document, selectedMessageIds)) {
+            Seq3ActionBarButton("Group") {
+                seq3GroupMessages(state, session, view, selectedMessageIds, Seq3FragmentKind.LOOP)
+            }
+        }
         Spacer(Modifier.weight(1f))
         Seq3ActionBarButton("Esc", active = false, onClick = ::clearSelection)
     }
@@ -1416,15 +1462,15 @@ private fun Seq3OccurrenceSelectionActionBar(
 @Composable
 private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document) {
     val tc = tc()
-    val selectedIds = view.selection.selectedIds.filterTo(linkedSetOf()) { id ->
-        document.messages.firstOrNull { it.id == id }?.occurrences?.size == 1
+    val selectedIds = view.selection.selectedIds.filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
+    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+        view.selectedCanvasRows.size
+    } else {
+        selectedIds.size
     }
 
     fun clearSelection() {
-        view.selection = com.indagium.diagram3.Seq3Selection()
-        view.selectedOccurrenceIds = emptySet()
-        view.selectedOccurrenceMessageId = null
-        view.selectedOccurrenceEntryId = null
+        seq3ClearSelection(view)
     }
 
     fun dispatch(action: Seq3BulkAction): Boolean =
@@ -1435,7 +1481,7 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        AppText("${selectedIds.size} selected", color = tc.bg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        AppText("$selectedRowCount selected", color = tc.bg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         Seq3DropdownButton(label = "Set from", labelColor = tc.bg) { close ->
             document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
                 Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetFrom(lifeline.id)); close() }
@@ -1446,12 +1492,13 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
                 Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetTo(lifeline.id)); close() }
             }
         }
-        Seq3DropdownButton(label = "Group", labelColor = tc.bg) { close ->
-            Seq3FragmentKind.entries.forEach { kind ->
-                Seq3DropdownMenuItem(kind.name.lowercase()) {
-                    val fragment = Seq3Fragment("frag-${UUID.randomUUID()}", kind, kind.name.lowercase(), selectedIds.toList())
-                    dispatch(Seq3BulkAction.Group(fragment))
-                    close()
+        if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+            Seq3DropdownButton(label = "Group", labelColor = tc.bg) { close ->
+                Seq3FragmentKind.entries.forEach { kind ->
+                    Seq3DropdownMenuItem(kind.name.lowercase()) {
+                        seq3GroupMessages(state, session, view, selectedIds, kind)
+                        close()
+                    }
                 }
             }
         }

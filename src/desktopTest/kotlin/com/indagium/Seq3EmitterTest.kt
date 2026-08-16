@@ -11,6 +11,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
@@ -190,6 +191,34 @@ class Seq3EmitterTest {
 
         assertTrue(outerOpen in 0 until innerOpen, "the outer fragment must open before the inner one; got:\n$out")
         assertTrue(innerClose in 0 until outerClose, "the inner fragment must close before the outer one; got:\n$out")
+    }
+
+    @Test
+    fun occurrenceScopedFragmentDoesNotWrapARepeatedSibling() {
+        val msg = message(
+            repeat = Seq3Repeat.EVERY,
+            occurrences = listOf(occurrence(1, "first"), occurrence(2, "second")),
+        )
+        val out = doc(
+            listOf(msg),
+            fragments = listOf(
+                Seq3Fragment(
+                    "exact",
+                    Seq3FragmentKind.LOOP,
+                    "only first",
+                    messageIds = emptyList(),
+                    occurrenceRefs = listOf(Seq3OccurrenceRef("m1", 1)),
+                ),
+            ),
+        ).toMermaid()
+        val open = out.indexOf("loop only first")
+        val close = out.indexOf("    end\n", open)
+        val first = out.indexOf("first")
+        val second = out.indexOf("second")
+
+        assertTrue(open >= 0 && close > open, "fragment must be balanced; got:\n$out")
+        assertTrue(open < first && first < close, "first occurrence must be inside the fragment; got:\n$out")
+        assertTrue(second > close, "sibling occurrence must stay outside the fragment; got:\n$out")
     }
 
     // ── Notes ────────────────────────────────────────────────────────────────────────────────

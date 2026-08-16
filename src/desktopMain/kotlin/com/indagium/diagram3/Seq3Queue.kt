@@ -122,6 +122,12 @@ sealed class Seq3BulkAction {
 
     data class Note(val note: Seq3Note) : Seq3BulkAction()
 
+    /** Removes one user-created fragment without touching any of its messages. */
+    data class DeleteFragment(val fragmentId: String) : Seq3BulkAction()
+
+    /** Removes one user-created note without touching any of its messages. */
+    data class DeleteNote(val noteId: String) : Seq3BulkAction()
+
     // ── Fragment/note rename (spec §06's `Group ▾`/`Note` are add-only; these are the missing
     //    edit-in-place counterparts) ───────────────────────────────────────────────────────────
     //
@@ -187,7 +193,9 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
     // [SetFragmentLabel]/[SetNoteText] name their target by [fragmentId]/[noteId], not by the
     // message selection (see those variants' own doc) — "select at least one message" would be a
     // pointless block on a rename that never reads `selectedIds` at all.
-    if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText) {
+    if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText &&
+        action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote
+    ) {
         return unapplied(document, "Select at least one message")
     }
     return when (action) {
@@ -198,6 +206,8 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         Seq3BulkAction.Hide -> applyVisibility(document, selectedIds, Seq3Visibility.HIDDEN)
         Seq3BulkAction.Show -> applyVisibility(document, selectedIds, Seq3Visibility.VISIBLE)
         is Seq3BulkAction.Note -> applyNote(document, selectedIds, action)
+        is Seq3BulkAction.DeleteFragment -> applyDeleteFragment(document, action)
+        is Seq3BulkAction.DeleteNote -> applyDeleteNote(document, action)
         is Seq3BulkAction.SetFragmentLabel -> applySetFragmentLabel(document, action)
         is Seq3BulkAction.SetNoteText -> applySetNoteText(document, action)
         is Seq3BulkAction.SetKind -> applySetKind(document, selectedIds, action)
@@ -292,10 +302,14 @@ private fun applyVisibility(document: Seq3Document, selectedIds: Set<String>, vi
 
 private fun applyGroup(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.Group): Seq3BulkResult {
     val fragment = action.fragment
+    val referencedMessageIds = (fragment.messageIds + fragment.occurrenceRefs.map { it.messageId }).toSet()
     return when {
         fragment.id.isBlank() || fragment.label.isBlank() -> unapplied(document, "Fragment id and label are required")
         document.fragments.any { it.id == fragment.id } -> unapplied(document, "Fragment id already exists")
-        fragment.messageIds.toSet() != selectedIds -> unapplied(document, "Fragment must contain exactly the selected messages")
+        referencedMessageIds != selectedIds -> unapplied(document, "Fragment must contain exactly the selected messages")
+        fragment.occurrenceRefs.any { ref ->
+            document.messages.firstOrNull { it.id == ref.messageId }?.occurrences?.none { it.entryId == ref.entryId } != false
+        } -> unapplied(document, "Fragment contains an unknown occurrence")
         else -> Seq3BulkResult(document.copy(fragments = document.fragments + fragment), applied = true)
     }
 }
@@ -308,6 +322,33 @@ private fun applyNote(document: Seq3Document, selectedIds: Set<String>, action: 
         note.messageIds.isEmpty() || !selectedIds.containsAll(note.messageIds) -> unapplied(document, "Note must span selected messages")
         else -> Seq3BulkResult(document.copy(notes = document.notes + note), applied = true)
     }
+}
+
+private fun applyDeleteFragment(document: Seq3Document, action: Seq3BulkAction.DeleteFragment): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.filterNot { it.id == action.fragmentId }),
+        applied = true,
+    )
+}
+
+private fun applyDeleteNote(document: Seq3Document, action: Seq3BulkAction.DeleteNote): Seq3BulkResult {
+    if (document.notes.none { it.id == action.noteId }) return unapplied(document, "Unknown note")
+    return Seq3BulkResult(
+        document.copy(notes = document.notes.filterNot { it.id == action.noteId }),
+        applied = true,
+    )
+}
+
+/** A fragment is a contiguous timeline region. Disjoint message selections would draw a box
+ *  across unrelated rows, so grouping is intentionally unavailable for them. */
+internal fun seq3MessageIdsAreContiguous(document: Seq3Document, selectedIds: Set<String>): Boolean {
+    if (selectedIds.size < 2) return false
+    val positions = selectedIds.map { id -> document.messages.indexOfFirst { it.id == id } }
+    if (positions.any { it < 0 }) return false
+    val first = positions.minOrNull() ?: return false
+    val last = positions.maxOrNull() ?: return false
+    return last - first + 1 == selectedIds.size
 }
 
 /** Renames an EXISTING fragment's label — the edit-in-place counterpart [applyGroup] doesn't have
@@ -370,6 +411,9 @@ private fun applyMerge(document: Seq3Document, selected: List<Seq3Message>, acti
     )
     val removedIds = orderedSelected.map { it.id }.toSet()
     val repointIds = { ids: List<String> -> ids.map { if (it in removedIds) mergedId else it }.distinct() }
+    val repointOccurrenceRefs = { refs: List<Seq3OccurrenceRef> ->
+        refs.map { ref -> if (ref.messageId in removedIds) ref.copy(messageId = mergedId) else ref }.distinct()
+    }
     val firstSelectedIndex = document.messages.indexOfFirst { it.id in removedIds }
     val mergedMessages = document.messages.filterNot { it.id in removedIds }.toMutableList().apply {
         add(firstSelectedIndex.coerceIn(0, size), merged)
@@ -377,7 +421,12 @@ private fun applyMerge(document: Seq3Document, selected: List<Seq3Message>, acti
     return Seq3BulkResult(
         document.copy(
             messages = mergedMessages,
-            fragments = document.fragments.map { it.copy(messageIds = repointIds(it.messageIds)) },
+            fragments = document.fragments.map {
+                it.copy(
+                    messageIds = repointIds(it.messageIds),
+                    occurrenceRefs = repointOccurrenceRefs(it.occurrenceRefs),
+                )
+            },
             notes = document.notes.map { it.copy(messageIds = repointIds(it.messageIds)) },
         ),
         applied = true,

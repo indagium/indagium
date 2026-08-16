@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram3.Seq3AttachmentMode
+import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
@@ -66,9 +67,12 @@ import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3GuidedPassState
+import com.indagium.diagram3.Seq3Note
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import java.util.UUID
 
 // ── v3 workspace shell (phase 4) ────────────────────────────────────────────────────────────
@@ -160,9 +164,19 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(Modifier.weight(1f)) {
+        Column(Modifier.width(240.dp)) {
             Seq3TitleField(state, session)
             AppText(subtitle, color = tc.ts, fontSize = 11.sp)
+        }
+        Row(
+            Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            val selectedIds = seq3SelectedMessageIds(session.document, view)
+            if (selectedIds.isNotEmpty()) {
+                Seq3ContextualSelectionActions(state, session, view, selectedIds)
+            }
         }
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -192,6 +206,60 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
         }
     }
+}
+
+@Composable
+private fun Seq3ContextualSelectionActions(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    selectedIds: Set<String>,
+) {
+    val tc = tc()
+    val document = session.document
+    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+        view.selectedCanvasRows.size
+    } else {
+        selectedIds.size
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (selectedRowCount == 1 && selectedIds.size == 1) {
+            Seq3TitleActionButton("Rename", "Rename selected line") {
+                seq3BeginLabelRename(view, document, selectedIds.single())
+            }
+            Seq3TitleActionButton("Note", "Add note for selected line") {
+                seq3AddNote(state, session, view, document, selectedIds)
+            }
+        } else if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+            Seq3DropdownButton(
+                label = "Group",
+                labelColor = tc.tx,
+                fillColor = tc.p2,
+                menuWidth = 130.dp,
+            ) { close ->
+                Seq3FragmentKind.entries.forEach { kind ->
+                    Seq3DropdownMenuItem(kind.name.lowercase()) {
+                        seq3GroupMessages(state, session, view, selectedIds, kind)
+                        close()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Seq3TitleActionButton(label: String, tooltip: String, onClick: () -> Unit) {
+    ToolbarBtn(
+        label = label,
+        tooltip = tooltip,
+        shape = CORNER_SM,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+        onClick = onClick,
+    )
 }
 
 /** Compact explicit note attachment action. The button itself stays the same 28dp footprint as the
@@ -389,6 +457,10 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
  * through [Seq3Session.applyCommand] — this class itself never holds a [com.indagium.diagram3.
  * Seq3Document].
  */
+/** One exact row drawn by the canvas. A null occurrence id identifies a standalone/authored row;
+ *  a non-null id distinguishes one occurrence from the other rows of the same repeated message. */
+internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryId: Int?)
+
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
     /** Expanded repeated-message rows in the queue. This is view state only; grouping remains part
@@ -427,6 +499,21 @@ internal class Seq3ViewState {
     /** The lifeline header chip drawn in the accent color (spec §04's "the selected one in
      *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target. */
     var selectedLifelineId by mutableStateOf<String?>(null)
+
+    /** Rectangle currently being dragged on the canvas to select multiple message rows. */
+    var canvasSelectionRect by mutableStateOf<Seq3Box?>(null)
+    /** True when the current message selection came from a marquee, which may intentionally span
+     * hidden/non-rendered rows while still representing one visible rectangle on the canvas. */
+    var selectionFromMarquee by mutableStateOf(false)
+    /** Exact rows selected by the canvas rectangle. Kept separate from queue checkbox selection:
+     *  a repeated queue message can contribute one selected arrow without selecting all of its
+     *  other occurrences. */
+    var selectedCanvasRows by mutableStateOf<Set<Seq3CanvasRowRef>>(emptySet())
+
+    /** Right-click menu state for a canvas message row. */
+    var canvasContextMenuMessageId by mutableStateOf<String?>(null)
+    var canvasContextMenuOffset by mutableStateOf(IntOffset.Zero)
+    var canvasContextMenuCanvasPoint by mutableStateOf(Seq3Box(0.0, 0.0, 0.0, 0.0))
 
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT)
@@ -481,6 +568,97 @@ internal enum class Seq3ZoomMode { FIT, FIT_WIDTH, MANUAL }
  *  its 9 call sites across this file, `Seq3QueuePanel.kt`, `Seq3Canvas.kt` and
  *  `Seq3RegenerateSheet.kt`. Null outside a v3 workspace (there is no requester to reclaim). */
 internal val LocalSeq3FocusRequester = compositionLocalOf<FocusRequester?> { null }
+
+/** Message ids selected across the queue, canvas, and occurrence checkboxes. */
+internal fun seq3SelectedMessageIds(document: Seq3Document, view: Seq3ViewState): Set<String> {
+    val occurrenceMessageIds = document.messages.flatMap { message ->
+        message.occurrences.mapNotNull { occurrence ->
+            val key = "${message.id}::${occurrence.entryId}"
+            message.id.takeIf { key in view.selectedOccurrenceIds }
+        }
+    }
+    return (view.selection.selectedIds + occurrenceMessageIds)
+        .filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
+}
+
+internal fun seq3ClearSelection(view: Seq3ViewState) {
+    view.selection = Seq3Selection()
+    view.selectionFromMarquee = false
+    view.selectedCanvasRows = emptySet()
+    view.selectedOccurrenceIds = emptySet()
+    view.selectedOccurrenceMessageId = null
+    view.selectedOccurrenceEntryId = null
+}
+
+internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, messageId: String): Boolean {
+    val message = document.messages.firstOrNull { it.id == messageId } ?: return false
+    view.inspectorMessageId = messageId
+    view.editingLabelMessageId = messageId
+    view.editingLabelOccurrenceEntryId = message.occurrences.firstOrNull()?.entryId
+    view.canvasContextMenuMessageId = null
+    return true
+}
+
+internal fun seq3AddNote(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    selectedIds: Set<String>,
+    placement: Seq3Box? = null,
+): Boolean {
+    val ids = document.messages.map { it.id }.filter { it in selectedIds }
+    if (ids.isEmpty()) return false
+    val note = Seq3Note(
+        id = "note-${UUID.randomUUID()}",
+        text = "Note",
+        messageIds = ids,
+        x = placement?.x,
+        y = placement?.y,
+        width = placement?.let { 220.0 },
+        height = placement?.let { 72.0 },
+    )
+    val applied = state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(ids.toSet(), Seq3BulkAction.Note(note)))
+    if (applied) {
+        view.canvasContextMenuMessageId = null
+        view.canvasContextMenuCanvasPoint = Seq3Box(0.0, 0.0, 0.0, 0.0)
+    }
+    return applied
+}
+
+internal fun seq3GroupMessages(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    selectedIds: Set<String>,
+    kind: Seq3FragmentKind,
+): Boolean {
+    if (!view.selectionFromMarquee && !seq3MessageIdsAreContiguous(session.document, selectedIds)) return false
+    val orderedIds = session.document.messages.map { it.id }.filter { it in selectedIds }
+    val canvasRows = view.selectedCanvasRows
+    val exactOccurrenceRefs = canvasRows.mapNotNull { row ->
+        row.occurrenceEntryId?.let { Seq3OccurrenceRef(row.messageId, it) }
+    }
+    val exactMessageIds = exactOccurrenceRefs.mapTo(hashSetOf()) { it.messageId }
+    val fallbackMessageIds = if (canvasRows.isEmpty()) {
+        orderedIds
+    } else {
+        canvasRows.map { it.messageId }.filterNot { it in exactMessageIds }.distinct()
+    }
+    val fragment = Seq3Fragment(
+        id = "seq3-fragment-${UUID.randomUUID()}",
+        kind = kind,
+        label = kind.name.lowercase(),
+        messageIds = fallbackMessageIds,
+        occurrenceRefs = exactOccurrenceRefs,
+    )
+    val applied = state.seq3Sessions.applyCommand(
+        session.id,
+        Seq3Command.Bulk(selectedIds, Seq3BulkAction.Group(fragment)),
+    )
+    if (applied) seq3ClearSelection(view)
+    return applied
+}
 
 // ── Shared small dropdown-button (Set from ▾ / Set to ▾ / Group ▾ / sort / target lifeline) ───
 //
@@ -721,13 +899,12 @@ private fun applySeq3KeyAction(
 
 private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
     view.textFieldFocused -> { view.textFieldFocused = false; true }
+    view.canvasContextMenuMessageId != null -> { view.canvasContextMenuMessageId = null; true }
+    view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
     view.selection.selectedIds.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty() -> {
-        view.selection = Seq3Selection()
-        view.selectedOccurrenceIds = emptySet()
-        view.selectedOccurrenceMessageId = null
-        view.selectedOccurrenceEntryId = null
+        seq3ClearSelection(view)
         true
     }
     else -> false
@@ -785,20 +962,12 @@ private fun applySeq3MergeSelection(state: AppState, session: Seq3WorkspaceSessi
 
 private fun applySeq3GroupSelection(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean {
     val ids = view.selection.selectedIds.takeIf { it.isNotEmpty() } ?: return false
-    val fragment = Seq3Fragment("seq3-fragment-${UUID.randomUUID()}", Seq3FragmentKind.LOOP, "loop", ids.toList())
-    state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(ids, Seq3BulkAction.Group(fragment)))
-    return true
+    return seq3GroupMessages(state, session, view, ids, Seq3FragmentKind.LOOP)
 }
 
 private fun applySeq3EditLabel(view: Seq3ViewState, document: Seq3Document): Boolean {
-    val messageId = view.inspectorMessageId ?: return false
-    view.editingLabelMessageId = messageId
-    view.editingLabelOccurrenceEntryId = document.messages
-        .firstOrNull { it.id == messageId }
-        ?.occurrences
-        ?.firstOrNull()
-        ?.entryId
-    return true
+    val messageId = seq3SelectedMessageIds(document, view).singleOrNull() ?: view.inspectorMessageId ?: return false
+    return seq3BeginLabelRename(view, document, messageId)
 }
 
 private fun applySeq3JumpToLog(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document): Boolean {

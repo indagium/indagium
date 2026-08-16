@@ -283,8 +283,9 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
 
     val rightEdge = maxOf(contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra)
     val noteRight = notes.maxOfOrNull { it.box.x + it.box.width } ?: 0.0
+    val noteBottom = notes.maxOfOrNull { it.box.y + it.box.height } ?: 0.0
     val width = maxOf(rightEdge, noteRight) + MARGIN
-    val height = rowBuild.bottomY + BOTTOM_MARGIN
+    val height = maxOf(rowBuild.bottomY, noteBottom) + BOTTOM_MARGIN
 
     val lifelineColumns = lifelinesSorted.mapIndexed { i, l ->
         Seq3LifelineColumn(
@@ -793,9 +794,8 @@ private fun layoutFragments(
     data class Bounds(val fragment: Seq3Fragment, val range: IntRange)
 
     val withBounds = fragments.mapNotNull { f ->
-        val starts = f.messageIds.mapNotNull { firstRowIndex[it] }
-        val ends = f.messageIds.mapNotNull { lastRowIndex[it] }
-        if (starts.isEmpty() || ends.isEmpty()) null else Bounds(f, starts.min()..ends.max())
+        val indices = fragmentRowIndices(f, firstRowIndex, lastRowIndex, rows)
+        if (indices.isEmpty()) null else Bounds(f, indices.min()..indices.max())
     }
     if (withBounds.isEmpty()) return emptyList()
     val sorted = withBounds.sortedWith(compareBy({ it.range.first }, { -it.range.last }))
@@ -811,6 +811,31 @@ private fun layoutFragments(
         result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows)
     }
     return result
+}
+
+/** Resolves a fragment to the drawn rows it actually references. Ordinary queue-created
+ * fragments only have message IDs and therefore include every rendered row for those messages.
+ * Marquee-created fragments additionally carry occurrence refs; those refs narrow the span to the
+ * exact arrows inside the selection rectangle instead of pulling in every similar occurrence. */
+private fun fragmentRowIndices(
+    fragment: Seq3Fragment,
+    firstRowIndex: Map<String, Int>,
+    lastRowIndex: Map<String, Int>,
+    rows: List<Seq3RowGeometry>,
+): List<Int> {
+    val exactMessageIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
+    val exact = fragment.occurrenceRefs.mapNotNull { ref ->
+        rows.indexOfFirst { row -> row.messageId == ref.messageId && row.occurrenceEntryId == ref.entryId }
+            .takeIf { it >= 0 }
+    }
+    val messageIndices = fragment.messageIds
+        .filterNot { it in exactMessageIds }
+        .flatMap { id ->
+            val first = firstRowIndex[id] ?: return@flatMap emptyList()
+            val last = lastRowIndex[id] ?: return@flatMap emptyList()
+            (first..last).toList()
+        }
+    return (exact + messageIndices).distinct().sorted()
 }
 
 private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int, rows: List<Seq3RowGeometry>): Seq3FragmentBox {
@@ -848,8 +873,18 @@ private fun layoutNotes(
         val anchorRow = rows.getOrNull(anchorIdx) ?: return@mapNotNull null
         val touchedX = note.messageIds.mapNotNull { lastRowIndex[it] }.flatMap { rowXExtent(rows[it]) }
         val cx = touchedX.average().takeIf { !it.isNaN() } ?: centers.firstOrNull() ?: 0.0
-        val width = max(NOTE_ROW_W, tm.width(Seq3FontRole.NOTE, note.text) + 2 * NOTE_PAD)
-        val box = Seq3Box(cx - width / 2, anchorRow.y + ROW_H / 2, width, ROW_H / 2 + NOTE_PAD)
+        val naturalWidth = max(NOTE_ROW_W, tm.width(Seq3FontRole.NOTE, note.text) + 2 * NOTE_PAD)
+        val naturalHeight = ROW_H / 2 + NOTE_PAD
+        val box = if (note.x != null && note.y != null && note.width != null && note.height != null) {
+            Seq3Box(
+                note.x,
+                note.y,
+                max(NOTE_ROW_W, note.width),
+                max(naturalHeight, note.height),
+            )
+        } else {
+            Seq3Box(cx - naturalWidth / 2, anchorRow.y + ROW_H / 2, naturalWidth, naturalHeight)
+        }
         Seq3NoteBox(note.id, box, note.text)
     }
 }

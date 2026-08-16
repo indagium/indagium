@@ -54,6 +54,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
@@ -62,16 +64,20 @@ import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3FragmentBox
+import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Layout
 import com.indagium.diagram3.Seq3LifelineColumn
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.seq3Select
+import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -105,8 +111,18 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
     // Selecting an expanded queue occurrence must be observable even when that message is
     // currently collapsed on the canvas. This is a view-only expansion: the saved document keeps
     // its repeat policy, while the selected occurrence gets a real row to emphasize temporarily.
-    val layoutDocument = remember(document, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId) {
-        seq3CanvasDocumentForSelection(document, view.selectedOccurrenceMessageId, view.selectedOccurrenceEntryId)
+    val layoutDocument = remember(
+        document,
+        view.selectedOccurrenceMessageId,
+        view.selectedOccurrenceEntryId,
+        view.selectedCanvasRows,
+    ) {
+        seq3CanvasDocumentForSelection(
+            document,
+            view.selectedOccurrenceMessageId,
+            view.selectedOccurrenceEntryId,
+            view.selectedCanvasRows,
+        )
     }
     val layout = remember(layoutDocument) { Seq3RenderCache.layout(layoutDocument) }
     Column(modifier.fillMaxSize().background(tc.bg)) {
@@ -127,15 +143,28 @@ private fun seq3CanvasDocumentForSelection(
     document: Seq3Document,
     selectedMessageId: String?,
     selectedEntryId: Int?,
+    selectedCanvasRows: Set<Seq3CanvasRowRef>,
 ): Seq3Document {
-    if (selectedMessageId == null || selectedEntryId == null) return document
-    val message = document.messages.firstOrNull { it.id == selectedMessageId } ?: return document
-    if (message.occurrences.none { it.entryId == selectedEntryId }) return document
-    if (message.occurrences.size <= 1 || message.kind == Seq3Kind.NOTE || message.toLifelineId == null) return document
-    if (message.repeat == Seq3Repeat.EVERY) return document
+    val selectedOccurrenceIds = buildSet {
+        if (selectedMessageId != null && selectedEntryId != null) add(selectedMessageId to selectedEntryId)
+        selectedCanvasRows.forEach { row ->
+            row.occurrenceEntryId?.let { add(row.messageId to it) }
+        }
+    }
+    if (selectedOccurrenceIds.isEmpty()) return document
+    val expandableIds = selectedOccurrenceIds.map { it.first }.toSet()
     return document.copy(
         messages = document.messages.map { current ->
-            if (current.id == selectedMessageId) current.copy(repeat = Seq3Repeat.EVERY) else current
+            if (current.id in expandableIds &&
+                current.occurrences.size > 1 &&
+                current.kind != Seq3Kind.NOTE &&
+                current.toLifelineId != null &&
+                current.repeat != Seq3Repeat.EVERY
+            ) {
+                current.copy(repeat = Seq3Repeat.EVERY)
+            } else {
+                current
+            }
         },
     )
 }
@@ -278,12 +307,14 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                                 view.inspectorMessageId,
                                 view.selectedOccurrenceMessageId,
                                 view.selectedOccurrenceEntryId,
+                                view.selectedCanvasRows,
+                                view.canvasSelectionRect,
                                 dragPreview,
                             )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(fragment) }
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
-                        layout.notes.forEach { note -> Seq3NoteTextOverlay(note) }
+                        layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note) }
                         layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density) }
                     }
                 }
@@ -301,6 +332,9 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                 modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                 style = appScrollbarStyle(tc),
             )
+            if (view.canvasContextMenuMessageId != null) {
+                Seq3CanvasContextMenu(state, session, view, document)
+            }
         }
     }
 }
@@ -339,21 +373,20 @@ private fun seq3CanvasGestureModifier(
             var moved = false
             var lastClickTimeMs = 0L
             var lastClickMessageId: String? = null
-            // Drag-to-pan (item 12, phase-5 post-ship plan). `panning` arms IMMEDIATELY on a
-            // middle-button press (unambiguous — nothing else in this file uses the middle button),
-            // or LAZILY on a primary-button drag once it (a) exceeds the click-vs-drag slop
-            // threshold already used for row clicks and (b) started on truly empty background — no
-            // row, no endpoint — so a plain click/drag on real content keeps meaning what it always
-            // meant. The pan anchor is kept in viewport pixels, not the diagram node's local
-            // pixels: scrolling moves that node under a stationary cursor, so raw local deltas
-            // would alternate direction and make the whole diagram flicker. `panViewportPosition`
-            // puts each event back into the stable viewport basis before handing its delta to
-            // `dispatchRawDelta`, so wheel-scroll, scrollbar-drag, and pan-drag all agree on the
-            // SAME ScrollState.
+            // Drag-to-pan (item 12, phase-5 post-ship plan). Middle-button drag always pans. A
+            // primary drag on empty background creates the requested marquee selection. Overlay
+            // bounds are excluded before this gesture is armed, so dragging a note or lifeline
+            // cannot also paint a selection rectangle. The pan anchor is kept in viewport pixels,
+            // not the diagram node's local pixels: scrolling moves that node under a stationary
+            // cursor, so raw local deltas would alternate direction and make the whole diagram
+            // flicker.
             var panning = false
             var pressWasMiddle = false
             var lastPanPosition: Offset? = null
-            var primaryPanEligible = false
+            var selectingArea = false
+            var selectionStart: Offset? = null
+            var selectionAdditive = false
+            var selectionRange = false
             var childOwnsGesture = false
             fun panViewportPosition(position: Offset): Offset = Offset(
                 position.x - currentHScroll.value.value,
@@ -377,6 +410,37 @@ private fun seq3CanvasGestureModifier(
                 when (event.type) {
                     PointerEventType.Press -> {
                         val isMiddle = event.buttons.isTertiaryPressed
+                        if (event.buttons.isSecondaryPressed) {
+                            if (!change.isConsumed) {
+                                val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
+                                if (hitRow != null) {
+                                    val modifiers = event.keyboardModifiers
+                                    val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                                    val document = currentSession.value.document
+                                    if (hitRow.messageId !in view.selection.selectedIds || additive || modifiers.isShiftPressed) {
+                                        view.selection = seq3Select(
+                                            document.messages.map { it.id },
+                                            view.selection,
+                                            hitRow.messageId,
+                                            additive = additive,
+                                            range = modifiers.isShiftPressed,
+                                        )
+                                    }
+                                    view.selectionFromMarquee = false
+                                    view.selectedCanvasRows = emptySet()
+                                    view.inspectorMessageId = hitRow.messageId
+                                    view.canvasContextMenuMessageId = hitRow.messageId
+                                    view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
+                                    view.canvasContextMenuOffset = IntOffset(
+                                        change.position.x.roundToInt().coerceAtLeast(0),
+                                        change.position.y.roundToInt().coerceAtLeast(0),
+                                    )
+                                    change.consume()
+                                }
+                            }
+                            childOwnsGesture = true
+                            continue
+                        }
                         if (event.buttons.isPrimaryPressed || isMiddle) {
                             if (change.isConsumed) {
                                 // A child owns this gesture (for example a lifeline chip or an
@@ -388,15 +452,25 @@ private fun seq3CanvasGestureModifier(
                                 moved = false
                                 panning = false
                                 pressWasMiddle = false
-                                primaryPanEligible = false
+                                selectingArea = false
+                                selectionStart = null
                                 continue
                             }
                             childOwnsGesture = false
+                            view.canvasContextMenuMessageId = null
                             downPosition = change.position
                             moved = false
                             pressWasMiddle = isMiddle
-                            primaryPanEligible = !isMiddle && seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
+                            val modifiers = event.keyboardModifiers
+                            selectionAdditive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                            selectionRange = modifiers.isShiftPressed
                             dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
+                            val emptyBackground = seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
+                            if (!isMiddle && dragEndpoint == null && emptyBackground) {
+                                selectingArea = true
+                                selectionStart = Offset(xUnits.toFloat(), yUnits.toFloat())
+                                view.canvasSelectionRect = Seq3Box(xUnits, yUnits, 0.0, 0.0)
+                            }
                             // The surrounding scroll modifiers must not take ownership of a
                             // primary drag before this canvas has decided whether it is an
                             // endpoint drag, a background pan, or a click. If an endpoint hit is
@@ -438,9 +512,9 @@ private fun seq3CanvasGestureModifier(
                                 }
                                 change.consume()
                             }
-                            down != null && !pressWasMiddle && moved && primaryPanEligible -> {
-                                panning = true
-                                lastPanPosition = panViewportPosition(change.position)
+                            selectingArea -> {
+                                val start = selectionStart ?: Offset(xUnits.toFloat(), yUnits.toFloat())
+                                view.canvasSelectionRect = seq3SelectionRect(start.x.toDouble(), start.y.toDouble(), xUnits, yUnits)
                                 change.consume()
                             }
                             downPosition == null -> view.hoveredMessageId = seq3RowAt(activeLayout, xUnits, yUnits)?.messageId
@@ -471,12 +545,47 @@ private fun seq3CanvasGestureModifier(
                                 }
                             }
                             panning -> {
+                                val wasMoved = moved
                                 panning = false
                                 lastPanPosition = null
+                                if (!wasMoved) seq3ClearSelection(view)
+                            }
+                            selectingArea -> {
+                                val start = selectionStart
+                                val rect = start?.let { seq3SelectionRect(it.x.toDouble(), it.y.toDouble(), xUnits, yUnits) }
+                                val selectedRows = rect?.let { seq3RowRefsInSelection(activeLayout, it) }.orEmpty()
+                                val ids = selectedRows.mapTo(linkedSetOf()) { it.messageId }
+                                view.canvasSelectionRect = null
+                                selectingArea = false
+                                selectionStart = null
+                                if (ids.isNotEmpty()) {
+                                    view.selection = if (selectionAdditive || selectionRange) {
+                                        Seq3Selection(view.selection.selectedIds + ids, ids.first())
+                                    } else {
+                                        Seq3Selection(ids, ids.first())
+                                    }
+                                    view.selectedCanvasRows = if (selectionAdditive || selectionRange) {
+                                        view.selectedCanvasRows + selectedRows
+                                    } else {
+                                        selectedRows.toSet()
+                                    }
+                                    view.selectionFromMarquee = true
+                                    view.selectedOccurrenceIds = emptySet()
+                                    view.selectedOccurrenceMessageId = null
+                                    view.selectedOccurrenceEntryId = null
+                                } else if (!moved) {
+                                    seq3ClearSelection(view)
+                                }
                             }
                             !moved && !pressWasMiddle -> {
                                 val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
-                                if (hitRow != null) seq3HandleCanvasRowClick(view, hitRow) { now, id ->
+                                if (hitRow != null) seq3HandleCanvasRowClick(
+                                    view,
+                                    currentSession.value.document,
+                                    hitRow,
+                                    selectionAdditive,
+                                    selectionRange,
+                                ) { now, id ->
                                     val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
                                     lastClickTimeMs = now
                                     lastClickMessageId = id
@@ -486,7 +595,8 @@ private fun seq3CanvasGestureModifier(
                         }
                         downPosition = null
                         pressWasMiddle = false
-                        primaryPanEligible = false
+                        selectionAdditive = false
+                        selectionRange = false
                     }
                     PointerEventType.Exit -> view.hoveredMessageId = null
                     else -> Unit
@@ -498,18 +608,45 @@ private fun seq3CanvasGestureModifier(
 
 private fun seq3HandleCanvasRowClick(
     view: Seq3ViewState,
+    document: Seq3Document,
     hitRow: Seq3RowGeometry,
+    additive: Boolean,
+    range: Boolean,
     registerClick: (nowMs: Long, id: String) -> Boolean,
 ) {
-    // Canvas/message presses are Inspector navigation, never queue selection. Selection is
-    // intentionally owned by the message checkboxes so clicking an arrow cannot unexpectedly
-    // activate a checkbox or trigger the selection action bar. Modifier keys do not change this
-    // rule.
     // A click always resolves the row into view even when the current queue filter/text hides it
     // (spec §04) — reset the view here, BEFORE requesting the scroll, so Seq3QueuePanel's effect
     // finds the row on the very next recomposition.
     view.filter = Seq3Filter.ALL
     view.textFilter = ""
+    view.selection = seq3Select(
+        document.messages.map { it.id },
+        view.selection,
+        hitRow.messageId,
+        additive = additive,
+        range = range,
+    )
+    view.selectionFromMarquee = false
+    view.selectedCanvasRows = emptySet()
+    val message = document.messages.firstOrNull { it.id == hitRow.messageId }
+    val occurrenceEntryId = hitRow.occurrenceEntryId
+    if (message != null && occurrenceEntryId != null && message.occurrences.size > 1) {
+        val occurrenceKey = "${message.id}::${occurrenceEntryId}"
+        view.selectedOccurrenceIds = if (additive) {
+            view.selectedOccurrenceIds + occurrenceKey
+        } else {
+            setOf(occurrenceKey)
+        }
+        view.selectedOccurrenceMessageId = message.id
+        view.selectedOccurrenceEntryId = occurrenceEntryId
+        if (message.occurrences.size > 1) {
+            view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds + message.id
+        }
+    } else {
+        view.selectedOccurrenceIds = emptySet()
+        view.selectedOccurrenceMessageId = null
+        view.selectedOccurrenceEntryId = null
+    }
     view.inspectorMessageId = hitRow.messageId
     view.scrollRequestId = hitRow.messageId
     val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
@@ -521,6 +658,43 @@ private fun seq3HandleCanvasRowClick(
     }
 }
 
+internal fun seq3SelectionRect(startX: Double, startY: Double, endX: Double, endY: Double): Seq3Box = Seq3Box(
+    x = min(startX, endX),
+    y = min(startY, endY),
+    width = kotlin.math.abs(endX - startX),
+    height = kotlin.math.abs(endY - startY),
+)
+
+internal fun seq3RowsInSelection(layout: Seq3Layout, selection: Seq3Box): Set<String> = layout.rows
+    .filter { row -> seq3RowBounds(row).let { bounds -> boxesIntersect(bounds, selection) } }
+    .mapTo(linkedSetOf()) { it.messageId }
+
+internal fun seq3RowRefsInSelection(layout: Seq3Layout, selection: Seq3Box): List<Seq3CanvasRowRef> = layout.rows
+    .filter { row -> row !is Seq3ElisionRow && seq3RowBounds(row).let { bounds -> boxesIntersect(bounds, selection) } }
+    .map { row -> Seq3CanvasRowRef(row.messageId, row.occurrenceEntryId) }
+
+private fun seq3RowBounds(row: Seq3RowGeometry): Seq3Box = when (row) {
+    is Seq3ArrowRow -> Seq3Box(
+        min(row.fromX, row.toX),
+        row.y - SEQ3_ROW_HIT_Y_TOLERANCE,
+        max(row.toX, row.fromX) - min(row.fromX, row.toX),
+        SEQ3_ROW_HIT_Y_TOLERANCE * 2,
+    )
+    is Seq3SelfLoopRow -> Seq3Box(row.x, row.y - SEQ3_ROW_HIT_Y_TOLERANCE, row.loopWidth, SEQ3_ROW_HIT_Y_TOLERANCE * 2)
+    is Seq3UnresolvedStubRow -> Seq3Box(
+        min(row.fromX, row.stubEndX),
+        row.y - SEQ3_ROW_HIT_Y_TOLERANCE,
+        max(row.stubEndX, row.fromX) - min(row.fromX, row.stubEndX),
+        SEQ3_ROW_HIT_Y_TOLERANCE * 2,
+    )
+    is Seq3MessageNoteRow -> row.box
+    is Seq3ElisionRow -> row.box
+}
+
+private fun boxesIntersect(a: Seq3Box, b: Seq3Box): Boolean =
+    a.x <= b.x + b.width && a.x + a.width >= b.x &&
+        a.y <= b.y + b.height && a.y + a.height >= b.y
+
 // ── Line/shape drawing — everything from `Seq3Layout`'s own unit-less coordinates ─────────────
 
 private fun DrawScope.drawSeq3Diagram(
@@ -531,6 +705,8 @@ private fun DrawScope.drawSeq3Diagram(
     focusedMessageId: String?,
     selectedOccurrenceMessageId: String?,
     selectedOccurrenceEntryId: Int?,
+    selectedCanvasRows: Set<Seq3CanvasRowRef>,
+    selectionRect: Seq3Box? = null,
     dragPreview: Seq3EndpointDragPreview? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
@@ -565,6 +741,7 @@ private fun DrawScope.drawSeq3Diagram(
             focusedMessageId,
             selectedOccurrenceMessageId,
             selectedOccurrenceEntryId,
+            selectedCanvasRows,
         )
         val arrowColor = when {
             draggingRow -> tc.ac
@@ -615,6 +792,19 @@ private fun DrawScope.drawSeq3Diagram(
                 )
             }
         drawSeq3DragPreview(dragPreview, tc.ac, strokeWidth = 2.dp.toPx())
+    }
+    selectionRect?.let { rect ->
+        drawRect(
+            color = tc.ac.copy(alpha = 0.12f),
+            topLeft = Offset(rect.x.dp.toPx(), rect.y.dp.toPx()),
+            size = Size(rect.width.dp.toPx(), rect.height.dp.toPx()),
+        )
+        drawRect(
+            color = tc.ac,
+            topLeft = Offset(rect.x.dp.toPx(), rect.y.dp.toPx()),
+            size = Size(rect.width.dp.toPx(), rect.height.dp.toPx()),
+            style = Stroke(width = 1.dp.toPx()),
+        )
     }
 }
 
@@ -705,37 +895,19 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
         view.inspectorMessageId,
         view.selectedOccurrenceMessageId,
         view.selectedOccurrenceEntryId,
+        view.selectedCanvasRows,
     )
     val labelColor = if (emphasized) tc.ac else tc.tx
     when (row) {
         is Seq3ArrowRow -> {
             Seq3LabelText(row.labelBox, row.label, labelColor)
             row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount) }
-            if (view.editingLabelMessageId == row.messageId &&
-                (view.editingLabelOccurrenceEntryId == null || view.editingLabelOccurrenceEntryId == row.occurrenceEntryId)
-            ) {
-                // A row label can be a rendered occurrence (for example, `vendorId=04E8`),
-                // while SetLabel edits the shared message template. Seed the editor from that
-                // template so saving a rename cannot accidentally replace `{vendorId}` and
-                // `{productId}` with one occurrence's concrete values for every sibling row.
-                val labelTemplate = session.document.messages
-                    .firstOrNull { it.id == row.messageId }
-                    ?.labelTemplate
-                    ?: row.label
-                Seq3InlineLabelEditor(
-                    state,
-                    session,
-                    view,
-                    row.messageId,
-                    row.occurrenceEntryId,
-                    labelTemplate,
-                    row.labelBox,
-                )
-            }
+            Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3SelfLoopRow -> {
             Seq3LabelText(row.labelBox, row.label, labelColor)
             row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount) }
+            Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3UnresolvedStubRow -> {
             Seq3LabelText(row.labelBox, row.label, tc.warn)
@@ -744,17 +916,49 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
                     .background(tc.warnBg, RoundedCornerShape(50)).border(1.dp, tc.warn, RoundedCornerShape(50)),
                 contentAlignment = Alignment.Center,
             ) { AppText("drop on a lifeline", color = tc.warn, fontSize = 9.sp, maxLines = 1) }
+            Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3MessageNoteRow -> {
             Box(Modifier.offset(row.box.x.dp, row.box.y.dp).size(row.box.width.dp, row.box.height.dp).padding(3.dp)) {
                 Column { row.lines.forEach { line -> AppText(line, color = tc.tx, fontSize = 10.sp, maxLines = 1) } }
             }
+            Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.lines.joinToString(" "), row.box)
         }
         is Seq3ElisionRow -> Box(
             Modifier.offset(row.box.x.dp, row.box.y.dp).size(row.box.width.dp, row.box.height.dp),
             contentAlignment = Alignment.Center,
         ) { AppText("⋮ ×${row.elidedCount}", color = tc.td, fontSize = 9.sp) }
     }
+}
+
+@Composable
+private fun Seq3InlineLabelEditorIfNeeded(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    row: Seq3RowGeometry,
+    renderedLabel: String,
+    box: Seq3Box,
+) {
+    if (view.editingLabelMessageId != row.messageId ||
+        (view.editingLabelOccurrenceEntryId != null && view.editingLabelOccurrenceEntryId != row.occurrenceEntryId)
+    ) return
+    // A row label can be a rendered occurrence (for example, `vendorId=04E8`), while SetLabel
+    // edits the shared message template. Seed the editor from that template so saving a rename
+    // cannot replace capture slots with one occurrence's concrete values for every sibling row.
+    val labelTemplate = session.document.messages
+        .firstOrNull { it.id == row.messageId }
+        ?.labelTemplate
+        ?: renderedLabel
+    Seq3InlineLabelEditor(
+        state,
+        session,
+        view,
+        row.messageId,
+        row.occurrenceEntryId,
+        labelTemplate,
+        box,
+    )
 }
 
 internal fun seq3RowIsEmphasized(
@@ -764,8 +968,12 @@ internal fun seq3RowIsEmphasized(
     focusedMessageId: String?,
     selectedOccurrenceMessageId: String?,
     selectedOccurrenceEntryId: Int?,
+    selectedCanvasRows: Set<Seq3CanvasRowRef> = emptySet(),
 ): Boolean {
     if (row.messageId == hoveredMessageId) return true
+    if (selectedCanvasRows.isNotEmpty()) {
+        return Seq3CanvasRowRef(row.messageId, row.occurrenceEntryId) in selectedCanvasRows
+    }
     if (selectedOccurrenceMessageId != null) {
         return row.messageId == selectedOccurrenceMessageId && row.occurrenceEntryId == selectedOccurrenceEntryId
     }
@@ -799,10 +1007,172 @@ private fun Seq3FragmentLabelOverlay(fragment: Seq3FragmentBox) {
 }
 
 @Composable
-private fun Seq3NoteTextOverlay(note: Seq3NoteBox) {
+private fun Seq3CanvasContextMenu(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+) {
+    val messageId = view.canvasContextMenuMessageId ?: return
+    val selectedIds = seq3SelectedMessageIds(document, view)
+    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+        view.selectedCanvasRows.size
+    } else {
+        selectedIds.size
+    }
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = view.canvasContextMenuOffset,
+        onDismissRequest = { view.canvasContextMenuMessageId = null },
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(170.dp)
+                .background(tc().p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc().br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            Seq3DropdownMenuItem("Rename label") {
+                seq3BeginLabelRename(view, document, messageId)
+            }
+            Seq3DropdownMenuItem("Add note") {
+                seq3AddNote(
+                    state,
+                    session,
+                    view,
+                    document,
+                    selectedIds,
+                    placement = view.canvasContextMenuCanvasPoint,
+                )
+            }
+            if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+                Seq3DropdownMenuItem("Group as loop") {
+                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP)
+                }
+                Seq3DropdownMenuItem("Group as alt") {
+                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.ALT)
+                }
+                Seq3DropdownMenuItem("Group as opt") {
+                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.OPT)
+                }
+                Seq3DropdownMenuItem("Group as par") {
+                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.PAR)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Seq3NoteTextOverlay(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    note: Seq3NoteBox,
+) {
     val tc = tc()
-    Box(Modifier.offset(note.box.x.dp, note.box.y.dp).size(note.box.width.dp, note.box.height.dp).padding(4.dp)) {
-        AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 2)
+    val density = LocalDensity.current.density
+    var editing by remember(note.noteId) { mutableStateOf(false) }
+    var text by remember(note.noteId, note.text) { mutableStateOf(note.text) }
+    var moveDelta by remember(note.noteId) { mutableStateOf(Offset.Zero) }
+    var resizeDelta by remember(note.noteId) { mutableStateOf(Offset.Zero) }
+    val latestMoveDelta = rememberUpdatedState(moveDelta)
+    val latestResizeDelta = rememberUpdatedState(resizeDelta)
+    val movedBox = note.box.copy(
+        x = note.box.x + moveDelta.x / density,
+        y = note.box.y + moveDelta.y / density,
+        width = (note.box.width + resizeDelta.x / density).coerceAtLeast(120.0),
+        height = (note.box.height + resizeDelta.y / density).coerceAtLeast(32.0),
+    )
+
+    fun commitBox(box: Seq3Box) {
+        state.seq3Sessions.applyCommand(
+            session.id,
+            Seq3Command.SetNoteGeometry(note.noteId, box.x, box.y, box.width, box.height),
+        )
+        moveDelta = Offset.Zero
+        resizeDelta = Offset.Zero
+    }
+
+    fun commitText() {
+        if (text.isNotBlank()) {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(note.noteId, text)),
+            )
+        }
+        editing = false
+    }
+
+    Box(
+        Modifier.offset(movedBox.x.dp, movedBox.y.dp)
+            .size(movedBox.width.dp, movedBox.height.dp)
+            .background(tc.seq2.copy(alpha = NOTE_FILL_ALPHA), CORNER_SM)
+            .border(1.dp, tc.seq2, CORNER_SM)
+            .pointerInput(session.id, note.noteId, note.box) {
+                detectDragGestures(
+                    onDrag = { change, dragAmount ->
+                        change.consume()
+                        moveDelta += dragAmount
+                    },
+                    onDragEnd = {
+                        val delta = latestMoveDelta.value
+                        commitBox(note.box.copy(x = note.box.x + delta.x / density, y = note.box.y + delta.y / density))
+                    },
+                    onDragCancel = { moveDelta = Offset.Zero },
+                )
+            }
+            .pointerInput(session.id, note.noteId) {
+                detectTapGestures(onDoubleTap = { editing = true })
+            },
+    ) {
+        if (editing) {
+            Column(Modifier.fillMaxSize().padding(4.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                InlineField(
+                    value = text,
+                    onValue = { text = it },
+                    fontSize = 10.sp,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    onSubmit = ::commitText,
+                )
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End)) {
+                    SquareIconButton("✓", fontSize = 10.sp, onClick = ::commitText, size = 16.dp)
+                    SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+                }
+            }
+        } else {
+            AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(4.dp))
+            SquareIconButton(
+                "✎",
+                fontSize = 10.sp,
+                onClick = { editing = true },
+                modifier = Modifier.align(Alignment.TopEnd).padding(2.dp),
+                size = 16.dp,
+            )
+        }
+        Box(
+            Modifier.align(Alignment.BottomEnd)
+                .size(12.dp)
+                .background(tc.seq2, RoundedCornerShape(topStart = 4.dp))
+                .pointerInput(session.id, note.noteId, note.box) {
+                    detectDragGestures(
+                        onDrag = { change, dragAmount ->
+                            change.consume()
+                            resizeDelta += dragAmount
+                        },
+                        onDragEnd = {
+                            val delta = latestResizeDelta.value
+                            commitBox(
+                                note.box.copy(
+                                    width = (note.box.width + delta.x / density).coerceAtLeast(120.0),
+                                    height = (note.box.height + delta.y / density).coerceAtLeast(32.0),
+                                ),
+                            )
+                        },
+                        onDragCancel = { resizeDelta = Offset.Zero },
+                    )
+                },
+        )
     }
 }
 
@@ -1066,7 +1436,9 @@ internal fun seq3NearestLifelineId(layout: Seq3Layout, x: Double): String? =
 internal fun seq3IsEmptyCanvasBackground(layout: Seq3Layout, x: Double, y: Double): Boolean =
     seq3RowAt(layout, x, y) == null &&
         seq3ResolveDragEndpoint(layout, x, y) == null &&
-        layout.lifelines.none { seq3PointInBox(it.header, x, y) }
+        layout.lifelines.none { seq3PointInBox(it.header, x, y) } &&
+        layout.notes.none { seq3PointInBox(it.box, x, y) } &&
+        layout.fragments.none { seq3PointInBox(it.box, x, y) }
 
 /** Live feedback while dragging an arrow endpoint (item 13, phase-5 post-ship plan): the FIXED end
  *  of [endpoint]'s row (the one NOT being dragged), its shared y, the live cursor x, and whichever
