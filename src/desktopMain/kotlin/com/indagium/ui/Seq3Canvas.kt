@@ -85,10 +85,9 @@ import java.awt.Cursor as AwtCursor
 // now survives ONLY for headless PNG export (Seq3Raster.kt/Seq3RenderCache.render/display/
 // pngBytes) — this file never calls those, and never calls `layoutSeq3` a second time itself.
 //
-// Zoom is a single `Modifier.graphicsLayer(scaleX/scaleY)` around the whole unscaled content —
-// Compose inverse-transforms pointer positions through a graphicsLayer automatically, so every
-// hit-test below still operates in the layout's own unit-less coordinates (1 unit == 1 dp) without
-// this file ever multiplying a click position by the current zoom by hand.
+// Pointer input is installed on the scaled-size wrapper, outside the graphicsLayer. Pointer
+// positions are therefore physical pixels in the zoomed canvas and must be converted back to the
+// layout's own unit-less coordinates before hit-testing.
 
 private const val ZOOM_STEP = 0.1f
 private const val MIN_ZOOM = 0.1f
@@ -256,15 +255,19 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
         Box(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(vScroll)) {
                 val zoom = view.zoom
-                Box(Modifier.size((layout.width * zoom).dp, (layout.height * zoom).dp)) {
+                Box(
+                    Modifier
+                        .size((layout.width * zoom).dp, (layout.height * zoom).dp)
+                        .then(
+                            seq3CanvasGestureModifier(state, session, view, layout, density, hScroll, vScroll) {
+                                dragPreview = it
+                            },
+                        ),
+                ) {
                     Box(
-                        Modifier.size(layout.width.dp, layout.height.dp)
-                            .graphicsLayer(scaleX = zoom, scaleY = zoom, transformOrigin = TransformOrigin(0f, 0f))
-                            .then(
-                                seq3CanvasGestureModifier(state, session, view, layout, density, hScroll, vScroll) {
-                                    dragPreview = it
-                                },
-                            ),
+                        Modifier
+                            .size(layout.width.dp, layout.height.dp)
+                            .graphicsLayer(scaleX = zoom, scaleY = zoom, transformOrigin = TransformOrigin(0f, 0f)),
                     ) {
                         Canvas(Modifier.size(layout.width.dp, layout.height.dp)) {
                             drawSeq3Diagram(
@@ -351,22 +354,20 @@ private fun seq3CanvasGestureModifier(
             var pressWasMiddle = false
             var lastPanPosition: Offset? = null
             var primaryPanEligible = false
-            fun panViewportPosition(position: Offset): Offset {
-                val zoom = currentView.value.zoom
-                return Offset(
-                    position.x * zoom - currentHScroll.value.value,
-                    position.y * zoom - currentVScroll.value.value,
-                )
-            }
+            fun panViewportPosition(position: Offset): Offset = Offset(
+                position.x - currentHScroll.value.value,
+                position.y - currentVScroll.value.value,
+            )
             while (true) {
                 val event = awaitPointerEvent(PointerEventPass.Initial)
                 val change = event.changes.firstOrNull() ?: continue
                 val activeLayout = currentLayout.value
                 val activeDensity = currentDensity.value
-                // Pointer deltas are in PIXELS (CLAUDE.md's own gotcha) — divide by density to get
-                // back to the layout's own unit-less coordinates (1 unit == 1 dp) before hit-testing.
-                val xUnits = (change.position.x / activeDensity).toDouble()
-                val yUnits = (change.position.y / activeDensity).toDouble()
+                // Pointer positions are physical pixels on the zoomed wrapper (CLAUDE.md's own
+                // gotcha) — remove both density and zoom to get layout coordinates (1 unit == 1 dp).
+                val activeZoom = currentView.value.zoom
+                val xUnits = seq3PointerPxToLayoutUnits(change.position.x, activeDensity, activeZoom)
+                val yUnits = seq3PointerPxToLayoutUnits(change.position.y, activeDensity, activeZoom)
                 when (event.type) {
                     PointerEventType.Press -> {
                         val isMiddle = event.buttons.isTertiaryPressed
@@ -1092,6 +1093,13 @@ internal fun seq3FitHeightZoom(contentHeight: Double, viewportHeight: Double): F
 internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double): Float {
     if (contentWidth <= 0.0 || viewportWidth <= 0.0) return 1f
     return (viewportWidth / contentWidth).toFloat().coerceIn(MIN_FIT_ZOOM, MAX_FIT_ZOOM)
+}
+
+/** Converts a pointer coordinate from physical pixels on the zoomed canvas to layout units. */
+internal fun seq3PointerPxToLayoutUnits(pointerPx: Float, density: Float, zoom: Float): Double {
+    val safeDensity = density.coerceAtLeast(0.001f)
+    val safeZoom = zoom.coerceAtLeast(0.001f)
+    return pointerPx.toDouble() / safeDensity / safeZoom
 }
 
 internal fun seq3ZoomPercentLabel(zoom: Float): String = "${(zoom * PERCENT).roundToInt()}%"
