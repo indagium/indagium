@@ -4,6 +4,7 @@ import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
@@ -14,16 +15,20 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3BulkAction
+import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.seq3FilterCounts
+import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
+import com.indagium.diagram3.undoSeq3Command
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -244,12 +249,52 @@ class Seq3QueueTest {
     }
 
     @Test
+    fun groupAllowsExplicitMarqueeSelectionAcrossNonSelectedRows() {
+        val doc = baseDocument()
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1", "m2"))
+        assertFalse(seq3MessageIdsAreContiguous(doc, setOf("m1", "m2")))
+        val result = applySeq3BulkAction(doc, setOf("m1", "m2"), Seq3BulkAction.Group(fragment))
+        assertTrue(result.applied)
+        assertEquals(listOf(fragment), result.document.fragments)
+    }
+
+    @Test
+    fun groupAcceptsExactOccurrenceReferencesForARepeatedMessage() {
+        val doc = baseDocument()
+        val fragment = Seq3Fragment(
+            id = "frag1",
+            kind = Seq3FragmentKind.ALT,
+            label = "only one occurrence",
+            messageIds = emptyList(),
+            occurrenceRefs = listOf(Seq3OccurrenceRef("m1", 11)),
+        )
+        val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.Group(fragment))
+
+        assertTrue(result.applied, result.reason)
+        assertEquals(listOf(Seq3OccurrenceRef("m1", 11)), result.document.fragments.single().occurrenceRefs)
+    }
+
+    @Test
     fun noteSpansTheSelection() {
         val doc = baseDocument()
         val note = Seq3Note("n1", "watch this", listOf("m1", "m3"))
         val result = applySeq3BulkAction(doc, setOf("m1", "m3"), Seq3BulkAction.Note(note))
         assertTrue(result.applied)
         assertEquals(listOf(note), result.document.notes)
+    }
+
+    @Test
+    fun noteGeometryMovesAndResizesAsOneUndoableCommand() {
+        val note = Seq3Note("n1", "watch this", listOf("m1"))
+        val doc = baseDocument().copy(notes = listOf(note))
+        val result = applySeq3Command(doc, Seq3Command.SetNoteGeometry("n1", 42.0, 84.0, 220.0, 64.0))
+
+        assertTrue(result.applied)
+        assertEquals(42.0, result.document.notes.single().x)
+        assertEquals(84.0, result.document.notes.single().y)
+        assertEquals(220.0, result.document.notes.single().width)
+        assertEquals(64.0, result.document.notes.single().height)
+        assertEquals(doc, undoSeq3Command(result.undo!!))
     }
 
     // ── Fragment/note rename (edit-in-place counterpart to Group/Note's add-only behaviour) ────
@@ -290,6 +335,23 @@ class Seq3QueueTest {
         val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteText("no-such-note", "updated"))
         assertFalse(result.applied)
         assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun deleteFragmentAndNoteRemoveOnlyTheRequestedArtifacts() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1", "m3"))
+        val note = Seq3Note("n1", "watch this", listOf("m2"))
+        val doc = baseDocument().copy(fragments = listOf(fragment), notes = listOf(note))
+
+        val withoutFragment = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteFragment("frag1"))
+        assertTrue(withoutFragment.applied)
+        assertTrue(withoutFragment.document.fragments.isEmpty())
+        assertEquals(listOf(note), withoutFragment.document.notes)
+
+        val withoutNote = applySeq3BulkAction(withoutFragment.document, emptySet(), Seq3BulkAction.DeleteNote("n1"))
+        assertTrue(withoutNote.applied)
+        assertTrue(withoutNote.document.notes.isEmpty())
+        assertEquals(doc.messages, withoutNote.document.messages)
     }
 
     @Test

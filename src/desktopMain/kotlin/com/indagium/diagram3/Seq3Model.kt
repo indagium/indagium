@@ -259,12 +259,18 @@ enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR }
 
 /** A labelled fragment box spanning the named messages. [messageIds] need not be a physically
  *  contiguous run of [Seq3Document.messages] — the bracket is drawn from the earliest to the
- *  latest referenced message, same as the old `DiagramFrame`'s bracket-around-a-range approach. */
+ *  latest referenced message, same as the old `DiagramFrame`'s bracket-around-a-range approach.
+ *
+ * [occurrenceRefs] is used when a canvas selection targets individual drawn occurrences of a
+ * repeated message. In that case the fragment must not expand to every occurrence owned by the
+ * same queue message. When present, occurrence references take precedence over [messageIds] for
+ * their message IDs. */
 data class Seq3Fragment(
     val id: String,
     val kind: Seq3FragmentKind,
     val label: String,
     val messageIds: List<String>,
+    val occurrenceRefs: List<Seq3OccurrenceRef> = emptyList(),
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct
@@ -273,6 +279,11 @@ data class Seq3Note(
     val id: String,
     val text: String,
     val messageIds: List<String>,
+    /** Optional canvas placement. Null keeps the automatic message-span anchor. */
+    val x: Double? = null,
+    val y: Double? = null,
+    val width: Double? = null,
+    val height: Double? = null,
 )
 
 // ── Range ────────────────────────────────────────────────────────────────────────────────────

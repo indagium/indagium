@@ -3,11 +3,14 @@ package com.indagium
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3FontRole
+import com.indagium.diagram3.Seq3Fragment
+import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
@@ -16,6 +19,7 @@ import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.ui.Seq3DragEndpoint
+import com.indagium.ui.Seq3CanvasRowRef
 import com.indagium.ui.Seq3EndpointSide
 import com.indagium.ui.seq3ArrowEndpointAt
 import com.indagium.ui.seq3CrossingLabel
@@ -31,6 +35,9 @@ import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
 import com.indagium.ui.seq3RowIsEmphasized
+import com.indagium.ui.seq3RowsInSelection
+import com.indagium.ui.seq3RowRefsInSelection
+import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
 import com.indagium.ui.seq3ZoomPercentLabel
 import kotlin.test.Test
@@ -90,6 +97,68 @@ class Seq3CanvasTest {
         val row = layout.rows.single() as Seq3ArrowRow
         val hit = seq3RowAt(layout, x = (row.fromX + row.toX) / 2, y = row.y)
         assertEquals("m1", hit?.messageId)
+    }
+
+    @Test
+    fun marqueeSelectionReturnsEveryMessageRowIntersectingTheRectangle() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, 2_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val first = layout.rows[0] as Seq3ArrowRow
+        val selected = seq3RowsInSelection(
+            layout,
+            seq3SelectionRect(first.fromX - 5.0, first.y - 5.0, first.toX + 5.0, first.y + 5.0),
+        )
+
+        assertEquals(setOf("m1"), selected)
+    }
+
+    @Test
+    fun marqueeSelectionKeepsRepeatedOccurrencesAsExactRows() {
+        val repeated = message(
+            "m1",
+            "A",
+            "B",
+            occurrences = listOf(occurrence(1, 1_000L), occurrence(2, 2_000L)),
+        ).copy(repeat = Seq3Repeat.EVERY)
+        val layout = layoutSeq3(
+            Seq3Document(
+                lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+                messages = listOf(repeated),
+            ),
+            opts(),
+        )
+        val first = layout.rows[0] as Seq3ArrowRow
+        val selected = seq3RowRefsInSelection(
+            layout,
+            seq3SelectionRect(first.fromX - 5.0, first.y - 5.0, first.toX + 5.0, first.y + 5.0),
+        )
+
+        assertEquals(listOf(Seq3CanvasRowRef("m1", 1)), selected)
+        assertEquals(
+            false,
+            seq3RowIsEmphasized(layout.rows[1], null, setOf("m1"), null, null, null, selected.toSet()),
+            "a selected occurrence must not highlight its sibling occurrence",
+        )
+    }
+
+    @Test
+    fun noteAndFragmentBoundsAreNotEmptyCanvasBackground() {
+        val doc = twoLifelineArrowDoc().copy(
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.LOOP, "loop", listOf("m1"))),
+            notes = listOf(Seq3Note("n1", "note", listOf("m1"))),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val note = layout.notes.single().box
+        val fragment = layout.fragments.single().box
+
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, note.x + note.width / 2, note.y + note.height / 2))
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, fragment.x + 2.0, fragment.y + 2.0))
     }
 
     @Test

@@ -13,6 +13,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
@@ -109,6 +110,34 @@ class Seq3LayoutTest {
         assertEquals(1, inner.depth)
         assertTrue(inner.box.y >= outer.box.y, "inner top must not escape above outer top")
         assertTrue(inner.box.y + inner.box.height <= outer.box.y + outer.box.height, "inner bottom must not escape below outer bottom")
+    }
+
+    @Test
+    fun occurrenceScopedFragmentDoesNotExpandToSiblingOccurrences() {
+        val repeated = message(
+            "m1",
+            "A",
+            "B",
+            occurrences = listOf(occurrence(1), occurrence(2)),
+        ).copy(repeat = Seq3Repeat.EVERY)
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(repeated),
+            fragments = listOf(
+                Seq3Fragment(
+                    "exact",
+                    Seq3FragmentKind.LOOP,
+                    "only first",
+                    messageIds = emptyList(),
+                    occurrenceRefs = listOf(Seq3OccurrenceRef("m1", 1)),
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val firstRow = layout.rows.single { it.occurrenceEntryId == 1 }
+        val fragment = layout.fragments.single()
+
+        assertEquals(firstRow.y + 21.0, fragment.box.y + fragment.box.height)
     }
 
     @Test

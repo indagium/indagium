@@ -487,23 +487,59 @@ private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
 
 // ── Fragment / note ──────────────────────────────────────────────────────────────────────────
 
+private fun occurrenceRefToMap(ref: Seq3OccurrenceRef): Map<String, Any?> = mapOf(
+    "messageId" to ref.messageId,
+    "entryId" to ref.entryId,
+)
+
+private fun occurrenceRefFromMap(map: Map<String, Any?>): Seq3OccurrenceRef? {
+    val messageId = boundedString(map.str("messageId")) ?: return null
+    val entryId = map.int("entryId") ?: return null
+    return Seq3OccurrenceRef(messageId, entryId)
+}
+
 private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
-    mapOf("id" to f.id, "kind" to f.kind.name, "label" to f.label, "messageIds" to f.messageIds)
+    mapOf(
+        "id" to f.id,
+        "kind" to f.kind.name,
+        "label" to f.label,
+        "messageIds" to f.messageIds,
+        "occurrenceRefs" to f.occurrenceRefs.map(::occurrenceRefToMap),
+    )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
     val id = boundedString(map.str("id")) ?: return null
+    val occurrenceRefMaps = map.mapList("occurrenceRefs").orEmpty()
+    if (occurrenceRefMaps.size > MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT) return null
     return Seq3Fragment(
         id = id,
         kind = enumFromName(map.str("kind"), Seq3FragmentKind.LOOP),
         label = boundedString(map.str("label")) ?: "",
         messageIds = map.strList("messageIds").orEmpty(),
+        occurrenceRefs = occurrenceRefMaps.mapNotNull(::occurrenceRefFromMap),
     )
 }
 
-private fun noteToMap(n: Seq3Note): Map<String, Any?> = mapOf("id" to n.id, "text" to n.text, "messageIds" to n.messageIds)
+private fun noteToMap(n: Seq3Note): Map<String, Any?> = mapOf(
+    "id" to n.id,
+    "text" to n.text,
+    "messageIds" to n.messageIds,
+    "x" to n.x,
+    "y" to n.y,
+    "width" to n.width,
+    "height" to n.height,
+)
 
 private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
     val id = boundedString(map.str("id")) ?: return null
     val text = boundedString(map.str("text")) ?: return null
-    return Seq3Note(id = id, text = text, messageIds = map.strList("messageIds").orEmpty())
+    return Seq3Note(
+        id = id,
+        text = text,
+        messageIds = map.strList("messageIds").orEmpty(),
+        x = (map["x"] as? Number)?.toDouble(),
+        y = (map["y"] as? Number)?.toDouble(),
+        width = (map["width"] as? Number)?.toDouble(),
+        height = (map["height"] as? Number)?.toDouble(),
+    )
 }

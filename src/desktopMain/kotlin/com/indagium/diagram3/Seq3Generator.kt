@@ -635,10 +635,23 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
     } else {
         (ids + newMessageId).distinct().sortedBy { remainingMessages.indexOfFirst { message -> message.id == it } }
     }
+    fun repointOccurrenceRefs(refs: List<Seq3OccurrenceRef>): List<Seq3OccurrenceRef> =
+        refs.map { ref ->
+            if (ref.messageId == messageId && ref.entryId == entryId) {
+                ref.copy(messageId = newMessageId)
+            } else {
+                ref
+            }
+        }.distinct()
     return Seq3MessageEditResult.Updated(
         document.copy(
             messages = remainingMessages,
-            fragments = document.fragments.map { it.copy(messageIds = repoint(it.messageIds)) },
+            fragments = document.fragments.map {
+                it.copy(
+                    messageIds = repoint(it.messageIds),
+                    occurrenceRefs = repointOccurrenceRefs(it.occurrenceRefs),
+                )
+            },
             notes = document.notes.map { it.copy(messageIds = repoint(it.messageIds)) },
         ),
     )

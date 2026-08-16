@@ -81,6 +81,15 @@ sealed class Seq3Command {
         val visibility: Seq3Visibility,
     ) : Seq3Command()
 
+    /** Moves/resizes one canvas note without changing the messages it annotates. */
+    data class SetNoteGeometry(
+        val noteId: String,
+        val x: Double,
+        val y: Double,
+        val width: Double,
+        val height: Double,
+    ) : Seq3Command()
+
     data class ReorderLifelines(val orderedLifelineIds: List<String>) : Seq3Command()
 
     data class RenameLifeline(val lifelineId: String, val name: String) : Seq3Command()
@@ -139,6 +148,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.MoveOccurrencesOut -> dispatchMoveOccurrencesOut(document, command)
     is Seq3Command.MoveOccurrenceBack -> dispatchMoveOccurrenceBack(document, command)
     is Seq3Command.SetOccurrenceVisibility -> dispatchSetOccurrenceVisibility(document, command)
+    is Seq3Command.SetNoteGeometry -> dispatchSetNoteGeometry(document, command)
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
@@ -157,6 +167,8 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     Seq3BulkAction.Hide -> "Hide"
     Seq3BulkAction.Show -> "Show"
     is Seq3BulkAction.Note -> "Add note"
+    is Seq3BulkAction.DeleteFragment -> "Remove fragment"
+    is Seq3BulkAction.DeleteNote -> "Remove note"
     is Seq3BulkAction.SetFragmentLabel -> "Rename fragment"
     is Seq3BulkAction.SetNoteText -> "Rename note"
     is Seq3BulkAction.SetKind -> "Set kind"
@@ -178,11 +190,19 @@ private fun dispatchReplaceMessage(document: Seq3Document, command: Seq3Command.
     val replacement = command.replacement.copy(id = command.messageId)
     val removedIds = command.removeMessageIds - command.messageId
     val repointIds = { ids: List<String> -> ids.map { if (it in removedIds) command.messageId else it }.distinct() }
+    val repointOccurrenceRefs = { refs: List<Seq3OccurrenceRef> ->
+        refs.map { ref -> if (ref.messageId in removedIds) ref.copy(messageId = command.messageId) else ref }.distinct()
+    }
     val replaced = document.copy(
         messages = document.messages
             .filterNot { it.id in removedIds }
             .map { if (it.id == command.messageId) replacement else it },
-        fragments = document.fragments.map { it.copy(messageIds = repointIds(it.messageIds)) },
+        fragments = document.fragments.map {
+            it.copy(
+                messageIds = repointIds(it.messageIds),
+                occurrenceRefs = repointOccurrenceRefs(it.occurrenceRefs),
+            )
+        },
         notes = document.notes.map { it.copy(messageIds = repointIds(it.messageIds)) },
     )
     return applied(replaced, "Revert to generated")
@@ -259,6 +279,22 @@ private fun dispatchSetOccurrenceVisibility(document: Seq3Document, command: Seq
         }
         is Seq3MessageEditResult.Rejected -> unapplied(document, result.reason)
     }
+
+private fun dispatchSetNoteGeometry(document: Seq3Document, command: Seq3Command.SetNoteGeometry): Outcome {
+    if (document.notes.none { it.id == command.noteId }) return unapplied(document, "Unknown note")
+    if (command.width <= 1.0 || command.height <= 1.0) return unapplied(document, "Note size must be positive")
+    val updated = document.copy(
+        notes = document.notes.map { note ->
+            if (note.id == command.noteId) note.copy(
+                x = command.x,
+                y = command.y,
+                width = command.width,
+                height = command.height,
+            ) else note
+        },
+    )
+    return if (updated == document) unapplied(document, "No change") else applied(updated, "Move/resize note")
+}
 
 private fun dispatchReorder(document: Seq3Document, command: Seq3Command.ReorderLifelines): Outcome {
     if (command.orderedLifelineIds.toSet() != document.lifelines.map { it.id }.toSet()) return unapplied(document, "Must list every lifeline exactly once")

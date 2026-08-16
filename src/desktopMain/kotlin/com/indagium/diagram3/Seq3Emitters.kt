@@ -85,6 +85,7 @@ private fun repeatSuffix(count: Int): String = if (count > 1) " ×$count" else "
 
 private sealed class Seq3Emission {
     abstract val messageId: String
+    abstract val occurrenceEntryId: Int?
 
     data class Arrow(
         override val messageId: String,
@@ -93,13 +94,26 @@ private sealed class Seq3Emission {
         val label: String,
         val kind: Seq3Kind,
         val repeatCount: Int,
+        override val occurrenceEntryId: Int? = null,
     ) : Seq3Emission()
 
-    data class NeedsTarget(override val messageId: String, val fromIdx: Int, val label: String) : Seq3Emission()
+    data class NeedsTarget(
+        override val messageId: String,
+        val fromIdx: Int,
+        val label: String,
+        override val occurrenceEntryId: Int? = null,
+    ) : Seq3Emission()
 
-    data class NoteLine(override val messageId: String, val participantIdx: Int, val text: String) : Seq3Emission()
+    data class NoteLine(
+        override val messageId: String,
+        val participantIdx: Int,
+        val text: String,
+        override val occurrenceEntryId: Int? = null,
+    ) : Seq3Emission()
 
-    data class Elided(override val messageId: String, val participantIdx: Int, val count: Int) : Seq3Emission()
+    data class Elided(override val messageId: String, val participantIdx: Int, val count: Int) : Seq3Emission() {
+        override val occurrenceEntryId: Int? get() = null
+    }
 }
 
 // The collapsed/multi-occurrence label keeps `{name}` slots visible (the templated form); a
@@ -122,11 +136,11 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
-        return listOf(Seq3Emission.NoteLine(message.id, fromIdx, templatedLabel(message)))
+        return listOf(Seq3Emission.NoteLine(message.id, fromIdx, templatedLabel(message), occurrences.firstOrNull()?.entryId))
     }
     val toIdx = message.toLifelineId?.let(lifelineIndex::get)
     if (toIdx == null) {
-        return listOf(Seq3Emission.NeedsTarget(message.id, fromIdx, templatedLabel(message)))
+        return listOf(Seq3Emission.NeedsTarget(message.id, fromIdx, templatedLabel(message), occurrences.firstOrNull()?.entryId))
     }
     // Authored messages intentionally have no fabricated log occurrence. They still need one
     // drawable arrow in both source dialects, using the authored label and no evidence expansion.
@@ -135,26 +149,26 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     }
     return when (message.repeat) {
         Seq3Repeat.EVERY -> occurrences.map { occ ->
-            Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occ), message.kind, 1)
+            Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occ), message.kind, 1, occ.entryId)
         }
         Seq3Repeat.FIRST_LAST -> firstAndLastEmissions(message, fromIdx, toIdx, occurrences)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
-            listOf(Seq3Emission.Arrow(message.id, fromIdx, toIdx, templatedLabel(message), message.kind, occurrences.size))
+            listOf(Seq3Emission.Arrow(message.id, fromIdx, toIdx, templatedLabel(message), message.kind, occurrences.size, occurrences.first().entryId))
         } else {
-            occurrences.map { occ -> Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occ), message.kind, 1) }
+            occurrences.map { occ -> Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occ), message.kind, 1, occ.entryId) }
         }
     }
 }
 
 private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int, occurrences: List<Seq3Occurrence>): List<Seq3Emission> {
     if (occurrences.size <= 1) {
-        return listOf(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.first()), message.kind, 1))
+        return listOf(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.first()), message.kind, 1, occurrences.first().entryId))
     }
     val elided = occurrences.size - 2
     return buildList {
-        add(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.first()), message.kind, 1))
+        add(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.first()), message.kind, 1, occurrences.first().entryId))
         if (elided > 0) add(Seq3Emission.Elided(message.id, fromIdx, elided))
-        add(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.last()), message.kind, 1))
+        add(Seq3Emission.Arrow(message.id, fromIdx, toIdx, occurrenceLabel(message, occurrences.last()), message.kind, 1, occurrences.last().entryId))
     }
 }
 
@@ -165,6 +179,7 @@ private class Seq3EmissionPlan(
     val emissions: List<Seq3Emission>,
     val firstIndexByMessage: Map<String, Int>,
     val lastIndexByMessage: Map<String, Int>,
+    val indexByOccurrence: Map<Seq3OccurrenceRef, Int>,
 )
 
 private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
@@ -172,15 +187,21 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
     val emissions = mutableListOf<Seq3Emission>()
     val firstIndex = HashMap<String, Int>()
     val lastIndex = HashMap<String, Int>()
+    val indexByOccurrence = HashMap<Seq3OccurrenceRef, Int>()
     document.messages.forEach { message ->
         if (message.visibility == Seq3Visibility.HIDDEN) return@forEach
         val expanded = expandMessage(message, lifelineIndex)
         if (expanded.isEmpty()) return@forEach
         firstIndex[message.id] = emissions.size
+        expanded.forEachIndexed { offset, emission ->
+            emission.occurrenceEntryId?.let { entryId ->
+                indexByOccurrence[Seq3OccurrenceRef(message.id, entryId)] = emissions.size + offset
+            }
+        }
         emissions += expanded
         lastIndex[message.id] = emissions.size - 1
     }
-    return Seq3EmissionPlan(lifelineIndex, emissions, firstIndex, lastIndex)
+    return Seq3EmissionPlan(lifelineIndex, emissions, firstIndex, lastIndex, indexByOccurrence)
 }
 
 private fun emissionParticipants(emission: Seq3Emission): List<Int> = when (emission) {
@@ -201,10 +222,14 @@ private fun emissionParticipants(emission: Seq3Emission): List<Int> = when (emis
 private class Seq3Bracket(val fragment: Seq3Fragment, val range: IntRange, val depth: Int)
 
 private fun fragmentBounds(fragment: Seq3Fragment, plan: Seq3EmissionPlan): IntRange? {
-    val starts = fragment.messageIds.mapNotNull { plan.firstIndexByMessage[it] }
-    val ends = fragment.messageIds.mapNotNull { plan.lastIndexByMessage[it] }
-    if (starts.isEmpty() || ends.isEmpty()) return null
-    return starts.min()..ends.max()
+    val exactMessageIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
+    val exact = fragment.occurrenceRefs.mapNotNull { plan.indexByOccurrence[it] }
+    val messageIds = fragment.messageIds.filterNot { it in exactMessageIds }
+    val starts = messageIds.mapNotNull { plan.firstIndexByMessage[it] }
+    val ends = messageIds.mapNotNull { plan.lastIndexByMessage[it] }
+    if (exact.isEmpty() && (starts.isEmpty() || ends.isEmpty())) return null
+    val all = exact + starts + ends
+    return all.min()..all.max()
 }
 
 private fun normalizedBrackets(fragments: List<Seq3Fragment>, plan: Seq3EmissionPlan): List<Seq3Bracket> {
