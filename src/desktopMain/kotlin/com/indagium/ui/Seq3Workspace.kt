@@ -80,8 +80,8 @@ import java.util.UUID
 // Phase 3 delivered a skeleton (title bar, panel/canvas split, footer) with placeholder rows and
 // a rasterized-bitmap canvas so generation was visible end to end. This phase replaces both
 // placeholders with the real spec §04/§06/§07 queue panel and a NATIVE Compose canvas (no more
-// bitmap image — see Seq3Canvas.kt's own header for why), and adds the spec §03 Inspector as a
-// third, conditionally-shown pane.
+// bitmap image — see Seq3Canvas.kt's own header for why), and keeps message details inside the
+// queue rows so the workspace has no separate details pane.
 //
 // All colors still come from [ThemeColors] (via [tc]) — including warn/warnBg/ok through
 // [toSeq3RasterTheme] where the raster theme is still needed (Seq3RenderCache.layout, the PNG
@@ -91,11 +91,9 @@ import java.util.UUID
 private val PANEL_WIDTH = 392.dp
 
 // Item 14 — drag bounds for the queue-panel divider. The panel width stays the seed value a
-// freshly-opened workspace starts at; the height bounds keep the two stacked sections usable.
+// freshly-opened workspace starts at.
 private const val PANEL_WIDTH_MIN_DP = 280f
 private const val PANEL_WIDTH_MAX_DP = 560f
-internal const val SEQ3_INSPECTOR_HEIGHT_MIN_DP = 140f
-internal const val SEQ3_INSPECTOR_HEIGHT_MAX_DP = 520f
 
 @Composable
 fun Seq3Workspace(state: AppState, sessionId: String) {
@@ -184,7 +182,7 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
         ) {
             ToolbarBtn(
                 label = "≡",
-                tooltip = if (view.sidebarOpen) "Hide Messages and Inspector" else "Show Messages and Inspector",
+                tooltip = if (view.sidebarOpen) "Hide Messages" else "Show Messages",
                 active = view.sidebarOpen,
                 modifier = Modifier.size(28.dp),
                 shape = CORNER_SM,
@@ -246,6 +244,9 @@ private fun Seq3ContextualSelectionActions(
                     }
                 }
             }
+        }
+        Seq3TitleActionButton("Clear", "Clear selection") {
+            seq3ClearSelection(view)
         }
     }
 }
@@ -336,7 +337,11 @@ private val TITLE_FIELD_MAX_WIDTH = 220.dp
 private val TITLE_FIELD_MIN_WIDTH = 96.dp
 private val TITLE_FIELD_HEIGHT = 24.dp
 private const val TITLE_MAX_VISIBLE_CHARS = 28
-private const val TITLE_CHARACTER_WIDTH_DP = 7.2f
+// Compose's density is already applied to this estimate. The old 7.2dp/character value made a
+// short title reserve roughly twice its rendered width on Retina displays, leaving the pencil
+// visibly detached from the name. Keep a little trailing room for the text caret/ellipsis while
+// letting the icon sit immediately after ordinary titles.
+private const val TITLE_CHARACTER_WIDTH_DP = 4.8f
 private const val TITLE_HORIZONTAL_PADDING_DP = 16f
 
 private fun seq3TitleWidth(title: String): androidx.compose.ui.unit.Dp {
@@ -436,7 +441,7 @@ private fun Seq3TitleEditor(
     }
 }
 
-/** Pure bounds-clamping behind the queue-panel/inspector divider drags (item 14) — same
+/** Pure bounds-clamping behind the queue-panel divider drags (item 14) — same
  *  split-out-for-testability rationale as [seq3KeyAction]/[seq3ScopeMenuState], so
  *  [Seq3KeyActionTest] can assert it directly without a composition. [current] and [delta] are
  *  both dp-equivalent Floats, matching what [HDivider]'s own `onDelta` callback already hands
@@ -444,11 +449,11 @@ private fun Seq3TitleEditor(
 internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max: Float): Float =
     (current + delta).coerceIn(min, max)
 
-// ── Shared ephemeral view state (queue<->canvas<->inspector) ───────────────────────────────────
+// ── Shared ephemeral view state (queue<->canvas) ──────────────────────────────────────────────
 
 /**
- * Session-scoped VIEW state shared between [Seq3QueuePanel], [Seq3Canvas] and [Seq3Inspector] —
- * filter/sort/selection/hover/zoom/which-message-the-inspector-shows. Deliberately never part of
+ * Session-scoped VIEW state shared between [Seq3QueuePanel] and [Seq3Canvas] —
+ * filter/sort/selection/hover/zoom/focused message. Deliberately never part of
  * [Seq3WorkspaceSession]: spec §07's "sort is a view, never an edit" reasoning extends to every
  * field here — none of it is undo-tracked, none of it is written to a note, and losing it when a
  * session is closed and reopened is correct (the same way a browser tab's own scroll position
@@ -465,6 +470,9 @@ internal class Seq3ViewState {
     /** Expanded repeated-message rows in the queue. This is view state only; grouping remains part
      *  of the durable message and the extracted occurrence command is the only document edit. */
     var expandedOccurrenceMessageIds by mutableStateOf<Set<String>>(emptySet())
+    /** Expanded per-message Pattern/Label details. This is independent from occurrence expansion
+     *  so both disclosures can remain open at once, with details rendered first. */
+    var expandedInfoMessageIds by mutableStateOf<Set<String>>(emptySet())
     /** Independent checkbox state for the evidence rows shown inside an expanded group. */
     var selectedOccurrenceIds by mutableStateOf<Set<String>>(emptySet())
     /** The queue row selected by its message body. When set, the canvas emphasizes this exact
@@ -484,10 +492,9 @@ internal class Seq3ViewState {
      *  filter itself before setting this, so the panel only ever needs to scroll. */
     var scrollRequestId by mutableStateOf<String?>(null)
 
-    /** Which message [Seq3Inspector] shows; null hides the inspector pane entirely. Set on a
-     *  single-row queue click or a canvas row click; NOT touched by ⇧/⌘ multi-select (the
-     *  inspector is a one-message-at-a-time surface, spec §03). */
-    var inspectorMessageId by mutableStateOf<String?>(null)
+    /** The message currently focused by a queue/canvas click. This drives the cross-surface
+     *  highlight and keyboard actions; it is not a selection and does not affect checkboxes. */
+    var focusedMessageId by mutableStateOf<String?>(null)
 
     /** Canvas double-click inline label editor target (spec §04). */
     var editingLabelMessageId by mutableStateOf<String?>(null)
@@ -513,28 +520,24 @@ internal class Seq3ViewState {
 
     /** Right-click menu state for a canvas message row. */
     var canvasContextMenuMessageId by mutableStateOf<String?>(null)
+    /** Exact repeated occurrence under the right-clicked canvas arrow, when there is one. */
+    var canvasContextMenuOccurrenceEntryId by mutableStateOf<Int?>(null)
     var canvasContextMenuOffset by mutableStateOf(IntOffset.Zero)
     var canvasContextMenuCanvasPoint by mutableStateOf(Seq3Box(0.0, 0.0, 0.0, 0.0))
 
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT_WIDTH)
 
-    /** Queue-panel width (dp), drag-resized via the [HDivider] in [Seq3Workspace]'s main `Row`.
-     *  The Inspector now lives inside that same panel and owns a vertical height preference. */
+    /** Queue-panel width (dp), drag-resized via the [HDivider] in [Seq3Workspace]'s main `Row`. */
     var panelWidthDp by mutableStateOf(PANEL_WIDTH.value)
 
-    /** Whether the Messages + Inspector sidebar is visible. The diagram remains usable full-width
-     *  when this is collapsed; it is a view preference and is never persisted into the document. */
+    /** Whether the Messages sidebar is visible. The diagram remains usable full-width when this is
+     *  collapsed; it is a view preference and is never persisted into the document. */
     var sidebarOpen by mutableStateOf(true)
 
-    /** Whether the stacked Messages and Inspector sections are expanded. These are view-only
-     *  preferences, so collapsing either section never changes the document or its undo history. */
+    /** Whether the Messages section is expanded. This is a view-only preference, so collapsing it
+     *  never changes the document or its undo history. */
     var messagesExpanded by mutableStateOf(true)
-    var inspectorExpanded by mutableStateOf(true)
-
-    /** Inspector body height in dp. [VDivider] changes this with the same cursor-driven resize
-     *  affordance used by the app's other split panels. */
-    var inspectorHeightDp by mutableStateOf(320f)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
@@ -578,7 +581,8 @@ internal fun seq3SelectedMessageIds(document: Seq3Document, view: Seq3ViewState)
             message.id.takeIf { key in view.selectedOccurrenceIds }
         }
     }
-    return (view.selection.selectedIds + occurrenceMessageIds)
+    val canvasMessageIds = view.selectedCanvasRows.map { it.messageId }
+    return (view.selection.selectedIds + occurrenceMessageIds + canvasMessageIds)
         .filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
 }
 
@@ -611,7 +615,7 @@ internal fun seq3CanGroupSelection(
     return exactRowCount >= 2 || (exactRowCount == 0 && seq3MessageIdsAreContiguous(document, selectedIds))
 }
 
-internal fun seq3ClearSelection(view: Seq3ViewState, clearInspector: Boolean = false) {
+internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false) {
     view.selection = Seq3Selection()
     view.selectionFromMarquee = false
     view.selectedCanvasRows = emptySet()
@@ -619,15 +623,16 @@ internal fun seq3ClearSelection(view: Seq3ViewState, clearInspector: Boolean = f
     view.selectedOccurrenceMessageId = null
     view.selectedOccurrenceEntryId = null
     view.hoveredMessageId = null
-    if (clearInspector) view.inspectorMessageId = null
+    if (clearFocus) view.focusedMessageId = null
 }
 
 internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, messageId: String): Boolean {
     val message = document.messages.firstOrNull { it.id == messageId } ?: return false
-    view.inspectorMessageId = messageId
+    view.focusedMessageId = messageId
     view.editingLabelMessageId = messageId
     view.editingLabelOccurrenceEntryId = message.occurrences.firstOrNull()?.entryId
     view.canvasContextMenuMessageId = null
+    view.canvasContextMenuOccurrenceEntryId = null
     return true
 }
 
@@ -653,6 +658,7 @@ internal fun seq3AddNote(
     val applied = state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(ids.toSet(), Seq3BulkAction.Note(note)))
     if (applied) {
         view.canvasContextMenuMessageId = null
+        view.canvasContextMenuOccurrenceEntryId = null
         view.canvasContextMenuCanvasPoint = Seq3Box(0.0, 0.0, 0.0, 0.0)
     }
     return applied
@@ -914,8 +920,8 @@ private fun applySeq3KeyAction(
         is Seq3KeyAction.StartGuidedPass -> applySeq3StartGuidedPass(document, view)
         is Seq3KeyAction.SkipGuided -> { skipSeq3Guided(session, view); true }
         is Seq3KeyAction.ConfirmGuided -> false // the footer button owns the explicit apply
-        is Seq3KeyAction.PrevMessage -> { view.inspectorMessageId = seq3NeighbourMessageId(document, view.inspectorMessageId, -1); true }
-        is Seq3KeyAction.NextMessage -> { view.inspectorMessageId = seq3NeighbourMessageId(document, view.inspectorMessageId, +1); true }
+        is Seq3KeyAction.PrevMessage -> { view.focusedMessageId = seq3NeighbourMessageId(document, view.focusedMessageId, -1); true }
+        is Seq3KeyAction.NextMessage -> { view.focusedMessageId = seq3NeighbourMessageId(document, view.focusedMessageId, +1); true }
         is Seq3KeyAction.SetTarget -> applySeq3SetTarget(state, session, view, document, action)
         is Seq3KeyAction.SetSource -> applySeq3SetSource(state, session, view, document, action)
         is Seq3KeyAction.ToggleHide -> applySeq3ToggleHide(state, session, view, document)
@@ -929,7 +935,11 @@ private fun applySeq3KeyAction(
 
 private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
     view.textFieldFocused -> { view.textFieldFocused = false; true }
-    view.canvasContextMenuMessageId != null -> { view.canvasContextMenuMessageId = null; true }
+    view.canvasContextMenuMessageId != null -> {
+        view.canvasContextMenuMessageId = null
+        view.canvasContextMenuOccurrenceEntryId = null
+        true
+    }
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
@@ -954,7 +964,7 @@ private fun applySeq3SetTarget(
     action: Seq3KeyAction.SetTarget,
 ): Boolean {
     val lifeline = seq3GuidedLifelineForKey(document, action.oneBasedKey) ?: return false
-    val messageId = view.guidedPass?.currentMessageId ?: view.inspectorMessageId ?: return false
+    val messageId = view.guidedPass?.currentMessageId ?: view.focusedMessageId ?: return false
     if (view.guidedPass != null) {
         applySeq3GuidedChoice(state, session, view, Seq3Command.GuidedTarget(messageId, lifeline.id))
     } else {
@@ -971,7 +981,7 @@ private fun applySeq3SetSource(
     action: Seq3KeyAction.SetSource,
 ): Boolean {
     val lifeline = seq3GuidedLifelineForKey(document, action.oneBasedKey) ?: return false
-    val messageId = view.guidedPass?.currentMessageId ?: view.inspectorMessageId ?: return false
+    val messageId = view.guidedPass?.currentMessageId ?: view.focusedMessageId ?: return false
     state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.SetFrom(lifeline.id)))
     return true
 }
@@ -996,12 +1006,12 @@ private fun applySeq3GroupSelection(state: AppState, session: Seq3WorkspaceSessi
 }
 
 private fun applySeq3EditLabel(view: Seq3ViewState, document: Seq3Document): Boolean {
-    val messageId = seq3SelectedMessageIds(document, view).singleOrNull() ?: view.inspectorMessageId ?: return false
+    val messageId = seq3SelectedMessageIds(document, view).singleOrNull() ?: view.focusedMessageId ?: return false
     return seq3BeginLabelRename(view, document, messageId)
 }
 
 private fun applySeq3JumpToLog(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document): Boolean {
-    val messageId = view.inspectorMessageId ?: return false
+    val messageId = view.focusedMessageId ?: return false
     val entryId = document.messages.firstOrNull { it.id == messageId }?.occurrences?.firstOrNull()?.entryId ?: return false
     val tabId = session.sourceTabId ?: return false
     state.navigateToLogLine(tabId, entryId)
@@ -1019,6 +1029,6 @@ private fun seq3NeighbourMessageId(document: Seq3Document, currentId: String?, d
 }
 
 /** `H` (hide/show) applies to the whole selection when there is one, otherwise to the single
- *  message the inspector is showing. */
+ *  message currently focused by the queue or canvas. */
 private fun seq3TargetIds(view: Seq3ViewState): Set<String>? =
-    view.selection.selectedIds.takeIf { it.isNotEmpty() } ?: view.inspectorMessageId?.let(::setOf)
+    view.selection.selectedIds.takeIf { it.isNotEmpty() } ?: view.focusedMessageId?.let(::setOf)

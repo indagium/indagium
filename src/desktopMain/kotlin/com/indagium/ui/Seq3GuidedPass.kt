@@ -401,9 +401,16 @@ internal fun applySeq3GuidedChoice(
     command: Seq3Command,
 ) {
     val pass = view.guidedPass ?: return
-    state.seq3Sessions.applyCommand(session.id, command)
+    if (!state.seq3Sessions.applyCommand(session.id, command)) return
     val updated = state.seq3Sessions.sessions.firstOrNull { it.id == session.id }?.document ?: return
-    view.guidedPass = advanceSeq3GuidedPass(updated, pass)
+    // Adding a lifeline is intentionally not a target choice. Keep the current row in the pass so
+    // the new card can be selected and confirmed explicitly instead of silently becoming its
+    // target (which would also make later messages point at an unchosen lifeline).
+    view.guidedPass = if (command is Seq3Command.GuidedNewLifeline) {
+        pass
+    } else {
+        advanceSeq3GuidedPass(updated, pass)
+    }
     runCatching { view.focusRequester.requestFocus() }
 }
 

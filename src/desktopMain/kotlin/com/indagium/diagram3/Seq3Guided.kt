@@ -132,11 +132,12 @@ fun applySeq3GuidedSelfCall(document: Seq3Document, messageId: String): Seq3Docu
     },
 )
 
-/** "＋ New lifeline" (spec §05): appends [newLifeline] (caller assigns id/ordinal) and resolves
- *  [messageId] onto it in one step. A duplicate [Seq3Lifeline.id] is rejected (returns [document]
- *  unchanged) rather than silently overwriting an existing column. */
+/** "＋ New lifeline" (spec §05): appends [newLifeline] (caller assigns id/ordinal) without
+ *  assigning it to [messageId]. Adding a candidate is deliberately separate from choosing a
+ *  target: the guided pass must never create a new lifeline and silently retarget the current
+ *  message before the user confirms that choice. A duplicate [Seq3Lifeline.id] is rejected
+ *  (returns [document] unchanged) rather than silently overwriting an existing column. */
 fun applySeq3GuidedNewLifeline(document: Seq3Document, messageId: String, newLifeline: Seq3Lifeline): Seq3Document {
-    if (document.lifelines.any { it.id == newLifeline.id }) return document
-    val withLifeline = document.copy(lifelines = document.lifelines + newLifeline)
-    return applySeq3GuidedTarget(withLifeline, messageId, newLifeline.id)
+    if (document.messages.none { it.id == messageId } || document.lifelines.any { it.id == newLifeline.id }) return document
+    return document.copy(lifelines = document.lifelines + newLifeline)
 }

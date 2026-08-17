@@ -175,11 +175,11 @@ class Seq3GuidedTest {
     }
 
     @Test
-    fun newLifelineIsAddedAndImmediatelyUsedAsTheTarget() {
+    fun newLifelineIsAddedWithoutChoosingItAsTheTarget() {
         val doc = documentWith(needsTargetMessage("m1", "Producer", 1))
         val newLifeline = Seq3Lifeline("Database", "Database", setOf("Database"), 2)
         val result = applySeq3GuidedNewLifeline(doc, "m1", newLifeline)
         assertTrue(result.lifelines.any { it.id == "Database" })
-        assertEquals("Database", result.messages.single().toLifelineId)
+        assertNull(result.messages.single().toLifelineId)
     }
 }

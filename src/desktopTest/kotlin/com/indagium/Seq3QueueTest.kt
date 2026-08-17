@@ -84,6 +84,20 @@ class Seq3QueueTest {
     }
 
     @Test
+    fun hiddenFilterIncludesAGroupWhenOnlyOneOccurrenceIsHidden() {
+        val doc = baseDocument().copy(
+            messages = listOf(
+                baseDocument().messages.first().copy(
+                    occurrences = listOf(occ(1, 100), occ(11, 100).copy(visibility = Seq3Visibility.HIDDEN)),
+                ),
+            ),
+        )
+
+        assertEquals(1, seq3FilterCounts(doc).hidden)
+        assertEquals(listOf("m1"), seq3QueueRows(doc, Seq3Filter.HIDDEN).map { it.id })
+    }
+
+    @Test
     fun textFilterMatchesTheRenderedTemplate() {
         val doc = baseDocument()
         assertEquals(listOf("m2"), seq3QueueRows(doc, Seq3Filter.ALL, textFilter = "special-target").map { it.id })

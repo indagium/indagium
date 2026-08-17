@@ -61,6 +61,18 @@ private val EXCEPTION_PRELUDE_RE = Regex("""\b(caught|uncaught|throwing|threw)\b
 private val ANR_MSG_RE = Regex("""ANR in\s+\S+""")
 private const val ANR_TAG = "ActivityManager"
 
+// Rule B (see computeStackTraceGroups' doc comment): how many entries an open trace may reach
+// past its own last claimed line before it must be flushed. Measured over a sample of real
+// multi-process Android logs (~70k lines, 89 well-formed dumps): every well-formed dump had a gap
+// of 0 — a real Java stack dump is emitted contiguously by a single thread in one logcat write,
+// with zero foreign lines interleaved between consecutive members, and that held even for a
+// 355-line StackOverflowError dump. Without a bound, a standalone one-line warning that merely
+// matches the exception-header shape opens a trace that a quiet pid never closes: one observed
+// case stayed open for 1180 lines and absorbed 7 later repeats of itself, hiding them from their
+// true position in the view. 64 is a wide safety margin over the observed legitimate maximum (0)
+// that still hard-caps a runaway trace's footprint far short of four figures.
+private const val MAX_TRACE_INTERLEAVE = 64
+
 // Tombstone dumps ("debuggerd") report native (C/C++) crashes on logcat's DEBUG tag with a line
 // like "Fatal signal 11 (SIGSEGV), code 1, fault addr 0x0 in tid 1234".
 private val NATIVE_CRASH_MSG_RE = Regex("""Fatal signal \d+""")
@@ -143,12 +155,26 @@ private fun isExceptionPrelude(scan: MsgScanner, msg: String): Boolean {
 // auto-folds Java/Kotlin exception dumps (FATAL EXCEPTION / <Class>Exception headers, "at ...”
 // frames, "Caused by:" chains, "... N more") into one collapsible group.
 //
-// Single O(n) linear pass with one open trace tracked per pid — this runs on every
+// Single O(n) linear pass with one open trace tracked per (pid, tid) — this runs on every
 // computeItems() call (every filter/expand keystroke), so it must stay cheap, unlike
-// computeSeqGroups()'s O(n^2) worst case. Continuation lines are scoped to the SAME pid as their
-// trigger line: logcat interleaves processes, so another pid's line must neither extend nor
-// break an open trace — tracking one open trace per pid (rather than one global slot) lets an
-// unrelated pid's lines pass through mid-trace without disturbing it.
+// computeSeqGroups()'s O(n^2) worst case. Continuation lines are scoped to the SAME pid+tid as
+// their trigger line: a Java stack dump is always emitted by a single thread in one logcat write
+// (see MAX_TRACE_INTERLEAVE's doc — in the measured sample every well-formed dump was
+// single-threaded), so another (pid, tid)'s line must neither extend nor break an open trace —
+// tracking one open trace per key (rather than one global slot) lets unrelated lines pass through
+// mid-trace without disturbing it. Formats with no tid field (RE_TIME/RE_BARE/RE_BRIEF/RAW) leave
+// tid=0 on every entry, so those degrade to plain per-pid scoping — unchanged from before Rule A.
+// Keyed on a packed Long (traceKey), not a Pair/data class, to avoid an allocation per line across
+// multi-million-line files.
+//
+// Two more rules bound an open trace's reach, both driven by the same 5-real-log measurement:
+// Rule B (MAX_TRACE_INTERLEAVE, see its doc) caps how far a continuation can sit from the trace's
+// last claimed line. Rule C (see flush()) requires at least one *unconditional* continuation
+// member (a real "at" frame / "Caused by:" / "... N more" / "Process:" line) before a trace is
+// emitted as a group — without it, a trigger-shaped line that never sees a real dump follow it
+// (a one-line "<Class>Exception: msg" status warning logged over and over) would fold
+// its own later repeats into a bogus "group" purely via isHeaderFollowUp, which exists for
+// metadata lines immediately after a real header, not for far-apart repeats of the header itself.
 //
 // v1 produces flat groups only (trigger + all continuation lines) — no nesting for "Caused by:"
 // chains, matching the single-header requirement and avoiding a second nesting model on day one.
@@ -164,6 +190,16 @@ private fun isExceptionPrelude(scan: MsgScanner, msg: String): Boolean {
 private class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
     val memberIds = mutableListOf<Int>()
     var sawFrame = false
+
+    // Rule B bookkeeping: the logData index of the most recently claimed line (trigger line
+    // itself until a member is added). computeStackTraceGroups checks the gap from this to the
+    // current index before letting a continuation extend the trace — see MAX_TRACE_INTERLEAVE.
+    var lastClaimedIdx = triggerIdx
+
+    // Rule C bookkeeping: true once any member was accepted via isUnconditionalContinuation (a
+    // real "at" frame, "Caused by:", "... N more", or "Process:" line) rather than only via
+    // isHeaderFollowUp. flush() refuses to emit a group that never sets this — see its doc.
+    var hasUnconditionalMember = false
 
     // Populated as the scan progresses; see the module doc comment on signature capture.
     var exceptionClassName: String? = null
@@ -201,14 +237,63 @@ private class OpenTrace(val triggerIdx: Int, val isFatal: Boolean) {
     }
 }
 
+private const val INT_BITS = 32
+private const val LOW_32_BITS_MASK = 0xFFFFFFFFL
+
+// Rule A: packs (pid, tid) into one primitive map key instead of a Pair/data class — this scan
+// runs on every computeItems() call over files with millions of lines, so a per-line allocation
+// here would be measurable. pid/tid are both Int (32-bit); tid occupies the low 32 bits.
+private fun traceKey(pid: Int, tid: Int): Long = (pid.toLong() shl INT_BITS) or (tid.toLong() and LOW_32_BITS_MASK)
+
+// Rule B gate: whether a continuation at logData index `i` is still close enough to `open`'s last
+// claimed line to extend it. See MAX_TRACE_INTERLEAVE's doc for the measured justification.
+private fun withinTraceReach(open: OpenTrace, i: Int): Boolean = i - open.lastClaimedIdx <= MAX_TRACE_INTERLEAVE
+
+// Decides whether `entry` extends `open` as a continuation member and, if so, mutates `open`'s
+// member list / frame / signature state and returns true. Pulled out of computeStackTraceGroups
+// for the same reason OpenTrace itself was (see that class's doc comment) — keeping the caller's
+// branch count under detekt's CyclomaticComplexMethod threshold.
+private fun tryExtendTrace(open: OpenTrace, entry: LogEntry, trigger: Boolean): Boolean {
+    // Real crash dumps put metadata lines — "Process: <pkg>, PID: <n>", the exception class-name
+    // line ("java.lang.NullPointerException: ...") — between the "FATAL EXCEPTION" header and the
+    // first "at" frame. Tolerate a trigger-like line here too (fold it in) as long as no frame has
+    // been seen yet. Once a frame has been seen, a later trigger-like line is a genuinely new
+    // exception (back-to-back crashes), not a continuation of this one.
+    val isHeaderFollowUp = !open.sawFrame && trigger
+    val isUnconditional = isUnconditionalContinuation(entry.msg)
+    if (!isUnconditional && !isHeaderFollowUp) return false
+    open.memberIds += entry.id
+    // Rule C: only an unconditional continuation (never a bare isHeaderFollowUp repeat of the
+    // trigger shape) proves this is a real stack dump rather than the same one-line message
+    // logged repeatedly — see flush()'s doc.
+    if (isUnconditional) open.hasUnconditionalMember = true
+    if (AT_FRAME_RE.containsMatchIn(entry.msg.trim())) {
+        open.sawFrame = true
+        open.noteFrame(entry.msg)
+    } else if (isHeaderFollowUp) {
+        // The class-name line ("java.lang.NullPointerException: ...") lands here for a real
+        // "FATAL EXCEPTION" dump — folded in before any frame, same as the doc comment above
+        // describes for metadata lines.
+        open.noteIfClassNameLine(entry.msg)
+    }
+    return true
+}
+
 fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
-    val openByPid = HashMap<Int, OpenTrace>()
-    val pendingPreludeByPid = HashMap<Int, Int>()
+    val openByKey = HashMap<Long, OpenTrace>()
+    val pendingPreludeByKey = HashMap<Long, Int>()
     val groups = mutableListOf<StackTraceGroup>()
 
-    fun flush(pid: Int) {
-        val open = openByPid.remove(pid) ?: return
-        if (open.memberIds.isNotEmpty()) {
+    fun flush(key: Long) {
+        val open = openByKey.remove(key) ?: return
+        // Rule C: a trace whose members are exclusively isHeaderFollowUp repeats of the trigger
+        // line — never a real "at" frame / "Caused by:" / "... N more" / "Process:" line — is not
+        // a stack dump, it's the same one-line exception message logged repeatedly (the worst
+        // observed case: 7 members, 1172 interleaved foreign lines, zero "at" frames).
+        // Do not weaken this to "must contain an at frame": a truncated dump whose only member is
+        // a "Process: <pkg>, PID: <n>" line (isUnconditionalContinuation accepts it) must still
+        // produce a group — see aHeaderWithNoClassNameOrFrameGetsAUniquePerRidSignature... test.
+        if (open.memberIds.isNotEmpty() && open.hasUnconditionalMember) {
             val rid = logData[open.triggerIdx].id
             groups += StackTraceGroup(
                 gid = "st_$rid", rid = rid, memberIds = open.memberIds.toList(), isFatal = open.isFatal,
@@ -222,51 +307,41 @@ fun computeStackTraceGroups(logData: List<LogEntry>): List<StackTraceGroup> {
         val entry = logData[i]
         scanner.scan(entry.msg)
         val trigger = isTrigger(scanner, entry.msg)
-        val open = openByPid[entry.pid]
+        val key = traceKey(entry.pid, entry.tid)
+        val open = openByKey[key]
         if (open != null) {
-            // Real crash dumps put metadata lines — "Process: <pkg>, PID: <n>", the exception
-            // class-name line ("java.lang.NullPointerException: ...") — between the "FATAL
-            // EXCEPTION" header and the first "at" frame. Tolerate a trigger-like line here too
-            // (fold it in) as long as no frame has been seen yet. Once a frame has been seen, a
-            // later trigger-like line is a genuinely new exception (back-to-back crashes), not a
-            // continuation of this one.
-            val isHeaderFollowUp = !open.sawFrame && trigger
-            if (isUnconditionalContinuation(entry.msg) || isHeaderFollowUp) {
-                open.memberIds += entry.id
-                if (AT_FRAME_RE.containsMatchIn(entry.msg.trim())) {
-                    open.sawFrame = true
-                    open.noteFrame(entry.msg)
-                } else if (isHeaderFollowUp) {
-                    // The class-name line ("java.lang.NullPointerException: ...") lands here for a
-                    // real "FATAL EXCEPTION" dump — folded in before any frame, same as the doc
-                    // comment above describes for metadata lines.
-                    open.noteIfClassNameLine(entry.msg)
-                }
+            if (withinTraceReach(open, i) && tryExtendTrace(open, entry, trigger)) {
+                open.lastClaimedIdx = i
                 continue
             }
-            flush(entry.pid)
+            // Either too far past the trace's last claimed line (Rule B) or not a continuation
+            // shape at all — either way, flush and fall through to re-evaluate this line fresh.
+            flush(key)
         }
         if (trigger) {
-            val preludeIdx = pendingPreludeByPid[entry.pid]
+            val preludeIdx = pendingPreludeByKey[key]
                 ?.takeIf { it == i - 1 && logData[it].tag == entry.tag }
-            openByPid[entry.pid] = OpenTrace(preludeIdx ?: i, isFatal = scanner.fatalException).also { trace ->
-                if (preludeIdx != null) trace.memberIds += entry.id
+            openByKey[key] = OpenTrace(preludeIdx ?: i, isFatal = scanner.fatalException).also { trace ->
+                if (preludeIdx != null) {
+                    trace.memberIds += entry.id
+                    trace.lastClaimedIdx = i
+                }
                 // Covers both shapes: a bare "<Class>Exception: msg" trigger opening its own
                 // trace, and a prelude-promoted trigger (this line IS the exception header even
                 // though the trace's rid points at the prelude line before it).
                 trace.noteIfClassNameLine(entry.msg)
             }
-            pendingPreludeByPid.remove(entry.pid)
+            pendingPreludeByKey.remove(key)
         } else if (isExceptionPrelude(scanner, entry.msg)) {
-            pendingPreludeByPid[entry.pid] = i
+            pendingPreludeByKey[key] = i
         } else {
-            pendingPreludeByPid.remove(entry.pid)
+            pendingPreludeByKey.remove(key)
         }
     }
-    openByPid.keys.toList().forEach { flush(it) }
+    openByKey.keys.toList().forEach { flush(it) }
 
-    // Flush order follows whichever pid's trace closed first, not document order once multiple
-    // pids interleave — restore document order (entry id increases monotonically per tab).
+    // Flush order follows whichever key's trace closed first, not document order once multiple
+    // pid/tid keys interleave — restore document order (entry id increases monotonically per tab).
     return groups.sortedBy { it.rid }
 }
 
