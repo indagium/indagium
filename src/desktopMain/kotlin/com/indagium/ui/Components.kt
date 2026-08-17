@@ -1025,6 +1025,9 @@ fun SegmentedControl(
     selectedColors: List<Color>? = null,
     fillWidth: Boolean = false,
     enabled: Boolean = true,
+    segmentHeight: Dp = 28.dp,
+    segmentFontSize: TextUnit = 12.sp,
+    segmentHorizontalPadding: Dp = 10.dp,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
@@ -1048,7 +1051,7 @@ fun SegmentedControl(
             Box(
                 contentAlignment = Alignment.Center,
                 modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
-                    .height(28.dp)
+                    .height(segmentHeight)
                     .clip(segmentShape)
                     .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent, segmentShape)
                     .clickable(enabled = enabled) { onToggle(index) },
@@ -1057,14 +1060,14 @@ fun SegmentedControl(
                     AppText(
                         text = label,
                         color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
-                        fontSize = 12.sp,
+                        fontSize = segmentFontSize,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                        modifier = Modifier.padding(horizontal = 10.dp),
+                        modifier = Modifier.padding(horizontal = segmentHorizontalPadding),
                     )
                 }
             }
             if (index < options.lastIndex) {
-                Box(Modifier.width(0.5.dp).height(28.dp).background(tc.br))
+                Box(Modifier.width(0.5.dp).height(segmentHeight).background(tc.br))
             }
         }
     }

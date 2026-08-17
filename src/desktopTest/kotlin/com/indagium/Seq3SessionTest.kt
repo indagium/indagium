@@ -15,6 +15,7 @@ import com.indagium.ui.DiagramLibrarySnapshot
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.Seq3Session
+import com.indagium.ui.Seq3ZoomMode
 import com.indagium.ui.defaultSeq3Title
 import com.indagium.ui.mkTab
 import com.indagium.utils.computeLogFingerprint
@@ -26,6 +27,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** Covers `ui/Seq3Session.kt`: session lifecycle, source-tab-close independence (SAAD §11.6),
@@ -129,6 +131,25 @@ class Seq3SessionTest {
         assertFalse(state.seq3Sessions.activate("does-not-exist"))
 
         assertEquals(id, state.seq3Sessions.activeSessionId)
+    }
+
+    @Test
+    fun diagramViewKeepsFitWidthDefaultAndZoomAcrossSessionSwitches() {
+        val state = state()
+        val first = state.seq3Sessions.begin("log", setOf(1))!!
+        val second = state.seq3Sessions.begin("log", setOf(2))!!
+        val firstView = state.seq3Sessions.viewState(first)!!
+
+        assertEquals(Seq3ZoomMode.FIT_WIDTH, firstView.zoomMode)
+        firstView.zoom = 1.7f
+        firstView.zoomMode = Seq3ZoomMode.MANUAL
+
+        state.seq3Sessions.activate(second)
+        state.seq3Sessions.activate(first)
+
+        assertSame(firstView, state.seq3Sessions.viewState(first))
+        assertEquals(1.7f, state.seq3Sessions.viewState(first)!!.zoom)
+        assertEquals(Seq3ZoomMode.MANUAL, state.seq3Sessions.viewState(first)!!.zoomMode)
     }
 
     @Test

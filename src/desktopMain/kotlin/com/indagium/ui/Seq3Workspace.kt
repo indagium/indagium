@@ -102,13 +102,13 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
     val session = state.seq3Sessions.sessions.firstOrNull { it.id == sessionId } ?: return
     val tc = tc()
     // Session-scoped, ephemeral VIEW state — see [Seq3ViewState]'s own doc for why this is never
-    // part of [Seq3WorkspaceSession]. `remember(sessionId)` gives every open v3 workspace its own
-    // instance and resets it when a session closes and a different one is opened in its place.
+    // part of [Seq3WorkspaceSession]. Seq3Session owns the instance so it survives this surface
+    // leaving composition when the user switches to another tab.
     // [Seq3ViewState.focusRequester] lives ON the view (not a separately remembered local) so every
     // composable already holding `view` — the row press/checkbox handlers in Seq3QueuePanel.kt,
     // [Seq3DropdownButton] via [LocalSeq3FocusRequester] below — can reclaim keyboard focus after a
     // click without a new parameter threaded through every call site.
-    val view = remember(sessionId) { Seq3ViewState() }
+    val view = state.seq3Sessions.viewState(sessionId) ?: return
     // The workspace root owns the §09 keyboard map. `onPreviewKeyEvent` (not onKeyEvent) so a key
     // is seen before a child consumes it, and the handler itself no-ops whenever a text field has
     // focus — see Seq3ViewState.textFieldFocused.
@@ -202,7 +202,6 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                     )
                 },
             )
-            Seq3CanvasZoomToolbarControls(view)
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
         }
     }
@@ -502,6 +501,8 @@ internal class Seq3ViewState {
 
     /** Rectangle currently being dragged on the canvas to select multiple message rows. */
     var canvasSelectionRect by mutableStateOf<Seq3Box?>(null)
+    /** Once enabled by the toolbar toggle, primary-button drags pan the view. */
+    var canvasPanMode by mutableStateOf(false)
     /** True when the current message selection came from a marquee, which may intentionally span
      * hidden/non-rendered rows while still representing one visible rectangle on the canvas. */
     var selectionFromMarquee by mutableStateOf(false)
@@ -516,7 +517,7 @@ internal class Seq3ViewState {
     var canvasContextMenuCanvasPoint by mutableStateOf(Seq3Box(0.0, 0.0, 0.0, 0.0))
 
     var zoom by mutableStateOf(1f)
-    var zoomMode by mutableStateOf(Seq3ZoomMode.FIT)
+    var zoomMode by mutableStateOf(Seq3ZoomMode.FIT_WIDTH)
 
     /** Queue-panel width (dp), drag-resized via the [HDivider] in [Seq3Workspace]'s main `Row`.
      *  The Inspector now lives inside that same panel and owns a vertical height preference. */
@@ -930,6 +931,7 @@ private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view
     view.textFieldFocused -> { view.textFieldFocused = false; true }
     view.canvasContextMenuMessageId != null -> { view.canvasContextMenuMessageId = null; true }
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
+    view.canvasPanMode -> { view.canvasPanMode = false; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
     view.selection.selectedIds.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty() -> {
@@ -1021,19 +1023,3 @@ private fun seq3NeighbourMessageId(document: Seq3Document, currentId: String?, d
  *  message the inspector is showing. */
 private fun seq3TargetIds(view: Seq3ViewState): Set<String>? =
     view.selection.selectedIds.takeIf { it.isNotEmpty() } ?: view.inspectorMessageId?.let(::setOf)
-
-// ── Draft-saved status label — shared by Seq3Canvas's status bar ───────────────────────────────
-
-private const val MILLIS_PER_MINUTE = 60_000L
-
-/** "Draft saved 2 min ago" after the explicit note action / "Unsaved changes" while edits are
- *  pending / blank before the first save. Not `@Composable` — evaluated fresh on every recomposition. */
-internal fun draftStatusLabel(session: Seq3WorkspaceSession): String = when {
-    session.dirty -> "Unsaved changes"
-    session.draftSavedAtMillis == null -> ""
-    else -> {
-        val ageMs = (System.currentTimeMillis() - session.draftSavedAtMillis).coerceAtLeast(0)
-        val minutes = ageMs / MILLIS_PER_MINUTE
-        if (minutes <= 0) "Draft saved just now" else "Draft saved ${minutes}m ago"
-    }
-}
