@@ -17,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -271,37 +273,46 @@ private fun Seq3GuidedLifelineCard(
     onClick: () -> Unit,
 ) {
     val tc = tc()
+    val shape = RoundedCornerShape(8.dp)
     DisableSelection {
         HoverBox(
-            modifier = modifier.clip(RoundedCornerShape(8.dp))
-            .background(if (selected) tc.abg else tc.p, RoundedCornerShape(8.dp))
-            .border(if (selected) 1.5.dp else 1.dp, if (selected) tc.ac else tc.br, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            // Keep the hover/selected fill on the same surface as the border. Padding belongs to
+            // the content row; otherwise HoverBox paints its hover color only inside the padding
+            // and the card looks like it contains a separately selected text rectangle.
+            modifier = modifier
+                .clip(shape)
+                .border(if (selected) 1.5.dp else 1.dp, if (selected) tc.ac else tc.br, shape),
+            baseBg = if (selected) tc.abg else tc.p,
+            hoverBg = if (selected) tc.abg else tc.ac.copy(alpha = .10f),
             onClick = onClick,
         ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            Box(
-                Modifier.width(18.dp).height(18.dp).clip(CORNER_SM)
-                    .background(if (selected) tc.ac else tc.p2, CORNER_SM),
-                contentAlignment = Alignment.Center,
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(9.dp),
             ) {
+                Box(
+                    Modifier.width(18.dp).height(18.dp).clip(CORNER_SM)
+                        .background(if (selected) tc.ac else tc.p2, CORNER_SM),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText(
+                        keyNumber?.toString() ?: "·",
+                        color = if (selected) tc.p else tc.ts,
+                        fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                    )
+                }
                 AppText(
-                    keyNumber?.toString() ?: "·",
-                    color = if (selected) tc.p else tc.ts,
-                    fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+                    lifeline.name, color = tc.tx, fontSize = 13.sp,
+                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
+                if (suggested) {
+                    Spacer(Modifier.weight(1f))
+                    AppText("suggested", color = tc.ac, fontSize = 11.sp)
+                }
             }
-            AppText(
-                lifeline.name, color = tc.tx, fontSize = 13.sp,
-                fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            if (suggested) {
-                Spacer(Modifier.weight(1f))
-                AppText("suggested", color = tc.ac, fontSize = 11.sp)
-            }
-        }
         }
     }
 }
@@ -369,22 +380,48 @@ private fun Seq3GuidedFooter(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        CheckRow(checked = applyToAll, onToggle = onToggleApplyToAll, modifier = Modifier.weight(1f)) {
-            AppText("Apply to all ×$occurrenceCount occurrences", color = tc.tx, fontSize = 12.sp)
+        val applyShape = RoundedCornerShape(8.dp)
+        DisableSelection {
+            HoverBox(
+                modifier = Modifier.weight(1f).clip(applyShape)
+                    .border(1.dp, if (applyToAll) tc.ac else tc.br, applyShape),
+                baseBg = if (applyToAll) tc.abg else tc.p,
+                hoverBg = if (applyToAll) tc.abg else tc.ac.copy(alpha = .10f),
+                onClick = onToggleApplyToAll,
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Checkbox(
+                        checked = applyToAll,
+                        onCheckedChange = { onToggleApplyToAll() },
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = tc.ac,
+                            uncheckedColor = tc.td,
+                            checkmarkColor = tc.p,
+                        ),
+                        modifier = Modifier.height(20.dp).width(20.dp),
+                    )
+                    AppText("Apply to all ×$occurrenceCount occurrences", color = tc.tx, fontSize = 12.sp)
+                }
+            }
         }
         Spacer(Modifier.weight(1f))
+        val actionShape = RoundedCornerShape(7.dp)
         HoverBox(
-            modifier = Modifier.clip(RoundedCornerShape(7.dp))
-                .background(if (enabled) tc.ac else tc.p2, RoundedCornerShape(7.dp))
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+            // Keep the accent fill and hover state on one surface. Padding is inside the content,
+            // so hovering cannot paint a neutral rectangle inside the blue action button.
+            modifier = Modifier.clip(actionShape),
+            baseBg = if (enabled) tc.ac else tc.p2,
+            hoverBg = if (enabled) tc.ac else tc.p2,
             hoverEnabled = enabled,
             onClick = { if (enabled) onConfirm() },
         ) {
-            AppText(
-                "Set target & next ⏎",
-                color = if (enabled) tc.p else tc.td,
-                fontSize = 13.sp, fontWeight = FontWeight.Medium,
-            )
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                AppText("Set target & next ⏎", color = if (enabled) tc.p else tc.td, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }
