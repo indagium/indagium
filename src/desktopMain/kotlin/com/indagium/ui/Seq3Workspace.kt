@@ -931,7 +931,6 @@ private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view
     view.textFieldFocused -> { view.textFieldFocused = false; true }
     view.canvasContextMenuMessageId != null -> { view.canvasContextMenuMessageId = null; true }
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
-    view.canvasPanMode -> { view.canvasPanMode = false; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
     view.selection.selectedIds.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty() -> {

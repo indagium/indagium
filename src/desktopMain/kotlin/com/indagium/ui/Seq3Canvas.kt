@@ -1,12 +1,15 @@
 @file:OptIn(
     androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
 )
 
 package com.indagium.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -32,7 +35,7 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.BackHand
+import androidx.compose.material.icons.outlined.OpenWith
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +60,7 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
@@ -176,28 +180,32 @@ private fun seq3CanvasDocumentForSelection(
 @Composable
 internal fun Seq3CanvasZoomToolbarControls(view: Seq3ViewState) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        ToolbarBtn(
-            label = "Pan diagram",
-            icon = Icons.Outlined.BackHand,
-            showLabel = false,
-            active = view.canvasPanMode,
-            modifier = Modifier.size(24.dp),
-            shape = CORNER_SM,
-            contentPadding = PaddingValues(0.dp),
-            onClick = { view.canvasPanMode = !view.canvasPanMode },
-        )
+        Seq3CanvasControlTooltip("Pan diagram") {
+            ToolbarBtn(
+                label = "Pan diagram",
+                icon = Icons.Outlined.OpenWith,
+                showLabel = false,
+                active = view.canvasPanMode,
+                modifier = Modifier.size(24.dp),
+                shape = CORNER_SM,
+                contentPadding = PaddingValues(0.dp),
+                onClick = { view.canvasPanMode = !view.canvasPanMode },
+            )
+        }
         Seq3ZoomControls(view)
-        ToolbarBtn(
-            label = "↺",
-            showLabel = false,
-            modifier = Modifier.size(24.dp),
-            shape = CORNER_SM,
-            contentPadding = PaddingValues(0.dp),
-            onClick = {
-                view.zoom = 1f
-                view.zoomMode = Seq3ZoomMode.MANUAL
-            },
-        )
+        Seq3CanvasControlTooltip("Reset zoom to 100%") {
+            ToolbarBtn(
+                label = "↺",
+                showLabel = false,
+                modifier = Modifier.size(24.dp),
+                shape = CORNER_SM,
+                contentPadding = PaddingValues(0.dp),
+                onClick = {
+                    view.zoom = 1f
+                    view.zoomMode = Seq3ZoomMode.MANUAL
+                },
+            )
+        }
         SegmentedControl(
             options = listOf("Fit height", "Fit width"),
             selectedIndices = when (view.zoomMode) {
@@ -216,6 +224,20 @@ internal fun Seq3CanvasZoomToolbarControls(view: Seq3ViewState) {
             segmentHorizontalPadding = 7.dp,
         )
     }
+}
+
+@Composable
+private fun Seq3CanvasControlTooltip(text: String, content: @Composable () -> Unit) {
+    TooltipArea(
+        tooltip = { ToolbarTooltip(text) },
+        delayMillis = 650,
+        tooltipPlacement = TooltipPlacement.ComponentRect(
+            anchor = Alignment.TopCenter,
+            alignment = Alignment.BottomCenter,
+            offset = DpOffset(0.dp, -24.dp),
+        ),
+        content = content,
+    )
 }
 
 @Composable
@@ -286,7 +308,6 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
     val density = LocalDensity.current.density
     val hScroll = rememberScrollState()
     val vScroll = rememberScrollState()
-    val panCursor = remember { PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR)) }
     // Live cursor position + candidate lifeline while an arrow-endpoint drag is in progress (item
     // 13, phase-5 post-ship plan) — hoisted here rather than kept inside
     // [seq3CanvasGestureModifier] because the DRAW code below (drawSeq3Diagram) needs to read it
@@ -308,7 +329,6 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
         }
         Box(
             Modifier.fillMaxSize()
-                .then(if (view.canvasPanMode) Modifier.pointerHoverIcon(panCursor) else Modifier)
                 .then(seq3ZoomWheelModifier(view, session.id)),
         ) {
             Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(vScroll)) {
