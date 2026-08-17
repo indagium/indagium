@@ -99,8 +99,9 @@ data class Seq3WorkspaceSession(
      *  scanning) for this session. */
     val generating: Boolean = false,
     val dirty: Boolean = false,
-    /** Wall-clock millis of the last time [dirty] settled back to false — the canvas status bar's
-     *  "Draft saved 2 min ago" (design spec §04). Null before the first settle. */
+    /** Wall-clock millis of the last time [dirty] settled back to false. Null before the first
+     *  settle; retained for save bookkeeping even though the canvas no longer renders a save
+     *  status label. */
     val draftSavedAtMillis: Long? = null,
     val confirmedBlockId: String? = null,
     /** Spec §08's review sheet — non-null while a "Build review" result is on screen awaiting
@@ -167,6 +168,19 @@ class Seq3Session(
         private set
 
     val activeSession: Seq3WorkspaceSession? get() = activeSessionId?.let(::session)
+
+    /**
+     * View state is kept with the open workspace rather than with its Compose composition. The
+     * active-surface switch removes the workspace from composition, so a `remember(sessionId)`
+     * inside [Seq3Workspace] would lose zoom and the other view preferences every time the user
+     * visited another tab. The state is still ephemeral: closing the workspace drops it here.
+     */
+    private val workspaceViewStates = ConcurrentHashMap<String, Seq3ViewState>()
+
+    internal fun viewState(id: String): Seq3ViewState? {
+        if (session(id) == null) return null
+        return workspaceViewStates.computeIfAbsent(id) { Seq3ViewState() }
+    }
 
     private fun session(id: String): Seq3WorkspaceSession? = sessions.firstOrNull { it.id == id }
 
@@ -266,6 +280,7 @@ class Seq3Session(
         generateJobs.remove(id)?.cancel()
         revertJobs.remove(id)?.cancel()
         generations.remove(id)
+        workspaceViewStates.remove(id)
         sessions = sessions.filterNot { it.id == id }
         if (activeSessionId == id) {
             val next = sessions.lastOrNull()?.id

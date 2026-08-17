@@ -1,4 +1,6 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
 
 package com.indagium.ui
 
@@ -29,6 +31,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BackHand
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -135,7 +139,7 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
                 Seq3CanvasContent(state, session, view, document, layout)
             }
         }
-        Seq3CanvasStatusBar(state, session, document)
+        Seq3CanvasStatusBar(state, session, document, view)
     }
 }
 
@@ -171,10 +175,31 @@ private fun seq3CanvasDocumentForSelection(
 
 @Composable
 internal fun Seq3CanvasZoomToolbarControls(view: Seq3ViewState) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        ToolbarBtn(
+            label = "Pan diagram",
+            icon = Icons.Outlined.BackHand,
+            showLabel = false,
+            active = view.canvasPanMode,
+            modifier = Modifier.size(24.dp),
+            shape = CORNER_SM,
+            contentPadding = PaddingValues(0.dp),
+            onClick = { view.canvasPanMode = !view.canvasPanMode },
+        )
         Seq3ZoomControls(view)
+        ToolbarBtn(
+            label = "↺",
+            showLabel = false,
+            modifier = Modifier.size(24.dp),
+            shape = CORNER_SM,
+            contentPadding = PaddingValues(0.dp),
+            onClick = {
+                view.zoom = 1f
+                view.zoomMode = Seq3ZoomMode.MANUAL
+            },
+        )
         SegmentedControl(
-            options = listOf("Fit height", "Fit width", "Reset"),
+            options = listOf("Fit height", "Fit width"),
             selectedIndices = when (view.zoomMode) {
                 Seq3ZoomMode.FIT -> setOf(0)
                 Seq3ZoomMode.FIT_WIDTH -> setOf(1)
@@ -184,12 +209,11 @@ internal fun Seq3CanvasZoomToolbarControls(view: Seq3ViewState) {
                 when (index) {
                     0 -> view.zoomMode = Seq3ZoomMode.FIT
                     1 -> view.zoomMode = Seq3ZoomMode.FIT_WIDTH
-                    else -> {
-                        view.zoom = 1f
-                        view.zoomMode = Seq3ZoomMode.MANUAL
-                    }
                 }
             },
+            segmentHeight = 24.dp,
+            segmentFontSize = 11.sp,
+            segmentHorizontalPadding = 7.dp,
         )
     }
 }
@@ -199,7 +223,7 @@ private fun Seq3ZoomControls(view: Seq3ViewState) {
     val tc = tc()
     Row(
         modifier = Modifier
-            .height(28.dp)
+            .height(24.dp)
             .border(0.5.dp, tc.br, CORNER_MD)
             .clip(CORNER_MD),
         verticalAlignment = Alignment.CenterVertically,
@@ -209,10 +233,10 @@ private fun Seq3ZoomControls(view: Seq3ViewState) {
             view.zoomMode = Seq3ZoomMode.MANUAL
         }
         Box(
-            Modifier.width(42.dp).height(28.dp),
+            Modifier.width(36.dp).height(24.dp),
             contentAlignment = Alignment.Center,
         ) {
-            AppText(seq3ZoomPercentLabel(view.zoom), color = tc.ts, fontSize = 11.sp)
+            AppText(seq3ZoomPercentLabel(view.zoom), color = tc.ts, fontSize = 10.sp)
         }
         Seq3ZoomStepButton("+") {
             view.zoom = (view.zoom + ZOOM_STEP).coerceAtMost(MAX_ZOOM)
@@ -226,7 +250,7 @@ private fun Seq3ZoomStepButton(label: String, onClick: () -> Unit) {
     val tc = tc()
     ToolbarBtn(
         label = label,
-        modifier = Modifier.size(28.dp)
+        modifier = Modifier.size(24.dp)
             .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)), overrideDescendants = true),
         shape = CORNER_SM,
         contentPadding = PaddingValues(0.dp),
@@ -236,13 +260,13 @@ private fun Seq3ZoomStepButton(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, document: Seq3Document) {
+private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, document: Seq3Document, view: Seq3ViewState) {
     val tc = tc()
     val scanned = state.seq3Sessions.scannedEntryCount(session.id)
     val shown = document.messages.count { it.visibility == Seq3Visibility.VISIBLE }
     val hidden = document.messages.size - shown
     Row(
-        Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 12.dp, vertical = 6.dp),
+        Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -250,7 +274,7 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
             "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden",
             color = tc.ts, fontSize = 10.sp,
         )
-        AppText(draftStatusLabel(session), color = tc.ts, fontSize = 10.sp)
+        Seq3CanvasZoomToolbarControls(view)
     }
 }
 
@@ -262,6 +286,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
     val density = LocalDensity.current.density
     val hScroll = rememberScrollState()
     val vScroll = rememberScrollState()
+    val panCursor = remember { PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR)) }
     // Live cursor position + candidate lifeline while an arrow-endpoint drag is in progress (item
     // 13, phase-5 post-ship plan) — hoisted here rather than kept inside
     // [seq3CanvasGestureModifier] because the DRAW code below (drawSeq3Diagram) needs to read it
@@ -281,7 +306,11 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
             }
             if (target != null) view.zoom = target
         }
-        Box(Modifier.fillMaxSize()) {
+        Box(
+            Modifier.fillMaxSize()
+                .then(if (view.canvasPanMode) Modifier.pointerHoverIcon(panCursor) else Modifier)
+                .then(seq3ZoomWheelModifier(view, session.id)),
+        ) {
             Box(Modifier.fillMaxSize().horizontalScroll(hScroll).verticalScroll(vScroll)) {
                 val zoom = view.zoom
                 Box(
@@ -339,6 +368,31 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
     }
 }
 
+/** Ctrl/Cmd-wheel zooms the diagram while an unmodified wheel keeps scrolling the canvas. This
+ * modifier sits outside the scroll containers and listens in the Initial pass, so the scroll
+ * modifier cannot consume a modified wheel event before the zoom gesture sees it. */
+@Composable
+private fun seq3ZoomWheelModifier(view: Seq3ViewState, sessionId: String): Modifier {
+    val currentView = rememberUpdatedState(view)
+    return Modifier.pointerInput(sessionId) {
+        awaitPointerEventScope {
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.type != PointerEventType.Scroll) continue
+                val change = event.changes.firstOrNull() ?: continue
+                val modifiers = event.keyboardModifiers
+                if (!modifiers.isCtrlPressed && !modifiers.isMetaPressed) continue
+                val nextZoom = seq3ZoomByWheel(currentView.value.zoom, change.scrollDelta.y)
+                if (nextZoom != currentView.value.zoom) {
+                    currentView.value.zoom = nextZoom
+                    currentView.value.zoomMode = Seq3ZoomMode.MANUAL
+                }
+                change.consume()
+            }
+        }
+    }
+}
+
 // Session/tab id is folded into every remembered/pointerInput key above (session.id via the
 // composables' own `session` param) — see CLAUDE.md's "ID collisions across tabs" gotcha: without
 // it, two open v3 workspaces would share pointerInput coroutines keyed only by `document`/`layout`
@@ -374,12 +428,12 @@ private fun seq3CanvasGestureModifier(
             var lastClickTimeMs = 0L
             var lastClickMessageId: String? = null
             // Drag-to-pan (item 12, phase-5 post-ship plan). Middle-button drag always pans. A
-            // primary drag on empty background creates the requested marquee selection. Overlay
-            // bounds are excluded before this gesture is armed, so dragging a note or lifeline
-            // cannot also paint a selection rectangle. The pan anchor is kept in viewport pixels,
-            // not the diagram node's local pixels: scrolling moves that node under a stationary
-            // cursor, so raw local deltas would alternate direction and make the whole diagram
-            // flicker.
+            // primary drag on empty background pans when the toolbar pan toggle is enabled;
+            // otherwise it creates the marquee selection. Overlay bounds are excluded before
+            // this gesture is armed, so dragging a note or lifeline cannot also paint a selection
+            // rectangle. The pan anchor is kept in viewport pixels, not the diagram node's local
+            // pixels: scrolling moves that node under a stationary cursor, so raw local deltas
+            // would alternate direction and make the whole diagram flicker.
             var panning = false
             var pressWasMiddle = false
             var lastPanPosition: Offset? = null
@@ -392,6 +446,12 @@ private fun seq3CanvasGestureModifier(
                 position.x - currentHScroll.value.value,
                 position.y - currentVScroll.value.value,
             )
+            fun registerMessageClick(now: Long, id: String): Boolean {
+                val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
+                lastClickTimeMs = now
+                lastClickMessageId = id
+                return doubleClick
+            }
             while (true) {
                 // Let interactive overlays (lifeline chips, the inline label editor, and its
                 // buttons) see the press before the canvas decides to own it. The old Initial-pass
@@ -467,7 +527,8 @@ private fun seq3CanvasGestureModifier(
                             selectionRange = modifiers.isShiftPressed
                             dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
                             val emptyBackground = seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
-                            if (!isMiddle && dragEndpoint == null && emptyBackground) {
+                            val panBackground = !isMiddle && view.canvasPanMode && dragEndpoint == null && emptyBackground
+                            if (!isMiddle && !panBackground && dragEndpoint == null && emptyBackground) {
                                 selectingArea = true
                                 selectionStart = Offset(xUnits.toFloat(), yUnits.toFloat())
                                 view.canvasSelectionRect = Seq3Box(xUnits, yUnits, 0.0, 0.0)
@@ -486,6 +547,11 @@ private fun seq3CanvasGestureModifier(
                                     change.consume()
                                 }
                                 isMiddle -> {
+                                    panning = true
+                                    lastPanPosition = panViewportPosition(change.position)
+                                    change.consume()
+                                }
+                                panBackground -> {
                                     panning = true
                                     lastPanPosition = panViewportPosition(change.position)
                                     change.consume()
@@ -560,10 +626,7 @@ private fun seq3CanvasGestureModifier(
                                     selectionAdditive,
                                     selectionRange,
                                 ) { now, id ->
-                                    val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
-                                    lastClickTimeMs = now
-                                    lastClickMessageId = id
-                                    doubleClick
+                                    registerMessageClick(now, id)
                                 }
                             }
                             panning -> {
@@ -609,12 +672,7 @@ private fun seq3CanvasGestureModifier(
                                     yUnits,
                                     selectionAdditive,
                                     selectionRange,
-                                ) { now, id ->
-                                    val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
-                                    lastClickTimeMs = now
-                                    lastClickMessageId = id
-                                    doubleClick
-                                }
+                                ) { now, id -> registerMessageClick(now, id) }
                             }
                         }
                         downPosition = null
@@ -1667,6 +1725,15 @@ internal fun seq3PointerPxToLayoutUnits(pointerPx: Float, density: Float, zoom: 
 }
 
 internal fun seq3ZoomPercentLabel(zoom: Float): String = "${(zoom * PERCENT).roundToInt()}%"
+
+internal fun seq3ZoomByWheel(currentZoom: Float, scrollDeltaY: Float): Float {
+    val direction = when {
+        scrollDeltaY < 0f -> 1f
+        scrollDeltaY > 0f -> -1f
+        else -> 0f
+    }
+    return (currentZoom + direction * ZOOM_STEP).coerceIn(MIN_ZOOM, MAX_ZOOM)
+}
 
 internal fun seq3CrossingLabel(count: Int): String = when (count) {
     0 -> "No arrow crossings"

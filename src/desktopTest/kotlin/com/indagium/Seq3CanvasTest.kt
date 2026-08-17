@@ -40,6 +40,7 @@ import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
 import com.indagium.ui.seq3ZoomPercentLabel
+import com.indagium.ui.seq3ZoomByWheel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -483,6 +484,15 @@ class Seq3CanvasTest {
     fun zoomPercentLabelRoundsToTheNearestPercent() {
         assertEquals("86%", seq3ZoomPercentLabel(0.864f))
         assertEquals("100%", seq3ZoomPercentLabel(1f))
+    }
+
+    @Test
+    fun modifierWheelZoomsInAndOutWithinTheSupportedRange() {
+        assertEquals(1.1f, seq3ZoomByWheel(1f, -1f))
+        assertEquals(0.9f, seq3ZoomByWheel(1f, 1f))
+        assertEquals(4f, seq3ZoomByWheel(4f, -1f))
+        assertEquals(0.1f, seq3ZoomByWheel(0.1f, 1f))
+        assertEquals(1f, seq3ZoomByWheel(1f, 0f))
     }
 
     @Test
