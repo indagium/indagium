@@ -844,14 +844,18 @@ fun CheckRow(
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
-    Row(
-        modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 12.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Checkbox(checked = checked, onCheckedChange = { onToggle() },
-            colors = CheckboxDefaults.colors(checkedColor = accentColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
-            modifier = Modifier.size(16.dp))
-        content()
+    // This is one control: keep its label out of any ambient text selection and put the click
+    // handler after padding so the complete visual row toggles, not only the checkbox/text bounds.
+    DisableSelection {
+        Row(
+            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).clickable(onClick = onToggle),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Checkbox(checked = checked, onCheckedChange = { onToggle() },
+                colors = CheckboxDefaults.colors(checkedColor = accentColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
+                modifier = Modifier.size(16.dp))
+            content()
+        }
     }
 }
 

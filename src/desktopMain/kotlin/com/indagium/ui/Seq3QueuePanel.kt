@@ -50,8 +50,8 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Note
-import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
@@ -67,12 +67,12 @@ import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
 import com.indagium.model.LogEntry
 import kotlinx.coroutines.delay
-import java.util.UUID
 import java.awt.Cursor as AwtCursor
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.VisibilityOff
+import androidx.compose.material.icons.outlined.Info
 
 private const val ADD_HINT_DURATION_MS = 2_500L
 private const val ADD_ROW_RANGE_LIMIT = 2_000
@@ -113,9 +113,6 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     val tc = tc()
     val document = session.document
     val counts = seq3FilterCounts(document)
-    val hasSelectableMessageSelection = view.selection.selectedIds.any { id ->
-        document.messages.any { it.id == id }
-    }
     val rows = remember(document, view.filter, view.textFilter, view.sort) {
         seq3QueueRows(document, view.filter, view.textFilter, view.sort)
     }
@@ -168,43 +165,8 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                         style = appScrollbarStyle(tc),
                     )
                 }
-                if (view.selectedOccurrenceIds.isNotEmpty()) {
-                    Seq3OccurrenceSelectionActionBar(state, session, view, document)
-                } else if (hasSelectableMessageSelection) {
-                    Seq3SelectionActionBar(state, session, view, document)
-                } else {
-                    Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
-                }
+                Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
             }
-        }
-        if (view.messagesExpanded && view.inspectorExpanded) {
-            VDivider { delta ->
-                // Dragging the boundary upward (negative delta) gives Inspector more room.
-                view.inspectorHeightDp = seq3ClampDividerWidth(
-                    view.inspectorHeightDp,
-                    -delta,
-                    SEQ3_INSPECTOR_HEIGHT_MIN_DP,
-                    SEQ3_INSPECTOR_HEIGHT_MAX_DP,
-                )
-            }
-        }
-        SectionHeader(
-            title = "Inspector",
-            expanded = view.inspectorExpanded,
-            onToggle = { view.inspectorExpanded = !view.inspectorExpanded },
-        )
-        if (view.inspectorExpanded) {
-            val inspectorModifier = if (view.messagesExpanded) {
-                Modifier.fillMaxWidth().height(view.inspectorHeightDp.dp)
-            } else {
-                Modifier.fillMaxWidth().weight(1f)
-            }
-            Seq3Inspector(
-                state,
-                session,
-                view,
-                inspectorModifier,
-            )
         }
     }
 }
@@ -868,8 +830,9 @@ private fun Seq3QueueRow(
     val selected = message.id in view.selection.selectedIds
     val needsTarget = message.state == Seq3State.NEEDS_TARGET
     val hidden = message.visibility == Seq3Visibility.HIDDEN
+    val hasHiddenOccurrence = message.occurrences.any { it.visibility == Seq3Visibility.HIDDEN }
     val hovered = view.hoveredMessageId == message.id
-    val inspectorSelected = view.inspectorMessageId == message.id
+    val focused = view.focusedMessageId == message.id
     val collapsedCount = seq3CollapsedOccurrenceCount(message)
     val mergeBackTarget = seq3MergeBackTarget(document, message)
     // Pin controls only make sense against LOG-ORDER adjacency (Seq3Queue's nudge is defined over
@@ -882,7 +845,7 @@ private fun Seq3QueueRow(
             .clip(CORNER_SM)
             .background(
                 when {
-                    inspectorSelected -> tc.abg
+                    focused -> tc.abg
                     selected -> tc.sl
                     needsTarget -> tc.warnBg
                     hovered -> tc.hv
@@ -890,9 +853,9 @@ private fun Seq3QueueRow(
                 },
                 CORNER_SM,
             )
-            // Inspector focus is intentionally independent from checkbox selection: the accent
+            // Row focus is intentionally independent from checkbox selection: the accent
             // outline identifies the row being inspected without changing its checkbox state.
-            .then(if (inspectorSelected) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
+            .then(if (focused) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
             .drawBehind {
                 if (selected) drawRect(color = tc.ac, size = Size(3.dp.toPx(), size.height))
             }
@@ -916,7 +879,7 @@ private fun Seq3QueueRow(
             } else {
                 Box(Modifier.width(16.dp).padding(top = 2.dp)) {
                     Seq3RowCheckbox(checked = selected) {
-                        // Checkbox selection is independent from inspector/occurrence focus.
+                        // Checkbox selection is independent from row/occurrence focus.
                         view.selection = seq3Select(visibleIds, view.selection, message.id, additive = true)
                         view.selectionFromMarquee = false
                         view.selectedCanvasRows = emptySet()
@@ -926,7 +889,7 @@ private fun Seq3QueueRow(
                     }
                 }
             }
-            // Keep the Inspector-only row press handler on the message body, not on the row
+            // Keep the focus-only row press handler on the message body, not on the row
             // wrapper. The checkbox is a sibling hit target, so its pointer stream cannot reach
             // this handler and can never activate/deactivate the checkbox as a side effect — even
             // with Shift/Cmd/Ctrl held down.
@@ -943,7 +906,15 @@ private fun Seq3QueueRow(
                                 val doubleClick = now - lastBodyClickMs <= SEQ3_QUEUE_DOUBLE_CLICK_WINDOW_MS
                                 lastBodyClickMs = now
                                 val modifiers = event.keyboardModifiers
-                                val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
+                                // A plain click must not discard a set built with the row
+                                // checkboxes. This is especially important when the next row is
+                                // opened/expanded to inspect it: the checked rows are the user's
+                                // working set, not a transient focus selection. Shift still keeps
+                                // its range-selection meaning; an explicit clear button is
+                                // available in the selection actions.
+                                val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed ||
+                                    ((view.selection.selectedIds.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty()) &&
+                                        !modifiers.isShiftPressed)
                                 if (additive && !modifiers.isShiftPressed) {
                                     // Queue-body Cmd/Ctrl-clicks use the same message-row set as a
                                     // canvas marquee. This makes non-contiguous grouping available
@@ -970,10 +941,9 @@ private fun Seq3QueueRow(
                                     view.selectedCanvasRows = emptySet()
                                 }
                                 view.selectionFromMarquee = false
-                                view.selectedOccurrenceIds = emptySet()
                                 view.selectedOccurrenceMessageId = null
                                 view.selectedOccurrenceEntryId = null
-                                view.inspectorMessageId = message.id.takeIf { view.selection.selectedIds.isNotEmpty() }
+                                view.focusedMessageId = message.id.takeIf { view.selection.selectedIds.isNotEmpty() }
                                 if (doubleClick && message.occurrences.size > 1) {
                                     view.expandedOccurrenceMessageIds = if (message.id in view.expandedOccurrenceMessageIds) {
                                         view.expandedOccurrenceMessageIds - message.id
@@ -990,14 +960,19 @@ private fun Seq3QueueRow(
             ) {
                 Seq3RowPatternLine(message, collapsedCount)
                 Seq3RowEndpointsLine(state, session, message)
-                Seq3MessageControlsLine(state, session, message, pinnable, hidden, mergeBackTarget)
+                Seq3MessageControlsLine(state, session, view, message, pinnable, hidden, mergeBackTarget)
                 if (hidden) {
                     Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                         AppText("Hidden from canvas · evidence kept", color = tc.td, fontSize = 10.sp)
                     }
                 } else if (collapsedCount != null) {
                     Row(Modifier.fillMaxWidth().padding(top = 2.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-                        AppText("Collapsed to one arrow · ×$collapsedCount", color = tc.td, fontSize = 10.sp)
+                        AppText(
+                            if (hasHiddenOccurrence) "Some occurrences hidden · evidence kept"
+                            else "Collapsed to one arrow · ×$collapsedCount",
+                            color = tc.td,
+                            fontSize = 10.sp,
+                        )
                         AppButton(
                             "Show occurrences",
                             onClick = {
@@ -1015,8 +990,15 @@ private fun Seq3QueueRow(
                             ),
                         )
                     }
+                } else if (hasHiddenOccurrence) {
+                    Row(Modifier.fillMaxWidth().padding(top = 2.dp)) {
+                        AppText("Some occurrences hidden · evidence kept", color = tc.td, fontSize = 10.sp)
+                    }
                 }
             }
+        }
+        if (message.id in view.expandedInfoMessageIds) {
+            Seq3MessageInfo(state, session, view, message)
         }
         if (message.occurrences.size > 1 && message.id in view.expandedOccurrenceMessageIds) {
             // Keep the nested list at its content height up to ten rows. A fixed height based on
@@ -1048,6 +1030,65 @@ private fun Seq3QueueRow(
                 }
         }
     }
+}
+
+@Composable
+private fun Seq3MessageInfo(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    message: Seq3Message,
+) {
+    var pattern by remember(message.id, message.match.template) { mutableStateOf(message.match.template) }
+    var label by remember(message.id, message.labelTemplate) { mutableStateOf(message.labelTemplate) }
+
+    Column(
+        Modifier.fillMaxWidth()
+            .padding(start = 22.dp, end = 6.dp, top = 6.dp, bottom = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Seq3InfoFieldLabel("Pattern")
+        InlineField(
+            value = pattern,
+            onValue = { pattern = it },
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().onFocusChanged { view.textFieldFocused = it.hasFocus },
+            onSubmit = {
+                if (pattern.isNotBlank()) {
+                    val match = Seq3Match(
+                        tag = message.match.tag,
+                        template = pattern,
+                        captures = seq3ParseTemplateCaptures(pattern),
+                    )
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetPattern(match, pattern)),
+                    )
+                }
+            },
+        )
+        Spacer(Modifier.height(4.dp))
+        Seq3InfoFieldLabel("Label")
+        InlineField(
+            value = label,
+            onValue = { label = it },
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().onFocusChanged { view.textFieldFocused = it.hasFocus },
+            onSubmit = {
+                if (label.isNotBlank()) {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetLabel(label)),
+                    )
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun Seq3InfoFieldLabel(text: String) {
+    AppText(text.uppercase(), color = tc().td, fontSize = 9.sp, fontWeight = FontWeight.Medium)
 }
 
 private fun occurrenceSelectionKey(messageId: String, entryId: Int): String = "$messageId::$entryId"
@@ -1095,7 +1136,7 @@ private fun Seq3OccurrenceSubRow(
             view.selectedCanvasRows = emptySet()
             view.selectedOccurrenceMessageId = message.id
             view.selectedOccurrenceEntryId = entryId
-            view.inspectorMessageId = message.id
+            view.focusedMessageId = message.id
             runCatching { view.focusRequester.requestFocus() }
         }
         Column(
@@ -1106,14 +1147,19 @@ private fun Seq3OccurrenceSubRow(
                         if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
                             event.changes.none { it.isConsumed }
                         ) {
-                            // Selecting an occurrence for inspection must not select its parent
-                            // message. The occurrence checkbox is the explicit occurrence-level
-                            // selection control.
-                            view.selectedOccurrenceMessageId = message.id
+                            // A body click is an exact occurrence focus, not a checkbox action.
+                            // Store it in the same exact-row representation the canvas marquee and
+                            // Cmd-click use, so the matching submessage is expanded/highlighted
+                            // on the diagram while its checkbox stays unchanged.
+                            view.selectedCanvasRows = setOf(Seq3CanvasRowRef(message.id, entryId))
                             view.selectionFromMarquee = false
-                            view.selectedCanvasRows = emptySet()
+                            // Keep the queue's exact-submessage focus as well as the canvas row
+                            // ref.  The former paints this submessage as selected; the latter
+                            // expands/highlights only its matching arrow on the diagram.
+                            view.selectedOccurrenceMessageId = message.id
                             view.selectedOccurrenceEntryId = entryId
-                            view.inspectorMessageId = message.id
+                            view.focusedMessageId = message.id
+                            view.scrollRequestId = message.id
                             runCatching { view.focusRequester.requestFocus() }
                         }
                     }
@@ -1258,6 +1304,7 @@ private fun Seq3RowEndpointsLine(
 private fun Seq3MessageControlsLine(
     state: AppState,
     session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
     message: Seq3Message,
     pinnable: Set<Seq3PinDirection>,
     hidden: Boolean,
@@ -1268,6 +1315,25 @@ private fun Seq3MessageControlsLine(
         // Keep the hide action first on this dedicated row, matching the compact action order in
         // the reference and making parent hide semantics obvious before kind/pin controls.
         Seq3VisibilityButton(state, session, message)
+        val infoExpanded = message.id in view.expandedInfoMessageIds
+        ToolbarBtn(
+            label = "Info",
+            icon = Icons.Outlined.Info,
+            showLabel = false,
+            tooltip = if (infoExpanded) "Hide message information" else "Show message information",
+            active = infoExpanded,
+            contentPadding = PaddingValues(0.dp),
+            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+            shape = CORNER_SM,
+            onClick = {
+                view.expandedInfoMessageIds = if (infoExpanded) {
+                    view.expandedInfoMessageIds - message.id
+                } else {
+                    view.expandedInfoMessageIds + message.id
+                }
+                runCatching { view.focusRequester.requestFocus() }
+            },
+        )
         Seq3MessageKindPicker(state, session, message, fixedHeight = SEQ3_ACTION_BADGE_SIZE)
         if (pinnable.isNotEmpty()) {
             Seq3PinControls(state, session, message, pinnable)
@@ -1428,156 +1494,6 @@ private fun Seq3StateWord(message: Seq3Message, hidden: Boolean) {
     }
 }
 
-// ── Selection needs verbs — spec §06 ────────────────────────────────────────────────────────────
-//
-// Dark (inverted-contrast) action bar: `tc.tx` as the fill and `tc.bg` as the foreground text is
-// this theme's own primary-text/background pair swapped, so it reads as "the one high-contrast
-// bar on this screen" on every preset (light OR dark) without a hardcoded near-black hex — the
-// mock's literal dark bar, reproduced as a relationship instead of a color (see the v3 rewrite
-// plan's palette decision: "hues track the active preset; layout and spacing will not").
-
-@Composable
-private fun Seq3OccurrenceSelectionActionBar(
-    state: AppState,
-    session: Seq3WorkspaceSession,
-    view: Seq3ViewState,
-    document: Seq3Document,
-) {
-    val tc = tc()
-    val selected = document.messages.flatMap { message ->
-        message.occurrences.mapNotNull { occurrence ->
-            val key = occurrenceSelectionKey(message.id, occurrence.entryId)
-            if (key in view.selectedOccurrenceIds) Seq3OccurrenceRef(message.id, occurrence.entryId) else null
-        }
-    }
-    val canMoveOut = selected.isNotEmpty() && selected.groupBy { it.messageId }.all { (messageId, refs) ->
-        document.messages.firstOrNull { it.id == messageId }?.let { refs.size < it.occurrences.size } == true
-    }
-    val selectedMessageIds = selected.map { it.messageId }.toSet()
-
-    fun clearSelection() {
-        view.selectedOccurrenceIds = emptySet()
-        view.selectedOccurrenceMessageId = null
-        view.selectedOccurrenceEntryId = null
-    }
-
-    Row(
-        Modifier.fillMaxWidth().background(tc.tx)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("${selected.size} selected", color = tc.bg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Seq3ActionBarButton(
-            "Move out",
-            enabled = canMoveOut,
-            tooltip = if (canMoveOut) {
-                "Move the selected occurrences into standalone messages"
-            } else {
-                "Keep at least one occurrence in each message group"
-            },
-        ) {
-            if (canMoveOut && state.seq3Sessions.applyCommand(session.id, Seq3Command.MoveOccurrencesOut(selected))) {
-                clearSelection()
-            }
-        }
-        Seq3ActionBarButton("Note") {
-            seq3AddNote(state, session, view, document, selectedMessageIds)
-        }
-        if (seq3CanGroupSelection(document, view, selectedMessageIds)) {
-            Seq3DropdownButton(label = "Group") { close ->
-                Seq3FragmentKind.entries.forEach { kind ->
-                    Seq3DropdownMenuItem(kind.name.lowercase()) {
-                        seq3GroupMessages(state, session, view, selectedMessageIds, kind)
-                        close()
-                    }
-                }
-            }
-        }
-        Spacer(Modifier.weight(1f))
-        Seq3ActionBarButton("Esc", active = false, onClick = ::clearSelection)
-    }
-}
-
-@Composable
-private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document) {
-    val tc = tc()
-    val selectedIds = view.selection.selectedIds.filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
-    val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
-        view.selectedCanvasRows.size
-    } else {
-        selectedIds.size
-    }
-
-    fun clearSelection() {
-        seq3ClearSelection(view)
-    }
-
-    fun dispatch(action: Seq3BulkAction): Boolean =
-        state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(selectedIds, action))
-    Row(
-        Modifier.fillMaxWidth().background(tc.tx)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("$selectedRowCount selected", color = tc.bg, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        Seq3DropdownButton(label = "Set from", labelColor = tc.bg) { close ->
-            document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
-                Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetFrom(lifeline.id)); close() }
-            }
-        }
-        Seq3DropdownButton(label = "Set to", labelColor = tc.bg) { close ->
-            document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
-                Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetTo(lifeline.id)); close() }
-            }
-        }
-        if (seq3CanGroupSelection(document, view, selectedIds)) {
-            Seq3DropdownButton(label = "Group", labelColor = tc.bg) { close ->
-                Seq3FragmentKind.entries.forEach { kind ->
-                    Seq3DropdownMenuItem(kind.name.lowercase()) {
-                        seq3GroupMessages(state, session, view, selectedIds, kind)
-                        close()
-                    }
-                }
-            }
-        }
-        Seq3ActionBarButton("Hide") {
-            dispatch(Seq3BulkAction.Hide)
-            clearSelection()
-        }
-        Seq3ActionBarButton("Note") {
-            val note = Seq3Note("note-${UUID.randomUUID()}", "Note", selectedIds.toList())
-            dispatch(Seq3BulkAction.Note(note))
-        }
-        Spacer(Modifier.weight(1f))
-        Seq3ActionBarButton("Esc", active = false, onClick = ::clearSelection)
-    }
-}
-
-@Composable
-private fun Seq3ActionBarButton(
-    label: String,
-    active: Boolean = true,
-    enabled: Boolean = true,
-    tooltip: String? = null,
-    onClick: () -> Unit,
-) {
-    ToolbarBtn(
-        label = label,
-        active = active,
-        enabled = enabled,
-        tooltip = tooltip,
-        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
-        shape = CORNER_SM,
-        modifier = Modifier.pointerHoverIcon(
-            PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)),
-            overrideDescendants = true,
-        ),
-        onClick = onClick,
-    )
-}
-
 /** Finds the exact group recorded by [MoveOccurrenceOut]. The action stays hidden when that group
  * is no longer present or its endpoints/kind have become incompatible. */
 private fun seq3MergeBackTarget(document: Seq3Document, message: Seq3Message): Seq3Message? {
@@ -1631,7 +1547,7 @@ internal fun seq3TemplateSegments(template: String): List<Seq3TemplateSegment> {
     return segments
 }
 
-/** Parses `{name}` tokens out of a freely-typed template (Inspector's pattern field, spec §03) into
+/** Parses `{name}` tokens out of a freely-typed template (the row info field) into
  *  [com.indagium.diagram3.Seq3Capture]s with [com.indagium.diagram3.Seq3CaptureSource.AUTHOR] — the
  *  source reserved for "a capture a user names by hand" (Seq3Model.kt's own doc on that enum
  *  value). Duplicate token names keep only their first occurrence. */

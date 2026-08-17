@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3AttachmentMode
+import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
@@ -639,6 +640,23 @@ class Seq3SessionTest {
             state.seq3Sessions.sessions.single().document.messages.single { it.id == original.id }.labelTemplate,
             "undo must restore exactly the pre-revert (hand-edited) message",
         )
+    }
+
+    @Test
+    fun restoringAChangedMessageToItsGeneratedValuesClearsTheEditedBadge() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val original = state.seq3Sessions.sessions.single().document.messages.first()
+
+        state.seq3Sessions.applyCommand(id, Seq3Command.Bulk(setOf(original.id), Seq3BulkAction.SetLabel("temporary label")))
+        assertEquals(Seq3Authoring.EDITED, state.seq3Sessions.sessions.single().document.messages.first { it.id == original.id }.authoring)
+
+        state.seq3Sessions.applyCommand(id, Seq3Command.Bulk(setOf(original.id), Seq3BulkAction.SetLabel(original.labelTemplate)))
+
+        val restored = state.seq3Sessions.sessions.single().document.messages.first { it.id == original.id }
+        assertEquals(original.labelTemplate, restored.labelTemplate)
+        assertEquals(Seq3Authoring.AUTO, restored.authoring)
     }
 
     @Test

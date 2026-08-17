@@ -353,7 +353,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                                 tc,
                                 view.hoveredMessageId,
                                 view.selection.selectedIds,
-                                view.inspectorMessageId,
+                                view.focusedMessageId,
                                 view.selectedOccurrenceMessageId,
                                 view.selectedOccurrenceEntryId,
                                 view.selectedCanvasRows,
@@ -509,8 +509,9 @@ private fun seq3CanvasGestureModifier(
                                     }
                                     view.selectionFromMarquee = false
                                     view.selectedCanvasRows = emptySet()
-                                    view.inspectorMessageId = hitRow.messageId
+                                    view.focusedMessageId = hitRow.messageId
                                     view.canvasContextMenuMessageId = hitRow.messageId
+                                    view.canvasContextMenuOccurrenceEntryId = hitRow.occurrenceEntryId
                                     view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
                                     view.canvasContextMenuOffset = IntOffset(
                                         change.position.x.roundToInt().coerceAtLeast(0),
@@ -539,6 +540,7 @@ private fun seq3CanvasGestureModifier(
                             }
                             childOwnsGesture = false
                             view.canvasContextMenuMessageId = null
+                            view.canvasContextMenuOccurrenceEntryId = null
                             downPosition = change.position
                             moved = false
                             pressWasMiddle = isMiddle
@@ -653,7 +655,7 @@ private fun seq3CanvasGestureModifier(
                                 val wasMoved = moved
                                 panning = false
                                 lastPanPosition = null
-                                if (!wasMoved) seq3ClearSelection(view, clearInspector = true)
+                                if (!wasMoved) seq3ClearSelection(view, clearFocus = true)
                             }
                             selectingArea -> {
                                 val start = selectionStart
@@ -669,7 +671,7 @@ private fun seq3CanvasGestureModifier(
                                     } else {
                                         Seq3Selection(ids, ids.first())
                                     }
-                                    view.inspectorMessageId = view.selection.selectedIds.firstOrNull()
+                                    view.focusedMessageId = view.selection.selectedIds.firstOrNull()
                                     view.selectedCanvasRows = if (selectionAdditive || selectionRange) {
                                         view.selectedCanvasRows + selectedRows
                                     } else {
@@ -680,7 +682,7 @@ private fun seq3CanvasGestureModifier(
                                     view.selectedOccurrenceMessageId = null
                                     view.selectedOccurrenceEntryId = null
                                 } else if (!moved) {
-                                    seq3ClearSelection(view, clearInspector = true)
+                                    seq3ClearSelection(view, clearFocus = true)
                                 }
                             }
                             !moved && !pressWasMiddle -> {
@@ -724,7 +726,7 @@ private fun seq3HandleCanvasClick(
     } else if (!additive && !range) {
         // Notes, fragments, lifeline headers, and empty canvas space are not message-selection
         // targets. A plain click on any of them must dismiss the previous message selection.
-        seq3ClearSelection(view, clearInspector = true)
+        seq3ClearSelection(view, clearFocus = true)
     }
 }
 
@@ -758,8 +760,17 @@ private fun seq3HandleCanvasRowClick(
             anchorId = hitRow.messageId,
         )
         view.selectedOccurrenceIds = emptySet()
-        view.selectedOccurrenceMessageId = null
-        view.selectedOccurrenceEntryId = null
+        // Keep the exact occurrence focus for the queue as well as the canvas row ref. The canvas
+        // uses selectedCanvasRows for exact arrow emphasis; the queue uses these two fields for
+        // the visible selected-submessage background.
+        view.selectedOccurrenceMessageId = hitRow.occurrenceEntryId?.let { hitRow.messageId }
+        view.selectedOccurrenceEntryId = hitRow.occurrenceEntryId
+        if (hitRow.occurrenceEntryId != null) {
+            // A canvas click must make the exact queue row visible even when the parent group was
+            // collapsed. Otherwise the diagram knows the occurrence, but the user cannot see or
+            // act on the matching submessage in the queue.
+            view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds + hitRow.messageId
+        }
     } else {
         view.selection = seq3Select(
             document.messages.map { it.id },
@@ -773,7 +784,7 @@ private fun seq3HandleCanvasRowClick(
         view.selectedOccurrenceMessageId = null
         view.selectedOccurrenceEntryId = null
     }
-    view.inspectorMessageId = hitRow.messageId.takeIf { view.selection.selectedIds.isNotEmpty() }
+    view.focusedMessageId = hitRow.messageId.takeIf { view.selection.selectedIds.isNotEmpty() }
     view.scrollRequestId = hitRow.messageId
     val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
     view.editingLabelMessageId = null
@@ -1018,7 +1029,7 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
         row,
         view.hoveredMessageId,
         view.selection.selectedIds,
-        view.inspectorMessageId,
+        view.focusedMessageId,
         view.selectedOccurrenceMessageId,
         view.selectedOccurrenceEntryId,
         view.selectedCanvasRows,
@@ -1161,7 +1172,7 @@ private fun Seq3FragmentLabelOverlay(
             .height(headerHeight)
             .pointerInput(session.id, fragment.fragmentId) {
                 detectTapGestures(
-                    onTap = { seq3ClearSelection(view, clearInspector = true) },
+                    onTap = { seq3ClearSelection(view, clearFocus = true) },
                     onDoubleTap = { editing = true },
                 )
             },
@@ -1221,6 +1232,7 @@ private fun Seq3CanvasContextMenu(
     document: Seq3Document,
 ) {
     val messageId = view.canvasContextMenuMessageId ?: return
+    val occurrenceEntryId = view.canvasContextMenuOccurrenceEntryId
     val selectedIds = seq3SelectedMessageIds(document, view)
     val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
         view.selectedCanvasRows.size
@@ -1230,7 +1242,10 @@ private fun Seq3CanvasContextMenu(
     Popup(
         alignment = Alignment.TopStart,
         offset = view.canvasContextMenuOffset,
-        onDismissRequest = { view.canvasContextMenuMessageId = null },
+        onDismissRequest = {
+            view.canvasContextMenuMessageId = null
+            view.canvasContextMenuOccurrenceEntryId = null
+        },
         properties = PopupProperties(focusable = true),
     ) {
         Column(
@@ -1264,6 +1279,35 @@ private fun Seq3CanvasContextMenu(
                 }
                 Seq3DropdownMenuItem("Group as par") {
                     seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.PAR)
+                }
+            }
+            document.messages.firstOrNull { it.id == messageId }?.let { message ->
+                val occurrence = occurrenceEntryId?.let { entryId ->
+                    message.occurrences.firstOrNull { it.entryId == entryId }
+                }
+                val hidden = occurrence?.visibility == Seq3Visibility.HIDDEN ||
+                    (occurrence == null && message.visibility == Seq3Visibility.HIDDEN)
+                Seq3DropdownMenuItem(if (hidden) "Show message" else "Hide message") {
+                    if (occurrence != null) {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.SetOccurrenceVisibility(
+                                messageId,
+                                occurrence.entryId,
+                                if (hidden) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                            ),
+                        )
+                    } else {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.Bulk(
+                                setOf(messageId),
+                                if (hidden) Seq3BulkAction.Show else Seq3BulkAction.Hide,
+                            ),
+                        )
+                    }
+                    view.canvasContextMenuMessageId = null
+                    view.canvasContextMenuOccurrenceEntryId = null
                 }
             }
         }
@@ -1338,7 +1382,7 @@ private fun Seq3NoteTextOverlay(
             }
             .pointerInput(session.id, note.noteId) {
                 detectTapGestures(
-                    onTap = { seq3ClearSelection(view, clearInspector = true) },
+                    onTap = { seq3ClearSelection(view, clearFocus = true) },
                     onDoubleTap = { editing = true },
                 )
             },
@@ -1496,7 +1540,7 @@ private fun Seq3LifelineChip(
                         // Select on press so a plain click gives immediate feedback even though
                         // this same surface also owns drag-to-reorder and double-click-to-rename.
                         onPress = {
-                            seq3ClearSelection(view, clearInspector = true)
+                            seq3ClearSelection(view, clearFocus = true)
                             view.selectedLifelineId = column.lifelineId
                             tryAwaitRelease()
                         },

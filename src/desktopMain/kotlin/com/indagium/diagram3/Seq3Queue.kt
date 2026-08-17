@@ -21,14 +21,18 @@ fun seq3FilterCounts(document: Seq3Document): Seq3FilterCounts = Seq3FilterCount
     all = document.messages.size,
     needsTarget = document.messages.count { it.state == Seq3State.NEEDS_TARGET },
     edited = document.messages.count { it.authoring == Seq3Authoring.EDITED },
-    hidden = document.messages.count { it.visibility == Seq3Visibility.HIDDEN },
+    hidden = document.messages.count(::seq3MessageHasHiddenContent),
 )
+
+/** A grouped message belongs in Hidden when either the whole group or one evidence row is hidden. */
+private fun seq3MessageHasHiddenContent(message: Seq3Message): Boolean =
+    message.visibility == Seq3Visibility.HIDDEN || message.occurrences.any { it.visibility == Seq3Visibility.HIDDEN }
 
 private fun passesFilter(message: Seq3Message, filter: Seq3Filter): Boolean = when (filter) {
     Seq3Filter.ALL -> true
     Seq3Filter.NEEDS_TARGET -> message.state == Seq3State.NEEDS_TARGET
     Seq3Filter.EDITED -> message.authoring == Seq3Authoring.EDITED
-    Seq3Filter.HIDDEN -> message.visibility == Seq3Visibility.HIDDEN
+    Seq3Filter.HIDDEN -> seq3MessageHasHiddenContent(message)
 }
 
 /** Matches [Seq3Message.labelTemplate] or the underlying [Seq3Match.template] — the two can differ
@@ -148,21 +152,21 @@ sealed class Seq3BulkAction {
      *  [SetFragmentLabel]. */
     data class SetNoteText(val noteId: String, val text: String) : Seq3BulkAction()
 
-    // ── Single-message field edits (Seq3Inspector, phase 4 — spec §03) ─────────────────────────
+    // ── Single-message field edits (queue row info — spec §03) ─────────────────────────────────
     //
-    // These route the Inspector's per-message controls through the SAME bulk pipeline as every
+    // These route the row info controls through the SAME bulk pipeline as every
     // other verb (usually called with a singleton `selectedIds`, but nothing here requires that) —
     // "every editing verb goes through Seq3Session.applyCommand", never a bespoke command type per
     // field. All three stamp EDITED via [editMessages], exactly like [SetFrom]/[SetTo] already do:
     // a hand-adjusted kind/pattern/repeat policy must survive a later regeneration too.
 
-    /** Inspector's kind segmented control. Switching TO [Seq3Kind.SELF] also snaps `toLifelineId`
+    /** Row info kind control. Switching TO [Seq3Kind.SELF] also snaps `toLifelineId`
      *  to the message's own `fromLifelineId` (mirrors [applySeq3GuidedSelfCall]) so a self-call
      *  never reads as needs-target; switching AWAY from SELF leaves `toLifelineId` exactly as it
      *  was — the user's own `to` choice for a call/return/async/note is never second-guessed here. */
     data class SetKind(val kind: Seq3Kind) : Seq3BulkAction()
 
-    /** Inspector's pattern field (the power-user escape hatch, spec §03) — replaces the WHOLE
+    /** Row info pattern field (the power-user escape hatch, spec §03) — replaces the WHOLE
      *  match/label pair. [match] and [labelTemplate] are taken as already-validated by the caller
      *  (UI parses `{name}` tokens out of the typed template); this only rejects a blank template. */
     data class SetPattern(val match: Seq3Match, val labelTemplate: String) : Seq3BulkAction()
@@ -171,7 +175,7 @@ sealed class Seq3BulkAction {
      *  touching the underlying [Seq3Message.match], the lighter-weight sibling of [SetPattern]. */
     data class SetLabel(val labelTemplate: String) : Seq3BulkAction()
 
-    /** Inspector's repeats control: collapse-above-N / every / first+last (spec §03).
+    /** Row info repeats control: collapse-above-N / every / first+last (spec §03).
      *  [threshold] only matters for [Seq3Repeat.COLLAPSE_ABOVE] (mirrors
      *  [Seq3Message.repeatThreshold]'s own doc) but is always required here to keep this action's
      *  shape total rather than silently reusing whatever threshold a message happened to have. */

@@ -7,6 +7,8 @@ import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
 import com.indagium.diagram3.Seq3AttachmentMetadata
 import com.indagium.diagram3.Seq3AttachmentMode
+import com.indagium.diagram3.Seq3Authoring
+import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
@@ -15,6 +17,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
 import com.indagium.diagram3.Seq3UndoEntry
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
@@ -131,6 +134,32 @@ data class Seq3WorkspaceSession(
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
 
+/** Restores generated authoring only when every user-editable value of a message is back at the
+ *  runtime baseline. Visibility is intentionally ignored because it is an orthogonal display flag:
+ *  hiding/showing a message must not make a previously restored row look edited. */
+private fun restoreGeneratedAuthoring(document: Seq3Document, baseline: Seq3Document?): Seq3Document {
+    if (baseline == null) return document
+    val baselineById = baseline.messages.associateBy { it.id }
+    return document.copy(
+        messages = document.messages.map { message ->
+            val generated = baselineById[message.id] ?: return@map message
+            fun comparable(value: Seq3Message) = value.copy(
+                authoring = Seq3Authoring.AUTO,
+                visibility = Seq3Visibility.VISIBLE,
+                // The row editor recreates captures as AUTHOR captures. Compare the stable
+                // capture names, not their provenance, when deciding whether the typed pattern
+                // is back at the generated value.
+                match = value.match.copy(
+                    captures = value.match.captures.map { it.copy(source = Seq3CaptureSource.AUTHOR) },
+                ),
+            )
+            val comparable = comparable(message)
+            val generatedComparable = comparable(generated)
+            if (comparable == generatedComparable) message.copy(authoring = generated.authoring) else message
+        },
+    )
+}
+
 /**
  * A unique default title for a brand-new session, seeded in [Seq3Session.begin] against that exact
  * log's own already-saved diagrams ([DiagramLibraryStore.forSource]) so two diagrams for the SAME
@@ -176,6 +205,11 @@ class Seq3Session(
      * visited another tab. The state is still ephemeral: closing the workspace drops it here.
      */
     private val workspaceViewStates = ConcurrentHashMap<String, Seq3ViewState>()
+
+    /** Runtime-only generated snapshot used to clear a stale EDITED badge when a row is changed
+     *  and later restored to its original generated values. It is deliberately not persisted as a
+     *  second copy of the diagram note. */
+    private val generatedBaselines = ConcurrentHashMap<String, Seq3Document>()
 
     internal fun viewState(id: String): Seq3ViewState? {
         if (session(id) == null) return null
@@ -259,6 +293,7 @@ class Seq3Session(
             dialect = parsed.dialect,
         )
         sessions = sessions + session
+        generatedBaselines[id] = parsed.document
         activeSessionId = id
         appState.activeSurface = ActiveSurface.Diagram3(id)
         return id
@@ -281,6 +316,7 @@ class Seq3Session(
         revertJobs.remove(id)?.cancel()
         generations.remove(id)
         workspaceViewStates.remove(id)
+        generatedBaselines.remove(id)
         sessions = sessions.filterNot { it.id == id }
         if (activeSessionId == id) {
             val next = sessions.lastOrNull()?.id
@@ -396,6 +432,7 @@ class Seq3Session(
             // A freshly generated document's title is empty (Seq3Generator never invents one); keep
             // whatever the user already typed rather than blanking it on every regenerate.
             val document = fresh.copy(title = current.document.title.ifBlank { fresh.title })
+            generatedBaselines[id] = document
             val tab = current.sourceTabId?.let(appState::tab)
             val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
             val libraryItemId = tab?.let {
@@ -479,7 +516,12 @@ class Seq3Session(
         val result = applySeq3Command(current.document, command)
         val undo = result.undo
         if (!result.applied || undo == null) return false
-        replace(id) { it.copy(document = result.document, undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH)) }
+        val document = restoreGeneratedAuthoring(result.document, generatedBaselines[id])
+        // Tolerant command paths may report success even when the requested value is already
+        // present. Once authoring normalization is applied, that is a true no-op and must not
+        // create a misleading undo entry.
+        if (document == current.document) return false
+        replace(id) { it.copy(document = document, undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH)) }
         markDirty(id)
         return true
     }
@@ -754,6 +796,7 @@ class Seq3Session(
             dialect = parsed.dialect,
         )
         sessions = sessions + session
+        generatedBaselines[sessionId] = parsed.document
         activeSessionId = sessionId
         appState.activeSurface = ActiveSurface.Diagram3(sessionId)
         return true
