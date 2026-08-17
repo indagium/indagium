@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -77,7 +78,6 @@ import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.seq3Select
-import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -312,7 +312,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                                 dragPreview,
                             )
                         }
-                        layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(fragment) }
+                        layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment) }
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note) }
                         layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density) }
@@ -410,6 +410,7 @@ private fun seq3CanvasGestureModifier(
                 when (event.type) {
                     PointerEventType.Press -> {
                         val isMiddle = event.buttons.isTertiaryPressed
+                        view.hoveredMessageId = null
                         if (event.buttons.isSecondaryPressed) {
                             if (!change.isConsumed) {
                                 val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
@@ -527,7 +528,7 @@ private fun seq3CanvasGestureModifier(
                         }
                         val drag = dragEndpoint
                         when {
-                            drag != null -> {
+                            drag != null && moved -> {
                                 // Clear transient UI state before the command can trigger a
                                 // document/layout recomposition and invalidate this pointer pass.
                                 currentDragPreviewCallback.value(null)
@@ -544,11 +545,32 @@ private fun seq3CanvasGestureModifier(
                                     )
                                 }
                             }
+                            drag != null -> {
+                                // An endpoint hit is also a valid message click. Only a gesture
+                                // that crossed the drag threshold should retarget the endpoint;
+                                // a stationary Cmd/Ctrl-click must participate in multi-selection.
+                                currentDragPreviewCallback.value(null)
+                                dragEndpoint = null
+                                seq3HandleCanvasClick(
+                                    view,
+                                    currentSession.value.document,
+                                    activeLayout,
+                                    xUnits,
+                                    yUnits,
+                                    selectionAdditive,
+                                    selectionRange,
+                                ) { now, id ->
+                                    val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
+                                    lastClickTimeMs = now
+                                    lastClickMessageId = id
+                                    doubleClick
+                                }
+                            }
                             panning -> {
                                 val wasMoved = moved
                                 panning = false
                                 lastPanPosition = null
-                                if (!wasMoved) seq3ClearSelection(view)
+                                if (!wasMoved) seq3ClearSelection(view, clearInspector = true)
                             }
                             selectingArea -> {
                                 val start = selectionStart
@@ -564,6 +586,7 @@ private fun seq3CanvasGestureModifier(
                                     } else {
                                         Seq3Selection(ids, ids.first())
                                     }
+                                    view.inspectorMessageId = view.selection.selectedIds.firstOrNull()
                                     view.selectedCanvasRows = if (selectionAdditive || selectionRange) {
                                         view.selectedCanvasRows + selectedRows
                                     } else {
@@ -574,15 +597,16 @@ private fun seq3CanvasGestureModifier(
                                     view.selectedOccurrenceMessageId = null
                                     view.selectedOccurrenceEntryId = null
                                 } else if (!moved) {
-                                    seq3ClearSelection(view)
+                                    seq3ClearSelection(view, clearInspector = true)
                                 }
                             }
                             !moved && !pressWasMiddle -> {
-                                val hitRow = seq3RowAt(activeLayout, xUnits, yUnits)
-                                if (hitRow != null) seq3HandleCanvasRowClick(
+                                seq3HandleCanvasClick(
                                     view,
                                     currentSession.value.document,
-                                    hitRow,
+                                    activeLayout,
+                                    xUnits,
+                                    yUnits,
                                     selectionAdditive,
                                     selectionRange,
                                 ) { now, id ->
@@ -606,6 +630,26 @@ private fun seq3CanvasGestureModifier(
     }
 }
 
+private fun seq3HandleCanvasClick(
+    view: Seq3ViewState,
+    document: Seq3Document,
+    layout: Seq3Layout,
+    x: Double,
+    y: Double,
+    additive: Boolean,
+    range: Boolean,
+    registerClick: (nowMs: Long, id: String) -> Boolean,
+) {
+    val hitRow = seq3RowAt(layout, x, y)
+    if (hitRow != null) {
+        seq3HandleCanvasRowClick(view, document, hitRow, additive, range, registerClick)
+    } else if (!additive && !range) {
+        // Notes, fragments, lifeline headers, and empty canvas space are not message-selection
+        // targets. A plain click on any of them must dismiss the previous message selection.
+        seq3ClearSelection(view, clearInspector = true)
+    }
+}
+
 private fun seq3HandleCanvasRowClick(
     view: Seq3ViewState,
     document: Seq3Document,
@@ -619,35 +663,39 @@ private fun seq3HandleCanvasRowClick(
     // finds the row on the very next recomposition.
     view.filter = Seq3Filter.ALL
     view.textFilter = ""
-    view.selection = seq3Select(
-        document.messages.map { it.id },
-        view.selection,
-        hitRow.messageId,
-        additive = additive,
-        range = range,
-    )
-    view.selectionFromMarquee = false
-    view.selectedCanvasRows = emptySet()
-    val message = document.messages.firstOrNull { it.id == hitRow.messageId }
-    val occurrenceEntryId = hitRow.occurrenceEntryId
-    if (message != null && occurrenceEntryId != null && message.occurrences.size > 1) {
-        val occurrenceKey = "${message.id}::${occurrenceEntryId}"
-        view.selectedOccurrenceIds = if (additive) {
-            view.selectedOccurrenceIds + occurrenceKey
+    if (!range) {
+        // Cmd/Ctrl-click uses the same exact-row representation as a marquee. This keeps
+        // highlighting, repeated-occurrence expansion, and fragment grouping identical between
+        // the two canvas selection gestures.
+        val rowRef = Seq3CanvasRowRef(hitRow.messageId, hitRow.occurrenceEntryId)
+        val nextRows = if (additive) {
+            if (rowRef in view.selectedCanvasRows) view.selectedCanvasRows - rowRef
+            else view.selectedCanvasRows + rowRef
         } else {
-            setOf(occurrenceKey)
+            setOf(rowRef)
         }
-        view.selectedOccurrenceMessageId = message.id
-        view.selectedOccurrenceEntryId = occurrenceEntryId
-        if (message.occurrences.size > 1) {
-            view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds + message.id
-        }
+        view.selectedCanvasRows = nextRows
+        view.selection = Seq3Selection(
+            selectedIds = nextRows.mapTo(linkedSetOf()) { it.messageId },
+            anchorId = hitRow.messageId,
+        )
+        view.selectedOccurrenceIds = emptySet()
+        view.selectedOccurrenceMessageId = null
+        view.selectedOccurrenceEntryId = null
     } else {
+        view.selection = seq3Select(
+            document.messages.map { it.id },
+            view.selection,
+            hitRow.messageId,
+            additive = additive,
+            range = range,
+        )
+        view.selectedCanvasRows = emptySet()
         view.selectedOccurrenceIds = emptySet()
         view.selectedOccurrenceMessageId = null
         view.selectedOccurrenceEntryId = null
     }
-    view.inspectorMessageId = hitRow.messageId
+    view.inspectorMessageId = hitRow.messageId.takeIf { view.selection.selectedIds.isNotEmpty() }
     view.scrollRequestId = hitRow.messageId
     val doubleClick = registerClick(System.currentTimeMillis(), hitRow.messageId)
     view.editingLabelMessageId = null
@@ -972,7 +1020,10 @@ internal fun seq3RowIsEmphasized(
 ): Boolean {
     if (row.messageId == hoveredMessageId) return true
     if (selectedCanvasRows.isNotEmpty()) {
-        return Seq3CanvasRowRef(row.messageId, row.occurrenceEntryId) in selectedCanvasRows
+        // A null occurrence id represents a whole-message selection (queue Cmd/Ctrl-click).
+        // Concrete occurrence ids remain exact, which keeps repeated submessages independent.
+        return Seq3CanvasRowRef(row.messageId, occurrenceEntryId = null) in selectedCanvasRows ||
+            Seq3CanvasRowRef(row.messageId, row.occurrenceEntryId) in selectedCanvasRows
     }
     if (selectedOccurrenceMessageId != null) {
         return row.messageId == selectedOccurrenceMessageId && row.occurrenceEntryId == selectedOccurrenceEntryId
@@ -999,10 +1050,88 @@ private fun Seq3BadgeChip(box: Seq3Box, count: Int) {
 }
 
 @Composable
-private fun Seq3FragmentLabelOverlay(fragment: Seq3FragmentBox) {
+private fun Seq3FragmentLabelOverlay(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    fragment: Seq3FragmentBox,
+) {
     val tc = tc()
-    Box(Modifier.offset(fragment.box.x.dp, fragment.box.y.dp).padding(3.dp)) {
-        AppText(fragment.label, color = tc.seq1, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+    var editing by remember(session.id, fragment.fragmentId) { mutableStateOf(false) }
+    var text by remember(session.id, fragment.fragmentId, fragment.label) { mutableStateOf(fragment.label) }
+    val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0).dp
+    val kindLabel = fragment.kind.name.lowercase()
+    val displayedLabel = if (fragment.label.equals(kindLabel, ignoreCase = true)) {
+        fragment.label
+    } else {
+        "$kindLabel: ${fragment.label}"
+    }
+
+    fun commit() {
+        if (text.isNotBlank()) {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentLabel(fragment.fragmentId, text)),
+            )
+        }
+        editing = false
+    }
+
+    Box(
+        Modifier.offset(fragment.box.x.dp, fragment.box.y.dp)
+            .width(fragment.box.width.dp)
+            .height(headerHeight)
+            .pointerInput(session.id, fragment.fragmentId) {
+                detectTapGestures(
+                    onTap = { seq3ClearSelection(view, clearInspector = true) },
+                    onDoubleTap = { editing = true },
+                )
+            },
+    ) {
+        if (editing) {
+            Row(
+                Modifier.fillMaxSize().padding(horizontal = 3.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                InlineField(
+                    value = text,
+                    onValue = { text = it },
+                    fontSize = 10.sp,
+                    modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                    onSubmit = ::commit,
+                )
+                SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
+                SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+            }
+        } else {
+            Row(
+                Modifier.fillMaxSize().padding(start = 3.dp, end = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                AppText(
+                    displayedLabel,
+                    color = tc.seq1,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f),
+                )
+                SquareIconButton("✎", fontSize = 9.sp, onClick = { editing = true }, size = 16.dp)
+                SquareIconButton(
+                    "×",
+                    fontSize = 10.sp,
+                    onClick = {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteFragment(fragment.fragmentId)),
+                        )
+                    },
+                    size = 16.dp,
+                )
+            }
+        }
     }
 }
 
@@ -1015,7 +1144,7 @@ private fun Seq3CanvasContextMenu(
 ) {
     val messageId = view.canvasContextMenuMessageId ?: return
     val selectedIds = seq3SelectedMessageIds(document, view)
-    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+    val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
         view.selectedCanvasRows.size
     } else {
         selectedIds.size
@@ -1045,7 +1174,7 @@ private fun Seq3CanvasContextMenu(
                     placement = view.canvasContextMenuCanvasPoint,
                 )
             }
-            if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+            if (seq3CanGroupSelection(document, view, selectedIds)) {
                 Seq3DropdownMenuItem("Group as loop") {
                     seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP)
                 }
@@ -1072,10 +1201,10 @@ private fun Seq3NoteTextOverlay(
 ) {
     val tc = tc()
     val density = LocalDensity.current.density
-    var editing by remember(note.noteId) { mutableStateOf(false) }
-    var text by remember(note.noteId, note.text) { mutableStateOf(note.text) }
-    var moveDelta by remember(note.noteId) { mutableStateOf(Offset.Zero) }
-    var resizeDelta by remember(note.noteId) { mutableStateOf(Offset.Zero) }
+    var editing by remember(session.id, note.noteId) { mutableStateOf(false) }
+    var text by remember(session.id, note.noteId, note.text) { mutableStateOf(note.text) }
+    var moveDelta by remember(session.id, note.noteId) { mutableStateOf(Offset.Zero) }
+    var resizeDelta by remember(session.id, note.noteId) { mutableStateOf(Offset.Zero) }
     val latestMoveDelta = rememberUpdatedState(moveDelta)
     val latestResizeDelta = rememberUpdatedState(resizeDelta)
     val movedBox = note.box.copy(
@@ -1104,6 +1233,13 @@ private fun Seq3NoteTextOverlay(
         editing = false
     }
 
+    fun deleteNote() {
+        state.seq3Sessions.applyCommand(
+            session.id,
+            Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.noteId)),
+        )
+    }
+
     Box(
         Modifier.offset(movedBox.x.dp, movedBox.y.dp)
             .size(movedBox.width.dp, movedBox.height.dp)
@@ -1123,7 +1259,10 @@ private fun Seq3NoteTextOverlay(
                 )
             }
             .pointerInput(session.id, note.noteId) {
-                detectTapGestures(onDoubleTap = { editing = true })
+                detectTapGestures(
+                    onTap = { seq3ClearSelection(view, clearInspector = true) },
+                    onDoubleTap = { editing = true },
+                )
             },
     ) {
         if (editing) {
@@ -1132,23 +1271,29 @@ private fun Seq3NoteTextOverlay(
                     value = text,
                     onValue = { text = it },
                     fontSize = 10.sp,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    modifier = Modifier.fillMaxWidth().weight(1f)
+                        .onFocusChanged { view.textFieldFocused = it.hasFocus },
                     onSubmit = ::commitText,
                 )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End)) {
+                // Reserve the resize handle's corner so the reject button remains a separate,
+                // clickable target while the note editor is open.
+                Row(
+                    Modifier.fillMaxWidth().padding(end = NOTE_RESIZE_HANDLE_RESERVED_DP),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End),
+                ) {
                     SquareIconButton("✓", fontSize = 10.sp, onClick = ::commitText, size = 16.dp)
                     SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
                 }
             }
         } else {
             AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(4.dp))
-            SquareIconButton(
-                "✎",
-                fontSize = 10.sp,
-                onClick = { editing = true },
-                modifier = Modifier.align(Alignment.TopEnd).padding(2.dp),
-                size = 16.dp,
-            )
+            Row(
+                Modifier.align(Alignment.TopEnd).padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 16.dp)
+                SquareIconButton("×", fontSize = 11.sp, onClick = ::deleteNote, size = 16.dp)
+            }
         }
         Box(
             Modifier.align(Alignment.BottomEnd)
@@ -1175,6 +1320,8 @@ private fun Seq3NoteTextOverlay(
         )
     }
 }
+
+private val NOTE_RESIZE_HANDLE_RESERVED_DP = 16.dp
 
 @Composable
 private fun Seq3InlineLabelEditor(
@@ -1271,6 +1418,7 @@ private fun Seq3LifelineChip(
                         // Select on press so a plain click gives immediate feedback even though
                         // this same surface also owns drag-to-reorder and double-click-to-rename.
                         onPress = {
+                            seq3ClearSelection(view, clearInspector = true)
                             view.selectedLifelineId = column.lifelineId
                             tryAwaitRelease()
                         },

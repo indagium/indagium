@@ -217,7 +217,7 @@ private fun Seq3ContextualSelectionActions(
 ) {
     val tc = tc()
     val document = session.document
-    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+    val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
         view.selectedCanvasRows.size
     } else {
         selectedIds.size
@@ -233,7 +233,7 @@ private fun Seq3ContextualSelectionActions(
             Seq3TitleActionButton("Note", "Add note for selected line") {
                 seq3AddNote(state, session, view, document, selectedIds)
             }
-        } else if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+        } else if (seq3CanGroupSelection(document, view, selectedIds)) {
             Seq3DropdownButton(
                 label = "Group",
                 labelColor = tc.tx,
@@ -581,13 +581,44 @@ internal fun seq3SelectedMessageIds(document: Seq3Document, view: Seq3ViewState)
         .filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
 }
 
-internal fun seq3ClearSelection(view: Seq3ViewState) {
+/** Exact occurrence rows selected by a canvas marquee/Cmd-click or by submessage checkboxes. */
+internal fun seq3SelectedOccurrenceRefs(document: Seq3Document, view: Seq3ViewState): List<Seq3OccurrenceRef> {
+    val canvasRefs = view.selectedCanvasRows.mapNotNull { row ->
+        row.occurrenceEntryId?.let { Seq3OccurrenceRef(row.messageId, it) }
+    }
+    val checkedRefs = document.messages.flatMap { message ->
+        message.occurrences.mapNotNull { occurrence ->
+            val key = "${message.id}::${occurrence.entryId}"
+            occurrence.entryId.takeIf { key in view.selectedOccurrenceIds }
+                ?.let { Seq3OccurrenceRef(message.id, it) }
+        }
+    }
+    return (canvasRefs + checkedRefs).distinct()
+}
+
+/** All selection surfaces expose the same "at least two rows" grouping affordance. */
+internal fun seq3CanGroupSelection(
+    document: Seq3Document,
+    view: Seq3ViewState,
+    selectedIds: Set<String>,
+): Boolean {
+    val exactRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
+        view.selectedCanvasRows.size
+    } else {
+        seq3SelectedOccurrenceRefs(document, view).size
+    }
+    return exactRowCount >= 2 || (exactRowCount == 0 && seq3MessageIdsAreContiguous(document, selectedIds))
+}
+
+internal fun seq3ClearSelection(view: Seq3ViewState, clearInspector: Boolean = false) {
     view.selection = Seq3Selection()
     view.selectionFromMarquee = false
     view.selectedCanvasRows = emptySet()
     view.selectedOccurrenceIds = emptySet()
     view.selectedOccurrenceMessageId = null
     view.selectedOccurrenceEntryId = null
+    view.hoveredMessageId = null
+    if (clearInspector) view.inspectorMessageId = null
 }
 
 internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, messageId: String): Boolean {
@@ -633,17 +664,15 @@ internal fun seq3GroupMessages(
     selectedIds: Set<String>,
     kind: Seq3FragmentKind,
 ): Boolean {
-    if (!view.selectionFromMarquee && !seq3MessageIdsAreContiguous(session.document, selectedIds)) return false
     val orderedIds = session.document.messages.map { it.id }.filter { it in selectedIds }
-    val canvasRows = view.selectedCanvasRows
-    val exactOccurrenceRefs = canvasRows.mapNotNull { row ->
-        row.occurrenceEntryId?.let { Seq3OccurrenceRef(row.messageId, it) }
-    }
+    if (!seq3CanGroupSelection(session.document, view, selectedIds)) return false
+    val hasExactRows = view.selectedCanvasRows.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty()
+    val exactOccurrenceRefs = seq3SelectedOccurrenceRefs(session.document, view)
     val exactMessageIds = exactOccurrenceRefs.mapTo(hashSetOf()) { it.messageId }
-    val fallbackMessageIds = if (canvasRows.isEmpty()) {
+    val fallbackMessageIds = if (!hasExactRows) {
         orderedIds
     } else {
-        canvasRows.map { it.messageId }.filterNot { it in exactMessageIds }.distinct()
+        orderedIds.filterNot { it in exactMessageIds }
     }
     val fragment = Seq3Fragment(
         id = "seq3-fragment-${UUID.randomUUID()}",

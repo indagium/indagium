@@ -24,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.*
@@ -53,6 +54,7 @@ import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.Seq3Visibility
@@ -61,7 +63,6 @@ import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
 import com.indagium.diagram3.seq3FilterCounts
-import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
 import com.indagium.model.LogEntry
@@ -149,7 +150,7 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                 Seq3FilterChipsRow(view, counts)
                 Seq3FilterTextAndSortRow(view)
                 if (document.fragments.isNotEmpty() || document.notes.isNotEmpty()) {
-                    Seq3FragmentsAndNotesSection(state, session, document)
+                    Seq3FragmentsAndNotesSection(state, session, view, document)
                 }
                 Box(Modifier.weight(1f)) {
                     LazyColumn(
@@ -742,7 +743,12 @@ private fun Seq3QueueFooter(counts: com.indagium.diagram3.Seq3FilterCounts, onRe
 // already exempts exactly these two actions (Seq3Queue.kt's own comment on that guard).
 
 @Composable
-private fun Seq3FragmentsAndNotesSection(state: AppState, session: Seq3WorkspaceSession, document: Seq3Document) {
+private fun Seq3FragmentsAndNotesSection(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+) {
     var expanded by remember(session.id) { mutableStateOf(false) }
     val total = document.fragments.size + document.notes.size
     Column(Modifier.fillMaxWidth()) {
@@ -752,14 +758,14 @@ private fun Seq3FragmentsAndNotesSection(state: AppState, session: Seq3Workspace
             onToggle = { expanded = !expanded },
         )
         if (expanded) {
-            document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, fragment) }
-            document.notes.forEach { note -> Seq3NoteRenameRow(state, session, note) }
+            document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
+            document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
         }
     }
 }
 
 @Composable
-private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession, fragment: Seq3Fragment) {
+private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, fragment: Seq3Fragment) {
     val tc = tc()
     var editing by remember(fragment.id) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -775,7 +781,13 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
                 )
                 editing = false
             }
-            InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.weight(1f), onSubmit = ::commit)
+            InlineField(
+                value = text,
+                onValue = { text = it },
+                fontSize = 10.sp,
+                modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                onSubmit = ::commit,
+            )
             SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
             SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
         } else {
@@ -799,7 +811,7 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
 }
 
 @Composable
-private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, note: Seq3Note) {
+private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, note: Seq3Note) {
     val tc = tc()
     var editing by remember(note.id) { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -812,7 +824,13 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, no
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(note.id, text)))
                 editing = false
             }
-            InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.weight(1f), onSubmit = ::commit)
+            InlineField(
+                value = text,
+                onValue = { text = it },
+                fontSize = 10.sp,
+                modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                onSubmit = ::commit,
+            )
             SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
             SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
         } else {
@@ -926,19 +944,36 @@ private fun Seq3QueueRow(
                                 lastBodyClickMs = now
                                 val modifiers = event.keyboardModifiers
                                 val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
-                                view.selection = seq3Select(
-                                    visibleIds,
-                                    view.selection,
-                                    message.id,
-                                    additive = additive,
-                                    range = modifiers.isShiftPressed,
-                                )
+                                if (additive && !modifiers.isShiftPressed) {
+                                    // Queue-body Cmd/Ctrl-clicks use the same message-row set as a
+                                    // canvas marquee. This makes non-contiguous grouping available
+                                    // from the side panel too, while a plain queue click remains a
+                                    // normal whole-message selection.
+                                    val baseRows = view.selection.selectedIds.mapTo(linkedSetOf()) {
+                                        Seq3CanvasRowRef(it, occurrenceEntryId = null)
+                                    }
+                                    val rowRef = Seq3CanvasRowRef(message.id, occurrenceEntryId = null)
+                                    val nextRows = if (rowRef in baseRows) baseRows - rowRef else baseRows + rowRef
+                                    view.selectedCanvasRows = nextRows
+                                    view.selection = Seq3Selection(
+                                        selectedIds = nextRows.mapTo(linkedSetOf()) { it.messageId },
+                                        anchorId = message.id,
+                                    )
+                                } else {
+                                    view.selection = seq3Select(
+                                        visibleIds,
+                                        view.selection,
+                                        message.id,
+                                        additive = additive,
+                                        range = modifiers.isShiftPressed,
+                                    )
+                                    view.selectedCanvasRows = emptySet()
+                                }
                                 view.selectionFromMarquee = false
-                                view.selectedCanvasRows = emptySet()
                                 view.selectedOccurrenceIds = emptySet()
                                 view.selectedOccurrenceMessageId = null
                                 view.selectedOccurrenceEntryId = null
-                                view.inspectorMessageId = message.id
+                                view.inspectorMessageId = message.id.takeIf { view.selection.selectedIds.isNotEmpty() }
                                 if (doubleClick && message.occurrences.size > 1) {
                                     view.expandedOccurrenceMessageIds = if (message.id in view.expandedOccurrenceMessageIds) {
                                         view.expandedOccurrenceMessageIds - message.id
@@ -1449,9 +1484,14 @@ private fun Seq3OccurrenceSelectionActionBar(
         Seq3ActionBarButton("Note") {
             seq3AddNote(state, session, view, document, selectedMessageIds)
         }
-        if (view.selectionFromMarquee || seq3MessageIdsAreContiguous(document, selectedMessageIds)) {
-            Seq3ActionBarButton("Group") {
-                seq3GroupMessages(state, session, view, selectedMessageIds, Seq3FragmentKind.LOOP)
+        if (seq3CanGroupSelection(document, view, selectedMessageIds)) {
+            Seq3DropdownButton(label = "Group") { close ->
+                Seq3FragmentKind.entries.forEach { kind ->
+                    Seq3DropdownMenuItem(kind.name.lowercase()) {
+                        seq3GroupMessages(state, session, view, selectedMessageIds, kind)
+                        close()
+                    }
+                }
             }
         }
         Spacer(Modifier.weight(1f))
@@ -1463,7 +1503,7 @@ private fun Seq3OccurrenceSelectionActionBar(
 private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document) {
     val tc = tc()
     val selectedIds = view.selection.selectedIds.filterTo(linkedSetOf()) { id -> document.messages.any { it.id == id } }
-    val selectedRowCount = if (view.selectionFromMarquee && view.selectedCanvasRows.isNotEmpty()) {
+    val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
         view.selectedCanvasRows.size
     } else {
         selectedIds.size
@@ -1492,7 +1532,7 @@ private fun Seq3SelectionActionBar(state: AppState, session: Seq3WorkspaceSessio
                 Seq3DropdownMenuItem(lifeline.name) { dispatch(Seq3BulkAction.SetTo(lifeline.id)); close() }
             }
         }
-        if ((view.selectionFromMarquee && selectedRowCount > 1) || seq3MessageIdsAreContiguous(document, selectedIds)) {
+        if (seq3CanGroupSelection(document, view, selectedIds)) {
             Seq3DropdownButton(label = "Group", labelColor = tc.bg) { close ->
                 Seq3FragmentKind.entries.forEach { kind ->
                     Seq3DropdownMenuItem(kind.name.lowercase()) {
