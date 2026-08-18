@@ -95,6 +95,25 @@ sealed class Seq3Command {
     data class RenameLifeline(val lifelineId: String, val name: String) : Seq3Command()
 
     data class MergeLifelines(val keepLifelineId: String, val mergedLifelineId: String) : Seq3Command()
+
+    /** Adds an author-created lifeline. It may have no source tag and can still be used as a
+     *  target for authored or unresolved messages. */
+    data class AddLifeline(val lifeline: Seq3Lifeline) : Seq3Command()
+
+    data class SetLifelineVisibility(val lifelineId: String, val visibility: Seq3Visibility) : Seq3Command()
+
+    /** Removes a lifeline while preserving target-side messages by making those targets unresolved. */
+    data class RemoveLifeline(val lifelineId: String) : Seq3Command()
+
+    /** One undoable merge for a checkbox selection of lifelines. */
+    data class MergeLifelineSelection(val keepLifelineId: String, val mergedLifelineIds: Set<String>) : Seq3Command()
+
+    /** Moves one represented source tag out of a merged lifeline into [newLifeline]. */
+    data class SplitLifeline(
+        val lifelineId: String,
+        val tagId: String,
+        val newLifeline: Seq3Lifeline,
+    ) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -152,6 +171,11 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.ReorderLifelines -> dispatchReorder(document, command)
     is Seq3Command.RenameLifeline -> dispatchRename(document, command)
     is Seq3Command.MergeLifelines -> dispatchMergeLifelines(document, command)
+    is Seq3Command.AddLifeline -> dispatchAddLifeline(document, command)
+    is Seq3Command.SetLifelineVisibility -> dispatchSetLifelineVisibility(document, command)
+    is Seq3Command.RemoveLifeline -> dispatchRemoveLifeline(document, command)
+    is Seq3Command.MergeLifelineSelection -> dispatchMergeLifelineSelection(document, command)
+    is Seq3Command.SplitLifeline -> dispatchSplitLifeline(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -304,9 +328,12 @@ private fun dispatchReorder(document: Seq3Document, command: Seq3Command.Reorder
 }
 
 private fun dispatchRename(document: Seq3Document, command: Seq3Command.RenameLifeline): Outcome {
-    if (command.name.isBlank()) return unapplied(document, "Lifeline name is required")
-    if (document.lifelines.none { it.id == command.lifelineId }) return unapplied(document, "Unknown lifeline")
-    val renamed = document.copy(lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(name = command.name) else it })
+    val name = command.name.trim()
+    if (name.isBlank()) return unapplied(document, "Lifeline name is required")
+    val lifeline = document.lifelines.firstOrNull { it.id == command.lifelineId }
+        ?: return unapplied(document, "Unknown lifeline")
+    if (lifeline.name == name) return unapplied(document, "No change")
+    val renamed = document.copy(lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(name = name) else it })
     return applied(renamed, "Rename lifeline")
 }
 
@@ -314,17 +341,111 @@ private fun dispatchRename(document: Seq3Document, command: Seq3Command.RenameLi
  *  `tagIds` fold into [command.keepLifelineId], every message endpoint referencing the merged id is
  *  repointed, and the merged lifeline is dropped from the document. */
 private fun dispatchMergeLifelines(document: Seq3Document, command: Seq3Command.MergeLifelines): Outcome {
-    val keepId = command.keepLifelineId
-    val mergeId = command.mergedLifelineId
-    if (keepId == mergeId) return unapplied(document, "Cannot merge a lifeline with itself")
-    val keep = document.lifelines.firstOrNull { it.id == keepId } ?: return unapplied(document, "Unknown lifeline to keep")
-    val merge = document.lifelines.firstOrNull { it.id == mergeId } ?: return unapplied(document, "Unknown lifeline to merge")
-    val mergedLifeline = keep.copy(tagIds = keep.tagIds + merge.tagIds)
+    if (command.keepLifelineId == command.mergedLifelineId) return unapplied(document, "Cannot merge a lifeline with itself")
+    return mergeLifelines(document, command.keepLifelineId, setOf(command.mergedLifelineId))
+}
 
-    fun repoint(id: String?): String? = if (id == mergeId) keepId else id
-    val result = document.copy(
-        lifelines = document.lifelines.filterNot { it.id == mergeId }.map { if (it.id == keepId) mergedLifeline else it },
-        messages = document.messages.map { it.copy(fromLifelineId = repoint(it.fromLifelineId) ?: it.fromLifelineId, toLifelineId = repoint(it.toLifelineId)) },
+private fun dispatchAddLifeline(document: Seq3Document, command: Seq3Command.AddLifeline): Outcome {
+    val lifeline = command.lifeline.copy(name = command.lifeline.name.trim())
+    if (lifeline.id.isBlank()) return unapplied(document, "Lifeline id is required")
+    if (lifeline.name.isBlank()) return unapplied(document, "Lifeline name is required")
+    if (document.lifelines.any { it.id == lifeline.id }) return unapplied(document, "Lifeline already exists")
+    return applied(document.copy(lifelines = document.lifelines + lifeline), "Add lifeline")
+}
+
+private fun dispatchSetLifelineVisibility(document: Seq3Document, command: Seq3Command.SetLifelineVisibility): Outcome {
+    val lifeline = document.lifelines.firstOrNull { it.id == command.lifelineId }
+        ?: return unapplied(document, "Unknown lifeline")
+    if (lifeline.visibility == command.visibility) return unapplied(document, "No change")
+    return applied(
+        document.copy(lifelines = document.lifelines.map {
+            if (it.id == command.lifelineId) it.copy(visibility = command.visibility) else it
+        }),
+        if (command.visibility == Seq3Visibility.HIDDEN) "Hide lifeline" else "Show lifeline",
     )
-    return applied(result, "Merge lifelines")
+}
+
+private fun dispatchRemoveLifeline(document: Seq3Document, command: Seq3Command.RemoveLifeline): Outcome {
+    if (document.lifelines.none { it.id == command.lifelineId }) return unapplied(document, "Unknown lifeline")
+    if (document.messages.any { it.fromLifelineId == command.lifelineId }) {
+        return unapplied(document, "Reassign this lifeline's source messages before removing it")
+    }
+    val updatedMessages = document.messages.map { message ->
+        if (message.toLifelineId == command.lifelineId) {
+            message.copy(
+                toLifelineId = null,
+                kind = if (message.kind == Seq3Kind.SELF) Seq3Kind.CALL else message.kind,
+            )
+        } else {
+            message
+        }
+    }
+    return applied(
+        document.copy(
+            lifelines = document.lifelines.filterNot { it.id == command.lifelineId },
+            messages = updatedMessages,
+        ),
+        "Remove lifeline",
+    )
+}
+
+private fun dispatchMergeLifelineSelection(document: Seq3Document, command: Seq3Command.MergeLifelineSelection): Outcome {
+    if (command.mergedLifelineIds.isEmpty()) return unapplied(document, "Select at least two lifelines")
+    if (command.keepLifelineId in command.mergedLifelineIds) return unapplied(document, "Cannot merge a lifeline with itself")
+    return mergeLifelines(document, command.keepLifelineId, command.mergedLifelineIds)
+}
+
+private fun mergeLifelines(document: Seq3Document, keepId: String, mergeIds: Set<String>): Outcome {
+    val keep = document.lifelines.firstOrNull { it.id == keepId }
+        ?: return unapplied(document, "Unknown lifeline to keep")
+    if (mergeIds.isEmpty()) return unapplied(document, "Select a lifeline to merge")
+    if (mergeIds.any { id -> id == keepId || document.lifelines.none { it.id == id } }) {
+        return unapplied(document, "Unknown lifeline to merge")
+    }
+    val mergedTags = document.lifelines.filter { it.id in mergeIds }.flatMapTo(keep.tagIds.toMutableSet()) { it.tagIds }
+    fun repoint(id: String?): String? = if (id != null && id in mergeIds) keepId else id
+    val result = document.copy(
+        lifelines = document.lifelines
+            .filterNot { it.id in mergeIds }
+            .map { if (it.id == keepId) it.copy(tagIds = mergedTags) else it },
+        messages = document.messages.map {
+            it.copy(
+                fromLifelineId = repoint(it.fromLifelineId) ?: it.fromLifelineId,
+                toLifelineId = repoint(it.toLifelineId),
+            )
+        },
+    )
+    return if (result == document) unapplied(document, "No change") else applied(result, "Merge lifelines")
+}
+
+private fun dispatchSplitLifeline(document: Seq3Document, command: Seq3Command.SplitLifeline): Outcome {
+    val source = document.lifelines.firstOrNull { it.id == command.lifelineId }
+        ?: return unapplied(document, "Unknown lifeline")
+    if (source.tagIds.size <= 1 || command.tagId !in source.tagIds) {
+        return unapplied(document, "Only a represented tag from a merged lifeline can be moved out")
+    }
+    val newLifeline = command.newLifeline.copy(tagIds = setOf(command.tagId))
+    if (newLifeline.id.isBlank() || newLifeline.name.isBlank()) return unapplied(document, "New lifeline name is required")
+    if (document.lifelines.any { it.id == newLifeline.id }) return unapplied(document, "Lifeline already exists")
+    val insertedOrdinal = source.ordinal + 1
+    val lifelines = document.lifelines.map {
+        when {
+            it.id == source.id -> it.copy(tagIds = it.tagIds - command.tagId)
+            it.ordinal >= insertedOrdinal -> it.copy(ordinal = it.ordinal + 1)
+            else -> it
+        }
+    } + newLifeline.copy(ordinal = insertedOrdinal)
+    val messages = document.messages.map {
+        if (it.fromLifelineId == source.id && it.match.tag == command.tagId) {
+            it.copy(
+                fromLifelineId = newLifeline.id,
+                // A self-call's target mirrors its source. Preserve that invariant when the
+                // represented tag is split out; ordinary calls still keep their existing target.
+                toLifelineId = if (it.kind == Seq3Kind.SELF && it.toLifelineId == source.id) newLifeline.id else it.toLifelineId,
+            )
+        } else {
+            it
+        }
+    }
+    return applied(document.copy(lifelines = lifelines, messages = messages), "Move tag to lifeline")
 }

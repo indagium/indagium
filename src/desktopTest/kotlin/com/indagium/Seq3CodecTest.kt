@@ -83,6 +83,31 @@ class Seq3CodecTest {
     }
 
     @Test
+    fun lifelineVisibilityRoundTripsAndOldDefaultRemainsVisible() {
+        val original = fixedDocument().copy(
+            lifelines = fixedDocument().lifelines.mapIndexed { index, lifeline ->
+                if (index == 1) lifeline.copy(visibility = Seq3Visibility.HIDDEN) else lifeline
+            },
+        )
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+        assertNotNull(parsed)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.lifelines.single { it.id == "B" }.visibility)
+
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+        val legacy = parseSeq3Note(legacyText)
+        assertNotNull(legacy)
+        assertEquals(Seq3Visibility.VISIBLE, legacy.document.lifelines.single().visibility)
+    }
+
+    @Test
     fun stripSeq3NoteHeaderLeavesOnlyTheFencedBody() {
         val text = encodeSeq3Note(fixedDocument())
         val stripped = stripSeq3NoteHeader(text)

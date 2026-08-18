@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.ui.Seq3KeyAction
 import com.indagium.ui.seq3ClampDividerWidth
+import com.indagium.ui.seq3ClampLifelinesHeight
 import com.indagium.ui.seq3KeyAction
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -194,5 +195,23 @@ class Seq3KeyActionTest {
         var width = 280f
         repeat(5) { width = seq3ClampDividerWidth(width, delta = 10f, min = 200f, max = 400f) }
         assertEquals(330f, width)
+    }
+
+    // ── seq3ClampLifelinesHeight: stacked queue-panel divider drag math ───────────────────────
+
+    @Test
+    fun draggingTheLifelinesDividerUpGrowsTheLowerSection() {
+        assertEquals(260f, seq3ClampLifelinesHeight(current = 220f, delta = -40f))
+    }
+
+    @Test
+    fun draggingTheLifelinesDividerDownShrinksTheLowerSection() {
+        assertEquals(180f, seq3ClampLifelinesHeight(current = 220f, delta = 40f))
+    }
+
+    @Test
+    fun lifelinesHeightClampsAtBothBounds() {
+        assertEquals(120f, seq3ClampLifelinesHeight(current = 130f, delta = 40f))
+        assertEquals(420f, seq3ClampLifelinesHeight(current = 410f, delta = -40f))
     }
 }

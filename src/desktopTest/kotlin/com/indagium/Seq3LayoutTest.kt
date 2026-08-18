@@ -374,6 +374,20 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun hiddenLifelinesAndTheirArrowsLeaveTheCanvasUntilShownAgain() {
+        val hiddenB = lifeline("B", 1).copy(visibility = Seq3Visibility.HIDDEN)
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), hiddenB),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(listOf("A"), layout.lifelines.map { it.lifelineId })
+        assertTrue(layout.rows.isEmpty(), "an arrow to a hidden lifeline must not become a dangling canvas row")
+    }
+
+    @Test
     fun canvasAndRasterShareTheExactSameLayoutGeometry() {
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),

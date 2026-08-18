@@ -183,7 +183,8 @@ private class Seq3EmissionPlan(
 )
 
 private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
-    val lifelineIndex = document.lifelines.withIndex().associate { (i, l) -> l.id to i }
+    val visibleLifelines = document.lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val lifelineIndex = visibleLifelines.withIndex().associate { (i, l) -> l.id to i }
     val emissions = mutableListOf<Seq3Emission>()
     val firstIndex = HashMap<String, Int>()
     val lastIndex = HashMap<String, Int>()
@@ -277,7 +278,8 @@ private fun noteSpan(note: Seq3Note, plan: Seq3EmissionPlan, aliases: List<Strin
 
 fun Seq3Document.toMermaid(): String {
     val plan = planEmissions(this)
-    val aliases = sanitizedAliases(lifelines)
+    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val aliases = sanitizedAliases(visibleLifelines)
     val brackets = normalizedBrackets(fragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
@@ -288,7 +290,7 @@ fun Seq3Document.toMermaid(): String {
     return buildString {
         append("sequenceDiagram\n")
         if (title.isNotBlank()) append("    title ").append(mermaidEscape(title)).append('\n')
-        lifelines.forEachIndexed { i, l -> append("    participant ").append(aliases[i]).append(" as ").append(mermaidEscape(l.name)).append('\n') }
+        visibleLifelines.forEachIndexed { i, l -> append("    participant ").append(aliases[i]).append(" as ").append(mermaidEscape(l.name)).append('\n') }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 append("    ").append(b.fragment.kind.name.lowercase()).append(' ').append(mermaidEscape(fragmentLabel(b.fragment))).append('\n')
@@ -323,7 +325,8 @@ fun Seq3Document.toMermaid(): String {
 
 fun Seq3Document.toPlantUml(): String {
     val plan = planEmissions(this)
-    val aliases = sanitizedAliases(lifelines)
+    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val aliases = sanitizedAliases(visibleLifelines)
     val brackets = normalizedBrackets(fragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
@@ -334,7 +337,7 @@ fun Seq3Document.toPlantUml(): String {
     return buildString {
         append("@startuml\n")
         if (title.isNotBlank()) append("title ").append(plantUmlEscape(title)).append('\n')
-        lifelines.forEachIndexed { i, l -> append("participant \"").append(plantUmlEscape(l.name)).append("\" as ").append(aliases[i]).append('\n') }
+        visibleLifelines.forEachIndexed { i, l -> append("participant \"").append(plantUmlEscape(l.name)).append("\" as ").append(aliases[i]).append('\n') }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 append(b.fragment.kind.name.lowercase()).append(' ').append(plantUmlEscape(fragmentLabel(b.fragment))).append('\n')

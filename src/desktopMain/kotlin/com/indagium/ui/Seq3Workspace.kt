@@ -189,6 +189,15 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                 onClick = { view.sidebarOpen = !view.sidebarOpen },
             )
+            ToolbarBtn(
+                label = "⇅",
+                tooltip = if (view.lifelinesSectionOpen) "Hide Lifelines" else "Show Lifelines",
+                active = view.lifelinesSectionOpen,
+                modifier = Modifier.size(28.dp),
+                shape = CORNER_SM,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                onClick = { view.lifelinesSectionOpen = !view.lifelinesSectionOpen },
+            )
             Seq3AttachmentAction(state, session)
             SegmentedControl(
                 options = listOf("PlantUML", "Mermaid"),
@@ -505,6 +514,8 @@ internal class Seq3ViewState {
     /** The lifeline header chip drawn in the accent color (spec §04's "the selected one in
      *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target. */
     var selectedLifelineId by mutableStateOf<String?>(null)
+    /** Lifelines checked in the panel for a multi-lifeline operation such as Merge. */
+    var selectedLifelineIds by mutableStateOf<Set<String>>(emptySet())
 
     /** Rectangle currently being dragged on the canvas to select multiple message rows. */
     var canvasSelectionRect by mutableStateOf<Seq3Box?>(null)
@@ -538,6 +549,16 @@ internal class Seq3ViewState {
     /** Whether the Messages section is expanded. This is a view-only preference, so collapsing it
      *  never changes the document or its undo history. */
     var messagesExpanded by mutableStateOf(true)
+
+    /** Whether the Lifelines section is expanded. This is a panel-only preference and never enters
+     *  the saved diagram or undo history. */
+    var lifelinesExpanded by mutableStateOf(true)
+
+    /** Whether the Lifelines section is visible in the queue panel. */
+    var lifelinesSectionOpen by mutableStateOf(true)
+
+    /** Height of the expanded Lifelines section, adjusted by the horizontal panel divider. */
+    var lifelinesSectionHeightDp by mutableStateOf(220f)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
