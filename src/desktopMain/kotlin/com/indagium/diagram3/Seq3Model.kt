@@ -38,6 +38,8 @@ data class Seq3Lifeline(
     /** Display/column order. Lower sorts first; a stable id-based tiebreak lives with whatever
      *  sorts this list, not here. */
     val ordinal: Int,
+    /** Hiding a lifeline is independent from message authoring and keeps its represented tags. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
 // ── Match / capture ──────────────────────────────────────────────────────────────────────────

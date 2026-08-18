@@ -229,9 +229,18 @@ private const val ELLIPSIS = "…"
  * of this package's "never throw on bad/degenerate input" posture (see Seq3Generator.kt's header).
  */
 fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
-    val lifelinesSorted = doc.lifelines.sortedBy { it.ordinal }
+    val lifelinesSorted = doc.lifelines
+        .filter { it.visibility == Seq3Visibility.VISIBLE }
+        .sortedBy { it.ordinal }
     val lifelineIndex = lifelinesSorted.withIndex().associate { (i, l) -> l.id to i }
-    val visibleMessages = doc.messages.filter { it.visibility == Seq3Visibility.VISIBLE }
+    // A message whose source or target lifeline is hidden cannot be drawn without inventing a
+    // dangling endpoint. Keep it in the durable queue, but omit it from the canvas until all of
+    // its required lifelines are visible again.
+    val visibleMessages = doc.messages.filter {
+        it.visibility == Seq3Visibility.VISIBLE &&
+            it.fromLifelineId in lifelineIndex &&
+            (it.toLifelineId == null || it.toLifelineId in lifelineIndex)
+    }
     val crossingCount = computeCrossingCount(visibleMessages, lifelineIndex)
     if (lifelinesSorted.isEmpty()) {
         return Seq3Layout(0.0, 0.0, emptyList(), emptyList(), emptyList(), emptyList(), crossingCount)

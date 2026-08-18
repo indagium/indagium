@@ -362,7 +362,13 @@ private fun rangeFromMap(map: Map<String, Any?>): Seq3Range = when (map.str("typ
 // ── Lifeline ─────────────────────────────────────────────────────────────────────────────────
 
 private fun lifelineToMap(l: Seq3Lifeline): Map<String, Any?> =
-    mapOf("id" to l.id, "name" to l.name, "tagIds" to l.tagIds.toList(), "ordinal" to l.ordinal)
+    mapOf(
+        "id" to l.id,
+        "name" to l.name,
+        "tagIds" to l.tagIds.toList(),
+        "ordinal" to l.ordinal,
+        "visibility" to l.visibility.name,
+    )
 
 private fun lifelineFromMap(map: Map<String, Any?>): Seq3Lifeline? {
     val id = boundedString(map.str("id")) ?: return null
@@ -371,6 +377,7 @@ private fun lifelineFromMap(map: Map<String, Any?>): Seq3Lifeline? {
         name = boundedString(map.str("name")) ?: id,
         tagIds = map.strList("tagIds")?.mapNotNull(::boundedString)?.toSet() ?: setOf(id),
         ordinal = map.int("ordinal") ?: 0,
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }
 

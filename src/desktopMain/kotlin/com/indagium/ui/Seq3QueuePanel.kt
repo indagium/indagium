@@ -14,6 +14,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -49,6 +51,7 @@ import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Note
@@ -68,6 +71,7 @@ import com.indagium.diagram3.seq3Select
 import com.indagium.model.LogEntry
 import kotlinx.coroutines.delay
 import java.awt.Cursor as AwtCursor
+import java.util.UUID
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Visibility
@@ -77,6 +81,8 @@ import androidx.compose.material.icons.outlined.Info
 private const val ADD_HINT_DURATION_MS = 2_500L
 private const val ADD_ROW_RANGE_LIMIT = 2_000
 private const val SEQ3_QUEUE_DOUBLE_CLICK_WINDOW_MS = 350L
+private const val SEQ3_LIFELINES_MIN_HEIGHT_DP = 120f
+private const val SEQ3_LIFELINES_MAX_HEIGHT_DP = 420f
 private val SEQ3_ACTION_BADGE_SIZE = 24.dp
 private val SEQ3_SUBMESSAGE_ROW_HEIGHT = 44.dp
 
@@ -99,6 +105,20 @@ private enum class Seq3CustomPositionMode {
     AFTER,
     INDEX,
 }
+
+/**
+ * Applies a horizontal splitter drag to the lower Lifelines section.
+ *
+ * [VDivider] reports positive deltas when the pointer moves down, while this state stores the
+ * lower section's height. Moving the divider down therefore reduces that height; moving it up
+ * increases it. Keeping that inversion here makes the behavior match the other stacked panels.
+ */
+internal fun seq3ClampLifelinesHeight(
+    current: Float,
+    delta: Float,
+    min: Float = SEQ3_LIFELINES_MIN_HEIGHT_DP,
+    max: Float = SEQ3_LIFELINES_MAX_HEIGHT_DP,
+): Float = (current - delta).coerceIn(min, max)
 
 // ── The panel is a queue — design spec §04 + §06 + §07 ─────────────────────────────────────────
 //
@@ -132,9 +152,10 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     }
 
     Column(modifier.background(tc.p)) {
-        Seq3QueueHeader(state, session, counts, view)
         if (view.messagesExpanded) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
+                Seq3QueueHeader(state, session, counts, view)
+                Column(Modifier.weight(1f).fillMaxWidth()) {
                 if (counts.needsTarget > 0) {
                     Seq3NeedsTargetBanner(counts.needsTarget) {
                         // Spec §05: the banner is what starts the guided pass. `startSeq3GuidedPass`
@@ -166,6 +187,327 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                     )
                 }
                 Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
+                }
+            }
+        } else {
+            Seq3QueueHeader(state, session, counts, view)
+        }
+        if (view.lifelinesSectionOpen) {
+            if (view.messagesExpanded) {
+                VDivider { delta ->
+                    view.lifelinesSectionHeightDp =
+                        seq3ClampLifelinesHeight(view.lifelinesSectionHeightDp, delta)
+                }
+            }
+            val lifelinesModifier = when {
+                !view.messagesExpanded -> Modifier.weight(1f).fillMaxWidth()
+                view.lifelinesExpanded -> Modifier.height(view.lifelinesSectionHeightDp.dp).fillMaxWidth()
+                else -> Modifier.height(48.dp).fillMaxWidth()
+            }
+            Seq3LifelinesSection(state, session, view, lifelinesModifier)
+        }
+    }
+}
+
+@Composable
+private fun Seq3LifelinesSection(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val document = session.document
+    val lifelines = remember(document) { document.lifelines.sortedBy { it.ordinal } }
+    var addDialogOpen by remember(session.id) { mutableStateOf(false) }
+    var editingId by remember(session.id) { mutableStateOf<String?>(null) }
+    var editingText by remember(session.id) { mutableStateOf("") }
+    var hint by remember(session.id) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(hint) {
+        if (hint != null) {
+            delay(ADD_HINT_DURATION_MS)
+            hint = null
+        }
+    }
+    LaunchedEffect(lifelines) {
+        val validIds = lifelines.mapTo(hashSetOf()) { it.id }
+        view.selectedLifelineIds = view.selectedLifelineIds.filterTo(linkedSetOf()) { it in validIds }
+        if (view.selectedLifelineId !in validIds) view.selectedLifelineId = null
+        if (editingId !in validIds) editingId = null
+    }
+
+    fun startRename(lifeline: Seq3Lifeline) {
+        editingId = lifeline.id
+        editingText = lifeline.name
+    }
+
+    fun commitRename(lifelineId: String) {
+        if (!state.seq3Sessions.applyCommand(session.id, Seq3Command.RenameLifeline(lifelineId, editingText))) {
+            hint = "Enter a non-empty lifeline name"
+        }
+        editingId = null
+    }
+
+    fun toggleSelection(lifelineId: String) {
+        view.selectedLifelineIds = if (lifelineId in view.selectedLifelineIds) {
+            view.selectedLifelineIds - lifelineId
+        } else {
+            view.selectedLifelineIds + lifelineId
+        }
+        view.selectedLifelineId = lifelineId
+        runCatching { view.focusRequester.requestFocus() }
+    }
+
+    Column(modifier.fillMaxWidth()) {
+        SectionHeader(
+            title = "Lifelines · ${lifelines.size}",
+            trailing = {
+                LabelIconButton(
+                    text = "+ lifeline",
+                    fontSize = 10.sp,
+                    onClick = { addDialogOpen = true },
+                )
+            },
+            expanded = view.lifelinesExpanded,
+            onToggle = { view.lifelinesExpanded = !view.lifelinesExpanded },
+        )
+        hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
+        if (view.lifelinesExpanded) {
+            Column(
+                Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            ) {
+                lifelines.forEach { lifeline ->
+                    Seq3LifelineRow(
+                        lifeline = lifeline,
+                        selected = lifeline.id in view.selectedLifelineIds,
+                        editing = editingId == lifeline.id,
+                        editingText = editingText,
+                        onToggleSelection = { toggleSelection(lifeline.id) },
+                        onEditingText = { editingText = it },
+                        onCommitRename = { commitRename(lifeline.id) },
+                        onCancelRename = { editingId = null },
+                        onRename = { startRename(lifeline) },
+                        onToggleVisibility = {
+                            state.seq3Sessions.applyCommand(
+                                session.id,
+                                Seq3Command.SetLifelineVisibility(
+                                    lifeline.id,
+                                    if (lifeline.visibility == Seq3Visibility.VISIBLE) Seq3Visibility.HIDDEN else Seq3Visibility.VISIBLE,
+                                ),
+                            )
+                        },
+                        onRemove = {
+                            if (!state.seq3Sessions.applyCommand(session.id, Seq3Command.RemoveLifeline(lifeline.id))) {
+                                hint = "Reassign source messages before removing this lifeline"
+                            } else {
+                                view.selectedLifelineIds = view.selectedLifelineIds - lifeline.id
+                                if (view.selectedLifelineId == lifeline.id) view.selectedLifelineId = null
+                            }
+                        },
+                        onMoveTagOut = { tagId ->
+                            val newId = "seq3-lifeline-${UUID.randomUUID()}"
+                            val applied = state.seq3Sessions.applyCommand(
+                                session.id,
+                                Seq3Command.SplitLifeline(
+                                    lifelineId = lifeline.id,
+                                    tagId = tagId,
+                                    newLifeline = Seq3Lifeline(
+                                        id = newId,
+                                        name = tagId,
+                                        tagIds = setOf(tagId),
+                                        ordinal = lifeline.ordinal + 1,
+                                        visibility = lifeline.visibility,
+                                    ),
+                                ),
+                            )
+                            if (!applied) hint = "This tag cannot be moved out"
+                        },
+                    )
+                }
+                val selected = lifelines.filter { it.id in view.selectedLifelineIds }
+                if (selected.size >= 2) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppText("${selected.size} selected", color = tc.ts, fontSize = 10.sp)
+                        ToolbarBtn(
+                            label = "Merge",
+                            tooltip = "Merge selected lifelines into the first selected lifeline",
+                            active = true,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 3.dp),
+                            onClick = {
+                                val ordered = selected.sortedBy { it.ordinal }
+                                val keep = ordered.first()
+                                val merged = ordered.drop(1).mapTo(linkedSetOf()) { it.id }
+                                if (state.seq3Sessions.applyCommand(session.id, Seq3Command.MergeLifelineSelection(keep.id, merged))) {
+                                    view.selectedLifelineIds = emptySet()
+                                    view.selectedLifelineId = keep.id
+                                } else {
+                                    hint = "The lifelines could not be merged"
+                                }
+                            },
+                        )
+                        ToolbarBtn(
+                            label = "Clear",
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 3.dp),
+                            onClick = { view.selectedLifelineIds = emptySet() },
+                        )
+                    }
+                }
+            }
+        }
+    }
+    if (addDialogOpen) {
+        Seq3LifelineNameDialog(
+            onDismiss = { addDialogOpen = false },
+            onAdd = { name ->
+                addDialogOpen = false
+                val ordinal = (document.lifelines.maxOfOrNull { it.ordinal } ?: -1) + 1
+                val added = state.seq3Sessions.applyCommand(
+                    session.id,
+                    Seq3Command.AddLifeline(
+                        Seq3Lifeline(
+                            id = "seq3-lifeline-${UUID.randomUUID()}",
+                            name = name,
+                            tagIds = emptySet(),
+                            ordinal = ordinal,
+                        ),
+                    ),
+                )
+                if (!added) hint = "Enter a non-empty, unique lifeline name"
+            },
+        )
+    }
+}
+
+@Composable
+private fun Seq3LifelineRow(
+    lifeline: Seq3Lifeline,
+    selected: Boolean,
+    editing: Boolean,
+    editingText: String,
+    onToggleSelection: () -> Unit,
+    onEditingText: (String) -> Unit,
+    onCommitRename: () -> Unit,
+    onCancelRename: () -> Unit,
+    onRename: () -> Unit,
+    onToggleVisibility: () -> Unit,
+    onRemove: () -> Unit,
+    onMoveTagOut: (String) -> Unit,
+) {
+    val tc = tc()
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(CORNER_SM)
+            .background(if (selected) tc.sl else Color.Transparent, CORNER_SM)
+            .then(if (selected) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
+            .drawBehind {
+                if (selected) drawRect(color = tc.ac, size = Size(3.dp.toPx(), size.height))
+            }
+            .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CompactCheckBox(checked = selected, onToggle = onToggleSelection, modifier = Modifier.size(16.dp))
+            if (editing) {
+                InlineField(
+                    value = editingText,
+                    onValue = onEditingText,
+                    modifier = Modifier.weight(1f).height(24.dp),
+                    fontSize = 11.sp,
+                    onSubmit = onCommitRename,
+                )
+                SquareIconButton("✓", fontSize = 11.sp, onClick = onCommitRename, size = 20.dp)
+                SquareIconButton("×", fontSize = 13.sp, onClick = onCancelRename, size = 20.dp)
+            } else {
+                Column(Modifier.weight(1f)) {
+                    AppText(
+                        lifeline.name,
+                        color = if (lifeline.visibility == Seq3Visibility.VISIBLE) tc.tx else tc.ts,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        textDecoration = if (lifeline.visibility == Seq3Visibility.HIDDEN) TextDecoration.LineThrough else null,
+                    )
+                    AppText(
+                        when {
+                            lifeline.tagIds.size > 1 -> "merged · ${lifeline.tagIds.size} tags"
+                            lifeline.tagIds.size == 1 -> lifeline.tagIds.first()
+                            else -> "manual lifeline"
+                        },
+                        color = tc.ts,
+                        fontSize = 9.sp,
+                        maxLines = 1,
+                    )
+                }
+                ToolbarBtn(
+                    label = if (lifeline.visibility == Seq3Visibility.HIDDEN) "Show lifeline" else "Hide lifeline",
+                    icon = if (lifeline.visibility == Seq3Visibility.HIDDEN) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
+                    showLabel = false,
+                    tooltip = if (lifeline.visibility == Seq3Visibility.HIDDEN) "Show lifeline" else "Hide lifeline",
+                    active = lifeline.visibility == Seq3Visibility.HIDDEN,
+                    modifier = Modifier.size(22.dp),
+                    contentPadding = PaddingValues(0.dp),
+                    onClick = onToggleVisibility,
+                )
+                SquareIconButton("✎", fontSize = 10.sp, onClick = onRename, size = 22.dp)
+                SquareIconButton("×", fontSize = 14.sp, onClick = onRemove, size = 22.dp)
+            }
+        }
+        if (!editing && lifeline.tagIds.size > 1) {
+            Column(
+                Modifier.fillMaxWidth().padding(start = 22.dp, top = 5.dp),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                AppText("Merged lifelines", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+                lifeline.tagIds.sorted().forEach { tagId ->
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .clip(CORNER_SM)
+                            .background(tc.p2, CORNER_SM)
+                            .border(1.dp, tc.br, CORNER_SM)
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        AppText(tagId, color = tc.tx, fontSize = 10.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                        SquareIconButton(
+                            "↗",
+                            fontSize = 10.sp,
+                            onClick = { onMoveTagOut(tagId) },
+                            size = 16.dp,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Seq3LifelineNameDialog(onDismiss: () -> Unit, onAdd: (String) -> Unit) {
+    val tc = tc()
+    var name by remember { mutableStateOf("") }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(360.dp).clip(RoundedCornerShape(12.dp))
+                .background(tc.p, RoundedCornerShape(12.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(12.dp))
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            AppText("Add lifeline", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Create an empty lifeline for a manual or unresolved message.", color = tc.ts, fontSize = 11.sp)
+            InlineField(name, { name = it }, placeholder = "Lifeline name…", modifier = Modifier.fillMaxWidth(), fontSize = 12.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                AppButton("Cancel", onClick = onDismiss, variant = ButtonVariant.Ghost)
+                AppButton("Add lifeline", onClick = { onAdd(name.trim()) }, enabled = name.isNotBlank(), variant = ButtonVariant.Primary)
             }
         }
     }

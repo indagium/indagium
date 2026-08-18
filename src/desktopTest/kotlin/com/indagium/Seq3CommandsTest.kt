@@ -97,6 +97,67 @@ class Seq3CommandsTest {
     }
 
     @Test
+    fun selectedLifelinesCanBeMergedInOneUndoableCommand() {
+        val doc = Seq3Document(
+            lifelines = listOf(
+                Seq3Lifeline("A", "A", setOf("A"), 0),
+                Seq3Lifeline("B", "B", setOf("B"), 1),
+                Seq3Lifeline("C", "C", setOf("C"), 2),
+            ),
+            messages = listOf(message("m1", "C", "B", 1)),
+        )
+
+        val result = applySeq3Command(doc, Seq3Command.MergeLifelineSelection("A", setOf("B", "C")))
+
+        assertTrue(result.applied)
+        assertEquals(listOf("A"), result.document.lifelines.map { it.id })
+        assertEquals(setOf("A", "B", "C"), result.document.lifelines.single().tagIds)
+        assertEquals("A", result.document.messages.single().fromLifelineId)
+        assertEquals("A", result.document.messages.single().toLifelineId)
+        assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
+    fun hidingAndRemovingLifelinesPreservesTheQueue() {
+        val hidden = applySeq3Command(
+            baseDocument(),
+            Seq3Command.SetLifelineVisibility("B", Seq3Visibility.HIDDEN),
+        )
+        assertTrue(hidden.applied)
+        assertEquals(Seq3Visibility.HIDDEN, hidden.document.lifelines.single { it.id == "B" }.visibility)
+
+        val removed = applySeq3Command(hidden.document, Seq3Command.RemoveLifeline("B"))
+        assertTrue(removed.applied)
+        assertTrue(removed.document.lifelines.none { it.id == "B" })
+        assertNull(removed.document.messages.single { it.id == "m1" }.toLifelineId)
+        assertEquals(2, removed.document.messages.size)
+    }
+
+    @Test
+    fun movingOneTagOutOfAMergedLifelineCreatesASeparateSourceLifeline() {
+        val merged = Seq3Lifeline("Common", "Common", setOf("Legacy", "Modern"), 0)
+        val legacy = message("legacy", "Common", "Common", 1).copy(match = Seq3Match("Legacy", "legacy"))
+        val modern = message("modern", "Common", "Common", 2).copy(match = Seq3Match("Modern", "modern"))
+        val doc = Seq3Document(lifelines = listOf(merged), messages = listOf(legacy, modern))
+
+        val result = applySeq3Command(
+            doc,
+            Seq3Command.SplitLifeline(
+                lifelineId = "Common",
+                tagId = "Legacy",
+                newLifeline = Seq3Lifeline("Legacy-line", "Legacy", emptySet(), 1),
+            ),
+        )
+
+        assertTrue(result.applied)
+        assertEquals(setOf("Modern"), result.document.lifelines.single { it.id == "Common" }.tagIds)
+        assertEquals(setOf("Legacy"), result.document.lifelines.single { it.id == "Legacy-line" }.tagIds)
+        assertEquals("Legacy-line", result.document.messages.single { it.id == "legacy" }.fromLifelineId)
+        assertEquals("Common", result.document.messages.single { it.id == "modern" }.fromLifelineId)
+        assertEquals(doc, result.undo?.let(::undoSeq3Command))
+    }
+
+    @Test
     fun replaceMessageSwapsExactlyOneMessageAndIsUndoable() {
         val doc = baseDocument()
         val replacement = message("m2", "A", "B", 99) // same id, different content
