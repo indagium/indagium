@@ -878,6 +878,16 @@ fun AnnotationPanel(
                 scroll.scrollTo(scroll.maxValue)
             }
         }
+        // The suffix field grows as the user inserts line breaks. That changes the Notes content
+        // height without changing totalBlockHeightPx, so the effect above does not get a chance to
+        // keep the bottom section in view. When Next steps has focus, follow that growth after the
+        // new layout is measured; this keeps the same bottom inset visible as in the one-line
+        // state instead of letting the field run into the panel's rounded bottom edge.
+        LaunchedEffect(ann.suffix, suffixFocused, scroll, diagramScrollAnchor) {
+            if (!suffixFocused || diagramScrollAnchor != null) return@LaunchedEffect
+            withFrameNanos { }
+            scroll.scrollTo(scroll.maxValue)
+        }
         LaunchedEffect(highlightedBlockId, tab.id, blockStartOffsets[highlightedBlockId]) {
             val target = highlightedBlockId ?: return@LaunchedEffect
             if (ann.blocks.none { it.id == target }) return@LaunchedEffect
