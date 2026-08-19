@@ -61,8 +61,24 @@ data class Seq3Box(val x: Double, val y: Double, val width: Double, val height: 
 
 data class Seq3LifelineColumn(
     val lifelineId: String,
+    /** The RAW, unshortened [Seq3Lifeline.name] — kept distinct from [labelLines] because a
+     *  rename affordance (Seq3Canvas's double-click-to-rename) must seed its editor from the real
+     *  name, never from a display-segments-shortened or wrapped rendering of it. */
     val label: String,
+    /** [label] resolved through [seq3DisplayName] (per-lifeline override, else the document
+     *  default) and wrapped through [seq3WrapDisplayName] against this column's own [header]
+     *  width — what a renderer actually DRAWS. Always at least one entry, even for an empty name
+     *  (matches [seq3WrapDisplayName]'s own "never empty" contract). */
+    val labelLines: List<String>,
+    /** [Seq3Lifeline.kind] carried onto the column so a renderer (raster or Compose) can pick the
+     *  actor-glyph-vs-participant-chip paint path without a second lookup back into the source
+     *  [Seq3Document] — mirrors why [label]/[labelLines] are duplicated here rather than re-read. */
+    val kind: Seq3LifelineKind,
     val centerX: Double,
+    /** The drawn NAME box only — for an [Seq3LifelineKind.ACTOR] column this sits BELOW the
+     *  reserved stick-figure band (see [layoutSeq3]'s `actorReserve`), not at [lifelineTop]'s own
+     *  margin; both renderers infer the glyph's vertical band as the gap above [header] and below
+     *  the shared top margin, so no separate glyph box is threaded through here. */
     val header: Seq3Box,
     val lifelineTop: Double,
     val lifelineBottom: Double,
@@ -192,6 +208,17 @@ private const val HEADER_MAX_W = 200.0
 private const val HEADER_TO_ROWS_GAP = 22.0
 private const val BOTTOM_MARGIN = 20.0
 
+// Extra vertical band reserved ABOVE every column's name box, ONLY when at least one lifeline in
+// the document is Seq3LifelineKind.ACTOR (item 2's "actor glyph"). Reserved for ALL columns, not
+// just the actor ones, because headerHeight/lifelineTop is shared geometry (Seq3LifelineColumn's
+// own doc) — a participant column simply leaves this band blank while its neighbor's stick figure
+// occupies it, so every header chip still bottom-aligns at the same lifelineTop. The exact glyph
+// proportions drawn inside this band are each renderer's own paint-time decision (same split as
+// e.g. BADGE_ARC/PILL_ARC below, which layout also doesn't dictate) — this constant only reserves
+// the SPACE, matching the "geometry decisions belong in this file, painting decisions don't"
+// contract this file's header describes.
+private const val ACTOR_HEADER_RESERVE = 34.0
+
 private const val COLUMN_GAP = 70.0
 private const val COLUMN_GAP_MAX = 420.0
 private const val LABEL_PAD = 6.0
@@ -218,6 +245,12 @@ private const val ELISION_BOX_W = 40.0
 private const val FRAGMENT_PAD = 10.0
 private const val FRAGMENT_LABEL_H = 16.0
 private const val FRAGMENT_INSET_PER_DEPTH = 10.0
+
+// The fixed intrusion a fragment box claims above its first row (ROW_H/2 + FRAGMENT_LABEL_H) — see
+// fragmentBoxFrom's own doc. buildRows widens the header-to-rows gap by at least this much whenever
+// the document has any fragment, so a fragment spanning the FIRST message can never claim space
+// that belongs to the header band (item 5's regression — see this file's header/the plan doc).
+private const val FRAGMENT_TOP_RESERVE = ROW_H / 2 + FRAGMENT_LABEL_H + 6.0
 
 private const val ELLIPSIS = "…"
 
@@ -247,10 +280,28 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     }
 
     val tm = opts.textMetrics
-    val headerWidths = lifelinesSorted.map { l ->
-        (tm.width(Seq3FontRole.LIFELINE, l.name) + 2 * HEADER_PAD_H).coerceIn(HEADER_MIN_W, HEADER_MAX_W)
+    // Item 2: resolve each lifeline's display name (per-lifeline displaySegments override, else
+    // the document-wide default — see seq3DisplayName) and wrap it dot-boundary-first against the
+    // header's own available text width, exactly like Seq3Layout already clamps a single-line
+    // width to [HEADER_MIN_W, HEADER_MAX_W]. headerWidths is measured from the WIDEST resulting
+    // line, not the raw (possibly much longer) resolved name, so a long dotted name widens its
+    // column only as far as its longest wrapped line actually needs.
+    val displayNames = lifelinesSorted.map { l -> seq3DisplayName(l.name, l.displaySegments, doc.lifelineDisplaySegments) }
+    val labelLinesPerLifeline = displayNames.map { name -> seq3WrapDisplayName(name, HEADER_MAX_W - 2 * HEADER_PAD_H, tm) }
+    val headerWidths = labelLinesPerLifeline.map { lines ->
+        val widest = lines.maxOfOrNull { tm.width(Seq3FontRole.LIFELINE, it) } ?: 0.0
+        (widest + 2 * HEADER_PAD_H).coerceIn(HEADER_MIN_W, HEADER_MAX_W)
     }
-    val headerHeight = tm.lineHeight(Seq3FontRole.LIFELINE) + 2 * HEADER_PAD_V
+    // headerHeight is ONE shared value across every column (Seq3LifelineColumn's own doc:
+    // lifelineTop = MARGIN + headerHeight is shared geometry) — computed from the MAXIMUM line
+    // count so no column's chip clips its own wrapped text, and every chip still bottom-aligns.
+    val maxLabelLineCount = labelLinesPerLifeline.maxOfOrNull { it.size } ?: 1
+    val nameBoxHeight = tm.lineHeight(Seq3FontRole.LIFELINE) * maxLabelLineCount + 2 * HEADER_PAD_V
+    // Item 2 (actor glyph): reserve extra height for ALL columns the moment ANY lifeline is an
+    // ACTOR — see ACTOR_HEADER_RESERVE's own doc for why this is document-wide, not per-column.
+    val hasActorLifeline = lifelinesSorted.any { it.kind == Seq3LifelineKind.ACTOR }
+    val actorReserve = if (hasActorLifeline) ACTOR_HEADER_RESERVE else 0.0
+    val headerHeight = nameBoxHeight + actorReserve
 
     // Item 5 (phase-5 round-2 post-ship plan): the canvas must draw every arrow at its true
     // chronological position, interleaved with every other lifeline's activity exactly as it
@@ -285,9 +336,9 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
     val (lefts, centers, contentRight) = placeColumns(headerWidths, gapSolve.gaps)
-    val rowBuild = buildRows(emissions, requirements, lifelineIndex, centers, headerHeight)
+    val rowBuild = buildRows(emissions, requirements, lifelineIndex, centers, headerHeight, doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE })
 
-    val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowBuild.rows)
+    val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowBuild.rows, headerHeight)
     val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowBuild.rows, centers, tm)
 
     val rightEdge = maxOf(contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra)
@@ -300,8 +351,14 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         Seq3LifelineColumn(
             lifelineId = l.id,
             label = l.name,
+            labelLines = labelLinesPerLifeline[i],
+            kind = l.kind,
             centerX = centers[i],
-            header = Seq3Box(lefts[i], MARGIN, headerWidths[i], headerHeight),
+            // The NAME box sits below the actor-glyph reserve (see Seq3LifelineColumn's own doc):
+            // MARGIN + actorReserve, not just MARGIN, so a participant column also leaves the same
+            // blank band an actor column's stick figure occupies — that's what keeps every chip's
+            // bottom edge (and therefore lifelineTop below) aligned regardless of kind.
+            header = Seq3Box(lefts[i], MARGIN + actorReserve, headerWidths[i], nameBoxHeight),
             lifelineTop = MARGIN + headerHeight,
             lifelineBottom = rowBuild.bottomY,
         )
@@ -698,11 +755,18 @@ private fun buildRows(
     lifelineIndex: Map<String, Int>,
     centers: DoubleArray,
     headerHeight: Double,
+    // Item 5: a document with at least one fragment reserves MORE than the plain
+    // HEADER_TO_ROWS_GAP above the first row, because fragmentBoxFrom's top claims ROW_H/2 +
+    // FRAGMENT_LABEL_H above whatever row it spans — without this, a fragment grouping the FIRST
+    // message intrudes a fixed amount into the header band (see FRAGMENT_TOP_RESERVE's own doc and
+    // fragmentBoxFrom's clamp below, which is the second, defensive half of this same fix).
+    fragmentsPresent: Boolean,
 ): RowBuildResult {
     val rows = mutableListOf<Seq3RowGeometry>()
     val first = HashMap<String, Int>()
     val last = HashMap<String, Int>()
-    var y = MARGIN + headerHeight + HEADER_TO_ROWS_GAP
+    val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
+    var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
     emissions.forEachIndexed { i, emission ->
         val req = requirements[i]
@@ -797,12 +861,24 @@ private fun layoutFragments(
     firstRowIndex: Map<String, Int>,
     lastRowIndex: Map<String, Int>,
     rows: List<Seq3RowGeometry>,
+    // Item 5's DEFENSIVE half: fragmentBoxFrom clamps its computed `top` to never rise above
+    // `MARGIN + headerHeight + 4` regardless of what buildRows already reserved above the first
+    // row — see fragmentBoxFrom's own doc for why this is needed even with buildRows' own
+    // FRAGMENT_TOP_RESERVE widening (nested nested fragments share the exact same top formula with
+    // no extra vertical inset per depth, so the outermost's own reserve doesn't automatically cover
+    // every nested box without this second, direct clamp).
+    headerHeight: Double,
 ): List<Seq3FragmentBox> {
-    if (fragments.isEmpty() || rows.isEmpty()) return emptyList()
+    // Item 5 (hidden fragments): skip a HIDDEN fragment's bracket entirely — same "drop the box,
+    // keep the row" contract Seq3Fragment.visibility documents, and the same filter hidden
+    // lifelines/messages already get earlier in layoutSeq3.
+    val visibleFragments = fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
+    if (visibleFragments.isEmpty() || rows.isEmpty()) return emptyList()
+    val minTop = MARGIN + headerHeight + 4.0
 
     data class Bounds(val fragment: Seq3Fragment, val range: IntRange)
 
-    val withBounds = fragments.mapNotNull { f ->
+    val withBounds = visibleFragments.mapNotNull { f ->
         val indices = fragmentRowIndices(f, firstRowIndex, lastRowIndex, rows)
         if (indices.isEmpty()) null else Bounds(f, indices.min()..indices.max())
     }
@@ -817,7 +893,7 @@ private fun layoutFragments(
         val depth = stack.size
         val clamped = Bounds(bounds.fragment, bounds.range.first..clampedEnd)
         stack.addLast(clamped to depth)
-        result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows)
+        result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows, minTop)
     }
     return result
 }
@@ -847,13 +923,23 @@ private fun fragmentRowIndices(
     return (exact + messageIndices).distinct().sorted()
 }
 
-private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int, rows: List<Seq3RowGeometry>): Seq3FragmentBox {
+// Item 5: `top` is clamped to at least [minTop] — the raw formula (ROW_H/2 + FRAGMENT_LABEL_H
+// above the first spanned row) claims 37 units above a fragment's first row while buildRows' plain
+// HEADER_TO_ROWS_GAP only left 22, a fixed 15-unit intrusion into the header band for a fragment
+// spanning the FIRST message. buildRows' own FRAGMENT_TOP_RESERVE widening (this file's other half
+// of the same fix) should already prevent this in the common case, but nested fragments share this
+// exact top formula with NO per-depth vertical inset (unlike left/right, which DO inset by
+// `depth * FRAGMENT_INSET_PER_DEPTH`) — so a defensive clamp here is the only thing that also
+// covers a nested box, and stays correct even if a future caller ever invokes this without having
+// gone through buildRows' own reserve.
+private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int, rows: List<Seq3RowGeometry>, minTop: Double): Seq3FragmentBox {
     val spanned = range.mapNotNull { rows.getOrNull(it) }
     val xs = spanned.flatMap { rowXExtent(it) }
     val inset = depth * FRAGMENT_INSET_PER_DEPTH
     val left = (xs.minOrNull() ?: 0.0) - FRAGMENT_PAD + inset
     val right = (xs.maxOrNull() ?: 0.0) + FRAGMENT_PAD - inset
-    val top = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
+    val rawTop = (spanned.firstOrNull()?.y ?: 0.0) - ROW_H / 2 - FRAGMENT_LABEL_H
+    val top = max(rawTop, minTop)
     val bottom = (spanned.lastOrNull()?.y ?: 0.0) + ROW_H / 2
     val label = fragment.label.ifBlank { fragment.kind.name.lowercase() }
     return Seq3FragmentBox(fragment.id, fragment.kind, label, Seq3Box(left, top, max(1.0, right - left), max(1.0, bottom - top)), depth)
@@ -876,8 +962,11 @@ private fun layoutNotes(
     centers: DoubleArray,
     tm: Seq3TextMetrics,
 ): List<Seq3NoteBox> {
-    if (notes.isEmpty()) return emptyList()
-    return notes.mapNotNull { note ->
+    // Same "drop the box, keep the row" contract as hidden fragments above — see layoutFragments'
+    // own doc.
+    val visibleNotes = notes.filter { it.visibility == Seq3Visibility.VISIBLE }
+    if (visibleNotes.isEmpty()) return emptyList()
+    return visibleNotes.mapNotNull { note ->
         val anchorIdx = note.messageIds.mapNotNull { lastRowIndex[it] }.maxOrNull() ?: return@mapNotNull null
         val anchorRow = rows.getOrNull(anchorIdx) ?: return@mapNotNull null
         val touchedX = note.messageIds.mapNotNull { lastRowIndex[it] }.flatMap { rowXExtent(rows[it]) }

@@ -307,6 +307,8 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     "fragments" to d.fragments.map(::fragmentToMap),
     "notes" to d.notes.map(::noteToMap),
     "defaultRepeat" to d.defaultRepeat.name,
+    "lifelineDisplaySegments" to d.lifelineDisplaySegments,
+    "themePresetName" to d.themePresetName,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -338,6 +340,8 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         fragments = fragments,
         notes = noteMaps.mapNotNull(::noteFromMap),
         defaultRepeat = enumFromName(map.str("defaultRepeat"), Seq3Repeat.COLLAPSE_ABOVE),
+        lifelineDisplaySegments = map.int("lifelineDisplaySegments") ?: 0,
+        themePresetName = boundedString(map.str("themePresetName")),
     )
 }
 
@@ -368,16 +372,28 @@ private fun lifelineToMap(l: Seq3Lifeline): Map<String, Any?> =
         "tagIds" to l.tagIds.toList(),
         "ordinal" to l.ordinal,
         "visibility" to l.visibility.name,
+        "kind" to l.kind.name,
+        "displaySegments" to l.displaySegments,
     )
 
 private fun lifelineFromMap(map: Map<String, Any?>): Seq3Lifeline? {
     val id = boundedString(map.str("id")) ?: return null
+    val name = boundedString(map.str("name")) ?: id
+    // A decoded EMPTY set (as opposed to an absent key, already defaulted to setOf(id) below) is
+    // the exact shape a document saved before the item-8 merge fix left behind — see
+    // `dispatchAddLifeline`'s own doc for why a manual lifeline needs a non-empty represented tag.
+    // Backfilling here heals an already-saved document on load, without needing a one-time
+    // migration pass: the next save simply writes the healed set back out.
+    val decodedTagIds = map.strList("tagIds")?.mapNotNull(::boundedString)?.toSet()
+    val tagIds = decodedTagIds?.ifEmpty { setOf(name) } ?: setOf(id)
     return Seq3Lifeline(
         id = id,
-        name = boundedString(map.str("name")) ?: id,
-        tagIds = map.strList("tagIds")?.mapNotNull(::boundedString)?.toSet() ?: setOf(id),
+        name = name,
+        tagIds = tagIds,
         ordinal = map.int("ordinal") ?: 0,
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+        kind = enumFromName(map.str("kind"), Seq3LifelineKind.PARTICIPANT),
+        displaySegments = map.int("displaySegments"),
     )
 }
 
@@ -512,6 +528,7 @@ private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
         "label" to f.label,
         "messageIds" to f.messageIds,
         "occurrenceRefs" to f.occurrenceRefs.map(::occurrenceRefToMap),
+        "visibility" to f.visibility.name,
     )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
@@ -524,6 +541,7 @@ private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
         label = boundedString(map.str("label")) ?: "",
         messageIds = map.strList("messageIds").orEmpty(),
         occurrenceRefs = occurrenceRefMaps.mapNotNull(::occurrenceRefFromMap),
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }
 
@@ -535,6 +553,7 @@ private fun noteToMap(n: Seq3Note): Map<String, Any?> = mapOf(
     "y" to n.y,
     "width" to n.width,
     "height" to n.height,
+    "visibility" to n.visibility.name,
 )
 
 private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
@@ -548,5 +567,6 @@ private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
         y = (map["y"] as? Number)?.toDouble(),
         width = (map["width"] as? Number)?.toDouble(),
         height = (map["height"] as? Number)?.toDouble(),
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }

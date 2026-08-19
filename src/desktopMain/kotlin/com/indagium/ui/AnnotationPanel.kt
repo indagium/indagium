@@ -286,15 +286,25 @@ private fun stripDiagramHeaderFast(text: String): String {
 
 private data class ExpandedDiagram(val parsed: ParsedSeq3, val display: Seq3Display?)
 
+// WP4: [settings] is threaded through here (rather than a pre-resolved [Seq3RasterTheme] from the
+// caller) so the per-document theme can be resolved AFTER the parse, from the parsed document's
+// own [com.indagium.diagram3.Seq3Document.themePresetName] — a folded card's summary
+// (Seq3NoteSummary) never carries that field, since it sits after the lifelines/messages payload
+// in Seq3Codec's field order and reading it would defeat the whole point of the bounded,
+// payload-free summary scan (see Seq3NoteSummary's own doc). Resolving after the parse, still
+// inside the SAME withContext(Dispatchers.Default) hop the parse already pays for, costs nothing
+// extra and never blocks the composition thread with an eager full parse just to peek at a theme
+// name.
 @Composable
 private fun rememberExpandedDiagram(
     noteText: String,
-    theme: Seq3RasterTheme,
+    settings: AppSettings,
     expanded: Boolean,
 ): ExpandedDiagram? {
-    val result by produceState<ExpandedDiagram?>(initialValue = null, noteText, theme, expanded) {
+    val result by produceState<ExpandedDiagram?>(initialValue = null, noteText, settings, expanded) {
         value = if (!expanded) null else withContext(Dispatchers.Default) {
             Seq3NoteParseCache.parse(noteText)?.let { parsed ->
+                val theme = resolveSeq3ThemeColors(parsed.document, settings).toSeq3RasterTheme()
                 ExpandedDiagram(parsed, Seq3RenderCache.display(parsed.document, theme))
             }
         }
@@ -979,7 +989,7 @@ fun AnnotationPanel(
                 fun BlockContent(block: AnnBlock, isFirst: Boolean, isLast: Boolean, dragHandleModifier: Modifier) {
                     when (block) {
                         is AnnBlock.Note -> NoteBlock(
-                            block = block, tc = tc, isFirst = isFirst, isLast = isLast,
+                            block = block, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { focused ->
@@ -1595,7 +1605,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     // the note text raw would show a wall of spec-header JSON followed by source.
                     val summary = remember(block.text) { Seq3NoteSummaryCache.summary(block.text) }
                     val expandedDiagram = if (summary != null) {
-                        rememberExpandedDiagram(block.text, tc.toSeq3RasterTheme(), expanded = true)
+                        rememberExpandedDiagram(block.text, settings, expanded = true)
                     } else {
                         null
                     }
@@ -1830,6 +1840,7 @@ private fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypograph
 private fun NoteBlock(
     block: AnnBlock.Note,
     tc: ThemeColors,
+    settings: AppSettings,
     isFirst: Boolean, isLast: Boolean,
     focused: Boolean,
     fieldFocusRequester: FocusRequester?,
@@ -1862,10 +1873,15 @@ private fun NoteBlock(
             onCopyImage = diagram?.let { summary ->
                 {
                     // Copy is an explicit action, so it is the right point to pay for parsing
-                    // and rasterizing. A folded card itself stays document-free.
+                    // and rasterizing. A folded card itself stays document-free. WP4: this
+                    // document is fully in hand here, so it resolves ITS OWN theme rather than
+                    // the ambient app theme.
                     Seq3NoteParseCache.parse(block.text)?.document?.let { document ->
                         onCopyDiagramImage(
-                            Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), tc.toSeq3RasterTheme()),
+                            Seq3RenderCache.pngBytes(
+                                Seq3RenderCache.layout(document),
+                                resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
+                            ),
                             "Sequence diagram: ${summary.title.ifBlank { "Sequence diagram" }}",
                         )
                     }
@@ -1887,6 +1903,7 @@ private fun NoteBlock(
                 noteText = block.text,
                 summary = diagram,
                 tc = tc,
+                settings = settings,
                 fieldFocusRequester = fieldFocusRequester,
                 onFieldFocusChanged = onFieldFocusChanged,
                 onUpdateDiagramText = onUpdate,
@@ -2018,6 +2035,7 @@ private fun DiagramNoteView(
     noteText: String,
     summary: Seq3NoteSummary,
     tc: ThemeColors,
+    settings: AppSettings,
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
     onUpdateDiagramText: (String) -> Unit,
@@ -2059,9 +2077,10 @@ private fun DiagramNoteView(
     }
     // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
     // expansion starts the full parse/render pipeline on Dispatchers.Default and publishes its
-    // finished display artifact back to Compose.
-    val theme = tc.toSeq3RasterTheme()
-    val expandedDiagram = rememberExpandedDiagram(noteText, theme, expanded)
+    // finished display artifact back to Compose. WP4: the resolved theme comes from the parsed
+    // document itself (inside rememberExpandedDiagram), not the ambient app theme — see that
+    // function's own doc.
+    val expandedDiagram = rememberExpandedDiagram(noteText, settings, expanded)
     if (expanded) {
         Spacer(Modifier.height(6.dp))
         when {

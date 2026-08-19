@@ -77,6 +77,73 @@ class Seq3GeneratorTest {
         assertEquals(serverId, message.toLifelineId)
     }
 
+    // ── WP5: callback/listener registration evidence ────────────────────────────────────────────
+
+    @Test
+    fun callbackRegistrationEvidenceResolvesATargetThreadAndTokenSignalsAloneWouldMiss() {
+        // ButtonView registers a click listener once; three unrelated touch events each
+        // immediately precede a ButtonView onClick firing. pid/tid are left at their zero default
+        // (no thread handoff) and no message carries a correlation token — the ONLY signal linking
+        // Touch to ButtonView is the callback registration/firing pair.
+        val entries = listOf(
+            entry(1, "10:00:00.000", "ButtonView", "setOnClickListener(handler)"),
+            entry(2, "10:00:01.000", "Touch", "touch down"),
+            entry(3, "10:00:02.000", "ButtonView", "onClick(view)"),
+            entry(4, "10:00:03.000", "Touch", "touch down"),
+            entry(5, "10:00:04.000", "ButtonView", "onClick(view)"),
+            entry(6, "10:00:05.000", "Touch", "touch down"),
+            entry(7, "10:00:06.000", "ButtonView", "onClick(view)"),
+        )
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+
+        val touchId = doc.lifelines.single { it.name == "Touch" }.id
+        val buttonId = doc.lifelines.single { it.name == "ButtonView" }.id
+        val message = doc.messages.single { it.fromLifelineId == touchId }
+
+        assertEquals(buttonId, message.toLifelineId, "a prior setOnClickListener registration plus a firing onClick must resolve the target")
+        assertEquals(Seq3State.AUTO, message.state)
+    }
+
+    @Test
+    fun callbackRegistrationEvidenceBelowTheConfidenceRatioLeavesTheTargetNull() {
+        // Two registrars (ButtonView, Other), each firing back exactly once — a 1-vs-1 split of
+        // callback-evidenced candidates, below TARGET_CONFIDENCE_RATIO (0.6).
+        val entries = listOf(
+            entry(1, "10:00:00.000", "ButtonView", "setOnClickListener(handler)"),
+            entry(2, "10:00:01.000", "Other", "registerCallback(x)"),
+            entry(3, "10:00:02.000", "Touch", "touch down"),
+            entry(4, "10:00:03.000", "ButtonView", "onClick(view)"),
+            entry(5, "10:00:04.000", "Touch", "touch down"),
+            entry(6, "10:00:05.000", "Other", "onSomethingHappened(x)"),
+        )
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+
+        val touchId = doc.lifelines.single { it.name == "Touch" }.id
+        val message = doc.messages.single { it.fromLifelineId == touchId }
+
+        assertEquals(null, message.toLifelineId, "a 1-vs-1 split of evidenced candidates must not clear the confidence ratio")
+        assertEquals(Seq3State.NEEDS_TARGET, message.state)
+    }
+
+    @Test
+    fun callbackRegistrationEvidenceIsSkippedWhenTheOptionIsDisabled() {
+        val entries = listOf(
+            entry(1, "10:00:00.000", "ButtonView", "setOnClickListener(handler)"),
+            entry(2, "10:00:01.000", "Touch", "touch down"),
+            entry(3, "10:00:02.000", "ButtonView", "onClick(view)"),
+            entry(4, "10:00:03.000", "Touch", "touch down"),
+            entry(5, "10:00:04.000", "ButtonView", "onClick(view)"),
+            entry(6, "10:00:05.000", "Touch", "touch down"),
+            entry(7, "10:00:06.000", "ButtonView", "onClick(view)"),
+        )
+        val doc = generateSeq3(entries, Seq3Range.VisibleView, Seq3GenerateOptions(callbackInferenceEnabled = false))
+
+        val touchId = doc.lifelines.single { it.name == "Touch" }.id
+        val message = doc.messages.single { it.fromLifelineId == touchId }
+
+        assertEquals(null, message.toLifelineId, "turning the signal off must not resolve a target the callback heuristic alone would find")
+    }
+
     @Test
     fun anUninferableTargetIsNullAndFabricatesNoLifeline() {
         val entries = listOf(

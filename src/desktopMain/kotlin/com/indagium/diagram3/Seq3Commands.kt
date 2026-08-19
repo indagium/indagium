@@ -114,6 +114,22 @@ sealed class Seq3Command {
         val tagId: String,
         val newLifeline: Seq3Lifeline,
     ) : Seq3Command()
+
+    /** Actor vs participant glyph (item 3's "participant ▾" control) — offered for every
+     *  lifeline, not just manual ones, since [Seq3Lifeline.kind] has no generated/manual
+     *  distinction to respect. */
+    data class SetLifelineKind(val lifelineId: String, val kind: Seq3LifelineKind) : Seq3Command()
+
+    /** Per-lifeline display-name override (item 3's "name ▾" control) — null resets to "inherit
+     *  the diagram default" ([Seq3Document.lifelineDisplaySegments]). */
+    data class SetLifelineDisplaySegments(val lifelineId: String, val segments: Int?) : Seq3Command()
+
+    /** Diagram-wide default for every lifeline that doesn't set its own [SetLifelineDisplaySegments]
+     *  override. */
+    data class SetDocumentDisplaySegments(val segments: Int) : Seq3Command()
+
+    /** Per-diagram theme override (WP4's toolbar dropdown) — null means "follow the app theme". */
+    data class SetDocumentTheme(val themePresetName: String?) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -176,6 +192,10 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.RemoveLifeline -> dispatchRemoveLifeline(document, command)
     is Seq3Command.MergeLifelineSelection -> dispatchMergeLifelineSelection(document, command)
     is Seq3Command.SplitLifeline -> dispatchSplitLifeline(document, command)
+    is Seq3Command.SetLifelineKind -> dispatchSetLifelineKind(document, command)
+    is Seq3Command.SetLifelineDisplaySegments -> dispatchSetLifelineDisplaySegments(document, command)
+    is Seq3Command.SetDocumentDisplaySegments -> dispatchSetDocumentDisplaySegments(document, command)
+    is Seq3Command.SetDocumentTheme -> dispatchSetDocumentTheme(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -199,6 +219,9 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.SetPattern -> "Set pattern"
     is Seq3BulkAction.SetLabel -> "Rename label"
     is Seq3BulkAction.SetRepeat -> "Set repeat"
+    is Seq3BulkAction.SetFragmentVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide fragment" else "Show fragment"
+    is Seq3BulkAction.SetNoteVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide note" else "Show note"
+    Seq3BulkAction.SwapEndpoints -> "Swap direction"
 }
 
 private fun dispatchNudge(document: Seq3Document, command: Seq3Command.NudgePin): Outcome {
@@ -346,7 +369,16 @@ private fun dispatchMergeLifelines(document: Seq3Document, command: Seq3Command.
 }
 
 private fun dispatchAddLifeline(document: Seq3Document, command: Seq3Command.AddLifeline): Outcome {
-    val lifeline = command.lifeline.copy(name = command.lifeline.name.trim())
+    val trimmedName = command.lifeline.name.trim()
+    // A manual lifeline with NO represented tag contributes nothing to `mergeLifelines`' tagIds
+    // fold (that function only folds what's already there), so it could never show as "merged · N
+    // tags" and could never be split back out (`dispatchSplitLifeline` requires `tagIds.size > 1`).
+    // Defaulting to the lifeline's own name gives it a synthetic represented identity — see
+    // `AddCustomMessage`'s `Seq3Match.tag` population (Seq3Generator.kt), which reads
+    // `from.tagIds.firstOrNull()` and so now aligns with this default for any message authored on
+    // this lifeline afterward.
+    val tagIds = command.lifeline.tagIds.ifEmpty { setOf(trimmedName) }
+    val lifeline = command.lifeline.copy(name = trimmedName, tagIds = tagIds)
     if (lifeline.id.isBlank()) return unapplied(document, "Lifeline id is required")
     if (lifeline.name.isBlank()) return unapplied(document, "Lifeline name is required")
     if (document.lifelines.any { it.id == lifeline.id }) return unapplied(document, "Lifeline already exists")
@@ -404,10 +436,18 @@ private fun mergeLifelines(document: Seq3Document, keepId: String, mergeIds: Set
     }
     val mergedTags = document.lifelines.filter { it.id in mergeIds }.flatMapTo(keep.tagIds.toMutableSet()) { it.tagIds }
     fun repoint(id: String?): String? = if (id != null && id in mergeIds) keepId else id
+    val survivingLifelines = document.lifelines
+        .filterNot { it.id in mergeIds }
+        .map { if (it.id == keepId) it.copy(tagIds = mergedTags) else it }
+    // Compact the ordinal sequence after removal — matching `dispatchReorder` and
+    // `dispatchSplitLifeline`, which both already keep `ordinal` gap-free. Rank is taken from the
+    // SURVIVORS' existing ordinal order (not `document.lifelines`' own list position, which is
+    // display-insignificant — Seq3Layout always sorts by `ordinal`), then written back onto each
+    // element in place so the list's own element order/identity is otherwise untouched, exactly
+    // like `dispatchReorder`'s own `ordinalById.getValue(it.id)` lookup-and-map.
+    val ordinalById = survivingLifelines.sortedBy { it.ordinal }.withIndex().associate { (index, l) -> l.id to index }
     val result = document.copy(
-        lifelines = document.lifelines
-            .filterNot { it.id in mergeIds }
-            .map { if (it.id == keepId) it.copy(tagIds = mergedTags) else it },
+        lifelines = survivingLifelines.map { it.copy(ordinal = ordinalById.getValue(it.id)) },
         messages = document.messages.map {
             it.copy(
                 fromLifelineId = repoint(it.fromLifelineId) ?: it.fromLifelineId,
@@ -448,4 +488,37 @@ private fun dispatchSplitLifeline(document: Seq3Document, command: Seq3Command.S
         }
     }
     return applied(document.copy(lifelines = lifelines, messages = messages), "Move tag to lifeline")
+}
+
+// ── Lifeline identity / diagram-wide display commands (WP1 model foundation) ──────────────────
+
+private fun dispatchSetLifelineKind(document: Seq3Document, command: Seq3Command.SetLifelineKind): Outcome {
+    val lifeline = document.lifelines.firstOrNull { it.id == command.lifelineId } ?: return unapplied(document, "Unknown lifeline")
+    if (lifeline.kind == command.kind) return unapplied(document, "No change")
+    return applied(
+        document.copy(lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(kind = command.kind) else it }),
+        if (command.kind == Seq3LifelineKind.ACTOR) "Set as actor" else "Set as participant",
+    )
+}
+
+private fun dispatchSetLifelineDisplaySegments(document: Seq3Document, command: Seq3Command.SetLifelineDisplaySegments): Outcome {
+    val lifeline = document.lifelines.firstOrNull { it.id == command.lifelineId } ?: return unapplied(document, "Unknown lifeline")
+    if (lifeline.displaySegments == command.segments) return unapplied(document, "No change")
+    return applied(
+        document.copy(
+            lifelines = document.lifelines.map { if (it.id == command.lifelineId) it.copy(displaySegments = command.segments) else it },
+        ),
+        "Set display name",
+    )
+}
+
+private fun dispatchSetDocumentDisplaySegments(document: Seq3Document, command: Seq3Command.SetDocumentDisplaySegments): Outcome {
+    val segments = command.segments.coerceAtLeast(0)
+    if (document.lifelineDisplaySegments == segments) return unapplied(document, "No change")
+    return applied(document.copy(lifelineDisplaySegments = segments), "Set default display name")
+}
+
+private fun dispatchSetDocumentTheme(document: Seq3Document, command: Seq3Command.SetDocumentTheme): Outcome {
+    if (document.themePresetName == command.themePresetName) return unapplied(document, "No change")
+    return applied(document.copy(themePresetName = command.themePresetName), "Set diagram theme")
 }

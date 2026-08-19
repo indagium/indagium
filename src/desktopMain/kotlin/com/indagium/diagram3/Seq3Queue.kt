@@ -180,6 +180,29 @@ sealed class Seq3BulkAction {
      *  [Seq3Message.repeatThreshold]'s own doc) but is always required here to keep this action's
      *  shape total rather than silently reusing whatever threshold a message happened to have. */
     data class SetRepeat(val repeat: Seq3Repeat, val threshold: Int) : Seq3BulkAction()
+
+    // ── Fragment/note visibility (item 6, "Fragments & notes" section eye button) ──────────────
+    //
+    // Same "identify the EXISTING target by its own id, entirely independent of the message
+    // selection" shape as [SetFragmentLabel]/[SetNoteText] above, and the same unknown-id-is-a-
+    // safe-no-op contract — `applySeq3BulkAction`'s empty-selection guard is extended to exempt
+    // these two exactly like it already exempts the label/text renames.
+
+    /** Shows/hides an EXISTING fragment's box without touching any of its messages. */
+    data class SetFragmentVisibility(val fragmentId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+
+    /** Shows/hides an EXISTING note's box without touching any of its messages. */
+    data class SetNoteVisibility(val noteId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+
+    /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
+     *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
+     *  round-trips. A no-op for [Seq3Kind.NOTE] (a note has no `to` — see [Seq3Kind.NOTE]'s own
+     *  doc) and for a message whose `toLifelineId` is null (nothing to swap FROM;
+     *  [Seq3Message.fromLifelineId] is non-null by model contract and this action must never make
+     *  it null). Unlike [Hide]/[Show]/[applyVisibility], this genuinely rewrites the arrow's
+     *  endpoints — a real authoring edit — so it routes through [editMessages] and stamps EDITED,
+     *  same as [SetFrom]/[SetTo]. */
+    data object SwapEndpoints : Seq3BulkAction()
 }
 
 data class Seq3BulkResult(val document: Seq3Document, val applied: Boolean, val reason: String? = null)
@@ -198,7 +221,8 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
     // message selection (see those variants' own doc) — "select at least one message" would be a
     // pointless block on a rename that never reads `selectedIds` at all.
     if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText &&
-        action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote
+        action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote &&
+        action !is Seq3BulkAction.SetFragmentVisibility && action !is Seq3BulkAction.SetNoteVisibility
     ) {
         return unapplied(document, "Select at least one message")
     }
@@ -218,6 +242,9 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.SetPattern -> applySetPattern(document, selectedIds, action)
         is Seq3BulkAction.SetLabel -> applySetLabel(document, selectedIds, action)
         is Seq3BulkAction.SetRepeat -> applySetRepeat(document, selectedIds, action)
+        is Seq3BulkAction.SetFragmentVisibility -> applySetFragmentVisibility(document, action)
+        is Seq3BulkAction.SetNoteVisibility -> applySetNoteVisibility(document, action)
+        Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
 
@@ -374,6 +401,47 @@ private fun applySetNoteText(document: Seq3Document, action: Seq3BulkAction.SetN
     if (action.text.isBlank()) return unapplied(document, "Note text is required")
     return Seq3BulkResult(
         document.copy(notes = document.notes.map { if (it.id == action.noteId) it.copy(text = action.text) else it }),
+        applied = true,
+    )
+}
+
+/** Shows/hides an EXISTING fragment's box — the visibility counterpart [applySetFragmentLabel]
+ *  doesn't have. Same unknown-id safe-no-op contract; unlike a message [Hide]/[Show] this never
+ *  touches [Seq3Message.visibility] on the fragment's own messages, matching
+ *  [Seq3Fragment.visibility]'s own doc ("the fragment itself... is untouched"). */
+private fun applySetFragmentVisibility(document: Seq3Document, action: Seq3BulkAction.SetFragmentVisibility): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(visibility = action.visibility) else it }),
+        applied = true,
+    )
+}
+
+/** Shows/hides an EXISTING note's box — the visibility counterpart [applySetNoteText] doesn't
+ *  have. Same unknown-id safe-no-op contract. */
+private fun applySetNoteVisibility(document: Seq3Document, action: Seq3BulkAction.SetNoteVisibility): Seq3BulkResult {
+    if (document.notes.none { it.id == action.noteId }) return unapplied(document, "Unknown note")
+    return Seq3BulkResult(
+        document.copy(notes = document.notes.map { if (it.id == action.noteId) it.copy(visibility = action.visibility) else it }),
+        applied = true,
+    )
+}
+
+/** [Seq3BulkAction.SwapEndpoints] — see that variant's own doc for the exact no-op contract.
+ *  Filters the selection down to ELIGIBLE messages first and hands only those ids to
+ *  [editMessages], so a NOTE or a needs-target row caught in a mixed selection is left completely
+ *  untouched (not even EDITED-stamped) rather than silently no-op'd only on its endpoint fields. */
+private fun applySwapEndpoints(document: Seq3Document, selectedIds: Set<String>): Seq3BulkResult {
+    val eligibleIds = document.messages
+        .filter { it.id in selectedIds && it.kind != Seq3Kind.NOTE && it.toLifelineId != null }
+        .map { it.id }
+        .toSet()
+    if (eligibleIds.isEmpty()) return unapplied(document, "Nothing to swap")
+    return Seq3BulkResult(
+        editMessages(document, eligibleIds) { m ->
+            val to = m.toLifelineId ?: return@editMessages m // unreachable: filtered above
+            m.copy(fromLifelineId = to, toLifelineId = m.fromLifelineId)
+        },
         applied = true,
     )
 }

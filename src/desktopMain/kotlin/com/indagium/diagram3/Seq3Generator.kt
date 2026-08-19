@@ -73,13 +73,16 @@ fun generateSeq3(
     resolved.forEach { entry -> if (entry.tag in lifelineIdByTag) byTag.getOrPut(entry.tag) { mutableListOf() }.add(entry) }
 
     val sourceTraceCallEntryIds = resolveSourceTraceCallEntryIds(resolved, options, sourceIndex, cancellationCheck)
+    val callbackRegistrarFirstIndexByTag = resolveCallbackRegistrarFirstIndexByTag(resolved, options)
 
     val messages = mutableListOf<Seq3Message>()
     byTag.forEach { (tag, tagEntries) ->
         cancellationCheck()
         groupByShape(tagEntries).forEach { group ->
             cancellationCheck()
-            messages += buildMessages(tag, group, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds)
+            messages += buildMessages(
+                tag, group, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+            )
         }
     }
 
@@ -274,12 +277,16 @@ private fun buildMessages(
     entryIndexById: Map<Int, Int>,
     options: Seq3GenerateOptions,
     sourceTraceCallEntryIds: Set<Int> = emptySet(),
+    callbackRegistrarFirstIndexByTag: Map<String, Int> = emptyMap(),
 ): List<Seq3Message> {
     val result = tokenizeSeq3Messages(tag, group.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
     val match = result.match
     if (result.compiled && match != null) {
         return listOf(
-            toMessage(tag, match, group, result.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds),
+            toMessage(
+                tag, match, group, result.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options,
+                sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+            ),
         )
     }
     // The shape-grouped candidates turned out not to share a provable pattern — fall back to one
@@ -290,7 +297,7 @@ private fun buildMessages(
         val single = tokenizeSeq3Messages(tag, listOf(Seq3TokenizeInput(entry.id.toString(), entry.msg)))
         toMessage(
             tag, single.match!!, listOf(entry), single.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options,
-            sourceTraceCallEntryIds,
+            sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
         )
     }
 }
@@ -322,6 +329,7 @@ private fun toMessage(
     entryIndexById: Map<Int, Int>,
     options: Seq3GenerateOptions,
     sourceTraceCallEntryIds: Set<Int> = emptySet(),
+    callbackRegistrarFirstIndexByTag: Map<String, Int> = emptyMap(),
 ): Seq3Message {
     val occurrences = group.map { entry -> toOccurrence(entry, captureValuesByOccurrence[entry.id.toString()].orEmpty()) }
     return Seq3Message(
@@ -329,7 +337,9 @@ private fun toMessage(
         id = "",
         match = match,
         fromLifelineId = lifelineIdByTag.getValue(tag),
-        toLifelineId = inferTarget(tag, group, resolved, entryIndexById, lifelineIdByTag, options, sourceTraceCallEntryIds),
+        toLifelineId = inferTarget(
+            tag, group, resolved, entryIndexById, lifelineIdByTag, options, sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+        ),
         labelTemplate = match.template,
         repeat = options.defaultRepeat,
         repeatThreshold = options.defaultRepeatThreshold,
@@ -355,6 +365,12 @@ private fun toMessage(
 // vote thread-handoff and correlation-token already use — never a bypass of [TARGET_CONFIDENCE_RATIO]
 // — so a caller who supplies no index, or turns the option off, sees byte-identical inference to
 // before this signal existed (the set is simply empty).
+//
+// [callbackRegistrarFirstIndexByTag] is the fourth signal (WP5): the earliest [resolved] index at
+// which a given tag registered ANY callback/listener (`Seq3Correlation.isCallbackRegistration`),
+// keyed by tag — see [resolveCallbackRegistrarFirstIndexByTag]'s own doc. Folded into the SAME vote
+// as the other three: it never overrides [TARGET_CONFIDENCE_RATIO]/[MIN_TARGET_EVIDENCE_COUNT], it
+// only ever adds one more ballot a candidate can win with.
 
 private const val TARGET_CONFIDENCE_RATIO = 0.6
 private const val MIN_TARGET_EVIDENCE_COUNT = 1
@@ -381,6 +397,24 @@ private fun resolveSourceTraceCallEntryIds(
         .calls.mapTo(HashSet()) { it.callEntryId }
 }
 
+/**
+ * ONE forward pass over [resolved] (never per-candidate — see [inferTarget]'s own doc on why that
+ * matters) recording, per tag, the index of its EARLIEST [Seq3Correlation.isCallbackRegistration]
+ * hit. [inferTarget] only ever needs "did this tag register a callback before THIS candidate
+ * occurrence" — the earliest index answers that with a single `<` comparison per candidate
+ * (`earliest < candidateIndex`), no per-candidate rescan required. Returns an empty map — the same
+ * as if this signal did not exist — whenever the option is off, matching
+ * [resolveSourceTraceCallEntryIds]'s own zero-cost-when-off contract.
+ */
+private fun resolveCallbackRegistrarFirstIndexByTag(resolved: List<LogEntry>, options: Seq3GenerateOptions): Map<String, Int> {
+    if (!options.callbackInferenceEnabled) return emptyMap()
+    val firstIndexByTag = HashMap<String, Int>()
+    resolved.forEachIndexed { index, entry ->
+        if (entry.tag !in firstIndexByTag && isCallbackRegistration(entry) != null) firstIndexByTag[entry.tag] = index
+    }
+    return firstIndexByTag
+}
+
 private fun inferTarget(
     tag: String,
     group: List<LogEntry>,
@@ -389,16 +423,26 @@ private fun inferTarget(
     lifelineIdByTag: Map<String, String>,
     options: Seq3GenerateOptions,
     sourceTraceCallEntryIds: Set<Int> = emptySet(),
+    callbackRegistrarFirstIndexByTag: Map<String, Int> = emptyMap(),
 ): String? {
     val candidateCounts = LinkedHashMap<String, Int>()
     var consideredCount = 0
     group.forEach { entry ->
         val index = entryIndexById[entry.id] ?: return@forEach
-        val next = resolved.getOrNull(index + 1) ?: return@forEach
+        val nextIndex = index + 1
+        val next = resolved.getOrNull(nextIndex) ?: return@forEach
         if (next.tag == tag) return@forEach
+        // Callback evidence: the candidate line itself looks like a fired callback, AND its tag
+        // registered *some* callback strictly earlier in the range than this candidate occurrence
+        // — see this section's header for why an exact registration/firing name match isn't
+        // attempted.
+        val callbackEvidenced = options.callbackInferenceEnabled &&
+            looksInboundCallback(next) &&
+            (callbackRegistrarFirstIndexByTag[next.tag]?.let { it < nextIndex } == true)
         val evidenced = (options.threadHandoffEnabled && isThreadHandoff(next, entry)) ||
             (options.correlationTokenEnabled && hasSharedCorrelationToken(next, entry)) ||
-            next.id in sourceTraceCallEntryIds
+            next.id in sourceTraceCallEntryIds ||
+            callbackEvidenced
         if (!evidenced) return@forEach
         consideredCount++
         if (next.tag in lifelineIdByTag) candidateCounts[next.tag] = (candidateCounts[next.tag] ?: 0) + 1

@@ -73,6 +73,7 @@ import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.seq3MessageIdsAreContiguous
+import com.indagium.model.ThemePreset
 import java.util.UUID
 
 // ── v3 workspace shell (phase 4) ────────────────────────────────────────────────────────────
@@ -209,10 +210,53 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                     )
                 },
             )
+            Seq3DocumentThemeDropdown(state, session)
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
         }
     }
 }
+
+/**
+ * WP4: per-diagram theme picker, beside the PlantUML/Mermaid dialect control it visually pairs
+ * with — both are "how does this diagram present itself" toolbar controls. *Follow app theme*
+ * (`null`) plus all 20 [ThemePreset.entries] by [ThemePreset.label], dispatching
+ * [Seq3Command.SetDocumentTheme]. Reuses [Seq3DropdownButton] (not a hand-rolled Popup) precisely
+ * for its [closeAndReclaimFocus] handling — see this file's own header comment on
+ * [LocalSeq3FocusRequester] for why a hand-rolled popup here would silently kill the workspace's
+ * root key handler (Esc included) after the first click.
+ */
+@Composable
+private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSession) {
+    val tc = tc()
+    val themePresetName = session.document.themePresetName
+    Seq3DropdownButton(
+        label = "theme: ${seq3DiagramThemeLabel(themePresetName)}",
+        labelColor = tc.ts,
+        fillColor = tc.p2,
+        menuWidth = 190.dp,
+    ) { close ->
+        Seq3DropdownMenuItem("Follow app theme", active = themePresetName == null) {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(null))
+            close()
+        }
+        ThemePreset.entries.forEach { preset ->
+            Seq3DropdownMenuItem(preset.label, active = themePresetName == preset.name) {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(preset.name))
+                close()
+            }
+        }
+    }
+}
+
+/** Mirrors [seq3DocumentDisplaySegmentsLabel]'s "resolve the stored raw value back to a label"
+ *  shape — a garbage/renamed preset name (an old document opened against a build that renamed a
+ *  preset) reads as "Follow app theme" here rather than crashing, the same fallback
+ *  [resolveSeq3ThemeColors] applies when actually resolving colors. */
+private fun seq3DiagramThemeLabel(themePresetName: String?): String =
+    themePresetName
+        ?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
+        ?.label
+        ?: "Follow app theme"
 
 @Composable
 private fun Seq3ContextualSelectionActions(
@@ -512,10 +556,16 @@ internal class Seq3ViewState {
     var editingLabelOccurrenceEntryId by mutableStateOf<Int?>(null)
 
     /** The lifeline header chip drawn in the accent color (spec §04's "the selected one in
-     *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target. */
+     *  accent"). Purely a highlight — never gates which lifelines a dropdown/drag can target.
+     *  WP3 reuses this as the lifeline PANEL row's "focused" state (Seq3QueueRow's own
+     *  `focusedMessageId` counterpart) — set by a plain click on the row body, independent from
+     *  the checkbox-driven [selectedLifelineIds] below. */
     var selectedLifelineId by mutableStateOf<String?>(null)
     /** Lifelines checked in the panel for a multi-lifeline operation such as Merge. */
     var selectedLifelineIds by mutableStateOf<Set<String>>(emptySet())
+    /** Two-way row<->column hover for the Lifelines panel section, mirroring
+     *  [hoveredMessageId] for the Messages queue. */
+    var hoveredLifelineId by mutableStateOf<String?>(null)
 
     /** Rectangle currently being dragged on the canvas to select multiple message rows. */
     var canvasSelectionRect by mutableStateOf<Seq3Box?>(null)
@@ -559,6 +609,15 @@ internal class Seq3ViewState {
 
     /** Height of the expanded Lifelines section, adjusted by the horizontal panel divider. */
     var lifelinesSectionHeightDp by mutableStateOf(220f)
+
+    /** Whether the Fragments & notes section (WP3 item 9 — promoted out of the Messages area into
+     *  its own top-level panel section) is expanded. Panel-only, never enters the saved diagram or
+     *  undo history — same contract as [lifelinesExpanded]. */
+    var artifactsExpanded by mutableStateOf(false)
+
+    /** Height of the expanded Fragments & notes section, adjusted by its own horizontal panel
+     *  divider — the [artifactsSectionHeightDp] counterpart of [lifelinesSectionHeightDp]. */
+    var artifactsSectionHeightDp by mutableStateOf(200f)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the

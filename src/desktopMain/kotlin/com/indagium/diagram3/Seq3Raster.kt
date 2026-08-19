@@ -164,8 +164,6 @@ private fun fontFor(role: Seq3FontRole): Font {
 
 private const val STROKE_THIN = 1f
 private const val STROKE_THICK = 1.6f
-private val DASH_RETURN = floatArrayOf(6f, 4f)
-private val DASH_ASYNC = floatArrayOf(3f, 3f)
 private val DASH_WARN = floatArrayOf(4f, 3f)
 private val DASH_LIFELINE = floatArrayOf(4f, 4f)
 private const val ARROWHEAD_LEN = 9.0
@@ -174,6 +172,15 @@ private const val BADGE_ARC = 8f
 private const val PILL_ARC = 10f
 private const val NOTE_ARC = 6f
 private const val HEADER_ARC = 8f
+
+// Actor glyph (WP2 item 2): a stick figure drawn ABOVE the name box, occupying the vertical band
+// [col.header.y - ACTOR_GLYPH_H - ACTOR_GLYPH_GAP, col.header.y - ACTOR_GLYPH_GAP] — which fits
+// inside Seq3Layout's own ACTOR_HEADER_RESERVE reservation (34.0) with room to spare, since this
+// file draws the glyph, not the space for it (see Seq3LifelineColumn's own doc on why layout only
+// reserves the band and each renderer decides what to paint inside it).
+private const val ACTOR_GLYPH_W = 16.0
+private const val ACTOR_GLYPH_H = 26.0
+private const val ACTOR_GLYPH_GAP = 4.0
 
 private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme) {
     g.color = Color(theme.background, true)
@@ -195,17 +202,59 @@ private fun paintLifelines(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterT
 }
 
 private fun paintHeader(g: Graphics2D, col: Seq3LifelineColumn, theme: Seq3RasterTheme) {
+    if (col.kind == Seq3LifelineKind.ACTOR) {
+        paintActorGlyph(g, col, theme)
+        paintHeaderLabelLines(g, col, theme, box = col.header)
+        return
+    }
     val box = col.header
     g.color = Color(theme.headerFill, true)
     g.fillRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), HEADER_ARC.toInt(), HEADER_ARC.toInt())
     g.color = Color(theme.headerBorder, true)
     g.stroke = BasicStroke(STROKE_THIN)
     g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), HEADER_ARC.toInt(), HEADER_ARC.toInt())
+    paintHeaderLabelLines(g, col, theme, box)
+}
+
+/** Item 2: draws every entry of [Seq3LifelineColumn.labelLines], vertically centred as a BLOCK
+ *  inside [box] (single-line input reduces to the same centred baseline the old one-line version
+ *  used). Shared by both the participant chip and the actor glyph paths above so the two never
+ *  drift apart in how they lay out multi-line text. */
+private fun paintHeaderLabelLines(g: Graphics2D, col: Seq3LifelineColumn, theme: Seq3RasterTheme, box: Seq3Box) {
     g.color = Color(theme.headerText, true)
     g.font = fontFor(Seq3FontRole.LIFELINE)
     val fm = g.fontMetrics
-    val tw = fm.stringWidth(col.label)
-    g.drawString(col.label, (col.centerX - tw / 2).roundToInt(), (box.y + box.height / 2 + fm.ascent / 2).roundToInt())
+    val lines = col.labelLines.ifEmpty { listOf(col.label) }
+    val totalTextH = lines.size * fm.height
+    var ty = box.y + (box.height - totalTextH) / 2 + fm.ascent
+    lines.forEach { line ->
+        val tw = fm.stringWidth(line)
+        g.drawString(line, (col.centerX - tw / 2).roundToInt(), ty.roundToInt())
+        ty += fm.height
+    }
+}
+
+/** Item 2 (actor glyph): a plain stick figure — circle head, line body/arms/legs — drawn in the
+ *  band Seq3Layout reserved above [Seq3LifelineColumn.header] for every column the moment ANY
+ *  lifeline in the document is [Seq3LifelineKind.ACTOR] (see ACTOR_HEADER_RESERVE's own doc). No
+ *  fill/border box behind it — replaces the rounded participant chip entirely, matching this task's
+ *  brief ("draw a stick figure above the name INSTEAD OF the rounded chip"). */
+private fun paintActorGlyph(g: Graphics2D, col: Seq3LifelineColumn, theme: Seq3RasterTheme) {
+    val cx = col.centerX
+    val glyphBottom = col.header.y - ACTOR_GLYPH_GAP
+    val glyphTop = glyphBottom - ACTOR_GLYPH_H
+    val headR = ACTOR_GLYPH_W / 4
+    val headCenterY = glyphTop + headR
+    val bodyTop = headCenterY + headR
+    val legSplit = glyphBottom - ACTOR_GLYPH_H * 0.28
+    g.color = Color(theme.headerBorder, true)
+    g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+    g.draw(java.awt.geom.Ellipse2D.Double(cx - headR, headCenterY - headR, headR * 2, headR * 2))
+    g.draw(java.awt.geom.Line2D.Double(cx, bodyTop, cx, legSplit))
+    val armY = bodyTop + (legSplit - bodyTop) * 0.35
+    g.draw(java.awt.geom.Line2D.Double(cx - ACTOR_GLYPH_W / 2, armY, cx + ACTOR_GLYPH_W / 2, armY))
+    g.draw(java.awt.geom.Line2D.Double(cx, legSplit, cx - ACTOR_GLYPH_W / 2, glyphBottom))
+    g.draw(java.awt.geom.Line2D.Double(cx, legSplit, cx + ACTOR_GLYPH_W / 2, glyphBottom))
 }
 
 private fun paintRow(g: Graphics2D, row: Seq3RowGeometry, theme: Seq3RasterTheme) {
@@ -218,10 +267,21 @@ private fun paintRow(g: Graphics2D, row: Seq3RowGeometry, theme: Seq3RasterTheme
     }
 }
 
-private fun strokeFor(kind: Seq3Kind): BasicStroke = when (kind) {
-    Seq3Kind.RETURN -> BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_RETURN, 0f)
-    Seq3Kind.ASYNC -> BasicStroke(STROKE_THIN, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, DASH_ASYNC, 0f)
-    else -> BasicStroke(STROKE_THICK)
+// Consumes the shared [seq3ArrowStyle] descriptor for width/dash/solid-vs-dashed instead of its
+// own former parallel `when` over every field — see Seq3ArrowStyle.kt's header for why this used
+// to duplicate `strokeFor`'s own DASH_RETURN/DASH_ASYNC constants inline. The `when` that remains
+// here is deliberately narrower than before: it picks ONLY the AWT cap/join style (CAP_BUTT vs
+// CAP_ROUND), a rendering nuance [Seq3ArrowStyle] doesn't carry because Compose's `DrawScope` has
+// no shared vocabulary for it — see that file's own doc for why that's not an oversight.
+private fun strokeFor(kind: Seq3Kind): BasicStroke {
+    val style = seq3ArrowStyle(kind)
+    val width = if (style.thin) STROKE_THIN else STROKE_THICK
+    val dash = style.dash?.toFloatArray()
+    return when (kind) {
+        Seq3Kind.RETURN -> BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f)
+        Seq3Kind.ASYNC -> BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, dash, 0f)
+        else -> BasicStroke(width)
+    }
 }
 
 private fun drawArrowhead(g: Graphics2D, tipX: Double, tipY: Double, pointingRight: Boolean, filled: Boolean, color: Int) {
@@ -248,7 +308,7 @@ private fun paintArrowRow(g: Graphics2D, row: Seq3ArrowRow, theme: Seq3RasterThe
     g.stroke = strokeFor(row.kind)
     g.draw(java.awt.geom.Line2D.Double(row.fromX, row.y, row.toX, row.y))
     val pointingRight = row.toX > row.fromX
-    drawArrowhead(g, row.toX, row.y, pointingRight, filled = row.kind != Seq3Kind.RETURN && row.kind != Seq3Kind.ASYNC, theme.arrow)
+    drawArrowhead(g, row.toX, row.y, pointingRight, filled = seq3ArrowStyle(row.kind).filledHead, theme.arrow)
     paintLabel(g, row.label, row.labelBox, theme.label, centered = true)
     row.badgeBox?.let { paintBadge(g, "×${row.repeatCount}", it, theme) }
 }

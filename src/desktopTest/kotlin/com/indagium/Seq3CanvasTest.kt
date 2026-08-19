@@ -39,6 +39,7 @@ import com.indagium.ui.seq3RowsInSelection
 import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
+import com.indagium.ui.seq3ArrowStrokeWidths
 import com.indagium.ui.seq3ZoomPercentLabel
 import com.indagium.ui.seq3ZoomByWheel
 import kotlin.test.Test
@@ -500,5 +501,39 @@ class Seq3CanvasTest {
         assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 400f, density = 2f, zoom = 2f))
         assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 158f, density = 2f, zoom = 0.79f), absoluteTolerance = 0.0001)
         assertEquals(100.0, seq3PointerPxToLayoutUnits(pointerPx = 178f, density = 2f, zoom = 0.89f), absoluteTolerance = 0.0001)
+    }
+
+    // ── WP2 item 10: on-screen arrow stroke weight must consume seq3ArrowStyle per Seq3Kind ─────
+
+    @Test
+    fun callAndSelfKindsDrawAtTheUnthinnedReferenceWeight() {
+        // CALL/SELF/RETURN-filled-head etc. all resolve to seq3ArrowStyle's non-thin branch — the
+        // shaft draws at the plain (non-emphasized) reference weight with no thinning applied.
+        val (line, head) = seq3ArrowStrokeWidths(Seq3Kind.CALL, emphasisWidth = 1.5f, referenceWidth = 1.5f, thinWidth = 1f)
+        assertEquals(1.5f, line)
+        assertEquals(1.5f, head)
+    }
+
+    @Test
+    fun returnAndAsyncKindsDrawTheirShaftThinnerThanTheReferenceWeight() {
+        listOf(Seq3Kind.RETURN, Seq3Kind.ASYNC).forEach { kind ->
+            val (line, head) = seq3ArrowStrokeWidths(kind, emphasisWidth = 1.5f, referenceWidth = 1.5f, thinWidth = 1f)
+            assertEquals(1f, line, "$kind must draw its shaft at the thin weight")
+            // The open head is still drawn at the UN-thinned reference weight — mirrors
+            // Seq3Raster's own drawArrowhead, which always strokes an open head at STROKE_THICK.
+            assertEquals(1.5f, head, "$kind's open head must stay at the reference weight")
+        }
+    }
+
+    @Test
+    fun hoverEmphasisScalesBothTheShaftAndTheHeadByTheSameRatio() {
+        // The caller's existing emphasis pair (1.5 normal / 2.0 emphasized) must still visibly
+        // thicken a THIN kind's shaft, proportionally, without discarding the thinning altogether.
+        val (normalLine, normalHead) = seq3ArrowStrokeWidths(Seq3Kind.RETURN, emphasisWidth = 1.5f, referenceWidth = 1.5f, thinWidth = 1f)
+        val (emphasizedLine, emphasizedHead) = seq3ArrowStrokeWidths(Seq3Kind.RETURN, emphasisWidth = 2f, referenceWidth = 1.5f, thinWidth = 1f)
+
+        assertTrue(emphasizedLine > normalLine, "hover/selection must still thicken a thin kind's shaft")
+        assertEquals(2f, emphasizedHead, "the head always tracks the caller's own emphasis width exactly")
+        assertEquals(1.5f, normalHead, "and does the same at the non-emphasized baseline")
     }
 }

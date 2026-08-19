@@ -351,6 +351,43 @@ class Seq3QueueTest {
         assertEquals(doc, result.document)
     }
 
+    // ── Fragment/note visibility (WP1, the eye button in the new "Fragments & notes" section) ──
+
+    @Test
+    fun setFragmentVisibilityHidesAnExistingFragmentByIdIndependentOfSelectionAndTouchesNoMessages() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1", "m3"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentVisibility("frag1", Seq3Visibility.HIDDEN))
+        assertTrue(result.applied)
+        assertEquals(Seq3Visibility.HIDDEN, result.document.fragments.single().visibility)
+        assertEquals(doc.messages, result.document.messages, "hiding a fragment must not touch any of its messages")
+    }
+
+    @Test
+    fun setFragmentVisibilityIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentVisibility("no-such-fragment", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun setNoteVisibilityHidesAnExistingNoteByIdIndependentOfSelection() {
+        val note = Seq3Note("n1", "watch this", listOf("m1"))
+        val doc = baseDocument().copy(notes = listOf(note))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteVisibility("n1", Seq3Visibility.HIDDEN))
+        assertTrue(result.applied)
+        assertEquals(Seq3Visibility.HIDDEN, result.document.notes.single().visibility)
+    }
+
+    @Test
+    fun setNoteVisibilityIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteVisibility("no-such-note", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
     @Test
     fun deleteFragmentAndNoteRemoveOnlyTheRequestedArtifacts() {
         val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1", "m3"))

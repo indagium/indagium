@@ -348,6 +348,21 @@ class Seq3RegenerateSheetTest {
     }
 
     @Test
+    fun theCallbackInferenceToggleFlipsGenerateOptionsWithoutRegenerating() {
+        val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
+        val id = state.seq3Sessions.begin("log")!!
+        await { state.seq3Sessions.sessions.single().generating == false }
+        assertTrue(state.seq3Sessions.sessions.single().generateOptions.callbackInferenceEnabled, "default is on")
+        val runsBefore = state.seq3Sessions.generateRunCount.get()
+
+        // What Seq3RegenToggle's onToggle for the "Callback registrations" row does on click.
+        state.seq3Sessions.updateGenerateOptions(id) { it.copy(callbackInferenceEnabled = !it.callbackInferenceEnabled) }
+
+        assertFalse(state.seq3Sessions.sessions.single().generateOptions.callbackInferenceEnabled)
+        assertEquals(runsBefore, state.seq3Sessions.generateRunCount.get(), "a toggle is an input to the next Build review, not a rebuild itself")
+    }
+
+    @Test
     fun applyRegenReviewIsOneUndoStepThatFullyRestoresThePriorDocument() {
         val state = stateFor(mkTab("log", "sample.log", twoTagEntries()))
         val id = state.seq3Sessions.begin("log")!!
