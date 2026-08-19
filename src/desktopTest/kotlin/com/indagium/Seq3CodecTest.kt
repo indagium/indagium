@@ -6,6 +6,7 @@ import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Fragment
@@ -252,6 +253,78 @@ class Seq3CodecTest {
         assertEquals("DRACULA", parsed.document.themePresetName)
     }
 
+    // ── WP10 (item 7): inline call numbering / timestamps ───────────────────────────────────────
+
+    @Test
+    fun showSequenceNumbersAndShowTimestampsRoundTripThroughEncodeAndParse() {
+        val original = fixedDocument().copy(showSequenceNumbers = true, showTimestamps = true)
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertTrue(parsed.document.showSequenceNumbers)
+        assertTrue(parsed.document.showTimestamps)
+    }
+
+    @Test
+    fun aDocumentMissingTheWp10TogglesDecodesToBothFalse() {
+        // A note saved by a build predating WP10 has neither key at all.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertFalse(parsed.document.showSequenceNumbers)
+        assertFalse(parsed.document.showTimestamps)
+    }
+
+    // ── Delay (WP11) ─────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun delaysRoundTripThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            delays = listOf(
+                Seq3Delay("d1", afterMessageId = "m1", label = "5 minutes later"),
+                Seq3Delay("d2", afterMessageId = "m1", label = "hidden gap", visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals(original.delays, parsed.document.delays)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.delays.single { it.id == "d2" }.visibility)
+    }
+
+    @Test
+    fun aDocumentMissingTheDelaysKeyDecodesToAnEmptyList() {
+        // A note saved by a build predating WP11 has no "delays" key at all.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertTrue(parsed.document.delays.isEmpty())
+    }
+
     @Test
     fun aDocumentMissingEveryNewWp1KeyDecodesToTheDocumentedDefaults() {
         // Hand-built map with every WP1-added key entirely absent — the shape a note saved by a
@@ -303,5 +376,95 @@ class Seq3CodecTest {
         assertNotNull(parsed)
         assertEquals(setOf("Manual Actor"), parsed.document.lifelines.single { it.id == "manual-1" }.tagIds)
         assertEquals(setOf("no-key"), parsed.document.lifelines.single { it.id == "no-key" }.tagIds)
+    }
+
+    // ── Fragment kinds (WP12) ────────────────────────────────────────────────────────────────
+
+    @Test
+    fun everyNewWp12FragmentKindRoundTripsThroughEncodeAndParse() {
+        listOf(Seq3FragmentKind.CRITICAL, Seq3FragmentKind.BREAK, Seq3FragmentKind.GROUP).forEach { kind ->
+            val original = fixedDocument().copy(
+                fragments = listOf(Seq3Fragment("f1", kind, "label", listOf("m1"))),
+            )
+            val parsed = parseSeq3Note(encodeSeq3Note(original))
+            assertNotNull(parsed)
+            assertEquals(original, parsed.document)
+            assertEquals(kind, parsed.document.fragments.single().kind)
+        }
+    }
+
+    @Test
+    fun hideKindLabelRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            fragments = listOf(
+                Seq3Fragment("f1", Seq3FragmentKind.GROUP, "billing flow", listOf("m1"), hideKindLabel = true),
+                Seq3Fragment("f2", Seq3FragmentKind.LOOP, "retry", listOf("m1"), hideKindLabel = false),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertTrue(parsed.document.fragments.single { it.id == "f1" }.hideKindLabel)
+        assertFalse(parsed.document.fragments.single { it.id == "f2" }.hideKindLabel)
+    }
+
+    @Test
+    fun aDocumentWithAnUnknownFragmentKindCoercesToLoopRatherThanFailingToParse() {
+        // Exactly what an OLDER build sees if it opens a document a newer build saved with a kind
+        // it doesn't know about yet (e.g. a hypothetical future addition, or corrupted text) —
+        // Seq3FragmentKind's own enumFromName default keeps the whole document loadable.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(mapOf("id" to "f1", "kind" to "SOMETHING_FUTURE", "label" to "retry", "messageIds" to listOf<String>())),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertEquals(Seq3FragmentKind.LOOP, parsed.document.fragments.single().kind)
+    }
+
+    @Test
+    fun aDocumentMissingTheHideKindLabelKeyDecodesToFalse() {
+        // A fragment saved by a build predating WP12 has no "hideKindLabel" key at all.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(mapOf("id" to "f1", "kind" to "LOOP", "label" to "retry", "messageIds" to listOf<String>())),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertFalse(parsed.document.fragments.single().hideKindLabel)
+    }
+
+    @Test
+    fun aFreeFloatingNoteWithNoMessageIdsRoundTrips() {
+        // WP7 item 3: "Add note here" on empty canvas creates a note with an EMPTY messageIds and
+        // its own explicit geometry — must round-trip exactly like an anchored one, not get
+        // silently dropped or have its geometry lost.
+        val original = fixedDocument().copy(
+            notes = listOf(Seq3Note("floating1", "just a thought", messageIds = emptyList(), x = 120.0, y = 340.0, width = 220.0, height = 72.0)),
+        )
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        val note = parsed.document.notes.single()
+        assertTrue(note.messageIds.isEmpty())
+        assertEquals(120.0, note.x)
+        assertEquals(340.0, note.y)
     }
 }

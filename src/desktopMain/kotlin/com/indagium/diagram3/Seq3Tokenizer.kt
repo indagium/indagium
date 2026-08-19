@@ -133,22 +133,58 @@ private fun compileNamedValuePattern(
     // (which would then only match that one occurrence), the whole named-value path is abandoned
     // here so the positional single-run fallback below gets a chance to capture the actual
     // differing text under a generic name instead.
-    if (varyingNames.any { isGenericValueSet(valuesFor(it)) }) return null
+    //
+    // The same abandonment applies when a quoted-empty value (`key: ""`) is among the varying
+    // values: `unquote` strips the quotes from the STORED value but [replacements] below replaces
+    // the whole quoted range in the template, so an empty unquoted value would substitute back to
+    // nothing (`occurrenceLabel`'s `label.replace("{name}", "")`) — a captured value that silently
+    // vanishes is worse than one that never got captured. `compileSingleRunPattern` already refuses
+    // an empty middle capture for the same reason (its own `values.any { it.isEmpty() }` check); an
+    // empty unquoted named value is non-capturable for the identical reason.
+    if (varyingNames.any { name -> isGenericValueSet(valuesFor(name)) || valuesFor(name).any(String::isEmpty) }) return null
+
+    // seq3CaptureTokenNames/CAPTURE_TOKEN only recognise the charset `[A-Za-z_][A-Za-z0-9_]*`, but
+    // a NAMED_VALUE key may contain `.`/`-` (a real-world key like `screen.mode`). Left unsanitized,
+    // the generated `{screen.mode}` token would never match CAPTURE_TOKEN, so `matchesText` (which
+    // cross-checks `seq3CaptureTokenNames(template)` against `match.captures`) would fail for every
+    // occurrence and the whole group would silently degrade to one literal message per occurrence.
+    // Sanitise once here, keeping the raw->sanitized mapping so the template, the declared
+    // captures, and the returned values map all agree on the same generated name — and de-dupe so
+    // two keys that only differ by punctuation (`screen.mode` / `screen-mode`) can't collide.
+    val usedCaptureNames = mutableSetOf<String>()
+    val sanitizedNames = varyingNames.associateWith { sanitizeCaptureName(it, usedCaptureNames) }
 
     val first = occurrences.first().text
     val replacements = matches.first().mapNotNull { part ->
         val name = part.groupValues[1]
-        name.takeIf { it in varyingNames }?.let { part.groups[3]!!.range to "{$it}" }
+        name.takeIf { it in varyingNames }?.let { part.groups[3]!!.range to "{${sanitizedNames.getValue(it)}}" }
     }.sortedByDescending { it.first.first }
     var template = first
     replacements.forEach { (range, replacement) -> template = template.replaceRange(range, replacement) }
-    val captures = varyingNames.map { Seq3Capture(it, Seq3CaptureSource.NAMED_VALUE) }
+    val captures = varyingNames.map { Seq3Capture(sanitizedNames.getValue(it), Seq3CaptureSource.NAMED_VALUE) }
     val values = occurrences.associate { input ->
         val parts = NAMED_VALUE.findAll(input.text).toList()
-        input.occurrenceId to varyingNames.associateWith { name -> unquote(parts.first { it.groupValues[1] == name }.groupValues[3]) }
+        input.occurrenceId to varyingNames.associate { name ->
+            sanitizedNames.getValue(name) to unquote(parts.first { it.groupValues[1] == name }.groupValues[3])
+        }
     }
     return Seq3Match(tag = tag, template = template, captures = captures) to values
 }
+
+/** Sanitises a NAMED_VALUE key into the charset [CAPTURE_TOKEN] recognises (`.`/`-` -> `_`), and
+ *  de-dupes against [used] with a numeric suffix — same idiom as `Seq3Emitters.sanitizedAliases`. */
+private fun sanitizeCaptureName(rawName: String, used: MutableSet<String>): String {
+    val base = rawName.replace(CAPTURE_NAME_INVALID_CHAR, "_")
+    var candidate = base
+    var suffix = 2
+    while (!used.add(candidate)) {
+        candidate = "${base}_$suffix"
+        suffix++
+    }
+    return candidate
+}
+
+private val CAPTURE_NAME_INVALID_CHAR = Regex("[^A-Za-z0-9_]")
 
 private fun compileSingleRunPattern(
     tag: String,

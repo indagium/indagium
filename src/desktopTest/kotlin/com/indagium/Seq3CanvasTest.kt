@@ -40,10 +40,16 @@ import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
 import com.indagium.ui.seq3ArrowStrokeWidths
+import com.indagium.ui.seq3ContextMenuOffset
+import com.indagium.ui.seq3FragmentIsEmphasized
+import com.indagium.ui.seq3NoteIsEmphasized
 import com.indagium.ui.seq3ZoomPercentLabel
 import com.indagium.ui.seq3ZoomByWheel
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntOffset
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -247,12 +253,14 @@ class Seq3CanvasTest {
     }
 
     @Test
-    fun resolveDragEndpointAlwaysOffersTheToSideOfAnUnresolvedStub() {
+    fun resolveDragEndpointAlwaysOffersTheFromSideOfAnUnresolvedStub() {
+        // WP7 item 2: a stub drag resolves the CALLER, not a target — always FROM, and flagged
+        // isStub so release dispatches SetCaller instead of the plain SetFrom.
         val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null)))
         val layout = layoutSeq3(doc, opts())
         val row = layout.rows.single() as Seq3UnresolvedStubRow
         val drag = seq3ResolveDragEndpoint(layout, x = row.dropPill.x + 1.0, y = row.y)
-        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.TO, occurrenceEntryId = 1), drag)
+        assertEquals(Seq3DragEndpoint("m1", Seq3EndpointSide.FROM, occurrenceEntryId = 1, isStub = true), drag)
     }
 
     @Test
@@ -535,5 +543,45 @@ class Seq3CanvasTest {
         assertTrue(emphasizedLine > normalLine, "hover/selection must still thicken a thin kind's shaft")
         assertEquals(2f, emphasizedHead, "the head always tracks the caller's own emphasis width exactly")
         assertEquals(1.5f, normalHead, "and does the same at the non-emphasized baseline")
+    }
+
+    // ── WP7 item 4: the context-menu offset transform ───────────────────────────────────────────
+
+    @Test
+    fun contextMenuOffsetSubtractsScrollFromTheRawPointerPosition() {
+        // A Popup positioned outside the scrolled content needs viewport-relative pixels, while
+        // the raw pointer event is measured inside the scrolled (full-diagram) content — the same
+        // "subtract scroll" correction the pan-drag gesture's own panViewportPosition applies.
+        val offset = seq3ContextMenuOffset(Offset(500f, 300f), hScrollPx = 120, vScrollPx = 40)
+        assertEquals(IntOffset(380, 260), offset)
+    }
+
+    @Test
+    fun contextMenuOffsetIsUnchangedWhenTheCanvasIsNotScrolled() {
+        val offset = seq3ContextMenuOffset(Offset(150f, 90f), hScrollPx = 0, vScrollPx = 0)
+        assertEquals(IntOffset(150, 90), offset)
+    }
+
+    @Test
+    fun contextMenuOffsetNeverGoesNegativeEvenIfScrollOutrunsThePointer() {
+        val offset = seq3ContextMenuOffset(Offset(10f, 10f), hScrollPx = 500, vScrollPx = 500)
+        assertEquals(IntOffset(0, 0), offset)
+    }
+
+    // ── WP7 item 7: fragment/note panel-row selection and hover reach the canvas ────────────────
+
+    @Test
+    fun fragmentIsEmphasizedWhenSelectedOrHoveredButNotOtherwise() {
+        assertTrue(seq3FragmentIsEmphasized("f1", selectedFragmentId = "f1", hoveredFragmentId = null))
+        assertTrue(seq3FragmentIsEmphasized("f1", selectedFragmentId = null, hoveredFragmentId = "f1"))
+        assertFalse(seq3FragmentIsEmphasized("f1", selectedFragmentId = "f2", hoveredFragmentId = null))
+        assertFalse(seq3FragmentIsEmphasized("f1", selectedFragmentId = null, hoveredFragmentId = null))
+    }
+
+    @Test
+    fun noteIsEmphasizedWhenSelectedOrHoveredButNotOtherwise() {
+        assertTrue(seq3NoteIsEmphasized("n1", selectedNoteId = "n1", hoveredNoteId = null))
+        assertTrue(seq3NoteIsEmphasized("n1", selectedNoteId = null, hoveredNoteId = "n1"))
+        assertFalse(seq3NoteIsEmphasized("n1", selectedNoteId = "n2", hoveredNoteId = null))
     }
 }

@@ -3,6 +3,7 @@
 package com.indagium.diagram3
 
 import com.indagium.debug.Json
+import com.indagium.debug.bool
 import com.indagium.debug.int
 import com.indagium.debug.intList
 import com.indagium.debug.mapList
@@ -54,6 +55,7 @@ private const val MAX_SEQ3_OCCURRENCES_PER_MESSAGE = 5_000
 private const val MAX_SEQ3_CAPTURES_PER_MATCH = 32
 private const val MAX_SEQ3_FRAGMENTS = 128
 private const val MAX_SEQ3_NOTES = 400
+private const val MAX_SEQ3_DELAYS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
 private const val MAX_SEQ3_HEADER_CHARS = 512 * 1024
 private const val MAX_SEQ3_SOURCE_CHARS = 2 * 1024 * 1024
@@ -306,24 +308,35 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     "messages" to d.messages.map(::messageToMap),
     "fragments" to d.fragments.map(::fragmentToMap),
     "notes" to d.notes.map(::noteToMap),
+    "delays" to d.delays.map(::delayToMap),
     "defaultRepeat" to d.defaultRepeat.name,
     "lifelineDisplaySegments" to d.lifelineDisplaySegments,
     "themePresetName" to d.themePresetName,
+    "showSequenceNumbers" to d.showSequenceNumbers,
+    "showTimestamps" to d.showTimestamps,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
 // detekt's limit — this is the top-level "does the declared shape even fit our caps" gate, checked
 // BEFORE any of the four lists are actually decoded.
-private fun withinSeq3DocumentBounds(lifelineMaps: List<*>, messageMaps: List<*>, fragmentMaps: List<*>, noteMaps: List<*>): Boolean =
+private fun withinSeq3DocumentBounds(
+    lifelineMaps: List<*>,
+    messageMaps: List<*>,
+    fragmentMaps: List<*>,
+    noteMaps: List<*>,
+    delayMaps: List<*>,
+): Boolean =
     lifelineMaps.size <= MAX_SEQ3_LIFELINES && messageMaps.size <= MAX_SEQ3_MESSAGES &&
-        fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES
+        fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES &&
+        delayMaps.size <= MAX_SEQ3_DELAYS
 
 private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val lifelineMaps = map.mapList("lifelines").orEmpty()
     val messageMaps = map.mapList("messages").orEmpty()
     val fragmentMaps = map.mapList("fragments").orEmpty()
     val noteMaps = map.mapList("notes").orEmpty()
-    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps)) return null
+    val delayMaps = map.mapList("delays").orEmpty()
+    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps)) return null
 
     val messages = messageMaps.mapNotNull(::messageFromMap)
     val fragments = fragmentMaps.mapNotNull(::fragmentFromMap)
@@ -339,9 +352,15 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         messages = messages,
         fragments = fragments,
         notes = noteMaps.mapNotNull(::noteFromMap),
+        // Defaults to empty on read — an older note with no "delays" key at all (WP11 didn't exist
+        // yet) decodes to its original, marker-free rendering, same contract as every other list
+        // field's "old document degrades quietly" rule (see this file's own header).
+        delays = delayMaps.mapNotNull(::delayFromMap),
         defaultRepeat = enumFromName(map.str("defaultRepeat"), Seq3Repeat.COLLAPSE_ABOVE),
         lifelineDisplaySegments = map.int("lifelineDisplaySegments") ?: 0,
         themePresetName = boundedString(map.str("themePresetName")),
+        showSequenceNumbers = map.bool("showSequenceNumbers") ?: false,
+        showTimestamps = map.bool("showTimestamps") ?: false,
     )
 }
 
@@ -529,6 +548,7 @@ private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
         "messageIds" to f.messageIds,
         "occurrenceRefs" to f.occurrenceRefs.map(::occurrenceRefToMap),
         "visibility" to f.visibility.name,
+        "hideKindLabel" to f.hideKindLabel,
     )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
@@ -537,11 +557,17 @@ private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
     if (occurrenceRefMaps.size > MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT) return null
     return Seq3Fragment(
         id = id,
+        // An unknown/missing kind (e.g. an older build's document, or a GROUP document opened by a
+        // build that predates WP12) coerces to LOOP rather than failing the whole document — see
+        // this function's own call site doc / WP12's report for why that degrades quietly.
         kind = enumFromName(map.str("kind"), Seq3FragmentKind.LOOP),
         label = boundedString(map.str("label")) ?: "",
         messageIds = map.strList("messageIds").orEmpty(),
         occurrenceRefs = occurrenceRefMaps.mapNotNull(::occurrenceRefFromMap),
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+        // Missing in an older document (WP12 added this field) -> defaults to false, i.e. "show
+        // the kind word", matching every fragment that existed before this option did.
+        hideKindLabel = map.bool("hideKindLabel") ?: false,
     )
 }
 
@@ -567,6 +593,26 @@ private fun noteFromMap(map: Map<String, Any?>): Seq3Note? {
         y = (map["y"] as? Number)?.toDouble(),
         width = (map["width"] as? Number)?.toDouble(),
         height = (map["height"] as? Number)?.toDouble(),
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+    )
+}
+
+// ── Delay (WP11) ─────────────────────────────────────────────────────────────────────────────
+
+private fun delayToMap(d: Seq3Delay): Map<String, Any?> = mapOf(
+    "id" to d.id,
+    "afterMessageId" to d.afterMessageId,
+    "label" to d.label,
+    "visibility" to d.visibility.name,
+)
+
+private fun delayFromMap(map: Map<String, Any?>): Seq3Delay? {
+    val id = boundedString(map.str("id")) ?: return null
+    val afterMessageId = boundedString(map.str("afterMessageId")) ?: return null
+    return Seq3Delay(
+        id = id,
+        afterMessageId = afterMessageId,
+        label = boundedString(map.str("label")) ?: "",
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }

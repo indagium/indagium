@@ -45,6 +45,11 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -681,6 +686,15 @@ fun InlineField(
     fontSize: TextUnit = LocalFontBase.current.sp,
     onClear: (() -> Unit)? = null,
     onSubmit: (() -> Unit)? = null,
+    // WP7 item 6 (round-2 corrections plan): the one Esc hook every inline editor in the workspace
+    // needed and didn't have — previously each of the four canvas editors (and the panel's own
+    // rename rows) would have needed its own Modifier.onPreviewKeyEvent at the call site to cancel
+    // on Escape; centralizing it here removes that repeated gap instead of patching one call site.
+    // Null (the default) keeps every other InlineField call site — the vast majority, which have no
+    // "cancel" concept at all — completely unaffected: the key handler below only ever consumes
+    // Escape when a caller actually passed a cancel action, i.e. only while a cancelable editor is
+    // genuinely open.
+    onCancel: (() -> Unit)? = null,
     singleLine: Boolean = true,
     centerTextVertically: Boolean = false,
     visualTransformation: VisualTransformation = VisualTransformation.None,
@@ -695,6 +709,14 @@ fun InlineField(
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
         keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
         modifier = modifier
+            .onPreviewKeyEvent { event ->
+                if (onCancel != null && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onCancel()
+                    true
+                } else {
+                    false
+                }
+            }
             .background(tc.bg, CORNER_SM)
             .border(1.dp, tc.br, CORNER_SM)
             .padding(horizontal = 7.dp, vertical = 4.dp),

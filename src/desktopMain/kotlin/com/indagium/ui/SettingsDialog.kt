@@ -425,31 +425,25 @@ private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        ThemeGallery(state)
+        ThemeGallery(
+            settings = state.settings,
+            selected = state.settings.theme,
+            onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
+        )
     }
-    // WP4: the Settings-level default for a NEWLY created sequence diagram (Seq3Session.begin
+    // WP4/WP8: the Settings-level default for a NEWLY created sequence diagram (Seq3Session.begin
     // seeds Seq3Document.themePresetName from this) — never affects an already-saved document,
-    // which keeps whatever theme it was opened with regardless of this setting. A compact
-    // dropdown, not a second 20-card ThemeGallery: this picks a DEFAULT, not the active app theme.
+    // which keeps whatever theme it was opened with regardless of this setting. Uses the same
+    // card gallery as "Theme" above and the per-document picker in Seq3Workspace.kt for
+    // consistency — it used to be a dropdown on the (now stale) reasoning that the per-document
+    // picker was one too.
     CompactSetting("Default diagram theme") {
-        val current = state.settings.diagramDefaultTheme
-        Seq3DropdownButton(
-            label = current?.label ?: "Follow app theme",
-            labelColor = tc.tx,
-            fillColor = tc.p2,
-            menuWidth = 190.dp,
-        ) { close ->
-            Seq3DropdownMenuItem("Follow app theme", active = current == null) {
-                state.updateSettings { it.copy(diagramDefaultTheme = null) }
-                close()
-            }
-            ThemePreset.entries.forEach { preset ->
-                Seq3DropdownMenuItem(preset.label, active = current == preset) {
-                    state.updateSettings { it.copy(diagramDefaultTheme = preset) }
-                    close()
-                }
-            }
-        }
+        ThemeGallery(
+            settings = state.settings,
+            selected = state.settings.diagramDefaultTheme,
+            onSelect = { preset -> state.updateSettings { it.copy(diagramDefaultTheme = preset) } },
+            followAppTheme = true,
+        )
     }
     Row(
         Modifier.fillMaxWidth(),
@@ -2839,22 +2833,45 @@ internal fun RowWrapControl(auto: Boolean, wrapChars: Int, onToggleAuto: () -> U
     }
 }
 
+/**
+ * WP8: generalised so both the Settings "Theme"/"Default diagram theme" controls and the
+ * per-document picker in `Seq3Workspace.kt` share one card gallery instead of Settings having the
+ * only visual chooser and everything else falling back to a text dropdown. [settings] is only
+ * needed to resolve the *colors* of the leading "Follow app theme" tile (via
+ * [resolveSeq3ThemeColors]) when [followAppTheme] is true — selection itself is driven entirely by
+ * [selected]/[onSelect] so this has no idea whether it's picking the app theme, a per-document
+ * theme, or a default-for-new-documents.
+ */
 @Composable
-internal fun ThemeGallery(state: AppState) {
+internal fun ThemeGallery(
+    settings: AppSettings,
+    selected: ThemePreset?,
+    onSelect: (ThemePreset?) -> Unit,
+    height: Dp = 148.dp,
+    followAppTheme: Boolean = false,
+) {
     val tc = tc()
     val themeScroll = rememberScrollState()
-    Box(Modifier.fillMaxWidth().height(148.dp)) {
+    Box(Modifier.fillMaxWidth().height(height)) {
         FlowRow(
             Modifier.fillMaxWidth().verticalScroll(themeScroll).padding(end = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (followAppTheme) {
+                ThemeWindowCard(
+                    label = "Follow app theme",
+                    colors = resolveSeq3ThemeColors(null, settings),
+                    selected = selected == null,
+                    onClick = { onSelect(null) },
+                )
+            }
             ThemePreset.entries.forEach { preset ->
                 ThemeWindowCard(
                     label = preset.label,
                     colors = themeColors(preset),
-                    selected = preset == state.settings.theme,
-                    onClick = { state.updateSettings { it.copy(theme = preset) } },
+                    selected = preset == selected,
+                    onClick = { onSelect(preset) },
                 )
             }
         }

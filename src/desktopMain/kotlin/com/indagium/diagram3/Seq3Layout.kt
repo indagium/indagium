@@ -92,18 +92,38 @@ sealed class Seq3RowGeometry {
     abstract val messageId: String
     abstract val y: Double
     abstract val occurrenceEntryId: Int?
+
+    /** WP10 (item 7): the chronological value this row's [Emission] carried — [Emission
+     *  .timestampMillis]'s own doc explains where it comes from. Carried on every row type (not
+     *  just the ones whose [label][Seq3ArrowRow.label]-equivalent field is actually prefixed with
+     *  it today), on the base class rather than duplicated per-subtype, matching how
+     *  [messageId]/[y]/[occurrenceEntryId] are already shared here — a future consumer (e.g. WP11's
+     *  time-gap markers) can read it off any row without a `when` dispatch. */
+    abstract val timestampMillis: Long?
+
+    /** Display counterpart of [timestampMillis] — see `Seq3LabelSummary.seq3DisplayTimestamp` for
+     *  how a renderer turns this (or [timestampMillis]) into what's actually drawn. Empty, never
+     *  null, so every subtype can default it the same way a missing raw string already defaults
+     *  elsewhere in this package (e.g. [Seq3Message.manualRawTimestamp]). */
+    abstract val rawTimestamp: String
 }
 
 data class Seq3ArrowRow(
     override val messageId: String,
     override val y: Double,
     override val occurrenceEntryId: Int?,
+    override val timestampMillis: Long?,
+    override val rawTimestamp: String,
     // never SELF/NOTE — those get their own row types below
     val kind: Seq3Kind,
     val fromLifelineId: String,
     val toLifelineId: String,
     val fromX: Double,
     val toX: Double,
+    /** Already `[#n] [ts] label` prefixed when the document has either toggle on (WP10) — measured
+     *  and drawn as exactly this string, never the bare [Seq3Message.labelTemplate]/occurrence
+     *  substitution; see [prefixEmissionLabels]'s own doc for why prefixing happens before
+     *  measurement, not after. */
     val label: String,
     val labelBox: Seq3Box,
     val repeatCount: Int,
@@ -119,6 +139,8 @@ data class Seq3SelfLoopRow(
     override val messageId: String,
     override val y: Double,
     override val occurrenceEntryId: Int?,
+    override val timestampMillis: Long?,
+    override val rawTimestamp: String,
     val lifelineId: String,
     val x: Double,
     val loopBottomY: Double,
@@ -138,6 +160,8 @@ data class Seq3UnresolvedStubRow(
     override val messageId: String,
     override val y: Double,
     override val occurrenceEntryId: Int?,
+    override val timestampMillis: Long?,
+    override val rawTimestamp: String,
     val fromLifelineId: String,
     val fromX: Double,
     val stubEndX: Double,
@@ -153,6 +177,8 @@ data class Seq3MessageNoteRow(
     override val messageId: String,
     override val y: Double,
     override val occurrenceEntryId: Int?,
+    override val timestampMillis: Long?,
+    override val rawTimestamp: String,
     val lifelineId: String,
     val box: Seq3Box,
     /** Already wrapped/ellipsized to [Seq3LayoutOptions.maxLabelLines] — [box]'s height was sized
@@ -165,6 +191,8 @@ data class Seq3MessageNoteRow(
 data class Seq3ElisionRow(
     override val messageId: String,
     override val y: Double,
+    override val timestampMillis: Long?,
+    override val rawTimestamp: String,
     val lifelineId: String,
     val elidedCount: Int,
     val box: Seq3Box,
@@ -180,9 +208,21 @@ data class Seq3FragmentBox(
     /** Nesting depth, 0 = outermost — mirrors `diagram.DiagramFrame.depth`'s own convention, used
      *  by a renderer to inset nested boxes and stagger their label baselines. */
     val depth: Int,
+    /** Carried through from [Seq3Fragment.hideKindLabel] (WP12) purely so the canvas overlay can
+     *  decide whether to prefix [label] with the kind word — see that field's own doc. This layout
+     *  box's own geometry is unaffected either way; the raster/Mermaid/PlantUML outputs always used
+     *  the bare [label], never a "$kind: $label" prefix, so this field has nothing to do there. */
+    val hideKindLabel: Boolean = false,
 )
 
 data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
+
+/** A [Seq3Delay]'s drawn geometry (WP11) — a labelled band spanning the full diagram width,
+ *  anchored right after its [Seq3Delay.afterMessageId]'s last drawn row. [box] is already the
+ *  FULL band (not just a label box, unlike [Seq3NoteBox]'s tighter-fit box) because both
+ *  renderers draw this the same way a fragment box is drawn: fill/stroke the whole rect, then
+ *  center the label text inside it — see `buildRows`' own doc for where [box] comes from. */
+data class Seq3DelayBox(val delayId: String, val label: String, val box: Seq3Box)
 
 data class Seq3Layout(
     val width: Double,
@@ -196,6 +236,9 @@ data class Seq3Layout(
      *  ordinal order; dragging a lifeline chip (Seq3Queue, later) changes [Seq3Lifeline.ordinal]
      *  and this number changes with it on the next layout call. */
     val crossingCount: Int,
+    /** WP11 time-gap markers — see [Seq3DelayBox]'s own doc. Empty for a document with no delays,
+     *  same "absent list, nothing drawn" contract as [fragments]/[notes]. */
+    val delays: List<Seq3DelayBox> = emptyList(),
 )
 
 // ── Layout constants (all unit-less "1x" values — see this file's header) ──────────────────────
@@ -246,6 +289,14 @@ private const val FRAGMENT_PAD = 10.0
 private const val FRAGMENT_LABEL_H = 16.0
 private const val FRAGMENT_INSET_PER_DEPTH = 10.0
 
+// WP11: the vertical band a time-gap marker reserves between the row it follows and whatever
+// comes next — tall enough for one centered label line plus a little breathing room above/below,
+// mirroring how buildStubRow already grows a row's own pitch to fit an extra element (its pill)
+// rather than overlapping it. Unlike every other row type, a delay is inserted BETWEEN two
+// emissions rather than replacing one, so this constant is added to the y-cursor directly in
+// buildRows rather than folded into a BuiltRow's own pitch.
+private const val DELAY_BAND_H = 34.0
+
 // The fixed intrusion a fragment box claims above its first row (ROW_H/2 + FRAGMENT_LABEL_H) — see
 // fragmentBoxFrom's own doc. buildRows widens the header-to-rows gap by at least this much whenever
 // the document has any fragment, so a fragment spanning the FIRST message can never claim space
@@ -289,7 +340,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val displayNames = lifelinesSorted.map { l -> seq3DisplayName(l.name, l.displaySegments, doc.lifelineDisplaySegments) }
     val labelLinesPerLifeline = displayNames.map { name -> seq3WrapDisplayName(name, HEADER_MAX_W - 2 * HEADER_PAD_H, tm) }
     val headerWidths = labelLinesPerLifeline.map { lines ->
-        val widest = lines.maxOfOrNull { tm.width(Seq3FontRole.LIFELINE, it) } ?: 0.0
+        val widest = withMeasurementSlack(lines.maxOfOrNull { tm.width(Seq3FontRole.LIFELINE, it) } ?: 0.0)
         (widest + 2 * HEADER_PAD_H).coerceIn(HEADER_MIN_W, HEADER_MAX_W)
     }
     // headerHeight is ONE shared value across every column (Seq3LifelineColumn's own doc:
@@ -310,33 +361,44 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // row order. A timestamp override is authoritative for every emission of that message. For an
     // untimestamped authored message, interpolate a stable fallback between its nearest timestamped
     // neighbours so inserting it before/after a row also places it there on the canvas.
-    val messageOrder = doc.messages.withIndex().associate { (index, message) -> message.id to index }
-    val primaryTimestamps = doc.messages.map { it.primaryTimestampMillis }
-    val untimestampedFallbacks = doc.messages.mapIndexedNotNull { index, message ->
-        if (message.primaryTimestampMillis != null) return@mapIndexedNotNull null
-        val previous = (index - 1 downTo 0).firstNotNullOfOrNull { primaryTimestamps[it] }
-        val next = (index + 1 until primaryTimestamps.size).firstNotNullOfOrNull { primaryTimestamps[it] }
-        val fallback = when {
-            previous != null && next != null && previous < next -> previous + ((next - previous) / 2).coerceAtLeast(1L)
-            previous != null -> previous + 1L
-            next != null -> next - 1L
-            else -> null
-        }
-        fallback?.let { message.id to it }
-    }.toMap()
-    val emissions = visibleMessages.flatMap(::expandForLayout)
-        .sortedWith(
-            compareBy<Emission> { emission ->
-                emission.timestampMillis ?: untimestampedFallbacks[emission.messageId] ?: Long.MAX_VALUE
-            }
-                .thenBy { emission -> messageOrder[emission.messageId] ?: Int.MAX_VALUE }
-                .thenBy { emission -> emission.entryId ?: Int.MAX_VALUE },
-        )
+    // Task 0 (round-2 corrections plan, WP11 prerequisite): the interpolation + comparator below
+    // used to live here as a private, inline copy — Seq3Emitters.kt never sorted its own emissions
+    // at all, so the exported Mermaid/PlantUML text could draw a different row order (and therefore
+    // a different `[#n]` call number) than this canvas/PNG geometry for the same document. Both
+    // files now call through `seq3ChronologicalOrder`/`seq3ChronologicalFallbacks`
+    // (Seq3LabelSummary.kt) so the two can never again quietly disagree about order.
+    val chronologicalEmissions = seq3ChronologicalOrder(
+        doc,
+        visibleMessages.flatMap(::expandForLayout),
+        messageIdOf = { emission -> emission.messageId },
+        timestampMillisOf = { emission -> emission.timestampMillis },
+        entryIdOf = { emission -> emission.entryId },
+    )
+    // WP10 (item 7): number/timestamp-prefix each call's label BEFORE measurement — see
+    // prefixEmissionLabels' own doc for why doing this after measureRequirement would reintroduce
+    // WP9's clipping bug in a worse form (a toggle the user can flip live, not just a one-off typo).
+    val emissions = prefixEmissionLabels(chronologicalEmissions, doc.showSequenceNumbers, doc.showTimestamps)
     val requirements = emissions.map { measureRequirement(it, tm, opts.maxLabelLines) }
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
-    val (lefts, centers, contentRight) = placeColumns(headerWidths, gapSolve.gaps)
-    val rowBuild = buildRows(emissions, requirements, lifelineIndex, centers, headerHeight, doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE })
+    val (lefts, centers, contentRight) = placeColumns(headerWidths, gapSolve.gaps, gapSolve.leftExtra)
+    // WP11: delays are anchored by messageId (not by emission), so every visible delay is grouped
+    // here and handed to buildRows, which is the one place that already knows each message's FINAL
+    // chronological row — see buildRows' own doc for why the reservation happens there rather than
+    // as a post-pass over already-placed rows.
+    val delaysByAfterMessage = doc.delays.filter { it.visibility == Seq3Visibility.VISIBLE }.groupBy { it.afterMessageId }
+    val bandLeft = lefts.firstOrNull() ?: MARGIN
+    val rowBuild = buildRows(
+        emissions,
+        requirements,
+        lifelineIndex,
+        centers,
+        headerHeight,
+        doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE },
+        delaysByAfterMessage,
+        bandLeft,
+        contentRight,
+    )
 
     val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowBuild.rows, headerHeight)
     val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowBuild.rows, centers, tm)
@@ -363,7 +425,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
             lifelineBottom = rowBuild.bottomY,
         )
     }
-    return Seq3Layout(width, height, lifelineColumns, rowBuild.rows, fragments, notes, crossingCount)
+    return Seq3Layout(width, height, lifelineColumns, rowBuild.rows, fragments, notes, crossingCount, rowBuild.delayBoxes)
 }
 
 // ── Crossing count (design spec §07) ────────────────────────────────────────────────────────
@@ -429,6 +491,7 @@ private sealed class Emission {
         val repeatCount: Int,
         override val entryId: Int?,
         override val timestampMillis: Long?,
+        val rawTimestamp: String,
     ) : Emission()
 
     data class Self(
@@ -438,6 +501,7 @@ private sealed class Emission {
         val repeatCount: Int,
         override val entryId: Int?,
         override val timestampMillis: Long?,
+        val rawTimestamp: String,
     ) : Emission()
 
     data class Stub(
@@ -447,6 +511,7 @@ private sealed class Emission {
         val repeatCount: Int,
         override val entryId: Int?,
         override val timestampMillis: Long?,
+        val rawTimestamp: String,
     ) : Emission()
 
     data class Note(
@@ -455,6 +520,7 @@ private sealed class Emission {
         val text: String,
         override val entryId: Int?,
         override val timestampMillis: Long?,
+        val rawTimestamp: String,
     ) : Emission()
 
     /** The "N more" marker between a [Seq3Repeat.FIRST_LAST] message's first and last drawn rows —
@@ -467,30 +533,25 @@ private sealed class Emission {
         override val fromLifelineId: String,
         val count: Int,
         override val timestampMillis: Long?,
+        val rawTimestamp: String,
     ) : Emission() {
         override val entryId: Int? get() = null
     }
 }
 
-private fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): String {
-    if (message.match.captures.isEmpty()) return message.labelTemplate
-    var label = message.labelTemplate
-    message.match.captures.forEach { capture ->
-        val value = occurrence.captureValues[capture.name] ?: return@forEach
-        label = label.replace("{${capture.name}}", value)
-    }
-    return label
-}
-
-private fun emissionTimestamp(message: Seq3Message, occurrenceTimestampMillis: Long?): Long? =
-    message.manualTimestampMillis ?: occurrenceTimestampMillis
+// occurrenceLabel/collapsedRepeatLabel/seq3EmissionTimestamp/seq3EmissionRawTimestamp now live in
+// Seq3LabelSummary.kt, shared with Seq3Emitters — see that file's header on why (WP9: the two
+// copies of occurrenceLabel had drifted apart once already, the same class of bug round 1 hit with
+// arrow styles).
 
 private fun expandForLayout(message: Seq3Message): List<Emission> {
     val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && visibleOccurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
         val occ = visibleOccurrences.firstOrNull()
-        return listOf(Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, message.primaryTimestampMillis))
+        return listOf(
+            Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, message.primaryTimestampMillis, message.primaryRawTimestamp),
+        )
     }
     if (message.toLifelineId == null) {
         val occ = visibleOccurrences.firstOrNull()
@@ -502,37 +563,39 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
                 visibleOccurrences.size.coerceAtLeast(1),
                 occ?.entryId,
                 message.primaryTimestampMillis,
+                message.primaryRawTimestamp,
             ),
         )
     }
     val occurrences = visibleOccurrences
     val isSelf = message.kind == Seq3Kind.SELF
 
-    fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?): Emission = if (isSelf) {
-        Emission.Self(message.id, message.fromLifelineId, label, count, entryId, timestampMillis)
+    fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?, rawTimestamp: String): Emission = if (isSelf) {
+        Emission.Self(message.id, message.fromLifelineId, label, count, entryId, timestampMillis, rawTimestamp)
     } else {
-        Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId, timestampMillis)
+        Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId, timestampMillis, rawTimestamp)
     }
     if (occurrences.isEmpty()) {
-        return listOf(arrow(message.labelTemplate, 1, null, message.primaryTimestampMillis))
+        return listOf(arrow(message.labelTemplate, 1, null, message.primaryTimestampMillis, message.primaryRawTimestamp))
     }
     return when (message.repeat) {
         Seq3Repeat.EVERY -> occurrences.map { occ ->
-            arrow(occurrenceLabel(message, occ), 1, occ.entryId, emissionTimestamp(message, occ.timestampMillis))
+            arrow(occurrenceLabel(message, occ), 1, occ.entryId, seq3EmissionTimestamp(message, occ.timestampMillis), seq3EmissionRawTimestamp(message, occ.rawTimestamp))
         }
         Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, ::arrow)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
             listOf(
                 arrow(
-                    message.labelTemplate,
+                    collapsedRepeatLabel(message, occurrences),
                     occurrences.size,
                     occurrences.first().entryId,
-                    emissionTimestamp(message, occurrences.first().timestampMillis),
+                    seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
+                    seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
                 ),
             )
         } else {
             occurrences.map { occ ->
-                arrow(occurrenceLabel(message, occ), 1, occ.entryId, emissionTimestamp(message, occ.timestampMillis))
+                arrow(occurrenceLabel(message, occ), 1, occ.entryId, seq3EmissionTimestamp(message, occ.timestampMillis), seq3EmissionRawTimestamp(message, occ.rawTimestamp))
             }
         }
     }
@@ -541,7 +604,7 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
 private fun firstLastEmissions(
     message: Seq3Message,
     occurrences: List<Seq3Occurrence>,
-    arrow: (String, Int, Int?, Long?) -> Emission,
+    arrow: (String, Int, Int?, Long?, String) -> Emission,
 ): List<Emission> {
     if (occurrences.size <= 1) {
         val only = occurrences.firstOrNull()
@@ -550,7 +613,8 @@ private fun firstLastEmissions(
                 occurrenceLabel(message, occurrences.first()),
                 1,
                 only?.entryId,
-                emissionTimestamp(message, only?.timestampMillis),
+                seq3EmissionTimestamp(message, only?.timestampMillis),
+                seq3EmissionRawTimestamp(message, only?.rawTimestamp.orEmpty()),
             ),
         )
     }
@@ -561,7 +625,8 @@ private fun firstLastEmissions(
                 occurrenceLabel(message, occurrences.first()),
                 1,
                 occurrences.first().entryId,
-                emissionTimestamp(message, occurrences.first().timestampMillis),
+                seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
+                seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
             ),
         )
         if (elided > 0) {
@@ -570,7 +635,8 @@ private fun firstLastEmissions(
                     message.id,
                     message.fromLifelineId,
                     elided,
-                    emissionTimestamp(message, occurrences.first().timestampMillis),
+                    seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
+                    seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
                 ),
             )
         }
@@ -579,9 +645,46 @@ private fun firstLastEmissions(
                 occurrenceLabel(message, occurrences.last()),
                 1,
                 occurrences.last().entryId,
-                emissionTimestamp(message, occurrences.last().timestampMillis),
+                seq3EmissionTimestamp(message, occurrences.last().timestampMillis),
+                seq3EmissionRawTimestamp(message, occurrences.last().rawTimestamp),
             ),
         )
+    }
+}
+
+// ── WP10 (item 7): inline call numbering / timestamps ───────────────────────────────────────
+//
+// Runs BEFORE [measureRequirement] (see [layoutSeq3]'s own call site) — measuring the bare label
+// and only prefixing it afterward would size every labelBox to a string shorter than what actually
+// gets drawn, exactly the class of bug [withMeasurementSlack] exists to guard against, just
+// triggered by a toggle instead of a font-rasterizer mismatch. Only [Emission.Arrow]/[Emission
+// .Self]/[Emission.Stub] are numbered — those are the rows that are actual CALLS; a [Emission.Note]
+// isn't a call (nothing to number) and [Emission.Elision] represents elided rows it itself is not
+// one of, so it never consumes a number either. A hidden message/occurrence never reaches this
+// list at all ([expandForLayout] already dropped it), so "hidden rows don't consume a number" falls
+// out for free rather than needing its own check here. A collapsed [Seq3Repeat.COLLAPSE_ABOVE] row
+// above threshold is exactly ONE [Emission.Arrow]/[Emission.Self] at this point (see
+// [expandForLayout]'s own COLLAPSE_ABOVE branch), so it takes exactly one number, matching what the
+// design brief asks for.
+private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers: Boolean, showTimestamps: Boolean): List<Emission> {
+    if (!showSequenceNumbers && !showTimestamps) return emissions
+    var callNumber = 0
+    return emissions.map { emission ->
+        when (emission) {
+            is Emission.Arrow -> {
+                callNumber++
+                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+            }
+            is Emission.Self -> {
+                callNumber++
+                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+            }
+            is Emission.Stub -> {
+                callNumber++
+                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+            }
+            is Emission.Note, is Emission.Elision -> emission
+        }
     }
 }
 
@@ -590,6 +693,19 @@ private fun firstLastEmissions(
 private class RowRequirement(val lines: List<String>, val labelWidth: Double, val badgeWidth: Double)
 
 private fun badgeText(count: Int): String = "×$count"
+
+// Item 9 (WP9 regression fix): a box sized to *exactly* an AWT `FontMetrics.stringWidth` and then
+// drawn into by a different rasterizer (Compose/Skia — see Seq3Canvas's SEQ3_LABEL_FONT_SIZE doc)
+// has zero margin for the two engines' advance widths disagreeing by even one subpixel, and
+// `stringWidth` is itself an integer-rounded value, so exact equality was never actually safe even
+// before that font-family split existed. Every measured width that becomes a drawn box's width —
+// label boxes, the ×n badge, lifeline headers — goes through this once, so no caller can
+// accidentally regress back to a zero-slack box.
+private const val LABEL_SLACK_CONSTANT = 2.0
+private const val LABEL_SLACK_RATIO = 0.02
+
+private fun withMeasurementSlack(width: Double): Double =
+    if (width <= 0.0) width else width + LABEL_SLACK_CONSTANT + width * LABEL_SLACK_RATIO
 
 private fun measureRequirement(emission: Emission, tm: Seq3TextMetrics, maxLines: Int): RowRequirement {
     val (text, repeatCount) = when (emission) {
@@ -601,8 +717,8 @@ private fun measureRequirement(emission: Emission, tm: Seq3TextMetrics, maxLines
     }
     val role = if (emission is Emission.Note) Seq3FontRole.NOTE else Seq3FontRole.LABEL
     val lines = wrapLines(text, tm, role, maxLines.coerceAtLeast(1))
-    val labelWidth = lines.maxOfOrNull { tm.width(role, it) } ?: 0.0
-    val badgeWidth = if (repeatCount > 1) tm.width(Seq3FontRole.BADGE, badgeText(repeatCount)) + 2 * BADGE_PAD_H else 0.0
+    val labelWidth = withMeasurementSlack(lines.maxOfOrNull { tm.width(role, it) } ?: 0.0)
+    val badgeWidth = if (repeatCount > 1) withMeasurementSlack(tm.width(Seq3FontRole.BADGE, badgeText(repeatCount))) + 2 * BADGE_PAD_H else 0.0
     return RowRequirement(lines, labelWidth, badgeWidth)
 }
 
@@ -647,7 +763,7 @@ private fun ellipsize(text: String, tm: Seq3TextMetrics, role: Seq3FontRole, max
 // `lastColumnSelfExtra` did: a self-loop/stub/note anchored on the RIGHTMOST lifeline has no gap to
 // widen, so its own required width instead grows the canvas directly.
 
-private class GapSolveResult(val gaps: DoubleArray, val rightExtra: Double)
+private class GapSolveResult(val gaps: DoubleArray, val leftExtra: Double, val rightExtra: Double)
 
 private fun solveGaps(
     emissions: List<Emission>,
@@ -657,6 +773,7 @@ private fun solveGaps(
 ): GapSolveResult {
     val n = headerWidths.size
     val gaps = DoubleArray((n - 1).coerceAtLeast(0)) { COLUMN_GAP }
+    var leftExtra = 0.0
     var rightExtra = 0.0
     emissions.forEachIndexed { i, emission ->
         val req = requirements[i]
@@ -672,9 +789,16 @@ private fun solveGaps(
                 rightExtra = widenSingle(gaps, headerWidths, c, need, rightExtra)
             }
             is Emission.Stub -> {
+                // WP7 item 2: the stub now draws to the LEFT of its own lifeline (buildStubRow's
+                // own doc) — it needs room widened on the lifeline's LEFT side, the mirror image of
+                // how a self-loop/note widens to its right. widenLeftSingle is the exact mirror of
+                // widenSingle: for the leftmost column (c == 0) there is no gap before it to widen,
+                // so the reservation grows `leftExtra` instead, which shifts EVERY column's start
+                // (placeColumns) rather than a single gap — the only way to free space before the
+                // very first column.
                 val c = lifelineIndex[emission.fromLifelineId] ?: return@forEachIndexed
                 val need = STUB_W + LABEL_PAD + req.labelWidth + 2 * PILL_PAD_H
-                rightExtra = widenSingle(gaps, headerWidths, c, need, rightExtra)
+                leftExtra = widenLeftSingle(gaps, headerWidths, c, need, leftExtra)
             }
             is Emission.Note -> {
                 val c = lifelineIndex[emission.fromLifelineId] ?: return@forEachIndexed
@@ -685,7 +809,7 @@ private fun solveGaps(
         }
     }
     for (j in gaps.indices) gaps[j] = gaps[j].coerceAtMost(COLUMN_GAP_MAX)
-    return GapSolveResult(gaps, rightExtra)
+    return GapSolveResult(gaps, leftExtra, rightExtra)
 }
 
 private fun widenSpan(gaps: DoubleArray, headerWidths: List<Double>, a: Int, b: Int, required: Double) {
@@ -713,6 +837,20 @@ private fun widenSingle(gaps: DoubleArray, headerWidths: List<Double>, c: Int, n
     }
 }
 
+/** The mirror image of [widenSingle]: widens the gap BEFORE column [c] (between `c-1` and `c`)
+ *  instead of after it, so [need] worth of space (measured from column [c]'s own CENTER, same
+ *  convention [widenSingle]/[rightExtra] already use) is free to its LEFT. For the leftmost column
+ *  there is no gap before it — [leftExtra] plays [rightExtra]'s exact role there, consumed by
+ *  [placeColumns] to shift every column's start rather than widen a single gap. */
+private fun widenLeftSingle(gaps: DoubleArray, headerWidths: List<Double>, c: Int, need: Double, leftExtra: Double): Double =
+    if (c == 0) {
+        max(leftExtra, need)
+    } else {
+        val required = need - headerWidths[c] / 2
+        if (required > gaps[c - 1]) gaps[c - 1] = required
+        leftExtra
+    }
+
 // ── Column x-positions ──────────────────────────────────────────────────────────────────────
 
 private class ColumnPlacement(val lefts: DoubleArray, val centers: DoubleArray, val contentRight: Double) {
@@ -723,11 +861,18 @@ private class ColumnPlacement(val lefts: DoubleArray, val centers: DoubleArray, 
     operator fun component3() = contentRight
 }
 
-private fun placeColumns(headerWidths: List<Double>, gaps: DoubleArray): ColumnPlacement {
+private fun placeColumns(headerWidths: List<Double>, gaps: DoubleArray, leftExtra: Double = 0.0): ColumnPlacement {
     val n = headerWidths.size
     val lefts = DoubleArray(n)
     val centers = DoubleArray(n)
-    var cursor = MARGIN
+    // WP7 item 2: an unresolved stub on the LEFTMOST lifeline needs room to its left that no gap
+    // can provide (there is no column before it to widen a gap against) — solveGaps' leftExtra
+    // covers exactly that by shifting every column's start past the usual MARGIN, the same way
+    // rightExtra grows the canvas past the last column without moving anything. This keeps every
+    // column's own header width and every gap between columns unchanged; the whole arrangement
+    // just starts further right, so a leftmost-column stub can never render at a negative x or get
+    // clipped against the canvas edge.
+    var cursor = MARGIN + leftExtra
     for (i in 0 until n) {
         lefts[i] = cursor
         centers[i] = cursor + headerWidths[i] / 2
@@ -735,7 +880,7 @@ private fun placeColumns(headerWidths: List<Double>, gaps: DoubleArray): ColumnP
         cursor += headerWidths[i] + gap
     }
     val trailingGap = gaps.getOrElse(n - 1) { COLUMN_GAP }
-    val contentRight = if (n > 0) cursor - trailingGap else MARGIN
+    val contentRight = if (n > 0) cursor - trailingGap else MARGIN + leftExtra
     return ColumnPlacement(lefts, centers, contentRight)
 }
 
@@ -747,6 +892,7 @@ private class RowBuildResult(
     val lastRowIndex: Map<String, Int>,
     val bottomY: Double,
     val rightExtra: Double,
+    val delayBoxes: List<Seq3DelayBox>,
 )
 
 private fun buildRows(
@@ -761,10 +907,22 @@ private fun buildRows(
     // message intrudes a fixed amount into the header band (see FRAGMENT_TOP_RESERVE's own doc and
     // fragmentBoxFrom's clamp below, which is the second, defensive half of this same fix).
     fragmentsPresent: Boolean,
+    // WP11: every VISIBLE delay, keyed by the messageId it follows — see layoutSeq3's own call
+    // site comment for why this is resolved before buildRows rather than as a post-pass.
+    delaysByAfterMessage: Map<String, List<Seq3Delay>> = emptyMap(),
+    bandLeft: Double = MARGIN,
+    bandRight: Double = MARGIN,
 ): RowBuildResult {
     val rows = mutableListOf<Seq3RowGeometry>()
+    val delayBoxes = mutableListOf<Seq3DelayBox>()
     val first = HashMap<String, Int>()
     val last = HashMap<String, Int>()
+    // WP11: a message can draw several rows (repeated occurrences); a delay anchored to it must
+    // fire exactly once, right after its FINAL chronological row — not after every occurrence.
+    // `emissions` is already in the shared chronological order (Task 0), so the last index in
+    // THIS list at which a messageId appears is that final row.
+    val lastEmissionIndex = HashMap<String, Int>()
+    emissions.forEachIndexed { i, emission -> lastEmissionIndex[emission.messageId] = i }
     val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
     var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
@@ -776,8 +934,15 @@ private fun buildRows(
         last[emission.messageId] = rows.lastIndex
         y += built.pitch
         rightExtra = max(rightExtra, built.rightEdge)
+        if (lastEmissionIndex[emission.messageId] == i) {
+            delaysByAfterMessage[emission.messageId]?.forEach { delay ->
+                val box = Seq3Box(bandLeft, y, (bandRight - bandLeft).coerceAtLeast(1.0), DELAY_BAND_H)
+                delayBoxes += Seq3DelayBox(delay.id, delay.label, box)
+                y += DELAY_BAND_H
+            }
+        }
     }
-    return RowBuildResult(rows, first, last, y, rightExtra)
+    return RowBuildResult(rows, first, last, y, rightExtra, delayBoxes)
 }
 
 private class BuiltRow(val geometry: Seq3RowGeometry, val pitch: Double, val rightEdge: Double)
@@ -799,7 +964,7 @@ private fun buildArrowRow(e: Emission.Arrow, req: RowRequirement, lifelineIndex:
     val centerX = (fromX + toX) / 2
     val labelBox = Seq3Box(centerX - req.labelWidth / 2, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
     val badgeBox = if (e.repeatCount > 1) Seq3Box(labelBox.x + labelBox.width + BADGE_PAD_H, labelBox.y, req.badgeWidth, BADGE_H) else null
-    val arrow = Seq3ArrowRow(e.messageId, y, e.entryId, e.kind, e.fromLifelineId, e.toLifelineId, fromX, toX, e.label, labelBox, e.repeatCount, badgeBox)
+    val arrow = Seq3ArrowRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.kind, e.fromLifelineId, e.toLifelineId, fromX, toX, e.label, labelBox, e.repeatCount, badgeBox)
     return BuiltRow(arrow, ROW_H, max(fromX, toX))
 }
 
@@ -809,26 +974,36 @@ private fun buildSelfRow(e: Emission.Self, req: RowRequirement, lifelineIndex: M
     val loopH = max(SELF_EXTRA, ROW_H / 2)
     val labelBox = Seq3Box(x + SELF_LOOP_W + LABEL_PAD, y, req.labelWidth, loopH)
     val badgeBox = if (e.repeatCount > 1) Seq3Box(labelBox.x + labelBox.width + BADGE_PAD_H, y, req.badgeWidth, BADGE_H) else null
-    val row = Seq3SelfLoopRow(e.messageId, y, e.entryId, e.fromLifelineId, x, y + loopH, SELF_LOOP_W, e.label, labelBox, e.repeatCount, badgeBox)
+    val row = Seq3SelfLoopRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, x, y + loopH, SELF_LOOP_W, e.label, labelBox, e.repeatCount, badgeBox)
     val rightEdge = x + SELF_LOOP_W + LABEL_PAD + req.labelWidth + (badgeBox?.width ?: 0.0)
     return BuiltRow(row, ROW_H + loopH, rightEdge)
 }
 
-// labelBox sits ABOVE the dashed stub line (y range [y-ROW_H/2, y], mirroring buildArrowRow's own
-// label placement), and the pill sits BELOW it, separated by STUB_LABEL_PILL_GAP — the two boxes
-// used to share the same origin here and their y-ranges overlapped (item 10 of the phase-5
-// post-ship plan). The row's own pitch grows to fit both slots plus the same ROW_H/2 buffer every
-// other row leaves below its own content, so the pill never gets pushed into by the next row.
+// WP7 item 2: a class that logs a line is usually EXECUTING something it was asked to do, not
+// initiating one — so the tag's own lifeline reads as the CALLEE, and an unresolved stub must draw
+// with its arrowhead pointing INTO that lifeline, not away from it. The stub therefore extends to
+// the LEFT of the tag's column (stubEndX < fromX) rather than to the right as it did before this
+// package — dragging its drop pill onto another lifeline resolves THAT lifeline as the caller
+// (`from`), reusing the tag's own column as `to` (see Seq3BulkAction.SetCaller). labelBox/pill are
+// mirrored the same way: both RIGHT-align at `stubEndX - LABEL_PAD` (their shared edge nearest the
+// dashed line) and extend further left, the exact mirror image of the old left-aligned-at-originX
+// layout, so the pill still visually "collects" the label text the same way it always did. The
+// vertical placement (label above the line, pill below, separated by STUB_LABEL_PILL_GAP so their
+// y-ranges never overlap — item 10 of the phase-5 post-ship plan) is unchanged.
 private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {
     val idx = lifelineIndex[e.fromLifelineId] ?: return null
     val fromX = centers[idx]
-    val stubEndX = fromX + STUB_W
-    val originX = stubEndX + LABEL_PAD
-    val labelBox = Seq3Box(originX, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
-    val pill = Seq3Box(originX, y + STUB_LABEL_PILL_GAP, req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H, PILL_H)
-    val row = Seq3UnresolvedStubRow(e.messageId, y, e.entryId, e.fromLifelineId, fromX, stubEndX, e.label, labelBox, pill, e.repeatCount)
+    val stubEndX = fromX - STUB_W
+    val rightAlignX = stubEndX - LABEL_PAD
+    val pillWidth = req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H
+    val labelBox = Seq3Box(rightAlignX - req.labelWidth, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
+    val pill = Seq3Box(rightAlignX - pillWidth, y + STUB_LABEL_PILL_GAP, pillWidth, PILL_H)
+    val row = Seq3UnresolvedStubRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, fromX, stubEndX, e.label, labelBox, pill, e.repeatCount)
     val pitch = ROW_H / 2 + STUB_LABEL_PILL_GAP + PILL_H + ROW_H / 2
-    return BuiltRow(row, pitch, pill.x + pill.width)
+    // Unlike the old right-pointing stub, this row no longer extends past its own lifeline's
+    // center on the right — its rightmost touched x is simply fromX (rowXExtent already reports
+    // both fromX and the (now leftward) stubEndX for fragment/bounds purposes).
+    return BuiltRow(row, pitch, fromX)
 }
 
 private fun buildNoteRow(e: Emission.Note, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {
@@ -837,7 +1012,7 @@ private fun buildNoteRow(e: Emission.Note, req: RowRequirement, lifelineIndex: M
     val width = max(NOTE_ROW_W, req.labelWidth + 2 * NOTE_PAD)
     val height = req.lines.size * NOTE_LINE_H + 2 * NOTE_PAD
     val box = Seq3Box(cx - width / 2, y - ROW_H / 2, width, height.coerceAtLeast(ROW_H / 2))
-    val row = Seq3MessageNoteRow(e.messageId, y, e.entryId, e.fromLifelineId, box, req.lines)
+    val row = Seq3MessageNoteRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, box, req.lines)
     return BuiltRow(row, ROW_H, box.x + box.width)
 }
 
@@ -845,7 +1020,7 @@ private fun buildElisionRow(e: Emission.Elision, lifelineIndex: Map<String, Int>
     val idx = lifelineIndex[e.fromLifelineId] ?: return null
     val x = centers[idx]
     val box = Seq3Box(x - ELISION_BOX_W / 2, y - ROW_H / 4, ELISION_BOX_W, ROW_H / 2)
-    val row = Seq3ElisionRow(e.messageId, y, e.fromLifelineId, e.count, box)
+    val row = Seq3ElisionRow(e.messageId, y, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, e.count, box)
     return BuiltRow(row, ROW_H / 2, box.x + box.width)
 }
 
@@ -942,7 +1117,14 @@ private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int,
     val top = max(rawTop, minTop)
     val bottom = (spanned.lastOrNull()?.y ?: 0.0) + ROW_H / 2
     val label = fragment.label.ifBlank { fragment.kind.name.lowercase() }
-    return Seq3FragmentBox(fragment.id, fragment.kind, label, Seq3Box(left, top, max(1.0, right - left), max(1.0, bottom - top)), depth)
+    return Seq3FragmentBox(
+        fragment.id,
+        fragment.kind,
+        label,
+        Seq3Box(left, top, max(1.0, right - left), max(1.0, bottom - top)),
+        depth,
+        fragment.hideKindLabel,
+    )
 }
 
 private fun rowXExtent(row: Seq3RowGeometry): List<Double> = when (row) {
@@ -967,22 +1149,24 @@ private fun layoutNotes(
     val visibleNotes = notes.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (visibleNotes.isEmpty()) return emptyList()
     return visibleNotes.mapNotNull { note ->
+        val naturalWidth = max(NOTE_ROW_W, tm.width(Seq3FontRole.NOTE, note.text) + 2 * NOTE_PAD)
+        val naturalHeight = ROW_H / 2 + NOTE_PAD
+        // WP7 item 3: a free-floating note (the empty-canvas "Add note here" context menu) carries
+        // its own explicit geometry and an EMPTY messageIds — it has nothing to anchor to on
+        // purpose. Resolve its box from that geometry FIRST, before ever touching messageIds/
+        // lastRowIndex, so it is never dropped for having no message span (the old code's ?: return
+        // null on an empty `note.messageIds.mapNotNull{...}.maxOrNull()` did exactly that).
+        if (note.x != null && note.y != null && note.width != null && note.height != null) {
+            val box = Seq3Box(note.x, note.y, max(NOTE_ROW_W, note.width), max(naturalHeight, note.height))
+            return@mapNotNull Seq3NoteBox(note.id, box, note.text)
+        }
+        // Ordinary message-spanning note (design spec §06's "Note" verb): anchor to the LAST drawn
+        // row among its messages, same as before this WP.
         val anchorIdx = note.messageIds.mapNotNull { lastRowIndex[it] }.maxOrNull() ?: return@mapNotNull null
         val anchorRow = rows.getOrNull(anchorIdx) ?: return@mapNotNull null
         val touchedX = note.messageIds.mapNotNull { lastRowIndex[it] }.flatMap { rowXExtent(rows[it]) }
         val cx = touchedX.average().takeIf { !it.isNaN() } ?: centers.firstOrNull() ?: 0.0
-        val naturalWidth = max(NOTE_ROW_W, tm.width(Seq3FontRole.NOTE, note.text) + 2 * NOTE_PAD)
-        val naturalHeight = ROW_H / 2 + NOTE_PAD
-        val box = if (note.x != null && note.y != null && note.width != null && note.height != null) {
-            Seq3Box(
-                note.x,
-                note.y,
-                max(NOTE_ROW_W, note.width),
-                max(naturalHeight, note.height),
-            )
-        } else {
-            Seq3Box(cx - naturalWidth / 2, anchorRow.y + ROW_H / 2, naturalWidth, naturalHeight)
-        }
+        val box = Seq3Box(cx - naturalWidth / 2, anchorRow.y + ROW_H / 2, naturalWidth, naturalHeight)
         Seq3NoteBox(note.id, box, note.text)
     }
 }

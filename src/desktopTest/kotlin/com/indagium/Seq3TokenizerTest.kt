@@ -100,4 +100,65 @@ class Seq3TokenizerTest {
         assertFalse(result.compiled)
         assertEquals(null, result.match)
     }
+
+    // ── Item 9 (WP9) — two silent data-loss bugs found during exploration ──────────────────────
+
+    @Test
+    fun quotedEmptyNamedValueIsNeverCapturedAsEmpty() {
+        // Before the fix, this compiled via the NAMED_VALUE path with template "state: {state}"
+        // and an unquoted, EMPTY captured value for occurrence 1 -- which then substitutes back to
+        // nothing (`state: `, no visible marker the value was ever captured). The fix disqualifies
+        // an empty unquoted value from becoming a capture at all, so this must now fall back to the
+        // single-run path, whose raw (non-unquoted) captured value is never empty.
+        val result = tokenizeSeq3Messages("A", listOf(input(1, "state: \"\""), input(2, "state: on")))
+
+        assertTrue(result.compiled, result.error)
+        val captured = result.captureValuesByOccurrence.values.flatMap { it.values }
+        assertTrue(captured.isNotEmpty(), "expected at least one captured value")
+        assertTrue(captured.none { it.isEmpty() }, "a quoted-empty named value must never surface as an empty capture; got $captured")
+    }
+
+    @Test
+    fun aQuotedEmptyValueOnBothSidesFailsToCompileRatherThanCapturingEmpty() {
+        // Both occurrences are quoted-empty-vs-quoted-non-empty on the SAME literal quote
+        // boundary, so even the single-run fallback's own empty-middle guard rejects it. Failing
+        // to compile (and falling back to one literal message per occurrence upstream) is the
+        // honest outcome -- never a silently empty capture.
+        val result = tokenizeSeq3Messages("A", listOf(input(1, "state: \"\""), input(2, "state: \"on\"")))
+
+        val captured = result.captureValuesByOccurrence.values.flatMap { it.values }
+        assertTrue(captured.none { it.isEmpty() }, "must never surface an empty capture even when compilation itself fails; got $captured")
+    }
+
+    @Test
+    fun aDottedNamedKeySanitizesToAValidCaptureTokenAndRoundTrips() {
+        // NAMED_VALUE's key charset allows '.'/'-' but CAPTURE_TOKEN does not -- an unsanitized
+        // "{screen.mode}" token would be invisible to seq3CaptureTokenNames, failing matchesText
+        // for every occurrence and silently degrading the whole group to per-occurrence literals.
+        val result = tokenizeSeq3Messages("A", listOf(input(1, "screen.mode=on"), input(2, "screen.mode=off")))
+
+        assertTrue(result.compiled, result.error)
+        val match = result.match!!
+        assertEquals(listOf("screen_mode"), match.captures.map { it.name })
+        assertEquals(
+            mapOf("screen_mode" to "loud"),
+            matchesText(match, "screen.mode=loud"),
+            "the sanitized token must round-trip through matchesText, not silently fail every occurrence",
+        )
+    }
+
+    @Test
+    fun distinctKeysThatSanitizeToTheSameNameDoNotCollide() {
+        val result = tokenizeSeq3Messages(
+            "A",
+            listOf(
+                input(1, "screen.mode=on screen-mode=1"),
+                input(2, "screen.mode=off screen-mode=2"),
+            ),
+        )
+
+        assertTrue(result.compiled, result.error)
+        val names = result.match!!.captures.map { it.name }
+        assertEquals(names.size, names.distinct().size, "sanitized capture names must stay unique even when two raw keys collide after sanitizing; got $names")
+    }
 }

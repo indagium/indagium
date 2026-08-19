@@ -191,6 +191,7 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme)
     layout.lifelines.forEach { paintHeader(g, it, theme) }
     layout.rows.forEach { paintRow(g, it, theme) }
     layout.notes.forEach { paintNoteBox(g, it, theme) }
+    layout.delays.forEach { paintDelayBox(g, it, theme) }
 }
 
 private fun paintLifelines(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme) {
@@ -412,6 +413,28 @@ private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterThem
     g.color = Color(theme.noteText, true)
     val fm = g.fontMetrics
     g.drawString(note.text, (box.x + NOTE_ARC / 2).roundToInt(), (box.y + fm.ascent + NOTE_ARC / 2).roundToInt())
+}
+
+// WP11: a labelled vertical gap spanning the full diagram width — a horizontal dashed rule with
+// its label centered on top, deliberately NOT a filled box like paintFragment/paintNoteBox (a
+// time-gap marker is a break in the timeline, not a region grouping messages, so it reads as a
+// divider rather than a container). Reuses `arrow`/`label` theme roles rather than adding new
+// Seq3RasterTheme fields purely for this one marker — see this file's own header on why every
+// number/colour here comes from [Seq3Layout]/[theme] rather than being invented locally.
+private val DASH_DELAY = floatArrayOf(6f, 4f)
+
+private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterTheme) {
+    val box = delay.box
+    val midY = (box.y + box.height / 2).roundToInt()
+    g.color = Color(theme.arrow, true)
+    g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_DELAY, 0f)
+    g.drawLine(box.x.roundToInt(), midY, (box.x + box.width).roundToInt(), midY)
+    g.font = fontFor(Seq3FontRole.NOTE)
+    g.color = Color(theme.label, true)
+    val fm = g.fontMetrics
+    val text = delay.label
+    val tx = box.x + (box.width - fm.stringWidth(text)) / 2
+    g.drawString(text, tx.roundToInt(), (box.y + fm.ascent).roundToInt())
 }
 
 // ── Real AWT-backed Seq3TextMetrics — the source of truth layoutSeq3 measures against ─────────

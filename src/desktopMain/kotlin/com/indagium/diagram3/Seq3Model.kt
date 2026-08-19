@@ -273,8 +273,19 @@ sealed class Seq3MessageEditResult {
 /** The UML fragment shape a selection is grouped into (design spec §06's `Group ▾` verb). Unlike
  *  the old `diagram.DiagramFrame` (a colorless auto-detected bracket with no semantic meaning),
  *  every one of these IS semantic — a user explicitly chose it — so Seq3Emitters renders the
- *  dialect's real `loop`/`alt`/`opt`/`par` block instead of a meaning-free note pairing. */
-enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR }
+ *  dialect's real `loop`/`alt`/`opt`/`par`/`critical`/`break` block instead of a meaning-free note
+ *  pairing.
+ *
+ *  [GROUP] is the one exception, added for "frame these messages and say what they relate to"
+ *  (WP12). It is deliberately **not** a UML 2.x combined-fragment operator — UML defines exactly
+ *  twelve (`seq, alt, opt, break, par, strict, loop, critical, neg, assert, ignore, consider`) and
+ *  none of them means "these messages relate to X". PlantUML invented `group <label>` for exactly
+ *  this case and Seq3Emitters' PlantUML branch reuses that verbatim; Mermaid has no equivalent at
+ *  all (the bare word `group` is a Mermaid PARSE ERROR), so Seq3Emitters' Mermaid branch fakes it
+ *  with `rect rgb(...) … end` wrapping a `Note over` that carries the label — see that file's own
+ *  "Fragment open lines" section for why this needs its own per-dialect branch instead of the
+ *  `kind.name.lowercase()` call every other kind shares. */
+enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP }
 
 /** A labelled fragment box spanning the named messages. [messageIds] need not be a physically
  *  contiguous run of [Seq3Document.messages] — the bracket is drawn from the earliest to the
@@ -294,6 +305,13 @@ data class Seq3Fragment(
      *  fragment's bracket is skipped by [Seq3Layout]/export (WP2) but the fragment itself, and
      *  every message it groups, is untouched. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+    /** WP12: when true, the canvas overlay shows just [label] instead of `"$kind: $label"`. A
+     *  per-fragment (not document-level) flag on purpose — the user framed this as a property of
+     *  the individual artifact ("or to not show what is it"), and a [GROUP] fragment in particular
+     *  is meaningless with its operator word shown since "group" says nothing about what the
+     *  messages relate to. Canvas-presentation only: [Seq3Layout]/[Seq3Raster] already draw the
+     *  bare label with no kind prefix, so this has no effect there or on the emitted text. */
+    val hideKindLabel: Boolean = false,
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct
@@ -307,6 +325,31 @@ data class Seq3Note(
     val y: Double? = null,
     val width: Double? = null,
     val height: Double? = null,
+    /** Same meaning as [Seq3Fragment.visibility] — see that field's own doc. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+)
+
+// ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────────
+//
+// Deliberately NOT a [Seq3Kind]: a delay has no endpoints (nothing to draw an arrow between), no
+// evidence (no [Seq3Occurrence] backs it — it is a pure authoring artifact, closer to [Seq3Note]
+// than to [Seq3Message]), and must never enter the "N messages need a target" count or the message
+// queue itself. The `+ message` dialog's kind `SegmentedControl` (`ui/Seq3QueuePanel.kt`) indexes
+// [Seq3Kind.entries] POSITIONALLY, so adding a case there would silently renumber every existing
+// kind button in that control — a document-level list of its own, exactly like [fragments]/[notes]
+// above, sidesteps that trap entirely.
+
+/** A labelled vertical gap in the timeline, anchored right after the LAST drawn row of
+ *  [afterMessageId] — the design spec's "time-gap marker" (item 8). [id] is caller-generated
+ *  (mirrors [Seq3Fragment.id]/[Seq3Note.id], both minted by the UI layer via `UUID.randomUUID()`
+ *  before the bulk action that creates them). A delay whose [afterMessageId] no longer resolves to
+ *  a visible row (the anchor message was hidden, merged away, or deleted) simply draws nothing —
+ *  the same "drop the box, keep nothing to keep" contract [Seq3Fragment.visibility]/[Seq3Note
+ *  .visibility] document for their own dangling references, so a stale delay is never a crash. */
+data class Seq3Delay(
+    val id: String,
+    val afterMessageId: String,
+    val label: String,
     /** Same meaning as [Seq3Fragment.visibility] — see that field's own doc. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
@@ -353,6 +396,9 @@ data class Seq3Document(
     val messages: List<Seq3Message> = emptyList(),
     val fragments: List<Seq3Fragment> = emptyList(),
     val notes: List<Seq3Note> = emptyList(),
+    /** Time-gap markers (WP11) — see [Seq3Delay]'s own header for why this is a document-level
+     *  list, not a [Seq3Kind]. Defaults empty so an older note decodes to its original rendering. */
+    val delays: List<Seq3Delay> = emptyList(),
     /** The repeat policy newly generated messages start with; an already-[Seq3Authoring.EDITED]
      *  message's own [Seq3Message.repeat] is never overwritten by this. */
     val defaultRepeat: Seq3Repeat = Seq3Repeat.COLLAPSE_ABOVE,
@@ -366,6 +412,15 @@ data class Seq3Document(
      *  the app theme" (Settings' own diagram default, or the ambient theme if that too is unset);
      *  resolving that chain is `ui.Seq3Theme.resolveSeq3ThemeColors`'s job (WP4), not this file's. */
     val themePresetName: String? = null,
+    /** Item 7 (WP10): prefix every drawn call's label with `[#n]`, counting drawn rows in canvas
+     *  order — see `diagram3.Seq3LabelSummary.seq3PrefixedLabel`. Document-level, not view-only,
+     *  because the user chose "canvas, PNG export, and both text dialects must all agree" — a
+     *  view-only toggle could never keep an export in sync with what the panel showed when it was
+     *  produced. Defaults false so an old note decodes to its original, unnumbered rendering. */
+    val showSequenceNumbers: Boolean = false,
+    /** Item 7 (WP10): prefix every drawn call's label with its `[HH:MM:SS.mmm]` timestamp — same
+     *  export-parity reasoning as [showSequenceNumbers]. */
+    val showTimestamps: Boolean = false,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
