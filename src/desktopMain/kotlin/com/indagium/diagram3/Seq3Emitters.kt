@@ -183,7 +183,13 @@ private class Seq3EmissionPlan(
 )
 
 private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
-    val visibleLifelines = document.lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    // WP2: sorted by ordinal, exactly like Seq3Layout.kt's own `lifelinesSorted` — this file used
+    // to iterate in plain document-list order while Seq3Layout sorted by ordinal, so an exported
+    // participant order could already disagree with the canvas even before panel reorder (WP3)
+    // existed. toMermaid/toPlantUml build their OWN `visibleLifelines` (for aliases/participant
+    // lines) with this exact same filter+sort, so `lifelineIndex` here and `aliases` there always
+    // agree index-for-index — see those functions' own comments.
+    val visibleLifelines = document.lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }.sortedBy { it.ordinal }
     val lifelineIndex = visibleLifelines.withIndex().associate { (i, l) -> l.id to i }
     val emissions = mutableListOf<Seq3Emission>()
     val firstIndex = HashMap<String, Int>()
@@ -278,19 +284,34 @@ private fun noteSpan(note: Seq3Note, plan: Seq3EmissionPlan, aliases: List<Strin
 
 fun Seq3Document.toMermaid(): String {
     val plan = planEmissions(this)
-    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    // Same filter+sort as planEmissions' own `visibleLifelines` — see that function's own comment
+    // for why they must stay identical (index-for-index alignment between `aliases` here and
+    // `lifelineIndex` there).
+    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }.sortedBy { it.ordinal }
     val aliases = sanitizedAliases(visibleLifelines)
-    val brackets = normalizedBrackets(fragments, plan)
+    // Hidden fragments/notes are dropped exactly like a hidden lifeline/message already is —
+    // Seq3Fragment.visibility/Seq3Note.visibility's own "drop the box, keep the row" contract.
+    val visibleFragments = fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val visibleNotes = notes.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val brackets = normalizedBrackets(visibleFragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
-    val notesByAnchor = notes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
+    val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
     return buildString {
         append("sequenceDiagram\n")
         if (title.isNotBlank()) append("    title ").append(mermaidEscape(title)).append('\n')
-        visibleLifelines.forEachIndexed { i, l -> append("    participant ").append(aliases[i]).append(" as ").append(mermaidEscape(l.name)).append('\n') }
+        visibleLifelines.forEachIndexed { i, l ->
+            // Item: ACTOR lifelines emit Mermaid's own `actor` keyword instead of `participant` —
+            // purely a glyph/export-keyword choice (Seq3LifelineKind's own doc), and the resolved
+            // display name (per-lifeline override, else the document default) rather than the raw
+            // name, matching what the header chip/glyph actually shows on screen.
+            val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
+            val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
+            append("    ").append(keyword).append(' ').append(aliases[i]).append(" as ").append(mermaidEscape(displayName)).append('\n')
+        }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 append("    ").append(b.fragment.kind.name.lowercase()).append(' ').append(mermaidEscape(fragmentLabel(b.fragment))).append('\n')
@@ -325,19 +346,28 @@ fun Seq3Document.toMermaid(): String {
 
 fun Seq3Document.toPlantUml(): String {
     val plan = planEmissions(this)
-    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }
+    // See toMermaid's own comment: must stay the exact same filter+sort as planEmissions'
+    // `visibleLifelines` so `aliases` here and `lifelineIndex` there agree index-for-index.
+    val visibleLifelines = lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }.sortedBy { it.ordinal }
     val aliases = sanitizedAliases(visibleLifelines)
-    val brackets = normalizedBrackets(fragments, plan)
+    val visibleFragments = fragments.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val visibleNotes = notes.filter { it.visibility == Seq3Visibility.VISIBLE }
+    val brackets = normalizedBrackets(visibleFragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
-    val notesByAnchor = notes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
+    val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
     return buildString {
         append("@startuml\n")
         if (title.isNotBlank()) append("title ").append(plantUmlEscape(title)).append('\n')
-        visibleLifelines.forEachIndexed { i, l -> append("participant \"").append(plantUmlEscape(l.name)).append("\" as ").append(aliases[i]).append('\n') }
+        visibleLifelines.forEachIndexed { i, l ->
+            // Same ACTOR-vs-participant keyword and resolved-display-name treatment as toMermaid.
+            val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
+            val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
+            append(keyword).append(" \"").append(plantUmlEscape(displayName)).append("\" as ").append(aliases[i]).append('\n')
+        }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 append(b.fragment.kind.name.lowercase()).append(' ').append(plantUmlEscape(fragmentLabel(b.fragment))).append('\n')

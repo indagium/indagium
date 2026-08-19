@@ -4,10 +4,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -31,17 +34,23 @@ import androidx.compose.ui.input.pointer.PointerIcon
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.diagram3.Seq3AwtTextMetrics
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3GuidedPassState
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.advanceSeq3GuidedPass
 import com.indagium.diagram3.beginSeq3GuidedPass
+import com.indagium.diagram3.seq3DisplayName
 import com.indagium.diagram3.seq3GuidedContext
 import com.indagium.diagram3.seq3GuidedCurrentMessage
+import com.indagium.diagram3.seq3WrapDisplayName
 import com.indagium.diagram3.suggestSeq3Target
 import com.indagium.model.LogEntry
 import java.awt.Cursor as AwtCursor
@@ -222,28 +231,49 @@ private fun Seq3GuidedTargetGrid(
     var chosenId by remember(message.id) { mutableStateOf(suggestion?.id) }
     var applyToAll by remember(message.id) { mutableStateOf(true) }
     val candidates = document.lifelines.filter { it.id != message.fromLifelineId }
+    // Shared across every card in this grid rather than one per card: building `Seq3AwtTextMetrics`
+    // walks every `Seq3FontRole` to prime AWT font metrics, so hoisting it here (instead of inside
+    // Seq3GuidedLifelineCard) avoids redoing that for each of up to ~8 candidates on every pass.
+    val tm = remember { Seq3AwtTextMetrics() }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         AppText("Target lifeline", color = tc.tx, fontSize = 12.sp)
         // A plain wrapping Row rather than LazyVerticalGrid: at most a handful of lifelines, and
         // this pane already scrolls as a whole.
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            candidates.chunked(2).forEach { rowItems ->
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowItems.forEach { lifeline ->
-                        val keyIndex = document.lifelines.indexOfFirst { it.id == lifeline.id } + 1
-                        Seq3GuidedLifelineCard(
-                            lifeline = lifeline,
-                            keyNumber = keyIndex.takeIf { it in 1..SEQ3_MAX_KEYED_LIFELINES },
-                            selected = lifeline.id == chosenId,
-                            suggested = lifeline.id == suggestion?.id,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            chosenId = lifeline.id
-                            runCatching { view.focusRequester.requestFocus() }
+        //
+        // One BoxWithConstraints measurement for the WHOLE grid, not one per card: a card's own
+        // width is always exactly this minus the shared 8dp gap, halved, so computing it once here
+        // keeps each Seq3GuidedLifelineCard a plain Row/Column/Text subtree — which
+        // `Modifier.height(IntrinsicSize.Max)` below needs to equalize a tall (wrapped-name) card
+        // against a short one in the same row, since BoxWithConstraints itself does not support
+        // intrinsic measurement and must therefore stay outside any Row it would otherwise nest
+        // under.
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val cardWidth = (maxWidth - 8.dp) / 2
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                candidates.chunked(2).forEach { rowItems ->
+                    Row(
+                        Modifier.fillMaxWidth().height(IntrinsicSize.Max),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        rowItems.forEach { lifeline ->
+                            val keyIndex = document.lifelines.indexOfFirst { it.id == lifeline.id } + 1
+                            Seq3GuidedLifelineCard(
+                                lifeline = lifeline,
+                                keyNumber = keyIndex.takeIf { it in 1..SEQ3_MAX_KEYED_LIFELINES },
+                                selected = lifeline.id == chosenId,
+                                suggested = lifeline.id == suggestion?.id,
+                                documentDefault = document.lifelineDisplaySegments,
+                                cardWidth = cardWidth,
+                                tm = tm,
+                                modifier = Modifier.weight(1f).fillMaxHeight(),
+                            ) {
+                                chosenId = lifeline.id
+                                runCatching { view.focusRequester.requestFocus() }
+                            }
                         }
+                        if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                     }
-                    if (rowItems.size == 1) Spacer(Modifier.weight(1f))
                 }
             }
         }
@@ -263,17 +293,45 @@ private fun Seq3GuidedTargetGrid(
     }
 }
 
+/** Reserved width around the name text inside one card: the row's own horizontal padding (12dp
+ *  each side), the 18dp key-badge box, the 9dp spacing after it, and — only when this card also
+ *  carries the "suggested" label — a rough allowance for that label plus its own leading spacer.
+ *  Only a rough allowance because the "suggested" label's exact width isn't measured here: Row's
+ *  own weight(1f, fill=false)/weight(1f) layout already squeezes the name text to whatever
+ *  genuinely remains at layout time regardless of this estimate (see [seq3WrapDisplayName]'s
+ *  built-in maxLines/ellipsis cap for why a slightly-off estimate never overflows, just wraps a
+ *  hair earlier or later than pixel-perfect). */
+private fun seq3GuidedCardReservedWidth(suggested: Boolean): Dp =
+    12.dp * 2 + 18.dp + 9.dp + (if (suggested) 60.dp else 0.dp)
+
+private const val SEQ3_GUIDED_CARD_NAME_MAX_LINES = 3
+
 @Composable
 private fun Seq3GuidedLifelineCard(
     lifeline: Seq3Lifeline,
     keyNumber: Int?,
     selected: Boolean,
     suggested: Boolean,
+    documentDefault: Int,
+    cardWidth: Dp,
+    tm: Seq3TextMetrics,
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
+    // Item 2's second half (WP5): a dotted name like `com.mycompany.myapp.Example1` has no spaces,
+    // so Compose's own line-breaking would either overflow or hard-split mid-word with no regard
+    // for the dots that make it readable — see Seq3DisplayName.kt's own doc for why this can't
+    // reuse Compose's default wrap. Measuring against Seq3AwtTextMetrics — already this codebase's
+    // on-screen Compose measurement source for lifeline names, see Seq3Canvas.kt's own note on it
+    // — at this card's ACTUAL width (not a fixed constant) is what lets a tall card grow instead
+    // of clipping.
+    val displayName = seq3DisplayName(lifeline.name, lifeline.displaySegments, documentDefault)
+    val lines = remember(displayName, cardWidth, suggested) {
+        val availableWidth = (cardWidth - seq3GuidedCardReservedWidth(suggested)).value.toDouble().coerceAtLeast(1.0)
+        seq3WrapDisplayName(displayName, availableWidth, tm)
+    }
     DisableSelection {
         HoverBox(
             // Keep the hover/selected fill on the same surface as the border. Padding belongs to
@@ -303,9 +361,9 @@ private fun Seq3GuidedLifelineCard(
                     )
                 }
                 AppText(
-                    lifeline.name, color = tc.tx, fontSize = 13.sp,
+                    lines.joinToString("\n"), color = tc.tx, fontSize = Seq3FontRole.LIFELINE.basePointSize.sp,
                     fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                    maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    maxLines = SEQ3_GUIDED_CARD_NAME_MAX_LINES, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 if (suggested) {

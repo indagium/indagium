@@ -5801,10 +5801,13 @@ class AppState(
     // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
     fun copyRichPreview(tabId: String) {
         val t = tab(tabId) ?: return
-        // Diagrams are rasterized in the ACTIVE theme, so a pasted picture matches what the user is
-        // looking at rather than a fixed light palette.
-        val diagramTheme = themeColors(settings.theme).toSeq3RasterTheme()
-        val html = buildAnnotationsHtml(t, settings) { document -> Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), diagramTheme) }
+        // Each diagram is rasterized in ITS OWN theme (WP4's resolveSeq3ThemeColors — a document
+        // saved with a theme override keeps it here too), falling back to the active app theme
+        // for a document that follows it, so a pasted picture matches what the user is looking at
+        // rather than a fixed light palette.
+        val html = buildAnnotationsHtml(t, settings) { document ->
+            Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme())
+        }
         val plainText = maskWordForCopy(buildMd(t, settings), settings)
         Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
     }
@@ -5852,7 +5855,10 @@ class AppState(
      * Rendering goes through Seq3RenderCache because this runs on EVERY debounced note edit (see
      * autoExportAnnotations) — without it, typing in an unrelated text block would re-rasterize
      * every diagram in the document on a 400 ms cadence. The cache key includes the theme, so a
-     * theme switch still re-renders rather than exporting a stale palette.
+     * theme switch still re-renders rather than exporting a stale palette. Each diagram resolves
+     * ITS OWN theme (WP4's resolveSeq3ThemeColors) rather than one theme shared across every
+     * diagram in the tab, since two notes in the same tab can each carry a different
+     * [com.indagium.diagram3.Seq3Document.themePresetName].
      *
      * Unlike v1/v2's optional carried model, a v3 note's header always carries its whole
      * [com.indagium.diagram3.Seq3Document] (Seq3Codec.kt's own doc) — every parsed diagram note is
@@ -5864,9 +5870,9 @@ class AppState(
         diagrams: List<Pair<String, com.indagium.diagram3.ParsedSeq3>>,
     ) {
         if (diagrams.isEmpty()) return
-        val diagramTheme = themeColors(settings.theme).toSeq3RasterTheme()
         diagrams.forEachIndexed { index, (_, parsed) ->
             if (parsed.exportMode != com.indagium.diagram3.DiagramExportMode.IMAGE) return@forEachIndexed
+            val diagramTheme = resolveSeq3ThemeColors(parsed.document, settings).toSeq3RasterTheme()
             runCatching { Seq3RenderCache.pngBytes(Seq3RenderCache.layout(parsed.document), diagramTheme) }
                 .onSuccess { bytes ->
                     File(framesDir, annotationDiagramFileName(index + 1, t.annotations.frameStamp)).writeBytes(bytes)

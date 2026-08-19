@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Authoring
+import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
@@ -9,6 +10,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.advanceSeq3GuidedPass
+import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.applySeq3GuidedNewLifeline
 import com.indagium.diagram3.applySeq3GuidedSelfCall
 import com.indagium.diagram3.applySeq3GuidedTarget
@@ -181,5 +183,32 @@ class Seq3GuidedTest {
         val result = applySeq3GuidedNewLifeline(doc, "m1", newLifeline)
         assertTrue(result.lifelines.any { it.id == "Database" })
         assertNull(result.messages.single().toLifelineId)
+    }
+
+    // ── item 5 (WP5): "＋ New lifeline" hits the same empty-tagIds bug WP1 fixed for AddLifeline ──
+
+    @Test
+    fun newLifelineWithNoTagIdsIsDefaultedToARepresentedTagFromItsOwnName() {
+        val doc = documentWith(needsTargetMessage("m1", "Producer", 1))
+        // The exact shape ui.Seq3GuidedPass's "＋ New lifeline" button builds: tagIds = emptySet().
+        val newLifeline = Seq3Lifeline(id = "seq3-lifeline-3-database", name = "Database", tagIds = emptySet(), ordinal = 2)
+        val result = applySeq3GuidedNewLifeline(doc, "m1", newLifeline)
+        assertEquals(setOf("Database"), result.lifelines.single { it.id == "seq3-lifeline-3-database" }.tagIds)
+    }
+
+    @Test
+    fun aGuidedNewLifelineMergesWithMultipleRepresentedTagsAfterwards() {
+        val doc = documentWith(needsTargetMessage("m1", "Producer", 1))
+        val newLifeline = Seq3Lifeline(id = "seq3-lifeline-3-database", name = "Database", tagIds = emptySet(), ordinal = 2)
+        val withNewLifeline = applySeq3GuidedNewLifeline(doc, "m1", newLifeline)
+
+        val merged = applySeq3Command(
+            withNewLifeline,
+            Seq3Command.MergeLifelines(keepLifelineId = "Producer", mergedLifelineId = "seq3-lifeline-3-database"),
+        )
+        assertTrue(merged.applied)
+        val keep = merged.document.lifelines.single { it.id == "Producer" }
+        assertTrue(keep.tagIds.size > 1, "expected a folded multi-tag lifeline, got ${keep.tagIds}")
+        assertEquals(setOf("Producer", "Database"), keep.tagIds)
     }
 }

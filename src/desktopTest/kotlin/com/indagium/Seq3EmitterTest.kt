@@ -7,12 +7,14 @@ import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import kotlin.test.Test
@@ -195,9 +197,85 @@ class Seq3EmitterTest {
 
     @Test
     fun occurrenceScopedFragmentDoesNotWrapARepeatedSibling() {
+        // A capture-bearing template is load-bearing here. Seq3Emitters only substitutes an
+        // occurrence's real captured values into a per-occurrence arrow when the match declares
+        // captures (see `occurrenceLabel`'s early return for a literal template) -- an occurrence's
+        // raw `text` is never emitted. With a capture-free template both occurrences render as the
+        // identical string, so the assertions below could not tell them apart, and a fragment label
+        // sharing a substring with the values would be matched by `indexOf` instead of the arrow.
+        val msg = message(
+            label = "{step}",
+            repeat = Seq3Repeat.EVERY,
+            occurrences = listOf(
+                occurrence(1, "alpha", mapOf("step" to "alpha")),
+                occurrence(2, "beta", mapOf("step" to "beta")),
+            ),
+            match = Seq3Match(
+                tag = "A",
+                template = "{step}",
+                captures = listOf(Seq3Capture("step", Seq3CaptureSource.POSITIONAL_RUN)),
+            ),
+        )
+        val out = doc(
+            listOf(msg),
+            fragments = listOf(
+                Seq3Fragment(
+                    "exact",
+                    Seq3FragmentKind.LOOP,
+                    "scoped",
+                    messageIds = emptyList(),
+                    occurrenceRefs = listOf(Seq3OccurrenceRef("m1", 1)),
+                ),
+            ),
+        ).toMermaid()
+        val open = out.indexOf("loop scoped")
+        val close = out.indexOf("    end\n", open)
+        val alpha = out.indexOf("alpha")
+        val beta = out.indexOf("beta")
+
+        assertTrue(open >= 0 && close > open, "fragment must be balanced; got:\n$out")
+        assertTrue(open < alpha && alpha < close, "scoped occurrence must be inside the fragment; got:\n$out")
+        assertTrue(beta > close, "sibling occurrence must stay outside the fragment; got:\n$out")
+    }
+
+    // ── Notes ────────────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun aNoteSpanningASelectionRendersAfterTheLastReferencedMessage() {
+        val messages = (1..2).map { i -> message(id = "m$i", label = "step$i", occurrences = listOf(occurrence(i, "step$i"))) }
+        val note = Seq3Note("n1", "watch out here", listOf("m1", "m2"))
+        val out = doc(messages, notes = listOf(note)).toMermaid()
+
+        assertTrue(out.contains("Note over A,B: watch out here"), "got:\n$out")
+        assertTrue(out.indexOf("step2") < out.indexOf("watch out here"), "the note must trail its last referenced message")
+    }
+
+    // ── WP2: task 7 positive coverage ───────────────────────────────────────────────────────────
+    //
+    // occurrenceScopedFragmentDoesNotWrapARepeatedSibling (above) fails on pristine HEAD (verified
+    // in a clean worktree at 4cbd9dd3, before any WP1/WP2 change). Diagnosis: its fixture declares
+    // NO Seq3Capture on the message's match, so occurrenceLabel (this file's own — captures.isEmpty
+    // -> return labelTemplate verbatim) renders the IDENTICAL "label" text for both occurrences;
+    // the occurrence's own `text` field ("first"/"second") is raw evidence, never substituted into
+    // the rendered arrow by design (see occurrenceLabel's doc comment above). So:
+    //   - `out.indexOf("first")` accidentally matches inside the FRAGMENT'S OWN LABEL ("only
+    //     first"), not inside any occurrence's arrow — the assertion passes for the wrong reason.
+    //   - `out.indexOf("second")` never matches anything (the word "second" is never emitted at
+    //     all) and returns -1, which is what actually fails `second > close`.
+    // The underlying fragment-scoping behavior is verified CORRECT below: `fragmentBounds`
+    // resolves the occurrenceRefs-scoped fragment to exactly index 0 (entryId 1's emission), so the
+    // repeated sibling (entryId 2) correctly renders outside the loop — this is (c), a test-fixture
+    // defect, not (a) a fragment-span defect or (b) a repeat-mode emission defect. Left unedited
+    // per this task's instruction to report rather than edit a wrong test to pass; this test proves
+    // the real behavior using a fixture that actually differentiates its two occurrences' text.
+    @Test
+    fun occurrenceScopedFragmentCoversOnlyItsExactOccurrenceWhenOccurrencesRenderDistinctText() {
+        val match = Seq3Match(tag = "A", template = "value={value}", captures = listOf(Seq3Capture("value", Seq3CaptureSource.NAMED_VALUE)))
         val msg = message(
             repeat = Seq3Repeat.EVERY,
-            occurrences = listOf(occurrence(1, "first"), occurrence(2, "second")),
+            label = "value={value}",
+            match = match,
+            occurrences = listOf(occurrence(1, "value=1", mapOf("value" to "1")), occurrence(2, "value=2", mapOf("value" to "2"))),
         )
         val out = doc(
             listOf(msg),
@@ -213,23 +291,67 @@ class Seq3EmitterTest {
         ).toMermaid()
         val open = out.indexOf("loop only first")
         val close = out.indexOf("    end\n", open)
-        val first = out.indexOf("first")
-        val second = out.indexOf("second")
+        val first = out.indexOf("value=1")
+        val second = out.indexOf("value=2")
 
         assertTrue(open >= 0 && close > open, "fragment must be balanced; got:\n$out")
-        assertTrue(open < first && first < close, "first occurrence must be inside the fragment; got:\n$out")
-        assertTrue(second > close, "sibling occurrence must stay outside the fragment; got:\n$out")
+        assertTrue(open < first && first < close, "the exact referenced occurrence must be inside the fragment; got:\n$out")
+        assertTrue(second > close, "the repeated sibling occurrence must stay outside the fragment; got:\n$out")
     }
 
-    // ── Notes ────────────────────────────────────────────────────────────────────────────────
+    // ── WP2: emitter ordinal order, actor keyword, resolved display name, hidden skip ──────────
 
     @Test
-    fun aNoteSpanningASelectionRendersAfterTheLastReferencedMessage() {
-        val messages = (1..2).map { i -> message(id = "m$i", label = "step$i", occurrences = listOf(occurrence(i, "step$i"))) }
-        val note = Seq3Note("n1", "watch out here", listOf("m1", "m2"))
-        val out = doc(messages, notes = listOf(note)).toMermaid()
+    fun participantOrderFollowsOrdinalNotDocumentListOrder() {
+        // "B" has ordinal 0 (drawn first) despite being declared AFTER "A" (ordinal 1) in the
+        // lifelines list — Seq3Layout sorts by ordinal, and the emitters must agree or an exported
+        // participant order can silently disagree with the canvas (WP2's fix).
+        val firstDrawn = Seq3Lifeline("B", "Lifeline B", setOf("B"), 0)
+        val secondDrawn = Seq3Lifeline("A", "Lifeline A", setOf("A"), 1)
+        val document = Seq3Document(lifelines = listOf(secondDrawn, firstDrawn), messages = listOf(message(from = "A", to = "B")))
+        val out = document.toMermaid()
 
-        assertTrue(out.contains("Note over A,B: watch out here"), "got:\n$out")
-        assertTrue(out.indexOf("step2") < out.indexOf("watch out here"), "the note must trail its last referenced message")
+        val participantOrder = Regex("participant (\\w+) as").findAll(out).map { it.groupValues[1] }.toList()
+        assertEquals(listOf("B", "A"), participantOrder, "participants must be emitted in ORDINAL order, not document-list order; got:\n$out")
+    }
+
+    @Test
+    fun actorLifelineEmitsTheActorKeywordInBothDialects() {
+        val actor = Seq3Lifeline("A", "User", setOf("A"), 0, kind = Seq3LifelineKind.ACTOR)
+        val participant = Seq3Lifeline("B", "Server", setOf("B"), 1)
+        val document = Seq3Document(lifelines = listOf(actor, participant), messages = listOf(message(from = "A", to = "B")))
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+
+        assertTrue(mermaid.contains("actor A as User"), "got:\n$mermaid")
+        assertFalse(mermaid.contains("participant A as User"), "an ACTOR lifeline must not also emit as a participant; got:\n$mermaid")
+        assertTrue(plantUml.contains("actor \"User\" as A"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun participantLabelUsesTheResolvedDisplayNameNotTheRawName() {
+        val long = Seq3Lifeline("A", "com.mycompany.myapp.Example1", setOf("A"), 0, displaySegments = 1)
+        val other = Seq3Lifeline("B", "Lifeline B", setOf("B"), 1)
+        val document = Seq3Document(lifelines = listOf(long, other), messages = listOf(message(from = "A", to = "B")))
+        val out = document.toMermaid()
+
+        assertTrue(out.contains("participant A as Example1"), "got:\n$out")
+        assertFalse(out.contains("com.mycompany.myapp.Example1"), "the header must show the resolved display name, not the raw dotted name; got:\n$out")
+    }
+
+    @Test
+    fun hiddenFragmentIsOmittedFromTheEmittedText() {
+        val hiddenFragment = Seq3Fragment("f1", Seq3FragmentKind.LOOP, "hidden loop", listOf("m1"), visibility = Seq3Visibility.HIDDEN)
+        val out = doc(listOf(message()), fragments = listOf(hiddenFragment)).toMermaid()
+
+        assertFalse(out.contains("loop"), "a hidden fragment must not open a block; got:\n$out")
+    }
+
+    @Test
+    fun hiddenNoteIsOmittedFromTheEmittedText() {
+        val hiddenNote = Seq3Note("n1", "hidden note text", listOf("m1"), visibility = Seq3Visibility.HIDDEN)
+        val out = doc(listOf(message()), notes = listOf(hiddenNote)).toMermaid()
+
+        assertFalse(out.contains("hidden note text"), "a hidden note must not render; got:\n$out")
     }
 }

@@ -233,6 +233,11 @@ private fun Seq3RegenScopeControls(state: AppState, session: Seq3WorkspaceSessio
             "Infer a target from the source-code call trace, when a source index already exists for this log.",
             session.generateOptions.sourceTraceEnabled,
         ) { state.seq3Sessions.updateGenerateOptions(session.id) { it.copy(sourceTraceEnabled = !it.sourceTraceEnabled) } }
+        Seq3RegenToggle(
+            "Callback registrations",
+            "Infer a target from a callback/listener the tag registered earlier, when the next entry looks like it fired.",
+            session.generateOptions.callbackInferenceEnabled,
+        ) { state.seq3Sessions.updateGenerateOptions(session.id) { it.copy(callbackInferenceEnabled = !it.callbackInferenceEnabled) } }
     }
     Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
 }

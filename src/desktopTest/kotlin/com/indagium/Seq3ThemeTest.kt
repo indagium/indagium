@@ -4,8 +4,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.model.AppSettings
 import com.indagium.model.ThemePreset
 import com.indagium.ui.Seq3RenderCache
+import com.indagium.ui.resolveSeq3ThemeColors
 import com.indagium.ui.themeColors
 import com.indagium.ui.toSeq3RasterTheme
 import kotlin.test.BeforeTest
@@ -148,6 +150,75 @@ class Seq3ThemeTest {
 
         assertEquals(1, Seq3RenderCache.layoutMissCountForTest(), "the SAME document must not re-run layout just because the theme changed")
         assertEquals(2, Seq3RenderCache.renderMissCountForTest(), "each distinct theme must still rasterize once")
+    }
+
+    // ── WP4: resolveSeq3ThemeColors ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun documentThemeOverrideWinsOverTheAppTheme() {
+        val document = oneLifelineDocument().copy(themePresetName = ThemePreset.DRACULA.name)
+        val settings = AppSettings(theme = ThemePreset.LIGHT)
+
+        val resolved = resolveSeq3ThemeColors(document, settings)
+
+        assertEquals(themeColors(ThemePreset.DRACULA), resolved)
+    }
+
+    @Test
+    fun nullDocumentThemeFallsBackToTheAppTheme() {
+        val document = oneLifelineDocument().copy(themePresetName = null)
+        val settings = AppSettings(theme = ThemePreset.GRUVBOX)
+
+        val resolved = resolveSeq3ThemeColors(document, settings)
+
+        assertEquals(themeColors(ThemePreset.GRUVBOX), resolved)
+    }
+
+    @Test
+    fun anUnknownOrGarbagePresetNameFallsBackRatherThanThrowing() {
+        // A document saved by a later build that renamed/removed a preset must still open — this
+        // is the exact scenario the runCatching/getOrNull guard in resolveSeq3ThemeColors exists
+        // for (themeColors is THEME_PALETTES.getValue(), which throws on a missing key).
+        val document = oneLifelineDocument().copy(themePresetName = "NOT_A_REAL_PRESET")
+        val settings = AppSettings(theme = ThemePreset.TOKYO_NIGHT)
+
+        val resolved = resolveSeq3ThemeColors(document, settings)
+
+        assertEquals(themeColors(ThemePreset.TOKYO_NIGHT), resolved)
+    }
+
+    @Test
+    fun stringOverloadAgreesWithTheDocumentOverload() {
+        val settings = AppSettings(theme = ThemePreset.LIGHT)
+        val document = oneLifelineDocument().copy(themePresetName = ThemePreset.SOLARIZED_DARK.name)
+
+        assertEquals(
+            resolveSeq3ThemeColors(document, settings),
+            resolveSeq3ThemeColors(document.themePresetName, settings),
+        )
+    }
+
+    @Test
+    fun renderCacheStillDistinguishesTwoDocumentsResolvedToDifferentThemes() {
+        // Task 2's own claim: Seq3RenderCache is keyed on (layout, theme, scale) already, so
+        // per-document themes need no cache change — verified here rather than assumed, end to
+        // end through resolveSeq3ThemeColors rather than a raw Seq3RasterTheme literal. Sampling
+        // the top-left pixel (pure background fill, painted before anything else — see
+        // Seq3Raster.paintSeq3) is enough to prove the two rasters actually differ, not merely
+        // that two distinct cache entries were allocated.
+        val document = oneLifelineDocument()
+        val darkDocument = document.copy(themePresetName = ThemePreset.DRACULA.name)
+        val settings = AppSettings(theme = ThemePreset.LIGHT)
+
+        val followsAppTheme = Seq3RenderCache.display(document, resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme())
+        val ownTheme = Seq3RenderCache.display(darkDocument, resolveSeq3ThemeColors(darkDocument, settings).toSeq3RasterTheme())
+
+        assertEquals(2, Seq3RenderCache.renderMissCountForTest(), "each distinct resolved theme must rasterize once")
+        assertNotEquals(
+            followsAppTheme.rendered.image.getRGB(0, 0),
+            ownTheme.rendered.image.getRGB(0, 0),
+            "a document with its own theme must actually paint differently from one following the app theme",
+        )
     }
 
     private companion object {

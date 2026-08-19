@@ -1087,6 +1087,12 @@ data class AppSettings(
     // Applied only as a diagram note is created. Each note carries its own export metadata, so
     // changing this never rewrites or changes the representation of an existing diagram.
     val diagramDefaultExportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+    // Seeds a NEWLY created diagram's Seq3Document.themePresetName (Seq3Session.begin, WP4) and
+    // is otherwise just a fallback: an existing diagram's own per-diagram theme override always
+    // wins over this (see Seq3Theme.resolveSeq3ThemeColors). Null means "follow the app theme"
+    // (AppSettings.theme) rather than pin every new diagram to one preset regardless of the user's
+    // overall theme choice.
+    val diagramDefaultTheme: ThemePreset? = null,
 )
 
 enum class ThemePreset(val label: String) {

@@ -25,10 +25,14 @@ import com.indagium.ui.logItemStableKey
 import com.indagium.ui.mkTab
 import com.indagium.ui.orderedTabsForComparePicker
 import com.indagium.ui.panelCopySelectionIds
+import com.indagium.ui.partitionTabOrder
+import com.indagium.ui.reconcileTabOrder
 import com.indagium.ui.splitTabsForVisibility
 import com.indagium.ui.stripVisualWrapBreaks
+import com.indagium.ui.TabRef
 import com.indagium.ui.tabOrderAfterVisibleReorder
 import com.indagium.ui.tabRenderX
+
 import com.indagium.ui.visibleRowRangeIds
 import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.utils.computeItems
@@ -658,6 +662,124 @@ class SplitViewAndTabRegressionTest {
         )
 
         assertEquals(listOf("t1", "t2", "t3", "t4", "t5", "t6"), order)
+    }
+
+    // ── WP6: unified log/diagram tab strip (ui/TabBar.kt) ──────────────────────────────────────
+
+    @Test
+    fun reconcileTabOrderPreservesSurvivingEntriesOrderAcrossAnOpenAndAClose() {
+        // "a" closes, a new diagram "seq3-2" opens — "seq3-1" and "b" must stay exactly where they
+        // were relative to each other, and the newcomer lands at the end.
+        val previous = listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"))
+
+        val reconciled = reconcileTabOrder(
+            previousOrder = previous,
+            logTabIds = listOf("b"),
+            diagramSessionIds = listOf("seq3-1", "seq3-2"),
+        )
+
+        assertEquals(
+            listOf(TabRef.Diagram("seq3-1"), TabRef.Log("b"), TabRef.Diagram("seq3-2")),
+            reconciled,
+        )
+    }
+
+    @Test
+    fun reconcileTabOrderAppendsBrandNewTabsInEachStoresOwnOrder() {
+        val reconciled = reconcileTabOrder(
+            previousOrder = emptyList(),
+            logTabIds = listOf("a", "b"),
+            diagramSessionIds = listOf("seq3-1"),
+        )
+
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Diagram("seq3-1")), reconciled)
+    }
+
+    @Test
+    fun reconcileTabOrderDropsClosedTabsWithoutDisturbingSurvivors() {
+        val previous = listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Diagram("seq3-1"))
+
+        val reconciled = reconcileTabOrder(
+            previousOrder = previous,
+            logTabIds = listOf("a"),
+            diagramSessionIds = emptyList(),
+        )
+
+        assertEquals(listOf(TabRef.Log("a")), reconciled)
+    }
+
+    @Test
+    fun partitionTabOrderSeparatesLogAndDiagramIdsPreservingEachKindsRelativeOrder() {
+        val order = listOf(
+            TabRef.Log("a"),
+            TabRef.Diagram("seq3-1"),
+            TabRef.Log("b"),
+            TabRef.Diagram("seq3-2"),
+            TabRef.Log("c"),
+        )
+
+        val (logIds, diagramIds) = partitionTabOrder(order)
+
+        assertEquals(listOf("a", "b", "c"), logIds)
+        assertEquals(listOf("seq3-1", "seq3-2"), diagramIds)
+    }
+
+    @Test
+    fun partitionTabOrderHandlesADiagramDraggedBetweenTwoLogTabs() {
+        val order = listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Diagram("seq3-1"), TabRef.Log("c"))
+
+        val (logIds, diagramIds) = partitionTabOrder(order)
+
+        assertEquals(listOf("a", "b", "c"), logIds)
+        assertEquals(listOf("seq3-1"), diagramIds)
+    }
+
+    @Test
+    fun partitionTabOrderHandlesALogTabDraggedBetweenTwoDiagramTabs() {
+        val order = listOf(TabRef.Diagram("seq3-1"), TabRef.Log("a"), TabRef.Diagram("seq3-2"))
+
+        val (logIds, diagramIds) = partitionTabOrder(order)
+
+        assertEquals(listOf("a"), logIds)
+        assertEquals(listOf("seq3-1", "seq3-2"), diagramIds)
+    }
+
+    @Test
+    fun splitTabsForVisibilityHonoursLimitOverAMixedLogAndDiagramList() {
+        val refs = listOf(
+            TabRef.Log("a"),
+            TabRef.Log("b"),
+            TabRef.Diagram("seq3-1"),
+            TabRef.Log("c"),
+            TabRef.Diagram("seq3-2"),
+        )
+
+        val (visible, overflow) = splitTabsForVisibility(
+            tabs = refs,
+            containerPx = 2000,
+            minTabPx = 80,
+            overflowButtonPx = 40,
+            visibleTabLimit = 3,
+        )
+
+        assertEquals(listOf(TabRef.Diagram("seq3-1"), TabRef.Log("c"), TabRef.Diagram("seq3-2")), visible)
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b")), overflow)
+    }
+
+    @Test
+    fun splitTabsForVisibilityLimitAloneCanOverflowAMixedListEvenWithRoomToSpare() {
+        val refs = listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"), TabRef.Diagram("seq3-2"))
+
+        val (visible, overflow) = splitTabsForVisibility(
+            tabs = refs,
+            containerPx = 2000,
+            minTabPx = 80,
+            overflowButtonPx = 40,
+            visibleTabLimit = 2,
+        )
+
+        assertEquals(listOf(TabRef.Log("b"), TabRef.Diagram("seq3-2")), visible)
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1")), overflow)
     }
 
     @Test

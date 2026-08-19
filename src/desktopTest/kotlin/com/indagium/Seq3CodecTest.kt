@@ -12,6 +12,7 @@ import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -218,5 +219,89 @@ class Seq3CodecTest {
         assertNotNull(reparsed)
         assertEquals(attachment, reparsed.attachment)
         assertEquals("kept link", reparsed.caption)
+    }
+
+    // ── WP1: lifeline identity / fragment-note visibility / diagram-theme fields ────────────────
+
+    @Test
+    fun everyNewWp1FieldSurvivesAnEncodeDecodeRoundTrip() {
+        val original = fixedDocument().copy(
+            lifelines = listOf(
+                Seq3Lifeline("A", "Alpha", setOf("A"), 0, kind = Seq3LifelineKind.ACTOR, displaySegments = 2),
+                Seq3Lifeline("B", "Beta", setOf("B"), 1, kind = Seq3LifelineKind.PARTICIPANT, displaySegments = null),
+            ),
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.LOOP, "retry", listOf("m1"), visibility = Seq3Visibility.HIDDEN)),
+            notes = listOf(Seq3Note("n1", "watch this", listOf("m1"), visibility = Seq3Visibility.HIDDEN)),
+            lifelineDisplaySegments = 3,
+            themePresetName = "DRACULA",
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        val alpha = parsed.document.lifelines.single { it.id == "A" }
+        assertEquals(Seq3LifelineKind.ACTOR, alpha.kind)
+        assertEquals(2, alpha.displaySegments)
+        val beta = parsed.document.lifelines.single { it.id == "B" }
+        assertEquals(Seq3LifelineKind.PARTICIPANT, beta.kind)
+        assertNull(beta.displaySegments)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.fragments.single().visibility)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.notes.single().visibility)
+        assertEquals(3, parsed.document.lifelineDisplaySegments)
+        assertEquals("DRACULA", parsed.document.themePresetName)
+    }
+
+    @Test
+    fun aDocumentMissingEveryNewWp1KeyDecodesToTheDocumentedDefaults() {
+        // Hand-built map with every WP1-added key entirely absent — the shape a note saved by a
+        // build predating this phase would have. Every new field must fall back to the default
+        // that preserves that old document's original, unshortened, unthemed rendering.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(mapOf("id" to "f1", "kind" to "LOOP", "label" to "retry", "messageIds" to listOf<String>())),
+            "notes" to listOf(mapOf("id" to "n1", "text" to "hi", "messageIds" to listOf<String>())),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        val lifeline = parsed.document.lifelines.single()
+        assertEquals(Seq3LifelineKind.PARTICIPANT, lifeline.kind)
+        assertNull(lifeline.displaySegments)
+        assertEquals(Seq3Visibility.VISIBLE, parsed.document.fragments.single().visibility)
+        assertEquals(Seq3Visibility.VISIBLE, parsed.document.notes.single().visibility)
+        assertEquals(0, parsed.document.lifelineDisplaySegments)
+        assertNull(parsed.document.themePresetName)
+    }
+
+    @Test
+    fun aLifelineWithADeclaredButEmptyTagIdsListBackfillsToItsOwnName() {
+        // Exactly the shape a manual lifeline created before the item-8 merge fix left on disk:
+        // the key is present, but decodes to an empty set. An absent key still falls back to the
+        // lifeline's id (unchanged legacy behaviour) — only a genuinely empty DECODED set heals to
+        // the name, per lifelineFromMap's own doc.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(
+                mapOf("id" to "manual-1", "name" to "Manual Actor", "tagIds" to emptyList<String>(), "ordinal" to 0),
+                mapOf("id" to "no-key", "name" to "No Key", "ordinal" to 1),
+            ),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertEquals(setOf("Manual Actor"), parsed.document.lifelines.single { it.id == "manual-1" }.tagIds)
+        assertEquals(setOf("no-key"), parsed.document.lifelines.single { it.id == "no-key" }.tagIds)
     }
 }

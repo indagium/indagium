@@ -12,6 +12,8 @@ import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.toPngBytes
+import com.indagium.model.AppSettings
+import com.indagium.model.ThemePreset
 import kotlin.math.roundToInt
 
 // ── Compose theme -> diagram3 raster theme, and a cache in front of layout + render ────────────
@@ -83,6 +85,34 @@ fun ThemeColors.toSeq3RasterTheme(): Seq3RasterTheme = Seq3RasterTheme(
     warn = warn.toSeq3Argb(),
     warnBg = warnBg.toSeq3Argb(),
 )
+
+// ── WP4: per-diagram theme resolution ───────────────────────────────────────────────────────
+//
+// [Seq3Document.themePresetName] (null = "follow the app theme") is a bare String, not
+// model.ThemePreset — diagram3 deliberately never imports model (Seq3Model.kt's own note on the
+// same trade-off for Seq3Lifeline.kind's Char). This is the one boundary function every colour
+// source in the app must call through: the Compose canvas, the headless raster export, and the
+// note previews (AnnotationPanel) all resolve THIS document's theme rather than assuming the
+// ambient app theme, so a document saved with its own theme renders identically everywhere it is
+// drawn — on screen, in an exported PNG, and in a note preview.
+
+/**
+ * [themePresetName] overload: usable by callers that only have the raw stored name in hand (e.g.
+ * AnnotationPanel's bounded note-summary scan), without needing a full [Seq3Document]. The
+ * `runCatching`/`getOrNull` guard is load-bearing, not defensive noise: [themeColors] is
+ * `THEME_PALETTES.getValue(preset)` (`Theme.kt:208`) and `getValue` THROWS on a missing key, so a
+ * document saved with a preset name a later build renamed would crash on open without it.
+ */
+fun resolveSeq3ThemeColors(themePresetName: String?, settings: AppSettings): ThemeColors =
+    themePresetName
+        ?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
+        ?.let(::themeColors)
+        ?: themeColors(settings.theme)
+
+/** [Seq3Document] overload — the one named in the WP4 plan. Delegates to the [String] overload
+ *  above so both entry points share the exact same fallback logic. */
+fun resolveSeq3ThemeColors(document: Seq3Document, settings: AppSettings): ThemeColors =
+    resolveSeq3ThemeColors(document.themePresetName, settings)
 
 /** Immutable display pair — mirrors [DiagramDisplay]: the [bitmap] is cached beside [rendered] so
  *  the canvas can draw the exact raster it hit-tests against, without a PNG encode/decode round trip. */

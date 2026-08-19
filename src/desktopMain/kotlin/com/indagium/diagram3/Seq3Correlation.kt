@@ -114,3 +114,69 @@ fun hasSharedCorrelationToken(current: LogEntry, previous: LogEntry?): Boolean =
     previous != null &&
         deltaMillis(previous.ts, current.ts)?.let { abs(it) <= SEQ3_CORRELATION_MAX_GAP_MS } == true &&
         sharedCorrelationToken(previous.msg, current.msg) != null
+
+// ── Callback / listener registration evidence ───────────────────────────────────────────────
+//
+// A fourth, independent signal for `Seq3Generator.inferTarget`: "tag X registered a callback
+// earlier in the scanned range" plus "the candidate line is itself callback-shaped" is real
+// evidence that a call landed at X, even though neither a thread handoff nor a correlation token
+// will ever connect the two lines — a listener registration and its eventual firing are, by
+// construction, dispatched on whatever thread/looper owns the event, essentially never the
+// caller's own thread, and never share an id either. Deliberately NOT matched by exact method
+// name between the two sides (`setOnClickListener` vs `onClick` happen to line up; `request
+// LocationUpdates` vs `onLocationChanged` do not) — real naming drifts too much for that to be a
+// reliable per-pair check. Instead this is folded into the SAME majority-vote gate every other
+// signal in `inferTarget` already goes through (see that function's own doc): a tag-level "has
+// this tag ever registered *a* callback earlier" plus "does this candidate line look like *a*
+// callback firing" is enough to cast one vote, and a wrong vote is diluted by the same
+// TARGET_CONFIDENCE_RATIO/MIN_TARGET_EVIDENCE_COUNT bar as thread/token evidence.
+
+private val REGISTER_METHOD_RE = Regex("""(?i)\bregister(\w*?)\s*\(""")
+private val ADD_LISTENER_METHOD_RE = Regex("""(?i)\badd(\w*?)Listener\w*\s*\(""")
+private val SUBSCRIBE_METHOD_RE = Regex("""(?i)\bsubscribe(?:To)?(\w*?)\s*\(""")
+private val SET_ON_LISTENER_METHOD_RE = Regex("""(?i)\bsetOn(\w+?)Listener\w*\s*\(""")
+
+/**
+ * Recognises a `register*`/`addListener*`/`subscribe*`/`setOn*Listener` call shape in [entry] and
+ * returns a normalized identifier for it (lowercased, non-alphanumerics stripped; `"callback"` as
+ * a fallback when the call names nothing descriptive, e.g. bare `addListener(cb)`), or null when
+ * the message does not look like a callback/listener registration at all. The identifier is
+ * returned for callers that want it (tests, future richer matching) but [inferTarget] itself only
+ * cares about non-null-ness — see this section's header for why exact cross-matching against
+ * [looksInboundCallback] is deliberately not attempted.
+ */
+fun isCallbackRegistration(entry: LogEntry): String? {
+    val msg = entry.msg
+    val match = REGISTER_METHOD_RE.find(msg)
+        ?: ADD_LISTENER_METHOD_RE.find(msg)
+        ?: SUBSCRIBE_METHOD_RE.find(msg)
+        ?: SET_ON_LISTENER_METHOD_RE.find(msg)
+        ?: return null
+    return normalizeCallbackIdentifier(match.groupValues[1]).ifEmpty { "callback" }
+}
+
+private fun normalizeCallbackIdentifier(raw: String): String = raw.lowercase().filter(Char::isLetterOrDigit)
+
+// Deliberately NOT `(?i)` on these two: an inline case-insensitive flag would also fold `[A-Z]`
+// to match a lowercase letter, silently losing the one signal these patterns actually rely on — a
+// genuine camelCase method-call shape (`onClick(`, `handleClick`), not just any word that happens
+// to start with "on"/"handle" ("only(", "handled", "Handlebar" must all stay unmatched).
+private val INBOUND_ON_METHOD_RE = Regex("""\bon[A-Z]\w*\s*\(""")
+private val INBOUND_HANDLE_METHOD_RE = Regex("""\bhandle[A-Z]\w*\b""")
+private val INBOUND_CALLBACK_WORD_RE = Regex("""(?i)\bcallback\b""")
+private val INBOUND_LISTENER_WORD_RE = Regex("""(?i)\b\w*listener\b""")
+
+/**
+ * Recognises an `onX(...)` / `handleX` / `callback` / `*Listener` message shape — the CALLEE side
+ * of an event dispatch, i.e. what a fired callback/listener typically logs. Deliberately loose
+ * (any one of the four shapes is independently sufficient) and deliberately returns only a
+ * [Boolean]: [inferTarget] only needs to know the CANDIDATE line looks like a fired callback, not
+ * which one — see this section's header.
+ */
+fun looksInboundCallback(entry: LogEntry): Boolean {
+    val msg = entry.msg
+    return INBOUND_ON_METHOD_RE.containsMatchIn(msg) ||
+        INBOUND_HANDLE_METHOD_RE.containsMatchIn(msg) ||
+        INBOUND_CALLBACK_WORD_RE.containsMatchIn(msg) ||
+        INBOUND_LISTENER_WORD_RE.containsMatchIn(msg)
+}

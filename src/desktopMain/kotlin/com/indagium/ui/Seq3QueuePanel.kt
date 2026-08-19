@@ -6,7 +6,7 @@ import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,8 +19,11 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -29,10 +32,13 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,6 +46,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
@@ -52,6 +59,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Note
@@ -65,6 +73,7 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
+import com.indagium.diagram3.seq3DisplayName
 import com.indagium.diagram3.seq3FilterCounts
 import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
@@ -72,6 +81,7 @@ import com.indagium.model.LogEntry
 import kotlinx.coroutines.delay
 import java.awt.Cursor as AwtCursor
 import java.util.UUID
+import kotlin.math.roundToInt
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Visibility
@@ -83,8 +93,48 @@ private const val ADD_ROW_RANGE_LIMIT = 2_000
 private const val SEQ3_QUEUE_DOUBLE_CLICK_WINDOW_MS = 350L
 private const val SEQ3_LIFELINES_MIN_HEIGHT_DP = 120f
 private const val SEQ3_LIFELINES_MAX_HEIGHT_DP = 420f
+private const val SEQ3_ARTIFACTS_MIN_HEIGHT_DP = 100f
+private const val SEQ3_ARTIFACTS_MAX_HEIGHT_DP = 360f
 private val SEQ3_ACTION_BADGE_SIZE = 24.dp
 private val SEQ3_SUBMESSAGE_ROW_HEIGHT = 44.dp
+
+/** Diagram-wide default segments dropdown (SectionHeader's "names ▾") — every value is a concrete
+ *  `Int`, since [com.indagium.diagram3.Seq3Document.lifelineDisplaySegments] has no "inherit"
+ *  state of its own to offer. */
+internal val SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS: List<Pair<String, Int>> = listOf(
+    "Full name" to 0,
+    "Last segment" to 1,
+    "Last 2" to 2,
+    "Last 3" to 3,
+)
+
+/** Per-lifeline segments dropdown ("name ▾") — a superset of
+ *  [SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS] with the "inherit the diagram default" (`null`) choice
+ *  prepended, matching [com.indagium.diagram3.Seq3Lifeline.displaySegments]'s own null-means-inherit
+ *  contract. */
+internal val SEQ3_LIFELINE_DISPLAY_SEGMENT_OPTIONS: List<Pair<String, Int?>> = listOf("Diagram default" to null) +
+    SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS.map { (label, value) -> label to (value as Int?) }
+
+/** Label shown on a lifeline row's "name ▾" control — the inverse of picking an entry from
+ *  [SEQ3_LIFELINE_DISPLAY_SEGMENT_OPTIONS]. Falls back to "Last N" for any [segments] value a menu
+ *  entry doesn't cover (never thrown on a decoded note holding an unexpected number). */
+internal fun seq3LifelineDisplaySegmentsLabel(segments: Int?): String =
+    SEQ3_LIFELINE_DISPLAY_SEGMENT_OPTIONS.firstOrNull { it.second == segments }?.first ?: "Last ${segments ?: 0}"
+
+/** Label shown on the Lifelines section header's diagram-wide "names ▾" control — the
+ *  [SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS] counterpart of [seq3LifelineDisplaySegmentsLabel]. */
+internal fun seq3DocumentDisplaySegmentsLabel(segments: Int): String =
+    SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS.firstOrNull { it.second == segments }?.first ?: "Last $segments"
+
+/** Applies a horizontal splitter drag to the Fragments & notes section — the
+ *  [seq3ClampLifelinesHeight] counterpart for WP3 item 9's promoted section. Same inversion
+ *  rationale as that function's own doc. */
+internal fun seq3ClampArtifactsHeight(
+    current: Float,
+    delta: Float,
+    min: Float = SEQ3_ARTIFACTS_MIN_HEIGHT_DP,
+    max: Float = SEQ3_ARTIFACTS_MAX_HEIGHT_DP,
+): Float = (current - delta).coerceIn(min, max)
 
 private val MESSAGE_KIND_OPTIONS = listOf(
     Seq3Kind.CALL,
@@ -167,9 +217,6 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                 }
                 Seq3FilterChipsRow(view, counts)
                 Seq3FilterTextAndSortRow(view)
-                if (document.fragments.isNotEmpty() || document.notes.isNotEmpty()) {
-                    Seq3FragmentsAndNotesSection(state, session, view, document)
-                }
                 Box(Modifier.weight(1f)) {
                     LazyColumn(
                         Modifier.fillMaxSize().padding(end = 6.dp),
@@ -206,6 +253,23 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
             }
             Seq3LifelinesSection(state, session, view, lifelinesModifier)
         }
+        // Item 9 — promoted out of the Messages area (it used to render above the message
+        // LazyColumn) into its own top-level, independently collapsible/resizable section, same
+        // "own VDivider + own clamped height" shape as Lifelines above.
+        if (document.fragments.isNotEmpty() || document.notes.isNotEmpty()) {
+            if (view.messagesExpanded || view.lifelinesSectionOpen) {
+                VDivider { delta ->
+                    view.artifactsSectionHeightDp =
+                        seq3ClampArtifactsHeight(view.artifactsSectionHeightDp, delta)
+                }
+            }
+            val artifactsModifier = when {
+                !view.messagesExpanded && !view.lifelinesSectionOpen -> Modifier.weight(1f).fillMaxWidth()
+                view.artifactsExpanded -> Modifier.height(view.artifactsSectionHeightDp.dp).fillMaxWidth()
+                else -> Modifier.height(32.dp).fillMaxWidth()
+            }
+            Seq3FragmentsAndNotesSection(state, session, view, document, artifactsModifier)
+        }
     }
 }
 
@@ -219,10 +283,32 @@ private fun Seq3LifelinesSection(
     val tc = tc()
     val document = session.document
     val lifelines = remember(document) { document.lifelines.sortedBy { it.ordinal } }
+    val lifelineIds = remember(lifelines) { lifelines.map { it.id } }
     var addDialogOpen by remember(session.id) { mutableStateOf(false) }
     var editingId by remember(session.id) { mutableStateOf<String?>(null) }
     var editingText by remember(session.id) { mutableStateOf("") }
     var hint by remember(session.id) { mutableStateOf<String?>(null) }
+
+    // Drag-to-reorder (item 4, Variant B) — same state quintet/idioms as AnnotationPanel's own
+    // note-block drag (dragBlockId/dragOffsetY/justReleasedBlockId/liveVisualBlockIds +
+    // cumulativeBlockOffsets/blockOrderDuringDrag for the variable-row-height math, since a row
+    // with its merged-tag block expanded is taller than a plain row). Deliberately scoped to a
+    // dedicated "⠿" handle (Seq3LifelineRow's own dragHandleModifier param) rather than the whole
+    // row: a lifeline row now hosts two dropdowns and an inline rename field a whole-row gesture
+    // would fight — see AnnotationPanel.kt:479-485's own rationale, which applies identically here.
+    var dragId by remember(session.id) { mutableStateOf<String?>(null) }
+    var dragOffsetY by remember(session.id) { mutableStateOf(0f) }
+    var justReleasedId by remember(session.id) { mutableStateOf<String?>(null) }
+    var liveVisualIds by remember(session.id) { mutableStateOf(emptyList<String>()) }
+    val rowHeights = remember(session.id) { mutableStateMapOf<String, Float>() }
+    val rowDensity = LocalDensity.current.density
+
+    fun rowHeightOf(id: String): Float = rowHeights[id] ?: run {
+        val mergedTagCount = lifelines.firstOrNull { it.id == id }?.tagIds?.size ?: 1
+        val baseDp = 64f
+        val mergedBlockDp = if (mergedTagCount > 1) 20f + mergedTagCount * 24f else 0f
+        (baseDp + mergedBlockDp) * rowDensity
+    }
 
     LaunchedEffect(hint) {
         if (hint != null) {
@@ -234,8 +320,30 @@ private fun Seq3LifelinesSection(
         val validIds = lifelines.mapTo(hashSetOf()) { it.id }
         view.selectedLifelineIds = view.selectedLifelineIds.filterTo(linkedSetOf()) { it in validIds }
         if (view.selectedLifelineId !in validIds) view.selectedLifelineId = null
+        if (view.hoveredLifelineId !in validIds) view.hoveredLifelineId = null
         if (editingId !in validIds) editingId = null
     }
+    LaunchedEffect(lifelineIds, dragId, justReleasedId) {
+        if (shouldSyncSequenceVisualOrder(dragId, justReleasedId)) liveVisualIds = lifelineIds
+    }
+    LaunchedEffect(justReleasedId) {
+        if (justReleasedId != null) {
+            delay(120)
+            justReleasedId = null
+        }
+    }
+    val visualIds = liveVisualIds.takeIf { it.toSet() == lifelineIds.toSet() && it.size == lifelineIds.size } ?: lifelineIds
+    val currentVisualIds = rememberUpdatedState(visualIds)
+    val currentDragId = rememberUpdatedState(dragId)
+    // pointerInput below is keyed on lifeline.id alone (stable across reorders) so an in-progress
+    // drag isn't cancelled by the reorder it's causing — but that also means detectDragGestures'
+    // coroutine is never restarted after the first drag on a given row, so any plain `val` it
+    // closes over goes stale on every drag after the first. rememberUpdatedState keeps it reading
+    // the current order — same reasoning as AnnotationPanel's own `currentBlockIds`.
+    val currentLifelineIds = rememberUpdatedState(lifelineIds)
+    val targetOffsets = cumulativeBlockOffsets(visualIds, ::rowHeightOf)
+    val startOffsets = cumulativeBlockOffsets(lifelineIds, ::rowHeightOf)
+    val totalHeightPx = lifelineIds.sumOf { rowHeightOf(it).toDouble() }.toFloat()
 
     fun startRename(lifeline: Seq3Lifeline) {
         editingId = lifeline.id
@@ -249,25 +357,33 @@ private fun Seq3LifelinesSection(
         editingId = null
     }
 
-    fun toggleSelection(lifelineId: String) {
-        view.selectedLifelineIds = if (lifelineId in view.selectedLifelineIds) {
-            view.selectedLifelineIds - lifelineId
-        } else {
-            view.selectedLifelineIds + lifelineId
-        }
-        view.selectedLifelineId = lifelineId
-        runCatching { view.focusRequester.requestFocus() }
-    }
-
     Column(modifier.fillMaxWidth()) {
         SectionHeader(
             title = "Lifelines · ${lifelines.size}",
             trailing = {
-                LabelIconButton(
-                    text = "+ lifeline",
-                    fontSize = 10.sp,
-                    onClick = { addDialogOpen = true },
-                )
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    // Diagram-wide default for every lifeline whose own "name ▾" is "Diagram
+                    // default" (item 3's second half) — otherwise that per-lifeline option would
+                    // have nothing to inherit.
+                    Seq3DropdownButton(
+                        label = "names: ${seq3DocumentDisplaySegmentsLabel(document.lifelineDisplaySegments)}",
+                        labelColor = tc.ts,
+                        fillColor = tc.p2,
+                        menuWidth = 150.dp,
+                    ) { close ->
+                        SEQ3_DOCUMENT_DISPLAY_SEGMENT_OPTIONS.forEach { (label, value) ->
+                            Seq3DropdownMenuItem(label, active = document.lifelineDisplaySegments == value) {
+                                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentDisplaySegments(value))
+                                close()
+                            }
+                        }
+                    }
+                    LabelIconButton(
+                        text = "+ lifeline",
+                        fontSize = 10.sp,
+                        onClick = { addDialogOpen = true },
+                    )
+                }
             },
             expanded = view.lifelinesExpanded,
             onToggle = { view.lifelinesExpanded = !view.lifelinesExpanded },
@@ -277,53 +393,110 @@ private fun Seq3LifelinesSection(
             Column(
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
             ) {
-                lifelines.forEach { lifeline ->
-                    Seq3LifelineRow(
-                        lifeline = lifeline,
-                        selected = lifeline.id in view.selectedLifelineIds,
-                        editing = editingId == lifeline.id,
-                        editingText = editingText,
-                        onToggleSelection = { toggleSelection(lifeline.id) },
-                        onEditingText = { editingText = it },
-                        onCommitRename = { commitRename(lifeline.id) },
-                        onCancelRename = { editingId = null },
-                        onRename = { startRename(lifeline) },
-                        onToggleVisibility = {
-                            state.seq3Sessions.applyCommand(
-                                session.id,
-                                Seq3Command.SetLifelineVisibility(
-                                    lifeline.id,
-                                    if (lifeline.visibility == Seq3Visibility.VISIBLE) Seq3Visibility.HIDDEN else Seq3Visibility.VISIBLE,
-                                ),
+                Box(Modifier.fillMaxWidth().heightIn(min = (totalHeightPx / rowDensity).dp)) {
+                    lifelines.forEach { lifeline ->
+                        key(lifeline.id) {
+                            val isDragging = dragId == lifeline.id
+                            val targetY = targetOffsets[lifeline.id] ?: 0f
+                            val pointerY = (startOffsets[lifeline.id] ?: 0f) + dragOffsetY
+                            val y = sequenceRenderY(
+                                isDragging = isDragging,
+                                isJustReleased = justReleasedId == lifeline.id,
+                                pointerY = pointerY,
+                                targetY = targetY,
+                                animatedY = targetY,
                             )
-                        },
-                        onRemove = {
-                            if (!state.seq3Sessions.applyCommand(session.id, Seq3Command.RemoveLifeline(lifeline.id))) {
-                                hint = "Reassign source messages before removing this lifeline"
-                            } else {
-                                view.selectedLifelineIds = view.selectedLifelineIds - lifeline.id
-                                if (view.selectedLifelineId == lifeline.id) view.selectedLifelineId = null
+                            val dragHandleModifier = Modifier.pointerInput(lifeline.id) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        dragId = lifeline.id
+                                        dragOffsetY = 0f
+                                        justReleasedId = null
+                                        liveVisualIds = currentLifelineIds.value
+                                    },
+                                    onDrag = { change, delta ->
+                                        change.consume()
+                                        dragOffsetY += delta.y
+                                        liveVisualIds = blockOrderDuringDrag(
+                                            visibleIds = currentLifelineIds.value,
+                                            draggedId = dragId,
+                                            dragOffsetY = dragOffsetY,
+                                            heightOf = ::rowHeightOf,
+                                        )
+                                    },
+                                    onDragEnd = {
+                                        val releasedId = currentDragId.value ?: lifeline.id
+                                        val releasedOrder = currentVisualIds.value
+                                        if (releasedOrder != currentLifelineIds.value) {
+                                            state.seq3Sessions.applyCommand(session.id, Seq3Command.ReorderLifelines(releasedOrder))
+                                        }
+                                        justReleasedId = releasedId
+                                        dragId = null
+                                        dragOffsetY = 0f
+                                    },
+                                    onDragCancel = {
+                                        dragId = null
+                                        dragOffsetY = 0f
+                                    },
+                                )
                             }
-                        },
-                        onMoveTagOut = { tagId ->
-                            val newId = "seq3-lifeline-${UUID.randomUUID()}"
-                            val applied = state.seq3Sessions.applyCommand(
-                                session.id,
-                                Seq3Command.SplitLifeline(
-                                    lifelineId = lifeline.id,
-                                    tagId = tagId,
-                                    newLifeline = Seq3Lifeline(
-                                        id = newId,
-                                        name = tagId,
-                                        tagIds = setOf(tagId),
-                                        ordinal = lifeline.ordinal + 1,
-                                        visibility = lifeline.visibility,
-                                    ),
-                                ),
-                            )
-                            if (!applied) hint = "This tag cannot be moved out"
-                        },
-                    )
+                            Box(
+                                Modifier.fillMaxWidth()
+                                    .offset { IntOffset(0, y.roundToInt()) }
+                                    .zIndex(if (isDragging) 1f else 0f)
+                                    .graphicsLayer {
+                                        if (isDragging) {
+                                            scaleX = 1.02f
+                                            scaleY = 1.02f
+                                        }
+                                    }
+                                    .onSizeChanged { size -> rowHeights[lifeline.id] = size.height.toFloat() }
+                                    .background(if (isDragging) tc.p else Color.Transparent),
+                            ) {
+                                Seq3LifelineRow(
+                                    state = state,
+                                    session = session,
+                                    view = view,
+                                    document = document,
+                                    lifeline = lifeline,
+                                    editing = editingId == lifeline.id,
+                                    editingText = editingText,
+                                    onEditingText = { editingText = it },
+                                    onCommitRename = { commitRename(lifeline.id) },
+                                    onCancelRename = { editingId = null },
+                                    onRename = { startRename(lifeline) },
+                                    onRemove = {
+                                        if (!state.seq3Sessions.applyCommand(session.id, Seq3Command.RemoveLifeline(lifeline.id))) {
+                                            hint = "Reassign source messages before removing this lifeline"
+                                        } else {
+                                            view.selectedLifelineIds = view.selectedLifelineIds - lifeline.id
+                                            if (view.selectedLifelineId == lifeline.id) view.selectedLifelineId = null
+                                        }
+                                    },
+                                    onMoveTagOut = { tagId ->
+                                        val newId = "seq3-lifeline-${UUID.randomUUID()}"
+                                        val applied = state.seq3Sessions.applyCommand(
+                                            session.id,
+                                            Seq3Command.SplitLifeline(
+                                                lifelineId = lifeline.id,
+                                                tagId = tagId,
+                                                newLifeline = Seq3Lifeline(
+                                                    id = newId,
+                                                    name = tagId,
+                                                    tagIds = setOf(tagId),
+                                                    ordinal = lifeline.ordinal + 1,
+                                                    visibility = lifeline.visibility,
+                                                ),
+                                            ),
+                                        )
+                                        if (!applied) hint = "This tag cannot be moved out"
+                                    },
+                                    dragHandleModifier = dragHandleModifier,
+                                    isDragging = isDragging,
+                                )
+                            }
+                        }
+                    }
                 }
                 val selected = lifelines.filter { it.id in view.selectedLifelineIds }
                 if (selected.size >= 2) {
@@ -372,6 +545,15 @@ private fun Seq3LifelinesSection(
                         Seq3Lifeline(
                             id = "seq3-lifeline-${UUID.randomUUID()}",
                             name = name,
+                            // Deliberately still empty, not e.g. setOf(name): `dispatchAddLifeline`
+                            // is the one place that owns "what a manual lifeline's represented tag
+                            // defaults to" (setOf(the TRIMMED name) — see its own doc), and it
+                            // trims `name` itself before deriving that default. Pre-filling
+                            // setOf(name) here with the untrimmed dialog input would risk a
+                            // trim/tagIds mismatch dispatchAddLifeline's own trim-then-default
+                            // ordering avoids. Before this fix an empty set here meant the new
+                            // lifeline contributed nothing to a later merge's tagIds fold (item 8);
+                            // now it is defaulted downstream instead of left empty.
                             tagIds = emptySet(),
                             ordinal = ordinal,
                         ),
@@ -383,38 +565,84 @@ private fun Seq3LifelinesSection(
     }
 }
 
+/** Rebuilt against [Seq3QueueRow] (item 1) — same container recipe, checkbox gutter, two-line
+ *  title/controls body, and trailing state word. [dragHandleModifier] carries the section's
+ *  `detectDragGestures` (item 4); this composable itself owns no drag state. */
 @Composable
 private fun Seq3LifelineRow(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
     lifeline: Seq3Lifeline,
-    selected: Boolean,
     editing: Boolean,
     editingText: String,
-    onToggleSelection: () -> Unit,
     onEditingText: (String) -> Unit,
     onCommitRename: () -> Unit,
     onCancelRename: () -> Unit,
     onRename: () -> Unit,
-    onToggleVisibility: () -> Unit,
     onRemove: () -> Unit,
     onMoveTagOut: (String) -> Unit,
+    dragHandleModifier: Modifier,
+    isDragging: Boolean,
 ) {
     val tc = tc()
+    val selected = lifeline.id in view.selectedLifelineIds
+    val focused = view.selectedLifelineId == lifeline.id
+    val hovered = view.hoveredLifelineId == lifeline.id
+    val hidden = lifeline.visibility == Seq3Visibility.HIDDEN
+    val messageCount = document.messages.count { it.fromLifelineId == lifeline.id || it.toLifelineId == lifeline.id }
+    // Item 8's "manual" derivation, post-WP1: every manual lifeline now carries `tagIds =
+    // setOf(name)` (`dispatchAddLifeline`'s own doc), so `tagIds.isEmpty()` can no longer tell a
+    // manual lifeline apart from a generated one. What still can: a manual lifeline has never had
+    // any real log evidence attached to a message that references it (an authored/custom message
+    // is always added with `occurrences = emptyList()` — see `addSeq3CustomMessage`), while a
+    // generated lifeline always backs at least one message with real occurrences.
+    val hasOccurrenceBacking = document.messages.any {
+        (it.fromLifelineId == lifeline.id || it.toLifelineId == lifeline.id) && it.occurrences.isNotEmpty()
+    }
+    val displayName = seq3DisplayName(lifeline.name, lifeline.displaySegments, document.lifelineDisplaySegments)
+
+    fun toggleChecked() {
+        view.selectedLifelineIds = if (lifeline.id in view.selectedLifelineIds) {
+            view.selectedLifelineIds - lifeline.id
+        } else {
+            view.selectedLifelineIds + lifeline.id
+        }
+        runCatching { view.focusRequester.requestFocus() }
+    }
+
     Column(
         Modifier.fillMaxWidth()
             .clip(CORNER_SM)
-            .background(if (selected) tc.sl else Color.Transparent, CORNER_SM)
-            .then(if (selected) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
+            .background(
+                when {
+                    focused -> tc.abg
+                    selected -> tc.sl
+                    hovered -> tc.hv
+                    else -> Color.Transparent
+                },
+                CORNER_SM,
+            )
+            .then(if (focused) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
             .drawBehind {
                 if (selected) drawRect(color = tc.ac, size = Size(3.dp.toPx(), size.height))
             }
+            .onPointerEvent(PointerEventType.Enter) { view.hoveredLifelineId = lifeline.id }
+            .onPointerEvent(PointerEventType.Exit) { if (view.hoveredLifelineId == lifeline.id) view.hoveredLifelineId = null }
             .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
     ) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            CompactCheckBox(checked = selected, onToggle = onToggleSelection, modifier = Modifier.size(16.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                "⠿",
+                color = tc.td,
+                fontSize = 12.sp,
+                modifier = dragHandleModifier.padding(top = 2.dp)
+                    .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+            )
+            Box(Modifier.width(16.dp).padding(top = 2.dp)) {
+                Seq3RowCheckbox(checked = selected) { toggleChecked() }
+            }
             if (editing) {
                 InlineField(
                     value = editingText,
@@ -426,44 +654,111 @@ private fun Seq3LifelineRow(
                 SquareIconButton("✓", fontSize = 11.sp, onClick = onCommitRename, size = 20.dp)
                 SquareIconButton("×", fontSize = 13.sp, onClick = onCancelRename, size = 20.dp)
             } else {
-                Column(Modifier.weight(1f)) {
-                    AppText(
-                        lifeline.name,
-                        color = if (lifeline.visibility == Seq3Visibility.VISIBLE) tc.tx else tc.ts,
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                        textDecoration = if (lifeline.visibility == Seq3Visibility.HIDDEN) TextDecoration.LineThrough else null,
-                    )
-                    AppText(
-                        when {
-                            lifeline.tagIds.size > 1 -> "merged · ${lifeline.tagIds.size} tags"
-                            lifeline.tagIds.size == 1 -> lifeline.tagIds.first()
-                            else -> "manual lifeline"
-                        },
-                        color = tc.ts,
-                        fontSize = 9.sp,
-                        maxLines = 1,
-                    )
+                Column(
+                    Modifier.weight(1f).pointerInput(lifeline.id) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
+                                    event.changes.none { it.isConsumed }
+                                ) {
+                                    view.selectedLifelineId = lifeline.id
+                                    runCatching { view.focusRequester.requestFocus() }
+                                }
+                            }
+                        }
+                    },
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    // Title line — mirrors Seq3RowPatternLine: display name left, ×N right.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        AppText(
+                            displayName,
+                            color = if (!hidden) tc.tx else tc.ts,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            textDecoration = if (hidden) TextDecoration.LineThrough else null,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (messageCount > 0) AppText("×$messageCount", color = tc.ts, fontSize = 10.sp)
+                    }
+                    // Controls line — mirrors Seq3MessageControlsLine: every control at the shared
+                    // 24dp badge size, contentPadding 0, CORNER_SM shape.
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ToolbarBtn(
+                            label = if (hidden) "Show lifeline" else "Hide lifeline",
+                            icon = if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
+                            showLabel = false,
+                            tooltip = if (hidden) "Show lifeline" else "Hide lifeline",
+                            active = hidden,
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = {
+                                state.seq3Sessions.applyCommand(
+                                    session.id,
+                                    Seq3Command.SetLifelineVisibility(
+                                        lifeline.id,
+                                        if (hidden) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                                    ),
+                                )
+                            },
+                        )
+                        ToolbarBtn(
+                            label = "✎",
+                            tooltip = "Rename lifeline",
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = onRename,
+                        )
+                        Seq3DropdownButton(
+                            label = seq3LifelineDisplaySegmentsLabel(lifeline.displaySegments),
+                            labelColor = tc.ts,
+                            fillColor = tc.p2,
+                            menuWidth = 150.dp,
+                            fixedHeight = SEQ3_ACTION_BADGE_SIZE,
+                        ) { close ->
+                            SEQ3_LIFELINE_DISPLAY_SEGMENT_OPTIONS.forEach { (label, value) ->
+                                Seq3DropdownMenuItem(label, active = lifeline.displaySegments == value) {
+                                    state.seq3Sessions.applyCommand(session.id, Seq3Command.SetLifelineDisplaySegments(lifeline.id, value))
+                                    close()
+                                }
+                            }
+                        }
+                        Seq3DropdownButton(
+                            label = lifeline.kind.name.lowercase(),
+                            labelColor = tc.ts,
+                            fillColor = tc.p2,
+                            menuWidth = 110.dp,
+                            fixedHeight = SEQ3_ACTION_BADGE_SIZE,
+                        ) { close ->
+                            Seq3LifelineKind.entries.forEach { kind ->
+                                Seq3DropdownMenuItem(kind.name.lowercase(), active = kind == lifeline.kind) {
+                                    state.seq3Sessions.applyCommand(session.id, Seq3Command.SetLifelineKind(lifeline.id, kind))
+                                    close()
+                                }
+                            }
+                        }
+                        ToolbarBtn(
+                            label = "×",
+                            tooltip = "Remove lifeline",
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = onRemove,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        Seq3LifelineStateWord(hidden = hidden, mergedCount = lifeline.tagIds.size, manual = !hasOccurrenceBacking)
+                    }
                 }
-                ToolbarBtn(
-                    label = if (lifeline.visibility == Seq3Visibility.HIDDEN) "Show lifeline" else "Hide lifeline",
-                    icon = if (lifeline.visibility == Seq3Visibility.HIDDEN) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
-                    showLabel = false,
-                    tooltip = if (lifeline.visibility == Seq3Visibility.HIDDEN) "Show lifeline" else "Hide lifeline",
-                    active = lifeline.visibility == Seq3Visibility.HIDDEN,
-                    modifier = Modifier.size(22.dp),
-                    contentPadding = PaddingValues(0.dp),
-                    onClick = onToggleVisibility,
-                )
-                SquareIconButton("✎", fontSize = 10.sp, onClick = onRename, size = 22.dp)
-                SquareIconButton("×", fontSize = 14.sp, onClick = onRemove, size = 22.dp)
             }
         }
         if (!editing && lifeline.tagIds.size > 1) {
             Column(
-                Modifier.fillMaxWidth().padding(start = 22.dp, top = 5.dp),
+                Modifier.fillMaxWidth().padding(start = 38.dp, top = 5.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 AppText("Merged lifelines", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.Medium)
@@ -488,6 +783,27 @@ private fun Seq3LifelineRow(
             }
         }
     }
+}
+
+/** [Seq3StateWord]'s lifeline counterpart — `hidden` / `merged · N` / `manual` / `auto`, in that
+ *  priority order (a hidden merged lifeline still reads "hidden", matching how a hidden message
+ *  reads "hidden" regardless of its own edited/needs-target state). */
+@Composable
+private fun Seq3LifelineStateWord(hidden: Boolean, mergedCount: Int, manual: Boolean) {
+    val tc = tc()
+    val (label, color) = when {
+        hidden -> "hidden" to tc.td
+        mergedCount > 1 -> "merged · $mergedCount" to tc.ac
+        manual -> "manual" to tc.ts
+        else -> "auto" to tc.ts
+    }
+    AppText(
+        label.uppercase(),
+        color = color,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        textDecoration = if (hidden) TextDecoration.LineThrough else null,
+    )
 }
 
 @Composable
@@ -1052,107 +1368,212 @@ private fun Seq3FragmentsAndNotesSection(
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     document: Seq3Document,
+    modifier: Modifier = Modifier,
 ) {
-    var expanded by remember(session.id) { mutableStateOf(false) }
     val total = document.fragments.size + document.notes.size
-    Column(Modifier.fillMaxWidth()) {
+    Column(modifier.fillMaxWidth()) {
         SectionHeader(
             title = "Fragments & notes · $total",
-            expanded = expanded,
-            onToggle = { expanded = !expanded },
+            expanded = view.artifactsExpanded,
+            onToggle = { view.artifactsExpanded = !view.artifactsExpanded },
         )
-        if (expanded) {
-            document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
-            document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
+        if (view.artifactsExpanded) {
+            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
+                document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
+            }
         }
     }
 }
 
+/** Every message id a fragment's bracket spans — [Seq3Fragment.occurrenceRefs] takes precedence
+ *  for their own message ids over [Seq3Fragment.messageIds] (that field's own doc), so the two
+ *  are unioned rather than either read alone. Mirrors `Seq3Queue.kt`'s private
+ *  `applyGroup`'s own `referencedMessageIds` computation. */
+internal fun seq3FragmentMessageCount(fragment: Seq3Fragment): Int =
+    (fragment.messageIds + fragment.occurrenceRefs.map { it.messageId }).distinct().size
+
 @Composable
 private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, fragment: Seq3Fragment) {
-    val tc = tc()
     var editing by remember(fragment.id) { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-        AppText(fragment.kind.name.lowercase(), color = tc.td, fontSize = 10.sp)
-        Spacer(Modifier.width(6.dp))
-        if (editing) {
-            var text by remember(fragment.id) { mutableStateOf(fragment.label) }
+    var text by remember(fragment.id) { mutableStateOf(fragment.label) }
 
-            fun commit() {
-                state.seq3Sessions.applyCommand(
-                    session.id,
-                    Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentLabel(fragment.id, text)),
-                )
-                editing = false
-            }
-            InlineField(
-                value = text,
-                onValue = { text = it },
-                fontSize = 10.sp,
-                modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
-                onSubmit = ::commit,
-            )
-            SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
-            SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
-        } else {
-            Box(Modifier.weight(1f).pointerInput(fragment.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
-                AppText(fragment.label, color = tc.tx, fontSize = 10.sp, maxLines = 1)
-            }
-            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 18.dp)
-            SquareIconButton(
-                "×",
-                fontSize = 11.sp,
-                onClick = {
-                    state.seq3Sessions.applyCommand(
-                        session.id,
-                        Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteFragment(fragment.id)),
-                    )
-                },
-                size = 18.dp,
-            )
-        }
+    fun commit() {
+        state.seq3Sessions.applyCommand(
+            session.id,
+            Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentLabel(fragment.id, text)),
+        )
+        editing = false
     }
+    Seq3ArtifactRow(
+        kindWord = fragment.kind.name.lowercase(),
+        label = fragment.label,
+        messageCount = seq3FragmentMessageCount(fragment),
+        hidden = fragment.visibility == Seq3Visibility.HIDDEN,
+        editing = editing,
+        editingText = text,
+        onEditingText = { text = it },
+        onCommitRename = ::commit,
+        onCancelRename = { editing = false },
+        onRename = { text = fragment.label; editing = true },
+        onToggleVisibility = {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(
+                    emptySet(),
+                    Seq3BulkAction.SetFragmentVisibility(
+                        fragment.id,
+                        if (fragment.visibility == Seq3Visibility.HIDDEN) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                    ),
+                ),
+            )
+        },
+        onRemove = {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteFragment(fragment.id)))
+        },
+        view = view,
+    )
 }
 
 @Composable
 private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, note: Seq3Note) {
-    val tc = tc()
     var editing by remember(note.id) { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
-        AppText("note", color = tc.td, fontSize = 10.sp)
-        Spacer(Modifier.width(6.dp))
-        if (editing) {
-            var text by remember(note.id) { mutableStateOf(note.text) }
+    var text by remember(note.id) { mutableStateOf(note.text) }
 
-            fun commit() {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(note.id, text)))
-                editing = false
-            }
-            InlineField(
-                value = text,
-                onValue = { text = it },
-                fontSize = 10.sp,
-                modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
-                onSubmit = ::commit,
+    fun commit() {
+        state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(note.id, text)))
+        editing = false
+    }
+    Seq3ArtifactRow(
+        kindWord = "note",
+        label = note.text,
+        messageCount = note.messageIds.distinct().size,
+        hidden = note.visibility == Seq3Visibility.HIDDEN,
+        editing = editing,
+        editingText = text,
+        onEditingText = { text = it },
+        onCommitRename = ::commit,
+        onCancelRename = { editing = false },
+        onRename = { text = note.text; editing = true },
+        onToggleVisibility = {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(
+                    emptySet(),
+                    Seq3BulkAction.SetNoteVisibility(
+                        note.id,
+                        if (note.visibility == Seq3Visibility.HIDDEN) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                    ),
+                ),
             )
-            SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
-            SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
-        } else {
-            Box(Modifier.weight(1f).pointerInput(note.id) { detectTapGestures(onDoubleTap = { editing = true }) }) {
-                AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 1)
+        },
+        onRemove = {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.id)))
+        },
+        view = view,
+    )
+}
+
+/** Shared row body for [Seq3FragmentRenameRow]/[Seq3NoteRenameRow] (item 9) — same container/
+ *  checkbox/title/controls recipe as [Seq3LifelineRow] and [Seq3QueueRow]. Neither fragments nor
+ *  notes have a bulk action to select FOR yet (unlike lifelines' Merge), so the checkbox here is a
+ *  plain per-row focus toggle scoped to this composable's own `remember` — it drives only this
+ *  row's own highlight, never a cross-row selection set. */
+@Composable
+private fun Seq3ArtifactRow(
+    kindWord: String,
+    label: String,
+    messageCount: Int,
+    hidden: Boolean,
+    editing: Boolean,
+    editingText: String,
+    onEditingText: (String) -> Unit,
+    onCommitRename: () -> Unit,
+    onCancelRename: () -> Unit,
+    onRename: () -> Unit,
+    onToggleVisibility: () -> Unit,
+    onRemove: () -> Unit,
+    view: Seq3ViewState,
+) {
+    val tc = tc()
+    var focused by remember { mutableStateOf(false) }
+    var hovered by remember { mutableStateOf(false) }
+    Column(
+        Modifier.fillMaxWidth()
+            .clip(CORNER_SM)
+            .background(if (focused) tc.abg else if (hovered) tc.hv else Color.Transparent, CORNER_SM)
+            .then(if (focused) Modifier.border(1.dp, tc.ac, CORNER_SM) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Box(Modifier.width(16.dp).padding(top = 2.dp)) {
+                Seq3RowCheckbox(checked = focused) { focused = !focused }
             }
-            SquareIconButton("✎", fontSize = 10.sp, onClick = { editing = true }, size = 18.dp)
-            SquareIconButton(
-                "×",
-                fontSize = 11.sp,
-                onClick = {
-                    state.seq3Sessions.applyCommand(
-                        session.id,
-                        Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.id)),
-                    )
-                },
-                size = 18.dp,
-            )
+            if (editing) {
+                InlineField(
+                    value = editingText,
+                    onValue = onEditingText,
+                    modifier = Modifier.weight(1f).height(24.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                    fontSize = 11.sp,
+                    onSubmit = onCommitRename,
+                )
+                SquareIconButton("✓", fontSize = 11.sp, onClick = onCommitRename, size = 20.dp)
+                SquareIconButton("×", fontSize = 13.sp, onClick = onCancelRename, size = 20.dp)
+            } else {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        Row(
+                            Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            AppText(kindWord, color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+                            AppText(
+                                label,
+                                color = if (!hidden) tc.tx else tc.ts,
+                                fontSize = 11.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textDecoration = if (hidden) TextDecoration.LineThrough else null,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        if (messageCount > 0) AppText("×$messageCount messages", color = tc.ts, fontSize = 10.sp)
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        ToolbarBtn(
+                            label = if (hidden) "Show" else "Hide",
+                            icon = if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
+                            showLabel = false,
+                            tooltip = if (hidden) "Show on canvas" else "Hide from canvas",
+                            active = hidden,
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = onToggleVisibility,
+                        )
+                        ToolbarBtn(
+                            label = "✎",
+                            tooltip = "Rename",
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = onRename,
+                        )
+                        Spacer(Modifier.weight(1f))
+                        ToolbarBtn(
+                            label = "×",
+                            tooltip = "Remove",
+                            contentPadding = PaddingValues(0.dp),
+                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                            shape = CORNER_SM,
+                            onClick = onRemove,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -1619,12 +2040,16 @@ private fun Seq3RowEndpointsLine(
     val tc = tc()
     val document = session.document
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-        Seq3EndpointChip(document, message.fromLifelineId) { lifelineId ->
+        // To is the primary endpoint (WP5): a log line usually means the emitting class is
+        // EXECUTING something it was asked to do, so the target is the interesting field — it gets
+        // the accent-filled chip. From (the tag the line was scanned under, always reliable) stays
+        // the plain secondary chip it always was.
+        Seq3EndpointChip(document, message.fromLifelineId, emphasized = false) { lifelineId ->
             state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetFrom(lifelineId)))
         }
         AppText("→", color = tc.td, fontSize = 10.sp)
         if (message.toLifelineId != null) {
-            Seq3EndpointChip(document, message.toLifelineId) { lifelineId ->
+            Seq3EndpointChip(document, message.toLifelineId, emphasized = true) { lifelineId ->
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetTo(lifelineId)))
             }
         } else if (message.kind != Seq3Kind.NOTE) {
@@ -1677,6 +2102,21 @@ private fun Seq3MessageControlsLine(
             },
         )
         Seq3MessageKindPicker(state, session, message, fixedHeight = SEQ3_ACTION_BADGE_SIZE)
+        // WP5: "the auto drawing can not find to/from normally" — a one-click fix for a
+        // wrongly-directed arrow instead of two dropdown round-trips (reassign From, reassign To).
+        // Disabled (not hidden, so the control never jumps around between rows) exactly when there
+        // is nothing to swap — see seq3CanSwapEndpoints's own doc.
+        ToolbarBtn(
+            label = "⇄",
+            tooltip = "Swap the from/to direction of this message",
+            enabled = seq3CanSwapEndpoints(message),
+            contentPadding = PaddingValues(0.dp),
+            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+            shape = CORNER_SM,
+            onClick = {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SwapEndpoints))
+            },
+        )
         if (pinnable.isNotEmpty()) {
             Seq3PinControls(state, session, message, pinnable)
         }
@@ -1746,10 +2186,19 @@ private fun Seq3MessageKindPicker(
 }
 
 @Composable
-private fun Seq3EndpointChip(document: Seq3Document, lifelineId: String, onReassign: (String) -> Unit) {
+private fun Seq3EndpointChip(document: Seq3Document, lifelineId: String, emphasized: Boolean = false, onReassign: (String) -> Unit) {
     val tc = tc()
     val name = document.lifelines.firstOrNull { it.id == lifelineId }?.name ?: lifelineId
-    Seq3DropdownButton(label = name, labelColor = tc.ts, fillColor = tc.p2, menuWidth = 150.dp) { close ->
+    // Emphasized (the To chip, WP5) reads as a permanently accent-filled control, the same
+    // always-filled recipe the "set target" warning chip below already uses for a semantic
+    // highlight riding on this same component (see Seq3DropdownButton's own doc on `alwaysFilled`).
+    Seq3DropdownButton(
+        label = name,
+        labelColor = if (emphasized) tc.ac else tc.ts,
+        fillColor = if (emphasized) tc.abg else tc.p2,
+        alwaysFilled = emphasized,
+        menuWidth = 150.dp,
+    ) { close ->
         document.lifelines.sortedBy { it.ordinal }.forEach { lifeline ->
             Seq3DropdownMenuItem(lifeline.name, active = lifeline.id == lifelineId) {
                 onReassign(lifeline.id)
@@ -1857,6 +2306,13 @@ private fun seq3MergeBackTarget(document: Seq3Document, message: Seq3Message): S
  *  is discarded) rather than reimplementing the tie rule, per this phase's brief. */
 internal fun seq3PinnableDirections(document: Seq3Document, messageId: String): Set<Seq3PinDirection> =
     Seq3PinDirection.entries.filterTo(linkedSetOf()) { direction -> nudgeSeq3OrderPin(document, messageId, direction).applied }
+
+/** Mirrors [Seq3BulkAction.SwapEndpoints]'s own eligibility filter exactly (a NOTE has no `to`; a
+ *  message with no target has nothing to swap FROM) — the WP5 `⇄` control is disabled, never
+ *  hidden, for the same rows the bulk action itself would leave untouched, so the control never
+ *  jumps around between rows as a selection changes kind/target. */
+internal fun seq3CanSwapEndpoints(message: Seq3Message): Boolean =
+    message.kind != Seq3Kind.NOTE && message.toLifelineId != null
 
 /** Non-null exactly when [message] is currently drawn as one collapsed/badged arrow (spec §04's
  *  third inset row line) — the same condition Seq3Layout's own `expandForLayout` uses for

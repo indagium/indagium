@@ -72,10 +72,12 @@ import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
+import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3FragmentBox
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Layout
 import com.indagium.diagram3.Seq3LifelineColumn
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3RowGeometry
@@ -85,6 +87,7 @@ import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.seq3ArrowStyle
 import com.indagium.diagram3.seq3Select
 import kotlin.math.max
 import kotlin.math.min
@@ -116,6 +119,13 @@ private const val PERCENT = 100
 internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, modifier: Modifier) {
     val tc = tc()
     val document = session.document
+    // WP4: the diagram's own content — canvas background, arrows, lifelines, fragments, notes,
+    // labels — resolves THIS document's theme (falling back to the ambient app theme when the
+    // document follows it), so it always agrees with the exported PNG and the note preview. Only
+    // genuinely chrome-level UI below (the zoom toolbar, status bar, context menu, inline editor
+    // popups, scrollbars) keeps reading the ambient [tc] instead — see Seq3CanvasContent's own
+    // call sites for exactly where that line is drawn.
+    val docTheme = resolveSeq3ThemeColors(document, state.settings)
     // Selecting an expanded queue occurrence must be observable even when that message is
     // currently collapsed on the canvas. This is a view-only expansion: the saved document keeps
     // its repeat policy, while the selected occurrence gets a real row to emphasize temporarily.
@@ -133,14 +143,14 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
         )
     }
     val layout = remember(layoutDocument) { Seq3RenderCache.layout(layoutDocument) }
-    Column(modifier.fillMaxSize().background(tc.bg)) {
+    Column(modifier.fillMaxSize().background(docTheme.bg)) {
         Box(Modifier.weight(1f).fillMaxWidth()) {
             if (layout.lifelines.isEmpty()) {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    AppText(if (session.generating) "Generating…" else "No lifelines to diagram", color = tc.ts, fontSize = 12.sp)
+                    AppText(if (session.generating) "Generating…" else "No lifelines to diagram", color = docTheme.ts, fontSize = 12.sp)
                 }
             } else {
-                Seq3CanvasContent(state, session, view, document, layout)
+                Seq3CanvasContent(state, session, view, document, layout, docTheme)
             }
         }
         Seq3CanvasStatusBar(state, session, document, view)
@@ -303,7 +313,14 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
 // ── Scrollable, zoomable, pointer-interactive content ──────────────────────────────────────────
 
 @Composable
-private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document, layout: Seq3Layout) {
+private fun Seq3CanvasContent(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    layout: Seq3Layout,
+    docTheme: ThemeColors,
+) {
     val tc = tc()
     val density = LocalDensity.current.density
     val hScroll = rememberScrollState()
@@ -350,7 +367,7 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                         Canvas(Modifier.size(layout.width.dp, layout.height.dp)) {
                             drawSeq3Diagram(
                                 layout,
-                                tc,
+                                docTheme,
                                 view.hoveredMessageId,
                                 view.selection.selectedIds,
                                 view.focusedMessageId,
@@ -361,10 +378,10 @@ private fun Seq3CanvasContent(state: AppState, session: Seq3WorkspaceSession, vi
                                 dragPreview,
                             )
                         }
-                        layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment) }
-                        layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row) }
-                        layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note) }
-                        layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density) }
+                        layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment, docTheme) }
+                        layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row, docTheme) }
+                        layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
+                        layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density, docTheme) }
                     }
                 }
             }
@@ -952,21 +969,81 @@ private const val NOTE_FILL_ALPHA = 0.20f
 private const val ARROWHEAD_LEN_DP = 8f
 private const val ARROWHEAD_HALF_DP = 4f
 
+// Item 10 (WP2): the "reference" weight the caller's `strokeWidth` argument was always expressed
+// relative to BEFORE this rewrite — the call site (drawSeq3Diagram) still passes exactly
+// `1.5.dp.toPx()` normal / `2.dp.toPx()` emphasized, unchanged, so this is what makes THIS
+// function's own re-derivation of that emphasis ratio agree with what the caller means by it.
+private const val ARROW_REFERENCE_WIDTH_DP = 1.5f
+
+// Seq3ArrowStyle.thin's own weight, one notch thinner than the reference above — mirrors
+// Seq3Raster's STROKE_THIN vs STROKE_THICK split (1f vs 1.6f) closely enough that RETURN/ASYNC
+// read visibly thinner than a CALL arrow on screen, matching the exported PNG.
+private const val ARROW_THIN_WIDTH_DP = 1f
+
+/**
+ * Item 10 (phase-5/WP2 fix): this used to always draw a solid line with a filled triangular head,
+ * never reading [Seq3ArrowRow.kind] at all — RETURN/ASYNC looked identical to CALL on screen while
+ * already differing in the exported PNG (Seq3Raster's `strokeFor`/`drawArrowhead` DID branch on
+ * kind). Now both renderers consume the exact same [seq3ArrowStyle] descriptor, so they can never
+ * drift apart again.
+ *
+ * [strokeWidth] is the caller's hover/selection EMPHASIS signal (`drawSeq3Diagram` still passes the
+ * same `1.5.dp.toPx()` / `2.dp.toPx()` pair it always did) — see [ARROW_REFERENCE_WIDTH_DP]'s own
+ * doc for how this function re-expresses it as a ratio and re-applies that ratio on top of THIS
+ * kind's own base weight, rather than discarding the caller's emphasis behaviour outright.
+ */
+/**
+ * Pure ratio math extracted out of [drawSeq3Arrow] so [Seq3CanvasTest] can pin it down without a
+ * live Compose `DrawScope`/`Density` — [emphasisWidth]/[referenceWidth]/[thinWidth] are meant to
+ * be called with values in the SAME unit (this file always passes already-`.dp.toPx()`-resolved
+ * pixels; the ratio itself is unit/density invariant, so a caller in a pure test can just as
+ * validly pass plain dp floats). Returns (line stroke width, open-head stroke width) in that same
+ * unit — see [drawSeq3Arrow]'s own doc for why the head width is always the UN-thinned reference
+ * width scaled by the emphasis ratio, even when the line itself draws thinner.
+ */
+internal fun seq3ArrowStrokeWidths(
+    kind: Seq3Kind,
+    emphasisWidth: Float,
+    referenceWidth: Float = ARROW_REFERENCE_WIDTH_DP,
+    thinWidth: Float = ARROW_THIN_WIDTH_DP,
+): Pair<Float, Float> {
+    val style = seq3ArrowStyle(kind)
+    val emphasisRatio = if (referenceWidth > 0f) emphasisWidth / referenceWidth else 1f
+    val baseWidth = if (style.thin) thinWidth else referenceWidth
+    val lineWidth = baseWidth * emphasisRatio
+    val headWidth = referenceWidth * emphasisRatio
+    return lineWidth to headWidth
+}
+
 private fun DrawScope.drawSeq3Arrow(row: Seq3ArrowRow, color: Color, strokeWidth: Float) {
+    val style = seq3ArrowStyle(row.kind)
+    val referenceWidthPx = ARROW_REFERENCE_WIDTH_DP.dp.toPx()
+    val thinWidthPx = ARROW_THIN_WIDTH_DP.dp.toPx()
+    val (lineWidth, headStrokeWidth) = seq3ArrowStrokeWidths(row.kind, strokeWidth, referenceWidthPx, thinWidthPx)
+
     val start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx())
     val end = Offset(row.toX.dp.toPx(), row.y.dp.toPx())
-    drawLine(color, start, end, strokeWidth = strokeWidth)
+    val pathEffect = style.dash?.let { dash -> PathEffect.dashPathEffect(dash.map { it.dp.toPx() }.toFloatArray()) }
+    drawLine(color, start, end, strokeWidth = lineWidth, pathEffect = pathEffect)
+
     val dir = if (row.toX >= row.fromX) 1f else -1f
     val headLen = ARROWHEAD_LEN_DP.dp.toPx()
     val headHalf = ARROWHEAD_HALF_DP.dp.toPx()
     val backX = end.x - dir * headLen
-    val head = Path().apply {
-        moveTo(end.x, end.y)
-        lineTo(backX, end.y - headHalf)
-        lineTo(backX, end.y + headHalf)
-        close()
+    if (style.filledHead) {
+        val head = Path().apply {
+            moveTo(end.x, end.y)
+            lineTo(backX, end.y - headHalf)
+            lineTo(backX, end.y + headHalf)
+            close()
+        }
+        drawPath(head, color)
+    } else {
+        // Open two-line head — never drawPath(head) for RETURN/ASYNC, matching Seq3Raster's own
+        // `drawArrowhead(filled = false)` two-stroke shape instead of a filled triangle.
+        drawLine(color, Offset(end.x, end.y), Offset(backX, end.y - headHalf), strokeWidth = headStrokeWidth)
+        drawLine(color, Offset(end.x, end.y), Offset(backX, end.y + headHalf), strokeWidth = headStrokeWidth)
     }
-    drawPath(head, color)
 }
 
 private fun DrawScope.drawSeq3DragPreview(
@@ -1023,8 +1100,13 @@ private fun DrawScope.drawSeq3SelfLoop(row: Seq3SelfLoopRow, color: Color) {
 // ── Text/badge/pill overlay composables — positioned from Seq3Layout's own boxes ──────────────
 
 @Composable
-private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, row: Seq3RowGeometry) {
-    val tc = tc()
+private fun Seq3RowOverlay(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    row: Seq3RowGeometry,
+    docTheme: ThemeColors,
+) {
     val emphasized = seq3RowIsEmphasized(
         row,
         view.hoveredMessageId,
@@ -1034,37 +1116,37 @@ private fun Seq3RowOverlay(state: AppState, session: Seq3WorkspaceSession, view:
         view.selectedOccurrenceEntryId,
         view.selectedCanvasRows,
     )
-    val labelColor = if (emphasized) tc.ac else tc.tx
+    val labelColor = if (emphasized) docTheme.ac else docTheme.tx
     when (row) {
         is Seq3ArrowRow -> {
             Seq3LabelText(row.labelBox, row.label, labelColor)
-            row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount) }
+            row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount, docTheme) }
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3SelfLoopRow -> {
             Seq3LabelText(row.labelBox, row.label, labelColor)
-            row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount) }
+            row.badgeBox?.let { Seq3BadgeChip(it, row.repeatCount, docTheme) }
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3UnresolvedStubRow -> {
-            Seq3LabelText(row.labelBox, row.label, tc.warn)
+            Seq3LabelText(row.labelBox, row.label, docTheme.warn)
             Box(
                 Modifier.offset(row.dropPill.x.dp, row.dropPill.y.dp).size(row.dropPill.width.dp, row.dropPill.height.dp)
-                    .background(tc.warnBg, RoundedCornerShape(50)).border(1.dp, tc.warn, RoundedCornerShape(50)),
+                    .background(docTheme.warnBg, RoundedCornerShape(50)).border(1.dp, docTheme.warn, RoundedCornerShape(50)),
                 contentAlignment = Alignment.Center,
-            ) { AppText("drop on a lifeline", color = tc.warn, fontSize = 9.sp, maxLines = 1) }
+            ) { AppText("drop on a lifeline", color = docTheme.warn, fontSize = 9.sp, maxLines = 1) }
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3MessageNoteRow -> {
             Box(Modifier.offset(row.box.x.dp, row.box.y.dp).size(row.box.width.dp, row.box.height.dp).padding(3.dp)) {
-                Column { row.lines.forEach { line -> AppText(line, color = tc.tx, fontSize = 10.sp, maxLines = 1) } }
+                Column { row.lines.forEach { line -> AppText(line, color = docTheme.tx, fontSize = 10.sp, maxLines = 1) } }
             }
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.lines.joinToString(" "), row.box)
         }
         is Seq3ElisionRow -> Box(
             Modifier.offset(row.box.x.dp, row.box.y.dp).size(row.box.width.dp, row.box.height.dp),
             contentAlignment = Alignment.Center,
-        ) { AppText("⋮ ×${row.elidedCount}", color = tc.td, fontSize = 9.sp) }
+        ) { AppText("⋮ ×${row.elidedCount}", color = docTheme.td, fontSize = 9.sp) }
     }
 }
 
@@ -1120,22 +1202,29 @@ internal fun seq3RowIsEmphasized(
     return row.messageId in selectedIds || row.messageId == focusedMessageId
 }
 
+// Item 2 (WP2 font-mismatch fix): Seq3Layout measures a message label at Seq3FontRole.LABEL's
+// basePointSize (12pt, Seq3AwtTextMetrics) — this used to draw at 11.sp, so the AWT-computed label
+// box (and any wrapping/ellipsizing sized against it) was measured at a size Compose never
+// actually painted at. Aligning the draw size to what layout measured is the fix (rather than
+// re-measuring in Compose), per this file's own header: layout is the single geometry source both
+// renderers must agree with, never re-derived downstream.
+private val SEQ3_LABEL_FONT_SIZE = Seq3FontRole.LABEL.basePointSize.sp
+
 @Composable
 private fun Seq3LabelText(box: Seq3Box, text: String, color: Color) {
     if (text.isEmpty()) return
     Box(Modifier.offset(box.x.dp, box.y.dp).size(box.width.dp, box.height.dp), contentAlignment = Alignment.CenterStart) {
-        AppText(text, color = color, fontSize = 11.sp, maxLines = 1)
+        AppText(text, color = color, fontSize = SEQ3_LABEL_FONT_SIZE, maxLines = 1)
     }
 }
 
 @Composable
-private fun Seq3BadgeChip(box: Seq3Box, count: Int) {
-    val tc = tc()
+private fun Seq3BadgeChip(box: Seq3Box, count: Int, docTheme: ThemeColors) {
     Box(
         Modifier.offset(box.x.dp, box.y.dp).size(box.width.dp, box.height.dp)
-            .background(tc.p2, RoundedCornerShape(3.dp)).border(1.dp, tc.br, RoundedCornerShape(3.dp)),
+            .background(docTheme.p2, RoundedCornerShape(3.dp)).border(1.dp, docTheme.br, RoundedCornerShape(3.dp)),
         contentAlignment = Alignment.Center,
-    ) { AppText("×$count", color = tc.ts, fontSize = 9.sp) }
+    ) { AppText("×$count", color = docTheme.ts, fontSize = 9.sp) }
 }
 
 @Composable
@@ -1144,8 +1233,8 @@ private fun Seq3FragmentLabelOverlay(
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     fragment: Seq3FragmentBox,
+    docTheme: ThemeColors,
 ) {
-    val tc = tc()
     var editing by remember(session.id, fragment.fragmentId) { mutableStateOf(false) }
     var text by remember(session.id, fragment.fragmentId, fragment.label) { mutableStateOf(fragment.label) }
     val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0).dp
@@ -1201,7 +1290,7 @@ private fun Seq3FragmentLabelOverlay(
             ) {
                 AppText(
                     displayedLabel,
-                    color = tc.seq1,
+                    color = docTheme.seq1,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -1320,8 +1409,8 @@ private fun Seq3NoteTextOverlay(
     session: Seq3WorkspaceSession,
     view: Seq3ViewState,
     note: Seq3NoteBox,
+    docTheme: ThemeColors,
 ) {
-    val tc = tc()
     val density = LocalDensity.current.density
     var editing by remember(session.id, note.noteId) { mutableStateOf(false) }
     var text by remember(session.id, note.noteId, note.text) { mutableStateOf(note.text) }
@@ -1365,8 +1454,8 @@ private fun Seq3NoteTextOverlay(
     Box(
         Modifier.offset(movedBox.x.dp, movedBox.y.dp)
             .size(movedBox.width.dp, movedBox.height.dp)
-            .background(tc.seq2.copy(alpha = NOTE_FILL_ALPHA), CORNER_SM)
-            .border(1.dp, tc.seq2, CORNER_SM)
+            .background(docTheme.seq2.copy(alpha = NOTE_FILL_ALPHA), CORNER_SM)
+            .border(1.dp, docTheme.seq2, CORNER_SM)
             .pointerInput(session.id, note.noteId, note.box) {
                 detectDragGestures(
                     onDrag = { change, dragAmount ->
@@ -1408,7 +1497,7 @@ private fun Seq3NoteTextOverlay(
                 }
             }
         } else {
-            AppText(note.text, color = tc.tx, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(4.dp))
+            AppText(note.text, color = docTheme.tx, fontSize = 10.sp, maxLines = 4, modifier = Modifier.padding(4.dp))
             Row(
                 Modifier.align(Alignment.TopEnd).padding(2.dp),
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
@@ -1420,7 +1509,7 @@ private fun Seq3NoteTextOverlay(
         Box(
             Modifier.align(Alignment.BottomEnd)
                 .size(12.dp)
-                .background(tc.seq2, RoundedCornerShape(topStart = 4.dp))
+                .background(docTheme.seq2, RoundedCornerShape(topStart = 4.dp))
                 .pointerInput(session.id, note.noteId, note.box) {
                     detectDragGestures(
                         onDrag = { change, dragAmount ->
@@ -1493,8 +1582,8 @@ private fun Seq3LifelineChip(
     layout: Seq3Layout,
     column: Seq3LifelineColumn,
     density: Float,
+    docTheme: ThemeColors,
 ) {
-    val tc = tc()
     val currentDocument = rememberUpdatedState(document)
     val currentLayout = rememberUpdatedState(layout)
     val currentColumn = rememberUpdatedState(column)
@@ -1502,14 +1591,40 @@ private fun Seq3LifelineChip(
     var renaming by remember(column.lifelineId) { mutableStateOf(false) }
     var renameText by remember(column.lifelineId) { mutableStateOf(column.label) }
     val selected = column.lifelineId == view.selectedLifelineId
+    val isActor = column.kind == Seq3LifelineKind.ACTOR
 
-    Column {
+    // A plain Box, NOT a Column: both children below use their OWN absolute `offset` (derived
+    // straight from column.header's unit-less coordinates), matching every other absolutely
+    // positioned overlay in this file. A Column would first stack them in flow order and then
+    // apply each child's offset ON TOP of that flow position, silently double-offsetting the
+    // second child — a Box's default per-child placement is (0,0), so two independently offset
+    // children never interfere with each other, the same way the sole pre-existing child never did.
+    Box {
+        if (isActor) {
+            Canvas(
+                Modifier
+                    .offset {
+                        IntOffset(
+                            (column.header.x * density + dragPx).roundToInt(),
+                            ((column.header.y - SEQ3_ACTOR_GLYPH_RESERVE_DP) * density).roundToInt(),
+                        )
+                    }
+                    .size(column.header.width.dp, SEQ3_ACTOR_GLYPH_RESERVE_DP.dp),
+            ) {
+                drawSeq3ActorGlyph(if (selected) docTheme.ac else docTheme.br)
+            }
+        }
         Box(
             Modifier
                 .offset { IntOffset((column.header.x * density + dragPx).roundToInt(), (column.header.y * density).roundToInt()) }
                 .size(column.header.width.dp, column.header.height.dp)
-                .background(if (selected) tc.abg else tc.p2, RoundedCornerShape(4.dp))
-                .border(1.dp, if (selected) tc.ac else tc.br, RoundedCornerShape(4.dp))
+                .let {
+                    // Item 2 (actor glyph): "a stick figure ABOVE THE NAME INSTEAD OF the rounded
+                    // chip" — an actor column skips the fill/border entirely rather than drawing
+                    // an (unwanted) box behind its name, mirroring Seq3Raster's paintActorGlyph.
+                    if (isActor) it else it.background(if (selected) docTheme.abg else docTheme.p2, RoundedCornerShape(4.dp))
+                        .border(1.dp, if (selected) docTheme.ac else docTheme.br, RoundedCornerShape(4.dp))
+                }
                 .pointerInput(session.id, column.lifelineId) {
                     detectDragGestures(
                         onDragStart = { view.selectedLifelineId = column.lifelineId },
@@ -1560,13 +1675,55 @@ private fun Seq3LifelineChip(
                     },
                 )
             } else {
-                AppText(
-                    column.label, color = if (selected) tc.ac else tc.tx, fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium, maxLines = 1,
-                )
+                // Item 2: labelLines is already wrapped/ellipsized by Seq3Layout against this exact
+                // header width — draw every line it produced, not just column.label's single-line
+                // raw name (see Seq3LifelineColumn's own doc on why the two are kept distinct).
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    column.labelLines.ifEmpty { listOf(column.label) }.forEach { line ->
+                        AppText(
+                            line, color = if (selected) docTheme.ac else docTheme.tx, fontSize = SEQ3_LIFELINE_FONT_SIZE,
+                            fontWeight = FontWeight.Medium, maxLines = 1,
+                        )
+                    }
+                }
             }
         }
     }
+}
+
+// Item 2 (WP2 font-mismatch fix): Seq3Layout measures a lifeline header at Seq3FontRole.LIFELINE's
+// basePointSize (13pt) — this chip used to draw at 11.sp, so header wrapping computed by layout
+// (against the 13pt-measured width) would not match what Compose actually painted. See
+// SEQ3_LABEL_FONT_SIZE's own doc for why aligning the draw size to the measured size, not the
+// other way around, is the fix.
+private val SEQ3_LIFELINE_FONT_SIZE = Seq3FontRole.LIFELINE.basePointSize.sp
+
+// Item 2 (actor glyph): how tall a band this file draws the stick figure within, above the name
+// box — mirrors Seq3Raster's own ACTOR_GLYPH_H + ACTOR_GLYPH_GAP (26 + 4), independently chosen
+// here (not read off Seq3Layout) for the same reason the raster's own constants aren't threaded
+// through Seq3Layout either: layout only reserves the SPACE (its ACTOR_HEADER_RESERVE, 34 units),
+// painting proportions inside that space are each renderer's own call — see Seq3LifelineColumn's
+// own doc. Kept comfortably under 34 so the glyph never crowds the name box above it.
+private const val SEQ3_ACTOR_GLYPH_RESERVE_DP = 30f
+
+/** Item 2 (actor glyph): a plain stick figure — circle head, line body/arms/legs — filling this
+ *  DrawScope's own size (set by the caller to [SEQ3_ACTOR_GLYPH_RESERVE_DP] tall, the column's
+ *  header width wide). Mirrors Seq3Raster's `paintActorGlyph` shape so the on-screen glyph and the
+ *  exported PNG's glyph read as the same figure, just drawn through two different graphics APIs. */
+private fun DrawScope.drawSeq3ActorGlyph(color: Color) {
+    val cx = size.width / 2
+    val glyphBottom = size.height
+    val headR = size.width / 8
+    val headCenterY = headR
+    val bodyTop = headCenterY + headR
+    val legSplit = glyphBottom - size.height * 0.28f
+    val armY = bodyTop + (legSplit - bodyTop) * 0.35f
+    val stroke = Stroke(width = 1.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+    drawCircle(color, radius = headR, center = Offset(cx, headCenterY), style = stroke)
+    drawLine(color, Offset(cx, bodyTop), Offset(cx, legSplit), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx - size.width / 4, armY), Offset(cx + size.width / 4, armY), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx, legSplit), Offset(cx - size.width / 4, glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx, legSplit), Offset(cx + size.width / 4, glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
 }
 
 // ── Pure helpers — testable without a composition (Seq3CanvasTest) ─────────────────────────────

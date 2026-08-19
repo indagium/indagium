@@ -136,8 +136,18 @@ fun applySeq3GuidedSelfCall(document: Seq3Document, messageId: String): Seq3Docu
  *  assigning it to [messageId]. Adding a candidate is deliberately separate from choosing a
  *  target: the guided pass must never create a new lifeline and silently retarget the current
  *  message before the user confirms that choice. A duplicate [Seq3Lifeline.id] is rejected
- *  (returns [document] unchanged) rather than silently overwriting an existing column. */
+ *  (returns [document] unchanged) rather than silently overwriting an existing column.
+ *
+ *  Same fix as `dispatchAddLifeline` (Seq3Commands.kt, item 8): a lifeline with no represented
+ *  tag contributes nothing to `mergeLifelines`'s `tagIds` fold, so it could never show as
+ *  "merged · N tags" nor be split back out (`dispatchSplitLifeline` requires `tagIds.size > 1`).
+ *  This was WP1's scope for [Seq3Command.AddLifeline] only; `ui.Seq3GuidedPass`'s "＋ New
+ *  lifeline" button builds its [Seq3Lifeline] with `tagIds = emptySet()` too and hits the exact
+ *  same bug, so the default belongs here, at the one place every caller of this command routes
+ *  through — not at that one call site. */
 fun applySeq3GuidedNewLifeline(document: Seq3Document, messageId: String, newLifeline: Seq3Lifeline): Seq3Document {
     if (document.messages.none { it.id == messageId } || document.lifelines.any { it.id == newLifeline.id }) return document
-    return document.copy(lifelines = document.lifelines + newLifeline)
+    val trimmedName = newLifeline.name.trim()
+    val tagIds = newLifeline.tagIds.ifEmpty { setOf(trimmedName) }
+    return document.copy(lifelines = document.lifelines + newLifeline.copy(name = trimmedName, tagIds = tagIds))
 }

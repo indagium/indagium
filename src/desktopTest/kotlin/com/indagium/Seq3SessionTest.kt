@@ -10,6 +10,7 @@ import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
+import com.indagium.model.ThemePreset
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibrarySnapshot
@@ -108,6 +109,64 @@ class Seq3SessionTest {
         val session = state.seq3Sessions.sessions.single()
         assertTrue(session.document.lifelines.size >= 2, "expected both tags to become lifelines")
         assertIs<Seq3Range.Ids>(session.range)
+    }
+
+    // ── WP4: per-diagram theme seeding ──────────────────────────────────────────────────────
+
+    @Test
+    fun beginSeedsANewDocumentsThemeFromTheSettingsDefault() {
+        val state = state()
+        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.DRACULA)
+
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+
+        assertEquals("DRACULA", state.seq3Sessions.sessions.single { it.id == id }.document.themePresetName)
+    }
+
+    @Test
+    fun beginLeavesANewDocumentsThemeNullWhenNoSettingsDefaultIsSet() {
+        val state = state()
+        assertNull(state.settings.diagramDefaultTheme, "fixture precondition: no default configured")
+
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+
+        assertNull(state.seq3Sessions.sessions.single { it.id == id }.document.themePresetName, "null must mean follow the app theme")
+    }
+
+    @Test
+    fun beginEditReopeningAnExistingDocumentKeepsItsOwnThemeRegardlessOfTheCurrentSettingsDefault() {
+        val state = state()
+        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.DRACULA)
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        // This document was created BEFORE the setting below was changed, exactly like a document
+        // saved by an earlier session — beginEdit must never retroactively apply today's default.
+        state.seq3Sessions.applyCommand(id, Seq3Command.SetDocumentTheme(ThemePreset.GRUVBOX.name))
+        val blockId = state.seq3Sessions.attachSnapshot(id)!!
+        state.seq3Sessions.close(id)
+        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.SOLARIZED_DARK)
+
+        val reopenedId = state.seq3Sessions.beginEdit("log", blockId)!!
+
+        assertEquals(
+            "GRUVBOX",
+            state.seq3Sessions.sessions.single { it.id == reopenedId }.document.themePresetName,
+            "reopening an existing document must keep the theme it was saved with, not the current Settings default",
+        )
+    }
+
+    @Test
+    fun aDocumentsThemeSurvivesAttachSaveAndReopenRoundTrip() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        state.seq3Sessions.applyCommand(id, Seq3Command.SetDocumentTheme(ThemePreset.TOKYO_NIGHT.name))
+        val blockId = state.seq3Sessions.attachSnapshot(id)!!
+        state.seq3Sessions.close(id)
+
+        val reopenedId = state.seq3Sessions.beginEdit("log", blockId)!!
+
+        assertEquals("TOKYO_NIGHT", state.seq3Sessions.sessions.single { it.id == reopenedId }.document.themePresetName)
     }
 
     @Test

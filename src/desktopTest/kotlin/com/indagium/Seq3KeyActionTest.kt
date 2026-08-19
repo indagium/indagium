@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.ui.Seq3KeyAction
+import com.indagium.ui.seq3ClampArtifactsHeight
 import com.indagium.ui.seq3ClampDividerWidth
 import com.indagium.ui.seq3ClampLifelinesHeight
 import com.indagium.ui.seq3KeyAction
@@ -213,5 +214,23 @@ class Seq3KeyActionTest {
     fun lifelinesHeightClampsAtBothBounds() {
         assertEquals(120f, seq3ClampLifelinesHeight(current = 130f, delta = 40f))
         assertEquals(420f, seq3ClampLifelinesHeight(current = 410f, delta = -40f))
+    }
+
+    // ── seq3ClampArtifactsHeight: WP3 item 9's Fragments & notes divider drag math ────────────
+
+    @Test
+    fun draggingTheArtifactsDividerUpGrowsTheSection() {
+        assertEquals(240f, seq3ClampArtifactsHeight(current = 200f, delta = -40f))
+    }
+
+    @Test
+    fun draggingTheArtifactsDividerDownShrinksTheSection() {
+        assertEquals(160f, seq3ClampArtifactsHeight(current = 200f, delta = 40f))
+    }
+
+    @Test
+    fun artifactsHeightClampsAtBothBounds() {
+        assertEquals(100f, seq3ClampArtifactsHeight(current = 110f, delta = 40f))
+        assertEquals(360f, seq3ClampArtifactsHeight(current = 350f, delta = -40f))
     }
 }

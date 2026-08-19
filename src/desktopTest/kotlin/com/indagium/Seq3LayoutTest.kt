@@ -9,6 +9,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -402,5 +403,127 @@ class Seq3LayoutTest {
         // the target scale instead, these would silently drift apart.
         assertEquals((layout.width * scale).roundToInt(), rendered.widthPx)
         assertEquals((layout.height * scale).roundToInt(), rendered.heightPx)
+    }
+
+    // ── WP2 item 5: fragment box must never intrude into the header band ───────────────────────
+
+    @Test
+    fun fragmentSpanningTheFirstMessageNeverIntrudesIntoTheHeaderBand() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.LOOP, "retry", listOf("m1"))),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val headerBandBottom = layout.lifelines.first().lifelineTop
+        val fragment = layout.fragments.single()
+
+        assertTrue(
+            fragment.box.y >= headerBandBottom,
+            "fragment top (${fragment.box.y}) must not rise above the header band bottom ($headerBandBottom)",
+        )
+    }
+
+    @Test
+    fun nestedFragmentSpanningTheFirstMessageAlsoNeverIntrudesIntoTheHeaderBand() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            fragments = listOf(
+                Seq3Fragment("outer", Seq3FragmentKind.LOOP, "retry", listOf("m1", "m2")),
+                Seq3Fragment("inner", Seq3FragmentKind.ALT, "maybe", listOf("m1")),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val headerBandBottom = layout.lifelines.first().lifelineTop
+
+        layout.fragments.forEach { fragment ->
+            assertTrue(
+                fragment.box.y >= headerBandBottom,
+                "fragment '${fragment.fragmentId}' top (${fragment.box.y}) must not rise above the header band bottom ($headerBandBottom)",
+            )
+        }
+    }
+
+    @Test
+    fun hiddenFragmentIsOmittedFromTheLayout() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.LOOP, "retry", listOf("m1"), visibility = Seq3Visibility.HIDDEN)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.fragments.isEmpty(), "a hidden fragment must not produce a drawn box")
+    }
+
+    @Test
+    fun hiddenNoteIsOmittedFromTheLayout() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            notes = listOf(Seq3Note("n1", "hidden note", listOf("m1"), visibility = Seq3Visibility.HIDDEN)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.notes.isEmpty(), "a hidden note must not produce a drawn box")
+    }
+
+    // ── WP2 item 2: multi-line headers + actor glyph ────────────────────────────────────────────
+
+    @Test
+    fun longDottedLifelineNameWrapsAndGrowsTheSharedHeaderHeight() {
+        val shortDoc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B")),
+        )
+        val shortLayout = layoutSeq3(shortDoc, opts())
+
+        val long = Seq3Lifeline("A", "com.mycompany.myapp.Example1", setOf("A"), 0)
+        val short = Seq3Lifeline("B", "B", setOf("B"), 1)
+        val longDoc = Seq3Document(lifelines = listOf(long, short), messages = listOf(message("m1", "A", "B")))
+        val longLayout = layoutSeq3(longDoc, opts())
+
+        val longCol = longLayout.lifelines.single { it.lifelineId == "A" }
+        val shortCol = longLayout.lifelines.single { it.lifelineId == "B" }
+        assertTrue(longCol.labelLines.size > 1, "a long dotted name must wrap into multiple lines; got ${longCol.labelLines}")
+        // headerHeight is ONE shared value: the short-named column's box must be exactly as tall
+        // as the wrapped long-named column's, even though its own label is one line.
+        assertEquals(shortCol.header.height, longCol.header.height, "every column's header box must share ONE height")
+        assertTrue(
+            longLayout.lifelines.first().lifelineTop > shortLayout.lifelines.first().lifelineTop,
+            "wrapping to multiple lines must grow the shared header band",
+        )
+    }
+
+    @Test
+    fun actorLifelineReservesExtraHeaderHeightForEveryColumn() {
+        val plainDoc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B")),
+        )
+        val plainLayout = layoutSeq3(plainDoc, opts())
+
+        val actor = lifeline("A", 0).copy(kind = Seq3LifelineKind.ACTOR)
+        val participant = lifeline("B", 1)
+        val actorDoc = Seq3Document(lifelines = listOf(actor, participant), messages = listOf(message("m1", "A", "B")))
+        val actorLayout = layoutSeq3(actorDoc, opts())
+
+        val actorCol = actorLayout.lifelines.single { it.lifelineId == "A" }
+        val participantCol = actorLayout.lifelines.single { it.lifelineId == "B" }
+        assertEquals(Seq3LifelineKind.ACTOR, actorCol.kind)
+        assertEquals(Seq3LifelineKind.PARTICIPANT, participantCol.kind)
+        // The reserve is document-wide (shared geometry), so the PARTICIPANT column also grows.
+        assertEquals(actorCol.header.height, participantCol.header.height)
+        assertTrue(
+            actorLayout.lifelines.first().lifelineTop > plainLayout.lifelines.first().lifelineTop,
+            "an ACTOR lifeline anywhere in the document must grow the shared header band for every column",
+        )
     }
 }

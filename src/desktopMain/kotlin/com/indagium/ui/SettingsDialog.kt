@@ -427,6 +427,30 @@ private fun AppearanceSettingsSection(state: AppState) {
         AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         ThemeGallery(state)
     }
+    // WP4: the Settings-level default for a NEWLY created sequence diagram (Seq3Session.begin
+    // seeds Seq3Document.themePresetName from this) — never affects an already-saved document,
+    // which keeps whatever theme it was opened with regardless of this setting. A compact
+    // dropdown, not a second 20-card ThemeGallery: this picks a DEFAULT, not the active app theme.
+    CompactSetting("Default diagram theme") {
+        val current = state.settings.diagramDefaultTheme
+        Seq3DropdownButton(
+            label = current?.label ?: "Follow app theme",
+            labelColor = tc.tx,
+            fillColor = tc.p2,
+            menuWidth = 190.dp,
+        ) { close ->
+            Seq3DropdownMenuItem("Follow app theme", active = current == null) {
+                state.updateSettings { it.copy(diagramDefaultTheme = null) }
+                close()
+            }
+            ThemePreset.entries.forEach { preset ->
+                Seq3DropdownMenuItem(preset.label, active = current == preset) {
+                    state.updateSettings { it.copy(diagramDefaultTheme = preset) }
+                    close()
+                }
+            }
+        }
+    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp),

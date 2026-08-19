@@ -2,13 +2,16 @@ package com.indagium
 
 import com.indagium.diagram3.extractCorrelationTokens
 import com.indagium.diagram3.hasSharedCorrelationToken
+import com.indagium.diagram3.isCallbackRegistration
 import com.indagium.diagram3.isThreadHandoff
+import com.indagium.diagram3.looksInboundCallback
 import com.indagium.diagram3.sharedCorrelationToken
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /** Mirrors `CorrelationTokenTest`'s own expectations for the ported extract/shared functions,
@@ -84,5 +87,43 @@ class Seq3CorrelationTest {
         assertFalse(hasSharedCorrelationToken(farMatch, previous), "beyond the gap bound must not correlate")
         assertFalse(hasSharedCorrelationToken(noToken, previous), "no shared token means no correlation")
         assertFalse(hasSharedCorrelationToken(closeMatch, null), "no previous entry means no correlation")
+    }
+
+    // ── WP5: isCallbackRegistration / looksInboundCallback ──────────────────────────────────────
+
+    @Test
+    fun callbackRegistrationRecognisesRegisterAddSubscribeAndSetOnListenerShapes() {
+        assertEquals("locationlistener", isCallbackRegistration(entry(1, "10:00:00.000", "A", "registerLocationListener(listener)")))
+        assertEquals("click", isCallbackRegistration(entry(2, "10:00:00.000", "A", "MyView: addClickListener(handler)")))
+        assertEquals("updates", isCallbackRegistration(entry(3, "10:00:00.000", "A", "EventBus: subscribeToUpdates(this)")))
+        assertEquals("click", isCallbackRegistration(entry(4, "10:00:00.000", "A", "Button: setOnClickListener(this)")))
+        // A registration call that names nothing descriptive still counts as a registration — the
+        // TAG registering *something* is the signal inferTarget needs, not the identifier text.
+        assertEquals("callback", isCallbackRegistration(entry(5, "10:00:00.000", "A", "Foo: addListener(cb)")))
+    }
+
+    @Test
+    fun callbackRegistrationRejectsUnregisterAndOrdinaryLogLines() {
+        assertNull(
+            isCallbackRegistration(entry(1, "10:00:00.000", "A", "unregisterListener(listener)")),
+            "un-registering must never be read as registering",
+        )
+        assertNull(isCallbackRegistration(entry(2, "10:00:00.000", "A", "Downloading update from server")))
+        assertNull(isCallbackRegistration(entry(3, "10:00:00.000", "A", "onClick(view)")), "a firing callback is not itself a registration")
+    }
+
+    @Test
+    fun looksInboundCallbackRecognisesOnXHandleXCallbackAndListenerShapes() {
+        assertTrue(looksInboundCallback(entry(1, "10:00:00.000", "A", "onClick(view)")))
+        assertTrue(looksInboundCallback(entry(2, "10:00:00.000", "A", "handleClickEvent(event)")))
+        assertTrue(looksInboundCallback(entry(3, "10:00:00.000", "A", "invoking registered callback now")))
+        assertTrue(looksInboundCallback(entry(4, "10:00:00.000", "A", "notifying scrollListener of change")))
+    }
+
+    @Test
+    fun looksInboundCallbackRejectsOrdinaryLogLines() {
+        assertFalse(looksInboundCallback(entry(1, "10:00:00.000", "A", "Downloading update from server")))
+        assertFalse(looksInboundCallback(entry(2, "10:00:00.000", "A", "Connected to 192.168.0.1 on port 8080")))
+        assertFalse(looksInboundCallback(entry(3, "10:00:00.000", "A", "Constructor initialized fields")))
     }
 }

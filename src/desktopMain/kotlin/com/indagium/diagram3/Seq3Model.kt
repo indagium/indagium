@@ -28,6 +28,12 @@ const val DEFAULT_SEQ3_REPEAT_THRESHOLD = 3
 
 // ── Lifelines ────────────────────────────────────────────────────────────────────────────────
 
+/** Which UML glyph a lifeline's header draws: the default rounded participant box, or a stick
+ *  figure for [ACTOR] (spec §07's "actor vs participant"). Purely a rendering/export-keyword
+ *  choice (Mermaid/PlantUML emit `actor` instead of `participant` — see Seq3Emitters, WP2) — it
+ *  never affects message routing, merge, or lifeline identity. */
+enum class Seq3LifelineKind { PARTICIPANT, ACTOR }
+
 /** One column on the canvas. A freshly generated lifeline owns exactly one raw log tag
  *  ([tagIds] is a singleton); more than one only after a user explicitly merges two lifelines
  *  that turned out to be the same actor under two tags (Seq3Queue, phase 2 — not built here). */
@@ -40,6 +46,17 @@ data class Seq3Lifeline(
     val ordinal: Int,
     /** Hiding a lifeline is independent from message authoring and keeps its represented tags. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+    /** Actor vs participant glyph — see [Seq3LifelineKind]'s own doc. Deliberately has NO
+     *  document-level default the way [displaySegments] does: every lifeline starts as
+     *  [Seq3LifelineKind.PARTICIPANT] independent of its siblings, because the point of ACTOR is
+     *  to call out the one or two human/external participants in an otherwise-participant
+     *  diagram, not to flip the whole diagram's default glyph. */
+    val kind: Seq3LifelineKind = Seq3LifelineKind.PARTICIPANT,
+    /** Per-lifeline override of how many trailing dot-separated segments of [name] the header
+     *  shows: null inherits [Seq3Document.lifelineDisplaySegments], 0 keeps the full name, and a
+     *  positive n keeps the last n segments (`com.mycompany.myapp.Example1` at n=1 -> `Example1`).
+     *  See [seq3DisplayName], the pure resolver both renderers and the panel call. */
+    val displaySegments: Int? = null,
 )
 
 // ── Match / capture ──────────────────────────────────────────────────────────────────────────
@@ -273,6 +290,10 @@ data class Seq3Fragment(
     val label: String,
     val messageIds: List<String>,
     val occurrenceRefs: List<Seq3OccurrenceRef> = emptyList(),
+    /** Same "drop the box/arrow but keep the row" meaning as [Seq3Message.visibility] — a hidden
+     *  fragment's bracket is skipped by [Seq3Layout]/export (WP2) but the fragment itself, and
+     *  every message it groups, is untouched. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct
@@ -286,6 +307,8 @@ data class Seq3Note(
     val y: Double? = null,
     val width: Double? = null,
     val height: Double? = null,
+    /** Same meaning as [Seq3Fragment.visibility] — see that field's own doc. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
 // ── Range ────────────────────────────────────────────────────────────────────────────────────
@@ -333,6 +356,16 @@ data class Seq3Document(
     /** The repeat policy newly generated messages start with; an already-[Seq3Authoring.EDITED]
      *  message's own [Seq3Message.repeat] is never overwritten by this. */
     val defaultRepeat: Seq3Repeat = Seq3Repeat.COLLAPSE_ABOVE,
+    /** Diagram-wide default for [Seq3Lifeline.displaySegments] when a lifeline doesn't set its
+     *  own override. 0 (full name, no shortening) matches every document's effective behaviour
+     *  before this field existed, so an old note decodes with identical rendering. */
+    val lifelineDisplaySegments: Int = 0,
+    /** Per-diagram theme override. A plain [String] holding a `model.ThemePreset.name`, never the
+     *  enum itself — this package must never import `com.indagium.model` (see this file's own
+     *  header on [Seq3Occurrence.level]'s bare `Char` for the same reasoning). Null means "follow
+     *  the app theme" (Settings' own diagram default, or the ambient theme if that too is unset);
+     *  resolving that chain is `ui.Seq3Theme.resolveSeq3ThemeColors`'s job (WP4), not this file's. */
+    val themePresetName: String? = null,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
@@ -363,6 +396,15 @@ data class Seq3GenerateOptions(
      *  that function's own doc. Off has zero cost (no engine constructed, no `.resolve()` call);
      *  on with no index supplied is equally a no-op, so this flag alone never triggers indexing. */
     val sourceTraceEnabled: Boolean = true,
+    /** Fourth target-inference signal (WP5, Seq3Generator.inferTarget): a candidate line that looks
+     *  like a fired callback (`Seq3Correlation.looksInboundCallback`) whose tag registered some
+     *  callback/listener earlier in the scanned range (`Seq3Correlation.isCallbackRegistration`).
+     *  Unlike [threadHandoffEnabled]/[correlationTokenEnabled] this needs no adjacency between the
+     *  two lines — a listener registration and its eventual firing are essentially never on the
+     *  same thread nor share an id, by construction — so it exists as its own toggle rather than
+     *  folding into either of those, and defaults on for the same reason they do: it only ever adds
+     *  one more vote to the same confidence-ratio gate, never a bypass of it. */
+    val callbackInferenceEnabled: Boolean = true,
 )
 
 // ── Note export representation ──────────────────────────────────────────────────────────────
