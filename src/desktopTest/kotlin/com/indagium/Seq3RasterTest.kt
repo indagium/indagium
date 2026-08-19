@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Kind
@@ -73,6 +74,21 @@ class Seq3RasterTest {
 
         assertTrue(rendered.widthPx > 0 && rendered.heightPx > 0, "a placeholder must still be a real, decodable image")
         assertTrue(rendered.toPngBytes().isNotEmpty())
+    }
+
+    @Test
+    fun aDocumentWithADelayRastersWithoutThrowingAndGrowsTallerThanWithoutIt() {
+        val withDelay = fixedDocument().copy(delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "a while later")))
+        val plainLayout = layout(fixedDocument())
+        val delayLayout = layout(withDelay)
+
+        assertTrue(delayLayout.height > plainLayout.height, "reserving the delay band must grow the diagram's own height")
+        val rendered = renderSeq3(delayLayout, Seq3RasterTheme.DEFAULT_LIGHT)
+        val bytes = rendered.toPngBytes()
+        assertTrue(bytes.isNotEmpty())
+        val decoded = ImageIO.read(ByteArrayInputStream(bytes))
+        assertEquals(rendered.widthPx, decoded.width)
+        assertEquals(rendered.heightPx, decoded.height, "the rastered image must actually be the taller size, not silently clipped back to the plain layout")
     }
 
     @Test

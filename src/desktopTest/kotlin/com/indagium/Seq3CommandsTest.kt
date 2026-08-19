@@ -20,6 +20,7 @@ import com.indagium.diagram3.undoSeq3Command
 import com.indagium.diagram3.withSeq3RegenDecision
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -422,6 +423,46 @@ class Seq3CommandsTest {
         assertNull(cleared.document.themePresetName)
     }
 
+    // ── WP10 (item 7): inline call numbering / timestamps toggles ──────────────────────────────
+
+    @Test
+    fun setShowSequenceNumbersTogglesAndIsUndoable() {
+        val doc = baseDocument()
+        assertFalse(doc.showSequenceNumbers)
+
+        val on = applySeq3Command(doc, Seq3Command.SetShowSequenceNumbers(true))
+        assertTrue(on.applied)
+        assertTrue(on.document.showSequenceNumbers)
+        assertEquals(doc, on.undo?.let(::undoSeq3Command))
+
+        val off = applySeq3Command(on.document, Seq3Command.SetShowSequenceNumbers(false))
+        assertTrue(off.applied)
+        assertFalse(off.document.showSequenceNumbers)
+    }
+
+    @Test
+    fun setShowSequenceNumbersIsANoOpWhenAlreadyAtTheRequestedValue() {
+        val doc = baseDocument()
+        val result = applySeq3Command(doc, Seq3Command.SetShowSequenceNumbers(false))
+        assertFalse(result.applied)
+        assertNull(result.undo)
+    }
+
+    @Test
+    fun setShowTimestampsTogglesAndIsUndoable() {
+        val doc = baseDocument()
+        assertFalse(doc.showTimestamps)
+
+        val on = applySeq3Command(doc, Seq3Command.SetShowTimestamps(true))
+        assertTrue(on.applied)
+        assertTrue(on.document.showTimestamps)
+        assertEquals(doc, on.undo?.let(::undoSeq3Command))
+
+        val off = applySeq3Command(on.document, Seq3Command.SetShowTimestamps(false))
+        assertTrue(off.applied)
+        assertFalse(off.document.showTimestamps)
+    }
+
     // ── WP1: SwapEndpoints (needed by WP5's ⇄ control) ──────────────────────────────────────────
 
     @Test
@@ -458,5 +499,45 @@ class Seq3CommandsTest {
         // m2 must be byte-identical to before, not just endpoint-unchanged: it must not even pick
         // up the EDITED stamp from being caught in the same selection.
         assertEquals(doc.messages.single { it.id == "m2" }, result.document.messages.single { it.id == "m2" })
+    }
+
+    // ── WP7 item 2: SetCaller (the stub-drop verb) ──────────────────────────────────────────────
+
+    @Test
+    fun setCallerAssignsTheDroppedLifelineAsFromAndTheMessagesPriorFromAsToInOneCommand() {
+        val doc = baseDocument() // m2: A -> null (unresolved stub, tag lifeline is A)
+        val result = applySeq3Command(doc, Seq3Command.Bulk(setOf("m2"), Seq3BulkAction.SetCaller("B")))
+        assertTrue(result.applied)
+        val m2 = result.document.messages.single { it.id == "m2" }
+        // "B" was dropped on -> B is now the CALLER; the tag's own prior from ("A") becomes the
+        // CALLEE — both endpoints set from a single command, so this is one undo step.
+        assertEquals("B", m2.fromLifelineId)
+        assertEquals("A", m2.toLifelineId)
+        assertEquals(Seq3Authoring.EDITED, m2.authoring)
+        assertEquals(doc, result.undo?.let(::undoSeq3Command), "one Bulk command must be one undo step")
+    }
+
+    @Test
+    fun setCallerDroppedBackOntoTheTagsOwnLifelineResolvesAsASelfCall() {
+        // Degenerate case (WP7 item 2's own decision): dropping the stub back onto the tag's OWN
+        // lifeline collapses from/to onto the same id — read as a genuine self-call rather than
+        // rejected, the same auto-flip SetFrom/SetTo already perform elsewhere.
+        val doc = baseDocument() // m2: A -> null
+        val result = applySeq3Command(doc, Seq3Command.Bulk(setOf("m2"), Seq3BulkAction.SetCaller("A")))
+        assertTrue(result.applied)
+        val m2 = result.document.messages.single { it.id == "m2" }
+        assertEquals("A", m2.fromLifelineId)
+        assertEquals("A", m2.toLifelineId)
+        assertEquals(Seq3Kind.SELF, m2.kind)
+        assertEquals(Seq3Authoring.EDITED, m2.authoring)
+    }
+
+    @Test
+    fun setCallerIsANoOpForAnUnknownLifeline() {
+        val doc = baseDocument()
+        val result = applySeq3Command(doc, Seq3Command.Bulk(setOf("m2"), Seq3BulkAction.SetCaller("NoSuchLifeline")))
+        assertFalseApplied(result)
+        assertEquals(doc, result.document)
+        assertNull(result.undo)
     }
 }

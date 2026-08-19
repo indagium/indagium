@@ -58,6 +58,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.DpOffset
@@ -69,6 +70,8 @@ import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Delay
+import com.indagium.diagram3.Seq3DelayBox
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
@@ -376,11 +379,16 @@ private fun Seq3CanvasContent(
                                 view.selectedCanvasRows,
                                 view.canvasSelectionRect,
                                 dragPreview,
+                                view.selectedFragmentId,
+                                view.hoveredFragmentId,
+                                view.selectedNoteId,
+                                view.hoveredNoteId,
                             )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment, docTheme) }
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row, docTheme) }
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
+                        layout.delays.forEach { delay -> Seq3DelayLabelOverlay(state, session, view, delay, docTheme) }
                         layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density, docTheme) }
                     }
                 }
@@ -400,6 +408,9 @@ private fun Seq3CanvasContent(
             )
             if (view.canvasContextMenuMessageId != null) {
                 Seq3CanvasContextMenu(state, session, view, document)
+            }
+            if (view.canvasEmptyContextMenuOpen) {
+                Seq3CanvasEmptyContextMenu(state, session, view, document)
             }
         }
     }
@@ -529,10 +540,26 @@ private fun seq3CanvasGestureModifier(
                                     view.focusedMessageId = hitRow.messageId
                                     view.canvasContextMenuMessageId = hitRow.messageId
                                     view.canvasContextMenuOccurrenceEntryId = hitRow.occurrenceEntryId
+                                    view.canvasEmptyContextMenuOpen = false
                                     view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
-                                    view.canvasContextMenuOffset = IntOffset(
-                                        change.position.x.roundToInt().coerceAtLeast(0),
-                                        change.position.y.roundToInt().coerceAtLeast(0),
+                                    view.canvasContextMenuOffset = seq3ContextMenuOffset(
+                                        change.position,
+                                        currentHScroll.value.value,
+                                        currentVScroll.value.value,
+                                    )
+                                    change.consume()
+                                } else {
+                                    // WP7 item 5 (canvas half): right-clicking empty background —
+                                    // no message row under the cursor — still opens a menu, just
+                                    // the "Add note here" one instead of the row menu.
+                                    view.canvasContextMenuMessageId = null
+                                    view.canvasContextMenuOccurrenceEntryId = null
+                                    view.canvasEmptyContextMenuOpen = true
+                                    view.canvasContextMenuCanvasPoint = Seq3Box(xUnits, yUnits, 0.0, 0.0)
+                                    view.canvasContextMenuOffset = seq3ContextMenuOffset(
+                                        change.position,
+                                        currentHScroll.value.value,
+                                        currentVScroll.value.value,
                                     )
                                     change.consume()
                                 }
@@ -558,6 +585,7 @@ private fun seq3CanvasGestureModifier(
                             childOwnsGesture = false
                             view.canvasContextMenuMessageId = null
                             view.canvasContextMenuOccurrenceEntryId = null
+                            view.canvasEmptyContextMenuOpen = false
                             downPosition = change.position
                             moved = false
                             pressWasMiddle = isMiddle
@@ -639,10 +667,13 @@ private fun seq3CanvasGestureModifier(
                                 currentDragPreviewCallback.value(null)
                                 dragEndpoint = null
                                 seq3NearestLifelineId(activeLayout, xUnits)?.let { targetLifelineId ->
-                                    val action = if (drag.side == Seq3EndpointSide.FROM) {
-                                        Seq3BulkAction.SetFrom(targetLifelineId)
-                                    } else {
-                                        Seq3BulkAction.SetTo(targetLifelineId)
+                                    val action = when {
+                                        // WP7 item 2: a stub drop sets BOTH endpoints (from =
+                                        // dropped lifeline, to = the tag's own prior from) in one
+                                        // command — see Seq3BulkAction.SetCaller's own doc.
+                                        drag.isStub -> Seq3BulkAction.SetCaller(targetLifelineId)
+                                        drag.side == Seq3EndpointSide.FROM -> Seq3BulkAction.SetFrom(targetLifelineId)
+                                        else -> Seq3BulkAction.SetTo(targetLifelineId)
                                     }
                                     currentState.value.seq3Sessions.applyCommand(
                                         currentSession.value.id,
@@ -862,19 +893,37 @@ private fun DrawScope.drawSeq3Diagram(
     selectedCanvasRows: Set<Seq3CanvasRowRef>,
     selectionRect: Seq3Box? = null,
     dragPreview: Seq3EndpointDragPreview? = null,
+    // WP7 item 7 (deferred from an earlier package, TODO(WP7) on Seq3ViewState): a Fragments &
+    // notes panel row's click/hover already writes these two id pairs — the canvas was the one
+    // missing consumer. Mirrors how a message row's hover/selection already emphasizes its own
+    // arrow (seq3RowIsEmphasized below) via the same "thicker accent stroke" visual language.
+    selectedFragmentId: String? = null,
+    hoveredFragmentId: String? = null,
+    selectedNoteId: String? = null,
+    hoveredNoteId: String? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
     layout.fragments.forEach { fragment ->
+        val emphasized = seq3FragmentIsEmphasized(fragment.fragmentId, selectedFragmentId, hoveredFragmentId)
         val topLeft = Offset(fragment.box.x.dp.toPx(), fragment.box.y.dp.toPx())
         val size = Size(fragment.box.width.dp.toPx(), fragment.box.height.dp.toPx())
         drawRect(color = tc.seq1.copy(alpha = FRAGMENT_WASH_ALPHA), topLeft = topLeft, size = size)
-        drawRect(color = tc.seq1, topLeft = topLeft, size = size, style = Stroke(width = 1.dp.toPx()))
+        drawRect(
+            color = if (emphasized) tc.ac else tc.seq1,
+            topLeft = topLeft, size = size,
+            style = Stroke(width = (if (emphasized) 2 else 1).dp.toPx()),
+        )
     }
     layout.notes.forEach { note ->
+        val emphasized = seq3NoteIsEmphasized(note.noteId, selectedNoteId, hoveredNoteId)
         val topLeft = Offset(note.box.x.dp.toPx(), note.box.y.dp.toPx())
         val size = Size(note.box.width.dp.toPx(), note.box.height.dp.toPx())
         drawRect(color = tc.seq2.copy(alpha = NOTE_FILL_ALPHA), topLeft = topLeft, size = size)
-        drawRect(color = tc.seq2, topLeft = topLeft, size = size, style = Stroke(width = 1.dp.toPx()))
+        drawRect(
+            color = if (emphasized) tc.ac else tc.seq2,
+            topLeft = topLeft, size = size,
+            style = Stroke(width = (if (emphasized) 2 else 1).dp.toPx()),
+        )
     }
     layout.lifelines.forEach { column ->
         drawLine(
@@ -929,6 +978,24 @@ private fun DrawScope.drawSeq3Diagram(
             }
             is Seq3ElisionRow -> Unit // text-only marker, drawn by the overlay composable
         }
+    }
+    // WP11: time-gap markers draw last, on top of every row/lifeline they cross — same "delays
+    // draw last" ordering as Seq3Raster.kt's own paintSeq3 (that file's own comment explains why:
+    // a delay is a break IN the timeline, so it should read as sitting above it, not buried under
+    // it). The label itself is a Compose Text overlay (Seq3DelayLabelOverlay, drawn in the parent
+    // Box alongside Seq3FragmentLabelOverlay/Seq3NoteTextOverlay), not drawn here — this DrawScope
+    // only paints the dashed divider line, exactly like it only paints arrows/lifelines and leaves
+    // every label to its own overlay composable.
+    val delayDash = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))
+    layout.delays.forEach { delay ->
+        val midY = (delay.box.y + delay.box.height / 2).dp.toPx()
+        drawLine(
+            color = tc.ts,
+            start = Offset(delay.box.x.dp.toPx(), midY),
+            end = Offset((delay.box.x + delay.box.width).dp.toPx(), midY),
+            strokeWidth = 1.dp.toPx(),
+            pathEffect = delayDash,
+        )
     }
     // Live feedback while an arrow-endpoint drag is in progress (item 13, phase-5 post-ship plan) —
     // drawn LAST so it sits on top of every row it might cross. The dragged row is omitted above,
@@ -1202,6 +1269,17 @@ internal fun seq3RowIsEmphasized(
     return row.messageId in selectedIds || row.messageId == focusedMessageId
 }
 
+/** WP7 item 7: the fragment counterpart of [seq3RowIsEmphasized] — a Fragments & notes panel row's
+ *  selection OR hover highlights that fragment's bracket on the canvas. Pure/trivial on purpose
+ *  (both id comparisons, no state reads) so it stays testable without a composition, matching every
+ *  other hit-test/emphasis helper in this file. */
+internal fun seq3FragmentIsEmphasized(fragmentId: String, selectedFragmentId: String?, hoveredFragmentId: String?): Boolean =
+    fragmentId == selectedFragmentId || fragmentId == hoveredFragmentId
+
+/** The note counterpart of [seq3FragmentIsEmphasized] — same contract. */
+internal fun seq3NoteIsEmphasized(noteId: String, selectedNoteId: String?, hoveredNoteId: String?): Boolean =
+    noteId == selectedNoteId || noteId == hoveredNoteId
+
 // Item 2 (WP2 font-mismatch fix): Seq3Layout measures a message label at Seq3FontRole.LABEL's
 // basePointSize (12pt, Seq3AwtTextMetrics) — this used to draw at 11.sp, so the AWT-computed label
 // box (and any wrapping/ellipsizing sized against it) was measured at a size Compose never
@@ -1210,11 +1288,23 @@ internal fun seq3RowIsEmphasized(
 // renderers must agree with, never re-derived downstream.
 private val SEQ3_LABEL_FONT_SIZE = Seq3FontRole.LABEL.basePointSize.sp
 
+// Item 9 (WP9 regression fix): Seq3AwtTextMetrics measures with `java.awt.Font(Font.SANS_SERIF, ...)`
+// (Seq3Raster.kt's fontFor). AppText's default fontFamily is FontFamily.Default, which Skia/Compose
+// resolves to whatever the platform's default UI font is — NOT necessarily the same face or the
+// same advance widths as AWT's SansSerif logical font. Aligning WP2's font *size* without also
+// aligning the font *family* still leaves the two renderers free to disagree on a string's painted
+// width, and a label box sized to the AWT measurement with zero slack (see Seq3Layout's
+// withMeasurementSlack) then clips the tail of the drawn text — this is exactly what made a real
+// message's parameter (e.g. `onScreenChanged: MEDIA`) vanish from the canvas while still showing up
+// correctly in the raster/PNG export (which paints with the very FontMetrics that measured it) and
+// in the Info panel (which reads the model directly, never the painted pixels).
+private val SEQ3_MEASURED_FONT_FAMILY = FontFamily.SansSerif
+
 @Composable
 private fun Seq3LabelText(box: Seq3Box, text: String, color: Color) {
     if (text.isEmpty()) return
     Box(Modifier.offset(box.x.dp, box.y.dp).size(box.width.dp, box.height.dp), contentAlignment = Alignment.CenterStart) {
-        AppText(text, color = color, fontSize = SEQ3_LABEL_FONT_SIZE, maxLines = 1)
+        AppText(text, color = color, fontSize = SEQ3_LABEL_FONT_SIZE, fontFamily = SEQ3_MEASURED_FONT_FAMILY, maxLines = 1)
     }
 }
 
@@ -1239,7 +1329,11 @@ private fun Seq3FragmentLabelOverlay(
     var text by remember(session.id, fragment.fragmentId, fragment.label) { mutableStateOf(fragment.label) }
     val headerHeight = fragment.box.height.coerceAtMost(28.0).coerceAtLeast(20.0).dp
     val kindLabel = fragment.kind.name.lowercase()
-    val displayedLabel = if (fragment.label.equals(kindLabel, ignoreCase = true)) {
+    // WP12: `hideKindLabel` lets a fragment show just its own label, with no "$kind: " prefix — a
+    // per-fragment presentation flag (Seq3Fragment.hideKindLabel's own doc explains why per-
+    // fragment rather than document-wide). This is canvas-only: the raster/Mermaid/PlantUML
+    // outputs already draw/emit the bare label, never this prefix, so nothing else reads this flag.
+    val displayedLabel = if (fragment.hideKindLabel || fragment.label.equals(kindLabel, ignoreCase = true)) {
         fragment.label
     } else {
         "$kindLabel: ${fragment.label}"
@@ -1252,6 +1346,11 @@ private fun Seq3FragmentLabelOverlay(
                 Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentLabel(fragment.fragmentId, text)),
             )
         }
+        editing = false
+    }
+
+    fun cancel() {
+        text = fragment.label
         editing = false
     }
 
@@ -1278,9 +1377,10 @@ private fun Seq3FragmentLabelOverlay(
                     fontSize = 10.sp,
                     modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
                     onSubmit = ::commit,
+                    onCancel = ::cancel,
                 )
                 SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
-                SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+                SquareIconButton("×", fontSize = 10.sp, onClick = ::cancel, size = 16.dp)
             }
         } else {
             Row(
@@ -1307,6 +1407,82 @@ private fun Seq3FragmentLabelOverlay(
                         )
                     },
                     size = 16.dp,
+                )
+            }
+        }
+    }
+}
+
+/** WP11 — the label overlay for one [Seq3DelayBox]. Mirrors [Seq3FragmentLabelOverlay]'s
+ *  edit/delete affordances (double-click to rename, always-visible × to remove) rather than
+ *  [Seq3NoteTextOverlay]'s drag/resize handling — a delay has no position of its own to drag, it
+ *  is always exactly where [Seq3DelayBox.box] (computed by `buildRows`, Seq3Layout.kt) says. */
+@Composable
+private fun Seq3DelayLabelOverlay(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    delay: Seq3DelayBox,
+    docTheme: ThemeColors,
+) {
+    var editing by remember(session.id, delay.delayId) { mutableStateOf(false) }
+    var text by remember(session.id, delay.delayId, delay.label) { mutableStateOf(delay.label) }
+
+    fun commit() {
+        if (text.isNotBlank()) {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetDelayLabel(delay.delayId, text)),
+            )
+        }
+        editing = false
+    }
+
+    Box(
+        Modifier.offset(delay.box.x.dp, delay.box.y.dp)
+            .width(delay.box.width.dp)
+            .height(delay.box.height.dp)
+            .pointerInput(session.id, delay.delayId) {
+                detectTapGestures(
+                    onTap = { seq3ClearSelection(view, clearFocus = true) },
+                    onDoubleTap = { editing = true },
+                )
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        if (editing) {
+            Row(
+                Modifier.background(docTheme.p, RoundedCornerShape(4.dp)).padding(horizontal = 3.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                InlineField(
+                    value = text,
+                    onValue = { text = it },
+                    fontSize = 10.sp,
+                    modifier = Modifier.width(90.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                    onSubmit = ::commit,
+                )
+                SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
+                SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+            }
+        } else {
+            Row(
+                Modifier.background(docTheme.p, RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                AppText(delay.label, color = docTheme.ts, fontSize = 10.sp, maxLines = 1)
+                SquareIconButton(
+                    "×",
+                    fontSize = 9.sp,
+                    onClick = {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteDelay(delay.delayId)),
+                        )
+                    },
+                    size = 14.dp,
                 )
             }
         }
@@ -1356,6 +1532,11 @@ private fun Seq3CanvasContextMenu(
                     placement = view.canvasContextMenuCanvasPoint,
                 )
             }
+            Seq3DropdownMenuItem("Insert delay after this") {
+                seq3InsertDelayAfter(state, session, messageId)
+                view.canvasContextMenuMessageId = null
+                view.canvasContextMenuOccurrenceEntryId = null
+            }
             if (seq3CanGroupSelection(document, view, selectedIds)) {
                 Seq3DropdownMenuItem("Group as loop") {
                     seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP)
@@ -1398,6 +1579,40 @@ private fun Seq3CanvasContextMenu(
                     view.canvasContextMenuMessageId = null
                     view.canvasContextMenuOccurrenceEntryId = null
                 }
+            }
+        }
+    }
+}
+
+/** WP7 item 5 (canvas half): the empty-canvas counterpart of [Seq3CanvasContextMenu] — opened by a
+ *  right-click that hit no message row (`seq3RowAt` returned null). Only "Add note here" today; a
+ *  future verb with no message-row precondition would belong here too. */
+@Composable
+private fun Seq3CanvasEmptyContextMenu(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+) {
+    if (!view.canvasEmptyContextMenuOpen) return
+    val placement = view.canvasContextMenuCanvasPoint
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = view.canvasContextMenuOffset,
+        onDismissRequest = { view.canvasEmptyContextMenuOpen = false },
+        properties = PopupProperties(focusable = true),
+    ) {
+        Column(
+            Modifier.width(170.dp)
+                .background(tc().p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc().br, RoundedCornerShape(7.dp))
+                .padding(vertical = 4.dp),
+        ) {
+            Seq3DropdownMenuItem("Add note here") {
+                // Explicit emptySet() rather than the canvas' current message selection — a
+                // free-floating note dropped on empty background is never meant to span whatever
+                // happened to be selected before the right-click.
+                seq3AddNote(state, session, view, document, emptySet(), placement = placement)
             }
         }
     }
@@ -1451,6 +1666,11 @@ private fun Seq3NoteTextOverlay(
         )
     }
 
+    fun cancelText() {
+        text = note.text
+        editing = false
+    }
+
     Box(
         Modifier.offset(movedBox.x.dp, movedBox.y.dp)
             .size(movedBox.width.dp, movedBox.height.dp)
@@ -1485,6 +1705,7 @@ private fun Seq3NoteTextOverlay(
                     modifier = Modifier.fillMaxWidth().weight(1f)
                         .onFocusChanged { view.textFieldFocused = it.hasFocus },
                     onSubmit = ::commitText,
+                    onCancel = ::cancelText,
                 )
                 // Reserve the resize handle's corner so the reject button remains a separate,
                 // clickable target while the note editor is open.
@@ -1493,7 +1714,7 @@ private fun Seq3NoteTextOverlay(
                     horizontalArrangement = Arrangement.spacedBy(2.dp, Alignment.End),
                 ) {
                     SquareIconButton("✓", fontSize = 10.sp, onClick = ::commitText, size = 16.dp)
-                    SquareIconButton("×", fontSize = 10.sp, onClick = { editing = false }, size = 16.dp)
+                    SquareIconButton("×", fontSize = 10.sp, onClick = ::cancelText, size = 16.dp)
                 }
             }
         } else {
@@ -1550,22 +1771,35 @@ private fun Seq3InlineLabelEditor(
     // each occurrence's captured parameter values distinct after a rename.
     var text by remember(messageId, occurrenceEntryId) { mutableStateOf(currentLabelTemplate) }
 
-    fun commit() {
-        state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.SetLabel(text)))
+    fun close() {
         view.editingLabelMessageId = null
         view.editingLabelOccurrenceEntryId = null
+    }
+
+    fun commit() {
+        state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(messageId), Seq3BulkAction.SetLabel(text)))
+        close()
+    }
+
+    fun cancel() {
+        text = currentLabelTemplate
+        close()
     }
     Row(
         Modifier.offset(box.x.dp, (box.y - LABEL_EDITOR_Y_OFFSET_DP).dp)
             .background(tc.p, CORNER_SM).border(1.dp, tc.ac, CORNER_SM).padding(2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        InlineField(value = text, onValue = { text = it }, fontSize = 10.sp, modifier = Modifier.width(140.dp), onSubmit = ::commit)
+        InlineField(
+            value = text,
+            onValue = { text = it },
+            fontSize = 10.sp,
+            modifier = Modifier.width(140.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+            onSubmit = ::commit,
+            onCancel = ::cancel,
+        )
         SquareIconButton("✓", fontSize = 10.sp, onClick = ::commit, size = 16.dp)
-        SquareIconButton("×", fontSize = 10.sp, onClick = {
-            view.editingLabelMessageId = null
-            view.editingLabelOccurrenceEntryId = null
-        }, size = 16.dp)
+        SquareIconButton("×", fontSize = 10.sp, onClick = ::cancel, size = 16.dp)
     }
 }
 
@@ -1592,6 +1826,22 @@ private fun Seq3LifelineChip(
     var renameText by remember(column.lifelineId) { mutableStateOf(column.label) }
     val selected = column.lifelineId == view.selectedLifelineId
     val isActor = column.kind == Seq3LifelineKind.ACTOR
+
+    // WP7 item 6: this used to be the only inline editor in the workspace with no accept/reject
+    // buttons, no blank-name guard, and — most importantly — no view.textFieldFocused wiring, so
+    // the single-letter key map (h/m/g/…) fired while typing a rename. Brought in line with the
+    // other three canvas editors (Seq3FragmentLabelOverlay is the model).
+    fun commitRename() {
+        if (renameText.isNotBlank()) {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.RenameLifeline(column.lifelineId, renameText))
+        }
+        renaming = false
+    }
+
+    fun cancelRename() {
+        renameText = column.label
+        renaming = false
+    }
 
     // A plain Box, NOT a Column: both children below use their OWN absolute `offset` (derived
     // straight from column.header's unit-less coordinates), matching every other absolutely
@@ -1666,14 +1916,22 @@ private fun Seq3LifelineChip(
             contentAlignment = Alignment.Center,
         ) {
             if (renaming) {
-                InlineField(
-                    value = renameText, onValue = { renameText = it }, fontSize = 10.sp,
-                    modifier = Modifier.padding(2.dp),
-                    onSubmit = {
-                        state.seq3Sessions.applyCommand(session.id, Seq3Command.RenameLifeline(column.lifelineId, renameText))
-                        renaming = false
-                    },
-                )
+                Row(
+                    Modifier.padding(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    InlineField(
+                        value = renameText,
+                        onValue = { renameText = it },
+                        fontSize = 10.sp,
+                        modifier = Modifier.width(100.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                        onSubmit = ::commitRename,
+                        onCancel = ::cancelRename,
+                    )
+                    SquareIconButton("✓", fontSize = 10.sp, onClick = ::commitRename, size = 16.dp)
+                    SquareIconButton("×", fontSize = 10.sp, onClick = ::cancelRename, size = 16.dp)
+                }
             } else {
                 // Item 2: labelLines is already wrapped/ellipsized by Seq3Layout against this exact
                 // header width — draw every line it produced, not just column.label's single-line
@@ -1682,7 +1940,7 @@ private fun Seq3LifelineChip(
                     column.labelLines.ifEmpty { listOf(column.label) }.forEach { line ->
                         AppText(
                             line, color = if (selected) docTheme.ac else docTheme.tx, fontSize = SEQ3_LIFELINE_FONT_SIZE,
-                            fontWeight = FontWeight.Medium, maxLines = 1,
+                            fontFamily = SEQ3_MEASURED_FONT_FAMILY, fontWeight = FontWeight.Medium, maxLines = 1,
                         )
                     }
                 }
@@ -1695,7 +1953,8 @@ private fun Seq3LifelineChip(
 // basePointSize (13pt) — this chip used to draw at 11.sp, so header wrapping computed by layout
 // (against the 13pt-measured width) would not match what Compose actually painted. See
 // SEQ3_LABEL_FONT_SIZE's own doc for why aligning the draw size to the measured size, not the
-// other way around, is the fix.
+// other way around, is the fix — and SEQ3_MEASURED_FONT_FAMILY's own doc (item 9) for why the
+// font *family* has to be aligned the same way, not just the size.
 private val SEQ3_LIFELINE_FONT_SIZE = Seq3FontRole.LIFELINE.basePointSize.sp
 
 // Item 2 (actor glyph): how tall a band this file draws the stick figure within, above the name
@@ -1739,6 +1998,14 @@ internal data class Seq3DragEndpoint(
     val side: Seq3EndpointSide,
     /** Stable row identity for repeated occurrences; null keeps compatibility for one-row/custom messages. */
     val occurrenceEntryId: Int? = null,
+    /** WP7 item 2: true when this endpoint was resolved from an unresolved stub rather than an
+     *  existing arrow/self-loop's own FROM/TO handle. [side] is FROM either way (a stub drag
+     *  resolves the CALLER), but release must still tell the two apart: a stub drop dispatches
+     *  [com.indagium.diagram3.Seq3BulkAction.SetCaller] (sets BOTH endpoints in one command),
+     *  never the plain [com.indagium.diagram3.Seq3BulkAction.SetFrom] used for an ordinary arrow's
+     *  FROM handle — that would leave `to` at null and the message would still read as
+     *  needs-target. */
+    val isStub: Boolean = false,
 )
 
 internal fun seq3PointInBox(box: Seq3Box, x: Double, y: Double): Boolean =
@@ -1763,8 +2030,14 @@ private fun seq3RowXDistance(row: Seq3RowGeometry, x: Double): Double = when (ro
         distanceToBox(row.labelBox, x),
     )
     is Seq3UnresolvedStubRow -> {
-        val rightEdge = row.dropPill.x + row.dropPill.width
-        if (x in row.fromX..rightEdge) 0.0 else min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - rightEdge))
+        // WP7 item 2: the stub (and its pill) now draw to the LEFT of its lifeline, so the pill's
+        // own LEFT edge (row.dropPill.x) — not its right edge — is the far/outer boundary of the
+        // touchable span; row.fromX (the lifeline) is the near one. Bracket with min/max rather
+        // than assume either order, so this stays correct regardless of which is numerically larger.
+        val pillFar = row.dropPill.x
+        val lo = min(row.fromX, pillFar)
+        val hi = max(row.fromX, pillFar)
+        if (x in lo..hi) 0.0 else min(kotlin.math.abs(x - row.fromX), kotlin.math.abs(x - pillFar))
     }
     is Seq3MessageNoteRow -> {
         val rightEdge = row.box.x + row.box.width
@@ -1818,8 +2091,9 @@ internal fun seq3SelfLoopEndpointAt(
 }
 
 /** Resolves a press at ([x], [y]) to an endpoint-drag start: either an existing arrow's FROM/TO
- *  handle, or an unresolved stub's whole line/pill (always the TO side — a stub has no target
- *  yet). Null anywhere else on the canvas, which lets the caller fall through to a plain click. */
+ *  handle, or an unresolved stub's whole line/pill (WP7 item 2: always the FROM side, with
+ *  [Seq3DragEndpoint.isStub] set — dragging a stub resolves its CALLER, not a target). Null
+ *  anywhere else on the canvas, which lets the caller fall through to a plain click. */
 internal fun seq3ResolveDragEndpoint(layout: Seq3Layout, x: Double, y: Double): Seq3DragEndpoint? {
     data class Candidate(val endpoint: Seq3DragEndpoint, val distance: Double)
     val candidates = layout.rows.mapNotNull { row ->
@@ -1837,10 +2111,18 @@ internal fun seq3ResolveDragEndpoint(layout: Seq3Layout, x: Double, y: Double): 
                 )
             }
             is Seq3UnresolvedStubRow -> {
+                // WP7 item 2: dragging a stub resolves the CALLER, so this is always a FROM
+                // endpoint (see Seq3DragEndpoint.isStub's own doc for why release must still tell
+                // it apart from an ordinary arrow's FROM handle). The pill sits to the LEFT of
+                // fromX now, so its LEFT edge (not right) is the far/outer boundary — see
+                // seq3RowXDistance's own doc on the same fix.
+                val pillFar = row.dropPill.x
+                val lo = min(row.fromX, pillFar)
+                val hi = max(row.fromX, pillFar)
                 val onStub = kotlin.math.abs(y - row.y) <= SEQ3_ROW_HIT_Y_TOLERANCE &&
-                    (x in row.fromX..(row.dropPill.x + row.dropPill.width) || seq3PointInBox(row.dropPill, x, y))
+                    (x in lo..hi || seq3PointInBox(row.dropPill, x, y))
                 if (onStub) Candidate(
-                    Seq3DragEndpoint(row.messageId, Seq3EndpointSide.TO, row.occurrenceEntryId),
+                    Seq3DragEndpoint(row.messageId, Seq3EndpointSide.FROM, row.occurrenceEntryId, isStub = true),
                     kotlin.math.abs(y - row.y),
                 ) else null
             }
@@ -1865,7 +2147,8 @@ internal fun seq3IsEmptyCanvasBackground(layout: Seq3Layout, x: Double, y: Doubl
         seq3ResolveDragEndpoint(layout, x, y) == null &&
         layout.lifelines.none { seq3PointInBox(it.header, x, y) } &&
         layout.notes.none { seq3PointInBox(it.box, x, y) } &&
-        layout.fragments.none { seq3PointInBox(it.box, x, y) }
+        layout.fragments.none { seq3PointInBox(it.box, x, y) } &&
+        layout.delays.none { seq3PointInBox(it.box, x, y) }
 
 /** Live feedback while dragging an arrow endpoint (item 13, phase-5 post-ship plan): the FIXED end
  *  of [endpoint]'s row (the one NOT being dragged), its shared y, the live cursor x, and whichever
@@ -1944,6 +2227,22 @@ internal fun seq3PointerPxToLayoutUnits(pointerPx: Float, density: Float, zoom: 
     val safeZoom = zoom.coerceAtLeast(0.001f)
     return pointerPx.toDouble() / safeDensity / safeZoom
 }
+
+/** WP7 item 4: `view.canvasContextMenuOffset` positions a `Popup` composed OUTSIDE the scrolled
+ *  diagram content (a sibling of the scroll containers, in `Seq3CanvasContent`'s own
+ *  `BoxWithConstraints`), while [change].position (the raw pointer event this file reads) is
+ *  measured INSIDE that scrolled content — i.e. relative to the full diagram, not the visible
+ *  viewport. On an unscrolled canvas the two coincide, but scroll away from the origin and the
+ *  menu drifts by exactly the scroll offset. This is the same "subtract scroll before using a raw
+ *  pointer pixel" correction every hit-test already gets via [seq3PointerPxToLayoutUnits] (which
+ *  needs no scroll subtraction of its own — layout coordinates are absolute diagram-space, not
+ *  viewport-anchored) and the pan-drag gesture's own `panViewportPosition` closure already applies
+ *  for exactly this reason. Clamped to non-negative so a menu opened right at the viewport edge
+ *  never requests a negative `Popup` offset. */
+internal fun seq3ContextMenuOffset(pointerPx: Offset, hScrollPx: Int, vScrollPx: Int): IntOffset = IntOffset(
+    (pointerPx.x - hScrollPx).roundToInt().coerceAtLeast(0),
+    (pointerPx.y - vScrollPx).roundToInt().coerceAtLeast(0),
+)
 
 internal fun seq3ZoomPercentLabel(zoom: Float): String = "${(zoom * PERCENT).roundToInt()}%"
 

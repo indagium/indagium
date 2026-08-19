@@ -1,11 +1,15 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Match
@@ -14,7 +18,9 @@ import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import kotlin.test.Test
@@ -167,8 +173,11 @@ class Seq3EmitterTest {
     // ── Fragments ────────────────────────────────────────────────────────────────────────────
 
     @Test
-    fun everyFragmentKindEmitsItsNativeKeywordAndABalancedEnd() {
-        Seq3FragmentKind.entries.forEach { kind ->
+    fun everyRealUmlFragmentKindEmitsItsNativeKeywordAndABalancedEnd() {
+        // GROUP is deliberately excluded here — it is not a UML operator and Mermaid has no bare
+        // "group" keyword at all (see groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml below,
+        // which is the dedicated test for its very different, per-dialect shape).
+        (Seq3FragmentKind.entries - Seq3FragmentKind.GROUP).forEach { kind ->
             val msg = message()
             val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
             val out = doc(listOf(msg), fragments = listOf(fragment)).toMermaid()
@@ -177,6 +186,46 @@ class Seq3EmitterTest {
             assertTrue(out.contains("    $keyword Retry\n"), "expected '$keyword Retry' in:\n$out")
             assertTrue(out.contains("    end\n"), "expected a balanced 'end' in:\n$out")
         }
+    }
+
+    @Test
+    fun criticalAndBreakEmitTheBareKeywordInBothDialects() {
+        listOf(Seq3FragmentKind.CRITICAL, Seq3FragmentKind.BREAK).forEach { kind ->
+            val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
+            val doc = doc(listOf(message()), fragments = listOf(fragment))
+            val keyword = kind.name.lowercase()
+
+            val mermaid = doc.toMermaid()
+            assertTrue(mermaid.contains("    $keyword Retry\n"), "expected '$keyword Retry' in Mermaid:\n$mermaid")
+            assertTrue(mermaid.contains("    end\n"), "expected a balanced 'end' in Mermaid:\n$mermaid")
+
+            val plantUml = doc.toPlantUml()
+            assertTrue(plantUml.contains("$keyword Retry\n"), "expected '$keyword Retry' in PlantUML:\n$plantUml")
+            assertTrue(plantUml.contains("end\n"), "expected a balanced 'end' in PlantUML:\n$plantUml")
+        }
+    }
+
+    @Test
+    fun groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml() {
+        // WP12: GROUP is not a UML operator — PlantUML invented `group <label>` for exactly this,
+        // but the bare word `group` is a Mermaid PARSE ERROR, so Mermaid fakes it with
+        // `rect rgb(...) … end` wrapping a `Note over` that carries the label. Both dialects are
+        // asserted here, for the SAME document, because that divergence is the entire point.
+        val fragment = Seq3Fragment("f1", Seq3FragmentKind.GROUP, "billing retry flow", listOf("m1"))
+        val document = doc(listOf(message()), fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertFalse(mermaid.contains("    group "), "bare 'group' is a Mermaid parse error; got:\n$mermaid")
+        assertTrue(mermaid.contains("    rect rgb("), "expected a 'rect rgb(...)' wrapper in Mermaid:\n$mermaid")
+        assertTrue(
+            mermaid.contains("    Note over A,B: billing retry flow\n"),
+            "expected the label to survive as a 'Note over' in Mermaid:\n$mermaid",
+        )
+        assertTrue(mermaid.contains("    end\n"), "expected the rect to close with a balanced 'end' in Mermaid:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("group billing retry flow\n"), "expected PlantUML's own 'group <label>' verbatim:\n$plantUml")
+        assertTrue(plantUml.contains("end\n"), "expected a balanced 'end' in PlantUML:\n$plantUml")
     }
 
     @Test
@@ -248,6 +297,55 @@ class Seq3EmitterTest {
 
         assertTrue(out.contains("Note over A,B: watch out here"), "got:\n$out")
         assertTrue(out.indexOf("step2") < out.indexOf("watch out here"), "the note must trail its last referenced message")
+    }
+
+    // ── Time-gap markers (WP11) — the two dialects genuinely differ; see Seq3Emitters.kt's own
+    //    "Time-gap markers" header for why this must never be "unified" into one shared branch. ──
+
+    @Test
+    fun plantUmlEmitsRealDelaySyntaxAndMermaidEmitsNoteOverForTheSameDocument() {
+        val messages = listOf(message(id = "m1", label = "step1"), message(id = "m2", label = "step2"))
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "5 minutes later")
+        val document = doc(messages).copy(delays = listOf(delay))
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("...5 minutes later...\n"), "PlantUML must use its own real delay syntax; got:\n$plantUml")
+
+        val mermaid = document.toMermaid()
+        assertFalse(mermaid.contains("..."), "Mermaid has no delay construct at all — must never leak PlantUML's syntax; got:\n$mermaid")
+        assertTrue(mermaid.contains("Note over A,B: 5 minutes later"), "Mermaid must fall back to a full-width Note over; got:\n$mermaid")
+    }
+
+    @Test
+    fun aHiddenDelayIsOmittedFromBothDialects() {
+        val messages = listOf(message(id = "m1", label = "step1"))
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "shouldn't appear", visibility = Seq3Visibility.HIDDEN)
+        val document = doc(messages).copy(delays = listOf(delay))
+
+        assertFalse(document.toMermaid().contains("shouldn't appear"))
+        assertFalse(document.toPlantUml().contains("shouldn't appear"))
+    }
+
+    @Test
+    fun aDelayDoesNotConsumeACallNumberInEitherDialect() {
+        val messages = listOf(
+            message(id = "m1", label = "first"),
+            message(id = "m2", label = "second"),
+        )
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "a pause")
+        val document = doc(messages).copy(delays = listOf(delay), showSequenceNumbers = true)
+
+        val mermaid = document.toMermaid()
+        // Mermaid escapes '#' (its own comment/directive delimiter) in every label it writes,
+        // exactly like theSamePrefixIsProducedByTheLayoutRowLabelAndBothEmittedDialects above —
+        // "[#1]" becomes "[#35;1]" in mermaid text, never a parity bug.
+        assertTrue(mermaid.contains("[#35;1] first"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("[#35;2] second"), "the delay in between must not consume #2, leaving second stuck at #3; got:\n$mermaid")
+        assertTrue(mermaid.contains("Note over A,B: a pause"), "the delay's own line must never itself carry a [#n] prefix; got:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("[#1] first"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("[#2] second"), "got:\n$plantUml")
     }
 
     // ── WP2: task 7 positive coverage ───────────────────────────────────────────────────────────
@@ -353,5 +451,214 @@ class Seq3EmitterTest {
         val out = doc(listOf(message()), notes = listOf(hiddenNote)).toMermaid()
 
         assertFalse(out.contains("hidden note text"), "a hidden note must not render; got:\n$out")
+    }
+
+    // ── Item 9 (WP9 regression fix) — same rule as Seq3LayoutTest, must agree with it exactly ────
+
+    @Test
+    fun collapsedRowWithThreeOrFewerDistinctValuesShowsACompactSummary() {
+        val occurrences = listOf(
+            occurrence(1, "onScreenChanged: MEDIA", mapOf("screen" to "MEDIA")),
+            occurrence(2, "onScreenChanged: HOME", mapOf("screen" to "HOME")),
+            occurrence(3, "onScreenChanged: MEDIA", mapOf("screen" to "MEDIA")),
+            occurrence(4, "onScreenChanged: HOME", mapOf("screen" to "HOME")),
+        )
+        val match = Seq3Match(tag = "A", template = "onScreenChanged: {screen}", captures = listOf(Seq3Capture("screen", Seq3CaptureSource.NAMED_VALUE)))
+        val out = doc(
+            listOf(
+                message(
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3, occurrences = occurrences,
+                    match = match, label = "onScreenChanged: {screen}",
+                ),
+            ),
+        ).toPlantUml()
+
+        assertTrue(
+            out.contains("onScreenChanged: MEDIA|onScreenChanged: HOME"),
+            "a collapsed row with <=3 distinct values must show a compact A|B|C summary, not a raw {token}; got:\n$out",
+        )
+        assertFalse(out.contains("{screen}"), "got:\n$out")
+    }
+
+    @Test
+    fun collapsedRowWithMoreThanThreeDistinctValuesKeepsTheRawTemplate() {
+        val occurrences = (1..5).map { i -> occurrence(i, "onScreenChanged: V$i", mapOf("screen" to "V$i")) }
+        val match = Seq3Match(tag = "A", template = "onScreenChanged: {screen}", captures = listOf(Seq3Capture("screen", Seq3CaptureSource.NAMED_VALUE)))
+        val out = doc(
+            listOf(
+                message(
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3, occurrences = occurrences,
+                    match = match, label = "onScreenChanged: {screen}",
+                ),
+            ),
+        ).toPlantUml()
+
+        assertTrue(
+            out.contains("onScreenChanged: {screen}"),
+            "above 3 distinct values, the raw {token} template is the honest 'many different values' signal; got:\n$out",
+        )
+    }
+
+    // ── WP10 (item 7): inline call numbering / timestamps ───────────────────────────────────────
+
+    @Test
+    fun showSequenceNumbersPrefixesEachDrawnCallAndSkipsHiddenMessages() {
+        val document = doc(
+            listOf(
+                message("m1", label = "first"),
+                message("m2", label = "hidden").copy(visibility = Seq3Visibility.HIDDEN),
+                message("m3", label = "second"),
+            ),
+        ).copy(showSequenceNumbers = true)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+
+        // Mermaid escapes '#' (its own entity-escape marker) in every label it writes, "[#1]"
+        // included — see mermaidEscapesReservedCharactersAndTurnsNewlinesIntoBr; "#35;" is that
+        // escape's literal replacement for '#'.
+        assertTrue(mermaid.contains(": [#35;1] first"), "got:\n$mermaid")
+        assertTrue(mermaid.contains(": [#35;2] second"), "a hidden message must not consume a number; got:\n$mermaid")
+        assertFalse(mermaid.contains("hidden"), "a hidden message must not appear at all; got:\n$mermaid")
+        assertTrue(plantUml.contains(": [#1] first"), "got:\n$plantUml")
+        assertTrue(plantUml.contains(": [#2] second"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun collapsedRepeatEmissionTakesExactlyOneSequenceNumber() {
+        val occurrences = (1..5).map { i -> occurrence(i, "repeated") }
+        val document = doc(
+            listOf(
+                message("m1", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3, occurrences = occurrences, label = "repeated"),
+                message("m2", label = "next"),
+            ),
+        ).copy(showSequenceNumbers = true)
+
+        val out = document.toMermaid()
+
+        // See showSequenceNumbersPrefixesEachDrawnCallAndSkipsHiddenMessages's own comment: mermaid
+        // escapes '#' to "#35;" in every label.
+        assertTrue(out.contains(": [#35;1] repeated ×5"), "the collapsed ×5 group must draw as ONE numbered call; got:\n$out")
+        assertTrue(out.contains(": [#35;2] next"), "the message after a collapsed row must be #2, not #6; got:\n$out")
+    }
+
+    @Test
+    fun showTimestampsPrefixesTheOccurrencesRawTimestamp() {
+        val document = doc(listOf(message("m1", label = "hello"))).copy(showTimestamps = true)
+
+        // PlantUML never escapes ':', so this is the literal, unescaped prefix — see this class's
+        // own parity test for why Mermaid's escaped form ("#58;" in place of ':') is expected, not
+        // a bug, and asserted separately there.
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains(": [10:00:00.000] hello"), "got:\n$plantUml")
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains(": [10#58;00#58;00.000] hello"), "got:\n$mermaid")
+    }
+
+    @Test
+    fun bothTogglesOffLeaveTheEmittedTextUnprefixed() {
+        val out = doc(listOf(message("m1", label = "plain"))).toMermaid()
+
+        assertTrue(out.contains(": plain"), "got:\n$out")
+        assertFalse(out.contains("[#"), "got:\n$out")
+    }
+
+    // ── Parity: layout row label and both emitted dialects must be byte-identical (WP10's whole
+    //    point is a single shared prefix helper — see Seq3LabelSummary.seq3PrefixedLabel). This
+    //    document's messages are already in chronological/declaration order, so Seq3Layout's
+    //    canvas-order numbering and Seq3Emitters' declaration-order numbering agree exactly — see
+    //    prefixSeq3EmissionLabels' own doc for why that agreement isn't guaranteed in general. ────
+
+    @Test
+    fun theSamePrefixIsProducedByTheLayoutRowLabelAndBothEmittedDialects() {
+        val occ1 = Seq3Occurrence(entryId = 1, timestampMillis = 1_000L, rawTimestamp = "10:00:01.000", pid = 0, tid = 0, level = 'I', text = "first")
+        val occ2 = Seq3Occurrence(entryId = 2, timestampMillis = 2_000L, rawTimestamp = "10:00:02.000", pid = 0, tid = 0, level = 'I', text = "second")
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "first"),
+            message("m2", occurrences = listOf(occ2), label = "second"),
+        )
+        val document = doc(messages).copy(showSequenceNumbers = true, showTimestamps = true)
+
+        val layout = layoutSeq3(document, Seq3LayoutOptions(FixedWidthMetrics()))
+        val layoutLabels = layout.rows.filterIsInstance<Seq3ArrowRow>().map { it.label }
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+
+        val expected = listOf("[#1] [10:00:01.000] first", "[#2] [10:00:02.000] second")
+        assertEquals(expected, layoutLabels, "canvas row labels")
+        // PlantUML's own escaping (backslash/quote/newline only) never touches this prefix, so the
+        // text is byte-identical to the canvas row label — the direct proof the shared helper
+        // (Seq3LabelSummary.seq3PrefixedLabel) produced the same string in both places.
+        expected.forEach { prefixed ->
+            assertTrue(plantUml.contains(": $prefixed"), "plantuml must carry the identical prefix; got:\n$plantUml")
+        }
+        // Mermaid escapes ':' (its own arrow-syntax delimiter) in EVERY label it writes — same
+        // treatment an ordinary user label with a colon in it already gets (see
+        // mermaidEscapesReservedCharactersAndTurnsNewlinesIntoBr above) — so a timestamp's colons
+        // are escaped too. The prefix's CONTENT (same number, same timestamp text) still came from
+        // the identical seq3PrefixedLabel call as the canvas row and PlantUML; only mermaid's
+        // mandatory post-hoc escaping differs the raw bytes, which is dialect-correct, not a
+        // parity bug.
+        expected.forEach { prefixed ->
+            // Order matters: escape '#' FIRST, exactly like mermaidEscape's own single left-to-right
+            // pass over the raw text — escaping ':' first would corrupt the "#58;" it just wrote by
+            // then also escaping ITS '#'.
+            val mermaidEscaped = prefixed.replace("#", "#35;").replace(":", "#58;")
+            assertTrue(mermaid.contains(": $mermaidEscaped"), "mermaid must carry the same prefix content, escaped; got:\n$mermaid")
+        }
+    }
+
+    // ── Task 0 (round-2 corrections plan, WP11 prerequisite): canvas and exported text must
+    //    agree on ROW ORDER, not just on the prefix string, for a document whose `messages` list
+    //    is deliberately NOT already in timestamp order — e.g. reachable via
+    //    `Seq3Command.MoveMessage`, or an authored message inserted with a `manualTimestampMillis`
+    //    that disagrees with its list position. Before the shared `seq3ChronologicalOrder` fix,
+    //    Seq3Emitters never re-sorted its own emissions at all, so this fixture would have drawn
+    //    "earlier" before "later" on the canvas while emitting "later" (declaration order) first
+    //    in Mermaid/PlantUML text, with a MISMATCHED `[#n]` on top of it. ─────────────────────────
+
+    @Test
+    fun canvasRowOrderAndEmittedTextOrderAgreeForAnOutOfOrderMessageList() {
+        val laterOcc = Seq3Occurrence(entryId = 1, timestampMillis = 5_000L, rawTimestamp = "10:00:05.000", pid = 0, tid = 0, level = 'I', text = "later")
+        val earlierOcc = Seq3Occurrence(entryId = 2, timestampMillis = 1_000L, rawTimestamp = "10:00:01.000", pid = 0, tid = 0, level = 'I', text = "earlier")
+        // Deliberately NOT time-ordered: "mLater" (ts=5000) is declared FIRST, "mEarlier" (ts=1000)
+        // SECOND — the reverse of true chronological order.
+        val messages = listOf(
+            message("mLater", occurrences = listOf(laterOcc), label = "later-thing"),
+            message("mEarlier", occurrences = listOf(earlierOcc), label = "earlier-thing"),
+        )
+        val document = doc(messages).copy(showSequenceNumbers = true)
+
+        val layout = layoutSeq3(document, Seq3LayoutOptions(FixedWidthMetrics()))
+        val canvasOrder = layout.rows.sortedBy { it.y }.map { it.messageId }
+        assertEquals(listOf("mEarlier", "mLater"), canvasOrder, "canvas must draw true chronological order, not declaration order")
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        val mermaidEarlierIdx = mermaid.indexOf("earlier-thing")
+        val mermaidLaterIdx = mermaid.indexOf("later-thing")
+        assertTrue(mermaidEarlierIdx in 0 until mermaidLaterIdx, "mermaid must emit the chronologically earlier arrow first; got:\n$mermaid")
+        val plantUmlEarlierIdx = plantUml.indexOf("earlier-thing")
+        val plantUmlLaterIdx = plantUml.indexOf("later-thing")
+        assertTrue(plantUmlEarlierIdx in 0 until plantUmlLaterIdx, "plantuml must emit the chronologically earlier arrow first; got:\n$plantUml")
+
+        // The call NUMBER must agree too, not just line order: #1 goes to the chronologically
+        // FIRST row (mEarlier) in canvas, Mermaid, AND PlantUML alike.
+        val layoutLabels = layout.rows.filterIsInstance<Seq3ArrowRow>().associateBy({ it.messageId }, { it.label })
+        assertEquals("[#1] earlier-thing", layoutLabels.getValue("mEarlier"))
+        assertEquals("[#2] later-thing", layoutLabels.getValue("mLater"))
+        // Mermaid escapes '#' in every label (see aDelayDoesNotConsumeACallNumberInEitherDialect's
+        // own comment for why "[#1]" becomes "[#35;1]" in mermaid text).
+        assertTrue(mermaid.contains("[#35;1] earlier-thing"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("[#35;2] later-thing"), "got:\n$mermaid")
+        assertTrue(plantUml.contains("[#1] earlier-thing"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("[#2] later-thing"), "got:\n$plantUml")
+    }
+
+    private class FixedWidthMetrics : Seq3TextMetrics {
+        override fun width(role: Seq3FontRole, text: String): Double = text.length * 7.0
+
+        override fun lineHeight(role: Seq3FontRole): Double = 16.0
     }
 }

@@ -1,6 +1,9 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3ArrowRow
+import com.indagium.diagram3.Seq3Capture
+import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3FontRole
@@ -41,8 +44,8 @@ class Seq3LayoutTest {
 
     private fun lifeline(id: String, ordinal: Int) = Seq3Lifeline(id, id, setOf(id), ordinal)
 
-    private fun occurrence(entryId: Int, ts: Long? = 1_000L, text: String = "line $entryId") =
-        Seq3Occurrence(entryId, ts, "10:00:00.000", pid = 1, tid = 1, level = 'I', text = text)
+    private fun occurrence(entryId: Int, ts: Long? = 1_000L, text: String = "line $entryId", captureValues: Map<String, String> = emptyMap()) =
+        Seq3Occurrence(entryId, ts, "10:00:00.000", pid = 1, tid = 1, level = 'I', text = text, captureValues = captureValues)
 
     private fun message(
         id: String,
@@ -54,9 +57,10 @@ class Seq3LayoutTest {
         occurrences: List<Seq3Occurrence> = listOf(occurrence(1)),
         visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
         template: String = "$id-label",
+        match: Seq3Match = Seq3Match(from, template),
     ) = Seq3Message(
         id = id,
-        match = Seq3Match(from, template),
+        match = match,
         fromLifelineId = from,
         toLifelineId = to,
         labelTemplate = template,
@@ -85,8 +89,12 @@ class Seq3LayoutTest {
         assertEquals(1, layout.rows.size, "an unresolved message must still draw something")
         val stub = layout.rows.single() as Seq3UnresolvedStubRow
         assertEquals("A", stub.fromLifelineId)
-        assertTrue(stub.stubEndX > stub.fromX, "the stub must extend outward from its lifeline")
+        // WP7 item 2: a class that logs a line is usually the CALLEE, so the stub now draws to the
+        // LEFT of its own lifeline (arrowhead pointing INTO it once resolved), not to the right.
+        assertTrue(stub.stubEndX < stub.fromX, "the stub must extend to the LEFT of its lifeline so the eventual arrow points into it")
         assertTrue(stub.dropPill.width > 0 && stub.dropPill.height > 0, "the drop-on-a-lifeline pill must have real geometry")
+        assertTrue(stub.dropPill.x >= 0.0, "the pill must never render at a negative x, even on the leftmost (only) lifeline")
+        assertTrue(stub.labelBox.x >= 0.0, "the label must never render at a negative x either")
     }
 
     @Test
@@ -156,6 +164,40 @@ class Seq3LayoutTest {
         val note = layout.notes.single()
         assertEquals("n1", note.noteId)
         assertTrue(note.box.width > 0 && note.box.height > 0)
+    }
+
+    @Test
+    fun aFreeFloatingNoteWithNoMessageIdsSurvivesLayoutInsteadOfBeingDropped() {
+        // WP7 item 3: the empty-canvas "Add note here" menu creates a note with an EMPTY
+        // messageIds and its own explicit geometry — the old code dropped any note whose
+        // messageIds resolved to nothing (no anchor row to find), which silently ate this one too.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            notes = listOf(Seq3Note("floating1", "just a thought", messageIds = emptyList(), x = 300.0, y = 500.0, width = 220.0, height = 72.0)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val note = layout.notes.single()
+        assertEquals("floating1", note.noteId)
+        assertEquals(300.0, note.box.x)
+        assertEquals(500.0, note.box.y)
+        assertEquals(220.0, note.box.width)
+        assertEquals(72.0, note.box.height)
+    }
+
+    @Test
+    fun aNoteWithNoMessageIdsAndNoGeometryIsStillDroppedRatherThanCrashing() {
+        // The degenerate case a free-floating note's own "carries its own geometry" contract
+        // depends on: empty messageIds AND no x/y/width/height at all has genuinely nothing to
+        // place it by — layoutNotes must still skip it safely, not throw or invent a position.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            notes = listOf(Seq3Note("n1", "orphaned", messageIds = emptyList())),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.notes.isEmpty())
     }
 
     @Test
@@ -342,6 +384,33 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun stubOnTheLeftmostOfSeveralLifelinesShiftsTheWholeDiagramRatherThanClipping() {
+        // WP7 item 2: buildStubRow draws to the LEFT of its lifeline; when that lifeline is the
+        // FIRST column there is no gap before it to widen (unlike an interior column, where
+        // solveGaps' widenLeftSingle widens gaps[c-1] instead) — layoutSeq3 must instead shift
+        // every column's start (placeColumns' leftExtra) so the pill/label still land at a
+        // non-negative x, never clipped against the canvas edge.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2)),
+            messages = listOf(
+                message("m1", "A", null, template = "a genuinely long unresolved label text"),
+                message("m2", "B", "C", occurrences = listOf(occurrence(2))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val stub = layout.rows.single { it.messageId == "m1" } as Seq3UnresolvedStubRow
+
+        assertTrue(stub.stubEndX < stub.fromX, "the stub still points into its own (leftmost) lifeline")
+        assertTrue(stub.dropPill.x >= 0.0, "the pill must never render at a negative x on the leftmost lifeline")
+        assertTrue(stub.labelBox.x >= 0.0, "the label must never render at a negative x on the leftmost lifeline")
+        // Every OTHER lifeline must have shifted right by the same amount, not just A — otherwise
+        // the columns would overlap or the inter-column gaps would silently change.
+        val bCenter = layout.lifelines.single { it.lifelineId == "B" }.centerX
+        val cCenter = layout.lifelines.single { it.lifelineId == "C" }.centerX
+        assertTrue(bCenter < cCenter, "B must still sit left of C after the shift")
+    }
+
+    @Test
     fun crossingCountDetectsAnInterleavedArrangementButNotANestedOrDisjointOne() {
         val lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2), lifeline("D", 3))
         // A->C (span 0..2) and B->D (span 1..3) interleave: 0 < 1 < 2 < 3 -> exactly one crossing.
@@ -525,5 +594,224 @@ class Seq3LayoutTest {
             actorLayout.lifelines.first().lifelineTop > plainLayout.lifelines.first().lifelineTop,
             "an ACTOR lifeline anywhere in the document must grow the shared header band for every column",
         )
+    }
+
+    // ── Item 9 (WP9 regression fix) ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun labelBoxIsStrictlyWiderThanItsOwnMeasuredString() {
+        // The exact string from the user's bug report: visible in the Info panel but clipped off
+        // the drawn arrow because the box used to be sized to EXACTLY this string's measured width.
+        val text = "onScreenChanged: MEDIA"
+        val metrics = StubMetrics()
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", template = text)),
+        )
+        val layout = layoutSeq3(doc, Seq3LayoutOptions(metrics))
+
+        val row = layout.rows.single() as Seq3ArrowRow
+        val measured = metrics.width(Seq3FontRole.LABEL, text)
+        assertTrue(
+            row.labelBox.width > measured,
+            "label box (${row.labelBox.width}) must carry slack over the raw measured width ($measured), or a residual rasterizer delta clips the drawn text",
+        )
+
+        // WP10: turning on numbering/timestamps widens the DRAWN string itself ("[#1] [10:00:00.000]
+        // onScreenChanged: MEDIA"). If measurement ran on the bare label and prefixing happened
+        // afterward, the box would be sized to the SHORTER, unprefixed string while the longer,
+        // prefixed one is what's actually drawn — WP9's bug again, just triggered by a toggle
+        // instead of a font mismatch. Assert against the box's own drawn label, not the original
+        // bare text, so this only passes when prefixing happened BEFORE measureRequirement ran.
+        val prefixedDoc = doc.copy(showSequenceNumbers = true, showTimestamps = true)
+        val prefixedLayout = layoutSeq3(prefixedDoc, Seq3LayoutOptions(metrics))
+        val prefixedRow = prefixedLayout.rows.single() as Seq3ArrowRow
+        assertTrue(prefixedRow.label.startsWith("[#1] ["), "expected the drawn label to carry the [#n] [ts] prefix; got '${prefixedRow.label}'")
+        val prefixedMeasured = metrics.width(Seq3FontRole.LABEL, prefixedRow.label)
+        assertTrue(
+            prefixedRow.labelBox.width > prefixedMeasured,
+            "prefixed label box (${prefixedRow.labelBox.width}) must carry slack over its OWN measured width ($prefixedMeasured) — " +
+                "measurement must run AFTER prefixing, not before",
+        )
+    }
+
+    @Test
+    fun selfLoopLabelBoxAlsoCarriesSlack() {
+        val text = "reallyQuiteALongSelfCallLabel"
+        val metrics = StubMetrics()
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            messages = listOf(message("m1", "A", "A", kind = Seq3Kind.SELF, template = text)),
+        )
+        val layout = layoutSeq3(doc, Seq3LayoutOptions(metrics))
+
+        val row = layout.rows.single() as Seq3SelfLoopRow
+        val measured = metrics.width(Seq3FontRole.LABEL, text)
+        assertTrue(row.labelBox.width > measured, "self-loop label box (${row.labelBox.width}) must carry slack over the raw measured width ($measured)")
+    }
+
+    @Test
+    fun collapsedRowWithThreeOrFewerDistinctValuesShowsACompactSummary() {
+        val occs = listOf(
+            occurrence(1, text = "onScreenChanged: MEDIA", captureValues = mapOf("screen" to "MEDIA")),
+            occurrence(2, text = "onScreenChanged: HOME", captureValues = mapOf("screen" to "HOME")),
+            occurrence(3, text = "onScreenChanged: MEDIA", captureValues = mapOf("screen" to "MEDIA")),
+            occurrence(4, text = "onScreenChanged: HOME", captureValues = mapOf("screen" to "HOME")),
+        )
+        val match = Seq3Match(tag = "A", template = "onScreenChanged: {screen}", captures = listOf(Seq3Capture("screen", Seq3CaptureSource.NAMED_VALUE)))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1", "A", "B",
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs,
+                    template = "onScreenChanged: {screen}", match = match,
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertEquals(4, row.repeatCount)
+        assertEquals("onScreenChanged: MEDIA|onScreenChanged: HOME", row.label, "a collapsed row with <=3 distinct values must show a compact A|B|C summary, not a raw {token}")
+    }
+
+    @Test
+    fun collapsedRowWithMoreThanThreeDistinctValuesKeepsTheRawTemplate() {
+        val occs = (1..5).map { i -> occurrence(i, text = "onScreenChanged: V$i", captureValues = mapOf("screen" to "V$i")) }
+        val match = Seq3Match(tag = "A", template = "onScreenChanged: {screen}", captures = listOf(Seq3Capture("screen", Seq3CaptureSource.NAMED_VALUE)))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1", "A", "B",
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs,
+                    template = "onScreenChanged: {screen}", match = match,
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertEquals(5, row.repeatCount)
+        assertEquals("onScreenChanged: {screen}", row.label, "above 3 distinct values, the raw {token} template is the honest 'many different values' signal")
+    }
+
+    // ── WP10 (item 7): inline call numbering ────────────────────────────────────────────────────
+
+    @Test
+    fun sequenceNumbersSkipHiddenMessagesAndCountOnlyDrawnRows() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", template = "first"),
+                message("m2", "A", "B", template = "hidden", visibility = Seq3Visibility.HIDDEN),
+                message("m3", "A", "B", template = "second"),
+            ),
+            showSequenceNumbers = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(2, rows.size, "the hidden message must never draw a row at all")
+        assertTrue(rows[0].label.startsWith("[#1] "), "the first drawn call must be numbered #1; got '${rows[0].label}'")
+        assertTrue(rows[1].label.startsWith("[#2] "), "a hidden row must not consume a number — the next drawn call is #2, not #3; got '${rows[1].label}'")
+    }
+
+    @Test
+    fun collapsedRepeatRowTakesExactlyOneSequenceNumber() {
+        val occs = (1..5).map { i -> occurrence(i) }
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated"),
+                message("m2", "A", "B", template = "next"),
+            ),
+            showSequenceNumbers = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(2, rows.size, "the collapsed ×5 group must still draw as ONE row")
+        assertEquals(5, rows[0].repeatCount)
+        assertTrue(rows[0].label.startsWith("[#1] "), "a collapsed ×n row takes exactly one number; got '${rows[0].label}'")
+        assertTrue(rows[1].label.startsWith("[#2] "), "the next message must be #2, not #6; got '${rows[1].label}'")
+    }
+
+    @Test
+    fun bothTogglesOffLeaveTheLabelUnprefixed() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", template = "plain")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertEquals("plain", row.label)
+    }
+
+    @Test
+    fun everyDrawnRowGeometryCarriesItsOwnTimestampFields() {
+        val occ = occurrence(1, ts = 5_000L, text = "line")
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occ))),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single() as Seq3ArrowRow
+        assertEquals(5_000L, row.timestampMillis)
+        assertEquals("10:00:00.000", row.rawTimestamp)
+    }
+
+    // ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun aDelayRendersAsALabelledBandAfterItsAnchorMessageAndPushesLaterRowsDown() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+            delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "a while later")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(2, layout.rows.size, "a delay is not a drawn row of its own")
+        val delayBox = layout.delays.single()
+        assertEquals("d1", delayBox.delayId)
+        assertEquals("a while later", delayBox.label)
+        assertTrue(delayBox.box.width > 0.0, "the band must span real width, not a zero-width sliver")
+
+        val m1Row = layout.rows.single { it.messageId == "m1" }
+        val m2Row = layout.rows.single { it.messageId == "m2" }
+        assertTrue(delayBox.box.y >= m1Row.y, "the band must sit at or after its anchor row")
+        assertTrue(m2Row.y >= delayBox.box.y + delayBox.box.height, "a row after the delay must be pushed below the whole band, not overlap it")
+    }
+
+    @Test
+    fun aDelayWithNoVisibleAnchorRowRendersNothing() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", visibility = Seq3Visibility.HIDDEN)),
+            delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "gap")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.delays.isEmpty(), "an anchor with no drawn row leaves nothing to attach the band to")
+    }
+
+    @Test
+    fun aHiddenDelayIsDroppedFromLayoutButItsMessageIsUnaffected() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "gap", visibility = Seq3Visibility.HIDDEN)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.delays.isEmpty())
+        assertEquals(1, layout.rows.size)
     }
 }

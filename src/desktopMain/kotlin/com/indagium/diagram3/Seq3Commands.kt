@@ -130,6 +130,14 @@ sealed class Seq3Command {
 
     /** Per-diagram theme override (WP4's toolbar dropdown) — null means "follow the app theme". */
     data class SetDocumentTheme(val themePresetName: String?) : Seq3Command()
+
+    /** Item 7 (WP10): toggle inline `[#n]` call numbering — see [Seq3Document.showSequenceNumbers]'s
+     *  own doc for why this is document-level rather than a view flag. */
+    data class SetShowSequenceNumbers(val show: Boolean) : Seq3Command()
+
+    /** Item 7 (WP10): toggle inline `[HH:MM:SS.mmm]` timestamps — see
+     *  [Seq3Document.showTimestamps]'s own doc. */
+    data class SetShowTimestamps(val show: Boolean) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -196,6 +204,8 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetLifelineDisplaySegments -> dispatchSetLifelineDisplaySegments(document, command)
     is Seq3Command.SetDocumentDisplaySegments -> dispatchSetDocumentDisplaySegments(document, command)
     is Seq3Command.SetDocumentTheme -> dispatchSetDocumentTheme(document, command)
+    is Seq3Command.SetShowSequenceNumbers -> dispatchSetShowSequenceNumbers(document, command)
+    is Seq3Command.SetShowTimestamps -> dispatchSetShowTimestamps(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -206,6 +216,7 @@ private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Out
 private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.SetFrom -> "Set from"
     is Seq3BulkAction.SetTo -> "Set target"
+    is Seq3BulkAction.SetCaller -> "Set caller"
     is Seq3BulkAction.Merge -> "Merge messages"
     is Seq3BulkAction.Group -> "Group as fragment"
     Seq3BulkAction.Hide -> "Hide"
@@ -214,13 +225,18 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.DeleteFragment -> "Remove fragment"
     is Seq3BulkAction.DeleteNote -> "Remove note"
     is Seq3BulkAction.SetFragmentLabel -> "Rename fragment"
+    is Seq3BulkAction.SetFragmentKind -> "Set fragment kind"
     is Seq3BulkAction.SetNoteText -> "Rename note"
     is Seq3BulkAction.SetKind -> "Set kind"
     is Seq3BulkAction.SetPattern -> "Set pattern"
     is Seq3BulkAction.SetLabel -> "Rename label"
     is Seq3BulkAction.SetRepeat -> "Set repeat"
     is Seq3BulkAction.SetFragmentVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide fragment" else "Show fragment"
+    is Seq3BulkAction.SetFragmentHideKindLabel -> if (action.hide) "Hide fragment kind" else "Show fragment kind"
     is Seq3BulkAction.SetNoteVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide note" else "Show note"
+    is Seq3BulkAction.AddDelay -> "Insert delay"
+    is Seq3BulkAction.SetDelayLabel -> "Rename delay"
+    is Seq3BulkAction.DeleteDelay -> "Remove delay"
     Seq3BulkAction.SwapEndpoints -> "Swap direction"
 }
 
@@ -521,4 +537,14 @@ private fun dispatchSetDocumentDisplaySegments(document: Seq3Document, command: 
 private fun dispatchSetDocumentTheme(document: Seq3Document, command: Seq3Command.SetDocumentTheme): Outcome {
     if (document.themePresetName == command.themePresetName) return unapplied(document, "No change")
     return applied(document.copy(themePresetName = command.themePresetName), "Set diagram theme")
+}
+
+private fun dispatchSetShowSequenceNumbers(document: Seq3Document, command: Seq3Command.SetShowSequenceNumbers): Outcome {
+    if (document.showSequenceNumbers == command.show) return unapplied(document, "No change")
+    return applied(document.copy(showSequenceNumbers = command.show), "Toggle call numbers")
+}
+
+private fun dispatchSetShowTimestamps(document: Seq3Document, command: Seq3Command.SetShowTimestamps): Outcome {
+    if (document.showTimestamps == command.show) return unapplied(document, "No change")
+    return applied(document.copy(showTimestamps = command.show), "Toggle timestamps")
 }

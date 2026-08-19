@@ -61,6 +61,7 @@ import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
@@ -199,6 +200,15 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
                 onClick = { view.lifelinesSectionOpen = !view.lifelinesSectionOpen },
             )
+            ToolbarBtn(
+                label = "▦",
+                tooltip = if (view.artifactsSectionOpen) "Hide Fragments & notes" else "Show Fragments & notes",
+                active = view.artifactsSectionOpen,
+                modifier = Modifier.size(28.dp),
+                shape = CORNER_SM,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                onClick = { view.artifactsSectionOpen = !view.artifactsSectionOpen },
+            )
             Seq3AttachmentAction(state, session)
             SegmentedControl(
                 options = listOf("PlantUML", "Mermaid"),
@@ -210,6 +220,7 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                     )
                 },
             )
+            Seq3InlinePrefixToggles(state, session)
             Seq3DocumentThemeDropdown(state, session)
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
         }
@@ -217,34 +228,77 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
 }
 
 /**
- * WP4: per-diagram theme picker, beside the PlantUML/Mermaid dialect control it visually pairs
- * with — both are "how does this diagram present itself" toolbar controls. *Follow app theme*
- * (`null`) plus all 20 [ThemePreset.entries] by [ThemePreset.label], dispatching
+ * WP10 (item 7): two independent document-level toggles, beside the dialect control they visually
+ * pair with — "how does this diagram present itself" toolbar controls, same slot as
+ * [Seq3DocumentThemeDropdown]. Each dispatches its own [Seq3Command] so `⌘Z` undoes them
+ * independently, and both are document fields (not view state) precisely because the user wants
+ * the canvas, the PNG export, and the exported text to always agree on whether a call's `[#n]`/
+ * `[ts]` prefix is showing.
+ */
+@Composable
+private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSession) {
+    val document = session.document
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        ToolbarBtn(
+            label = "#",
+            tooltip = if (document.showSequenceNumbers) "Hide call numbers" else "Show call numbers",
+            active = document.showSequenceNumbers,
+            modifier = Modifier.size(28.dp),
+            shape = CORNER_SM,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            onClick = {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowSequenceNumbers(!document.showSequenceNumbers))
+            },
+        )
+        ToolbarBtn(
+            label = "⏱",
+            tooltip = if (document.showTimestamps) "Hide timestamps" else "Show timestamps",
+            active = document.showTimestamps,
+            modifier = Modifier.size(28.dp),
+            shape = CORNER_SM,
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            onClick = {
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowTimestamps(!document.showTimestamps))
+            },
+        )
+    }
+}
+
+/**
+ * WP4/WP8: per-diagram theme picker, beside the PlantUML/Mermaid dialect control it visually
+ * pairs with — both are "how does this diagram present itself" toolbar controls. *Follow app
+ * theme* (`null`) plus all 20 [ThemePreset.entries], as the same [ThemeGallery] card grid Settings
+ * uses — the user wants to *see* what they're picking, not read a 21-row text menu — dispatching
  * [Seq3Command.SetDocumentTheme]. Reuses [Seq3DropdownButton] (not a hand-rolled Popup) precisely
  * for its [closeAndReclaimFocus] handling — see this file's own header comment on
  * [LocalSeq3FocusRequester] for why a hand-rolled popup here would silently kill the workspace's
- * root key handler (Esc included) after the first click.
+ * root key handler (Esc included) after the first click. `menuWidth` is widened to fit ~3 cards
+ * per row (118dp cards + 8dp gaps ≈ 370dp, plus the gallery's own scrollbar gutter and the popup's
+ * padding).
  */
 @Composable
 private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSession) {
     val tc = tc()
     val themePresetName = session.document.themePresetName
+    val selected = themePresetName?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
     Seq3DropdownButton(
         label = "theme: ${seq3DiagramThemeLabel(themePresetName)}",
         labelColor = tc.ts,
         fillColor = tc.p2,
-        menuWidth = 190.dp,
+        menuWidth = 400.dp,
     ) { close ->
-        Seq3DropdownMenuItem("Follow app theme", active = themePresetName == null) {
-            state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(null))
-            close()
-        }
-        ThemePreset.entries.forEach { preset ->
-            Seq3DropdownMenuItem(preset.label, active = themePresetName == preset.name) {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(preset.name))
+        ThemeGallery(
+            settings = state.settings,
+            selected = selected,
+            onSelect = { preset ->
+                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(preset?.name))
                 close()
-            }
-        }
+            },
+            followAppTheme = true,
+        )
     }
 }
 
@@ -579,12 +633,24 @@ internal class Seq3ViewState {
      *  other occurrences. */
     var selectedCanvasRows by mutableStateOf<Set<Seq3CanvasRowRef>>(emptySet())
 
+    /** WP11 auto-suggest: `afterMessageId`s of a [com.indagium.diagram3.Seq3DelaySuggestion] the
+     *  user dismissed this session. View-only, never persisted — the round-2 corrections plan's
+     *  "manual insert plus auto-suggest, explicitly not silent automatic insertion" only requires
+     *  a dismissible OFFER, not a durable "never ask about this gap again" preference; re-showing
+     *  a dismissed suggestion after a reload is an acceptable, much simpler trade-off. */
+    var dismissedDelaySuggestionAfterIds by mutableStateOf<Set<String>>(emptySet())
+
     /** Right-click menu state for a canvas message row. */
     var canvasContextMenuMessageId by mutableStateOf<String?>(null)
     /** Exact repeated occurrence under the right-clicked canvas arrow, when there is one. */
     var canvasContextMenuOccurrenceEntryId by mutableStateOf<Int?>(null)
     var canvasContextMenuOffset by mutableStateOf(IntOffset.Zero)
     var canvasContextMenuCanvasPoint by mutableStateOf(Seq3Box(0.0, 0.0, 0.0, 0.0))
+    /** WP7 item 5 (canvas half): the empty-canvas right-click menu ("Add note here") — open when
+     *  the click hit no message row. Mutually exclusive with [canvasContextMenuMessageId]; shares
+     *  [canvasContextMenuOffset]/[canvasContextMenuCanvasPoint] for position since only one of the
+     *  two context menus is ever open at once. */
+    var canvasEmptyContextMenuOpen by mutableStateOf(false)
 
     var zoom by mutableStateOf(1f)
     var zoomMode by mutableStateOf(Seq3ZoomMode.FIT_WIDTH)
@@ -618,6 +684,30 @@ internal class Seq3ViewState {
     /** Height of the expanded Fragments & notes section, adjusted by its own horizontal panel
      *  divider — the [artifactsSectionHeightDp] counterpart of [lifelinesSectionHeightDp]. */
     var artifactsSectionHeightDp by mutableStateOf(200f)
+
+    /** WP8: whether the Fragments & notes section is visible in the queue panel at all — the
+     *  [artifactsSectionOpen] counterpart of [lifelinesSectionOpen] (toggled the same way, via a
+     *  title-bar [ToolbarBtn]). Independent from [artifactsExpanded], which only squishes an
+     *  already-visible section down to its header row. Panel-only; never enters the saved diagram
+     *  or undo history. */
+    var artifactsSectionOpen by mutableStateOf(true)
+
+    /** WP8: the fragment selected by clicking a Fragments & notes panel row's body. The row used
+     *  to carry a checkbox that drove a bare local `remember` — no shared selection, no bulk
+     *  action, no canvas link, and it wasn't clear what it did — so it was removed in favor of
+     *  making the row body itself clickable. Panel-only; never enters the saved diagram or undo
+     *  history. WP7: `Seq3Canvas`'s `drawSeq3Diagram` reads this (via `seq3FragmentIsEmphasized`)
+     *  to draw that fragment's bracket with the same accent-stroke emphasis a selected message row
+     *  already gets. */
+    var selectedFragmentId by mutableStateOf<String?>(null)
+    /** The note counterpart of [selectedFragmentId] above — same contract. */
+    var selectedNoteId by mutableStateOf<String?>(null)
+    /** Two-way row<->canvas hover for a Fragments & notes panel row, mirroring
+     *  [hoveredMessageId]/[hoveredLifelineId]. Panel-only; never enters the saved diagram or undo
+     *  history. WP7: consumed by `Seq3Canvas` the same way [selectedFragmentId] is. */
+    var hoveredFragmentId by mutableStateOf<String?>(null)
+    /** The note counterpart of [hoveredFragmentId] above — same contract. */
+    var hoveredNoteId by mutableStateOf<String?>(null)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
@@ -725,7 +815,10 @@ internal fun seq3AddNote(
     placement: Seq3Box? = null,
 ): Boolean {
     val ids = document.messages.map { it.id }.filter { it in selectedIds }
-    if (ids.isEmpty()) return false
+    // WP7 item 3: the empty-canvas "Add note here" menu has no message selection to span at all —
+    // a FREE-FLOATING note (empty messageIds, explicit x/y from the click) is the only way to add
+    // one there. An anchored note (>=1 message) still requires a selection, same as before.
+    if (ids.isEmpty() && placement == null) return false
     val note = Seq3Note(
         id = "note-${UUID.randomUUID()}",
         text = "Note",
@@ -739,9 +832,26 @@ internal fun seq3AddNote(
     if (applied) {
         view.canvasContextMenuMessageId = null
         view.canvasContextMenuOccurrenceEntryId = null
+        view.canvasEmptyContextMenuOpen = false
         view.canvasContextMenuCanvasPoint = Seq3Box(0.0, 0.0, 0.0, 0.0)
     }
     return applied
+}
+
+/** Manual insert (WP11, "Insert delay after this" — canvas context menu and the `+ message`
+ *  menu both call this): anchors a new [Seq3Delay] right after [afterMessageId]'s own last drawn
+ *  row. [label] defaults to a generic placeholder, editable in place afterward via
+ *  [Seq3BulkAction.SetDelayLabel] (the canvas overlay's double-click-to-rename, same pattern as
+ *  a fragment/note label) — this function's own job is only to create it, matching
+ *  [seq3AddNote]'s "caller mints the id, this fires the bulk action" shape. */
+internal fun seq3InsertDelayAfter(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    afterMessageId: String,
+    label: String = "delay",
+): Boolean {
+    val delay = Seq3Delay(id = "seq3-delay-${UUID.randomUUID()}", afterMessageId = afterMessageId, label = label)
+    return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddDelay(delay)))
 }
 
 internal fun seq3GroupMessages(
@@ -1014,7 +1124,16 @@ private fun applySeq3KeyAction(
 }
 
 private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
-    view.textFieldFocused -> { view.textFieldFocused = false; true }
+    // WP7 item 6: this root handler sits ABOVE every canvas/panel inline editor in the focus tree,
+    // and Compose dispatches onPreviewKeyEvent top-down (root first) — so if this branch claimed
+    // (returned true for) the event the way it used to, an editor's own InlineField.onCancel would
+    // NEVER see the Escape key press at all, no matter what it's wired to do. The blur side effect
+    // still always runs (harmless for a field with no cancel concept, e.g. the queue filter box,
+    // which has nothing deeper to hand the event to), but `false` lets the event keep propagating
+    // down to whatever field is actually focused, so its own onPreviewKeyEvent (InlineField's new
+    // onCancel hook) gets the chance to revert/close itself instead of just losing focus.
+    view.textFieldFocused -> { view.textFieldFocused = false; false }
+    view.canvasEmptyContextMenuOpen -> { view.canvasEmptyContextMenuOpen = false; true }
     view.canvasContextMenuMessageId != null -> {
         view.canvasContextMenuMessageId = null
         view.canvasContextMenuOccurrenceEntryId = null

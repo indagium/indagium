@@ -1,10 +1,12 @@
 package com.indagium
 
 import com.indagium.ui.Seq3KeyAction
+import com.indagium.ui.Seq3PanelSection
 import com.indagium.ui.seq3ClampArtifactsHeight
 import com.indagium.ui.seq3ClampDividerWidth
 import com.indagium.ui.seq3ClampLifelinesHeight
 import com.indagium.ui.seq3KeyAction
+import com.indagium.ui.seq3PanelWeightedSection
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -232,5 +234,35 @@ class Seq3KeyActionTest {
     fun artifactsHeightClampsAtBothBounds() {
         assertEquals(100f, seq3ClampArtifactsHeight(current = 110f, delta = 40f))
         assertEquals(360f, seq3ClampArtifactsHeight(current = 350f, delta = -40f))
+    }
+
+    // ── seq3PanelWeightedSection: WP8's Messages > Lifelines > Artifacts weight(1f) chain ──────
+    //
+    // The panel's three stacked sections can each be independently hidden/collapsed; exactly one
+    // (or none) should ever receive Modifier.weight(1f), so the Column keeps filling its container
+    // no matter which combination the user has toggled off.
+
+    @Test
+    fun messagesWinsWheneverExpandedRegardlessOfTheOtherTwo() {
+        assertEquals(Seq3PanelSection.MESSAGES, seq3PanelWeightedSection(true, true, true))
+        assertEquals(Seq3PanelSection.MESSAGES, seq3PanelWeightedSection(true, false, false))
+        assertEquals(Seq3PanelSection.MESSAGES, seq3PanelWeightedSection(true, true, false))
+        assertEquals(Seq3PanelSection.MESSAGES, seq3PanelWeightedSection(true, false, true))
+    }
+
+    @Test
+    fun lifelinesStepsUpWhenMessagesIsCollapsedButLifelinesIsVisible() {
+        assertEquals(Seq3PanelSection.LIFELINES, seq3PanelWeightedSection(false, true, true))
+        assertEquals(Seq3PanelSection.LIFELINES, seq3PanelWeightedSection(false, true, false))
+    }
+
+    @Test
+    fun artifactsStepsUpOnlyWhenNeitherMessagesNorLifelinesIsInTheRunning() {
+        assertEquals(Seq3PanelSection.ARTIFACTS, seq3PanelWeightedSection(false, false, true))
+    }
+
+    @Test
+    fun noSectionIsWeightedWhenAllThreeAreCollapsedOrHidden() {
+        assertNull(seq3PanelWeightedSection(false, false, false))
     }
 }

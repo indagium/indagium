@@ -116,6 +116,17 @@ sealed class Seq3BulkAction {
 
     data class SetTo(val lifelineId: String?) : Seq3BulkAction()
 
+    /** WP7 item 2: the canvas stub-drop verb. A class that logs a line is usually EXECUTING
+     *  something it was asked to do, not initiating one — so dropping a stub onto [lifelineId]
+     *  makes THAT lifeline the CALLER (`from`), and reuses the message's own current `from` (the
+     *  tag that logged the line) as the CALLEE (`to`), in one command so it is a single undo step
+     *  — unlike [SetFrom]/[SetTo], which only ever move one endpoint and would leave a stub's `to`
+     *  at null. Degenerate case: [lifelineId] equal to the message's own current `from` collapses
+     *  both endpoints onto the same lifeline — rather than rejecting the drop, [applySetCaller]
+     *  resolves this as a genuine self-call (kind flips to [Seq3Kind.SELF]), the same auto-flip
+     *  [SetFrom]/[SetTo] already perform whenever an edit makes `from == to`. */
+    data class SetCaller(val lifelineId: String) : Seq3BulkAction()
+
     data class Merge(val mergedId: String) : Seq3BulkAction()
 
     data class Group(val fragment: Seq3Fragment) : Seq3BulkAction()
@@ -147,6 +158,11 @@ sealed class Seq3BulkAction {
      *  [fragmentId] — see [applySeq3BulkAction]'s own "invalid selection is always a safe no-op"
      *  contract, extended here to "invalid target id" for a verb that isn't selection-keyed. */
     data class SetFragmentLabel(val fragmentId: String, val label: String) : Seq3BulkAction()
+
+    /** WP12: changes an EXISTING fragment's kind in place — today the only way to change a
+     *  fragment's kind is delete + re-`Group`. Mirrors [SetFragmentLabel] exactly: same
+     *  id-keyed/empty-selection shape, same unknown-id-is-a-safe-no-op contract. */
+    data class SetFragmentKind(val fragmentId: String, val kind: Seq3FragmentKind) : Seq3BulkAction()
 
     /** Renames an EXISTING note's text in place. Same unknown-id-is-a-safe-no-op contract as
      *  [SetFragmentLabel]. */
@@ -191,8 +207,33 @@ sealed class Seq3BulkAction {
     /** Shows/hides an EXISTING fragment's box without touching any of its messages. */
     data class SetFragmentVisibility(val fragmentId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
 
+    /** WP12: toggles an EXISTING fragment's [Seq3Fragment.hideKindLabel] — same id-keyed/
+     *  empty-selection shape and unknown-id-is-a-safe-no-op contract as [SetFragmentVisibility]. */
+    data class SetFragmentHideKindLabel(val fragmentId: String, val hide: Boolean) : Seq3BulkAction()
+
     /** Shows/hides an EXISTING note's box without touching any of its messages. */
     data class SetNoteVisibility(val noteId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+
+    // ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────
+    //
+    // Same "identify the target by its own id/param, entirely independent of the message
+    // selection" shape as [DeleteFragment]/[SetFragmentLabel] above — a delay is anchored by
+    // [Seq3Delay.afterMessageId], which the caller (the canvas context menu's "Insert delay after
+    // this", or the `+ message` menu) always already knows, so requiring a non-empty
+    // `selectedIds` here would be a pointless block exactly like it would be for those two.
+
+    /** Adds a new [Seq3Delay]. Mirrors [Group]/[Note]'s "caller builds the whole artifact,
+     *  including its own fresh id" shape rather than [SetFragmentLabel]'s "rename an existing
+     *  one" shape, since this one CREATES rather than edits — but still routes through the same
+     *  id-keyed, selection-independent allowlist as the rest of this section. */
+    data class AddDelay(val delay: Seq3Delay) : Seq3BulkAction()
+
+    /** Renames an EXISTING delay's label in place. Same unknown-id/blank-label safe-no-op
+     *  contract as [SetFragmentLabel]. */
+    data class SetDelayLabel(val delayId: String, val label: String) : Seq3BulkAction()
+
+    /** Removes one delay without touching the message it was anchored after. */
+    data class DeleteDelay(val delayId: String) : Seq3BulkAction()
 
     /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
      *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
@@ -219,16 +260,27 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
     val selected = document.messages.filter { it.id in selectedIds }
     // [SetFragmentLabel]/[SetNoteText] name their target by [fragmentId]/[noteId], not by the
     // message selection (see those variants' own doc) — "select at least one message" would be a
-    // pointless block on a rename that never reads `selectedIds` at all.
+    // pointless block on a rename that never reads `selectedIds` at all. [SetFragmentKind] is the
+    // same "targets by id, not by selection" shape as [SetFragmentLabel] (WP12) — see that
+    // variant's own doc.
+    // WP7 item 3: [Seq3BulkAction.Note] can now also build a FREE-FLOATING note (empty
+    // `messageIds`, explicit x/y from the empty-canvas "Add note here" menu) — that has no message
+    // selection to require either, the same "targets by its own payload, not by selection" shape
+    // [SetFragmentLabel]/[SetNoteText] already carry. [applyNote] itself still enforces "an
+    // anchored note must span the selection" for the ordinary case.
     if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText &&
         action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote &&
-        action !is Seq3BulkAction.SetFragmentVisibility && action !is Seq3BulkAction.SetNoteVisibility
+        action !is Seq3BulkAction.SetFragmentVisibility && action !is Seq3BulkAction.SetNoteVisibility &&
+        action !is Seq3BulkAction.AddDelay && action !is Seq3BulkAction.SetDelayLabel && action !is Seq3BulkAction.DeleteDelay &&
+        action !is Seq3BulkAction.SetFragmentKind && action !is Seq3BulkAction.SetFragmentHideKindLabel &&
+        action !is Seq3BulkAction.Note
     ) {
         return unapplied(document, "Select at least one message")
     }
     return when (action) {
         is Seq3BulkAction.SetFrom -> applySetFrom(document, selectedIds, action)
         is Seq3BulkAction.SetTo -> applySetTo(document, selectedIds, action)
+        is Seq3BulkAction.SetCaller -> applySetCaller(document, selectedIds, action)
         is Seq3BulkAction.Merge -> applyMerge(document, selected, action)
         is Seq3BulkAction.Group -> applyGroup(document, selectedIds, action)
         Seq3BulkAction.Hide -> applyVisibility(document, selectedIds, Seq3Visibility.HIDDEN)
@@ -237,13 +289,18 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.DeleteFragment -> applyDeleteFragment(document, action)
         is Seq3BulkAction.DeleteNote -> applyDeleteNote(document, action)
         is Seq3BulkAction.SetFragmentLabel -> applySetFragmentLabel(document, action)
+        is Seq3BulkAction.SetFragmentKind -> applySetFragmentKind(document, action)
         is Seq3BulkAction.SetNoteText -> applySetNoteText(document, action)
         is Seq3BulkAction.SetKind -> applySetKind(document, selectedIds, action)
         is Seq3BulkAction.SetPattern -> applySetPattern(document, selectedIds, action)
         is Seq3BulkAction.SetLabel -> applySetLabel(document, selectedIds, action)
         is Seq3BulkAction.SetRepeat -> applySetRepeat(document, selectedIds, action)
         is Seq3BulkAction.SetFragmentVisibility -> applySetFragmentVisibility(document, action)
+        is Seq3BulkAction.SetFragmentHideKindLabel -> applySetFragmentHideKindLabel(document, action)
         is Seq3BulkAction.SetNoteVisibility -> applySetNoteVisibility(document, action)
+        is Seq3BulkAction.AddDelay -> applyAddDelay(document, action)
+        is Seq3BulkAction.SetDelayLabel -> applySetDelayLabel(document, action)
+        is Seq3BulkAction.DeleteDelay -> applyDeleteDelay(document, action)
         Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
@@ -264,6 +321,28 @@ private fun applySetFrom(document: Seq3Document, selectedIds: Set<String>, actio
                     message.kind == Seq3Kind.SELF -> Seq3Kind.CALL
                     else -> message.kind
                 },
+            )
+        },
+        applied = true,
+    )
+}
+
+/** WP7 item 2 — see [Seq3BulkAction.SetCaller]'s own doc for the caller/callee reasoning and the
+ *  degenerate-self-call decision. Unlike [applySetFrom]/[applySetTo], this always writes BOTH
+ *  endpoints from a single [Seq3Message] read (`from = action.lifelineId`, `to = ` the message's
+ *  OWN prior `from`) so a stub can never end up with `to` still null after the drop. */
+private fun applySetCaller(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetCaller): Seq3BulkResult {
+    if (document.lifelines.none { it.id == action.lifelineId }) return unapplied(document, "Unknown caller lifeline")
+    return Seq3BulkResult(
+        editMessages(document, selectedIds) { message ->
+            val callee = message.fromLifelineId
+            message.copy(
+                fromLifelineId = action.lifelineId,
+                toLifelineId = callee,
+                // Degenerate case: dropping the stub back onto the tag's OWN lifeline makes
+                // `from == to` — read as a genuine self-call rather than rejected, mirroring the
+                // same auto-flip applySetFrom/applySetTo already perform.
+                kind = if (action.lifelineId == callee) Seq3Kind.SELF else if (message.kind == Seq3Kind.SELF) Seq3Kind.CALL else message.kind,
             )
         },
         applied = true,
@@ -347,10 +426,15 @@ private fun applyGroup(document: Seq3Document, selectedIds: Set<String>, action:
 
 private fun applyNote(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.Note): Seq3BulkResult {
     val note = action.note
+    // WP7 item 3: a free-floating note (empty-canvas "Add note here") carries no message
+    // selection at all — it stands on its own explicit x/y instead. Only an ANCHORED note (a
+    // non-empty messageIds) still has to span the current selection.
+    val freeFloating = note.messageIds.isEmpty() && note.x != null && note.y != null
     return when {
         note.id.isBlank() || note.text.isBlank() -> unapplied(document, "Note id and text are required")
         document.notes.any { it.id == note.id } -> unapplied(document, "Note id already exists")
-        note.messageIds.isEmpty() || !selectedIds.containsAll(note.messageIds) -> unapplied(document, "Note must span selected messages")
+        !freeFloating && (note.messageIds.isEmpty() || !selectedIds.containsAll(note.messageIds)) ->
+            unapplied(document, "Note must span selected messages")
         else -> Seq3BulkResult(document.copy(notes = document.notes + note), applied = true)
     }
 }
@@ -394,6 +478,16 @@ private fun applySetFragmentLabel(document: Seq3Document, action: Seq3BulkAction
     )
 }
 
+/** WP12: changes an EXISTING fragment's kind in place — the only prior way to do this was delete
+ *  + re-`Group`. Same unknown-id-is-a-safe-no-op contract as [applySetFragmentLabel]. */
+private fun applySetFragmentKind(document: Seq3Document, action: Seq3BulkAction.SetFragmentKind): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(kind = action.kind) else it }),
+        applied = true,
+    )
+}
+
 /** Renames an EXISTING note's text — the edit-in-place counterpart [applyNote] doesn't have. Same
  *  unknown-id/blank-text safe-no-op contract as [applySetFragmentLabel]. */
 private fun applySetNoteText(document: Seq3Document, action: Seq3BulkAction.SetNoteText): Seq3BulkResult {
@@ -417,6 +511,17 @@ private fun applySetFragmentVisibility(document: Seq3Document, action: Seq3BulkA
     )
 }
 
+/** WP12: toggles the canvas-only "show the kind word" presentation flag — see
+ *  [Seq3Fragment.hideKindLabel]'s own doc. Same unknown-id safe-no-op contract as
+ *  [applySetFragmentVisibility]. */
+private fun applySetFragmentHideKindLabel(document: Seq3Document, action: Seq3BulkAction.SetFragmentHideKindLabel): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(hideKindLabel = action.hide) else it }),
+        applied = true,
+    )
+}
+
 /** Shows/hides an EXISTING note's box — the visibility counterpart [applySetNoteText] doesn't
  *  have. Same unknown-id safe-no-op contract. */
 private fun applySetNoteVisibility(document: Seq3Document, action: Seq3BulkAction.SetNoteVisibility): Seq3BulkResult {
@@ -425,6 +530,37 @@ private fun applySetNoteVisibility(document: Seq3Document, action: Seq3BulkActio
         document.copy(notes = document.notes.map { if (it.id == action.noteId) it.copy(visibility = action.visibility) else it }),
         applied = true,
     )
+}
+
+/** Adds a new [Seq3Delay] — see [Seq3BulkAction.AddDelay]'s own doc. Rejects a blank id/label, a
+ *  colliding id (mirrors [applyGroup]/[applyNote]'s own "id already exists" guard), and an
+ *  [Seq3Delay.afterMessageId] that names no message in the document at all — a delay anchored to
+ *  nothing would never draw and would only confuse a later inspector. */
+private fun applyAddDelay(document: Seq3Document, action: Seq3BulkAction.AddDelay): Seq3BulkResult {
+    val delay = action.delay
+    return when {
+        delay.id.isBlank() || delay.label.isBlank() -> unapplied(document, "Delay id and label are required")
+        document.delays.any { it.id == delay.id } -> unapplied(document, "Delay id already exists")
+        document.messages.none { it.id == delay.afterMessageId } -> unapplied(document, "Unknown message")
+        else -> Seq3BulkResult(document.copy(delays = document.delays + delay), applied = true)
+    }
+}
+
+/** Renames an EXISTING delay's label — the edit-in-place counterpart [applyAddDelay] doesn't
+ *  have. Same unknown-id/blank-label safe-no-op contract as [applySetFragmentLabel]. */
+private fun applySetDelayLabel(document: Seq3Document, action: Seq3BulkAction.SetDelayLabel): Seq3BulkResult {
+    if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
+    if (action.label.isBlank()) return unapplied(document, "Delay label is required")
+    return Seq3BulkResult(
+        document.copy(delays = document.delays.map { if (it.id == action.delayId) it.copy(label = action.label) else it }),
+        applied = true,
+    )
+}
+
+/** Removes one delay without touching the message it was anchored after. */
+private fun applyDeleteDelay(document: Seq3Document, action: Seq3BulkAction.DeleteDelay): Seq3BulkResult {
+    if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
+    return Seq3BulkResult(document.copy(delays = document.delays.filterNot { it.id == action.delayId }), applied = true)
 }
 
 /** [Seq3BulkAction.SwapEndpoints] — see that variant's own doc for the exact no-op contract.

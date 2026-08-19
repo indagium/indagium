@@ -5,6 +5,7 @@ import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Command
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
@@ -72,6 +73,24 @@ class Seq3QueueTest {
         assertEquals(1, counts.needsTarget)
         assertEquals(1, counts.edited)
         assertEquals(1, counts.hidden)
+    }
+
+    @Test
+    fun delaysNeverAffectFilterCountsIncludingNeedsTarget() {
+        // WP11: a delay has no endpoints, no evidence, and must never enter the needs-target count
+        // or the message queue — see Seq3Delay's own header. Adding one changes nothing here.
+        val withDelays = baseDocument().copy(
+            delays = listOf(
+                Seq3Delay("d1", afterMessageId = "m1", label = "later"),
+                Seq3Delay("d2", afterMessageId = "m2", label = "even later"),
+            ),
+        )
+        val counts = seq3FilterCounts(withDelays)
+        assertEquals(4, counts.all)
+        assertEquals(1, counts.needsTarget, "m2's own missing target is unaffected by an unrelated delay")
+        assertEquals(1, counts.edited)
+        assertEquals(1, counts.hidden)
+        assertEquals(listOf("m1", "m3", "m2", "m4"), seq3QueueRows(withDelays, Seq3Filter.ALL).map { it.id }, "the message queue itself must not gain or lose a row")
     }
 
     @Test
@@ -334,6 +353,57 @@ class Seq3QueueTest {
         assertEquals(doc, result.document)
     }
 
+    // ── SetFragmentKind (WP12) ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun setFragmentKindChangesAnExistingFragmentsKindByIdIndependentOfSelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.LOOP, "original", listOf("m1", "m3"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        // Same "target by id, ignore selectedIds" contract as SetFragmentLabel above.
+        val result = applySeq3BulkAction(doc, setOf("m4"), Seq3BulkAction.SetFragmentKind("frag1", Seq3FragmentKind.GROUP))
+        assertTrue(result.applied)
+        val changed = result.document.fragments.single { it.id == "frag1" }
+        assertEquals(Seq3FragmentKind.GROUP, changed.kind)
+        assertEquals("original", changed.label, "changing kind must not touch the label")
+        assertEquals(listOf("m1", "m3"), changed.messageIds, "changing kind must not touch the fragment's own span")
+    }
+
+    @Test
+    fun setFragmentKindIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.SetFragmentKind("no-such-fragment", Seq3FragmentKind.CRITICAL))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun setFragmentKindWorksWithAnEmptySelectionLikeSetFragmentLabel() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.OPT, "original", listOf("m1"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentKind("frag1", Seq3FragmentKind.BREAK))
+        assertTrue(result.applied, result.reason)
+        assertEquals(Seq3FragmentKind.BREAK, result.document.fragments.single().kind)
+    }
+
+    // ── SetFragmentHideKindLabel (WP12) ─────────────────────────────────────────────────────
+
+    @Test
+    fun setFragmentHideKindLabelTogglesTheCanvasOnlyFlagByIdIndependentOfSelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.GROUP, "billing flow", listOf("m1"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentHideKindLabel("frag1", true))
+        assertTrue(result.applied)
+        assertTrue(result.document.fragments.single().hideKindLabel)
+    }
+
+    @Test
+    fun setFragmentHideKindLabelIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.SetFragmentHideKindLabel("no-such-fragment", true))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
     @Test
     fun setNoteTextRenamesAnExistingNoteByIdIndependentOfSelection() {
         val note = Seq3Note("n1", "original text", listOf("m1"))
@@ -384,6 +454,77 @@ class Seq3QueueTest {
     fun setNoteVisibilityIsASafeNoOpForAnUnknownId() {
         val doc = baseDocument()
         val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetNoteVisibility("no-such-note", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    // ── Delay (WP11) — add/remove/relabel, the same id-keyed/selection-independent shape as
+    //    Fragment/Note rename above ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun addDelayAppendsANewDelayIndependentOfSelection() {
+        val doc = baseDocument()
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "5 minutes later")
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddDelay(delay))
+        assertTrue(result.applied)
+        assertEquals(listOf(delay), result.document.delays)
+    }
+
+    @Test
+    fun addDelayIsASafeNoOpForABlankLabelACollidingIdOrAnUnknownAnchor() {
+        val doc = baseDocument().copy(delays = listOf(Seq3Delay("d1", "m1", "existing")))
+
+        val blankLabel = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddDelay(Seq3Delay("d2", "m1", "")))
+        assertFalse(blankLabel.applied)
+        assertEquals(doc, blankLabel.document)
+
+        val collidingId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddDelay(Seq3Delay("d1", "m3", "other")))
+        assertFalse(collidingId.applied)
+        assertEquals(doc, collidingId.document)
+
+        val unknownAnchor = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddDelay(Seq3Delay("d2", "no-such-message", "later")))
+        assertFalse(unknownAnchor.applied)
+        assertEquals(doc, unknownAnchor.document)
+    }
+
+    @Test
+    fun setDelayLabelRenamesAnExistingDelayByIdIndependentOfSelection() {
+        val delay = Seq3Delay("d1", "m1", "original")
+        val doc = baseDocument().copy(delays = listOf(delay))
+        val result = applySeq3BulkAction(doc, setOf("m4"), Seq3BulkAction.SetDelayLabel("d1", "renamed"))
+        assertTrue(result.applied)
+        val renamed = result.document.delays.single { it.id == "d1" }
+        assertEquals("renamed", renamed.label)
+        assertEquals("m1", renamed.afterMessageId, "rename must not touch the delay's own anchor")
+    }
+
+    @Test
+    fun setDelayLabelIsASafeNoOpForAnUnknownIdOrABlankLabel() {
+        val doc = baseDocument().copy(delays = listOf(Seq3Delay("d1", "m1", "original")))
+        val unknownId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetDelayLabel("no-such-delay", "renamed"))
+        assertFalse(unknownId.applied)
+        assertEquals(doc, unknownId.document)
+
+        val blankLabel = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetDelayLabel("d1", ""))
+        assertFalse(blankLabel.applied)
+        assertEquals(doc, blankLabel.document)
+    }
+
+    @Test
+    fun deleteDelayRemovesOnlyTheRequestedDelayAndTouchesNoMessage() {
+        val d1 = Seq3Delay("d1", "m1", "first")
+        val d2 = Seq3Delay("d2", "m3", "second")
+        val doc = baseDocument().copy(delays = listOf(d1, d2))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteDelay("d1"))
+        assertTrue(result.applied)
+        assertEquals(listOf(d2), result.document.delays)
+        assertEquals(doc.messages, result.document.messages)
+    }
+
+    @Test
+    fun deleteDelayIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteDelay("no-such-delay"))
         assertFalse(result.applied)
         assertEquals(doc, result.document)
     }
