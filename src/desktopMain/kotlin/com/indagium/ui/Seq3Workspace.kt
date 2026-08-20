@@ -279,24 +279,29 @@ private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSessi
  * per row (118dp cards + 8dp gaps ≈ 370dp, plus the gallery's own scrollbar gutter and the popup's
  * padding).
  *
- * WP-theme-badge: the trigger itself is a compact [Seq3ThemeSwatch] icon badge — same 28dp
- * footprint as its `≡`/`⇅`/`▦`/`#`/`⏱` neighbors in the title bar — rather than the old
- * always-visible "theme: <name>" text pill; the theme's name moves into a [TooltipArea] instead
- * of sitting on the control at rest.
+ * WP-theme-badge, round 5 (user-observed correction): the trigger is the [Seq3ThemeSwatch]
+ * mini-card alone — round 3's stacked name label is gone, since the swatch already shows the
+ * theme and the label made this control roughly three times wider than every other toolbar
+ * button. The name is not surfaced at rest at all; a plain "Choose diagram theme" [TooltipArea]
+ * explains the control instead. The swatch keeps its own landscape shape, padded out to the same
+ * 28dp height as its `≡`/`⇅`/`▦`/`#`/`⏱` siblings rather than forced into their square.
  */
 @Composable
 private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSession) {
     val themePresetName = session.document.themePresetName
     val selected = themePresetName?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
     val swatchColors = resolveSeq3ThemeColors(session.document, state.settings)
-    TooltipArea(tooltip = { ToolbarTooltip(seq3DiagramThemeLabel(themePresetName)) }) {
+    TooltipArea(tooltip = { ToolbarTooltip("Choose diagram theme") }) {
         Seq3DropdownButton(
             label = "theme",
-            modifier = Modifier.size(28.dp),
             fillColor = tc().p2,
             menuWidth = 400.dp,
-            fixedHeight = 28.dp,
-            anchorContent = { Seq3ThemeSwatch(swatchColors) },
+            // Round 6: only a 1dp inset, just enough to keep the chrome's own 1dp border
+            // visible — the swatch is meant to *be* the button face, not a small icon floating
+            // inside it, so its 42x26dp fills the 44x28dp footprint its toolbar siblings occupy.
+            anchorContent = {
+                Box(Modifier.padding(1.dp)) { Seq3ThemeSwatch(swatchColors) }
+            },
         ) { close ->
             ThemeGallery(
                 settings = state.settings,
@@ -311,45 +316,52 @@ private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSes
     }
 }
 
-/** Miniature, label-less rendering of [ThemeWindowCard]'s own bg/p/p2/ac/seq1/seq2 visual
- *  language (`SettingsDialog.kt`), scaled down from that card's 118×66dp gallery size to fit
- *  inside a 28dp-tall toolbar control: a tiny rounded "window" with a header strip and a body
- *  showing the accent rail plus the two sequence colors, no text — [Seq3DocumentThemeDropdown]
- *  wraps this in a [TooltipArea] to surface the theme's name on hover instead. */
+/** WP-theme-badge polish, round 6 (user-observed correction): rounds 2–3 built this as a 22dp
+ *  *square*, which squeezed [ThemeWindowCard]'s 118×66 landscape composition into an aspect ratio
+ *  the card itself never has, and round 4's 36×22 still sat inside a 4dp/3dp inset that left a
+ *  visible dead margin between the swatch and the button border. This is now the button face:
+ *  42×26dp inside a 44×28dp trigger (its `≡`/`⇅`/`▦`/`#`/`⏱` siblings' footprint), leaving only
+ *  the 1dp the chrome's border needs. Every element is scaled independently rather than
+ *  pixel-scaled uniformly — a literal ~35% scale of the card's 4dp rail and 8dp swatches would
+ *  still read as mush — while the card's own proportions are kept: an outer [ThemeColors.bg]
+ *  frame, a `p` title strip at the card's ≈21% height ratio with its ac/seq1/seq2 dot trio, and
+ *  a `p2` body pane with the left accent rail and bottom-right swatch pair. No text: the theme's
+ *  name lives in [Seq3DocumentThemeDropdown]'s tooltip. */
 @Composable
 private fun Seq3ThemeSwatch(colors: ThemeColors) {
-    val shape = RoundedCornerShape(6.dp)
     Column(
-        Modifier.size(22.dp)
-            .clip(shape)
-            .background(colors.bg, shape)
-            .border(1.dp, colors.br, shape)
+        Modifier.width(42.dp).height(26.dp)
+            .clip(RoundedCornerShape(3.dp))
+            .background(colors.bg)
             .padding(2.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
+        verticalArrangement = Arrangement.spacedBy(1.5.dp),
     ) {
-        Box(Modifier.fillMaxWidth().height(4.dp).background(colors.p, RoundedCornerShape(2.dp)))
+        Row(
+            Modifier.fillMaxWidth().height(6.dp)
+                .background(colors.p, RoundedCornerShape(2.dp))
+                .padding(horizontal = 2.dp),
+            horizontalArrangement = Arrangement.spacedBy(1.5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            listOf(colors.ac, colors.seq1, colors.seq2).forEach { color ->
+                Box(Modifier.size(2.5.dp).background(color, RoundedCornerShape(50)))
+            }
+        }
         Box(Modifier.fillMaxWidth().weight(1f).background(colors.p2, RoundedCornerShape(2.dp))) {
-            Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(2.dp).background(colors.ac, RoundedCornerShape(1.dp)))
+            Box(
+                Modifier.align(Alignment.CenterStart).fillMaxHeight().width(3.dp)
+                    .background(colors.ac, RoundedCornerShape(1.dp)),
+            )
             Row(
-                Modifier.align(Alignment.BottomEnd).padding(1.dp),
-                horizontalArrangement = Arrangement.spacedBy(1.dp),
+                Modifier.align(Alignment.BottomEnd).padding(2.dp),
+                horizontalArrangement = Arrangement.spacedBy(1.5.dp),
             ) {
-                Box(Modifier.size(3.dp).background(colors.seq1, RoundedCornerShape(1.dp)))
-                Box(Modifier.size(3.dp).background(colors.seq2, RoundedCornerShape(1.dp)))
+                Box(Modifier.size(4.dp).background(colors.seq1, RoundedCornerShape(1.dp)))
+                Box(Modifier.size(4.dp).background(colors.seq2, RoundedCornerShape(1.dp)))
             }
         }
     }
 }
-
-/** Mirrors [seq3DocumentDisplaySegmentsLabel]'s "resolve the stored raw value back to a label"
- *  shape — a garbage/renamed preset name (an old document opened against a build that renamed a
- *  preset) reads as "Follow app theme" here rather than crashing, the same fallback
- *  [resolveSeq3ThemeColors] applies when actually resolving colors. */
-private fun seq3DiagramThemeLabel(themePresetName: String?): String =
-    themePresetName
-        ?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
-        ?.label
-        ?: "Follow app theme"
 
 @Composable
 private fun Seq3ContextualSelectionActions(
@@ -1020,7 +1032,21 @@ internal fun Seq3DropdownButton(
         focusRequester?.let { runCatching { it.requestFocus() } }
     }
     val fixedHeightModifier = fixedHeight?.let { Modifier.height(it) } ?: Modifier
-    val fixedSurfaceModifier = if (fixedHeight != null) Modifier.fillMaxHeight() else Modifier
+    // WP-theme-badge sizing fix: this only ever filled HEIGHT, so a compact `anchorContent`
+    // trigger (the theme badge) hugged its own intrinsic content width (the 22dp swatch) instead
+    // of the full square the outer Box(modifier.then(fixedHeightModifier)) reserves — the badge
+    // rendered narrower than its 28dp `≡`/`⇅`/`▦`/`#`/`⏱` toolbar siblings. Gated on
+    // `anchorContent != null`: the default label+▾ Row call sites (Seq3QueuePanel.kt's lifeline
+    // kind/display-segments/fragment-kind pickers, Seq3MessageKindPicker) sit inside a
+    // `Row(Modifier.fillMaxWidth())` of several controls and rely on their own intrinsic
+    // (text-driven) width — adding fillMaxWidth() there would make each dropdown claim the
+    // entire row and push its neighbors out, so they must keep the height-only behavior exactly
+    // as before.
+    val fixedSurfaceModifier = when {
+        fixedHeight != null && anchorContent != null -> Modifier.fillMaxHeight().fillMaxWidth()
+        fixedHeight != null -> Modifier.fillMaxHeight()
+        else -> Modifier
+    }
     Box(modifier.then(fixedHeightModifier)) {
         HoverBox(
             // Keep the padding inside the clickable Box. `HoverBox` appends its clickable
