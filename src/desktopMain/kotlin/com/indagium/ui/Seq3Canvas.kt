@@ -383,8 +383,6 @@ private fun Seq3CanvasContent(
                                 view.hoveredFragmentId,
                                 view.selectedNoteId,
                                 view.hoveredNoteId,
-                                view.selectedDelayId,
-                                view.hoveredDelayId,
                             )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment, docTheme) }
@@ -903,10 +901,6 @@ private fun DrawScope.drawSeq3Diagram(
     hoveredFragmentId: String? = null,
     selectedNoteId: String? = null,
     hoveredNoteId: String? = null,
-    // The delay counterpart of the fragment/note pair above — same "Artifacts panel row
-    // select/hover emphasizes the canvas" contract, added when delays moved into that panel.
-    selectedDelayId: String? = null,
-    hoveredDelayId: String? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
     layout.fragments.forEach { fragment ->
@@ -985,25 +979,14 @@ private fun DrawScope.drawSeq3Diagram(
             is Seq3ElisionRow -> Unit // text-only marker, drawn by the overlay composable
         }
     }
-    // WP11: time-gap markers draw last, on top of every row/lifeline they cross — same "delays
-    // draw last" ordering as Seq3Raster.kt's own paintSeq3 (that file's own comment explains why:
-    // a delay is a break IN the timeline, so it should read as sitting above it, not buried under
-    // it). The label itself is a Compose Text overlay (Seq3DelayLabelOverlay, drawn in the parent
-    // Box alongside Seq3FragmentLabelOverlay/Seq3NoteTextOverlay), not drawn here — this DrawScope
-    // only paints the dashed divider line, exactly like it only paints arrows/lifelines and leaves
-    // every label to its own overlay composable.
-    val delayDash = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))
-    layout.delays.forEach { delay ->
-        val emphasized = seq3DelayIsEmphasized(delay.delayId, selectedDelayId, hoveredDelayId)
-        val midY = (delay.box.y + delay.box.height / 2).dp.toPx()
-        drawLine(
-            color = if (emphasized) tc.ac else tc.ts,
-            start = Offset(delay.box.x.dp.toPx(), midY),
-            end = Offset((delay.box.x + delay.box.width).dp.toPx(), midY),
-            strokeWidth = (if (emphasized) 2 else 1).dp.toPx(),
-            pathEffect = delayDash,
-        )
-    }
+    // User-observed correction: this used to draw a dashed rule spanning the full diagram width
+    // for every delay. PlantUML's own `...label...` (plantuml.com's own "Delay" example, compared
+    // against directly) draws no divider line at all — only the participants' own lifelines
+    // continue straight through the gap (already painted, unbroken, in the lifeline loop above),
+    // with the label centered in the extra vertical space. Nothing to paint here any more; the
+    // label itself is a Compose Text overlay (Seq3DelayLabelOverlay, drawn in the parent Box
+    // alongside Seq3FragmentLabelOverlay/Seq3NoteTextOverlay), including its own selected/hovered
+    // emphasis now that there's no rule left to color instead.
     // Live feedback while an arrow-endpoint drag is in progress (item 13, phase-5 post-ship plan) —
     // drawn LAST so it sits on top of every row it might cross. The dragged row is omitted above,
     // so this is the one visible line for that message and it follows the cursor in either
@@ -1438,6 +1421,10 @@ private fun Seq3DelayLabelOverlay(
 ) {
     var editing by remember(session.id, delay.delayId) { mutableStateOf(false) }
     var text by remember(session.id, delay.delayId, delay.label) { mutableStateOf(delay.label) }
+    // Now that there's no rule left to color (the horizontal divider was removed — see the
+    // DrawScope call site's own comment on why), the Artifacts panel row's select/hover instead
+    // outlines this chip, same "accent border" language Seq3ArtifactRow uses for a selected row.
+    val emphasized = seq3DelayIsEmphasized(delay.delayId, view.selectedDelayId, view.hoveredDelayId)
 
     fun commit() {
         if (text.isNotBlank()) {
@@ -1479,11 +1466,13 @@ private fun Seq3DelayLabelOverlay(
             }
         } else {
             Row(
-                Modifier.background(docTheme.p, RoundedCornerShape(4.dp)).padding(horizontal = 4.dp, vertical = 1.dp),
+                Modifier.background(docTheme.p, RoundedCornerShape(4.dp))
+                    .then(if (emphasized) Modifier.border(1.dp, docTheme.ac, RoundedCornerShape(4.dp)) else Modifier)
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                AppText(delay.label, color = docTheme.ts, fontSize = 10.sp, maxLines = 1)
+                AppText(delay.label, color = if (emphasized) docTheme.ac else docTheme.ts, fontSize = 10.sp, maxLines = 1)
                 SquareIconButton(
                     "×",
                     fontSize = 9.sp,
