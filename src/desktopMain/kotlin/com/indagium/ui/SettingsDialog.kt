@@ -431,20 +431,6 @@ private fun AppearanceSettingsSection(state: AppState) {
             onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
         )
     }
-    // WP4/WP8: the Settings-level default for a NEWLY created sequence diagram (Seq3Session.begin
-    // seeds Seq3Document.themePresetName from this) — never affects an already-saved document,
-    // which keeps whatever theme it was opened with regardless of this setting. Uses the same
-    // card gallery as "Theme" above and the per-document picker in Seq3Workspace.kt for
-    // consistency — it used to be a dropdown on the (now stale) reasoning that the per-document
-    // picker was one too.
-    CompactSetting("Default diagram theme") {
-        ThemeGallery(
-            settings = state.settings,
-            selected = state.settings.diagramDefaultTheme,
-            onSelect = { preset -> state.updateSettings { it.copy(diagramDefaultTheme = preset) } },
-            followAppTheme = true,
-        )
-    }
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -2834,9 +2820,9 @@ internal fun RowWrapControl(auto: Boolean, wrapChars: Int, onToggleAuto: () -> U
 }
 
 /**
- * WP8: generalised so both the Settings "Theme"/"Default diagram theme" controls and the
- * per-document picker in `Seq3Workspace.kt` share one card gallery instead of Settings having the
- * only visual chooser and everything else falling back to a text dropdown. [settings] is only
+ * WP8: generalised so both the Settings "Theme" control and the per-document diagram picker in
+ * `Seq3Workspace.kt` share one card gallery instead of Settings having the only visual chooser and
+ * everything else falling back to a text dropdown. [settings] is only
  * needed to resolve the *colors* of the leading "Follow app theme" tile (via
  * [resolveSeq3ThemeColors]) when [followAppTheme] is true — selection itself is driven entirely by
  * [selected]/[onSelect] so this has no idea whether it's picking the app theme, a per-document

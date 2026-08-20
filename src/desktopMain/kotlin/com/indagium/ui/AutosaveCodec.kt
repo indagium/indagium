@@ -634,7 +634,6 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("autoScrollWhileTailing", autoScrollWhileTailing)
     put("diagramLinkedNotePrimary", diagramLinkedNotePrimary)
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
-    diagramDefaultTheme?.let { put("diagramDefaultTheme", it.name) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -929,10 +928,6 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         diagramDefaultExportMode = o.stringOrNull("diagramDefaultExportMode")
             ?.let { raw -> runCatching { com.indagium.diagram3.DiagramExportMode.valueOf(raw) }.getOrNull() }
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
-        // Missing (predates this field) or a preset name a later build renamed/removed both
-        // degrade to null ("follow the app theme") rather than throwing — see AppSettings'
-        // own doc on this field.
-        diagramDefaultTheme = o.stringOrNull("diagramDefaultTheme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() },
     )
 }.getOrNull()
 
