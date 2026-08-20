@@ -416,12 +416,22 @@ private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterThem
 }
 
 // WP11: a labelled vertical gap spanning the full diagram width — a horizontal dashed rule with
-// its label centered on top, deliberately NOT a filled box like paintFragment/paintNoteBox (a
-// time-gap marker is a break in the timeline, not a region grouping messages, so it reads as a
-// divider rather than a container). Reuses `arrow`/`label` theme roles rather than adding new
-// Seq3RasterTheme fields purely for this one marker — see this file's own header on why every
-// number/colour here comes from [Seq3Layout]/[theme] rather than being invented locally.
+// its label sitting directly on the rule, deliberately NOT a filled box like
+// paintFragment/paintNoteBox (a time-gap marker is a break in the timeline, not a region grouping
+// messages, so it reads as a divider rather than a container). Reuses `arrow`/`label` theme roles
+// rather than adding new Seq3RasterTheme fields purely for this one marker — see this file's own
+// header on why every number/colour here comes from [Seq3Layout]/[theme] rather than being
+// invented locally.
+//
+// User-observed correction: this used to draw the label flush against the TOP of the reserved
+// band while the rule sat at the band's vertical middle, leaving a visible gap between the two —
+// unlike PlantUML's own `...label...`, which centers the label directly on the dotted rule (see
+// the plantuml.com "Delay" example this was compared against). The rule is drawn first and the
+// label second so the label's own background — none here, this marker stays unfilled by design —
+// would occlude it if it had one; as-is the dashes simply run behind the glyphs.
 private val DASH_DELAY = floatArrayOf(6f, 4f)
+
+private const val DELAY_LABEL_HALO_PAD = 4.0
 
 private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterTheme) {
     val box = delay.box
@@ -430,11 +440,25 @@ private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterT
     g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_DELAY, 0f)
     g.drawLine(box.x.roundToInt(), midY, (box.x + box.width).roundToInt(), midY)
     g.font = fontFor(Seq3FontRole.NOTE)
-    g.color = Color(theme.label, true)
     val fm = g.fontMetrics
     val text = delay.label
-    val tx = box.x + (box.width - fm.stringWidth(text)) / 2
-    g.drawString(text, tx.roundToInt(), (box.y + fm.ascent).roundToInt())
+    val textWidth = fm.stringWidth(text)
+    val tx = box.x + (box.width - textWidth) / 2
+    // Baseline centered on midY: ascent/descent straddle the rule the same way PlantUML's label
+    // straddles its dotted line, instead of the old (box.y + fm.ascent) which anchored to the
+    // band's top edge regardless of where the rule was drawn.
+    val ty = midY + (fm.ascent - fm.descent) / 2
+    // A background halo masks the dashes directly behind the glyphs — PlantUML's own delay label
+    // sits on a plain gap in the line, not dashes drawn straight through the letters.
+    g.color = Color(theme.background, true)
+    g.fillRect(
+        (tx - DELAY_LABEL_HALO_PAD).roundToInt(),
+        midY - fm.ascent,
+        (textWidth + 2 * DELAY_LABEL_HALO_PAD).roundToInt(),
+        fm.ascent + fm.descent,
+    )
+    g.color = Color(theme.label, true)
+    g.drawString(text, tx.roundToInt(), ty)
 }
 
 // ── Real AWT-backed Seq3TextMetrics — the source of truth layoutSeq3 measures against ─────────
