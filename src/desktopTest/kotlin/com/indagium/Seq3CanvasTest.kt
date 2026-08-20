@@ -40,6 +40,7 @@ import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
 import com.indagium.ui.seq3ArrowStrokeWidths
+import com.indagium.ui.seq3ActorGlyphGeometry
 import com.indagium.ui.seq3ContextMenuOffset
 import com.indagium.ui.seq3FragmentIsEmphasized
 import com.indagium.ui.seq3NoteIsEmphasized
@@ -583,5 +584,58 @@ class Seq3CanvasTest {
         assertTrue(seq3NoteIsEmphasized("n1", selectedNoteId = "n1", hoveredNoteId = null))
         assertTrue(seq3NoteIsEmphasized("n1", selectedNoteId = null, hoveredNoteId = "n1"))
         assertFalse(seq3NoteIsEmphasized("n1", selectedNoteId = "n2", hoveredNoteId = null))
+    }
+
+    // ── Task 2 regression: the actor glyph's own proportions must not scale with the column's
+    // header width. seq3ActorGlyphGeometry mirrors Seq3Raster's fixed ACTOR_GLYPH_W/H (16/26) math
+    // exactly (glyphTop = 0 as this function's own local origin) — see its own doc.
+
+    @Test
+    fun actorGlyphGeometryIsIdenticalRegardlessOfHeaderWidth() {
+        // Fixed px values a real caller derives from ACTOR_GLYPH_W_DP/ACTOR_GLYPH_H_DP via
+        // `.dp.toPx()` — same for every call regardless of density, since both header widths below
+        // are evaluated at the same (arbitrary) density.
+        val glyphWidthPx = 16f
+        val glyphHeightPx = 26f
+
+        // A narrow header (HEADER_MIN_W) vs. a wide one (HEADER_MAX_W) — Seq3Layout.kt's own
+        // 90–200dp range. The old, buggy implementation derived headR from this width directly
+        // (`size.width / 8`), which is exactly what made the figure balloon on a wide lifeline.
+        val narrowHeader = seq3ActorGlyphGeometry(boxWidthPx = 90f, glyphWidthPx, glyphHeightPx)
+        val wideHeader = seq3ActorGlyphGeometry(boxWidthPx = 200f, glyphWidthPx, glyphHeightPx)
+
+        assertEquals(narrowHeader, wideHeader)
+    }
+
+    @Test
+    fun actorGlyphGeometryNeverCrossesTheHeadOrLegs() {
+        for (boxWidthPx in listOf(90f, 200f)) {
+            val geometry = seq3ActorGlyphGeometry(boxWidthPx, glyphWidthPx = 16f, glyphHeightPx = 26f)
+
+            // legSplit must sit below bodyTop (not above it) — otherwise the body/leg lines draw
+            // backward and cross through the head circle, the exact malformed glyph reported.
+            assertTrue(geometry.legSplit > geometry.bodyTop)
+            // armY must sit strictly between bodyTop and legSplit — otherwise the arm line draws
+            // outside the body line's own span (above the head or below the leg split).
+            assertTrue(geometry.armY > geometry.bodyTop)
+            assertTrue(geometry.armY < geometry.legSplit)
+        }
+    }
+
+    @Test
+    fun actorGlyphGeometryMatchesSeq3RasterPaintActorGlyphExactly() {
+        // Hand-computed from Seq3Raster.kt's paintActorGlyph with ACTOR_GLYPH_W = 16.0,
+        // ACTOR_GLYPH_H = 26.0, substituting glyphTop = 0 for the raster's own
+        // `col.header.y - ACTOR_GLYPH_GAP - ACTOR_GLYPH_H` (this function's local origin — see its
+        // own doc): headR = 16/4 = 4, headCenterY = 4, bodyTop = 8, glyphBottom = 26,
+        // legSplit = 26 - 26*0.28 = 18.72, armY = 8 + (18.72-8)*0.35 = 11.752.
+        val geometry = seq3ActorGlyphGeometry(boxWidthPx = 140f, glyphWidthPx = 16f, glyphHeightPx = 26f)
+
+        assertEquals(4f, geometry.headR)
+        assertEquals(4f, geometry.headCenterY)
+        assertEquals(8f, geometry.bodyTop)
+        assertEquals(26f, geometry.glyphBottom)
+        assertEquals(18.72f, geometry.legSplit, 0.001f)
+        assertEquals(11.752f, geometry.armY, 0.001f)
     }
 }

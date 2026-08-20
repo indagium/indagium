@@ -191,9 +191,10 @@ internal enum class Seq3PanelSection { MESSAGES, LIFELINES, ARTIFACTS }
  * all, so the Column is intentionally shorter than its container (the pre-WP8 behavior when, e.g.,
  * Messages was collapsed and Lifelines was hidden with no fragments/notes present).
  *
- * [lifelinesVisible] is `view.lifelinesSectionOpen`; [artifactsVisible] is
- * `view.artifactsSectionOpen` already ANDed with "does this document have any fragments or notes
- * to show" — a closed toggle and an empty section both mean "not in the running" identically here.
+ * [lifelinesVisible] is `view.lifelinesSectionOpen`; [artifactsVisible] is `view.artifactsSectionOpen`
+ * directly — an empty-but-toggled-on Artifacts section still claims this weight (it renders its
+ * header, its "+ note" action, and an empty-state hint in place of the row list; see
+ * `Seq3FragmentsAndNotesSection`), so it is "in the running" the same as a non-empty one.
  */
 internal fun seq3PanelWeightedSection(
     messagesExpanded: Boolean,
@@ -205,6 +206,15 @@ internal fun seq3PanelWeightedSection(
     artifactsVisible -> Seq3PanelSection.ARTIFACTS
     else -> null
 }
+
+/** WP8 (revised): whether the Fragments & notes section renders in the panel at all — purely
+ *  [Seq3ViewState.artifactsSectionOpen]. Split out (mirroring [seq3PanelWeightedSection]'s own
+ *  "split out for testability" shape) so a test can assert this no longer depends on the document
+ *  having any fragments/notes — the function doesn't even take a [Seq3Document] parameter, unlike
+ *  the old inline `view.artifactsSectionOpen && (document.fragments.isNotEmpty() || ...)` this
+ *  replaces. An empty-but-toggled-on section still renders (header, "+ note", an empty-state hint
+ *  in place of the row list) — see `Seq3FragmentsAndNotesSection`. */
+internal fun seq3ArtifactsSectionVisible(view: Seq3ViewState): Boolean = view.artifactsSectionOpen
 
 // ── The panel is a queue — design spec §04 + §06 + §07 ─────────────────────────────────────────
 //
@@ -237,10 +247,12 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
         }
     }
 
-    // WP8: whether Artifacts is "in the running" for this document at all — a closed toggle and
-    // an empty section both mean the same thing to seq3PanelWeightedSection, and both mean the
-    // section isn't drawn below either.
-    val artifactsVisible = view.artifactsSectionOpen && (document.fragments.isNotEmpty() || document.notes.isNotEmpty())
+    // WP8 (revised): whether the Artifacts section renders at all — purely the user's own
+    // show/hide toggle. It used to also require the document to already have a fragment or note,
+    // which meant turning the section ON for an empty document rendered NOTHING at all — no
+    // header, no "+ note" button — hiding the only way to add the first one. An empty section now
+    // still renders (header + empty-state hint); see `Seq3FragmentsAndNotesSection`.
+    val artifactsVisible = seq3ArtifactsSectionVisible(view)
     val weightedSection = seq3PanelWeightedSection(view.messagesExpanded, view.lifelinesSectionOpen, artifactsVisible)
 
     Column(modifier.background(tc.p)) {
@@ -311,9 +323,8 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
         // Item 9 — promoted out of the Messages area (it used to render above the message
         // LazyColumn) into its own top-level, independently collapsible/resizable section, same
         // "own VDivider + own clamped height" shape as Lifelines above. WP8 3c added its own
-        // show/hide toggle (`artifactsSectionOpen`), so `artifactsVisible` folds that together
-        // with "does this document even have fragments/notes to show" — either one hides the
-        // section identically.
+        // show/hide toggle (`artifactsSectionOpen`); `artifactsVisible` is now exactly that toggle
+        // (see its own comment above) — an empty document still shows the section when toggled on.
         if (artifactsVisible) {
             if (view.messagesExpanded || view.lifelinesSectionOpen) {
                 VDivider { delta ->
@@ -740,7 +751,9 @@ private fun Seq3LifelineRow(
                                 if (event.type == PointerEventType.Press && event.buttons.isPrimaryPressed &&
                                     event.changes.none { it.isConsumed }
                                 ) {
-                                    view.selectedLifelineId = lifeline.id
+                                    // Item 4 (WP-panel-toggle): same toggle-to-deselect as the
+                                    // fragment/note rows in Seq3FragmentsAndNotesSection.
+                                    seq3ToggleLifelineSelection(view, lifeline.id)
                                     runCatching { view.focusRequester.requestFocus() }
                                 }
                             }
@@ -1513,10 +1526,13 @@ private fun Seq3FragmentsAndNotesSection(
 ) {
     val tc = tc()
     val total = document.fragments.size + document.notes.size
-    // WP8 3b: "+ note" attaches to the current message selection, same as the title bar's own
-    // "Note" action (Seq3TitleActionButton in Seq3Workspace.kt) — `seq3AddNote` returns false
-    // unless at least one message is selected, so surface that with the same transient-hint
-    // pattern Lifelines uses for its own inline errors, rather than silently doing nothing.
+    // WP8 3b (revised): "+ note" attaches to the current message selection, same as the title
+    // bar's own "Note" action (Seq3TitleActionButton in Seq3Workspace.kt) — but when nothing is
+    // selected it now falls back to a free-floating note at `seq3DefaultNotePlacement`'s default
+    // position (same mechanism the canvas's own empty-context-menu "Add note here" uses), so this
+    // button always succeeds. `hint` is kept only for the one genuine failure mode left: a stale
+    // panel selection whose ids no longer resolve to any message in the document (`seq3AddNote`'s
+    // own `ids.isEmpty() && placement == null` guard) — selectedIds non-empty but placement null.
     var hint by remember(session.id) { mutableStateOf<String?>(null) }
     LaunchedEffect(hint) {
         if (hint != null) {
@@ -1536,7 +1552,8 @@ private fun Seq3FragmentsAndNotesSection(
                     fontSize = 10.sp,
                     onClick = {
                         val selectedIds = seq3SelectedMessageIds(document, view)
-                        if (!seq3AddNote(state, session, view, document, selectedIds)) {
+                        val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
+                        if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
                             hint = "Select a message first to attach a note to it"
                         }
                     },
@@ -1547,9 +1564,19 @@ private fun Seq3FragmentsAndNotesSection(
         )
         hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
         if (view.artifactsExpanded) {
-            Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
-                document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
-                document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
+            if (document.fragments.isEmpty() && document.notes.isEmpty()) {
+                // WP8 (revised): the section now renders even with nothing to show (see
+                // `artifactsVisible`'s own comment above) — replace the now-empty scrolling list
+                // with a small hint so the section still claims its weighted section space
+                // instead of collapsing to nothing.
+                Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
+                    AppText("No fragments or notes yet", color = tc.td, fontSize = 10.sp)
+                }
+            } else {
+                Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
+                    document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
+                    document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
+                }
             }
         }
     }
@@ -1583,7 +1610,9 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
         selected = view.selectedFragmentId == fragment.id,
         hovered = view.hoveredFragmentId == fragment.id,
         onSelect = {
-            view.selectedFragmentId = fragment.id
+            // Item 4 (WP-panel-toggle): a second click on the already-selected row deselects it,
+            // matching message selection's own click-again-to-deselect behavior.
+            seq3ToggleFragmentSelection(view, fragment.id)
             runCatching { view.focusRequester.requestFocus() }
         },
         onHoverEnter = { view.hoveredFragmentId = fragment.id },
@@ -1645,7 +1674,8 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
         selected = view.selectedNoteId == note.id,
         hovered = view.hoveredNoteId == note.id,
         onSelect = {
-            view.selectedNoteId = note.id
+            // Item 4 (WP-panel-toggle): same toggle-to-deselect as the fragment row above.
+            seq3ToggleNoteSelection(view, note.id)
             runCatching { view.focusRequester.requestFocus() }
         },
         onHoverEnter = { view.hoveredNoteId = note.id },
@@ -1680,7 +1710,7 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
  *  checkbox driving a bare local `remember` — no shared selection, no bulk action, no canvas
  *  link, and it wasn't clear what it did — so it is gone. The row body is clickable instead,
  *  same "Press event on a `pointerInput`-wrapped body Column" idiom [Seq3LifelineRow] already
- *  uses for its own body-click-to-focus (`view.selectedLifelineId = lifeline.id`); [selected]/
+ *  uses for its own body-click-to-toggle (`seq3ToggleLifelineSelection`); [selected]/
  *  [hovered]/[onSelect]/[onHoverEnter]/[onHoverExit] are supplied by the caller so this stays
  *  agnostic to whether it's drawing a fragment or a note. */
 @Composable

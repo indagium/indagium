@@ -278,27 +278,66 @@ private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSessi
  * root key handler (Esc included) after the first click. `menuWidth` is widened to fit ~3 cards
  * per row (118dp cards + 8dp gaps ≈ 370dp, plus the gallery's own scrollbar gutter and the popup's
  * padding).
+ *
+ * WP-theme-badge: the trigger itself is a compact [Seq3ThemeSwatch] icon badge — same 28dp
+ * footprint as its `≡`/`⇅`/`▦`/`#`/`⏱` neighbors in the title bar — rather than the old
+ * always-visible "theme: <name>" text pill; the theme's name moves into a [TooltipArea] instead
+ * of sitting on the control at rest.
  */
 @Composable
 private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSession) {
-    val tc = tc()
     val themePresetName = session.document.themePresetName
     val selected = themePresetName?.let { name -> runCatching { ThemePreset.valueOf(name) }.getOrNull() }
-    Seq3DropdownButton(
-        label = "theme: ${seq3DiagramThemeLabel(themePresetName)}",
-        labelColor = tc.ts,
-        fillColor = tc.p2,
-        menuWidth = 400.dp,
-    ) { close ->
-        ThemeGallery(
-            settings = state.settings,
-            selected = selected,
-            onSelect = { preset ->
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(preset?.name))
-                close()
-            },
-            followAppTheme = true,
-        )
+    val swatchColors = resolveSeq3ThemeColors(session.document, state.settings)
+    TooltipArea(tooltip = { ToolbarTooltip(seq3DiagramThemeLabel(themePresetName)) }) {
+        Seq3DropdownButton(
+            label = "theme",
+            modifier = Modifier.size(28.dp),
+            fillColor = tc().p2,
+            menuWidth = 400.dp,
+            fixedHeight = 28.dp,
+            anchorContent = { Seq3ThemeSwatch(swatchColors) },
+        ) { close ->
+            ThemeGallery(
+                settings = state.settings,
+                selected = selected,
+                onSelect = { preset ->
+                    state.seq3Sessions.applyCommand(session.id, Seq3Command.SetDocumentTheme(preset?.name))
+                    close()
+                },
+                followAppTheme = true,
+            )
+        }
+    }
+}
+
+/** Miniature, label-less rendering of [ThemeWindowCard]'s own bg/p/p2/ac/seq1/seq2 visual
+ *  language (`SettingsDialog.kt`), scaled down from that card's 118×66dp gallery size to fit
+ *  inside a 28dp-tall toolbar control: a tiny rounded "window" with a header strip and a body
+ *  showing the accent rail plus the two sequence colors, no text — [Seq3DocumentThemeDropdown]
+ *  wraps this in a [TooltipArea] to surface the theme's name on hover instead. */
+@Composable
+private fun Seq3ThemeSwatch(colors: ThemeColors) {
+    val shape = RoundedCornerShape(6.dp)
+    Column(
+        Modifier.size(22.dp)
+            .clip(shape)
+            .background(colors.bg, shape)
+            .border(1.dp, colors.br, shape)
+            .padding(2.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Box(Modifier.fillMaxWidth().height(4.dp).background(colors.p, RoundedCornerShape(2.dp)))
+        Box(Modifier.fillMaxWidth().weight(1f).background(colors.p2, RoundedCornerShape(2.dp))) {
+            Box(Modifier.align(Alignment.CenterStart).fillMaxHeight().width(2.dp).background(colors.ac, RoundedCornerShape(1.dp)))
+            Row(
+                Modifier.align(Alignment.BottomEnd).padding(1.dp),
+                horizontalArrangement = Arrangement.spacedBy(1.dp),
+            ) {
+                Box(Modifier.size(3.dp).background(colors.seq1, RoundedCornerShape(1.dp)))
+                Box(Modifier.size(3.dp).background(colors.seq2, RoundedCornerShape(1.dp)))
+            }
+        }
     }
 }
 
@@ -793,7 +832,40 @@ internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false
     view.selectedOccurrenceMessageId = null
     view.selectedOccurrenceEntryId = null
     view.hoveredMessageId = null
-    if (clearFocus) view.focusedMessageId = null
+    if (clearFocus) {
+        view.focusedMessageId = null
+        // Item 4 (WP-panel-toggle): every "clicked empty canvas background" site in Seq3Canvas.kt
+        // already calls this with clearFocus=true to drop the message focus/highlight — fold the
+        // panel-only fragment/note/lifeline selections into that same "clicked away" gesture so a
+        // click on empty canvas space deselects a panel-selected row the same way it already
+        // deselects a message. Seq3LifelineChip's own onPress calls `seq3ClearSelection(view,
+        // clearFocus = true)` immediately before re-setting `view.selectedLifelineId =
+        // column.lifelineId` on the SAME press — clearing it here and re-setting it on the very
+        // next line is fine (see that call site).
+        view.selectedFragmentId = null
+        view.selectedNoteId = null
+        view.selectedLifelineId = null
+    }
+}
+
+/** Toggle-to-deselect (item 4, WP-panel-toggle): clicking the already-selected fragment/note/
+ *  lifeline row a second time clears it, matching how message selection already behaves. Each
+ *  row's own `onSelect`/click handler in `Seq3QueuePanel.kt` calls the matching one of these
+ *  three instead of unconditionally assigning the id. */
+internal fun seq3ToggleFragmentSelection(view: Seq3ViewState, fragmentId: String) {
+    view.selectedFragmentId = if (view.selectedFragmentId == fragmentId) null else fragmentId
+}
+
+/** The note counterpart of [seq3ToggleFragmentSelection] above — same contract. */
+internal fun seq3ToggleNoteSelection(view: Seq3ViewState, noteId: String) {
+    view.selectedNoteId = if (view.selectedNoteId == noteId) null else noteId
+}
+
+/** The lifeline counterpart of [seq3ToggleFragmentSelection] above — same contract. This is the
+ *  panel row's plain-click FOCUS toggle ([Seq3ViewState.selectedLifelineId]), independent from the
+ *  checkbox-driven [Seq3ViewState.selectedLifelineIds] multi-select. */
+internal fun seq3ToggleLifelineSelection(view: Seq3ViewState, lifelineId: String) {
+    view.selectedLifelineId = if (view.selectedLifelineId == lifelineId) null else lifelineId
 }
 
 internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, messageId: String): Boolean {
@@ -836,6 +908,23 @@ internal fun seq3AddNote(
         view.canvasContextMenuCanvasPoint = Seq3Box(0.0, 0.0, 0.0, 0.0)
     }
     return applied
+}
+
+/** Default free-floating placement for the Fragments & notes panel header's "+ note" button
+ *  (`Seq3QueuePanel.kt`'s `Seq3FragmentsAndNotesSection`) when nothing is selected. The canvas's
+ *  own empty-context-menu "Add note here" anchors a free-floating note to the exact right-click
+ *  point (see `Seq3Canvas.kt`'s `Seq3CanvasEmptyContextMenu`); a panel button press has no click
+ *  point to anchor to, so this derives a position from the diagram's own overall size
+ *  ([Seq3RenderCache.layout]) instead — horizontally centered, a small margin down from the top —
+ *  so the note lands somewhere on the visible diagram rather than off it, for a diagram of any
+ *  size (including an empty one, where `layout.width` is 0 and the `coerceAtLeast(0.0)` keeps `x`
+ *  from going negative). */
+internal fun seq3DefaultNotePlacement(document: Seq3Document): Seq3Box {
+    val layout = Seq3RenderCache.layout(document)
+    val noteWidth = 220.0
+    val x = ((layout.width - noteWidth) / 2.0).coerceAtLeast(0.0)
+    val y = 24.0
+    return Seq3Box(x, y, 0.0, 0.0)
 }
 
 /** Manual insert (WP11, "Insert delay after this" — canvas context menu and the `+ message`
@@ -907,6 +996,12 @@ internal fun Seq3DropdownButton(
     alwaysFilled: Boolean = false,
     menuWidth: androidx.compose.ui.unit.Dp = 160.dp,
     fixedHeight: androidx.compose.ui.unit.Dp? = null,
+    // WP-theme-badge: lets a call site substitute its own trigger surface (e.g. the compact theme
+    // swatch below) for the default "label ▾" Row. Everything else about the dropdown — the click
+    // handling, the open/fillColor background, the Popup, closeAndReclaimFocus — stays identical;
+    // only the visible content of the trigger changes. `null` (the default) keeps every pre-existing
+    // call site rendering exactly as before.
+    anchorContent: (@Composable () -> Unit)? = null,
     menu: @Composable (close: () -> Unit) -> Unit,
 ) {
     val tc = tc()
@@ -938,14 +1033,23 @@ internal fun Seq3DropdownButton(
                 .border(1.dp, tc.br, CORNER_MD),
             onClick = { if (System.currentTimeMillis() >= suppressUntilMs) open = !open },
         ) {
-            Row(
-                fixedSurfaceModifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                DisableSelection {
-                    AppText(label, color = labelColor, fontSize = 11.sp)
-                    AppText("▾", color = labelColor.copy(alpha = .7f), fontSize = 9.sp)
+            if (anchorContent != null) {
+                // No horizontal/vertical padding here — a compact anchor (e.g. a 28dp badge) is
+                // meant to fill its whole `fixedSurfaceModifier` box; the old text-anchor's
+                // 8dp/4dp Row padding would otherwise squeeze it down well below its intended size.
+                Box(fixedSurfaceModifier, contentAlignment = Alignment.Center) {
+                    anchorContent()
+                }
+            } else {
+                Row(
+                    fixedSurfaceModifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    DisableSelection {
+                        AppText(label, color = labelColor, fontSize = 11.sp)
+                        AppText("▾", color = labelColor.copy(alpha = .7f), fontSize = 9.sp)
+                    }
                 }
             }
         }
@@ -1123,7 +1227,11 @@ private fun applySeq3KeyAction(
     }
 }
 
-private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
+// internal (not private): WP-panel-toggle's own Seq3KeyActionTest-style coverage of the
+// fragment/note/lifeline Esc branch needs to invoke this directly, the same reason
+// seq3ClearSelection/seq3AddNote/seq3BeginLabelRename above are already internal rather than
+// private.
+internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
     // WP7 item 6: this root handler sits ABOVE every canvas/panel inline editor in the focus tree,
     // and Compose dispatches onPreviewKeyEvent top-down (root first) — so if this branch claimed
     // (returned true for) the event the way it used to, an editor's own InlineField.onCancel would
@@ -1142,6 +1250,18 @@ private fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
+    // Item 4 (WP-panel-toggle): the three panel-only selections (fragment/note/lifeline) can't
+    // conflict with each other — they're different rows in different sections — so Esc clears
+    // whichever of them is set in one press, rather than picking a priority order among the three.
+    // This branch sits ahead of the message-selection branch below: a panel row is the more
+    // "local"/recent selection layer, so Esc peels it off first, same as it already peels off a
+    // context menu or a marquee rect before falling through to the broader message selection.
+    view.selectedFragmentId != null || view.selectedNoteId != null || view.selectedLifelineId != null -> {
+        view.selectedFragmentId = null
+        view.selectedNoteId = null
+        view.selectedLifelineId = null
+        true
+    }
     view.selection.selectedIds.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty() -> {
         seq3ClearSelection(view)
         true
