@@ -51,6 +51,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -72,6 +73,7 @@ import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3DelayBox
+import com.indagium.diagram3.seq3LifelineSegments
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
@@ -925,13 +927,23 @@ private fun DrawScope.drawSeq3Diagram(
             style = Stroke(width = (if (emphasized) 2 else 1).dp.toPx()),
         )
     }
+    // User-observed correction: a lifeline used to draw with the same dash the whole way down.
+    // PlantUML itself switches to a denser, round-dotted pattern for the height of a `...` delay
+    // marker, then reverts — dottedDash pairs a near-zero dash length with a round cap so it
+    // draws as dots, not tiny dashes; seq3LifelineSegments (Seq3Layout.kt) is the one place that
+    // decides where each pattern applies, shared with Seq3Raster.kt's own paintLifelines.
+    val dottedDash = PathEffect.dashPathEffect(floatArrayOf(0.1.dp.toPx(), 4.dp.toPx()))
     layout.lifelines.forEach { column ->
-        drawLine(
-            color = tc.td,
-            start = Offset(column.centerX.dp.toPx(), column.lifelineTop.dp.toPx()),
-            end = Offset(column.centerX.dp.toPx(), column.lifelineBottom.dp.toPx()),
-            strokeWidth = 1.dp.toPx(), pathEffect = dash,
-        )
+        seq3LifelineSegments(column.lifelineTop, column.lifelineBottom, layout.delays).forEach { segment ->
+            drawLine(
+                color = tc.td,
+                start = Offset(column.centerX.dp.toPx(), segment.fromY.dp.toPx()),
+                end = Offset(column.centerX.dp.toPx(), segment.toY.dp.toPx()),
+                strokeWidth = 1.dp.toPx(),
+                pathEffect = if (segment.isDotted) dottedDash else dash,
+                cap = if (segment.isDotted) StrokeCap.Round else StrokeCap.Butt,
+            )
+        }
     }
     layout.rows.forEach { row ->
         val draggingMessage = dragPreview?.messageId == row.messageId
@@ -1472,7 +1484,17 @@ private fun Seq3DelayLabelOverlay(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                AppText(delay.label, color = if (emphasized) docTheme.ac else docTheme.ts, fontSize = 10.sp, maxLines = 1)
+                // User-observed correction: this used to share the 10sp every other overlay chip's
+                // label uses, which read as too easy to miss floating alone with nothing else
+                // nearby to draw the eye — bumped to match Seq3FontRole.DELAY's 13pt raster size
+                // and given Medium weight, since a delay has no line of its own left to anchor it.
+                AppText(
+                    delay.label,
+                    color = if (emphasized) docTheme.ac else docTheme.ts,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                )
                 SquareIconButton(
                     "×",
                     fontSize = 9.sp,

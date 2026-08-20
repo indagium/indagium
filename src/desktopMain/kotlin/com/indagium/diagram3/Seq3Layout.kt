@@ -37,6 +37,10 @@ enum class Seq3FontRole(val basePointSize: Double) {
     FRAGMENT(11.0),
     NOTE(11.0),
     STUB(10.0),
+    // User-observed correction: a delay's label used to share NOTE's 11pt, which read as too
+    // small/easy to miss floating alone in an otherwise-empty band — bumped to LIFELINE's size,
+    // the largest role already in use, rather than inventing a new number.
+    DELAY(13.0),
 }
 
 /** Single-line text measurement, abstracted so [layoutSeq3] can run against a real AWT
@@ -218,11 +222,45 @@ data class Seq3FragmentBox(
 data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
 
 /** A [Seq3Delay]'s drawn geometry (WP11) — a labelled band spanning the full diagram width,
- *  anchored right after its [Seq3Delay.afterMessageId]'s last drawn row. [box] is already the
- *  FULL band (not just a label box, unlike [Seq3NoteBox]'s tighter-fit box) because both
- *  renderers draw this the same way a fragment box is drawn: fill/stroke the whole rect, then
- *  center the label text inside it — see `buildRows`' own doc for where [box] comes from. */
+ *  anchored right after its [Seq3Delay.afterMessageId]'s own drawn row (the exact occurrence when
+ *  [Seq3Delay.afterOccurrenceEntryId] resolves, else the message's last one). [box] is the FULL
+ *  reserved band (not just a label box, unlike [Seq3NoteBox]'s tighter-fit box) — a renderer
+ *  centers the label inside it and, per [seq3LifelineSegments], switches every lifeline crossing
+ *  it to a dotted pattern for the band's height — see `buildRows`' own doc for where [box] comes
+ *  from. */
 data class Seq3DelayBox(val delayId: String, val label: String, val box: Seq3Box)
+
+/** One vertical run of a lifeline's dashed guide line: the ordinary dash pattern outside a delay
+ *  ([isDotted] false), or a denser dotted pattern for the height of one it crosses ([isDotted]
+ *  true) — user-observed correction mirroring PlantUML's own `...` convention, where a lifeline
+ *  switches from its usual dashes to closely-spaced dots for the width of a delay marker, then
+ *  reverts. See [seq3LifelineSegments]. */
+data class Seq3LifelineSegment(val fromY: Double, val toY: Double, val isDotted: Boolean)
+
+/**
+ * Splits one lifeline's full vertical extent ([top]..[bottom]) into alternating
+ * [Seq3LifelineSegment]s around every delay it crosses. Every [Seq3DelayBox.box] already spans
+ * the FULL diagram width (that struct's own doc), so every lifeline crosses every delay
+ * identically — this needs no per-column filtering, just the same [delays] list for every column.
+ * A delay whose band falls entirely outside [top]..[bottom] (shouldn't happen — every lifeline
+ * spans the whole canvas height — but a defensive clamp costs nothing) contributes no segment.
+ * Delays are sorted by y first so out-of-order document.delays or overlapping bands (two delays
+ * anchored to nearly the same row) still produce a monotonic, non-overlapping segment list.
+ */
+fun seq3LifelineSegments(top: Double, bottom: Double, delays: List<Seq3DelayBox>): List<Seq3LifelineSegment> {
+    if (delays.isEmpty() || top >= bottom) return listOf(Seq3LifelineSegment(top, bottom, isDotted = false))
+    val segments = mutableListOf<Seq3LifelineSegment>()
+    var cursor = top
+    delays.sortedBy { it.box.y }.forEach { delay ->
+        val delayTop = delay.box.y.coerceIn(top, bottom)
+        val delayBottom = (delay.box.y + delay.box.height).coerceIn(top, bottom)
+        if (delayTop > cursor) segments += Seq3LifelineSegment(cursor, delayTop, isDotted = false)
+        if (delayBottom > delayTop) segments += Seq3LifelineSegment(delayTop, delayBottom, isDotted = true)
+        cursor = maxOf(cursor, delayBottom)
+    }
+    if (cursor < bottom) segments += Seq3LifelineSegment(cursor, bottom, isDotted = false)
+    return segments
+}
 
 data class Seq3Layout(
     val width: Double,

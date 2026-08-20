@@ -194,11 +194,21 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme)
     layout.delays.forEach { paintDelayBox(g, it, theme) }
 }
 
+// User-observed correction: a plain dash the whole way down didn't distinguish a delay's gap from
+// the rest of the timeline. PlantUML itself switches a lifeline to a denser, round-dotted pattern
+// for the height of a `...` delay marker, then reverts to its ordinary dashes — DASH_DOTTED is
+// that pattern: a near-zero dash length with a round cap draws as a dot, not a tiny dash.
+private val DASH_DOTTED = floatArrayOf(0.1f, 4f)
+
 private fun paintLifelines(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme) {
     g.color = Color(theme.lifeline, true)
-    g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_LIFELINE, 0f)
+    val dashStroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_LIFELINE, 0f)
+    val dottedStroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, DASH_DOTTED, 0f)
     layout.lifelines.forEach { l ->
-        g.draw(java.awt.geom.Line2D.Double(l.centerX, l.lifelineTop, l.centerX, l.lifelineBottom))
+        seq3LifelineSegments(l.lifelineTop, l.lifelineBottom, layout.delays).forEach { segment ->
+            g.stroke = if (segment.isDotted) dottedStroke else dashStroke
+            g.draw(java.awt.geom.Line2D.Double(l.centerX, segment.fromY, l.centerX, segment.toY))
+        }
     }
 }
 
@@ -420,14 +430,16 @@ private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterThem
 // paintFragment/paintNoteBox (a time-gap marker is a break in the timeline, not a region grouping
 // messages) and, per a second user-observed correction, NOT a horizontal rule of its own either.
 // PlantUML's actual `...label...` (plantuml.com's own "Delay" example, compared against directly)
-// draws no divider line at all — only the participants' own lifelines continue straight through
-// the gap ([paintLifelines] draws each one as a single dash pattern spanning the full diagram
-// height, so nothing here needs to touch them), with the label centered in the extra vertical
-// space. The first correction pass added a rule and centered the label ON it, matching a style
-// PlantUML doesn't actually use; this drops the rule entirely.
+// draws no divider line at all — only the participants' own lifelines continue through the gap,
+// switched to a dotted pattern for its height ([paintLifelines], via [seq3LifelineSegments]) —
+// PlantUML's own visual cue that time is passing here — with the label centered in the extra
+// vertical space. The first correction pass added a rule and centered the label ON it, matching a
+// style PlantUML doesn't actually use; this drops the rule entirely. A third correction bumped the
+// label to [Seq3FontRole.DELAY] (that role's own doc) — NOTE's 11pt read as too easy to miss,
+// floating alone with nothing else in its band to draw the eye to it.
 private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterTheme) {
     val box = delay.box
-    g.font = fontFor(Seq3FontRole.NOTE)
+    g.font = fontFor(Seq3FontRole.DELAY)
     g.color = Color(theme.label, true)
     val fm = g.fontMetrics
     val text = delay.label

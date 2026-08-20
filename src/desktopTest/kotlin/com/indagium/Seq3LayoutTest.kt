@@ -1,9 +1,11 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3ArrowRow
+import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3Delay
+import com.indagium.diagram3.Seq3DelayBox
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3FontRole
@@ -24,8 +26,10 @@ import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.Seq3LifelineSegment
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
+import com.indagium.diagram3.seq3LifelineSegments
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -856,5 +860,56 @@ class Seq3LayoutTest {
 
         assertTrue(layout.delays.isEmpty())
         assertEquals(1, layout.rows.size)
+    }
+
+    // ── seq3LifelineSegments (WP11 follow-up): dash/dot split around a delay band ─────────────
+
+    private fun delayBox(y: Double, height: Double = 34.0) = Seq3DelayBox("d", "gap", Seq3Box(0.0, y, 100.0, height))
+
+    @Test
+    fun noDelaysProducesOneUndottedSegmentSpanningTheWholeLifeline() {
+        val segments = seq3LifelineSegments(top = 0.0, bottom = 500.0, delays = emptyList())
+
+        assertEquals(listOf(Seq3LifelineSegment(0.0, 500.0, isDotted = false)), segments)
+    }
+
+    @Test
+    fun oneDelayInTheMiddleProducesDashDotDash() {
+        val segments = seq3LifelineSegments(top = 0.0, bottom = 500.0, delays = listOf(delayBox(y = 200.0, height = 34.0)))
+
+        assertEquals(
+            listOf(
+                Seq3LifelineSegment(0.0, 200.0, isDotted = false),
+                Seq3LifelineSegment(200.0, 234.0, isDotted = true),
+                Seq3LifelineSegment(234.0, 500.0, isDotted = false),
+            ),
+            segments,
+        )
+    }
+
+    @Test
+    fun aDelayFlushAgainstTheTopEdgeProducesJustDotThenDash() {
+        val segments = seq3LifelineSegments(top = 0.0, bottom = 100.0, delays = listOf(delayBox(y = 0.0, height = 34.0)))
+
+        assertEquals(listOf(Seq3LifelineSegment(0.0, 34.0, isDotted = true), Seq3LifelineSegment(34.0, 100.0, isDotted = false)), segments)
+    }
+
+    @Test
+    fun twoDelaysProduceDashDotDashDotDash() {
+        val segments = seq3LifelineSegments(top = 0.0, bottom = 500.0, delays = listOf(delayBox(y = 100.0), delayBox(y = 300.0)))
+
+        assertEquals(5, segments.size)
+        assertEquals(listOf(false, true, false, true, false), segments.map { it.isDotted })
+    }
+
+    @Test
+    fun delaysOutOfOrderInTheInputStillProduceAMonotonicNonOverlappingSegmentList() {
+        // document.delays has no guaranteed order — the function itself must sort by y.
+        val segments = seq3LifelineSegments(top = 0.0, bottom = 500.0, delays = listOf(delayBox(y = 300.0), delayBox(y = 100.0)))
+
+        assertEquals(listOf(false, true, false, true, false), segments.map { it.isDotted })
+        for (i in 1 until segments.size) {
+            assertTrue(segments[i - 1].toY <= segments[i].fromY, "segments must be produced in increasing, non-overlapping y order")
+        }
     }
 }
