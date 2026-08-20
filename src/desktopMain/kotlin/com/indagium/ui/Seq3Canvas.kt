@@ -1864,75 +1864,110 @@ private fun Seq3LifelineChip(
                 drawSeq3ActorGlyph(if (selected) docTheme.ac else docTheme.br)
             }
         }
-        Box(
-            Modifier
-                .offset { IntOffset((column.header.x * density + dragPx).roundToInt(), (column.header.y * density).roundToInt()) }
-                .size(column.header.width.dp, column.header.height.dp)
-                .let {
-                    // Item 2 (actor glyph): "a stick figure ABOVE THE NAME INSTEAD OF the rounded
-                    // chip" — an actor column skips the fill/border entirely rather than drawing
-                    // an (unwanted) box behind its name, mirroring Seq3Raster's paintActorGlyph.
-                    if (isActor) it else it.background(if (selected) docTheme.abg else docTheme.p2, RoundedCornerShape(4.dp))
-                        .border(1.dp, if (selected) docTheme.ac else docTheme.br, RoundedCornerShape(4.dp))
-                }
-                .pointerInput(session.id, column.lifelineId) {
-                    detectDragGestures(
-                        onDragStart = { view.selectedLifelineId = column.lifelineId },
-                        onDrag = { change, dragAmount -> change.consume(); dragPx += dragAmount.x },
-                        onDragEnd = {
-                            val activeDocument = currentDocument.value
-                            val activeLayout = currentLayout.value
-                            val activeColumn = currentColumn.value
-                            val order = activeDocument.lifelines.sortedBy { it.ordinal }.map { it.id }
-                            val orderedColumns = activeLayout.lifelines.sortedWith(compareBy { order.indexOf(it.lifelineId) })
-                            val dropXUnits = activeColumn.header.x + dragPx / density + activeColumn.header.width / 2
-                            // The insertion point is measured among the columns that will remain
-                            // after the dragged column is removed. Including the dragged column
-                            // shifts every right-side target by one slot.
-                            val targetIndex = seq3LifelineDropIndex(
-                                orderedColumns.filterNot { it.lifelineId == activeColumn.lifelineId }.map { it.centerX },
-                                dropXUnits,
-                            )
-                            val reordered = seq3ReorderLifelineIds(order, activeColumn.lifelineId, targetIndex)
-                            dragPx = 0f
-                            if (reordered != order) state.seq3Sessions.applyCommand(session.id, Seq3Command.ReorderLifelines(reordered))
-                        },
-                        onDragCancel = { dragPx = 0f },
-                    )
-                }
-                .pointerInput(session.id, column.lifelineId) {
-                    detectTapGestures(
-                        // Select on press so a plain click gives immediate feedback even though
-                        // this same surface also owns drag-to-reorder and double-click-to-rename.
-                        onPress = {
-                            seq3ClearSelection(view, clearFocus = true)
-                            view.selectedLifelineId = column.lifelineId
-                            tryAwaitRelease()
-                        },
-                        onTap = { view.selectedLifelineId = column.lifelineId },
-                        onDoubleTap = { renaming = true },
+        if (renaming) {
+            // Task 1 fix (rename editing surface): the static chip's `header.width`/`header.height`
+            // box is sized for a short, already-committed label (HEADER_MIN_W/HEADER_MAX_W in
+            // Seq3Layout.kt run ~90–200dp) and the old code squeezed the 100dp field + two 16dp
+            // buttons into that same box — on a narrow header the row's own content (~140dp)
+            // overflowed the box with no backdrop behind the overflow. This is a fully separate,
+            // wider, self-painted surface instead of reusing the static chip's geometry: it stays
+            // anchored to the SAME lifeline (centered on `column.centerX`, same `header.y`) but is
+            // free to be wider than any header, and it owns no drag-to-reorder pointerInput — that
+            // gesture belongs to the static chip only, which is absent from composition while
+            // renaming, so there is no drag/tap competition with the text field.
+            Box(
+                Modifier.offset {
+                    IntOffset(
+                        ((column.centerX - SEQ3_RENAME_SURFACE_WIDTH_DP / 2) * density).roundToInt(),
+                        (column.header.y * density).roundToInt(),
                     )
                 },
-            contentAlignment = Alignment.Center,
-        ) {
-            if (renaming) {
+            ) {
                 Row(
-                    Modifier.padding(2.dp),
+                    Modifier
+                        .width(SEQ3_RENAME_SURFACE_WIDTH_DP.dp)
+                        .height(column.header.height.dp)
+                        .background(docTheme.p2, RoundedCornerShape(4.dp))
+                        .border(1.dp, docTheme.ac, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
                 ) {
                     InlineField(
                         value = renameText,
                         onValue = { renameText = it },
                         fontSize = 10.sp,
-                        modifier = Modifier.width(100.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+                        modifier = Modifier.weight(1f).onFocusChanged { view.textFieldFocused = it.hasFocus },
                         onSubmit = ::commitRename,
                         onCancel = ::cancelRename,
                     )
+                }
+                // The ✓/× buttons sit OUTSIDE the editing surface's trailing edge (an .offset past
+                // where the surface's own border ends) rather than sharing the surface's cramped
+                // width with the text field — CenterStart vertically centers them against the
+                // surface's own height since the surface is always at least as tall as these 16dp
+                // buttons (column.header.height is sized for a full text line).
+                Row(
+                    Modifier
+                        .align(Alignment.CenterStart)
+                        .offset(x = (SEQ3_RENAME_SURFACE_WIDTH_DP + 4f).dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
                     SquareIconButton("✓", fontSize = 10.sp, onClick = ::commitRename, size = 16.dp)
                     SquareIconButton("×", fontSize = 10.sp, onClick = ::cancelRename, size = 16.dp)
                 }
-            } else {
+            }
+        } else {
+            Box(
+                Modifier
+                    .offset { IntOffset((column.header.x * density + dragPx).roundToInt(), (column.header.y * density).roundToInt()) }
+                    .size(column.header.width.dp, column.header.height.dp)
+                    .let {
+                        // Item 2 (actor glyph): "a stick figure ABOVE THE NAME INSTEAD OF the rounded
+                        // chip" — an actor column skips the fill/border entirely rather than drawing
+                        // an (unwanted) box behind its name, mirroring Seq3Raster's paintActorGlyph.
+                        if (isActor) it else it.background(if (selected) docTheme.abg else docTheme.p2, RoundedCornerShape(4.dp))
+                            .border(1.dp, if (selected) docTheme.ac else docTheme.br, RoundedCornerShape(4.dp))
+                    }
+                    .pointerInput(session.id, column.lifelineId) {
+                        detectDragGestures(
+                            onDragStart = { view.selectedLifelineId = column.lifelineId },
+                            onDrag = { change, dragAmount -> change.consume(); dragPx += dragAmount.x },
+                            onDragEnd = {
+                                val activeDocument = currentDocument.value
+                                val activeLayout = currentLayout.value
+                                val activeColumn = currentColumn.value
+                                val order = activeDocument.lifelines.sortedBy { it.ordinal }.map { it.id }
+                                val orderedColumns = activeLayout.lifelines.sortedWith(compareBy { order.indexOf(it.lifelineId) })
+                                val dropXUnits = activeColumn.header.x + dragPx / density + activeColumn.header.width / 2
+                                // The insertion point is measured among the columns that will remain
+                                // after the dragged column is removed. Including the dragged column
+                                // shifts every right-side target by one slot.
+                                val targetIndex = seq3LifelineDropIndex(
+                                    orderedColumns.filterNot { it.lifelineId == activeColumn.lifelineId }.map { it.centerX },
+                                    dropXUnits,
+                                )
+                                val reordered = seq3ReorderLifelineIds(order, activeColumn.lifelineId, targetIndex)
+                                dragPx = 0f
+                                if (reordered != order) state.seq3Sessions.applyCommand(session.id, Seq3Command.ReorderLifelines(reordered))
+                            },
+                            onDragCancel = { dragPx = 0f },
+                        )
+                    }
+                    .pointerInput(session.id, column.lifelineId) {
+                        detectTapGestures(
+                            // Select on press so a plain click gives immediate feedback even though
+                            // this same surface also owns drag-to-reorder and double-click-to-rename.
+                            onPress = {
+                                seq3ClearSelection(view, clearFocus = true)
+                                view.selectedLifelineId = column.lifelineId
+                                tryAwaitRelease()
+                            },
+                            onTap = { view.selectedLifelineId = column.lifelineId },
+                            onDoubleTap = { renaming = true },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
                 // Item 2: labelLines is already wrapped/ellipsized by Seq3Layout against this exact
                 // header width — draw every line it produced, not just column.label's single-line
                 // raw name (see Seq3LifelineColumn's own doc on why the two are kept distinct).
@@ -1948,6 +1983,12 @@ private fun Seq3LifelineChip(
         }
     }
 }
+
+// Task 1 fix: a fixed, generous width for the rename editing surface — independent of
+// `column.header.width` (90–200dp per HEADER_MIN_W/HEADER_MAX_W) so there is always comfortable
+// room to type a longer name than the committed label, with the ✓/× buttons offset past its
+// trailing edge rather than sharing this width with the text field.
+private const val SEQ3_RENAME_SURFACE_WIDTH_DP = 172f
 
 // Item 2 (WP2 font-mismatch fix): Seq3Layout measures a lifeline header at Seq3FontRole.LIFELINE's
 // basePointSize (13pt) — this chip used to draw at 11.sp, so header wrapping computed by layout
@@ -1965,24 +2006,75 @@ private val SEQ3_LIFELINE_FONT_SIZE = Seq3FontRole.LIFELINE.basePointSize.sp
 // own doc. Kept comfortably under 34 so the glyph never crowds the name box above it.
 private const val SEQ3_ACTOR_GLYPH_RESERVE_DP = 30f
 
-/** Item 2 (actor glyph): a plain stick figure — circle head, line body/arms/legs — filling this
- *  DrawScope's own size (set by the caller to [SEQ3_ACTOR_GLYPH_RESERVE_DP] tall, the column's
- *  header width wide). Mirrors Seq3Raster's `paintActorGlyph` shape so the on-screen glyph and the
- *  exported PNG's glyph read as the same figure, just drawn through two different graphics APIs. */
-private fun DrawScope.drawSeq3ActorGlyph(color: Color) {
-    val cx = size.width / 2
-    val glyphBottom = size.height
-    val headR = size.width / 8
+// Task 2 fix: the figure's OWN proportions, fixed — mirrors Seq3Raster's fixed ACTOR_GLYPH_W/H
+// constants exactly (16dp / 26dp). These must never be derived from `size.width`/`size.height`
+// (the caller's DrawScope size, which is the column's own header width/[SEQ3_ACTOR_GLYPH_RESERVE_DP]
+// reserve band) — that was the bug: a wide header inflated `headR` far past what the fixed-height
+// reserve band can hold, driving `legSplit` above `bodyTop` and drawing the body/legs backward
+// through the head. See [seq3ActorGlyphGeometry]'s own doc and Seq3CanvasTest's regression test.
+private const val ACTOR_GLYPH_W_DP = 16f
+private const val ACTOR_GLYPH_H_DP = 26f
+
+/** Pure geometry for the actor stick-figure glyph, extracted out of [drawSeq3ActorGlyph] so
+ *  [Seq3CanvasTest] can pin it down without a live Compose `DrawScope`/`Density`. Mirrors
+ *  Seq3Raster's own `paintActorGlyph` math exactly, substituting a local origin of `glyphTop = 0`
+ *  for the raster's `col.header.y - ACTOR_GLYPH_GAP - ACTOR_GLYPH_H` (this file draws inside a
+ *  Canvas already offset/sized to that band, so the band's own top IS this function's origin).
+ *
+ *  [boxWidthPx] is the caller's own DrawScope width — i.e. the column's header width in px, which
+ *  can be 90–200dp+ depending on the lifeline's name. It is accepted here ONLY to make explicit,
+ *  at the one call site and in this function's test, that it is NOT used to size the figure: every
+ *  dimension below comes exclusively from [glyphWidthPx]/[glyphHeightPx], fixed px values the
+ *  caller derives from [ACTOR_GLYPH_W_DP]/[ACTOR_GLYPH_H_DP] via `.dp.toPx()`. That is the fix for
+ *  the bug where `headR` used to be `size.width / 8`. */
+internal fun seq3ActorGlyphGeometry(
+    @Suppress("UNUSED_PARAMETER") boxWidthPx: Float,
+    glyphWidthPx: Float,
+    glyphHeightPx: Float,
+): Seq3ActorGlyphGeometry {
+    val headR = glyphWidthPx / 4f
     val headCenterY = headR
     val bodyTop = headCenterY + headR
-    val legSplit = glyphBottom - size.height * 0.28f
+    val glyphBottom = glyphHeightPx
+    val legSplit = glyphBottom - glyphHeightPx * 0.28f
     val armY = bodyTop + (legSplit - bodyTop) * 0.35f
+    return Seq3ActorGlyphGeometry(
+        headR = headR,
+        headCenterY = headCenterY,
+        bodyTop = bodyTop,
+        legSplit = legSplit,
+        armY = armY,
+        glyphBottom = glyphBottom,
+    )
+}
+
+internal data class Seq3ActorGlyphGeometry(
+    val headR: Float,
+    val headCenterY: Float,
+    val bodyTop: Float,
+    val legSplit: Float,
+    val armY: Float,
+    val glyphBottom: Float,
+)
+
+/** Item 2 (actor glyph): a plain stick figure — circle head, line body/arms/legs — drawn at a
+ *  FIXED size (see [seq3ActorGlyphGeometry]) within this DrawScope's own size (set by the caller
+ *  to [SEQ3_ACTOR_GLYPH_RESERVE_DP] tall, the column's header width wide — only `cx` below uses
+ *  that width, to center the figure horizontally within it). Mirrors Seq3Raster's `paintActorGlyph`
+ *  shape so the on-screen glyph and the exported PNG's glyph read as the same figure at the same
+ *  proportions, regardless of how wide the lifeline's header is. */
+private fun DrawScope.drawSeq3ActorGlyph(color: Color) {
+    val cx = size.width / 2
+    val glyphWidthPx = ACTOR_GLYPH_W_DP.dp.toPx()
+    val glyphHeightPx = ACTOR_GLYPH_H_DP.dp.toPx()
+    val geometry = seq3ActorGlyphGeometry(size.width, glyphWidthPx, glyphHeightPx)
+    val halfWidth = glyphWidthPx / 2
     val stroke = Stroke(width = 1.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round)
-    drawCircle(color, radius = headR, center = Offset(cx, headCenterY), style = stroke)
-    drawLine(color, Offset(cx, bodyTop), Offset(cx, legSplit), strokeWidth = stroke.width, cap = stroke.cap)
-    drawLine(color, Offset(cx - size.width / 4, armY), Offset(cx + size.width / 4, armY), strokeWidth = stroke.width, cap = stroke.cap)
-    drawLine(color, Offset(cx, legSplit), Offset(cx - size.width / 4, glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
-    drawLine(color, Offset(cx, legSplit), Offset(cx + size.width / 4, glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
+    drawCircle(color, radius = geometry.headR, center = Offset(cx, geometry.headCenterY), style = stroke)
+    drawLine(color, Offset(cx, geometry.bodyTop), Offset(cx, geometry.legSplit), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx - halfWidth, geometry.armY), Offset(cx + halfWidth, geometry.armY), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx, geometry.legSplit), Offset(cx - halfWidth, geometry.glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
+    drawLine(color, Offset(cx, geometry.legSplit), Offset(cx + halfWidth, geometry.glyphBottom), strokeWidth = stroke.width, cap = stroke.cap)
 }
 
 // ── Pure helpers — testable without a composition (Seq3CanvasTest) ─────────────────────────────
