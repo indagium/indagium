@@ -759,6 +759,11 @@ internal class Seq3ViewState {
     var hoveredFragmentId by mutableStateOf<String?>(null)
     /** The note counterpart of [hoveredFragmentId] above — same contract. */
     var hoveredNoteId by mutableStateOf<String?>(null)
+    /** The delay counterpart of [selectedFragmentId] above — same contract, backing the Artifacts
+     *  panel's own delay row (delays moved there from being canvas/context-menu-only). */
+    var selectedDelayId by mutableStateOf<String?>(null)
+    /** The delay counterpart of [hoveredFragmentId] above — same contract. */
+    var hoveredDelayId by mutableStateOf<String?>(null)
 
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
@@ -856,6 +861,7 @@ internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false
         // next line is fine (see that call site).
         view.selectedFragmentId = null
         view.selectedNoteId = null
+        view.selectedDelayId = null
         view.selectedLifelineId = null
     }
 }
@@ -871,6 +877,11 @@ internal fun seq3ToggleFragmentSelection(view: Seq3ViewState, fragmentId: String
 /** The note counterpart of [seq3ToggleFragmentSelection] above — same contract. */
 internal fun seq3ToggleNoteSelection(view: Seq3ViewState, noteId: String) {
     view.selectedNoteId = if (view.selectedNoteId == noteId) null else noteId
+}
+
+/** The delay counterpart of [seq3ToggleFragmentSelection] above — same contract. */
+internal fun seq3ToggleDelaySelection(view: Seq3ViewState, delayId: String) {
+    view.selectedDelayId = if (view.selectedDelayId == delayId) null else delayId
 }
 
 /** The lifeline counterpart of [seq3ToggleFragmentSelection] above — same contract. This is the
@@ -939,12 +950,13 @@ internal fun seq3DefaultNotePlacement(document: Seq3Document): Seq3Box {
     return Seq3Box(x, y, 0.0, 0.0)
 }
 
-/** Manual insert (WP11, "Insert delay after this" — canvas context menu and the `+ message`
- *  menu both call this): anchors a new [Seq3Delay] right after [afterMessageId]'s own last drawn
- *  row. [label] defaults to a generic placeholder, editable in place afterward via
- *  [Seq3BulkAction.SetDelayLabel] (the canvas overlay's double-click-to-rename, same pattern as
- *  a fragment/note label) — this function's own job is only to create it, matching
- *  [seq3AddNote]'s "caller mints the id, this fires the bulk action" shape. */
+/** Manual insert (WP11, "Insert delay after this" — the canvas context menu and the Artifacts
+ *  panel's "+ delay" button both call this): anchors a new [Seq3Delay] right after
+ *  [afterMessageId]'s own last drawn row. [label] defaults to a generic placeholder, editable in
+ *  place afterward via [Seq3BulkAction.SetDelayLabel] (the canvas overlay's or the Artifacts
+ *  row's double-click-to-rename, same pattern as a fragment/note label) — this function's own job
+ *  is only to create it, matching [seq3AddNote]'s "caller mints the id, this fires the bulk
+ *  action" shape. */
 internal fun seq3InsertDelayAfter(
     state: AppState,
     session: Seq3WorkspaceSession,
@@ -1276,15 +1288,16 @@ internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, vie
     view.canvasSelectionRect != null -> { view.canvasSelectionRect = null; true }
     view.regenerateSheetOpen -> { closeSeq3RegenerateSheet(state, session, view); true }
     view.guidedPass != null -> { view.guidedPass = null; true }
-    // Item 4 (WP-panel-toggle): the three panel-only selections (fragment/note/lifeline) can't
+    // Item 4 (WP-panel-toggle): the panel-only selections (fragment/note/delay/lifeline) can't
     // conflict with each other — they're different rows in different sections — so Esc clears
-    // whichever of them is set in one press, rather than picking a priority order among the three.
+    // whichever of them is set in one press, rather than picking a priority order among them.
     // This branch sits ahead of the message-selection branch below: a panel row is the more
     // "local"/recent selection layer, so Esc peels it off first, same as it already peels off a
     // context menu or a marquee rect before falling through to the broader message selection.
-    view.selectedFragmentId != null || view.selectedNoteId != null || view.selectedLifelineId != null -> {
+    view.selectedFragmentId != null || view.selectedNoteId != null || view.selectedDelayId != null || view.selectedLifelineId != null -> {
         view.selectedFragmentId = null
         view.selectedNoteId = null
+        view.selectedDelayId = null
         view.selectedLifelineId = null
         true
     }

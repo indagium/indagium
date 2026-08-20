@@ -530,6 +530,24 @@ class Seq3QueueTest {
     }
 
     @Test
+    fun setDelayVisibilityHidesAnExistingDelayByIdIndependentOfSelectionAndTouchesNoMessages() {
+        val delay = Seq3Delay("d1", "m1", "later")
+        val doc = baseDocument().copy(delays = listOf(delay))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetDelayVisibility("d1", Seq3Visibility.HIDDEN))
+        assertTrue(result.applied)
+        assertEquals(Seq3Visibility.HIDDEN, result.document.delays.single().visibility)
+        assertEquals(doc.messages, result.document.messages, "hiding a delay must not touch any of its messages")
+    }
+
+    @Test
+    fun setDelayVisibilityIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetDelayVisibility("no-such-delay", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
     fun deleteFragmentAndNoteRemoveOnlyTheRequestedArtifacts() {
         val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1", "m3"))
         val note = Seq3Note("n1", "watch this", listOf("m2"))

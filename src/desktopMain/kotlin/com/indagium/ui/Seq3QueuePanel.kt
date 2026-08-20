@@ -52,6 +52,7 @@ import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CustomMessageSpec
+import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3DelaySuggestion
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Filter
@@ -1010,17 +1011,6 @@ private fun Seq3QueueHeader(
                 ) {
                     Seq3AddMessageChoiceMenu(
                         selectedCount = tab?.selected?.size ?: 0,
-                        // WP11 manual insert: anchored after the LAST queue row (mirrors
-                        // `Seq3InsertionPosition.End`'s own default for a custom message) — this
-                        // menu has no single row in hand the way the canvas context menu's
-                        // "Insert delay after this" does, so "append one at the end of the
-                        // timeline" is the least surprising default; a user who wants it elsewhere
-                        // drags it there afterward like any other queue artifact.
-                        canInsertDelay = session.document.messages.isNotEmpty(),
-                        onDelay = {
-                            addMenuOpen = false
-                            session.document.messages.lastOrNull()?.let { last -> seq3InsertDelayAfter(state, session, last.id) }
-                        },
                         onSelectedRows = {
                             addMenuOpen = false
                             addFromEntries(tab?.let { seq3ResolveSelectedEntries(it.logData, it.selected) }.orEmpty())
@@ -1071,8 +1061,6 @@ private fun Seq3QueueHeader(
 @Composable
 private fun Seq3AddMessageChoiceMenu(
     selectedCount: Int,
-    canInsertDelay: Boolean,
-    onDelay: () -> Unit,
     onSelectedRows: () -> Unit,
     onRows: () -> Unit,
     onLogHandoff: () -> Unit,
@@ -1115,17 +1103,12 @@ private fun Seq3AddMessageChoiceMenu(
             modifier = Modifier.fillMaxWidth(),
             horizontalPadding = 8.dp,
         )
-        // WP11: NOT a Seq3Kind — Seq3AddCustomDialog's kind SegmentedControl indexes
-        // Seq3Kind.entries positionally (see Seq3Delay's own header), so a delay is offered as
-        // its own entry in THIS menu instead of a fifth kind option in that dialog.
-        AppButton(
-            "Insert delay marker",
-            onClick = onDelay,
-            enabled = canInsertDelay,
-            variant = ButtonVariant.Ghost,
-            modifier = Modifier.fillMaxWidth(),
-            horizontalPadding = 8.dp,
-        )
+        // User-observed correction: "Insert delay marker" used to live here, duplicating the
+        // Artifacts panel's own "+ delay" button (which a delay's Seq3ArtifactRow now belongs
+        // next to, matching the model's own "closer to Note than to Message" design — see
+        // Seq3Model.kt's Seq3Delay header) and the canvas context menu's "Insert delay after
+        // this" (still there, for anchoring to an arbitrary row rather than always the last one).
+        // This menu is strictly "add a message from…" now; a delay isn't one.
     }
 }
 
@@ -1525,7 +1508,7 @@ private fun Seq3FragmentsAndNotesSection(
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    val total = document.fragments.size + document.notes.size
+    val total = document.fragments.size + document.notes.size + document.delays.size
     // WP8 3b (revised): "+ note" attaches to the current message selection, same as the title
     // bar's own "Note" action (Seq3TitleActionButton in Seq3Workspace.kt) — but when nothing is
     // selected it now falls back to a free-floating note at `seq3DefaultNotePlacement`'s default
@@ -1542,40 +1525,60 @@ private fun Seq3FragmentsAndNotesSection(
     }
     Column(modifier.fillMaxWidth()) {
         SectionHeader(
-            title = "Fragments & notes · $total",
+            title = "Fragments, notes & delays · $total",
             trailing = {
                 // SectionHeader's whole Row sits inside a HoverBox(onClick = onToggle)
                 // (Components.kt:222) — LabelIconButton's own `.clickable` consumes the tap
                 // before it can bubble to that outer toggle, same as Lifelines' "+ lifeline".
-                LabelIconButton(
-                    text = "+ note",
-                    fontSize = 10.sp,
-                    onClick = {
-                        val selectedIds = seq3SelectedMessageIds(document, view)
-                        val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
-                        if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
-                            hint = "Select a message first to attach a note to it"
-                        }
-                    },
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    LabelIconButton(
+                        text = "+ note",
+                        fontSize = 10.sp,
+                        onClick = {
+                            val selectedIds = seq3SelectedMessageIds(document, view)
+                            val placement = if (selectedIds.isEmpty()) seq3DefaultNotePlacement(document) else null
+                            if (!seq3AddNote(state, session, view, document, selectedIds, placement = placement)) {
+                                hint = "Select a message first to attach a note to it"
+                            }
+                        },
+                    )
+                    // User-observed correction: delays moved here from being canvas/context-menu
+                    // only — they were invisible in both Messages (strictly Seq3Message rows) and
+                    // this Artifacts panel, matching neither the "add delay" affordance in the
+                    // (now-removed) +message menu nor the canvas's own "Insert delay after this".
+                    // Anchors after the LAST message, same default `seq3InsertDelayAfter` call the
+                    // +message menu used to make; a user who wants it elsewhere drags/edits it
+                    // afterward like any other queue artifact.
+                    LabelIconButton(
+                        text = "+ delay",
+                        fontSize = 10.sp,
+                        onClick = {
+                            val last = document.messages.lastOrNull()
+                            if (last == null || !seq3InsertDelayAfter(state, session, last.id)) {
+                                hint = "Add at least one message before inserting a delay"
+                            }
+                        },
+                    )
+                }
             },
             expanded = view.artifactsExpanded,
             onToggle = { view.artifactsExpanded = !view.artifactsExpanded },
         )
         hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
         if (view.artifactsExpanded) {
-            if (document.fragments.isEmpty() && document.notes.isEmpty()) {
+            if (document.fragments.isEmpty() && document.notes.isEmpty() && document.delays.isEmpty()) {
                 // WP8 (revised): the section now renders even with nothing to show (see
                 // `artifactsVisible`'s own comment above) — replace the now-empty scrolling list
                 // with a small hint so the section still claims its weighted section space
                 // instead of collapsing to nothing.
                 Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    AppText("No fragments or notes yet", color = tc.td, fontSize = 10.sp)
+                    AppText("No fragments, notes, or delays yet", color = tc.td, fontSize = 10.sp)
                 }
             } else {
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
                     document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
                     document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
+                    document.delays.forEach { delayItem -> Seq3DelayRenameRow(state, session, view, document, delayItem) }
                 }
             }
         }
@@ -1700,6 +1703,62 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
         },
         onRemove = {
             state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteNote(note.id)))
+        },
+        view = view,
+    )
+}
+
+/** The delay counterpart of [Seq3FragmentRenameRow]/[Seq3NoteRenameRow] above — same
+ *  select/hover/rename/hide/remove recipe via [Seq3ArtifactRow], added when delays moved into
+ *  this panel from being canvas/context-menu-only. [messageCount] is 0 (no "×N messages" badge):
+ *  a delay is anchored to exactly one point in the timeline, not attached to a set of messages,
+ *  so that badge — accurate for a fragment's span or a note's attachment — has nothing to count
+ *  here. */
+@Composable
+private fun Seq3DelayRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document, delayItem: Seq3Delay) {
+    var editing by remember(delayItem.id) { mutableStateOf(false) }
+    var text by remember(delayItem.id) { mutableStateOf(delayItem.label) }
+
+    fun commit() {
+        if (text.isNotBlank()) {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetDelayLabel(delayItem.id, text)))
+        }
+        editing = false
+    }
+    Seq3ArtifactRow(
+        id = delayItem.id,
+        kindWord = "delay",
+        label = delayItem.label,
+        messageCount = 0,
+        hidden = delayItem.visibility == Seq3Visibility.HIDDEN,
+        selected = view.selectedDelayId == delayItem.id,
+        hovered = view.hoveredDelayId == delayItem.id,
+        onSelect = {
+            seq3ToggleDelaySelection(view, delayItem.id)
+            runCatching { view.focusRequester.requestFocus() }
+        },
+        onHoverEnter = { view.hoveredDelayId = delayItem.id },
+        onHoverExit = { if (view.hoveredDelayId == delayItem.id) view.hoveredDelayId = null },
+        editing = editing,
+        editingText = text,
+        onEditingText = { text = it },
+        onCommitRename = ::commit,
+        onCancelRename = { editing = false },
+        onRename = { text = delayItem.label; editing = true },
+        onToggleVisibility = {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(
+                    emptySet(),
+                    Seq3BulkAction.SetDelayVisibility(
+                        delayItem.id,
+                        if (delayItem.visibility == Seq3Visibility.HIDDEN) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                    ),
+                ),
+            )
+        },
+        onRemove = {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteDelay(delayItem.id)))
         },
         view = view,
     )
