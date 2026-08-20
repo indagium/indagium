@@ -1533,7 +1533,11 @@ private fun Seq3CanvasContextMenu(
                 )
             }
             Seq3DropdownMenuItem("Insert delay after this") {
-                seq3InsertDelayAfter(state, session, messageId)
+                // User-observed correction: pass the exact occurrence the right-click hit
+                // (`occurrenceEntryId`, resolved above) rather than only `messageId` — a message
+                // that repeats used to always land the delay after its LAST occurrence, no matter
+                // which specific row's context menu this was opened from.
+                seq3InsertDelayAfter(state, session, messageId, afterOccurrenceEntryId = occurrenceEntryId)
                 view.canvasContextMenuMessageId = null
                 view.canvasContextMenuOccurrenceEntryId = null
             }

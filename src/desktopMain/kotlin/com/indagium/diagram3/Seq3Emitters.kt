@@ -530,7 +530,18 @@ private fun noteSpan(note: Seq3Note, plan: Seq3EmissionPlan, aliases: List<Strin
 // which neither dialect implements — being dialect-specific here is the necessary consequence of
 // that gap, not sloppiness that should be cleaned up.)
 
-private fun delayAnchorIndex(delay: Seq3Delay, plan: Seq3EmissionPlan): Int? = plan.lastIndexByMessage[delay.afterMessageId]
+// User-observed correction: this used to always resolve to the message's LAST emitted occurrence
+// (`lastIndexByMessage`), regardless of which specific occurrence a delay was actually anchored to
+// — right-clicking the FIRST of several repeated occurrences of a message and choosing "Insert
+// delay after this" still exported the `...` (PlantUML) / gap note (Mermaid) after the LAST one.
+// `afterOccurrenceEntryId` (null for every delay created before that field existed) now resolves
+// through the same `indexByOccurrence` map fragment/note boundary lookups already use, falling
+// back to `lastIndexByMessage` when it's null or names an occurrence that plan no longer emits
+// (hidden, or the row simply doesn't repeat that many times any more).
+private fun delayAnchorIndex(delay: Seq3Delay, plan: Seq3EmissionPlan): Int? =
+    delay.afterOccurrenceEntryId
+        ?.let { entryId -> plan.indexByOccurrence[Seq3OccurrenceRef(delay.afterMessageId, entryId)] }
+        ?: plan.lastIndexByMessage[delay.afterMessageId]
 
 private fun delaySpan(aliases: List<String>): String {
     val first = aliases.firstOrNull() ?: return "p0"

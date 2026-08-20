@@ -803,6 +803,49 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun aDelayAnchoredToOneSpecificOccurrenceLandsRightAfterThatRowEvenWhenTheMessageRepeatsLater() {
+        // User-observed correction: right-clicking the FIRST of two occurrences of the same
+        // repeated message and choosing "Insert delay after this" used to always place the delay
+        // after the LAST occurrence instead — afterMessageId alone can't tell the two rows apart.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L), occurrence(2, ts = 2_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+            delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "gap", afterOccurrenceEntryId = 1)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(3, layout.rows.size, "a delay is not a drawn row of its own")
+        val firstOccurrenceRow = layout.rows.single { it.messageId == "m1" && it.occurrenceEntryId == 1 }
+        val secondOccurrenceRow = layout.rows.single { it.messageId == "m1" && it.occurrenceEntryId == 2 }
+        val delayBox = layout.delays.single()
+        assertTrue(delayBox.box.y >= firstOccurrenceRow.y, "the band must sit at or after the FIRST occurrence it was anchored to")
+        assertTrue(
+            secondOccurrenceRow.y >= delayBox.box.y + delayBox.box.height,
+            "the SECOND occurrence must be pushed below the whole band, not sit above/inside it — the delay belongs between the two occurrences, not after both",
+        )
+    }
+
+    @Test
+    fun aDelayAnchoredToAStaleOccurrenceFallsBackToAfterTheLastOccurrenceOfItsMessage() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L), occurrence(2, ts = 2_000L))),
+            ),
+            // entryId 99 was never emitted (hidden, or the row no longer repeats that many times).
+            delays = listOf(Seq3Delay("d1", afterMessageId = "m1", label = "gap", afterOccurrenceEntryId = 99)),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val lastOccurrenceRow = layout.rows.single { it.messageId == "m1" && it.occurrenceEntryId == 2 }
+        val delayBox = layout.delays.single()
+        assertTrue(delayBox.box.y >= lastOccurrenceRow.y, "a dangling occurrence ref must fall back to the message's last occurrence, not draw nothing")
+    }
+
+    @Test
     fun aHiddenDelayIsDroppedFromLayoutButItsMessageIsUnaffected() {
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),

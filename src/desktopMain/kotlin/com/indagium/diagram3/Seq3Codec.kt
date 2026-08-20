@@ -604,6 +604,7 @@ private fun delayToMap(d: Seq3Delay): Map<String, Any?> = mapOf(
     "afterMessageId" to d.afterMessageId,
     "label" to d.label,
     "visibility" to d.visibility.name,
+    "afterOccurrenceEntryId" to d.afterOccurrenceEntryId,
 )
 
 private fun delayFromMap(map: Map<String, Any?>): Seq3Delay? {
@@ -614,5 +615,8 @@ private fun delayFromMap(map: Map<String, Any?>): Seq3Delay? {
         afterMessageId = afterMessageId,
         label = boundedString(map.str("label")) ?: "",
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+        // Missing (predates this field) or unparsable both fall back to null — "after the last
+        // occurrence", this field's own pre-existing default — rather than throwing.
+        afterOccurrenceEntryId = map.int("afterOccurrenceEntryId"),
     )
 }

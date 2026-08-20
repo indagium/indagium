@@ -962,8 +962,20 @@ internal fun seq3InsertDelayAfter(
     session: Seq3WorkspaceSession,
     afterMessageId: String,
     label: String = "delay",
+    // User-observed correction: omitting this (the pre-existing default) anchors after the
+    // message's LAST occurrence, same as before this parameter existed — right for a caller that
+    // only knows the messageId (the Artifacts panel's own anchor logic already picks the right
+    // message this way). The canvas context menu instead already knows exactly which occurrence's
+    // row was right-clicked (`view.canvasContextMenuOccurrenceEntryId`) and passes it through so a
+    // delay lands after THAT row even when the same message repeats later in the timeline.
+    afterOccurrenceEntryId: Int? = null,
 ): Boolean {
-    val delay = Seq3Delay(id = "seq3-delay-${UUID.randomUUID()}", afterMessageId = afterMessageId, label = label)
+    val delay = Seq3Delay(
+        id = "seq3-delay-${UUID.randomUUID()}",
+        afterMessageId = afterMessageId,
+        label = label,
+        afterOccurrenceEntryId = afterOccurrenceEntryId,
+    )
     return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddDelay(delay)))
 }
 

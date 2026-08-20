@@ -339,19 +339,31 @@ data class Seq3Note(
 // kind button in that control — a document-level list of its own, exactly like [fragments]/[notes]
 // above, sidesteps that trap entirely.
 
-/** A labelled vertical gap in the timeline, anchored right after the LAST drawn row of
- *  [afterMessageId] — the design spec's "time-gap marker" (item 8). [id] is caller-generated
- *  (mirrors [Seq3Fragment.id]/[Seq3Note.id], both minted by the UI layer via `UUID.randomUUID()`
- *  before the bulk action that creates them). A delay whose [afterMessageId] no longer resolves to
- *  a visible row (the anchor message was hidden, merged away, or deleted) simply draws nothing —
- *  the same "drop the box, keep nothing to keep" contract [Seq3Fragment.visibility]/[Seq3Note
- *  .visibility] document for their own dangling references, so a stale delay is never a crash. */
+/** A labelled vertical gap in the timeline, anchored right after [afterMessageId]'s LAST drawn
+ *  row by default — the design spec's "time-gap marker" (item 8) — or, when [afterOccurrenceEntryId]
+ *  is set, right after that ONE specific occurrence instead. [id] is caller-generated (mirrors
+ *  [Seq3Fragment.id]/[Seq3Note.id], both minted by the UI layer via `UUID.randomUUID()` before the
+ *  bulk action that creates them). A delay whose [afterMessageId] no longer resolves to a visible
+ *  row (the anchor message was hidden, merged away, or deleted) simply draws nothing — the same
+ *  "drop the box, keep nothing to keep" contract [Seq3Fragment.visibility]/[Seq3Note.visibility]
+ *  document for their own dangling references, so a stale delay is never a crash. Same contract
+ *  for [afterOccurrenceEntryId]: an id that no longer names a VISIBLE occurrence of that message
+ *  (hidden, or the row simply doesn't repeat that many times any more) falls back to "after the
+ *  last occurrence" rather than drawing nothing — see [Seq3Layout]'s own anchoring code. */
 data class Seq3Delay(
     val id: String,
     val afterMessageId: String,
     val label: String,
     /** Same meaning as [Seq3Fragment.visibility] — see that field's own doc. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+    /** User-observed correction: a delay used to always land after a message's LAST occurrence
+     *  regardless of which one the canvas context menu's "Insert delay after this" was invoked
+     *  on — right-clicking the FIRST of several repeated occurrences of the same message still
+     *  inserted the delay after the LAST one, since [afterMessageId] alone can't tell them apart.
+     *  Null (the default, and every delay created before this field existed) preserves that
+     *  "after the last occurrence" behavior; a non-null [Seq3Occurrence.entryId] pins it to one
+     *  exact occurrence instead, matching the row the user actually right-clicked. */
+    val afterOccurrenceEntryId: Int? = null,
 )
 
 // ── Range ────────────────────────────────────────────────────────────────────────────────────

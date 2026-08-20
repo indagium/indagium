@@ -1,11 +1,7 @@
-@file:OptIn(
-    androidx.compose.ui.ExperimentalComposeUiApi::class,
-    androidx.compose.foundation.ExperimentalFoundationApi::class,
-)
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 
 package com.indagium.ui
 
-import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -1550,40 +1546,13 @@ private fun Seq3FragmentsAndNotesSection(
                             }
                         },
                     )
-                    // User-observed correction: delays moved here from being canvas/context-menu
-                    // only — they were invisible in both Messages (strictly Seq3Message rows) and
-                    // this Artifacts panel. Anchors after the LAST currently-selected message
-                    // (`document.messages` order, so a multi-row selection resolves to whichever
-                    // one is chronologically latest — mirrors "+ note" above, which attaches to
-                    // the same selection), not blindly at the end of the whole document — a first
-                    // cut of this button always anchored to the document's last message
-                    // regardless of what was selected, which read as picking a random spot. Only
-                    // when nothing is selected does it fall back to the document's last message,
-                    // same "append at the end" default the canvas's empty-context-menu affordances
-                    // already use; a user who wants it elsewhere drags/edits it afterward like any
-                    // other queue artifact — or right-clicks the exact row on the canvas and picks
-                    // "Insert delay after this", which has always anchored precisely there.
-                    TooltipArea(
-                        tooltip = {
-                            ToolbarTooltip(
-                                "Inserts a time-gap marker after the latest selected message, or at the end of " +
-                                    "the timeline if nothing is selected. To anchor it to one exact row instead, " +
-                                    "right-click that row on the canvas and choose \"Insert delay after this\".",
-                            )
-                        },
-                    ) {
-                        LabelIconButton(
-                            text = "+ delay",
-                            fontSize = 10.sp,
-                            onClick = {
-                                val selectedIds = seq3SelectedMessageIds(document, view)
-                                val anchor = document.messages.lastOrNull { it.id in selectedIds } ?: document.messages.lastOrNull()
-                                if (anchor == null || !seq3InsertDelayAfter(state, session, anchor.id)) {
-                                    hint = "Add at least one message before inserting a delay"
-                                }
-                            },
-                        )
-                    }
+                    // User-observed correction: removed the "+ delay" button this section briefly
+                    // had — its only anchor logic ("after the latest selected message, else the
+                    // document's end") wasn't precise enough to be trustworthy, and the canvas
+                    // context menu's "Insert delay after this" (right-click the exact row) already
+                    // covers creating one precisely. A delay's Seq3ArtifactRow below still lists,
+                    // renames, hides, and removes every existing delay — only the ADD affordance
+                    // moved back to being canvas-only.
                 }
             },
             expanded = view.artifactsExpanded,

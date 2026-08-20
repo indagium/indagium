@@ -382,11 +382,29 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
     val (lefts, centers, contentRight) = placeColumns(headerWidths, gapSolve.gaps, gapSolve.leftExtra)
-    // WP11: delays are anchored by messageId (not by emission), so every visible delay is grouped
-    // here and handed to buildRows, which is the one place that already knows each message's FINAL
-    // chronological row — see buildRows' own doc for why the reservation happens there rather than
-    // as a post-pass over already-placed rows.
-    val delaysByAfterMessage = doc.delays.filter { it.visibility == Seq3Visibility.VISIBLE }.groupBy { it.afterMessageId }
+    // WP11: every visible delay is resolved to the exact EMISSION INDEX it draws after, then handed
+    // to buildRows keyed by that index, which is the one place that already knows each row's final
+    // position — see buildRows' own doc for why the reservation happens there rather than as a
+    // post-pass over already-placed rows.
+    //
+    // User-observed correction: a delay used to be grouped purely by `afterMessageId` and buildRows
+    // always placed it after that message's LAST chronological row — so right-clicking the FIRST of
+    // several repeated occurrences of a message and choosing "Insert delay after this" still landed
+    // the delay after the LAST one. `afterOccurrenceEntryId` (null for every delay created before
+    // that field existed) now picks out the exact occurrence's row when set, via the same
+    // `entryId`-keyed lookup fragment/note boundary resolution already relies on elsewhere; falling
+    // back to "after the last occurrence of the message" — this field's own pre-existing default —
+    // when it's null or names an occurrence no longer emitted (hidden, or the row simply doesn't
+    // repeat that many times any more).
+    val delaysByRowIndex = HashMap<Int, MutableList<Seq3Delay>>()
+    doc.delays.filter { it.visibility == Seq3Visibility.VISIBLE }.forEach { delay ->
+        val candidateIndices = emissions.withIndex().filter { (_, e) -> e.messageId == delay.afterMessageId }.map { it.index }
+        if (candidateIndices.isEmpty()) return@forEach
+        val targetIndex = delay.afterOccurrenceEntryId
+            ?.let { entryId -> candidateIndices.firstOrNull { i -> emissions[i].entryId == entryId } }
+            ?: candidateIndices.last()
+        delaysByRowIndex.getOrPut(targetIndex) { mutableListOf() } += delay
+    }
     val bandLeft = lefts.firstOrNull() ?: MARGIN
     val rowBuild = buildRows(
         emissions,
@@ -395,7 +413,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         centers,
         headerHeight,
         doc.fragments.any { it.visibility == Seq3Visibility.VISIBLE },
-        delaysByAfterMessage,
+        delaysByRowIndex,
         bandLeft,
         contentRight,
     )
@@ -907,9 +925,10 @@ private fun buildRows(
     // message intrudes a fixed amount into the header band (see FRAGMENT_TOP_RESERVE's own doc and
     // fragmentBoxFrom's clamp below, which is the second, defensive half of this same fix).
     fragmentsPresent: Boolean,
-    // WP11: every VISIBLE delay, keyed by the messageId it follows — see layoutSeq3's own call
-    // site comment for why this is resolved before buildRows rather than as a post-pass.
-    delaysByAfterMessage: Map<String, List<Seq3Delay>> = emptyMap(),
+    // WP11: every VISIBLE delay, keyed by the exact emission INDEX (into the same `emissions` list
+    // this function iterates) it draws after — see layoutSeq3's own call site comment for why this
+    // is resolved before buildRows rather than as a post-pass.
+    delaysByRowIndex: Map<Int, List<Seq3Delay>> = emptyMap(),
     bandLeft: Double = MARGIN,
     bandRight: Double = MARGIN,
 ): RowBuildResult {
@@ -917,12 +936,6 @@ private fun buildRows(
     val delayBoxes = mutableListOf<Seq3DelayBox>()
     val first = HashMap<String, Int>()
     val last = HashMap<String, Int>()
-    // WP11: a message can draw several rows (repeated occurrences); a delay anchored to it must
-    // fire exactly once, right after its FINAL chronological row — not after every occurrence.
-    // `emissions` is already in the shared chronological order (Task 0), so the last index in
-    // THIS list at which a messageId appears is that final row.
-    val lastEmissionIndex = HashMap<String, Int>()
-    emissions.forEachIndexed { i, emission -> lastEmissionIndex[emission.messageId] = i }
     val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
     var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
@@ -934,12 +947,10 @@ private fun buildRows(
         last[emission.messageId] = rows.lastIndex
         y += built.pitch
         rightExtra = max(rightExtra, built.rightEdge)
-        if (lastEmissionIndex[emission.messageId] == i) {
-            delaysByAfterMessage[emission.messageId]?.forEach { delay ->
-                val box = Seq3Box(bandLeft, y, (bandRight - bandLeft).coerceAtLeast(1.0), DELAY_BAND_H)
-                delayBoxes += Seq3DelayBox(delay.id, delay.label, box)
-                y += DELAY_BAND_H
-            }
+        delaysByRowIndex[i]?.forEach { delay ->
+            val box = Seq3Box(bandLeft, y, (bandRight - bandLeft).coerceAtLeast(1.0), DELAY_BAND_H)
+            delayBoxes += Seq3DelayBox(delay.id, delay.label, box)
+            y += DELAY_BAND_H
         }
     }
     return RowBuildResult(rows, first, last, y, rightExtra, delayBoxes)
