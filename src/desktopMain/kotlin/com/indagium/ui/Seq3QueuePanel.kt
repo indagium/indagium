@@ -1,7 +1,11 @@
-@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
 
 package com.indagium.ui
 
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -1525,7 +1529,11 @@ private fun Seq3FragmentsAndNotesSection(
     }
     Column(modifier.fillMaxWidth()) {
         SectionHeader(
-            title = "Fragments, notes & delays · $total",
+            // User-observed correction: this used to enumerate "Fragments, notes & delays" —
+            // every field/function backing this section is already named "artifact"
+            // (artifactsVisible, artifactsExpanded, Seq3ArtifactRow) precisely so a fourth kind
+            // added later doesn't need yet another word stitched onto the title.
+            title = "Artifacts · $total",
             trailing = {
                 // SectionHeader's whole Row sits inside a HoverBox(onClick = onToggle)
                 // (Components.kt:222) — LabelIconButton's own `.clickable` consumes the tap
@@ -1544,21 +1552,38 @@ private fun Seq3FragmentsAndNotesSection(
                     )
                     // User-observed correction: delays moved here from being canvas/context-menu
                     // only — they were invisible in both Messages (strictly Seq3Message rows) and
-                    // this Artifacts panel, matching neither the "add delay" affordance in the
-                    // (now-removed) +message menu nor the canvas's own "Insert delay after this".
-                    // Anchors after the LAST message, same default `seq3InsertDelayAfter` call the
-                    // +message menu used to make; a user who wants it elsewhere drags/edits it
-                    // afterward like any other queue artifact.
-                    LabelIconButton(
-                        text = "+ delay",
-                        fontSize = 10.sp,
-                        onClick = {
-                            val last = document.messages.lastOrNull()
-                            if (last == null || !seq3InsertDelayAfter(state, session, last.id)) {
-                                hint = "Add at least one message before inserting a delay"
-                            }
+                    // this Artifacts panel. Anchors after the LAST currently-selected message
+                    // (`document.messages` order, so a multi-row selection resolves to whichever
+                    // one is chronologically latest — mirrors "+ note" above, which attaches to
+                    // the same selection), not blindly at the end of the whole document — a first
+                    // cut of this button always anchored to the document's last message
+                    // regardless of what was selected, which read as picking a random spot. Only
+                    // when nothing is selected does it fall back to the document's last message,
+                    // same "append at the end" default the canvas's empty-context-menu affordances
+                    // already use; a user who wants it elsewhere drags/edits it afterward like any
+                    // other queue artifact — or right-clicks the exact row on the canvas and picks
+                    // "Insert delay after this", which has always anchored precisely there.
+                    TooltipArea(
+                        tooltip = {
+                            ToolbarTooltip(
+                                "Inserts a time-gap marker after the latest selected message, or at the end of " +
+                                    "the timeline if nothing is selected. To anchor it to one exact row instead, " +
+                                    "right-click that row on the canvas and choose \"Insert delay after this\".",
+                            )
                         },
-                    )
+                    ) {
+                        LabelIconButton(
+                            text = "+ delay",
+                            fontSize = 10.sp,
+                            onClick = {
+                                val selectedIds = seq3SelectedMessageIds(document, view)
+                                val anchor = document.messages.lastOrNull { it.id in selectedIds } ?: document.messages.lastOrNull()
+                                if (anchor == null || !seq3InsertDelayAfter(state, session, anchor.id)) {
+                                    hint = "Add at least one message before inserting a delay"
+                                }
+                            },
+                        )
+                    }
                 }
             },
             expanded = view.artifactsExpanded,
@@ -1572,7 +1597,7 @@ private fun Seq3FragmentsAndNotesSection(
                 // with a small hint so the section still claims its weighted section space
                 // instead of collapsing to nothing.
                 Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
-                    AppText("No fragments, notes, or delays yet", color = tc.td, fontSize = 10.sp)
+                    AppText("No artifacts yet", color = tc.td, fontSize = 10.sp)
                 }
             } else {
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
