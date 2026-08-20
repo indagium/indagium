@@ -959,59 +959,46 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
 
         // The two diagram defaults used to sit one-per-row above, each spending a full row on a
         // single control and leaving the section's last row's worth of space empty below. They
-        // share the final row's five equal tracks instead, so they line up under the first two
-        // Ctrl+F columns and the section ends without a gap.
+        // share one row instead, natural-width like the rest of this section's rows — NOT
+        // stretched into equal fifths like the Ctrl+F row's tracks, which squeezed "Snapshot"
+        // down to a couple of clipped letters.
         Row(
             Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Top,
+            horizontalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Diagram note action",
-                    tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
-                        "This chooses which half of the split action is primary.",
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SegmentedControl(
-                        options = listOf("Snapshot", "Link"),
-                        selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
-                        onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Diagram note action",
+                tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
+                    "This chooses which half of the split action is primary.",
+            ) {
+                SegmentedControl(
+                    options = listOf("Snapshot", "Link"),
+                    selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+                    onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
+                )
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Diagram export",
-                    tooltip = "Sets the representation for newly added sequence-diagram notes. " +
-                        "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
-                        "Src keeps the editable diagram text. Existing notes keep their own choice.",
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SegmentedControl(
-                        options = listOf("Img", "Src"),
-                        selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
-                        onToggle = { index ->
-                            state.updateSettings {
-                                it.copy(
-                                    diagramDefaultExportMode = if (index == 0) {
-                                        DiagramExportMode.IMAGE
-                                    } else {
-                                        DiagramExportMode.SOURCE
-                                    },
-                                )
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Diagram export",
+                tooltip = "Sets the representation for newly added sequence-diagram notes. " +
+                    "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
+                    "Src keeps the editable diagram text. Existing notes keep their own choice.",
+            ) {
+                SegmentedControl(
+                    options = listOf("Img", "Src"),
+                    selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
+                    onToggle = { index ->
+                        state.updateSettings {
+                            it.copy(
+                                diagramDefaultExportMode = if (index == 0) {
+                                    DiagramExportMode.IMAGE
+                                } else {
+                                    DiagramExportMode.SOURCE
+                                },
+                            )
+                        }
+                    },
+                )
             }
-            // Three empty tracks keep the two controls in the first two columns rather than
-            // stretching each across half the dialog.
-            repeat(3) { Box(Modifier.weight(1f, fill = true)) {} }
         }
     }
 }
