@@ -317,6 +317,40 @@ class Seq3EmitterTest {
     }
 
     @Test
+    fun aDelayAnchoredToOneOccurrenceExportsRightAfterThatOccurrenceEvenWhenTheMessageRepeatsLater() {
+        // User-observed correction: PlantUML's `...` / Mermaid's Note-over used to always land
+        // after a repeated message's LAST occurrence regardless of which one a delay was actually
+        // anchored to.
+        val messages = listOf(
+            message(id = "m1", label = "repeats", occurrences = listOf(occurrence(1, "repeats"), occurrence(2, "repeats"))),
+        )
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "gap", afterOccurrenceEntryId = 1)
+        val document = doc(messages).copy(delays = listOf(delay))
+
+        val plantUml = document.toPlantUml()
+        val firstLine = plantUml.lines().indexOfFirst { it.contains("repeats") }
+        val delayLine = plantUml.lines().indexOfFirst { it.contains("...gap...") }
+        val secondLine = plantUml.lines().indexOfLast { it.contains("repeats") }
+        assertTrue(firstLine < delayLine, "the delay must come after the FIRST occurrence; got:\n$plantUml")
+        assertTrue(delayLine < secondLine, "the delay must come before the SECOND occurrence, not after both; got:\n$plantUml")
+    }
+
+    @Test
+    fun aDelayAnchoredToAStaleOccurrenceFallsBackToAfterTheLastOccurrenceOfItsMessage() {
+        val messages = listOf(
+            message(id = "m1", label = "repeats", occurrences = listOf(occurrence(1, "repeats"), occurrence(2, "repeats"))),
+        )
+        // entryId 99 was never emitted (hidden, or the row no longer repeats that many times).
+        val delay = Seq3Delay("d1", afterMessageId = "m1", label = "gap", afterOccurrenceEntryId = 99)
+        val document = doc(messages).copy(delays = listOf(delay))
+
+        val plantUml = document.toPlantUml()
+        val lastLine = plantUml.lines().indexOfLast { it.contains("repeats") }
+        val delayLine = plantUml.lines().indexOfFirst { it.contains("...gap...") }
+        assertTrue(delayLine > lastLine, "a dangling occurrence ref must fall back to after the message's last occurrence, not be dropped; got:\n$plantUml")
+    }
+
+    @Test
     fun aHiddenDelayIsOmittedFromBothDialects() {
         val messages = listOf(message(id = "m1", label = "step1"))
         val delay = Seq3Delay("d1", afterMessageId = "m1", label = "shouldn't appear", visibility = Seq3Visibility.HIDDEN)

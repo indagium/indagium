@@ -293,7 +293,7 @@ class Seq3CodecTest {
     fun delaysRoundTripThroughEncodeAndParse() {
         val original = fixedDocument().copy(
             delays = listOf(
-                Seq3Delay("d1", afterMessageId = "m1", label = "5 minutes later"),
+                Seq3Delay("d1", afterMessageId = "m1", label = "5 minutes later", afterOccurrenceEntryId = 7),
                 Seq3Delay("d2", afterMessageId = "m1", label = "hidden gap", visibility = Seq3Visibility.HIDDEN),
             ),
         )
@@ -304,6 +304,32 @@ class Seq3CodecTest {
         assertEquals(original, parsed.document)
         assertEquals(original.delays, parsed.document.delays)
         assertEquals(Seq3Visibility.HIDDEN, parsed.document.delays.single { it.id == "d2" }.visibility)
+        assertEquals(7, parsed.document.delays.single { it.id == "d1" }.afterOccurrenceEntryId)
+        assertNull(parsed.document.delays.single { it.id == "d2" }.afterOccurrenceEntryId)
+    }
+
+    @Test
+    fun aDelayMissingTheAfterOccurrenceEntryIdKeyDecodesToNull() {
+        // A delay saved by a build predating this field has no "afterOccurrenceEntryId" key at
+        // all — must fall back to null ("after the last occurrence"), the field's own pre-existing
+        // default, rather than throwing. Same "hand-built legacy map" shape as
+        // aDocumentMissingTheDelaysKeyDecodesToAnEmptyList above.
+        val legacyDelayMap = mapOf("id" to "d1", "afterMessageId" to "m1", "label" to "gap", "visibility" to "VISIBLE")
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+            "delays" to listOf(legacyDelayMap),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertNull(parsed.document.delays.single().afterOccurrenceEntryId)
     }
 
     @Test
