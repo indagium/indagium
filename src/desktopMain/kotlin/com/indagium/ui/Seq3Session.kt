@@ -242,16 +242,14 @@ class Seq3Session(
         val session = Seq3WorkspaceSession(
             id = id,
             sourceTabId = tabId,
-            // WP4: a genuinely NEW document seeds its theme from the Settings default
-            // (AppSettings.diagramDefaultTheme; null = follow the app theme, same as the
-            // document's own null). beginEdit/openLibraryItem below intentionally do NOT do
-            // this — they open an EXISTING document and must keep whatever theme it was saved
-            // with, never overwrite it with today's default.
+            // A new document starts with no theme override (null = follow the app theme); the
+            // theme is chosen per diagram from the workspace title bar's theme picker. There is
+            // no Settings-level default for this — an existing document opened by
+            // beginEdit/openLibraryItem below likewise keeps whatever theme it was saved with.
             document = Seq3Document(
                 title = title,
                 sourceFile = File(tab.filename).name,
                 range = range,
-                themePresetName = appState.settings.diagramDefaultTheme?.name,
             ),
             range = range,
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),

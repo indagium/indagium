@@ -111,22 +111,11 @@ class Seq3SessionTest {
         assertIs<Seq3Range.Ids>(session.range)
     }
 
-    // ── WP4: per-diagram theme seeding ──────────────────────────────────────────────────────
+    // ── Per-diagram theme ───────────────────────────────────────────────────────────────────
 
     @Test
-    fun beginSeedsANewDocumentsThemeFromTheSettingsDefault() {
+    fun beginLeavesANewDocumentsThemeNull() {
         val state = state()
-        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.DRACULA)
-
-        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
-
-        assertEquals("DRACULA", state.seq3Sessions.sessions.single { it.id == id }.document.themePresetName)
-    }
-
-    @Test
-    fun beginLeavesANewDocumentsThemeNullWhenNoSettingsDefaultIsSet() {
-        val state = state()
-        assertNull(state.settings.diagramDefaultTheme, "fixture precondition: no default configured")
 
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
 
@@ -134,24 +123,20 @@ class Seq3SessionTest {
     }
 
     @Test
-    fun beginEditReopeningAnExistingDocumentKeepsItsOwnThemeRegardlessOfTheCurrentSettingsDefault() {
+    fun beginEditReopeningAnExistingDocumentKeepsItsOwnTheme() {
         val state = state()
-        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.DRACULA)
         val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
         awaitGenerated(state, id)
-        // This document was created BEFORE the setting below was changed, exactly like a document
-        // saved by an earlier session — beginEdit must never retroactively apply today's default.
         state.seq3Sessions.applyCommand(id, Seq3Command.SetDocumentTheme(ThemePreset.GRUVBOX.name))
         val blockId = state.seq3Sessions.attachSnapshot(id)!!
         state.seq3Sessions.close(id)
-        state.settings = state.settings.copy(diagramDefaultTheme = ThemePreset.SOLARIZED_DARK)
 
         val reopenedId = state.seq3Sessions.beginEdit("log", blockId)!!
 
         assertEquals(
             "GRUVBOX",
             state.seq3Sessions.sessions.single { it.id == reopenedId }.document.themePresetName,
-            "reopening an existing document must keep the theme it was saved with, not the current Settings default",
+            "reopening an existing document must keep the theme it was saved with",
         )
     }
 
