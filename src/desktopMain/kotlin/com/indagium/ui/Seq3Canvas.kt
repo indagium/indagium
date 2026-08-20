@@ -1535,12 +1535,33 @@ private fun Seq3CanvasContextMenu(
         },
         properties = PopupProperties(focusable = true),
     ) {
+        // The exact occurrence's own entryId when the right-click hit one specific row of a
+        // repeated message, else that message's first — same "prefer the exact occurrence, fall
+        // back to the message's own default" shape "Insert delay after this" below already uses.
+        // Null only when the message itself somehow has no occurrences left (every visible one
+        // hidden) — Seq3DropdownMenuItem's own `enabled` then makes the item a no-op, not a crash.
+        val jumpEntryId = document.messages.firstOrNull { it.id == messageId }?.let { message ->
+            occurrenceEntryId?.let { entryId -> message.occurrences.firstOrNull { it.entryId == entryId } }?.entryId
+                ?: message.occurrences.firstOrNull()?.entryId
+        }
         Column(
             Modifier.width(170.dp)
                 .background(tc().p, RoundedCornerShape(7.dp))
                 .border(1.dp, tc().br, RoundedCornerShape(7.dp))
                 .padding(vertical = 4.dp),
         ) {
+            // Mirrors the `l` keyboard shortcut (Seq3KeyAction.JumpToLog / applySeq3JumpToLog)
+            // but occurrence-precise rather than always the message's first occurrence, and
+            // reachable without first focusing the row — the same discoverability gap "Insert
+            // delay after this" filled for delays now filled here for the log-navigation path.
+            Seq3DropdownMenuItem("Go to log line", enabled = jumpEntryId != null && session.sourceTabId != null) {
+                val tabId = session.sourceTabId
+                if (jumpEntryId != null && tabId != null) {
+                    state.navigateToLogLine(tabId, jumpEntryId)
+                }
+                view.canvasContextMenuMessageId = null
+                view.canvasContextMenuOccurrenceEntryId = null
+            }
             Seq3DropdownMenuItem("Rename label") {
                 seq3BeginLabelRename(view, document, messageId)
             }
