@@ -219,8 +219,9 @@ sealed class Seq3BulkAction {
     // Same "identify the target by its own id/param, entirely independent of the message
     // selection" shape as [DeleteFragment]/[SetFragmentLabel] above — a delay is anchored by
     // [Seq3Delay.afterMessageId], which the caller (the canvas context menu's "Insert delay after
-    // this", or the `+ message` menu) always already knows, so requiring a non-empty
-    // `selectedIds` here would be a pointless block exactly like it would be for those two.
+    // this", or the Artifacts panel's "+ delay" button) always already knows, so requiring a
+    // non-empty `selectedIds` here would be a pointless block exactly like it would be for those
+    // two.
 
     /** Adds a new [Seq3Delay]. Mirrors [Group]/[Note]'s "caller builds the whole artifact,
      *  including its own fresh id" shape rather than [SetFragmentLabel]'s "rename an existing
@@ -234,6 +235,12 @@ sealed class Seq3BulkAction {
 
     /** Removes one delay without touching the message it was anchored after. */
     data class DeleteDelay(val delayId: String) : Seq3BulkAction()
+
+    /** Shows/hides an EXISTING delay's divider without touching the message it's anchored after —
+     *  the delay counterpart of [SetFragmentVisibility]/[SetNoteVisibility] above, added when
+     *  delays gained their own Artifacts-panel row (with its own hide/show eye button, matching
+     *  every other artifact row) instead of being canvas/context-menu-only. */
+    data class SetDelayVisibility(val delayId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
 
     /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
      *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
@@ -272,6 +279,7 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote &&
         action !is Seq3BulkAction.SetFragmentVisibility && action !is Seq3BulkAction.SetNoteVisibility &&
         action !is Seq3BulkAction.AddDelay && action !is Seq3BulkAction.SetDelayLabel && action !is Seq3BulkAction.DeleteDelay &&
+        action !is Seq3BulkAction.SetDelayVisibility &&
         action !is Seq3BulkAction.SetFragmentKind && action !is Seq3BulkAction.SetFragmentHideKindLabel &&
         action !is Seq3BulkAction.Note
     ) {
@@ -301,6 +309,7 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.AddDelay -> applyAddDelay(document, action)
         is Seq3BulkAction.SetDelayLabel -> applySetDelayLabel(document, action)
         is Seq3BulkAction.DeleteDelay -> applyDeleteDelay(document, action)
+        is Seq3BulkAction.SetDelayVisibility -> applySetDelayVisibility(document, action)
         Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
@@ -561,6 +570,17 @@ private fun applySetDelayLabel(document: Seq3Document, action: Seq3BulkAction.Se
 private fun applyDeleteDelay(document: Seq3Document, action: Seq3BulkAction.DeleteDelay): Seq3BulkResult {
     if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
     return Seq3BulkResult(document.copy(delays = document.delays.filterNot { it.id == action.delayId }), applied = true)
+}
+
+/** Shows/hides an EXISTING delay's divider — the visibility counterpart [applySetDelayLabel]
+ *  doesn't have. Same unknown-id safe-no-op contract as [applySetFragmentVisibility]/
+ *  [applySetNoteVisibility]. */
+private fun applySetDelayVisibility(document: Seq3Document, action: Seq3BulkAction.SetDelayVisibility): Seq3BulkResult {
+    if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
+    return Seq3BulkResult(
+        document.copy(delays = document.delays.map { if (it.id == action.delayId) it.copy(visibility = action.visibility) else it }),
+        applied = true,
+    )
 }
 
 /** [Seq3BulkAction.SwapEndpoints] — see that variant's own doc for the exact no-op contract.

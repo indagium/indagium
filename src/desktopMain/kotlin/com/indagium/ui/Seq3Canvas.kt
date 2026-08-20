@@ -383,6 +383,8 @@ private fun Seq3CanvasContent(
                                 view.hoveredFragmentId,
                                 view.selectedNoteId,
                                 view.hoveredNoteId,
+                                view.selectedDelayId,
+                                view.hoveredDelayId,
                             )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment, docTheme) }
@@ -901,6 +903,10 @@ private fun DrawScope.drawSeq3Diagram(
     hoveredFragmentId: String? = null,
     selectedNoteId: String? = null,
     hoveredNoteId: String? = null,
+    // The delay counterpart of the fragment/note pair above — same "Artifacts panel row
+    // select/hover emphasizes the canvas" contract, added when delays moved into that panel.
+    selectedDelayId: String? = null,
+    hoveredDelayId: String? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
     layout.fragments.forEach { fragment ->
@@ -988,12 +994,13 @@ private fun DrawScope.drawSeq3Diagram(
     // every label to its own overlay composable.
     val delayDash = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()))
     layout.delays.forEach { delay ->
+        val emphasized = seq3DelayIsEmphasized(delay.delayId, selectedDelayId, hoveredDelayId)
         val midY = (delay.box.y + delay.box.height / 2).dp.toPx()
         drawLine(
-            color = tc.ts,
+            color = if (emphasized) tc.ac else tc.ts,
             start = Offset(delay.box.x.dp.toPx(), midY),
             end = Offset((delay.box.x + delay.box.width).dp.toPx(), midY),
-            strokeWidth = 1.dp.toPx(),
+            strokeWidth = (if (emphasized) 2 else 1).dp.toPx(),
             pathEffect = delayDash,
         )
     }
@@ -1279,6 +1286,10 @@ internal fun seq3FragmentIsEmphasized(fragmentId: String, selectedFragmentId: St
 /** The note counterpart of [seq3FragmentIsEmphasized] — same contract. */
 internal fun seq3NoteIsEmphasized(noteId: String, selectedNoteId: String?, hoveredNoteId: String?): Boolean =
     noteId == selectedNoteId || noteId == hoveredNoteId
+
+/** The delay counterpart of [seq3FragmentIsEmphasized] — same contract. */
+internal fun seq3DelayIsEmphasized(delayId: String, selectedDelayId: String?, hoveredDelayId: String?): Boolean =
+    delayId == selectedDelayId || delayId == hoveredDelayId
 
 // Item 2 (WP2 font-mismatch fix): Seq3Layout measures a message label at Seq3FontRole.LABEL's
 // basePointSize (12pt, Seq3AwtTextMetrics) — this used to draw at 11.sp, so the AWT-computed label

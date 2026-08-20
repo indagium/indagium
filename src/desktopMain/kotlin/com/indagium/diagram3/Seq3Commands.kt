@@ -237,6 +237,7 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.AddDelay -> "Insert delay"
     is Seq3BulkAction.SetDelayLabel -> "Rename delay"
     is Seq3BulkAction.DeleteDelay -> "Remove delay"
+    is Seq3BulkAction.SetDelayVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide delay" else "Show delay"
     Seq3BulkAction.SwapEndpoints -> "Swap direction"
 }
 
