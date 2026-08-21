@@ -381,14 +381,21 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 
     // The strip's own interleaving of log tabs and diagram workspaces — the union order that lets
     // a diagram tab sit anywhere among log tabs. Deliberately session-only Compose state, not a
-    // new AppState field: TabBar is composed exactly once for the life of the window (App.kt:308,
-    // never behind a key()/conditional that would tear this down), so `remember` here already
-    // gives it the same lifetime an AppState field would, without widening AppState's surface for
-    // something that's purely a rendering order, fully re-derivable from the two backing stores on
-    // every read via reconcileTabOrder. NOT persisted to autosave / across app restarts — a fresh
-    // launch starts from the two stores' own natural order (log tabs first, diagrams appended),
-    // same as this file's original two-strip layout always effectively showed anyway.
-    var unifiedOrder by remember { mutableStateOf(emptyList<TabRef>()) }
+    // new AppState field to DRIVE rendering from: TabBar is composed exactly once for the life of
+    // the window (App.kt:308, never behind a key()/conditional that would tear this down), so
+    // `remember` here already gives it the same lifetime an AppState field would, without widening
+    // AppState's surface for something that's purely a rendering order, fully re-derivable from
+    // the two backing stores on every read via reconcileTabOrder.
+    //
+    // User-observed correction: seeded from state.tabOrder (rather than always emptyList()) so a
+    // restart can put a diagram tab BACK where it actually sat among the log tabs, not always
+    // appended after every one of them — AppState.restoreTabOrder resolves the persisted order's
+    // ids to whatever's actually live before this composable's first composition ever reads them,
+    // the same "restore runs before Compose starts" ordering AppState.restoreDiagramTabs already
+    // relies on. Every one of the three sites below that reassigns unifiedOrder also mirrors the
+    // new value into state.tabOrder — the one-way trip back out, purely so serializeAutosave() has
+    // something to persist; state.tabOrder is otherwise never read to drive anything.
+    var unifiedOrder by remember { mutableStateOf(state.tabOrder) }
 
     val minTabPx = (80 * density).toInt()
     val ovBtnPx = (40 * density).toInt()
@@ -399,7 +406,10 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     // LaunchedEffect below, so a membership change landing mid-gesture can never clobber the
     // in-flight optimistic reorder.
     LaunchedEffect(logTabIds, diagramSessionIds) {
-        if (dragTabId == null) unifiedOrder = reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds)
+        if (dragTabId == null) {
+            unifiedOrder = reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds)
+            state.tabOrder = unifiedOrder
+        }
     }
 
     val visibleTabLimit = state.settings.visibleTabLimit
@@ -445,6 +455,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
         val byRawId = currentUnifiedOrder.associateBy { it.rawId() }
         val newOrder = newRawOrder.mapNotNull(byRawId::get)
         unifiedOrder = newOrder
+        state.tabOrder = newOrder
         val (logOrder, diagramOrder) = partitionTabOrder(newOrder)
         state.tabs = logOrder.mapNotNull { id -> state.tabs.find { it.id == id } }
         state.seq3Sessions.reorderSessions(diagramOrder)
@@ -657,6 +668,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                             // (unlike the deleted diagramWorkspaceIdsForWidth sliding
                                             // window), so this strip's own unifiedOrder is what moves.
                                             unifiedOrder = unifiedOrder.filterNot { it == ref } + ref
+                                            state.tabOrder = unifiedOrder
                                             when (ref) {
                                                 is TabRef.Log -> state.activateOverflowTab(ref.tabId)
                                                 is TabRef.Diagram -> state.seq3Sessions.activate(ref.sessionId)

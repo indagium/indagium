@@ -1042,6 +1042,56 @@ internal fun AppState.restoreActiveDiagram(libraryItemId: String) {
     activeSurface = session?.id?.let(ActiveSurface::Diagram3) ?: activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
 }
 
+// ── Tab strip order (WP-diagram-restore follow-up) ─────────────────────────────────────────────
+//
+// User-observed correction: reopening a diagram tab (above) still isn't enough on its own — TabBar
+// interleaves log tabs and diagram workspaces into one strip via its own `unifiedOrder`, which is
+// deliberately local `remember` state (see that composable's own header) and defaults to "log tabs
+// first, diagrams appended" on a fresh launch. Without persisting the interleaving too, a diagram
+// tab that had been dragged to sit, say, between two specific log tabs would reopen correctly but
+// always land at the very end of the strip instead. AppState.tabOrder is the mirror TabBar keeps
+// in sync purely so these two functions have something to read/seed.
+
+/** A [TabRef.Diagram] entry is written by its session's libraryItemId (stable across a restart),
+ *  never its sessionId (freshly minted by every [Seq3Session.openLibraryItem] call, including the
+ *  one this very restart just made) — same substitution [activeDiagramToken] above already makes.
+ *  A session with no libraryItemId yet has nothing durable to reference and is simply dropped from
+ *  the persisted order, same "nothing to save yet" contract [diagramTabsToken] itself already has. */
+internal fun AppState.tabOrderToken(): String {
+    val libraryItemIdBySessionId = seq3Sessions.sessions.associate { it.id to it.libraryItemId }
+    return tabOrder.mapNotNull { ref ->
+        when (ref) {
+            is TabRef.Log -> tokenFields("L", ref.tabId)
+            is TabRef.Diagram -> libraryItemIdBySessionId[ref.sessionId]?.let { libId -> tokenFields("D", libId) }
+        }
+    }.joinToString(",") { it.b64() }
+}
+
+/** Reseeds [AppState.tabOrder] — MUST run after both [AppState.restoreTabsFromAutosave] and
+ *  [restoreDiagramTabs] (whichever tab/session ids it names need to already exist to resolve), and
+ *  is safe to call unconditionally even when no diagram was ever open (an all-"L" or blank token
+ *  degrades to the same "reconcileTabOrder will just re-derive log-tabs-first order" default
+ *  TabBar already falls back to on a legacy cache with no "tabOrder" key at all). A "D" entry whose
+ *  libraryItemId didn't come back as a live session (deleted between autosave writes, say) is
+ *  dropped rather than crashing — TabBar's own `reconcileTabOrder` would drop it too on the very
+ *  next reconcile, this just saves that one extra frame of a stale id floating in the seed value. */
+internal fun AppState.restoreTabOrder(token: String) {
+    if (token.isBlank()) {
+        tabOrder = emptyList()
+        return
+    }
+    val liveTabIds = tabs.mapTo(hashSetOf()) { it.id }
+    val sessionIdByLibraryItemId = seq3Sessions.sessions.mapNotNull { s -> s.libraryItemId?.let { it to s.id } }.toMap()
+    tabOrder = token.split(",").mapNotNull { entry ->
+        val fields = entry.unb64().tokenFields()
+        when (fields.getOrNull(0)) {
+            "L" -> fields.getOrNull(1)?.takeIf { it in liveTabIds }?.let(TabRef::Log)
+            "D" -> fields.getOrNull(1)?.let(sessionIdByLibraryItemId::get)?.let(TabRef::Diagram)
+            else -> null
+        }
+    }
+}
+
 internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     hlListExpanded.toString(),
     lvlExpanded.toString(),
