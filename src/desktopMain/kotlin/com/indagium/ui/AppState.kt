@@ -1626,7 +1626,9 @@ class AppState(
     var activeTabId by mutableStateOf("")
 
     /** Main content routing only.  [tabs] intentionally remains a collection of log tabs; open
-     * sequence diagrams are independent, non-persisted editor surfaces owned by seq3Sessions. */
+     * sequence diagrams are independent editor surfaces owned by seq3Sessions — see
+     * [diagramTabsToken]/[restoreDiagramTabs] (AutosaveCodec.kt) for how a diagram workspace tab's
+     * content (not this routing field itself) survives a restart. */
     var activeSurface by mutableStateOf<ActiveSurface?>(null)
 
     /** True while a diagram workspace owns the content area (App.kt:317).  activeTabId stays
@@ -1634,6 +1636,18 @@ class AppState(
      *  buttons, autosave, compare mode — so this exists purely to keep exactly one tab reading
      *  as selected in the tab bar. */
     val diagramSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Diagram3
+
+    /** User-observed correction: a mirror of [TabBar]'s own `unifiedOrder` — the strip's
+     *  interleaving of log tabs and diagram workspaces into one visual order. That composable's
+     *  own header explains why the LIVE value stays local `remember` state there rather than
+     *  living here natively (purely a rendering order, fully re-derivable from [tabs] +
+     *  `seq3Sessions.sessions` via `reconcileTabOrder` on every read) — this field exists purely
+     *  so [tabOrderToken] (AutosaveCodec.kt) has something to persist and [restoreTabOrder]
+     *  something to seed `unifiedOrder`'s OWN initial value with on the next launch (TabBar reads
+     *  this exactly once, at its first composition, the same "composed once for the life of the
+     *  window" lifetime `unifiedOrder`'s own `remember` already relies on). TabBar writes this
+     *  alongside every `unifiedOrder` assignment; nothing else ever reads it to drive rendering. */
+    internal var tabOrder by mutableStateOf(emptyList<TabRef>())
     var compareMode by mutableStateOf(false)
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
@@ -7923,6 +7937,14 @@ class AppState(
                     ?.substringAfter('\t', "")?.unb64().orEmpty()
                 restoreActiveDiagram(activeDiagramToken)
             }
+            // Tab strip order (WP-diagram-restore follow-up): must also run after both tabs and
+            // any diagram sessions above exist — see restoreTabOrder's own doc. Unconditional
+            // (unlike the diagramTabs branch above): a log-tabs-only order still needs restoring
+            // to seed TabBar's `unifiedOrder`, and an absent/blank "tabOrder" key (legacy cache)
+            // degrades to the exact same default TabBar already falls back to on its own.
+            val tabOrderToken = keyLines.firstOrNull { it.substringBefore('\t') == "tabOrder" }
+                ?.substringAfter('\t', "")?.unb64().orEmpty()
+            restoreTabOrder(tabOrderToken)
         }
     }
 
@@ -7955,9 +7977,9 @@ class AppState(
             "recent" -> recentFiles = value.pathTokenList()
             "recentNotes" -> recentNotes = value.pathTokenList()
             "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
-            // "diagramTabs"/"activeDiagram" are deliberately absent here — see restoreAutosave()'s
-            // own comment for why they're read directly from keyLines and applied AFTER
-            // restoreTabsFromAutosave instead of through this per-line dispatch.
+            // "diagramTabs"/"activeDiagram"/"tabOrder" are deliberately absent here — see
+            // restoreAutosave()'s own comments for why they're read directly from keyLines and
+            // applied AFTER restoreTabsFromAutosave instead of through this per-line dispatch.
         }
     }
 
@@ -8091,6 +8113,7 @@ class AppState(
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")
         appendLine("diagramTabs\t${diagramTabsToken().b64()}")
         appendLine("activeDiagram\t${activeDiagramToken().b64()}")
+        appendLine("tabOrder\t${tabOrderToken().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }

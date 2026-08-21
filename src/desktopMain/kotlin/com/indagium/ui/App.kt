@@ -177,6 +177,12 @@ fun App(
             state.activeSavedFilterIds,
             state.recentFiles,
             state.recentNotes,
+            // User-observed correction: dragging a diagram tab to a new position in the strip
+            // doesn't necessarily change state.tabs' own snapshot list (only its INTERLEAVING with
+            // diagram tabs may have moved) — without this key, that reorder would only ever get
+            // captured by the synchronous flush on quit (Main.kt's onCloseRequest), not this
+            // debounced background save, unlike every other tab edit.
+            state.tabOrder,
         ) {
             kotlinx.coroutines.delay(400)
             // Suppressed while any tab is actively tailing — a fast-growing logData would

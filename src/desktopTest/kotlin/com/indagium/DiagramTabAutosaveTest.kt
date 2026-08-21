@@ -5,6 +5,7 @@ import com.indagium.model.LogLevel
 import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.TabRef
 import com.indagium.ui.mkTab
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -128,5 +129,70 @@ class DiagramTabAutosaveTest {
             restored.activeSurface,
             "the session active at quit must stay active — not just whichever reopened last",
         )
+    }
+
+    // ── Tab strip order (WP-diagram-restore follow-up) ─────────────────────────────────────────
+    //
+    // TabBar itself renders the interleaved strip and isn't reachable from a plain unit test (no
+    // Compose UI test harness in this project — see AppState.tabOrder's own doc for the "TabBar
+    // mirrors into this field, AppState never drives rendering from it" split this relies on).
+    // These instead drive AppState.tabOrder directly, exactly the way TabBar's three
+    // `unifiedOrder = ...` sites do, and prove the round trip through tabOrderToken/restoreTabOrder
+    // a real restart takes.
+
+    @Test
+    fun aDiagramTabDraggedBetweenTwoLogTabsStaysThereAfterRestore() {
+        val dir = createTempDirectory("openlog-tab-order-restore").toFile()
+        val logFile1 = File(dir, "app1.log").apply { writeText("x") }
+        val logFile2 = File(dir, "app2.log").apply { writeText("x") }
+        val cacheFile = File(dir, "state.cache")
+        val libraryFile = File(dir, "library.cache")
+
+        val state = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile))
+        state.tabs = listOf(
+            mkTab("log1", "app1.log", twoTagEntries()).copy(sourcePath = logFile1.absolutePath),
+            mkTab("log2", "app2.log", twoTagEntries()).copy(sourcePath = logFile2.absolutePath),
+        )
+        state.activateTab("log1")
+        val sessionId = state.seq3Sessions.begin("log1", setOf(1, 2))!!
+        awaitGenerated(state, sessionId)
+        val libraryItemId = state.seq3Sessions.sessions.single().libraryItemId!!
+
+        // Mirrors what a drag that puts the diagram BETWEEN the two log tabs commits — same shape
+        // TabBar.commitReorder writes into unifiedOrder (and, since this feature, state.tabOrder).
+        state.tabOrder = listOf(TabRef.Log("log1"), TabRef.Diagram(sessionId), TabRef.Log("log2"))
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
+
+        val restoredSessionId = restored.seq3Sessions.sessions.single().id
+        assertEquals(
+            listOf(TabRef.Log("log1"), TabRef.Diagram(restoredSessionId), TabRef.Log("log2")),
+            restored.tabOrder,
+            "the diagram must reopen in the SAME position between the two log tabs, not appended after both",
+        )
+        // And the resolved id is real, not a stale one held over from before the restart.
+        assertTrue(restored.seq3Sessions.sessions.single { it.libraryItemId == libraryItemId }.id == restoredSessionId)
+    }
+
+    @Test
+    fun aTabOrderEntryForATabThatNoLongerExistsIsDroppedNotCarriedOverAsAGhost() {
+        val dir = createTempDirectory("openlog-tab-order-restore-stale").toFile()
+        val logFile = File(dir, "app.log").apply { writeText("x") }
+        val cacheFile = File(dir, "state.cache")
+        val libraryFile = File(dir, "library.cache")
+
+        val state = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile))
+        state.tabs = listOf(mkTab("log", "app.log", twoTagEntries()).copy(sourcePath = logFile.absolutePath))
+        state.activateTab("log")
+        // A log tab that was open when tabOrder was captured but is gone by the time autosaveNow()
+        // actually serializes — same "closed before quit" shape restoreTabsFromAutosave already
+        // handles for state.tabs itself; tabOrder must not leave a dangling reference to it.
+        state.tabOrder = listOf(TabRef.Log("log"), TabRef.Log("closed-before-quit"))
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
+
+        assertEquals(listOf(TabRef.Log("log")), restored.tabOrder)
     }
 }
