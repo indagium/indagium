@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -74,6 +75,8 @@ import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.seq3MessageIdsAreContiguous
+import com.indagium.diagram3.toMermaid
+import com.indagium.diagram3.toPlantUml
 import com.indagium.model.ThemePreset
 import java.util.UUID
 
@@ -135,7 +138,7 @@ fun Seq3Workspace(state: AppState, sessionId: String) {
                 Seq3GuidedPass(state, session, view, Modifier.fillMaxSize())
             } else {
                 Row(Modifier.fillMaxSize()) {
-                    if (view.sidebarOpen) {
+                    if (seq3PanelVisible(view)) {
                         Seq3QueuePanel(state, session, view, Modifier.width(view.panelWidthDp.dp).fillMaxHeight())
                         HDivider { delta ->
                             view.panelWidthDp = seq3ClampDividerWidth(view.panelWidthDp, delta, PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP)
@@ -164,9 +167,17 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(Modifier.width(240.dp)) {
+        // Design variant 1a: no more fixed 240dp box. A fixed width either clipped an ordinary
+        // title early (forcing the ellipsis+tooltip path far more often than the name actually
+        // needed it) or wasted space next to a short one; the identity block now takes exactly the
+        // width seq3TitleWidth() computes for THIS title, capped generously — see that function.
+        // The cap still has to be enforced on the COLUMN, not just on the title field: the
+        // subtitle below it is a second, independently-sized child, and a long source filename
+        // ("bugreport-2026-08-21-113355-…​.log · 128400 rows") would otherwise stretch the whole
+        // identity block past the title's own cap and squeeze the right cluster.
+        Column(Modifier.widthIn(max = TITLE_FIELD_MAX_WIDTH)) {
             Seq3TitleField(state, session)
-            AppText(subtitle, color = tc.ts, fontSize = 11.sp)
+            AppText(subtitle, color = tc.ts, fontSize = 11.sp, overflow = TextOverflow.Ellipsis)
         }
         Row(
             Modifier.weight(1f),
@@ -178,92 +189,234 @@ private fun Seq3TitleBar(state: AppState, session: Seq3WorkspaceSession, view: S
                 Seq3ContextualSelectionActions(state, session, view, selectedIds)
             }
         }
+        // Design variant 1a's right cluster: three NAMED groups — panes, diagram presentation,
+        // output — each closed off by a hairline ([Seq3HeaderHairline]) instead of the old flat
+        // run of individually-tooltipped icon buttons. Grouping by function is the whole point: a
+        // control now reads as "this belongs with diagram presentation" or "this is an output
+        // action" before the user even reads its own label.
         Row(
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            ToolbarBtn(
-                label = "≡",
-                tooltip = if (view.sidebarOpen) "Hide Messages" else "Show Messages",
-                active = view.sidebarOpen,
-                modifier = Modifier.size(28.dp),
-                shape = CORNER_SM,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                onClick = { view.sidebarOpen = !view.sidebarOpen },
-            )
-            ToolbarBtn(
-                label = "⇅",
-                tooltip = if (view.lifelinesSectionOpen) "Hide Lifelines" else "Show Lifelines",
-                active = view.lifelinesSectionOpen,
-                modifier = Modifier.size(28.dp),
-                shape = CORNER_SM,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                onClick = { view.lifelinesSectionOpen = !view.lifelinesSectionOpen },
-            )
-            ToolbarBtn(
-                label = "▦",
-                tooltip = if (view.artifactsSectionOpen) "Hide Fragments & notes" else "Show Fragments & notes",
-                active = view.artifactsSectionOpen,
-                modifier = Modifier.size(28.dp),
-                shape = CORNER_SM,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-                onClick = { view.artifactsSectionOpen = !view.artifactsSectionOpen },
-            )
-            Seq3AttachmentAction(state, session)
-            SegmentedControl(
-                options = listOf("PlantUML", "Mermaid"),
-                selectedIndices = setOf(if (session.dialect == Seq3Dialect.PLANTUML) 0 else 1),
-                onToggle = { index ->
-                    state.seq3Sessions.setDialect(
-                        session.id,
-                        if (index == 0) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID,
-                    )
-                },
-            )
-            Seq3InlinePrefixToggles(state, session)
-            Seq3DocumentThemeDropdown(state, session)
+            Seq3PanesGroup(view)
+            Seq3HeaderHairline()
+            Seq3DiagramPresentationGroup(state, session)
+            // Placed right before the OUTPUT group's leading hairline (not the diagram-
+            // presentation group's) so it reads as "still generating — the actions on the right
+            // are about to have something to act on", not as a stray note mid-cluster.
             if (session.generating) AppText("Generating…", color = tc.ts, fontSize = 11.sp)
+            Seq3HeaderHairline()
+            Seq3OutputGroup(state, session)
         }
     }
 }
 
+/** Design variant 1a's separator between the header's right-cluster groups — a plain 1dp rule
+ *  (not a wider gap) so the three functionally distinct groups it sits between read as separate
+ *  clusters even though [Seq3TitleBar] draws them in one continuous Row. */
+@Composable
+private fun Seq3HeaderHairline() {
+    Box(Modifier.width(1.dp).height(20.dp).background(tc().br))
+}
+
+/** Design variant 1a's Panes group — replaces three solid-accent `≡`/`⇅`/`▦` [ToolbarBtn]s (whose
+ *  accent fill made an "open" pane read as one of three heavy blocks, and whose glyphs meant
+ *  nothing without their tooltip) with ONE multi-select [SegmentedControl] whose labels
+ *  ("Messages"/"Lifelines"/"Artifacts") say outright what each toggles — the accent tint now
+ *  reads as "this pane is open" rather than "this button is pressed", and the old glyph tooltips
+ *  stop being load-bearing. [seq3PaneSegments]/[seq3TogglePaneSegment] hold the actual mapping to
+ *  [Seq3ViewState]'s three section-visibility flags as plain functions so [Seq3WorkspaceTest] can
+ *  assert it without composing this row. */
+@Composable
+private fun Seq3PanesGroup(view: Seq3ViewState) {
+    SegmentedControl(
+        options = listOf("Messages", "Lifelines", "Artifacts"),
+        selectedIndices = seq3PaneSegments(view),
+        onToggle = { index -> seq3TogglePaneSegment(view, index) },
+    )
+}
+
+/** Which segments of [Seq3PanesGroup]'s multi-select read as "on" — index 0 Messages/
+ *  [Seq3ViewState.messagesSectionOpen], 1 Lifelines/[Seq3ViewState.lifelinesSectionOpen],
+ *  2 Artifacts/[Seq3ViewState.artifactsSectionOpen]. All three are peers: each hides only its own
+ *  panel section, and the panel itself follows from them ([seq3PanelVisible]). */
+internal fun seq3PaneSegments(view: Seq3ViewState): Set<Int> = buildSet {
+    if (view.messagesSectionOpen) add(0)
+    if (view.lifelinesSectionOpen) add(1)
+    if (view.artifactsSectionOpen) add(2)
+}
+
+/** [seq3PaneSegments]'s toggle half — flips the one [Seq3ViewState] flag the clicked index maps
+ *  to. Kept as a plain function (not inlined into the `onToggle` lambda) so the index<->flag
+ *  mapping and its test sit next to [seq3PaneSegments] rather than only inside a composable. */
+internal fun seq3TogglePaneSegment(view: Seq3ViewState, index: Int) {
+    when (index) {
+        0 -> view.messagesSectionOpen = !view.messagesSectionOpen
+        1 -> view.lifelinesSectionOpen = !view.lifelinesSectionOpen
+        2 -> view.artifactsSectionOpen = !view.artifactsSectionOpen
+    }
+}
+
+/** Whether the queue panel (and its drag divider) renders at all — DERIVED from the three section
+ *  toggles rather than stored, because the panel is nothing but its sections: turning the last one
+ *  off should give the canvas the full width, and turning any one back on should bring the panel
+ *  back with exactly that section in it. Before the 1a header rework the Messages toggle *was* the
+ *  panel's own visibility flag, so switching Messages off took Lifelines and Artifacts down with
+ *  it even when the user had them open — the labelled segmented control made that mismatch
+ *  obvious, since three peer-looking labels have to behave like peers. */
+internal fun seq3PanelVisible(view: Seq3ViewState): Boolean =
+    view.messagesSectionOpen || view.lifelinesSectionOpen || view.artifactsSectionOpen
+
+/** Design variant 1a's diagram-presentation group — "how does this diagram present itself": the
+ *  PlantUML/Mermaid dialect control, the `#n`/`⏱ Time` prefix toggles, then the theme swatch.
+ *  Unchanged in behaviour from before the header rework — only grouped and hairline-bounded now
+ *  instead of running directly into the panes toggles on one side and the output actions on the
+ *  other. */
+@Composable
+private fun Seq3DiagramPresentationGroup(state: AppState, session: Seq3WorkspaceSession) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SegmentedControl(
+            options = listOf("PlantUML", "Mermaid"),
+            selectedIndices = setOf(if (session.dialect == Seq3Dialect.PLANTUML) 0 else 1),
+            onToggle = { index ->
+                state.seq3Sessions.setDialect(
+                    session.id,
+                    if (index == 0) Seq3Dialect.PLANTUML else Seq3Dialect.MERMAID,
+                )
+            },
+        )
+        Seq3InlinePrefixToggles(state, session)
+        Seq3DocumentThemeDropdown(state, session)
+    }
+}
+
+/** Design variant 1a's output group — the header's two actions on the PRODUCED diagram, as
+ *  opposed to anything that edits it: `Copy ▾` (read-only, never touches the document or its undo
+ *  history) and `Attach snapshot ▾` (the header's one accent-filled primary control, replacing the
+ *  old bare "+" icon button). Both go dim/disabled the same way when there is nothing to copy or
+ *  attach yet ([Seq3Document.lifelines] empty). */
+@Composable
+private fun Seq3OutputGroup(state: AppState, session: Seq3WorkspaceSession) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Seq3CopyDropdown(state, session)
+        Seq3AttachmentAction(state, session)
+    }
+}
+
+/** Design variant 1a's real functional addition: puts the diagram straight on the clipboard in
+ *  whatever form the destination needs, without going through a note first. Reuses
+ *  [Seq3DropdownButton] — never a hand-rolled [Popup], see this file's own header comment on
+ *  [LocalSeq3FocusRequester] for why that would silently break this surface's Esc handling —
+ *  rather than [Seq3AttachmentAction]'s split-button shape, because every item here is a plain
+ *  action with no checkmark state to show, so three menu items don't need their own
+ *  primary/secondary split. [seq3CopyTargetLabel]/[seq3CopyTargetText] hold the label<->action
+ *  mapping as plain functions the whole way except for the PNG item, which still renders through
+ *  [Seq3RenderCache] directly in its own click handler (the same shape [AppState.copyRichPreview]
+ *  already uses) since a raster needs a real [Seq3Document] and a resolved theme, not just its own
+ *  text. */
+@Composable
+private fun Seq3CopyDropdown(state: AppState, session: Seq3WorkspaceSession) {
+    val document = session.document
+    val hasContent = document.lifelines.isNotEmpty()
+    Seq3DropdownButton(
+        label = "Copy",
+        labelColor = tc().tx,
+        fillColor = tc().p2,
+        menuWidth = 170.dp,
+        // Without this the trigger sizes to its own 11sp label plus 4dp padding (~24dp) and sits
+        // visibly shorter than every 28dp control beside it in the header.
+        fixedHeight = 28.dp,
+        // Matches [Seq3AttachmentAction]'s own Popup offset so both header menus drop to the same
+        // line — see [Seq3DropdownButton]'s `menuOffsetY`.
+        menuOffsetY = SEQ3_HEADER_MENU_OFFSET_Y,
+    ) { close ->
+        Seq3CopyTarget.entries.forEach { target ->
+            Seq3DropdownMenuItem(label = seq3CopyTargetLabel(target), enabled = hasContent) {
+                when (target) {
+                    // The only item here that can throw (rasterizing the layout) — wrapped the
+                    // same way copyRichPreview's own PNG render is, so a bad document can't crash
+                    // the workspace out from under an otherwise plain clipboard action.
+                    Seq3CopyTarget.PNG_IMAGE -> runCatching {
+                        val png = Seq3RenderCache.pngBytes(
+                            Seq3RenderCache.layout(document),
+                            resolveSeq3ThemeColors(document, state.settings).toSeq3RasterTheme(),
+                        )
+                        state.copyImageToClipboard(png, document.title.ifBlank { "Sequence diagram v3" })
+                    }
+                    else -> seq3CopyTargetText(target, document)?.let(state::copyToClipboard)
+                }
+                close()
+            }
+        }
+    }
+}
+
+/** What `Copy ▾` ([Seq3CopyDropdown]) can put on the clipboard. */
+internal enum class Seq3CopyTarget { PNG_IMAGE, PLANTUML_SOURCE, MERMAID_SOURCE }
+
+/** [Seq3CopyDropdown]'s menu-item label for each [Seq3CopyTarget]. */
+internal fun seq3CopyTargetLabel(target: Seq3CopyTarget): String = when (target) {
+    Seq3CopyTarget.PNG_IMAGE -> "PNG image"
+    Seq3CopyTarget.PLANTUML_SOURCE -> "PlantUML source"
+    Seq3CopyTarget.MERMAID_SOURCE -> "Mermaid source"
+}
+
+/** Pure "what text does this target copy" half of [Seq3CopyDropdown] — split out so
+ *  [Seq3WorkspaceTest] can assert the PlantUML/Mermaid selection without a composition. `null` for
+ *  [Seq3CopyTarget.PNG_IMAGE]: that item copies bytes, not text, and is rendered directly by the
+ *  click handler instead (see [Seq3CopyDropdown]'s own doc comment for why). */
+internal fun seq3CopyTargetText(target: Seq3CopyTarget, document: Seq3Document): String? = when (target) {
+    Seq3CopyTarget.PNG_IMAGE -> null
+    Seq3CopyTarget.PLANTUML_SOURCE -> document.toPlantUml()
+    Seq3CopyTarget.MERMAID_SOURCE -> document.toMermaid()
+}
+
 /**
- * WP10 (item 7): two independent document-level toggles, beside the dialect control they visually
- * pair with — "how does this diagram present itself" toolbar controls, same slot as
- * [Seq3DocumentThemeDropdown]. Each dispatches its own [Seq3Command] so `⌘Z` undoes them
- * independently, and both are document fields (not view state) precisely because the user wants
- * the canvas, the PNG export, and the exported text to always agree on whether a call's `[#n]`/
- * `[ts]` prefix is showing.
+ * Design variant 1a: two independent document-level toggles, now ONE multi-select
+ * [SegmentedControl] inside [Seq3DiagramPresentationGroup] — beside the dialect control and
+ * [Seq3DocumentThemeDropdown] it visually pairs with ("how does this diagram present itself").
+ * Used to be two glyph `#`/`⏱` [ToolbarBtn]s explained only by a tooltip; the segments are now
+ * self-describing sample text (`"#n"`/`"⏱ Time"`) so the label itself carries the affordance.
+ * [SegmentedControl] renders every option in one font, so the design mock's monospace `#n` is out
+ * of reach here without forking the control — not worth it for two labels, so both render in the
+ * control's default font. Each segment still dispatches its OWN [Seq3Command]
+ * ([Seq3Command.SetShowSequenceNumbers]/[Seq3Command.SetShowTimestamps], via
+ * [seq3TogglePrefixSegment]) so `⌘Z` still undoes them independently, and both stay document
+ * fields (not view state) for the same reason as before: the canvas, the PNG export, and the
+ * exported text must always agree on whether a call's `[#n]`/`[ts]` prefix is showing. Per-segment
+ * tooltips are dropped for the same reason as the font: [SegmentedControl] draws its options as
+ * one internal Row, so wrapping either sample in its own [TooltipArea] would mean forking the
+ * control just for this one call site — the labels are the affordance now.
  */
 @Composable
 private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSession) {
+    SegmentedControl(
+        options = listOf("#n", "⏱ Time"),
+        selectedIndices = seq3PrefixToggleSegments(session.document),
+        onToggle = { index -> seq3TogglePrefixSegment(state, session, index) },
+    )
+}
+
+/** Which segments of [Seq3InlinePrefixToggles] read as "on". */
+internal fun seq3PrefixToggleSegments(document: Seq3Document): Set<Int> = buildSet {
+    if (document.showSequenceNumbers) add(0)
+    if (document.showTimestamps) add(1)
+}
+
+/** [seq3PrefixToggleSegments]'s toggle half — dispatches the [Seq3Command] the clicked index maps
+ *  to. Kept as a plain function so the index<->command mapping is testable without composing
+ *  [Seq3InlinePrefixToggles]. */
+internal fun seq3TogglePrefixSegment(state: AppState, session: Seq3WorkspaceSession, index: Int) {
     val document = session.document
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        ToolbarBtn(
-            label = "#",
-            tooltip = if (document.showSequenceNumbers) "Hide call numbers" else "Show call numbers",
-            active = document.showSequenceNumbers,
-            modifier = Modifier.size(28.dp),
-            shape = CORNER_SM,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            onClick = {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowSequenceNumbers(!document.showSequenceNumbers))
-            },
-        )
-        ToolbarBtn(
-            label = "⏱",
-            tooltip = if (document.showTimestamps) "Hide timestamps" else "Show timestamps",
-            active = document.showTimestamps,
-            modifier = Modifier.size(28.dp),
-            shape = CORNER_SM,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            onClick = {
-                state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowTimestamps(!document.showTimestamps))
-            },
-        )
+    when (index) {
+        0 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowSequenceNumbers(!document.showSequenceNumbers))
+        1 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowTimestamps(!document.showTimestamps))
     }
 }
 
@@ -283,8 +436,10 @@ private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSessi
  * mini-card alone — round 3's stacked name label is gone, since the swatch already shows the
  * theme and the label made this control roughly three times wider than every other toolbar
  * button. The name is not surfaced at rest at all; a plain "Choose diagram theme" [TooltipArea]
- * explains the control instead. The swatch keeps its own landscape shape, padded out to the same
- * 28dp height as its `≡`/`⇅`/`▦`/`#`/`⏱` siblings rather than forced into their square.
+ * explains the control instead. Design variant 1a: the swatch's "toolbar siblings" it matches the
+ * height of are now the two [SegmentedControl]s it shares [Seq3DiagramPresentationGroup] with
+ * (dialect, then `#n`/`⏱ Time`), not the old individual glyph buttons — the swatch keeps its own
+ * landscape shape rather than being forced into their square either way.
  */
 @Composable
 private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSession) {
@@ -298,7 +453,8 @@ private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSes
             menuWidth = 400.dp,
             // Round 6: only a 1dp inset, just enough to keep the chrome's own 1dp border
             // visible — the swatch is meant to *be* the button face, not a small icon floating
-            // inside it, so its 42x26dp fills the 44x28dp footprint its toolbar siblings occupy.
+            // inside it, so its 42x26dp fills the 44x28dp footprint its [Seq3DiagramPresentationGroup]
+            // siblings occupy.
             anchorContent = {
                 Box(Modifier.padding(1.dp)) { Seq3ThemeSwatch(swatchColors) }
             },
@@ -320,13 +476,13 @@ private fun Seq3DocumentThemeDropdown(state: AppState, session: Seq3WorkspaceSes
  *  *square*, which squeezed [ThemeWindowCard]'s 118×66 landscape composition into an aspect ratio
  *  the card itself never has, and round 4's 36×22 still sat inside a 4dp/3dp inset that left a
  *  visible dead margin between the swatch and the button border. This is now the button face:
- *  42×26dp inside a 44×28dp trigger (its `≡`/`⇅`/`▦`/`#`/`⏱` siblings' footprint), leaving only
- *  the 1dp the chrome's border needs. Every element is scaled independently rather than
- *  pixel-scaled uniformly — a literal ~35% scale of the card's 4dp rail and 8dp swatches would
- *  still read as mush — while the card's own proportions are kept: an outer [ThemeColors.bg]
- *  frame, a `p` title strip at the card's ≈21% height ratio with its ac/seq1/seq2 dot trio, and
- *  a `p2` body pane with the left accent rail and bottom-right swatch pair. No text: the theme's
- *  name lives in [Seq3DocumentThemeDropdown]'s tooltip. */
+ *  42×26dp inside a 44×28dp trigger (its [Seq3DiagramPresentationGroup] siblings' 28dp-tall
+ *  footprint), leaving only the 1dp the chrome's border needs. Every element is scaled
+ *  independently rather than pixel-scaled uniformly — a literal ~35% scale of the card's 4dp rail
+ *  and 8dp swatches would still read as mush — while the card's own proportions are kept: an outer
+ *  [ThemeColors.bg] frame, a `p` title strip at the card's ≈21% height ratio with its ac/seq1/seq2
+ *  dot trio, and a `p2` body pane with the left accent rail and bottom-right swatch pair. No text:
+ *  the theme's name lives in [Seq3DocumentThemeDropdown]'s tooltip. */
 @Composable
 private fun Seq3ThemeSwatch(colors: ThemeColors) {
     Column(
@@ -420,58 +576,127 @@ private fun Seq3TitleActionButton(label: String, tooltip: String, onClick: () ->
     )
 }
 
-/** Compact explicit note attachment action. The button itself stays the same 28dp footprint as the
- * zoom stepper; the two attachment modes live in the popup so neither choice is hidden behind an
- * update-only state. */
+// Where both header dropdown menus open, measured from their trigger's top: the controls in that
+// row are 28dp tall, so this is that height plus a 2dp gap. Shared by [Seq3AttachmentAction]'s own
+// Popup and (via `menuOffsetY`) [Seq3CopyDropdown]'s [Seq3DropdownButton], since two menus hanging
+// off the same toolbar row have to line up with each other.
+private val SEQ3_HEADER_MENU_OFFSET_Y = 30.dp
+
+// Asymmetric corners for [Seq3AttachmentAction]'s split button: the two halves share the same
+// 4dp radius [CORNER_MD] uses everywhere else, but only on their OUTER edge, so the pair still
+// reads as one rounded pill with a seam in the middle rather than two separate buttons glued
+// together.
+private val SEQ3_ATTACH_LEADING_SHAPE = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+private val SEQ3_ATTACH_TRAILING_SHAPE = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
+
+/** Design variant 1a: the header's single accent-filled PRIMARY control, replacing the old bare
+ *  "+" icon-only [ToolbarBtn]. Reworked from a single button-that-opens-a-menu into a genuine
+ *  split button because clicking "attach" is by far the more common action and no longer deserves
+ *  to cost an extra click just to reach the mode picker: the left half performs
+ *  `attachmentActionLabel(primary)` directly, one click, exactly like a plain button; only the
+ *  ~22dp caret half opens the popup, which now ALSO surfaces the "which mode is primary"
+ *  preference itself ([AppSettings.diagramLinkedNotePrimary] — the same field `SettingsDialog.kt`'s
+ *  "Diagram note action" row already exposes) so the user can retarget the left half's click
+ *  without leaving the header. Both halves reuse [ToolbarBtn]'s existing `active = true` solid-fill
+ *  treatment (the same white-on-[ThemeColors.ac] look every other active toolbar toggle already
+ *  has) rather than hand-rolling a new filled surface, sliced into two segments by
+ *  [SEQ3_ATTACH_LEADING_SHAPE]/[SEQ3_ATTACH_TRAILING_SHAPE] so the pair still reads as one pill.
+ *  Disabled together when [Seq3Document.lifelines] is empty, since [attach] already no-ops on an
+ *  empty document — this only makes that dead end visible instead of silently swallowing the
+ *  click. Keeps the hand-rolled [Popup] (not [Seq3DropdownButton] — see [Seq3CopyDropdown]'s own
+ *  doc comment for why that one DOES reuse it) because the split-button anchor shape has no
+ *  equivalent in [Seq3DropdownButton], but still goes through the same `closeAndReclaimFocus`
+ *  pattern that component uses, since this surface's Esc handling depends on it just the same —
+ *  see this file's own header comment on [LocalSeq3FocusRequester]. */
 @Composable
 private fun Seq3AttachmentAction(state: AppState, session: Seq3WorkspaceSession) {
+    val tc = tc()
     val density = LocalDensity.current
     val focusRequester = LocalSeq3FocusRequester.current
     var open by remember(session.id) { mutableStateOf(false) }
     val primary = if (state.settings.diagramLinkedNotePrimary) Seq3AttachmentMode.LINKED else Seq3AttachmentMode.SNAPSHOT
-    val secondary = if (primary == Seq3AttachmentMode.LINKED) Seq3AttachmentMode.SNAPSHOT else Seq3AttachmentMode.LINKED
+    val hasContent = session.document.lifelines.isNotEmpty()
 
-    fun close() {
+    fun closeAndReclaimFocus() {
         open = false
         focusRequester?.let { runCatching { it.requestFocus() } }
     }
 
     Box {
-        ToolbarBtn(
-            label = "+",
-            tooltip = "Attach diagram to note",
-            modifier = Modifier.size(28.dp),
-            shape = CORNER_SM,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
-            onClick = { open = !open },
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ToolbarBtn(
+                label = attachmentActionLabel(primary),
+                active = true,
+                enabled = hasContent,
+                modifier = Modifier.height(28.dp),
+                shape = SEQ3_ATTACH_LEADING_SHAPE,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp),
+                onClick = { attach(state, session, primary) },
+            )
+            // The seam between the two halves — white-on-accent like the ToolbarBtn text either
+            // side of it, not a themed tc.br rule, since it sits ON TOP of the accent fill rather
+            // than at the button's outer edge.
+            Box(Modifier.width(1.dp).height(28.dp).background(Color.White.copy(alpha = .28f)))
+            ToolbarBtn(
+                label = "▾",
+                tooltip = "More attach options",
+                active = true,
+                enabled = hasContent,
+                modifier = Modifier.width(22.dp).height(28.dp),
+                shape = SEQ3_ATTACH_TRAILING_SHAPE,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                onClick = { open = !open },
+            )
+        }
         if (open) {
             Popup(
                 alignment = Alignment.TopEnd,
-                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
-                onDismissRequest = ::close,
+                offset = IntOffset(0, with(density) { SEQ3_HEADER_MENU_OFFSET_Y.roundToPx() }),
+                onDismissRequest = ::closeAndReclaimFocus,
                 properties = PopupProperties(focusable = true),
             ) {
                 Column(
-                    Modifier.width(170.dp)
+                    Modifier.width(216.dp)
                         .shadow(8.dp, RoundedCornerShape(8.dp))
-                        .background(tc().p, RoundedCornerShape(8.dp))
-                        .border(1.dp, tc().br, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
                         .padding(4.dp),
                 ) {
                     Seq3DropdownMenuItem(
-                        label = attachmentActionLabel(primary),
+                        label = attachmentActionLabel(Seq3AttachmentMode.SNAPSHOT),
                         onClick = {
-                            attach(state, session, primary)
-                            close()
+                            attach(state, session, Seq3AttachmentMode.SNAPSHOT)
+                            closeAndReclaimFocus()
                         },
                     )
                     Seq3DropdownMenuItem(
-                        label = attachmentActionLabel(secondary),
+                        label = attachmentActionLabel(Seq3AttachmentMode.LINKED),
                         onClick = {
-                            attach(state, session, secondary)
-                            close()
+                            attach(state, session, Seq3AttachmentMode.LINKED)
+                            closeAndReclaimFocus()
                         },
+                    )
+                    Box(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+                    }
+                    // "CLICK ATTACHES" + the Snapshot/Live link picker below it change which mode
+                    // `primary` resolves to WITHOUT closing the menu — only the two action rows
+                    // above and the Popup's own dismiss do that — so the user can flip the
+                    // preference and immediately see the left half's label update before deciding
+                    // whether to also use one of the explicit actions this same click.
+                    AppText(
+                        "CLICK ATTACHES",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+                    )
+                    SegmentedControl(
+                        options = listOf("Snapshot", "Live link"),
+                        selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+                        onToggle = { index -> state.updateSettings { it.copy(diagramLinkedNotePrimary = index == 1) } },
+                        fillWidth = true,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
                     )
                 }
             }
@@ -491,10 +716,15 @@ private fun attach(state: AppState, session: Seq3WorkspaceSession, mode: Seq3Att
     }
 }
 
-private val TITLE_FIELD_MAX_WIDTH = 220.dp
+// Design variant 1a: the identity block no longer sits in a fixed 240dp Column (see
+// Seq3TitleBar's own comment), so this cap no longer has to leave headroom for the right cluster
+// squeezed in beside it — raised 220 -> 420dp (and TITLE_MAX_VISIBLE_CHARS 28 -> 56 to match) so
+// an ordinary title stops truncating well before it would ever crowd the now-independently-sized
+// right cluster.
+private val TITLE_FIELD_MAX_WIDTH = 420.dp
 private val TITLE_FIELD_MIN_WIDTH = 96.dp
 private val TITLE_FIELD_HEIGHT = 24.dp
-private const val TITLE_MAX_VISIBLE_CHARS = 28
+private const val TITLE_MAX_VISIBLE_CHARS = 56
 // Compose's density is already applied to this estimate. The old 7.2dp/character value made a
 // short title reserve roughly twice its rendered width on Retina displays, leaving the pencil
 // visibly detached from the name. Keep a little trailing room for the text caret/ellipsis while
@@ -530,7 +760,12 @@ private fun Seq3TitleField(state: AppState, session: Seq3WorkspaceSession) {
     } else {
         val titleBox: @Composable () -> Unit = {
             Box(
-                Modifier.width(titleWidth).height(TITLE_FIELD_HEIGHT)
+                // Display mode measures the real text and only caps it. The estimate below is a
+                // guess (4.8dp/char) that under-measures 13sp SemiBold badly enough that even
+                // "Untitled diagram" hit the 96dp floor and rendered as "Untitled diag…" — the
+                // exact truncation raising TITLE_FIELD_MAX_WIDTH was meant to end. The estimate
+                // survives only for the EDITOR, which needs a concrete width to lay out a field.
+                Modifier.widthIn(max = TITLE_FIELD_MAX_WIDTH).height(TITLE_FIELD_HEIGHT)
                     .pointerInput(session.id) { detectTapGestures(onDoubleTap = { editing = true }) },
                 contentAlignment = Alignment.CenterStart,
             ) {
@@ -709,9 +944,12 @@ internal class Seq3ViewState {
     /** Queue-panel width (dp), drag-resized via the [HDivider] in [Seq3Workspace]'s main `Row`. */
     var panelWidthDp by mutableStateOf(PANEL_WIDTH.value)
 
-    /** Whether the Messages sidebar is visible. The diagram remains usable full-width when this is
-     *  collapsed; it is a view preference and is never persisted into the document. */
-    var sidebarOpen by mutableStateOf(true)
+    /** Whether the Messages section is visible in the queue panel — the peer of
+     *  [lifelinesSectionOpen]/[artifactsSectionOpen], and distinct from [messagesExpanded], which
+     *  only collapses a *visible* Messages section down to its own header row. A view preference,
+     *  never persisted into the document. Whether the panel itself renders is derived from all
+     *  three section flags — see [seq3PanelVisible]. */
+    var messagesSectionOpen by mutableStateOf(true)
 
     /** Whether the Messages section is expanded. This is a view-only preference, so collapsing it
      *  never changes the document or its undo history. */
@@ -1032,6 +1270,13 @@ internal fun Seq3DropdownButton(
     alwaysFilled: Boolean = false,
     menuWidth: androidx.compose.ui.unit.Dp = 160.dp,
     fixedHeight: androidx.compose.ui.unit.Dp? = null,
+    // How far below the trigger's TOP the menu opens. The 26dp default suits this component's
+    // original call sites (Seq3QueuePanel.kt's SEQ3_ACTION_BADGE_SIZE chips and friends, all
+    // shorter than the header's controls); a taller trigger has to push its menu down by its own
+    // height instead, or the menu rides up over the button. The header's `Copy ▾` passes 30dp so
+    // it opens level with `Attach snapshot ▾`'s own popup right beside it — two menus dropping
+    // from one toolbar row must share an edge.
+    menuOffsetY: androidx.compose.ui.unit.Dp = 26.dp,
     // WP-theme-badge: lets a call site substitute its own trigger surface (e.g. the compact theme
     // swatch below) for the default "label ▾" Row. Everything else about the dropdown — the click
     // handling, the open/fillColor background, the Popup, closeAndReclaimFocus — stays identical;
@@ -1059,7 +1304,7 @@ internal fun Seq3DropdownButton(
     // WP-theme-badge sizing fix: this only ever filled HEIGHT, so a compact `anchorContent`
     // trigger (the theme badge) hugged its own intrinsic content width (the 22dp swatch) instead
     // of the full square the outer Box(modifier.then(fixedHeightModifier)) reserves — the badge
-    // rendered narrower than its 28dp `≡`/`⇅`/`▦`/`#`/`⏱` toolbar siblings. Gated on
+    // rendered narrower than its 28dp toolbar siblings. Gated on
     // `anchorContent != null`: the default label+▾ Row call sites (Seq3QueuePanel.kt's lifeline
     // kind/display-segments/fragment-kind pickers, Seq3MessageKindPicker) sit inside a
     // `Row(Modifier.fillMaxWidth())` of several controls and rely on their own intrinsic
@@ -1106,7 +1351,7 @@ internal fun Seq3DropdownButton(
         if (open) {
             Popup(
                 alignment = Alignment.TopStart,
-                offset = IntOffset(0, with(density) { 26.dp.roundToPx() }),
+                offset = IntOffset(0, with(density) { menuOffsetY.roundToPx() }),
                 onDismissRequest = ::closeAndReclaimFocus,
                 properties = PopupProperties(focusable = false),
             ) {

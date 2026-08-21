@@ -131,13 +131,47 @@ internal fun seq3DocumentDisplaySegmentsLabel(segments: Int): String =
 
 /** Applies a horizontal splitter drag to the Fragments & notes section — the
  *  [seq3ClampLifelinesHeight] counterpart for WP3 item 9's promoted section. Same inversion
- *  rationale as that function's own doc. */
+ *  rationale as that function's own doc. Used on its own only when the pane above the divider is
+ *  the weighted one (Lifelines hidden), which is the arrangement where it already behaves like
+ *  the Lifelines divider; otherwise the drag goes through [seq3DragArtifactsBoundary]. */
 internal fun seq3ClampArtifactsHeight(
     current: Float,
     delta: Float,
     min: Float = SEQ3_ARTIFACTS_MIN_HEIGHT_DP,
     max: Float = SEQ3_ARTIFACTS_MAX_HEIGHT_DP,
 ): Float = (current - delta).coerceIn(min, max)
+
+/**
+ * Drags the Lifelines/Artifacts boundary the way the Messages/Lifelines one already drags: the
+ * pane immediately ABOVE the divider grows and the pane below it shrinks, by the same amount.
+ *
+ * The two dividers only *look* like they need different code. Messages holds `weight(1f)`, so
+ * dragging the Lifelines divider gets this for free — the pane above the boundary is the flexible
+ * one, and it absorbs the change on the spot. The Artifacts divider has a FIXED pane above it
+ * (Lifelines) and the flexible pane two positions away, so resizing Artifacts alone pulled the
+ * height out of Messages and slid the entire Lifelines section up or down — the divider moved a
+ * boundary it wasn't sitting on. Trading the two adjacent heights instead keeps their sum constant,
+ * so Messages never notices and nothing above Lifelines moves.
+ *
+ * Both clamps are honoured jointly — the transfer is limited to the smaller of what Artifacts can
+ * give ([seq3ClampArtifactsHeight]) and what Lifelines can take ([seq3ClampLifelinesHeight]), so
+ * hitting either bound stops the boundary dead rather than letting one side keep moving.
+ *
+ * Returns `(lifelines, artifacts)`.
+ */
+internal fun seq3DragArtifactsBoundary(
+    lifelines: Float,
+    artifacts: Float,
+    delta: Float,
+): Pair<Float, Float> {
+    // [VDivider] reports positive deltas downward, and dragging this divider down means a taller
+    // Lifelines above it and a shorter Artifacts below — the same inversion the two clamp helpers
+    // already encode for their own sections.
+    val offered = artifacts - seq3ClampArtifactsHeight(artifacts, delta)
+    val lifelinesAfter = seq3ClampLifelinesHeight(lifelines, -offered)
+    val transferred = lifelinesAfter - lifelines
+    return lifelinesAfter to (artifacts - transferred)
+}
 
 private val MESSAGE_KIND_OPTIONS = listOf(
     Seq3Kind.CALL,
@@ -183,30 +217,49 @@ internal enum class Seq3PanelSection { MESSAGES, LIFELINES, ARTIFACTS }
  * fill the panel when nothing higher in priority is doing it, so the `Column` in [Seq3QueuePanel]
  * (`Modifier.fillMaxHeight()` from its caller) doesn't leave dead space below a shorter stack.
  *
- * Priority is Messages > Lifelines > Artifacts, exactly the chain the panel already used when it
- * only had two hideable sections (Lifelines stole the remaining space whenever Messages was
- * collapsed, *regardless* of whether Lifelines itself was expanded or squished to its own 48dp
- * collapsed row — the same "sacrifice a section's own collapse preference so something fills the
- * remainder" behavior carries forward to Artifacts here). At most one section is returned;
- * `null` means every section is either collapsed-without-being-the-only-option or not visible at
- * all, so the Column is intentionally shorter than its container (the pre-WP8 behavior when, e.g.,
- * Messages was collapsed and Lifelines was hidden with no fragments/notes present).
+ * Priority is Messages > Lifelines > Artifacts. Each argument means "this section is visible AND
+ * expanded", so only a section that actually has a body to show can claim the remaining height.
+ * An earlier revision let Lifelines take the weight whenever Messages was collapsed *regardless of
+ * whether Lifelines itself was expanded* — deliberately sacrificing a section's own collapse
+ * preference to avoid dead space. In practice that traded a small gap for a much worse one:
+ * collapse all three and the panel stretched a *collapsed* Lifelines section over the entire
+ * height, so its 48dp header floated at the top of a panel-sized void with Artifacts pinned to the
+ * far bottom. A collapsed section has nothing to fill space with, so it no longer volunteers.
  *
- * [lifelinesVisible] is `view.lifelinesSectionOpen`; [artifactsVisible] is `view.artifactsSectionOpen`
- * directly — an empty-but-toggled-on Artifacts section still claims this weight (it renders its
- * header, its "+ note" action, and an empty-state hint in place of the row list; see
- * `Seq3FragmentsAndNotesSection`), so it is "in the running" the same as a non-empty one.
+ * At most one section is returned; `null` means no visible section is expanded, so the Column is
+ * intentionally shorter than its container and the leftover simply reads as panel background —
+ * three collapsed headers stacked at the top, which is what "collapse everything" should look
+ * like.
+ *
+ * Visibility on its own is still enough to be "in the running" when the section IS expanded — an
+ * empty-but-toggled-on Artifacts section still claims the weight, since it renders its header, its
+ * "+ note" action, and an empty-state hint in place of the row list (see
+ * `Seq3FragmentsAndNotesSection`).
  */
 internal fun seq3PanelWeightedSection(
-    messagesExpanded: Boolean,
-    lifelinesVisible: Boolean,
-    artifactsVisible: Boolean,
+    messagesWeighted: Boolean,
+    lifelinesWeighted: Boolean,
+    artifactsWeighted: Boolean,
 ): Seq3PanelSection? = when {
-    messagesExpanded -> Seq3PanelSection.MESSAGES
-    lifelinesVisible -> Seq3PanelSection.LIFELINES
-    artifactsVisible -> Seq3PanelSection.ARTIFACTS
+    messagesWeighted -> Seq3PanelSection.MESSAGES
+    lifelinesWeighted -> Seq3PanelSection.LIFELINES
+    artifactsWeighted -> Seq3PanelSection.ARTIFACTS
     else -> null
 }
+
+/**
+ * [seq3PanelWeightedSection] applied to a live [Seq3ViewState] — the one place the "visible AND
+ * expanded" eligibility rule for each of the three sections is written down. Split out from
+ * [Seq3QueuePanel] so a test can pin the combination that used to stretch a *collapsed* Lifelines
+ * section over the whole panel (everything collapsed ⇒ nothing is weighted) without composing the
+ * panel.
+ */
+internal fun seq3PanelWeightedSectionFor(view: Seq3ViewState): Seq3PanelSection? =
+    seq3PanelWeightedSection(
+        view.messagesSectionOpen && view.messagesExpanded,
+        view.lifelinesSectionOpen && view.lifelinesExpanded,
+        view.artifactsSectionOpen && view.artifactsExpanded,
+    )
 
 /** WP8 (revised): whether the Fragments & notes section renders in the panel at all — purely
  *  [Seq3ViewState.artifactsSectionOpen]. Split out (mirroring [seq3PanelWeightedSection]'s own
@@ -254,10 +307,18 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
     // header, no "+ note" button — hiding the only way to add the first one. An empty section now
     // still renders (header + empty-state hint); see `Seq3FragmentsAndNotesSection`.
     val artifactsVisible = seq3ArtifactsSectionVisible(view)
-    val weightedSection = seq3PanelWeightedSection(view.messagesExpanded, view.lifelinesSectionOpen, artifactsVisible)
+    // 1a header rework: Messages is now a section toggle like the other two, so a hidden Messages
+    // section is neither drawn nor eligible for the weight(1f) chain — `messagesExpanded` alone
+    // (which only collapses a *visible* section to its header) is no longer the whole story.
+    val messagesVisible = view.messagesSectionOpen
+    // A section is eligible for the weight(1f) remainder only when it is both shown and expanded —
+    // a collapsed section is a fixed-height header with no body to stretch. See
+    // [seq3PanelWeightedSection].
+    val messagesWeighted = messagesVisible && view.messagesExpanded
+    val weightedSection = seq3PanelWeightedSectionFor(view)
 
     Column(modifier.background(tc.p)) {
-        if (view.messagesExpanded) {
+        if (messagesWeighted) {
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 Seq3QueueHeader(state, session, counts, view)
                 Column(Modifier.weight(1f).fillMaxWidth()) {
@@ -304,11 +365,11 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                 Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
                 }
             }
-        } else {
+        } else if (messagesVisible) {
             Seq3QueueHeader(state, session, counts, view)
         }
         if (view.lifelinesSectionOpen) {
-            if (view.messagesExpanded) {
+            if (messagesWeighted) {
                 VDivider { delta ->
                     view.lifelinesSectionHeightDp =
                         seq3ClampLifelinesHeight(view.lifelinesSectionHeightDp, delta)
@@ -317,7 +378,11 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
             val lifelinesModifier = when {
                 weightedSection == Seq3PanelSection.LIFELINES -> Modifier.weight(1f).fillMaxWidth()
                 view.lifelinesExpanded -> Modifier.height(view.lifelinesSectionHeightDp.dp).fillMaxWidth()
-                else -> Modifier.height(48.dp).fillMaxWidth()
+                // Collapsed: wrap the section header and nothing else, the same way a collapsed
+                // Messages section does by simply rendering its header. A forced height here (this
+                // was 48dp against a ~32dp header) padded 16dp of blank panel underneath, which
+                // read as a gap between Lifelines and Artifacts that Messages/Lifelines never had.
+                else -> Modifier.fillMaxWidth()
             }
             Seq3LifelinesSection(state, session, view, lifelinesModifier)
         }
@@ -327,16 +392,43 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
         // show/hide toggle (`artifactsSectionOpen`); `artifactsVisible` is now exactly that toggle
         // (see its own comment above) — an empty document still shows the section when toggled on.
         if (artifactsVisible) {
-            if (view.messagesExpanded || view.lifelinesSectionOpen) {
+            // The Lifelines divider above shows only when ITS pane above (Messages) is expanded.
+            // This is that same rule applied to this divider's own pane above — Lifelines when it
+            // is open, otherwise Messages. Collapse everything and neither divider draws, so the
+            // three headers stack identically instead of Artifacts being the only separated one.
+            // …and only when BOTH panes it separates can actually change size. A collapsed
+            // section is just its header, so there is nothing to drag and the handle is not drawn
+            // at all — rather than drawn but inert, or worse, drawn and quietly resizing something
+            // else.
+            val paneAboveExpanded =
+                if (view.lifelinesSectionOpen) view.lifelinesExpanded else messagesWeighted
+            if (paneAboveExpanded && view.artifactsExpanded) {
+                // Lifelines is present and fixed-height: the two trade, and Messages — the
+                // weighted section — is not touched by any code path here. The one exception is
+                // Lifelines being hidden or itself weighted, where there is no fixed pane above to
+                // trade with and no Lifelines that could move either way.
+                val tradesWithLifelines = view.lifelinesSectionOpen &&
+                    weightedSection != Seq3PanelSection.LIFELINES
                 VDivider { delta ->
-                    view.artifactsSectionHeightDp =
-                        seq3ClampArtifactsHeight(view.artifactsSectionHeightDp, delta)
+                    if (tradesWithLifelines) {
+                        val (lifelines, artifacts) = seq3DragArtifactsBoundary(
+                            view.lifelinesSectionHeightDp,
+                            view.artifactsSectionHeightDp,
+                            delta,
+                        )
+                        view.lifelinesSectionHeightDp = lifelines
+                        view.artifactsSectionHeightDp = artifacts
+                    } else {
+                        view.artifactsSectionHeightDp =
+                            seq3ClampArtifactsHeight(view.artifactsSectionHeightDp, delta)
+                    }
                 }
             }
             val artifactsModifier = when {
                 weightedSection == Seq3PanelSection.ARTIFACTS -> Modifier.weight(1f).fillMaxWidth()
                 view.artifactsExpanded -> Modifier.height(view.artifactsSectionHeightDp.dp).fillMaxWidth()
-                else -> Modifier.height(32.dp).fillMaxWidth()
+                // Collapsed: wrap the header, same as Lifelines above.
+                else -> Modifier.fillMaxWidth()
             }
             Seq3FragmentsAndNotesSection(state, session, view, document, artifactsModifier)
         }

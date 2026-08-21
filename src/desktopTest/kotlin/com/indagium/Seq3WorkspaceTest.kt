@@ -1,11 +1,14 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.toMermaid
+import com.indagium.diagram3.toPlantUml
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.Seq3CopyTarget
 import com.indagium.ui.Seq3RenderCache
 import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.applySeq3Escape
@@ -13,10 +16,17 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.seq3AddNote
 import com.indagium.ui.seq3ArtifactsSectionVisible
 import com.indagium.ui.seq3ClearSelection
+import com.indagium.ui.seq3CopyTargetLabel
+import com.indagium.ui.seq3CopyTargetText
 import com.indagium.ui.seq3DefaultNotePlacement
+import com.indagium.ui.seq3PaneSegments
+import com.indagium.ui.seq3PanelVisible
+import com.indagium.ui.seq3PrefixToggleSegments
 import com.indagium.ui.seq3ToggleFragmentSelection
 import com.indagium.ui.seq3ToggleLifelineSelection
 import com.indagium.ui.seq3ToggleNoteSelection
+import com.indagium.ui.seq3TogglePaneSegment
+import com.indagium.ui.seq3TogglePrefixSegment
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -275,5 +285,188 @@ class Seq3WorkspaceTest {
         val applied = seq3AddNote(state, session, view, document, emptySet(), placement = null)
 
         assertFalse(applied)
+    }
+
+    // ── seq3PaneSegments / seq3TogglePaneSegment: header 1a's Panes multi-select ─────────────
+
+    @Test
+    fun paneSegmentsReflectsAllThreeViewFlagsIndependently() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = true
+        view.lifelinesSectionOpen = false
+        view.artifactsSectionOpen = true
+
+        assertEquals(setOf(0, 2), seq3PaneSegments(view))
+    }
+
+    @Test
+    fun paneSegmentsIsEmptyWhenAllThreePanesAreClosed() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = false
+        view.lifelinesSectionOpen = false
+        view.artifactsSectionOpen = false
+
+        assertEquals(emptySet(), seq3PaneSegments(view))
+    }
+
+    @Test
+    fun paneSegmentsIsAllThreeWhenEveryPaneIsOpen() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = true
+        view.lifelinesSectionOpen = true
+        view.artifactsSectionOpen = true
+
+        assertEquals(setOf(0, 1, 2), seq3PaneSegments(view))
+    }
+
+    @Test
+    fun togglePaneSegmentFlipsOnlyTheMatchingFlag() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = true
+        view.lifelinesSectionOpen = true
+        view.artifactsSectionOpen = true
+
+        seq3TogglePaneSegment(view, 1)
+
+        assertTrue(view.messagesSectionOpen, "toggling index 1 must not touch messagesSectionOpen")
+        assertFalse(view.lifelinesSectionOpen, "toggling index 1 must flip lifelinesSectionOpen")
+        assertTrue(view.artifactsSectionOpen, "toggling index 1 must not touch artifactsSectionOpen")
+    }
+
+    @Test
+    fun panelStaysVisibleWhenMessagesIsClosedButAnotherSectionIsStillOpen() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = true
+        view.lifelinesSectionOpen = true
+        view.artifactsSectionOpen = false
+
+        seq3TogglePaneSegment(view, 0)
+
+        assertFalse(view.messagesSectionOpen, "index 0 closes only the Messages section")
+        assertTrue(view.lifelinesSectionOpen, "closing Messages must not close Lifelines")
+        assertTrue(seq3PanelVisible(view), "the panel stays up while any section is open")
+    }
+
+    @Test
+    fun panelHidesOnlyOnceEverySectionIsClosed() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = false
+        view.lifelinesSectionOpen = false
+        view.artifactsSectionOpen = true
+        assertTrue(seq3PanelVisible(view))
+
+        seq3TogglePaneSegment(view, 2)
+
+        assertFalse(seq3PanelVisible(view), "the last section closing gives the canvas full width")
+    }
+
+    @Test
+    fun panelComesBackWhenAnySectionIsReopened() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = false
+        view.lifelinesSectionOpen = false
+        view.artifactsSectionOpen = false
+
+        seq3TogglePaneSegment(view, 1)
+
+        assertTrue(seq3PanelVisible(view))
+        assertEquals(setOf(1), seq3PaneSegments(view))
+    }
+
+    @Test
+    fun togglePaneSegmentIsItsOwnInverse() {
+        val view = Seq3ViewState()
+        val before = seq3PaneSegments(view)
+
+        seq3TogglePaneSegment(view, 0)
+        seq3TogglePaneSegment(view, 0)
+
+        assertEquals(before, seq3PaneSegments(view))
+    }
+
+    // ── seq3PrefixToggleSegments / seq3TogglePrefixSegment: `#n` / `⏱ Time` multi-select ─────
+
+    @Test
+    fun prefixToggleSegmentsReflectsBothDocumentFieldsIndependently() {
+        val document = Seq3Document(showSequenceNumbers = true, showTimestamps = false)
+        assertEquals(setOf(0), seq3PrefixToggleSegments(document))
+
+        val both = Seq3Document(showSequenceNumbers = true, showTimestamps = true)
+        assertEquals(setOf(0, 1), seq3PrefixToggleSegments(both))
+
+        val neither = Seq3Document(showSequenceNumbers = false, showTimestamps = false)
+        assertEquals(emptySet(), seq3PrefixToggleSegments(neither))
+    }
+
+    @Test
+    fun togglePrefixSegmentFlipsOnlyShowSequenceNumbersForIndexZero() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        val before = session.document
+
+        seq3TogglePrefixSegment(state, session, 0)
+
+        val after = state.seq3Sessions.sessions.single { it.id == id }.document
+        assertEquals(!before.showSequenceNumbers, after.showSequenceNumbers)
+        assertEquals(before.showTimestamps, after.showTimestamps, "index 0 must not touch showTimestamps")
+    }
+
+    @Test
+    fun togglePrefixSegmentFlipsOnlyShowTimestampsForIndexOne() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        val before = session.document
+
+        seq3TogglePrefixSegment(state, session, 1)
+
+        val after = state.seq3Sessions.sessions.single { it.id == id }.document
+        assertEquals(before.showSequenceNumbers, after.showSequenceNumbers, "index 1 must not touch showSequenceNumbers")
+        assertEquals(!before.showTimestamps, after.showTimestamps)
+    }
+
+    // ── Seq3CopyTarget / seq3CopyTargetLabel / seq3CopyTargetText: header 1a's "Copy ▾" menu ──
+
+    @Test
+    fun copyTargetLabelsMatchTheMenuTextForEveryTarget() {
+        assertEquals("PNG image", seq3CopyTargetLabel(Seq3CopyTarget.PNG_IMAGE))
+        assertEquals("PlantUML source", seq3CopyTargetLabel(Seq3CopyTarget.PLANTUML_SOURCE))
+        assertEquals("Mermaid source", seq3CopyTargetLabel(Seq3CopyTarget.MERMAID_SOURCE))
+    }
+
+    @Test
+    fun copyTargetTextIsNullForPngSinceThatItemCopiesBytesNotText() {
+        assertNull(seq3CopyTargetText(Seq3CopyTarget.PNG_IMAGE, Seq3Document()))
+    }
+
+    @Test
+    fun copyTargetTextReturnsPlantUmlSourceForThePlantUmlTarget() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val document = state.seq3Sessions.sessions.single { it.id == id }.document
+
+        val text = seq3CopyTargetText(Seq3CopyTarget.PLANTUML_SOURCE, document)
+
+        assertNotNull(text)
+        assertTrue(text.startsWith("@startuml"), "PlantUML source should start with @startuml, was: $text")
+        assertEquals(document.toPlantUml(), text)
+    }
+
+    @Test
+    fun copyTargetTextReturnsMermaidSourceForTheMermaidTarget() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val document = state.seq3Sessions.sessions.single { it.id == id }.document
+
+        val text = seq3CopyTargetText(Seq3CopyTarget.MERMAID_SOURCE, document)
+
+        assertNotNull(text)
+        assertTrue(text.startsWith("sequenceDiagram"), "Mermaid source should start with sequenceDiagram, was: $text")
+        assertEquals(document.toMermaid(), text)
     }
 }
