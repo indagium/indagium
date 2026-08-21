@@ -7907,6 +7907,22 @@ class AppState(
             }
             restoreTabsFromAutosave(tabLines)
             pruneMissingRecentNotes()
+            // Diagram workspace tabs (WP-diagram-restore): deliberately NOT handled inside the
+            // keyLines loop above (restoreAutosaveKey has no "diagramTabs"/"activeDiagram" case) —
+            // Seq3Session.openLibraryItem's own tabId guard needs `tabs` to already be populated,
+            // which only happens after restoreTabsFromAutosave just above. activeDiagram is
+            // resolved only when at least one diagram tab actually reopened, both to avoid an
+            // unnecessary activeSurface write on the common "no diagrams were open" path and
+            // because restoreActiveDiagram's own fallback already matches activeSurface's plain
+            // default (null, App.kt's own "no activeSurface -> the log view" rule) either way.
+            val diagramTabsToken = keyLines.firstOrNull { it.substringBefore('\t') == "diagramTabs" }
+                ?.substringAfter('\t', "")?.unb64().orEmpty()
+            if (diagramTabsToken.isNotBlank()) {
+                restoreDiagramTabs(diagramTabsToken)
+                val activeDiagramToken = keyLines.firstOrNull { it.substringBefore('\t') == "activeDiagram" }
+                    ?.substringAfter('\t', "")?.unb64().orEmpty()
+                restoreActiveDiagram(activeDiagramToken)
+            }
         }
     }
 
@@ -7939,6 +7955,9 @@ class AppState(
             "recent" -> recentFiles = value.pathTokenList()
             "recentNotes" -> recentNotes = value.pathTokenList()
             "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
+            // "diagramTabs"/"activeDiagram" are deliberately absent here — see restoreAutosave()'s
+            // own comment for why they're read directly from keyLines and applied AFTER
+            // restoreTabsFromAutosave instead of through this per-line dispatch.
         }
     }
 
@@ -8070,6 +8089,8 @@ class AppState(
         appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
         appendLine("recentNotes\t${recentNotes.joinToString(",") { it.b64() }.b64()}")
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")
+        appendLine("diagramTabs\t${diagramTabsToken().b64()}")
+        appendLine("activeDiagram\t${activeDiagramToken().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
     }

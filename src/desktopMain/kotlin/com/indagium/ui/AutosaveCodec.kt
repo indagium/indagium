@@ -988,6 +988,60 @@ internal fun AppState.restoreCompareState(token: String) {
         .coerceIn(VIDEO_PANEL_MIN_WIDTH, VIDEO_PANEL_MAX_WIDTH)
 }
 
+// ── Diagram workspace tabs (WP-diagram-restore) ────────────────────────────────────────────────
+//
+// User-observed request: reopening the app used to restore every log tab but never which diagram
+// workspace tab(s) were open on top of them — activeSurface and Seq3Session.sessions are both
+// plain in-memory Compose state with no autosave key of their own. A session only needs its
+// libraryItemId + sourceTabId to come back: Seq3Session.openLibraryItem rebuilds the rest (undo
+// stack aside — a fresh undo history on reload is the same tradeoff every other autosaved surface
+// already makes) from the saved DiagramLibraryItem, and LogTab.id is itself stable across a
+// restart (tabToken()'s own first field), so a remembered sourceTabId still resolves correctly
+// once tabs exist again. A session with no libraryItemId yet (nothing generated, or the debounced
+// first generation never landed before quit) has nothing durable to reopen and is simply skipped —
+// the same "nothing to save yet" contract every other draft-style autosave key already has.
+
+internal fun AppState.diagramTabsToken(): String =
+    seq3Sessions.sessions
+        .mapNotNull { session -> session.libraryItemId?.let { libId -> tokenFields(libId, session.sourceTabId.orEmpty()) } }
+        .joinToString(",") { it.b64() }
+
+/** Reopens every remembered diagram workspace tab. MUST run after tabs exist again
+ *  ([AppState.restoreTabsFromAutosave]) — [Seq3Session.openLibraryItem]'s own tabId guard
+ *  (`appState.tab(it) != null`) would otherwise reject every entry, since restoreAutosaveKey's own
+ *  loop runs before tabs are restored. Each successful open leaves activeSurface pointed at THAT
+ *  session (openLibraryItem's own side effect) — see [restoreActiveDiagram] for putting it back on
+ *  whichever one was actually active at quit. */
+internal fun AppState.restoreDiagramTabs(token: String) {
+    if (token.isBlank()) return
+    token.split(",").forEach { entry ->
+        val fields = entry.unb64().tokenFields()
+        val libraryItemId = fields.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@forEach
+        val tabId = fields.getOrNull(1)?.takeIf { it.isNotBlank() }
+        seq3Sessions.openLibraryItem(libraryItemId, tabId)
+    }
+}
+
+/** Empty when the active surface at quit-time was the log view (or nothing had been opened yet);
+ *  the owning session's own [DiagramLibraryItem] id otherwise — sessionId itself is regenerated on
+ *  every [Seq3Session.openLibraryItem] call, so it can't be the thing remembered across a restart,
+ *  but libraryItemId (the saved record's own id) is stable. */
+internal fun AppState.activeDiagramToken(): String =
+    (activeSurface as? ActiveSurface.Diagram3)
+        ?.let { surface -> seq3Sessions.sessions.firstOrNull { it.id == surface.sessionId }?.libraryItemId }
+        .orEmpty()
+
+/** Only called when [restoreDiagramTabs] actually reopened at least one session (see call site) —
+ *  puts activeSurface back on whichever ONE of them was truly active at quit, undoing
+ *  openLibraryItem's own "the one just opened wins" side effect for every entry opened before it.
+ *  Falls back to the log view (matching what activeSurface already defaults to when nothing
+ *  diagram-related was ever open) when [libraryItemId] is blank or names a session that failed to
+ *  reopen (its DiagramLibraryItem was deleted between autosave writes, say). */
+internal fun AppState.restoreActiveDiagram(libraryItemId: String) {
+    val session = libraryItemId.takeIf { it.isNotBlank() }?.let { id -> seq3Sessions.sessions.firstOrNull { it.libraryItemId == id } }
+    activeSurface = session?.id?.let(ActiveSurface::Diagram3) ?: activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
+}
+
 internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     hlListExpanded.toString(),
     lvlExpanded.toString(),
