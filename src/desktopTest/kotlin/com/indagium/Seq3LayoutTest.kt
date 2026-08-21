@@ -10,6 +10,10 @@ import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
+import com.indagium.ui.Seq3ViewState
+import com.indagium.ui.seq3CanGroupSelection
+import com.indagium.ui.seq3FragmentSpanFor
+import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
@@ -33,6 +37,7 @@ import com.indagium.diagram3.seq3LifelineSegments
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class Seq3LayoutTest {
@@ -912,4 +917,186 @@ class Seq3LayoutTest {
             assertTrue(segments[i - 1].toY <= segments[i].fromY, "segments must be produced in increasing, non-overlapping y order")
         }
     }
+
+    @Test
+    fun aFragmentFromMarqueeSelectedRowsBracketsEveryOneOfThem() {
+        // The shape a canvas marquee produces when it crosses a repeated message: two occurrences
+        // of "verify" with another message's row sitting between them. Every one of the four rows
+        // was inside the selection rectangle, so every one of them has to end up inside the frame —
+        // a bracket that stops short of the last selected row is the bug this pins.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("descriptor", "A", "B", occurrences = listOf(occurrence(1))),
+                message("verify", "B", "A", occurrences = listOf(occurrence(2), occurrence(4))),
+                message("registered", "A", "B", occurrences = listOf(occurrence(3))),
+                // Rows below the selection, to prove the frame does not simply run to the bottom.
+                message("tail", "A", "B", occurrences = listOf(occurrence(5), occurrence(6))),
+            ),
+            fragments = listOf(
+                Seq3Fragment(
+                    "f1",
+                    Seq3FragmentKind.LOOP,
+                    "loop",
+                    messageIds = emptyList(),
+                    occurrenceRefs = listOf(
+                        Seq3OccurrenceRef("descriptor", 1),
+                        Seq3OccurrenceRef("verify", 2),
+                        Seq3OccurrenceRef("registered", 3),
+                        Seq3OccurrenceRef("verify", 4),
+                    ),
+                ),
+            ),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+        val box = layout.fragments.single().box
+        val selectedRows = layout.rows.filter { it.occurrenceEntryId in setOf(1, 2, 3, 4) }
+        val tailRows = layout.rows.filter { it.occurrenceEntryId in setOf(5, 6) }
+
+        assertEquals(4, selectedRows.size, "fixture should draw one row per selected occurrence")
+        selectedRows.forEach { row ->
+            assertTrue(
+                row.y >= box.y && row.y <= box.y + box.height,
+                "selected row entryId=${row.occurrenceEntryId} at y=${row.y} fell outside the frame ${box.y}..${box.y + box.height}",
+            )
+        }
+        tailRows.forEach { row ->
+            assertTrue(row.y > box.y + box.height, "unselected tail row entryId=${row.occurrenceEntryId} should sit below the frame")
+        }
+    }
+
+
+    @Test
+    fun aMarqueeAcrossTheCanvasFramesOnlyTheRowsItCovered() {
+        // Drives the REAL marquee pipeline end to end: layout -> seq3RowRefsInSelection(rect) ->
+        // Seq3ViewState -> seq3FragmentSpanFor. "verify" repeats far down the diagram; the rect
+        // only covers its FIRST occurrence, so the fragment must reference exact rows and must NOT
+        // fall back to verify's plain message id (which would bracket its whole span and stretch
+        // the frame to the bottom of the diagram — the reported bug).
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("descriptor", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("verify", "B", "A", occurrences = listOf(occurrence(2, ts = 2_000L), occurrence(9, ts = 9_000L))),
+                message("registered", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+                message("tail", "A", "B", occurrences = listOf(occurrence(7, ts = 7_000L), occurrence(8, ts = 8_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val covered = layout.rows.filter { it.occurrenceEntryId in setOf(1, 2, 3) }
+        val rect = Seq3Box(0.0, covered.minOf { it.y } - 1.0, layout.width, covered.maxOf { it.y } - covered.minOf { it.y } + 2.0)
+
+        val view = Seq3ViewState()
+        view.selectedCanvasRows = seq3RowRefsInSelection(layout, rect).toSet()
+        val selectedIds = view.selectedCanvasRows.mapTo(mutableSetOf()) { it.messageId }
+        val span = seq3FragmentSpanFor(doc, view, selectedIds)
+
+        assertEquals(setOf("descriptor", "verify", "registered"), selectedIds)
+        assertEquals(emptyList(), span.messageIds, "no message may fall back to its whole span here")
+        assertEquals(
+            listOf(
+                Seq3OccurrenceRef("descriptor", 1),
+                Seq3OccurrenceRef("verify", 2),
+                Seq3OccurrenceRef("registered", 3),
+            ),
+            span.occurrenceRefs.sortedBy { it.entryId },
+        )
+    }
+
+
+    @Test
+    fun tickingOccurrencesGroupsOnlyThoseMessagesNotTheirWholeContainer() {
+        // The reported bug, at its root. "verify" is a ×3 queue row: a CONTAINER of three
+        // independent messages, one of which fires near the bottom of the diagram. Ticking two of
+        // its rows must frame those two — not drag in the third just because they share a row in
+        // the queue, which is what stretched a loop to the end of the diagram.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("descriptor", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message(
+                    "verify", "B", "A",
+                    occurrences = listOf(occurrence(2, ts = 2_000L), occurrence(3, ts = 3_000L), occurrence(9, ts = 9_000L)),
+                ),
+            ),
+        )
+        val view = Seq3ViewState()
+        view.selectedOccurrenceIds = setOf("verify::2", "verify::3")
+
+        val span = seq3FragmentSpanFor(doc, view, setOf("verify"))
+
+        assertEquals(emptyList(), span.messageIds, "a container must never fall back to its whole span")
+        assertEquals(listOf(Seq3OccurrenceRef("verify", 2), Seq3OccurrenceRef("verify", 3)), span.occurrenceRefs)
+    }
+
+    @Test
+    fun selectingARepeatedContainerWithNothingTickedGroupsNothing() {
+        // Highlighting the ×3 queue row itself selects a container, not a message. Nothing is
+        // ticked, so there is nothing to draw a bracket around.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "verify", "B", "A",
+                    occurrences = listOf(occurrence(2, ts = 2_000L), occurrence(3, ts = 3_000L), occurrence(9, ts = 9_000L)),
+                ),
+            ),
+        )
+        val view = Seq3ViewState()
+
+        val span = seq3FragmentSpanFor(doc, view, setOf("verify"))
+
+        assertFalse(span.isNotEmpty())
+        assertFalse(seq3CanGroupSelection(doc, view, setOf("verify")))
+    }
+
+    @Test
+    fun aSingleMessageQueueRowIsItsOwnMessageAndStaysGroupable() {
+        // A ×1 row renders a checkbox rather than an expand toggle: it IS one message, so selecting
+        // it is enough on its own.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("one", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("two", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+        )
+        val view = Seq3ViewState()
+
+        val span = seq3FragmentSpanFor(doc, view, setOf("one", "two"))
+
+        assertTrue(seq3CanGroupSelection(doc, view, setOf("one", "two")))
+        assertEquals(listOf(Seq3OccurrenceRef("one", 1), Seq3OccurrenceRef("two", 2)), span.occurrenceRefs)
+        assertEquals(setOf("one", "two"), span.referencedMessageIds())
+    }
+
+
+    @Test
+    fun aRubberBandTakesOnlyTheArrowsItsEdgesEnclose() {
+        // Rows sit ROW_H (42) apart and a CLICK target is padded by 18 either side, so reusing the
+        // click box for the band swept in the arrow past each edge: the user dragged over 2 rows
+        // and got a fragment around 4. The band must take only the lines inside it.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("r1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("r2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("r3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+                message("r4", "A", "B", occurrences = listOf(occurrence(4, ts = 4_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val y = layout.rows.associate { it.messageId to it.y }
+        // A band drawn to sit strictly between r1 and r2 at the top, and between r3 and r4 at the
+        // bottom — it visually contains r2 and r3 only.
+        val top = (y.getValue("r1") + y.getValue("r2")) / 2
+        val bottom = (y.getValue("r3") + y.getValue("r4")) / 2
+        val band = Seq3Box(0.0, top, layout.width, bottom - top)
+
+        val picked = seq3RowRefsInSelection(layout, band).map { it.messageId }
+
+        assertEquals(listOf("r2", "r3"), picked)
+    }
+
 }

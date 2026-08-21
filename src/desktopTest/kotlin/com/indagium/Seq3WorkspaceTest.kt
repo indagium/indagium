@@ -1,6 +1,11 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3Match
+import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.LogEntry
@@ -14,6 +19,8 @@ import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.applySeq3Escape
 import com.indagium.ui.mkTab
 import com.indagium.ui.seq3AddNote
+import com.indagium.ui.seq3AutoExpandOccurrences
+import com.indagium.ui.seq3DisownAutoExpand
 import com.indagium.ui.seq3ArtifactsSectionVisible
 import com.indagium.ui.seq3ClearSelection
 import com.indagium.ui.seq3CopyTargetLabel
@@ -469,4 +476,69 @@ class Seq3WorkspaceTest {
         assertTrue(text.startsWith("sequenceDiagram"), "Mermaid source should start with sequenceDiagram, was: $text")
         assertEquals(document.toMermaid(), text)
     }
+
+    // ── Canvas-driven queue expansion ─────────────────────────────────────────────────────────
+    //
+    // A canvas click opens the clicked occurrence's group in the queue so the submessage is visible
+    // and actionable. That only ever ADDED, so clicking several repeated messages left every group
+    // open, all of them still open after the selection was cleared. The expansion is now tracked as
+    // automatic and released again — but only when it was this mechanism that opened it.
+
+    @Test
+    fun theCanvasCollapsesTheGroupItOpenedWhenItMovesToAnother() {
+        val view = Seq3ViewState()
+
+        seq3AutoExpandOccurrences(view, "m1")
+        assertEquals(setOf("m1"), view.expandedOccurrenceMessageIds)
+
+        seq3AutoExpandOccurrences(view, "m2")
+        assertEquals(setOf("m2"), view.expandedOccurrenceMessageIds, "m1's automatic expansion should not linger")
+    }
+
+    @Test
+    fun clearingTheSelectionCollapsesTheGroupTheCanvasOpened() {
+        val view = Seq3ViewState()
+        seq3AutoExpandOccurrences(view, "m1")
+
+        seq3ClearSelection(view)
+
+        assertEquals(emptySet(), view.expandedOccurrenceMessageIds)
+        assertNull(view.autoExpandedOccurrenceMessageId)
+    }
+
+    @Test
+    fun aGroupTheUserOpenedThemselvesIsNeverCollapsedByTheCanvas() {
+        val view = Seq3ViewState()
+        // The queue's own toggle, then a canvas click on that same group.
+        view.expandedOccurrenceMessageIds = setOf("m1")
+        seq3AutoExpandOccurrences(view, "m1")
+
+        seq3AutoExpandOccurrences(view, "m2")
+        seq3ClearSelection(view)
+
+        assertEquals(setOf("m1"), view.expandedOccurrenceMessageIds, "the user's own expansion must survive")
+    }
+
+    @Test
+    fun reachingForTheQueueToggleTakesOwnershipOfAnAutomaticExpansion() {
+        val view = Seq3ViewState()
+        seq3AutoExpandOccurrences(view, "m1")
+
+        seq3DisownAutoExpand(view, "m1")
+        seq3ClearSelection(view)
+
+        assertEquals(setOf("m1"), view.expandedOccurrenceMessageIds)
+    }
+
+    @Test
+    fun clickingTheSameGroupAgainKeepsItAutomatic() {
+        val view = Seq3ViewState()
+
+        seq3AutoExpandOccurrences(view, "m1")
+        seq3AutoExpandOccurrences(view, "m1")
+        seq3ClearSelection(view)
+
+        assertEquals(emptySet(), view.expandedOccurrenceMessageIds, "re-clicking must not turn it into a sticky expansion")
+    }
+
 }

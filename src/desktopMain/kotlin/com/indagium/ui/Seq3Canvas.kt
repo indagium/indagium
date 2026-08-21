@@ -5,6 +5,7 @@
 
 package com.indagium.ui
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.HorizontalScrollbar
@@ -28,6 +29,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -35,7 +37,14 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Login
+import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.OpenWith
+import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -46,6 +55,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -59,8 +69,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
@@ -83,6 +95,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Layout
 import com.indagium.diagram3.Seq3LifelineColumn
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
 import com.indagium.diagram3.Seq3RowGeometry
@@ -528,7 +541,20 @@ private fun seq3CanvasGestureModifier(
                                     val modifiers = event.keyboardModifiers
                                     val additive = modifiers.isCtrlPressed || modifiers.isMetaPressed
                                     val document = currentSession.value.document
-                                    if (hitRow.messageId !in view.selection.selectedIds || additive || modifiers.isShiftPressed) {
+                                    // Right-clicking INSIDE an existing selection has to leave it
+                                    // alone — the menu acts on what is selected. This used to
+                                    // clear selectedCanvasRows unconditionally, so a marquee
+                                    // selection silently collapsed to bare message ids the instant
+                                    // the menu opened: "Group as" then had only ×N containers to
+                                    // work with and disappeared, and grouping from the header
+                                    // afterwards framed whole messages instead of the picked rows.
+                                    val rowRef = Seq3CanvasRowRef(hitRow.messageId, hitRow.occurrenceEntryId)
+                                    val insideSelection = if (view.selectedCanvasRows.isNotEmpty()) {
+                                        rowRef in view.selectedCanvasRows
+                                    } else {
+                                        hitRow.messageId in view.selection.selectedIds
+                                    }
+                                    if (!insideSelection || additive || modifiers.isShiftPressed) {
                                         view.selection = seq3Select(
                                             document.messages.map { it.id },
                                             view.selection,
@@ -536,9 +562,16 @@ private fun seq3CanvasGestureModifier(
                                             additive = additive,
                                             range = modifiers.isShiftPressed,
                                         )
+                                        // Keep the exact-row representation a left click already
+                                        // uses, so right-clicking one arrow and grouping it frames
+                                        // that arrow rather than every occurrence of its message.
+                                        view.selectedCanvasRows = if (additive) {
+                                            view.selectedCanvasRows + rowRef
+                                        } else {
+                                            setOf(rowRef)
+                                        }
+                                        view.selectionFromMarquee = false
                                     }
-                                    view.selectionFromMarquee = false
-                                    view.selectedCanvasRows = emptySet()
                                     view.focusedMessageId = hitRow.messageId
                                     view.canvasContextMenuMessageId = hitRow.messageId
                                     view.canvasContextMenuOccurrenceEntryId = hitRow.occurrenceEntryId
@@ -597,7 +630,11 @@ private fun seq3CanvasGestureModifier(
                             dragEndpoint = if (isMiddle) null else seq3ResolveDragEndpoint(activeLayout, xUnits, yUnits)
                             val emptyBackground = seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits)
                             val panBackground = !isMiddle && view.canvasPanMode && dragEndpoint == null && emptyBackground
-                            if (!isMiddle && !panBackground && dragEndpoint == null && emptyBackground) {
+                            // Pan mode is unchanged: there a background press pans, so the band
+                            // never arms and the wider slot would only get in the way.
+                            val bandBackground = !view.canvasPanMode &&
+                                seq3IsEmptyCanvasBackground(activeLayout, xUnits, yUnits, SEQ3_BAND_START_Y_TOLERANCE)
+                            if (!isMiddle && !panBackground && dragEndpoint == null && bandBackground) {
                                 selectingArea = true
                                 selectionStart = Offset(xUnits.toFloat(), yUnits.toFloat())
                                 view.canvasSelectionRect = Seq3Box(xUnits, yUnits, 0.0, 0.0)
@@ -732,7 +769,21 @@ private fun seq3CanvasGestureModifier(
                                     view.selectedOccurrenceMessageId = null
                                     view.selectedOccurrenceEntryId = null
                                 } else if (!moved) {
-                                    seq3ClearSelection(view, clearFocus = true)
+                                    // Pressed and released without dragging: that is a click, not
+                                    // an empty band. Send it through the ordinary click path so the
+                                    // forgiving [SEQ3_ROW_HIT_Y_TOLERANCE] still picks up a nearby
+                                    // arrow — arming the band on a tighter tolerance must not cost
+                                    // the user the easy click they had before. That path clears the
+                                    // selection itself when nothing is under the cursor.
+                                    seq3HandleCanvasClick(
+                                        view,
+                                        currentSession.value.document,
+                                        activeLayout,
+                                        xUnits,
+                                        yUnits,
+                                        selectionAdditive,
+                                        selectionRange,
+                                    ) { now, id -> registerMessageClick(now, id) }
                                 }
                             }
                             !moved && !pressWasMiddle -> {
@@ -818,8 +869,9 @@ private fun seq3HandleCanvasRowClick(
         if (hitRow.occurrenceEntryId != null) {
             // A canvas click must make the exact queue row visible even when the parent group was
             // collapsed. Otherwise the diagram knows the occurrence, but the user cannot see or
-            // act on the matching submessage in the queue.
-            view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds + hitRow.messageId
+            // act on the matching submessage in the queue. Tracked as an automatic expansion so it
+            // collapses again when the canvas moves on — see seq3AutoExpandOccurrences.
+            seq3AutoExpandOccurrences(view, hitRow.messageId)
         }
     } else {
         view.selection = seq3Select(
@@ -853,26 +905,31 @@ internal fun seq3SelectionRect(startX: Double, startY: Double, endX: Double, end
 )
 
 internal fun seq3RowsInSelection(layout: Seq3Layout, selection: Seq3Box): Set<String> = layout.rows
-    .filter { row -> seq3RowBounds(row).let { bounds -> boxesIntersect(bounds, selection) } }
+    .filter { row -> boxesIntersect(seq3RowSelectionBounds(row), selection) }
     .mapTo(linkedSetOf()) { it.messageId }
 
 internal fun seq3RowRefsInSelection(layout: Seq3Layout, selection: Seq3Box): List<Seq3CanvasRowRef> = layout.rows
-    .filter { row -> row !is Seq3ElisionRow && seq3RowBounds(row).let { bounds -> boxesIntersect(bounds, selection) } }
+    .filter { row -> row !is Seq3ElisionRow && boxesIntersect(seq3RowSelectionBounds(row), selection) }
     .map { row -> Seq3CanvasRowRef(row.messageId, row.occurrenceEntryId) }
 
-private fun seq3RowBounds(row: Seq3RowGeometry): Seq3Box = when (row) {
-    is Seq3ArrowRow -> Seq3Box(
-        min(row.fromX, row.toX),
-        row.y - SEQ3_ROW_HIT_Y_TOLERANCE,
-        max(row.toX, row.fromX) - min(row.fromX, row.toX),
-        SEQ3_ROW_HIT_Y_TOLERANCE * 2,
-    )
-    is Seq3SelfLoopRow -> Seq3Box(row.x, row.y - SEQ3_ROW_HIT_Y_TOLERANCE, row.loopWidth, SEQ3_ROW_HIT_Y_TOLERANCE * 2)
+/** What a rubber band encloses.
+ *
+ *  This used to pad an arrow by [SEQ3_ROW_HIT_Y_TOLERANCE] above and below its line, borrowing
+ *  the generous target a CLICK wants ([seq3RowAt] still applies that tolerance, which is right for
+ *  pointing at a one-pixel line). A band is not a click: rows sit only ROW_H (42) apart, so 18
+ *  units of padding reached most of the way to the neighbouring arrow, and a band whose edge
+ *  stopped in the gap between two rows still swept in the row beyond it — the user dragged over
+ *  four arrows and got a fragment around six. A band selects what it visually contains, so an
+ *  arrow counts only when its own line falls inside. Rows that genuinely occupy a box (notes,
+ *  elisions) keep that box. */
+private fun seq3RowSelectionBounds(row: Seq3RowGeometry): Seq3Box = when (row) {
+    is Seq3ArrowRow -> Seq3Box(min(row.fromX, row.toX), row.y, max(row.toX, row.fromX) - min(row.fromX, row.toX), 0.0)
+    is Seq3SelfLoopRow -> Seq3Box(row.x, row.y, row.loopWidth, 0.0)
     is Seq3UnresolvedStubRow -> Seq3Box(
         min(row.fromX, row.stubEndX),
-        row.y - SEQ3_ROW_HIT_Y_TOLERANCE,
+        row.y,
         max(row.stubEndX, row.fromX) - min(row.fromX, row.stubEndX),
-        SEQ3_ROW_HIT_Y_TOLERANCE * 2,
+        0.0,
     )
     is Seq3MessageNoteRow -> row.box
     is Seq3ElisionRow -> row.box
@@ -1511,6 +1568,68 @@ private fun Seq3DelayLabelOverlay(
     }
 }
 
+// Both canvas context menus' card width — widened from the old borderless 170dp
+// Seq3DropdownMenuItem list (see this section's own header comment) to make room for CtxItem's
+// 24dp icon gutter and to match the log view's row context menu card (App.kt ~line 740) the two
+// are meant to feel identical to.
+private val SEQ3_CTX_MENU_WIDTH = 264.dp
+
+/** The non-interactive title row shared by [Seq3CanvasContextMenu]'s card — unlike the log view's
+ *  own `ActionHeader` (App.kt ~line 786, clickable because it doubles as "Add annotation") there
+ *  is no single primary verb for a right-clicked message, so this is a plain label plus the same
+ *  `p2` strip and hairline rule, not a [HoverBox]. */
+@Composable
+private fun Seq3CtxMenuHeader(label: String) {
+    val tc = tc()
+    Box(Modifier.fillMaxWidth().background(tc.p2).padding(horizontal = 14.dp, vertical = 10.dp)) {
+        AppText(label, color = tc.ac, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+    }
+    Box(Modifier.fillMaxWidth().height(0.5.dp).background(tc.br))
+}
+
+/** Confirms which message the canvas menu is about to act on — a repeated message's occurrence is
+ *  what decides where "Insert delay after this" lands (see that item's own comment below), and
+ *  without this preview the menu gave no confirmation of its target at all. Mirrors the log view's
+ *  own `CtxMenuEntry.Preview` card (App.kt ~line 860) styling exactly. Falls back to the raw
+ *  lifeline id if a lookup misses (should not happen for a well-formed document), and omits the
+ *  arrow line entirely for a [Seq3Kind.NOTE]-style message with no `toLifelineId`. */
+@Composable
+private fun Seq3CtxMenuPreview(document: Seq3Document, message: Seq3Message) {
+    val tc = tc()
+    val sourceName = document.lifelines.firstOrNull { it.id == message.fromLifelineId }?.name
+        ?: message.fromLifelineId
+    val targetName = message.toLifelineId?.let { toId ->
+        document.lifelines.firstOrNull { it.id == toId }?.name ?: toId
+    }
+    Column(
+        Modifier.fillMaxWidth()
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .background(tc.p2, CORNER_MD)
+            .border(BorderStroke(0.5.dp, tc.br.copy(alpha = 0.5f)), CORNER_MD)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        if (targetName != null) {
+            AppText(
+                "$sourceName → $targetName",
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = MONO,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(2.dp))
+        }
+        AppText(
+            message.labelTemplate,
+            color = tc.ts,
+            fontSize = 10.sp,
+            fontFamily = MONO,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 private fun Seq3CanvasContextMenu(
     state: AppState,
@@ -1521,10 +1640,17 @@ private fun Seq3CanvasContextMenu(
     val messageId = view.canvasContextMenuMessageId ?: return
     val occurrenceEntryId = view.canvasContextMenuOccurrenceEntryId
     val selectedIds = seq3SelectedMessageIds(document, view)
-    val selectedRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
-        view.selectedCanvasRows.size
-    } else {
-        selectedIds.size
+    val message = document.messages.firstOrNull { it.id == messageId }
+    val tc = tc()
+    val density = LocalDensity.current
+    val windowWidthPx = LocalWindowInfo.current.containerSize.width
+    // Same idea as App.kt's own `submenuOpensLeft` (that file's row context menu, ~line 481): a
+    // submenu opening to the right of a 264dp-wide card can fall off-screen near the window's
+    // right edge, so flip it left when there isn't room. This menu's own x comes from
+    // `view.canvasContextMenuOffset` (pixels, unlike App.kt's dp-based `x`) since it positions a
+    // Popup outside the scrolled canvas content rather than inside a BoxWithConstraints.
+    val submenuOpensLeft = with(density) {
+        view.canvasContextMenuOffset.x + SEQ3_CTX_MENU_WIDTH.roundToPx() + CTX_SUBMENU_WIDTH.roundToPx() > windowWidthPx
     }
     Popup(
         alignment = Alignment.TopStart,
@@ -1539,22 +1665,35 @@ private fun Seq3CanvasContextMenu(
         // repeated message, else that message's first — same "prefer the exact occurrence, fall
         // back to the message's own default" shape "Insert delay after this" below already uses.
         // Null only when the message itself somehow has no occurrences left (every visible one
-        // hidden) — Seq3DropdownMenuItem's own `enabled` then makes the item a no-op, not a crash.
-        val jumpEntryId = document.messages.firstOrNull { it.id == messageId }?.let { message ->
-            occurrenceEntryId?.let { entryId -> message.occurrences.firstOrNull { it.entryId == entryId } }?.entryId
-                ?: message.occurrences.firstOrNull()?.entryId
+        // hidden) — CtxItem's own `enabled` then makes the item a no-op, not a crash.
+        val jumpEntryId = message?.let {
+            occurrenceEntryId?.let { entryId -> it.occurrences.firstOrNull { occ -> occ.entryId == entryId } }?.entryId
+                ?: it.occurrences.firstOrNull()?.entryId
         }
         Column(
-            Modifier.width(170.dp)
-                .background(tc().p, RoundedCornerShape(7.dp))
-                .border(1.dp, tc().br, RoundedCornerShape(7.dp))
-                .padding(vertical = 4.dp),
+            Modifier.width(SEQ3_CTX_MENU_WIDTH)
+                .shadow(8.dp, RoundedCornerShape(7.dp))
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp)),
+            // No vertical padding on the card itself: the header's `p2` strip has to run flush to
+            // the card's top edge (the log view's own menu card has none either, for the same
+            // reason) or a 4dp band of `p` shows above it. The bottom's breathing room is the
+            // trailing Spacer below instead.
         ) {
+            Seq3CtxMenuHeader("Message")
+            if (message != null) {
+                Seq3CtxMenuPreview(document, message)
+            }
+            CtxDivider()
             // Mirrors the `l` keyboard shortcut (Seq3KeyAction.JumpToLog / applySeq3JumpToLog)
             // but occurrence-precise rather than always the message's first occurrence, and
             // reachable without first focusing the row — the same discoverability gap "Insert
             // delay after this" filled for delays now filled here for the log-navigation path.
-            Seq3DropdownMenuItem("Go to log line", enabled = jumpEntryId != null && session.sourceTabId != null) {
+            CtxItem(
+                Icons.AutoMirrored.Outlined.Login,
+                "Go to log line",
+                enabled = jumpEntryId != null && session.sourceTabId != null,
+            ) {
                 val tabId = session.sourceTabId
                 if (jumpEntryId != null && tabId != null) {
                     state.navigateToLogLine(tabId, jumpEntryId)
@@ -1562,10 +1701,10 @@ private fun Seq3CanvasContextMenu(
                 view.canvasContextMenuMessageId = null
                 view.canvasContextMenuOccurrenceEntryId = null
             }
-            Seq3DropdownMenuItem("Rename label") {
+            CtxItem(Icons.Outlined.Edit, "Rename label") {
                 seq3BeginLabelRename(view, document, messageId)
             }
-            Seq3DropdownMenuItem("Add note") {
+            CtxItem(Icons.AutoMirrored.Outlined.StickyNote2, "Add note") {
                 seq3AddNote(
                     state,
                     session,
@@ -1575,7 +1714,7 @@ private fun Seq3CanvasContextMenu(
                     placement = view.canvasContextMenuCanvasPoint,
                 )
             }
-            Seq3DropdownMenuItem("Insert delay after this") {
+            CtxItem(Icons.Outlined.Schedule, "Insert delay after this") {
                 // User-observed correction: pass the exact occurrence the right-click hit
                 // (`occurrenceEntryId`, resolved above) rather than only `messageId` — a message
                 // that repeats used to always land the delay after its LAST occurrence, no matter
@@ -1585,26 +1724,34 @@ private fun Seq3CanvasContextMenu(
                 view.canvasContextMenuOccurrenceEntryId = null
             }
             if (seq3CanGroupSelection(document, view, selectedIds)) {
-                Seq3DropdownMenuItem("Group as loop") {
-                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP)
-                }
-                Seq3DropdownMenuItem("Group as alt") {
-                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.ALT)
-                }
-                Seq3DropdownMenuItem("Group as opt") {
-                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.OPT)
-                }
-                Seq3DropdownMenuItem("Group as par") {
-                    seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.PAR)
-                }
+                CtxDivider()
+                // Replaces the old four "Group as loop/alt/opt/par" rows with every
+                // Seq3FragmentKind — the header's own `Group ▾` (Seq3Workspace.kt's
+                // Seq3ContextualSelectionActions) already offered all seven, so the canvas menu's
+                // shorter list was a real gap, not a deliberate trim. The row's own click (the log
+                // view's convention: clicking the row runs the default action) groups as LOOP,
+                // the most common case; the other six live only in the submenu.
+                CtxItemWithSubmenu(
+                    icon = Icons.Outlined.Layers,
+                    label = "Group as",
+                    submenu = Seq3FragmentKind.entries.map { kind ->
+                        kind.name.lowercase() to { seq3GroupMessages(state, session, view, selectedIds, kind) }
+                    },
+                    preferLeft = submenuOpensLeft,
+                    onClick = { seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP) },
+                )
             }
-            document.messages.firstOrNull { it.id == messageId }?.let { message ->
+            message?.let {
                 val occurrence = occurrenceEntryId?.let { entryId ->
-                    message.occurrences.firstOrNull { it.entryId == entryId }
+                    it.occurrences.firstOrNull { occ -> occ.entryId == entryId }
                 }
                 val hidden = occurrence?.visibility == Seq3Visibility.HIDDEN ||
-                    (occurrence == null && message.visibility == Seq3Visibility.HIDDEN)
-                Seq3DropdownMenuItem(if (hidden) "Show message" else "Hide message") {
+                    (occurrence == null && it.visibility == Seq3Visibility.HIDDEN)
+                CtxDivider()
+                CtxItem(
+                    if (hidden) Icons.Outlined.Visibility else Icons.Outlined.VisibilityOff,
+                    if (hidden) "Show message" else "Hide message",
+                ) {
                     if (occurrence != null) {
                         state.seq3Sessions.applyCommand(
                             session.id,
@@ -1627,13 +1774,16 @@ private fun Seq3CanvasContextMenu(
                     view.canvasContextMenuOccurrenceEntryId = null
                 }
             }
+            Spacer(Modifier.height(4.dp))
         }
     }
 }
 
 /** WP7 item 5 (canvas half): the empty-canvas counterpart of [Seq3CanvasContextMenu] — opened by a
  *  right-click that hit no message row (`seq3RowAt` returned null). Only "Add note here" today; a
- *  future verb with no message-row precondition would belong here too. */
+ *  future verb with no message-row precondition would belong here too. Same card chrome as
+ *  [Seq3CanvasContextMenu] (264dp width, shadow, border) so the two match, but no header or
+ *  preview block — nothing was right-clicked, so there is nothing to preview. */
 @Composable
 private fun Seq3CanvasEmptyContextMenu(
     state: AppState,
@@ -1650,12 +1800,13 @@ private fun Seq3CanvasEmptyContextMenu(
         properties = PopupProperties(focusable = true),
     ) {
         Column(
-            Modifier.width(170.dp)
+            Modifier.width(SEQ3_CTX_MENU_WIDTH)
+                .shadow(8.dp, RoundedCornerShape(7.dp))
                 .background(tc().p, RoundedCornerShape(7.dp))
                 .border(1.dp, tc().br, RoundedCornerShape(7.dp))
                 .padding(vertical = 4.dp),
         ) {
-            Seq3DropdownMenuItem("Add note here") {
+            CtxItem(Icons.AutoMirrored.Outlined.StickyNote2, "Add note here") {
                 // Explicit emptySet() rather than the canvas' current message selection — a
                 // free-floating note dropped on empty background is never meant to span whatever
                 // happened to be selected before the right-click.
@@ -2126,9 +2277,30 @@ private fun DrawScope.drawSeq3ActorGlyph(color: Color) {
 
 // ── Pure helpers — testable without a composition (Seq3CanvasTest) ─────────────────────────────
 
-internal const val SEQ3_ROW_HIT_Y_TOLERANCE = 18.0
-internal const val SEQ3_ROW_HIT_X_TOLERANCE = 24.0
-internal const val SEQ3_ENDPOINT_HIT_TOLERANCE_X = 36.0
+// How far from an arrow the canvas still reacts to the pointer — hover emphasis, click selection,
+// and (via seq3IsEmptyCanvasBackground) whether a press counts as "on a row" instead of background.
+//
+// These were 18 and 24. Rows sit only ROW_H (42) apart, so ±18 meant 36 of every 42 units belonged
+// to some row: the canvas lit up and selected a line while the pointer was visibly in the gap
+// beside it, and there was almost nowhere left to press that counted as background. Halved and
+// then some, so the reactive band is 16 of 42 and the gap between two arrows is genuinely inert.
+internal const val SEQ3_ROW_HIT_Y_TOLERANCE = 8.0
+internal const val SEQ3_ROW_HIT_X_TOLERANCE = 10.0
+
+/** How close to an arrow a press may land and still START A RUBBER BAND, as opposed to counting as
+ *  a press on that arrow ([SEQ3_ROW_HIT_Y_TOLERANCE]).
+ *
+ *  Kept a little tighter than the click tolerance so the band still yields to a deliberate press on
+ *  a line, while a press that never moves resolves through the ordinary click path on release
+ *  anyway — see the `selectingArea` release branch — so nothing is lost by arming eagerly here. */
+internal const val SEQ3_BAND_START_Y_TOLERANCE = 6.0
+
+// An arrow's endpoint handles sit ON the lifelines, and the left margin beside the first lifeline is
+// exactly where a rubber band gets started. At 36 this claimed a 72-wide strip around every
+// lifeline in which a press was an endpoint grab, so no band could arm and the row still reacted —
+// the "big reaction zone" that survived shrinking the row tolerances alone. 18 still gives the
+// handle a wide target relative to the 1px line it decorates.
+internal const val SEQ3_ENDPOINT_HIT_TOLERANCE_X = 18.0
 
 internal enum class Seq3EndpointSide { FROM, TO }
 
@@ -2281,8 +2453,15 @@ internal fun seq3NearestLifelineId(layout: Seq3Layout, x: Double): String? =
  *  — the condition that arms drag-to-pan on a plain left-button drag (item 12, phase-5 post-ship
  *  plan). A drag that starts ON content keeps meaning whatever it already means there (select,
  *  resolve an endpoint); only genuinely empty background pans. */
-internal fun seq3IsEmptyCanvasBackground(layout: Seq3Layout, x: Double, y: Double): Boolean =
-    seq3RowAt(layout, x, y) == null &&
+internal fun seq3IsEmptyCanvasBackground(
+    layout: Seq3Layout,
+    x: Double,
+    y: Double,
+    // Defaulted so pan-arming and every existing caller keep the forgiving click tolerance; only
+    // rubber-band arming passes the tighter [SEQ3_BAND_START_Y_TOLERANCE].
+    yTolerance: Double = SEQ3_ROW_HIT_Y_TOLERANCE,
+): Boolean =
+    seq3RowAt(layout, x, y, yTolerance) == null &&
         seq3ResolveDragEndpoint(layout, x, y) == null &&
         layout.lifelines.none { seq3PointInBox(it.header, x, y) } &&
         layout.notes.none { seq3PointInBox(it.box, x, y) } &&

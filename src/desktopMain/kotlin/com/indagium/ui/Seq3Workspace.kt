@@ -74,7 +74,6 @@ import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.seq3MessageIdsAreContiguous
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.ThemePreset
@@ -535,7 +534,7 @@ private fun Seq3ContextualSelectionActions(
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (selectedRowCount == 1 && selectedIds.size == 1) {
             Seq3TitleActionButton("Rename", "Rename selected line") {
@@ -544,12 +543,19 @@ private fun Seq3ContextualSelectionActions(
             Seq3TitleActionButton("Note", "Add note for selected line") {
                 seq3AddNote(state, session, view, document, selectedIds)
             }
-        } else if (seq3CanGroupSelection(document, view, selectedIds)) {
+        }
+        // Offered alongside Rename/Note rather than instead of them: a fragment around a single
+        // selected message is as legitimate as one around ten, exactly as it would be if the user
+        // wrote the bracket by hand in PlantUML.
+        if (seq3CanGroupSelection(document, view, selectedIds)) {
+            // Same geometry as `Copy ▾` ([Seq3CopyDropdown]) — 28dp fixed height, CORNER_MD (not
+            // a bespoke smaller radius) — so the two dropdown triggers in this header read as one
+            // family rather than "Group" looking like a heavier, separate kind of control.
             Seq3DropdownButton(
                 label = "Group",
                 labelColor = tc.tx,
-                fillColor = tc.p2,
                 menuWidth = 130.dp,
+                fixedHeight = 28.dp,
             ) { close ->
                 Seq3FragmentKind.entries.forEach { kind ->
                     Seq3DropdownMenuItem(kind.name.lowercase()) {
@@ -559,6 +565,10 @@ private fun Seq3ContextualSelectionActions(
                 }
             }
         }
+        // A hairline before "Clear" — same device [Seq3TitleBar] uses to separate its right
+        // cluster's groups — so the destructive verb reads apart from the constructive
+        // rename/note/group actions ahead of it, in both the single- and multi-selection branches.
+        Seq3HeaderHairline()
         Seq3TitleActionButton("Clear", "Clear selection") {
             seq3ClearSelection(view)
         }
@@ -570,8 +580,7 @@ private fun Seq3TitleActionButton(label: String, tooltip: String, onClick: () ->
     ToolbarBtn(
         label = label,
         tooltip = tooltip,
-        shape = CORNER_SM,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+        modifier = Modifier.height(28.dp),
         onClick = onClick,
     )
 }
@@ -863,6 +872,10 @@ internal class Seq3ViewState {
     /** Expanded repeated-message rows in the queue. This is view state only; grouping remains part
      *  of the durable message and the extracted occurrence command is the only document edit. */
     var expandedOccurrenceMessageIds by mutableStateOf<Set<String>>(emptySet())
+    /** Which of [expandedOccurrenceMessageIds] was opened BY a canvas click rather than by the user
+     *  reaching for the queue's own toggle — see [seq3AutoExpandOccurrences]. At most one, and only
+     *  while it is still the group the canvas is pointing at. */
+    var autoExpandedOccurrenceMessageId by mutableStateOf<String?>(null)
     /** Expanded per-message Pattern/Label details. This is independent from occurrence expansion
      *  so both disclosures can remain open at once, with details rendered first. */
     var expandedInfoMessageIds by mutableStateOf<Set<String>>(emptySet())
@@ -1065,18 +1078,50 @@ internal fun seq3SelectedOccurrenceRefs(document: Seq3Document, view: Seq3ViewSt
     return (canvasRefs + checkedRefs).distinct()
 }
 
-/** All selection surfaces expose the same "at least two rows" grouping affordance. */
-internal fun seq3CanGroupSelection(
-    document: Seq3Document,
-    view: Seq3ViewState,
-    selectedIds: Set<String>,
-): Boolean {
-    val exactRowCount = if (view.selectedCanvasRows.isNotEmpty()) {
-        view.selectedCanvasRows.size
-    } else {
-        seq3SelectedOccurrenceRefs(document, view).size
+/** Whether the current selection names anything a fragment can be drawn around — see
+ *  [seq3FragmentSpanFor] for what counts.
+ *
+ *  Deliberately no contiguity requirement and no "at least two rows" minimum. Both used to be
+ *  checked here and both silently removed the `Group` control, with nothing on screen saying why.
+ *  A bracket drawn around a selection the user made is not a state the app needs to protect them
+ *  from — hand-writing the same fragment in PlantUML puts it wherever the author wants it. */
+internal fun seq3CanGroupSelection(document: Seq3Document, view: Seq3ViewState, selectedIds: Set<String>): Boolean =
+    seq3FragmentSpanFor(document, view, selectedIds).isNotEmpty()
+
+/** Opens [messageId]'s occurrence rows in the queue because a canvas click landed on one of them —
+ *  the diagram knows exactly which occurrence was hit, so the matching submessage has to be visible
+ *  and actionable in the panel.
+ *
+ *  The expansion is also remembered as automatic, so [seq3ReleaseAutoExpand] can undo it when the
+ *  canvas moves on or the selection is dropped. Without that, this only ever ADDED: clicking five
+ *  repeated messages left five groups open, all still open long after the selection was gone.
+ *
+ *  A group the user opened themselves is never claimed — if it was already expanded before this
+ *  click, it stays theirs and nothing will collapse it later. Re-clicking the group this function
+ *  already owns keeps that ownership rather than quietly handing it over. */
+internal fun seq3AutoExpandOccurrences(view: Seq3ViewState, messageId: String) {
+    val alreadyExpanded = messageId in view.expandedOccurrenceMessageIds
+    val previous = view.autoExpandedOccurrenceMessageId
+    if (previous != null && previous != messageId) {
+        view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds - previous
     }
-    return exactRowCount >= 2 || (exactRowCount == 0 && seq3MessageIdsAreContiguous(document, selectedIds))
+    view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds + messageId
+    view.autoExpandedOccurrenceMessageId = if (alreadyExpanded && previous != messageId) null else messageId
+}
+
+/** Collapses whatever [seq3AutoExpandOccurrences] opened, if anything. A no-op for a group the user
+ *  opened themselves, which is the whole point of tracking ownership. */
+internal fun seq3ReleaseAutoExpand(view: Seq3ViewState) {
+    val auto = view.autoExpandedOccurrenceMessageId ?: return
+    view.expandedOccurrenceMessageIds = view.expandedOccurrenceMessageIds - auto
+    view.autoExpandedOccurrenceMessageId = null
+}
+
+/** The queue's own expand/collapse toggle taking [messageId] over: once the user has reached for it
+ *  themselves the row is theirs, open or closed, and the canvas must not collapse it out from under
+ *  them later. */
+internal fun seq3DisownAutoExpand(view: Seq3ViewState, messageId: String) {
+    if (view.autoExpandedOccurrenceMessageId == messageId) view.autoExpandedOccurrenceMessageId = null
 }
 
 internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false) {
@@ -1087,6 +1132,9 @@ internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false
     view.selectedOccurrenceMessageId = null
     view.selectedOccurrenceEntryId = null
     view.hoveredMessageId = null
+    // The canvas opened that group only to show what was selected; with the selection gone it has
+    // no reason to stay open. A group the user opened themselves is untouched.
+    seq3ReleaseAutoExpand(view)
     if (clearFocus) {
         view.focusedMessageId = null
         // Item 4 (WP-panel-toggle): every "clicked empty canvas background" site in Seq3Canvas.kt
@@ -1217,6 +1265,47 @@ internal fun seq3InsertDelayAfter(
     return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddDelay(delay)))
 }
 
+/** The individual messages a fragment built from the current selection has to reference. Split out
+ *  of [seq3GroupMessages] so the selection → fragment step can be asserted directly.
+ *
+ *  The unit of grouping is one message — one arrow on the canvas, one checkable row in the queue.
+ *  A repeated queue row (`×9`) is NOT one of those: it is a container holding that many independent
+ *  messages, drawn as a single row purely so the group can be edited from one place. That is why it
+ *  renders an expand toggle where a single message renders a checkbox, and it is why selecting it
+ *  contributes nothing here on its own — the bracket follows the children the user actually ticked,
+ *  never all of them because their container happened to be highlighted. Sweeping in every
+ *  occurrence is what stretched a `loop` from the top of a diagram to the bottom.
+ *
+ *  So a fragment references exactly:
+ *   - occurrence rows ticked in the queue and arrows picked on the canvas ([seq3SelectedOccurrenceRefs]);
+ *   - a selected message that holds at most one occurrence, which is a single message in its own
+ *     right rather than a container — as its one occurrence when it has evidence, or as a plain
+ *     message id when it is authored and has none. */
+internal data class Seq3FragmentSpan(val messageIds: List<String>, val occurrenceRefs: List<Seq3OccurrenceRef>) {
+    fun isNotEmpty(): Boolean = messageIds.isNotEmpty() || occurrenceRefs.isNotEmpty()
+
+    /** The message ids this span speaks for — what [Seq3BulkAction.Group]'s own "must contain
+     *  exactly the selected messages" check has to be given, since a selected container drops out. */
+    fun referencedMessageIds(): Set<String> = (messageIds + occurrenceRefs.map { it.messageId }).toSet()
+}
+
+internal fun seq3FragmentSpanFor(
+    document: Seq3Document,
+    view: Seq3ViewState,
+    selectedIds: Set<String>,
+): Seq3FragmentSpan {
+    val exactRefs = seq3SelectedOccurrenceRefs(document, view)
+    val exactIds = exactRefs.mapTo(hashSetOf()) { it.messageId }
+    val singles = document.messages.filter { it.id in selectedIds && it.id !in exactIds && it.occurrences.size <= 1 }
+    val singleRefs = singles.mapNotNull { message ->
+        message.occurrences.firstOrNull()?.let { Seq3OccurrenceRef(message.id, it.entryId) }
+    }
+    return Seq3FragmentSpan(
+        messageIds = singles.filter { it.occurrences.isEmpty() }.map { it.id },
+        occurrenceRefs = exactRefs + singleRefs,
+    )
+}
+
 internal fun seq3GroupMessages(
     state: AppState,
     session: Seq3WorkspaceSession,
@@ -1224,26 +1313,21 @@ internal fun seq3GroupMessages(
     selectedIds: Set<String>,
     kind: Seq3FragmentKind,
 ): Boolean {
-    val orderedIds = session.document.messages.map { it.id }.filter { it in selectedIds }
-    if (!seq3CanGroupSelection(session.document, view, selectedIds)) return false
-    val hasExactRows = view.selectedCanvasRows.isNotEmpty() || view.selectedOccurrenceIds.isNotEmpty()
-    val exactOccurrenceRefs = seq3SelectedOccurrenceRefs(session.document, view)
-    val exactMessageIds = exactOccurrenceRefs.mapTo(hashSetOf()) { it.messageId }
-    val fallbackMessageIds = if (!hasExactRows) {
-        orderedIds
-    } else {
-        orderedIds.filterNot { it in exactMessageIds }
-    }
+    val span = seq3FragmentSpanFor(session.document, view, selectedIds)
+    if (!span.isNotEmpty()) return false
     val fragment = Seq3Fragment(
         id = "seq3-fragment-${UUID.randomUUID()}",
         kind = kind,
         label = kind.name.lowercase(),
-        messageIds = fallbackMessageIds,
-        occurrenceRefs = exactOccurrenceRefs,
+        messageIds = span.messageIds,
+        occurrenceRefs = span.occurrenceRefs,
     )
+    // The span's own ids, not the raw selection: a highlighted `×N` container contributes no
+    // messages, and applyGroup rejects a fragment whose references don't match what it is told was
+    // selected.
     val applied = state.seq3Sessions.applyCommand(
         session.id,
-        Seq3Command.Bulk(selectedIds, Seq3BulkAction.Group(fragment)),
+        Seq3Command.Bulk(span.referencedMessageIds(), Seq3BulkAction.Group(fragment)),
     )
     if (applied) seq3ClearSelection(view)
     return applied

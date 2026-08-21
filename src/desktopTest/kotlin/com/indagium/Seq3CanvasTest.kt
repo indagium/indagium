@@ -26,6 +26,8 @@ import com.indagium.ui.seq3CrossingLabel
 import com.indagium.ui.seq3DragPreview
 import com.indagium.ui.seq3FitHeightZoom
 import com.indagium.ui.seq3FitWidthZoom
+import com.indagium.ui.SEQ3_BAND_START_Y_TOLERANCE
+import com.indagium.ui.SEQ3_ROW_HIT_Y_TOLERANCE
 import com.indagium.ui.seq3IsEmptyCanvasBackground
 import com.indagium.ui.seq3LifelineDropIndex
 import com.indagium.ui.seq3NearestLifelineId
@@ -638,4 +640,53 @@ class Seq3CanvasTest {
         assertEquals(18.72f, geometry.legSplit, 0.001f)
         assertEquals(11.752f, geometry.armY, 0.001f)
     }
+
+    // ── Rubber-band arming vs clicking ────────────────────────────────────────────────────────
+    //
+    // A band can only begin on "empty" background. Rows sit ROW_H (42) apart and a click's own
+    // tolerance is 18 either side, so the gap two neighbouring arrows leave for starting a band was
+    // 6 units — unusable once the band was tightened to select exactly what it encloses. Arming now
+    // uses SEQ3_BAND_START_Y_TOLERANCE while pointing at an arrow keeps the forgiving tolerance.
+
+    @Test
+    fun theGapBetweenTwoArrowsCanStartARubberBandEvenThoughAClickThereHitsARow() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val rows = layout.rows.sortedBy { it.y }
+        val midY = (rows[0].y + rows[1].y) / 2
+        val x = (rows[0] as Seq3ArrowRow).let { (it.fromX + it.toX) / 2 }
+
+        // A point deliberately inside the CLICK zone but outside the band zone: the one that used
+        // to swallow the press and select a row instead of starting a band.
+        val nearY = rows[1].y - (SEQ3_ROW_HIT_Y_TOLERANCE + SEQ3_BAND_START_Y_TOLERANCE) / 2
+
+        assertTrue(seq3IsEmptyCanvasBackground(layout, x, midY, SEQ3_BAND_START_Y_TOLERANCE), "midpoint must arm a band")
+        assertTrue(
+            seq3IsEmptyCanvasBackground(layout, x, nearY, SEQ3_BAND_START_Y_TOLERANCE),
+            "a point inside the click zone but outside the band zone must still arm a band",
+        )
+        assertTrue(
+            !seq3IsEmptyCanvasBackground(layout, x, nearY),
+            "...while that same point still resolves to a row for an ordinary click",
+        )
+    }
+
+    @Test
+    fun aPressRightOnAnArrowStillNeverArmsABand() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L)))),
+        )
+        val layout = layoutSeq3(doc, opts())
+        val row = layout.rows.filterIsInstance<Seq3ArrowRow>().single()
+
+        assertTrue(!seq3IsEmptyCanvasBackground(layout, (row.fromX + row.toX) / 2, row.y, SEQ3_BAND_START_Y_TOLERANCE))
+    }
+
 }
