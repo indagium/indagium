@@ -2072,6 +2072,9 @@ private fun Seq3QueueRow(
                     } else {
                         view.expandedOccurrenceMessageIds + message.id
                     }
+                    // Reaching for the toggle makes this row the user's, so a later canvas click
+                    // elsewhere can't collapse it out from under them.
+                    seq3DisownAutoExpand(view, message.id)
                     runCatching { view.focusRequester.requestFocus() }
                 }
             } else {
@@ -2148,6 +2151,8 @@ private fun Seq3QueueRow(
                                     } else {
                                         view.expandedOccurrenceMessageIds + message.id
                                     }
+                                    // Same as the toggle above: a deliberate double-click owns it.
+                                    seq3DisownAutoExpand(view, message.id)
                                 }
                                 runCatching { view.focusRequester.requestFocus() }
                             }
