@@ -6,7 +6,10 @@ import com.indagium.ui.seq3ClampArtifactsHeight
 import com.indagium.ui.seq3ClampDividerWidth
 import com.indagium.ui.seq3ClampLifelinesHeight
 import com.indagium.ui.seq3KeyAction
+import com.indagium.ui.Seq3ViewState
+import com.indagium.ui.seq3DragArtifactsBoundary
 import com.indagium.ui.seq3PanelWeightedSection
+import com.indagium.ui.seq3PanelWeightedSectionFor
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -236,6 +239,49 @@ class Seq3KeyActionTest {
         assertEquals(360f, seq3ClampArtifactsHeight(current = 350f, delta = -40f))
     }
 
+    // ── seq3DragArtifactsBoundary: the pane above grows, the pane below shrinks ───────────────
+    //
+    // The same gesture the Messages/Lifelines divider already performs, made explicit because the
+    // pane above THIS divider is fixed rather than the weighted one.
+
+    @Test
+    fun draggingDownGrowsTheSectionAboveAndShrinksTheOneBelow() {
+        val (lifelines, artifacts) = seq3DragArtifactsBoundary(lifelines = 220f, artifacts = 200f, delta = 30f)
+
+        assertEquals(250f, lifelines)
+        assertEquals(170f, artifacts)
+        assertEquals(420f, lifelines + artifacts, "a constant sum is what keeps Messages out of it")
+    }
+
+    @Test
+    fun draggingUpTradesTheOtherWay() {
+        val (lifelines, artifacts) = seq3DragArtifactsBoundary(lifelines = 220f, artifacts = 200f, delta = -40f)
+
+        assertEquals(180f, lifelines)
+        assertEquals(240f, artifacts)
+        assertEquals(420f, lifelines + artifacts)
+    }
+
+    @Test
+    fun theArtifactsMinimumStopsTheBoundaryDead() {
+        // Artifacts can only give up 100dp before hitting its floor, so Lifelines takes exactly
+        // that much even though the drag asked for 250dp.
+        val (lifelines, artifacts) = seq3DragArtifactsBoundary(lifelines = 200f, artifacts = 200f, delta = 250f)
+
+        assertEquals(100f, artifacts)
+        assertEquals(300f, lifelines)
+        assertEquals(400f, lifelines + artifacts)
+    }
+
+    @Test
+    fun theLifelinesMaximumStopsTheBoundaryDeadToo() {
+        val (lifelines, artifacts) = seq3DragArtifactsBoundary(lifelines = 400f, artifacts = 300f, delta = 200f)
+
+        assertEquals(420f, lifelines, "lifelines stops at its own maximum")
+        assertEquals(280f, artifacts, "artifacts gives up only what lifelines could take")
+        assertEquals(700f, lifelines + artifacts)
+    }
+
     // ── seq3PanelWeightedSection: WP8's Messages > Lifelines > Artifacts weight(1f) chain ──────
     //
     // The panel's three stacked sections can each be independently hidden/collapsed; exactly one
@@ -264,5 +310,50 @@ class Seq3KeyActionTest {
     @Test
     fun noSectionIsWeightedWhenAllThreeAreCollapsedOrHidden() {
         assertNull(seq3PanelWeightedSection(false, false, false))
+    }
+
+    // ── seq3PanelWeightedSectionFor: only a section with a body to show may stretch ────────────
+
+    @Test
+    fun collapsingEverySectionLeavesNothingWeighted() {
+        val view = Seq3ViewState()
+        view.messagesExpanded = false
+        view.lifelinesExpanded = false
+        view.artifactsExpanded = false
+
+        // The regression this guards: Lifelines used to take weight(1f) purely for being VISIBLE,
+        // stretching its 48dp collapsed header over a panel-sized void with Artifacts pinned to
+        // the bottom.
+        assertNull(seq3PanelWeightedSectionFor(view))
+    }
+
+    @Test
+    fun aCollapsedLifelinesSectionDoesNotStealTheRemainderFromAnExpandedArtifacts() {
+        val view = Seq3ViewState()
+        view.messagesExpanded = false
+        view.lifelinesExpanded = false
+        view.artifactsSectionOpen = true
+        view.artifactsExpanded = true
+
+        assertEquals(Seq3PanelSection.ARTIFACTS, seq3PanelWeightedSectionFor(view))
+    }
+
+    @Test
+    fun anExpandedLifelinesStillStepsUpWhenMessagesIsCollapsed() {
+        val view = Seq3ViewState()
+        view.messagesExpanded = false
+
+        assertEquals(Seq3PanelSection.LIFELINES, seq3PanelWeightedSectionFor(view))
+    }
+
+    @Test
+    fun aHiddenButExpandedSectionIsNotInTheRunning() {
+        val view = Seq3ViewState()
+        view.messagesSectionOpen = false
+        view.lifelinesSectionOpen = false
+        view.artifactsSectionOpen = false
+        view.artifactsExpanded = true
+
+        assertNull(seq3PanelWeightedSectionFor(view))
     }
 }
