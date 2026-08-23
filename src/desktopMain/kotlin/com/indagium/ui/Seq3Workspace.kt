@@ -96,8 +96,10 @@ private val PANEL_WIDTH = 392.dp
 
 // Item 14 — drag bounds for the queue-panel divider. The panel width stays the seed value a
 // freshly-opened workspace starts at.
-private const val PANEL_WIDTH_MIN_DP = 280f
-private const val PANEL_WIDTH_MAX_DP = 560f
+// internal (not private): AutosaveCodec's seq3ViewToken()/restoreSeq3ViewToken() re-clamp a
+// restored panelWidthDp through these same bounds rather than trusting the stored value.
+internal const val PANEL_WIDTH_MIN_DP = 280f
+internal const val PANEL_WIDTH_MAX_DP = 560f
 
 @Composable
 fun Seq3Workspace(state: AppState, sessionId: String) {
@@ -862,6 +864,17 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
  * isn't persisted either). Every EDIT that reads this class still only ever reaches the document
  * through [Seq3Session.applyCommand] — this class itself never holds a [com.indagium.diagram3.
  * Seq3Document].
+ *
+ * EXCEPTION (Wave 2.5): the queue panel's own layout preferences — [messagesSectionOpen]/
+ * [messagesExpanded], [lifelinesSectionOpen]/[lifelinesExpanded]/[lifelinesSectionHeightDp],
+ * [artifactsSectionOpen]/[artifactsExpanded]/[artifactsSectionHeightDp], and [panelWidthDp] — ARE
+ * persisted across a restart, keyed by the session's `libraryItemId` (stable) rather than its
+ * `sessionId` (regenerated every reopen — see [activeDiagramToken] for the identical
+ * substitution). See `seq3ViewToken()`/`restoreSeq3ViewToken()` in AutosaveCodec.kt. A user who
+ * spends time collapsing Lifelines and stretching Artifacts on one diagram found that layout gone
+ * on every restart, which reads as the app not remembering a preference rather than as the
+ * deliberate ephemerality every other field in this class still has. Nothing else here changes:
+ * selection/hover/zoom/filter/sort still reset to defaults on reopen, same as before.
  */
 /** One exact row drawn by the canvas. A null occurrence id identifies a standalone/authored row;
  *  a non-null id distinguishes one occurrence from the other rows of the same repeated message. */

@@ -236,6 +236,11 @@ internal fun SequenceDef.sequenceToken(): String =
         endMatchText.orEmpty(),
         endIsRegex.toString(),
         endTag.orEmpty(),
+        // Field 11 (Wave 2.1): thread-scoped ("async") sequences — appended last, same
+        // append-last discipline as every other autosave token in this file. Empty string for
+        // the (overwhelmingly common) unscoped case, matching the blank-means-null convention
+        // every other optional field on this line already uses.
+        scopeTid?.toString().orEmpty(),
     ).joinToString("|") { it.b64() }
 
 internal fun String.sequenceFromToken(): SequenceDef? = runCatching {
@@ -252,6 +257,9 @@ internal fun String.sequenceFromToken(): SequenceDef? = runCatching {
         endMatchText = parts[7].takeIf { it.isNotBlank() },
         endIsRegex = parts[8].toBoolean(),
         endTag = parts[9].takeIf { it.isNotBlank() },
+        // A pre-2.1 token has exactly 10 fields (no index 10 at all) — getOrNull degrades that
+        // to null (unscoped), the same behavior every SequenceDef had before this field existed.
+        scopeTid = parts.getOrNull(10)?.takeIf { it.isNotBlank() }?.toIntOrNull(),
     )
 }.getOrNull()
 
@@ -634,6 +642,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("autoScrollWhileTailing", autoScrollWhileTailing)
     put("diagramLinkedNotePrimary", diagramLinkedNotePrimary)
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
+    put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -928,6 +937,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         diagramDefaultExportMode = o.stringOrNull("diagramDefaultExportMode")
             ?.let { raw -> runCatching { com.indagium.diagram3.DiagramExportMode.valueOf(raw) }.getOrNull() }
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
+        suppressTagPrefixConflictPrompt = o.boolOrDefault("suppressTagPrefixConflictPrompt", false),
     )
 }.getOrNull()
 
@@ -1040,6 +1050,72 @@ internal fun AppState.activeDiagramToken(): String =
 internal fun AppState.restoreActiveDiagram(libraryItemId: String) {
     val session = libraryItemId.takeIf { it.isNotBlank() }?.let { id -> seq3Sessions.sessions.firstOrNull { it.libraryItemId == id } }
     activeSurface = session?.id?.let(ActiveSurface::Diagram3) ?: activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
+}
+
+// ── Diagram queue-panel view state (Wave 2.5) ──────────────────────────────────────────────────
+//
+// User-observed request: the Messages/Lifelines/Artifacts section open/expanded flags and their
+// drag-resized heights (plus the panel's own width) reset to their defaults every restart, even
+// though a user routinely collapses Lifelines and stretches Artifacts to fit one particular
+// diagram's shape. Everything else on Seq3ViewState (selection, hover, zoom, filter, sort) stays
+// deliberately ephemeral — see the EXCEPTION note on that class — only these layout preferences
+// gain a durable home here, on the exact model FilterPanelUiState.filterPanelToken() above already
+// established: a positional, comma-of-b64-tokenFields blob, one entry per session, every field
+// decoded with getOrNull so a legacy cache with no "seq3View" key (or a shorter one written before
+// a field existed) just leaves the in-memory defaults alone.
+
+/** One entry per diagram session that has been confirmed into the library — a session with no
+ *  [Seq3WorkspaceSession.libraryItemId] yet has nothing stable to key by and is skipped, the same
+ *  "nothing to save yet" contract [diagramTabsToken] itself already has. Keyed by libraryItemId,
+ *  not sessionId, for the identical reason [activeDiagramToken] is: sessionId is regenerated on
+ *  every [Seq3Session.openLibraryItem] call. */
+internal fun AppState.seq3ViewToken(): String =
+    seq3Sessions.sessions
+        .mapNotNull { session ->
+            val libraryItemId = session.libraryItemId ?: return@mapNotNull null
+            val view = seq3Sessions.viewState(session.id) ?: return@mapNotNull null
+            tokenFields(
+                libraryItemId,
+                view.messagesSectionOpen.toString(),
+                view.messagesExpanded.toString(),
+                view.lifelinesSectionOpen.toString(),
+                view.lifelinesExpanded.toString(),
+                view.artifactsSectionOpen.toString(),
+                view.artifactsExpanded.toString(),
+                view.lifelinesSectionHeightDp.toString(),
+                view.artifactsSectionHeightDp.toString(),
+                view.panelWidthDp.toString(),
+            )
+        }
+        .joinToString(",") { it.b64() }
+
+/** Restores [seq3ViewToken] entries. MUST run after [restoreDiagramTabs] — same requirement as
+ *  [restoreActiveDiagram] — since it looks the target session up by the libraryItemId that call
+ *  just reopened; called from the same "after tabs and diagram sessions exist" block in
+ *  [AppState.restoreAutosave]. An entry naming a libraryItemId whose session failed to reopen
+ *  (deleted between autosave writes, say) is simply skipped, leaving that session's view state at
+ *  its constructed default. Heights and width are re-clamped through the exact bounds the live
+ *  divider drags use ([seq3ClampLifelinesHeight]/[seq3ClampArtifactsHeight] called with a zero
+ *  delta — a pure clamp — and [PANEL_WIDTH_MIN_DP]/[PANEL_WIDTH_MAX_DP]) rather than trusting a
+ *  stored value that might predate a bounds change or have been hand-edited in the cache file. */
+internal fun AppState.restoreSeq3ViewToken(token: String) {
+    if (token.isBlank()) return
+    val sessionIdByLibraryItemId = seq3Sessions.sessions.mapNotNull { s -> s.libraryItemId?.let { id -> id to s.id } }.toMap()
+    token.split(",").forEach { entry ->
+        val fields = entry.unb64().tokenFields()
+        val libraryItemId = fields.getOrNull(0)?.takeIf { it.isNotBlank() } ?: return@forEach
+        val sessionId = sessionIdByLibraryItemId[libraryItemId] ?: return@forEach
+        val view = seq3Sessions.viewState(sessionId) ?: return@forEach
+        fields.getOrNull(1)?.toBooleanStrictOrNull()?.let { view.messagesSectionOpen = it }
+        fields.getOrNull(2)?.toBooleanStrictOrNull()?.let { view.messagesExpanded = it }
+        fields.getOrNull(3)?.toBooleanStrictOrNull()?.let { view.lifelinesSectionOpen = it }
+        fields.getOrNull(4)?.toBooleanStrictOrNull()?.let { view.lifelinesExpanded = it }
+        fields.getOrNull(5)?.toBooleanStrictOrNull()?.let { view.artifactsSectionOpen = it }
+        fields.getOrNull(6)?.toBooleanStrictOrNull()?.let { view.artifactsExpanded = it }
+        fields.getOrNull(7)?.toFloatOrNull()?.let { view.lifelinesSectionHeightDp = seq3ClampLifelinesHeight(it, 0f) }
+        fields.getOrNull(8)?.toFloatOrNull()?.let { view.artifactsSectionHeightDp = seq3ClampArtifactsHeight(it, 0f) }
+        fields.getOrNull(9)?.toFloatOrNull()?.let { view.panelWidthDp = it.coerceIn(PANEL_WIDTH_MIN_DP, PANEL_WIDTH_MAX_DP) }
+    }
 }
 
 // ── Tab strip order (WP-diagram-restore follow-up) ─────────────────────────────────────────────

@@ -49,9 +49,13 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
+import com.indagium.utils.CANCELLATION_CHECK_INTERVAL
+import com.indagium.utils.CancellationCheck
+import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.IssueSiteGroup
 import com.indagium.utils.MAX_DISTINCT_TEMPLATES
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.cachedCrossingThreadHintsFor
 import com.indagium.utils.containsPattern
 import com.indagium.utils.firstRegexMatch
 import com.indagium.utils.groupIssueSites
@@ -62,14 +66,18 @@ import com.indagium.utils.matchingMessageRule
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.passesFilter
 import com.indagium.utils.resolvePidTidTokens
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import java.io.File
 import kotlin.math.roundToInt
 
 // A message-rule search suggestion. inScope marks whether it's within the currently active
 // tag/package filter — out-of-scope candidates are shown after in-scope ones and dimmed, so
 // matches unrelated to the active filter are still discoverable instead of vanishing.
-private data class MsgCandidate(
+// internal (not private): returned by computeUnifiedCandidatesSync, which tests call directly.
+internal data class MsgCandidate(
     val pattern: String,
     val target: RuleTarget,
     val inScope: Boolean,
@@ -105,6 +113,284 @@ internal fun contextualMessageRuleCandidates(
     }
     .distinctBy { candidate -> Triple(candidate.label, candidate.pattern, candidate.tag) }
     .toList()
+
+// ── Off-thread, single-pass backing for unifiedCandidates/relevantScopeTags (P-01) ──────────────
+// The composable versions of these two used to be bare `remember(...) { ... }` blocks running
+// synchronously INSIDE composition, on the UI thread, over up to LARGE_FILE_CANDIDATE_SCAN_LIMIT
+// entries with ~7 independent passesFilter/containsPattern passes — cheap-looking individually, but
+// each one re-scans the same entries the previous pass already scanned, and every pattern here is
+// linear (not catastrophic), so TextMatch's own per-pattern budget never has a reason to fire. A
+// `tag.*word1.*word2`-shaped search over a normal (non-large-file) log was enough to pin the UI
+// thread for as long as the whole scan took. The functions below do the same classification in ONE
+// pass per entry instead, and are plain (non-Composable) so the composables further down can run
+// them on Dispatchers.Default via LaunchedEffect/withContext, threading a CancellationCheck through
+// so a superseded search (the user kept typing) actually stops instead of running to completion on
+// a thread nobody's waiting on anymore.
+
+// One full pass over `entries`, replacing what used to be up to 3 separate `.filter { passesFilter
+// (...) }` passes (inScopeContextual, outOfScopeContextual/outOfScopeMsgs share one predicate;
+// pidCandidates uses the relaxed one alone). `relaxedPassingEntries` preserves the entries' original
+// relative order across BOTH scopes — passesFilter(base) implies passesFilter(relaxed) (relaxed only
+// ever DROPS restrictions), so it's exactly inScope ∪ outOfScope in original order, computed without
+// a second scan or a third passesFilter(relaxed) call for entries already known in-scope.
+private class UnifiedCandidateScan(
+    val inScopeEntries: List<LogEntry>,
+    val outOfScopeEntries: List<LogEntry>,
+    val relaxedPassingEntries: List<LogEntry>,
+)
+
+private fun scanUnifiedCandidateEntries(
+    entries: List<LogEntry>,
+    baseFilter: Filter,
+    relaxedFilter: Filter,
+    regexContext: RegexEvaluationContext,
+    cancellationCheck: CancellationCheck,
+): UnifiedCandidateScan {
+    val inScope = ArrayList<LogEntry>()
+    val outOfScope = ArrayList<LogEntry>()
+    val relaxedPassing = ArrayList<LogEntry>()
+    var sinceCheck = 0
+    for (entry in entries) {
+        if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCheck = 0
+            cancellationCheck()
+        }
+        if (passesFilter(entry, baseFilter, regexContext)) {
+            inScope += entry
+            relaxedPassing += entry
+        } else if (passesFilter(entry, relaxedFilter, regexContext)) {
+            outOfScope += entry
+            relaxedPassing += entry
+        }
+    }
+    return UnifiedCandidateScan(inScope, outOfScope, relaxedPassing)
+}
+
+// One pass over an already-scoped subset (inScopeEntries or outOfScopeEntries above — never the
+// full candidateEntries) that builds BOTH the contextual tag/message variants and the message-only
+// stems together, evaluating each entry's msg-only containsPattern exactly once instead of once
+// inside contextualMessageRuleCandidates' own filter AND again inside the old matchingMsgsOf.
+// Mirrors contextualMessageRuleCandidates' exact filter (`!matchesMsgOnly && matchesTagAndMessage`)
+// and its trailing distinctBy — kept as a separate function (rather than reusing
+// contextualMessageRuleCandidates itself) so that function stays exactly as MessageRuleInputTest
+// pins it, byte for byte.
+private class ScopedCandidateAccumulation(
+    val contextual: List<ContextualMessageRuleCandidate>,
+    val msgs: List<String>,
+)
+
+private fun accumulateContextualAndMsgs(
+    entries: List<LogEntry>,
+    query: String,
+    regex: Boolean,
+    regexContext: RegexEvaluationContext,
+    cancellationCheck: CancellationCheck,
+): ScopedCandidateAccumulation {
+    val contextual = ArrayList<ContextualMessageRuleCandidate>()
+    val msgs = ArrayList<String>()
+    var sinceCheck = 0
+    for (entry in entries) {
+        if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCheck = 0
+            cancellationCheck()
+        }
+        val matchesMsgOnly = containsPattern(entry.msg, query, regex, regexContext = regexContext)
+        if (matchesMsgOnly) {
+            msgs += entry.msg
+        } else {
+            val matchesTagAndMessage =
+                containsPattern("${entry.tag}: ${entry.msg}", query, regex, regexContext = regexContext) ||
+                    containsPattern("${entry.tag} : ${entry.msg}", query, regex, regexContext = regexContext)
+            if (matchesTagAndMessage) {
+                messageRuleVariantsForEntry(entry).forEach { variant ->
+                    contextual += ContextualMessageRuleCandidate(variant.label, variant.pattern, variant.tag)
+                }
+            }
+        }
+    }
+    return ScopedCandidateAccumulation(
+        contextual.distinctBy { candidate -> Triple(candidate.label, candidate.pattern, candidate.tag) },
+        msgs,
+    )
+}
+
+// Off-thread body of unifiedCandidates (composable wrapper further down). Identical output to the
+// original ~7-pass version — see the two helpers above for where the passes were collapsed — kept
+// as a plain function so it's callable from a background dispatcher with no Compose dependency.
+internal fun computeUnifiedCandidatesSync(
+    tab: LogTab,
+    filter: Filter,
+    msgRuleSearch: String,
+    cancellationCheck: CancellationCheck,
+): List<MsgCandidate> {
+    if (msgRuleSearch.isBlank()) return emptyList()
+    val regexContext = RegexEvaluationContext()
+    val candidateEntries = if (tab.largeFileMode) {
+        tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+    } else {
+        tab.logData
+    }
+    val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
+    val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
+
+    val scan = scanUnifiedCandidateEntries(candidateEntries, baseFilter, relaxedFilter, regexContext, cancellationCheck)
+    val inScopeAcc = accumulateContextualAndMsgs(scan.inScopeEntries, msgRuleSearch, filter.kwInTagRegex, regexContext, cancellationCheck)
+    val outOfScopeAcc = accumulateContextualAndMsgs(scan.outOfScopeEntries, msgRuleSearch, filter.kwInTagRegex, regexContext, cancellationCheck)
+
+    val inScopeContextual = inScopeAcc.contextual.map { candidate ->
+        MsgCandidate(
+            pattern = candidate.pattern,
+            target = RuleTarget.MESSAGE,
+            inScope = true,
+            label = candidate.label,
+            tag = candidate.tag,
+            addsImmediately = true,
+        )
+    }
+    val contextualKeys = inScopeContextual.map { Triple(it.label, it.pattern, it.tag) }.toSet()
+    val outOfScopeContextual = outOfScopeAcc.contextual
+        .map { candidate ->
+            MsgCandidate(
+                pattern = candidate.pattern,
+                target = RuleTarget.MESSAGE,
+                inScope = false,
+                label = candidate.label,
+                tag = candidate.tag,
+                addsImmediately = true,
+            )
+        }
+        .filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
+    val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
+
+    // PIDs only when the search looks like a number
+    val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
+        scan.relaxedPassingEntries
+            .filter { it.pid != 0 }
+            .map { it.pid.toString() }.distinct()
+            .filter { it.contains(msgRuleSearch) }
+            .take(3)
+            .map { pid ->
+                // The stored rule pattern stays the bare pid (matching still keys off the
+                // number — a process can be renamed/recycled), but the suggestion itself
+                // shows the resolved name when known, so picking from the list doesn't
+                // require already knowing which pid belongs to which process.
+                val name = tab.analysis.processNames[pid.toIntOrNull()]
+                val label = if (name != null) "$pid · $name" else pid
+                MsgCandidate(pid, RuleTarget.PID_TID, inScope = true, label = label)
+            }
+    else emptyList()
+
+    // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
+    // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
+    // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
+    fun stemsAndFulls(msgs: List<String>): List<String> {
+        val leads = if (filter.kwInTagRegex) {
+            msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(80) }
+                .distinct()
+        } else {
+            msgs.map { msg ->
+                val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
+                if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
+                else msg.take(80)
+            }.distinct()
+        }
+        val fulls = msgs.map { it.take(80) }.distinct().filter { it !in leads }
+        return leads + fulls
+    }
+
+    val inScopeCandidates = stemsAndFulls(inScopeAcc.msgs).map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = true) }
+    val inScopePatterns = inScopeCandidates.map { it.pattern }.toSet()
+    val outOfScopeCandidates = stemsAndFulls(outOfScopeAcc.msgs)
+        .filter { it !in inScopePatterns }
+        .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
+    val remainingSlots = (8 - contextualCandidates.size).coerceAtLeast(0)
+    val visiblePidCandidates = pidCandidates.take(remainingSlots)
+    val msgCandidates = (inScopeCandidates + outOfScopeCandidates)
+        .take((remainingSlots - visiblePidCandidates.size).coerceAtLeast(0))
+    return contextualCandidates + visiblePidCandidates + msgCandidates
+}
+
+// Off-thread body of relevantScopeTags (composable wrapper further down) — same single-pass
+// treatment, same output as the original `.asSequence().filter{...}.map{it.tag}.toSet()`.
+internal fun computeRelevantScopeTagsSync(
+    tab: LogTab,
+    pending: PendingMessageRuleDraft,
+    cancellationCheck: CancellationCheck,
+): Set<String> {
+    val regexContext = RegexEvaluationContext()
+    val candidateEntries = if (tab.largeFileMode) {
+        tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
+    } else {
+        tab.logData
+    }
+    val tags = LinkedHashSet<String>()
+    var sinceCheck = 0
+    if (pending.target == RuleTarget.PID_TID) {
+        // Shares resolvePidTidTokens/matchesPidTidTokens with Filter.kt's own
+        // matchesPidTidFilter/matchesRule so a package-name pattern resolves identically
+        // here (which tags does this rule end up scoped to) and in the actual filter
+        // (which rows does this rule actually hide/show) — see those functions' doc.
+        val tokens = resolvePidTidTokens(pending.pattern, tab.analysis.processNames)
+        for (entry in candidateEntries) {
+            if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCheck = 0
+                cancellationCheck()
+            }
+            if (matchesPidTidTokens(entry, tokens)) tags += entry.tag
+        }
+    } else {
+        for (entry in candidateEntries) {
+            if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCheck = 0
+                cancellationCheck()
+            }
+            if (containsPattern(entry.msg, pending.pattern, pending.regex, regexContext = regexContext)) tags += entry.tag
+        }
+    }
+    return tags
+}
+
+// Async, cancellable wrapper around computeUnifiedCandidatesSync — same key shape as the old bare
+// `remember(tab.id, tab.largeFileMode, filter, msgRuleSearch)`, but the actual scan now runs on
+// Dispatchers.Default via LaunchedEffect, cancel-and-relaunch on key change (a superseded search
+// stops instead of finishing on an abandoned thread), and the PREVIOUS candidate list stays visible
+// while a new one computes — mirrors ComputedLogItems' "stale but usable" shape (LogViewer.kt) so
+// the popup doesn't flash empty on every keystroke.
+@Composable
+private fun rememberUnifiedCandidates(tab: LogTab, filter: Filter, msgRuleSearch: String): List<MsgCandidate> {
+    var candidates by remember(tab.id, tab.largeFileMode) { mutableStateOf(emptyList<MsgCandidate>()) }
+    LaunchedEffect(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
+        if (msgRuleSearch.isBlank()) {
+            candidates = emptyList()
+            return@LaunchedEffect
+        }
+        val snapshot = tab
+        candidates = withContext(Dispatchers.Default) {
+            computeUnifiedCandidatesSync(snapshot, filter, msgRuleSearch) { ensureActive() }
+        }
+    }
+    return candidates
+}
+
+// Async, cancellable wrapper around computeRelevantScopeTagsSync — same key shape and null
+// semantics (null = no scope chooser open) as the old bare `remember(tab.id, tab.largeFileMode,
+// pendingMessageRule)`, same "stale but usable" shape as rememberUnifiedCandidates above.
+@Composable
+private fun rememberRelevantScopeTags(tab: LogTab, pendingMessageRule: PendingMessageRuleDraft?): Set<String>? {
+    var tags by remember(tab.id, tab.largeFileMode) { mutableStateOf<Set<String>?>(null) }
+    LaunchedEffect(tab.id, tab.largeFileMode, pendingMessageRule) {
+        val pending = pendingMessageRule
+        if (pending == null) {
+            tags = null
+            return@LaunchedEffect
+        }
+        val snapshot = tab
+        tags = withContext(Dispatchers.Default) {
+            computeRelevantScopeTagsSync(snapshot, pending) { ensureActive() }
+        }
+    }
+    return tags
+}
 
 internal data class PendingMessageRuleDraft(
     val include: Boolean,
@@ -218,6 +504,15 @@ class FilterPanelUiState {
     // leak it into another tab.
     val tagQueryDrafts = mutableStateMapOf<String, String>()
     val messageQueryDrafts = mutableStateMapOf<String, String>()
+
+    // Task 4: crossing-different-thread sequence hints (see CrossingThreadHint) the user has
+    // already dismissed for a given tab — keyed "$tabId#$hostDefId|$guestDefId" (a def pair, not a
+    // gid: the hint is per-DEF-pair, same granularity "scope both" applies at). Held here rather
+    // than on the tab/Filter model itself so dismissing a hint is a pure UI decision that never
+    // touches autosave's `|`-joined positional token format — it only needs to survive this
+    // FilterPanel instance being hidden/reshown (same reasoning as every other field in this
+    // class), not a full app restart.
+    val dismissedCrossingThreadHints = mutableStateSetOf<String>()
 }
 
 @OptIn(
@@ -255,6 +550,14 @@ internal fun FilterPanel(
     onToggleSeqEnabled: (String) -> Unit,
     onSetSeqColor: (String, Color) -> Unit,
     onUpdateSeq: (String, String, Boolean, String?, String?, Boolean, String?) -> Unit,
+    // Task 3: switch an existing sequence between unscoped/thread-scoped from this panel, after
+    // creation — see AppState.setSequenceScoped's own doc for the resolution rule. Returns false
+    // (switching TO scoped only) when no log line matches the def's own start pattern, so the row
+    // below can show why the switch didn't happen instead of just silently doing nothing.
+    onSetSeqScoped: (String, Boolean) -> Boolean,
+    // Task 4: apply one crossing-different-thread hint (both sides at once — see AppState.
+    // scopeCrossingThreadPair's own doc).
+    onScopeCrossingThreadPair: (CrossingThreadHint) -> Unit,
     onToggleManualCollapse: (String) -> Unit,
     onRemoveManualCollapse: (String) -> Unit,
     onSetManualBlockColor: (String, Color) -> Unit,
@@ -356,6 +659,11 @@ internal fun FilterPanel(
     var tagSelectedIdx by remember { mutableStateOf(-1) }
     var tagSelectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
+    // Task 3: transient "no log line matches this sequence's start pattern" notice shown under a
+    // sequence row right after a failed switch-to-scoped click (onSetSeqScoped returned false).
+    // Not persisted anywhere — purely a one-shot explanation for the click that just happened,
+    // cleared on the next click of ANY scope toggle (see its own onClick below) or a tab switch.
+    var seqScopeToggleFailedId by remember(tab.id) { mutableStateOf<String?>(null) }
     var colorPickerHlId by remember { mutableStateOf<String?>(null) }
     var kwHighlightColorPickerOpen by remember { mutableStateOf(false) }
     var regexEditorOpen by remember { mutableStateOf(false) }
@@ -616,141 +924,16 @@ internal fun FilterPanel(
 
     // Unified candidates: contextual tag/message variants first, then the existing PID and
     // message-only suggestions. In-scope results come before out-of-scope ones, while the latter
-    // still respect level/exclude filters so unrelated matches remain discoverable.
-    val unifiedCandidates = remember(tab.id, tab.largeFileMode, filter, msgRuleSearch) {
-        if (msgRuleSearch.isBlank()) {
-            emptyList()
-        } else {
-            val regexContext = RegexEvaluationContext()
-            val candidateEntries = if (tab.largeFileMode) {
-                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
-            } else {
-                tab.logData
-            }
-            val baseFilter = filter.copy(kwInTag = "", messageRules = emptyList(), pidTidFilter = "")
-            val relaxedFilter = baseFilter.copy(activeTags = emptySet(), pkgPrefixes = emptySet())
-
-            fun contextualCandidatesOf(entries: List<LogEntry>, inScope: Boolean) =
-                contextualMessageRuleCandidates(entries, msgRuleSearch, filter.kwInTagRegex, regexContext)
-                    .map { candidate ->
-                        MsgCandidate(
-                            pattern = candidate.pattern,
-                            target = RuleTarget.MESSAGE,
-                            inScope = inScope,
-                            label = candidate.label,
-                            tag = candidate.tag,
-                            addsImmediately = true,
-                        )
-                    }
-
-            val inScopeContextual = contextualCandidatesOf(
-                candidateEntries.filter { passesFilter(it, baseFilter, regexContext) },
-                inScope = true,
-            )
-            val contextualKeys = inScopeContextual.map { Triple(it.label, it.pattern, it.tag) }.toSet()
-            val outOfScopeContextual = contextualCandidatesOf(
-                candidateEntries.filter {
-                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
-                },
-                inScope = false,
-            ).filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
-            val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
-
-            // PIDs only when the search looks like a number
-            val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
-                candidateEntries
-                    .filter { entry -> passesFilter(entry, relaxedFilter, regexContext) && entry.pid != 0 }
-                    .map { it.pid.toString() }.distinct()
-                    .filter { it.contains(msgRuleSearch) }
-                    .take(3)
-                    .map { pid ->
-                        // The stored rule pattern stays the bare pid (matching still keys off the
-                        // number — a process can be renamed/recycled), but the suggestion itself
-                        // shows the resolved name when known, so picking from the list doesn't
-                        // require already knowing which pid belongs to which process.
-                        val name = tab.analysis.processNames[pid.toIntOrNull()]
-                        val label = if (name != null) "$pid · $name" else pid
-                        MsgCandidate(pid, RuleTarget.PID_TID, inScope = true, label = label)
-                    }
-            else emptyList()
-
-            fun matchingMsgsOf(entries: List<LogEntry>) = entries
-                .filter {
-                    containsPattern(it.msg, msgRuleSearch, regex = filter.kwInTagRegex, regexContext = regexContext)
-                }
-                .map { it.msg }
-
-            val inScopeMsgs = matchingMsgsOf(candidateEntries.filter { passesFilter(it, baseFilter, regexContext) })
-            val outOfScopeMsgs = matchingMsgsOf(
-                candidateEntries.filter {
-                    !passesFilter(it, baseFilter, regexContext) && passesFilter(it, relaxedFilter, regexContext)
-                },
-            )
-
-            // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
-            // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
-            // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
-            fun stemsAndFulls(msgs: List<String>): List<String> {
-                val leads = if (filter.kwInTagRegex) {
-                    msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(80) }
-                        .distinct()
-                } else {
-                    msgs.map { msg ->
-                        val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
-                        if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
-                        else msg.take(80)
-                    }.distinct()
-                }
-                val fulls = msgs.map { it.take(80) }.distinct().filter { it !in leads }
-                return leads + fulls
-            }
-
-            val inScopeCandidates = stemsAndFulls(inScopeMsgs).map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = true) }
-            val inScopePatterns = inScopeCandidates.map { it.pattern }.toSet()
-            val outOfScopeCandidates = stemsAndFulls(outOfScopeMsgs)
-                .filter { it !in inScopePatterns }
-                .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
-            val remainingSlots = (8 - contextualCandidates.size).coerceAtLeast(0)
-            val visiblePidCandidates = pidCandidates.take(remainingSlots)
-            val msgCandidates = (inScopeCandidates + outOfScopeCandidates)
-                .take((remainingSlots - visiblePidCandidates.size).coerceAtLeast(0))
-            contextualCandidates + visiblePidCandidates + msgCandidates
-        }
-    }
+    // still respect level/exclude filters so unrelated matches remain discoverable. Computed off
+    // the UI thread — see rememberUnifiedCandidates/computeUnifiedCandidatesSync above.
+    val unifiedCandidates = rememberUnifiedCandidates(tab, filter, msgRuleSearch)
     // Tags/prefixes the scope picker offers are narrowed to ones the pending rule's pattern
     // actually occurs under — an "All" rule for "timeout" shouldn't list every tag in the file,
     // only ones that have ever logged something matching "timeout". Falls back to the full tag
     // list if nothing matched (e.g. scan-limit truncation on a huge file) so the picker never
-    // goes empty.
-    val relevantScopeTags = remember(tab.id, tab.largeFileMode, pendingMessageRule) {
-        val pending = pendingMessageRule
-        if (pending == null) {
-            null
-        } else {
-            val regexContext = RegexEvaluationContext()
-            val candidateEntries = if (tab.largeFileMode) {
-                tab.logData.asSequence().take(LARGE_FILE_CANDIDATE_SCAN_LIMIT).toList()
-            } else {
-                tab.logData
-            }
-            if (pending.target == RuleTarget.PID_TID) {
-                // Shares resolvePidTidTokens/matchesPidTidTokens with Filter.kt's own
-                // matchesPidTidFilter/matchesRule so a package-name pattern resolves identically
-                // here (which tags does this rule end up scoped to) and in the actual filter
-                // (which rows does this rule actually hide/show) — see those functions' doc.
-                val tokens = resolvePidTidTokens(pending.pattern, tab.analysis.processNames)
-                candidateEntries.asSequence()
-                    .filter { entry -> matchesPidTidTokens(entry, tokens) }
-                    .map { it.tag }.toSet()
-            } else {
-                candidateEntries.asSequence()
-                    .filter { entry ->
-                        containsPattern(entry.msg, pending.pattern, pending.regex, regexContext = regexContext)
-                    }
-                    .map { it.tag }.toSet()
-            }
-        }
-    }
+    // goes empty. Computed off the UI thread — see rememberRelevantScopeTags/
+    // computeRelevantScopeTagsSync above.
+    val relevantScopeTags = rememberRelevantScopeTags(tab, pendingMessageRule)
     val scopeOptionTags = remember(sortedTags, relevantScopeTags) {
         if (relevantScopeTags.isNullOrEmpty()) sortedTags else sortedTags.filter { it in relevantScopeTags }
     }
@@ -1936,6 +2119,65 @@ internal fun FilterPanel(
                                         color = if (def.enabled) tc.tx else tc.td,
                                         fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis,
                                     )
+                                    // Wave 2.1: a thread-scoped ("async") sequence otherwise looks
+                                    // identical to an unscoped one in this list — the only visible
+                                    // difference is which lines it swallows, which the user can't
+                                    // see without opening the editor. This badge is why a run
+                                    // looks narrower than expected: it's pinned to one thread.
+                                    // Also doubles as the "turn scoping off" control (Task 3) —
+                                    // clicking it always succeeds, so no failure state to show here.
+                                    if (def.scopeTid != null) {
+                                        AppText(
+                                            "tid ${def.scopeTid}",
+                                            color = tc.ac,
+                                            fontSize = 9.sp,
+                                            fontFamily = MONO,
+                                            modifier = Modifier
+                                                .background(tc.ac.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                                .clickable {
+                                                    seqScopeToggleFailedId = null
+                                                    onSetSeqScoped(def.id, false)
+                                                }
+                                                .padding(horizontal = 4.dp, vertical = 1.dp),
+                                        )
+                                    } else if (seqScopeToggleFailedId == def.id) {
+                                        // Task 3: "switch to thread-scoped" resolves the tid from a
+                                        // fresh scan of THIS tab's own log data (AppState.
+                                        // setSequenceScoped) rather than trusting a stale click — a
+                                        // scan that comes back with no match must never leave the
+                                        // user guessing whether the switch silently happened.
+                                        TooltipArea(tooltip = {
+                                            Box(
+                                                Modifier.background(tc.p2, CORNER_SM).border(0.5.dp, tc.br, CORNER_SM)
+                                                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                                            ) {
+                                                AppText(
+                                                    "No log line matches this sequence's start pattern — left unscoped.",
+                                                    color = tc.tx, fontSize = 10.sp,
+                                                )
+                                            }
+                                        }) {
+                                            AppText(
+                                                "no match",
+                                                color = LogLevel.W.defaultColor,
+                                                fontSize = 9.sp,
+                                                fontFamily = MONO,
+                                                modifier = Modifier
+                                                    .background(LogLevel.W.defaultColor.copy(alpha = 0.15f), RoundedCornerShape(3.dp))
+                                                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                                            )
+                                        }
+                                    }
+                                    // Turn thread-scoping ON (only shown while unscoped — once
+                                    // scoped, the badge above is the toggle back off). ⏱ mirrors
+                                    // the "async" framing "Set async sequence start" already uses
+                                    // in the log-row context menu (App.kt) for the creation-time
+                                    // path this control mirrors for an existing sequence.
+                                    if (def.scopeTid == null) {
+                                        SquareIconButton("⏱", fontSize = 11.sp, onClick = {
+                                            seqScopeToggleFailedId = if (onSetSeqScoped(def.id, true)) null else def.id
+                                        })
+                                    }
                                     SquareIconButton("✎", fontSize = 11.sp, onClick = {
                                         editingSeqId = if (editingSeqId == def.id) null else def.id
                                     })
@@ -1965,6 +2207,39 @@ internal fun FilterPanel(
                     }
                 }
             }
+            // Task 4: "these two sequences interleave on different threads — scope them?" —
+            // reuses computeItems' OWN crossing-resolution pass (cachedCrossingThreadHintsFor,
+            // populated the same render LogViewer already triggered) rather than re-deriving
+            // crossings here, and null (cache not warm yet this composition) just means no hint
+            // THIS pass, never "no crossings" — see that function's own doc. Dismissing (× or after
+            // Scope is clicked — a fix that was just applied has nothing left to nag about) is
+            // recorded in fpState, not tab/Filter, so it never touches autosave's token format;
+            // see dismissedCrossingThreadHints' own doc for why that's still enough to survive
+            // "doesn't nag every recomputation" (the requirement is per-session, not per-restart).
+            cachedCrossingThreadHintsFor(tab, applyFilter = true).orEmpty()
+                .filter { "${tab.id}#${it.hostDefId}|${it.guestDefId}" !in fpState.dismissedCrossingThreadHints }
+                .forEach { hint ->
+                    val hintKey = "${tab.id}#${hint.hostDefId}|${hint.guestDefId}"
+                    Row(
+                        Modifier.fillMaxWidth()
+                            .background(tc.ac.copy(alpha = 0.08f))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        AppText(
+                            "These sequences overlap on different threads — scope each to its own thread?",
+                            color = tc.tx, fontSize = 10.sp, modifier = Modifier.weight(1f),
+                        )
+                        LabelIconButton("Scope", fontSize = 10.sp, onClick = {
+                            onScopeCrossingThreadPair(hint)
+                            fpState.dismissedCrossingThreadHints += hintKey
+                        })
+                        SquareIconButton("×", fontSize = 12.sp, onClick = {
+                            fpState.dismissedCrossingThreadHints += hintKey
+                        })
+                    }
+                }
             if (tab.manualBlocks.isNotEmpty()) {
                 AppText("Collapsed ranges", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp))

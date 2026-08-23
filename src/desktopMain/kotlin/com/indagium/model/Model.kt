@@ -48,6 +48,16 @@ data class SequenceDef(
     val endMatchText: String? = null,
     val endIsRegex: Boolean = false,
     val endTag: String? = null,
+    // "Async" / thread-scoped sequences (Wave 2.1). A start logged by thread A could otherwise be
+    // closed by an end from thread B, and two interleaved runs of the same flow become crossing
+    // ranges the viewer can't attribute to either run (Filter.kt's crossing-sequence handling
+    // fixes the data-loss half of that, but not the "which line belongs to which run" confusion).
+    // Non-null pins both the start/end match AND every entry SeqComputer swallows as a child to
+    // this exact tid — interleaved lines from other threads render as plain rows outside the
+    // group instead of being silently absorbed into it. Appended LAST so every existing
+    // positional SequenceDef(...) construction (fixtures, autosave decode) keeps compiling/
+    // decoding unchanged; null means "unscoped", today's behavior.
+    val scopeTid: Int? = null,
 )
 
 // endExclusive is the index (into the full logData list SeqComputer was run against) one past
@@ -1087,6 +1097,12 @@ data class AppSettings(
     // Applied only as a diagram note is created. Each note carries its own export metadata, so
     // changing this never rewrites or changes the representation of an existing diagram.
     val diagramDefaultExportMode: DiagramExportMode = DiagramExportMode.IMAGE,
+    // Wave 2.2: suppresses AppState's tag-prefix/specific-class conflict dialog (adding a package
+    // prefix while a child tag under it is already selected, or vice versa) once the user has seen
+    // it and picked "don't ask again". False by default so the prompt fires the first time a real
+    // conflict occurs. JSON form ONLY (settingsJson/settingsFromJson) — the legacy positional
+    // settingsFromToken decoder is frozen by AutosaveGoldenV1Test and must never gain a field.
+    val suppressTagPrefixConflictPrompt: Boolean = false,
 )
 
 enum class ThemePreset(val label: String) {
@@ -1137,7 +1153,28 @@ data class AddAnnRequest(
 )
 
 sealed class LogItem {
-    data class Row(val entry: LogEntry, val indent: Int, val groupColor: Color? = null) : LogItem()
+    data class Row(
+        val entry: LogEntry,
+        val indent: Int,
+        val groupColor: Color? = null,
+        // Set only when this row is a genuine member (matching tid, not a foreign-thread row
+        // riding along inside the span) of a THREAD-SCOPED sequence's expanded interior — i.e.
+        // exactly the case ScopeTidBadge marks on that sequence's header (ui/LogViewer.kt). Always
+        // equal to [groupColor] when non-null (both are the owning SequenceDef's color; this is a
+        // separate field rather than reusing groupColor because groupColor alone can't tell an
+        // ordinary/unscoped sequence's member apart from a scoped one's — both tint groupColor the
+        // same way) — LogRow reads this to also tint the row's own timestamp/pid/tid columns (both
+        // their text colour AND, as a low-alpha wash, their cell background — see LogViewer.kt's
+        // appendTsPidTid), which otherwise render in the same muted grey regardless of sequence
+        // membership, making an interleaved async run hard to pick out at a glance. null for every
+        // other row: top-level rows, ordinary/unscoped-sequence members (today's appearance,
+        // unchanged — every line in an unscoped sequence's range belongs to it anyway, so the
+        // indent/bar already say so), and
+        // foreign-thread rows that fell out of a scoped sequence's span at the outer indent (they
+        // must stay visually untinted — that contrast is the whole point). Appended last so every
+        // existing positional Row(...) construction across the test suite keeps compiling.
+        val scopedSeqColor: Color? = null,
+    ) : LogItem()
 
     data class SeqHeader(
         val entry: LogEntry,
@@ -1145,7 +1182,12 @@ sealed class LogItem {
         val indent: Int,
         val expanded: Boolean,
         val count: Int,
-        val color: Color
+        val color: Color,
+        // The owning SequenceDef's scopeTid (Wave 2.1 "async" sequences), or null for the ordinary
+        // unscoped case — carried onto the rendered item purely so the header row can visibly show
+        // which thread this run is pinned to (ui/LogViewer.kt's SeqHeaderRow). Defaulted so the
+        // handful of test call sites building a SeqHeader directly don't need updating.
+        val scopeTid: Int? = null,
     ) : LogItem()
 
     data class ManualHeader(

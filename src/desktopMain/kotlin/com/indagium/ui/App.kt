@@ -450,8 +450,10 @@ fun App(
                         val hasNameAction = ctxTab.analysis.processNames[entry.pid] != null
                         // Estimate full menu height from items that will actually render:
                         //   header(37) + divider(9) + preview(63) + 1 item(32) + divider(9)
-                        //   + 2 items(64) [sequence] + divider(9) + 2 items(64) [collapse-to-start/end]
-                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags] = 458
+                        //   + labeled row-block(64) [sequence actions] + 1 item(32) [Add as sequence]
+                        //   + 1 item(32) [Sequence diagram] + divider(9)
+                        //   + 2 items(64) [collapse-to-start/end]
+                        //   + divider(9) + 2 items(64) [hide/show] + divider(9) + 1 row(32) [tags] = 490
                         // Selection text adds a preview extension line(15) on top of that. The merged
                         // "Process" block (CtxProcessActions — tid map + process name, formerly two
                         // separate blocks) is a fixed-shape header+one-row+divider costing 73, same as
@@ -464,10 +466,17 @@ fun App(
                         val hasProcessBlock = hasShowMapAction || hasHideMapAction || hasNameAction
                         val hasProcessSecondRow = hasShowMapAction && hasHideMapAction && hasNameAction
                         // This estimate only decides where the menu is anchored, but an
-                        // under-estimate lets it open off-screen.
-                        val estimatedMenuHeight = (458 +
+                        // under-estimate lets it open off-screen. The "sequence actions" row (Start /
+                        // Async start / End — CtxSequenceActions in Components.kt) replaced what used
+                        // to be a single 32dp "Set sequence ▶" flyout row with a taller, always-visible
+                        // labeled row-block (header + one row of buttons, same 64dp shape as the Tag
+                        // and Collapse blocks below), now folded into the 490 base above. Whether a
+                        // sequence start is pending only toggles its "End" button between
+                        // enabled/disabled — the block renders the same three buttons and the same
+                        // height either way, so (unlike hasProcessBlock/hasProcessSecondRow) no
+                        // separate pendingSequenceStart term is needed here.
+                        val estimatedMenuHeight = (490 +
                             (if (ctx.selText.isNotBlank()) 15 else 0) +
-                            (if (state.pendingSequenceStart != null) 32 else 0) +
                             (if (hasProcessBlock) 73 else 0) +
                             (if (hasProcessSecondRow) 28 else 0) +
                             // Video block: 2 Action rows (32 each) + a trailing divider (9).
@@ -527,7 +536,7 @@ fun App(
                                     Icons.Outlined.VisibilityOff,
                                     "Hide messages like this",
                                     onClick = { state.hideMessagesLikeCtx() },
-                                    submenu = ruleVariants.map { v -> v.label to { state.hideMessagesLikeVariant(v) } },
+                                    submenu = ruleVariants.map { v -> CtxSubmenuOption(v.label) { state.hideMessagesLikeVariant(v) } },
                                 ),
                             )
                             add(
@@ -535,7 +544,7 @@ fun App(
                                     Icons.Outlined.Visibility,
                                     "Show messages like this",
                                     onClick = { state.showOnlyMessagesLikeCtx() },
-                                    submenu = ruleVariants.map { v -> v.label to { state.showOnlyMessagesLikeVariant(v) } },
+                                    submenu = ruleVariants.map { v -> CtxSubmenuOption(v.label) { state.showOnlyMessagesLikeVariant(v) } },
                                 ),
                             )
                             add(CtxMenuEntry.Divider)
@@ -554,18 +563,31 @@ fun App(
                             // highlight block above to sit next to the rest of the sequence
                             // workflow instead of next to an unrelated highlight toggle.
                             run {
+                                // Inline segmented row (matching the "Tag" and "Collapse" blocks
+                                // above — CtxSequenceActions/CtxCollapseActions in Components.kt)
+                                // instead of a "Set sequence ▶" flyout: Start / Async start / End,
+                                // in that order, all always visible. "Async start" pins the
+                                // resulting sequence to this entry's thread (tid) so two interleaved
+                                // runs of the same start/end pattern from different threads don't
+                                // merge into one crossing group. "End" is only actionable while a
+                                // start is actually pending — shown but disabled (not omitted)
+                                // otherwise, so the option is visibly unavailable rather than
+                                // silently doing nothing (CLAUDE.md's enabled-vs-active rule).
+                                add(
+                                    CtxMenuEntry.SequenceActions(
+                                        onStart = { state.setSequenceStartFromCtx() },
+                                        onAsyncStart = { state.setAsyncSequenceStartFromCtx() },
+                                        onEnd = state.pendingSequenceStart?.let { { state.completeSequenceEndFromCtx() } },
+                                    ),
+                                )
                                 add(
                                     CtxMenuEntry.ActionWithSubmenu(
                                         Icons.Outlined.Layers,
                                         "Add as sequence",
                                         onClick = { state.addSeqFromCtx() },
-                                        submenu = ruleVariants.map { v -> v.label to { state.addSequenceVariant(v) } },
+                                        submenu = ruleVariants.map { v -> CtxSubmenuOption(v.label) { state.addSequenceVariant(v) } },
                                     ),
                                 )
-                                if (state.pendingSequenceStart != null) {
-                                    add(CtxMenuEntry.Action(Icons.Outlined.Flag, "Complete sequence end") { state.completeSequenceEndFromCtx() })
-                                }
-                                add(CtxMenuEntry.Action(Icons.Outlined.PlayArrow, "Set sequence start") { state.setSequenceStartFromCtx() })
                                 add(
                                     CtxMenuEntry.Action(Icons.Outlined.Schema, "Sequence diagram…") {
                                         state.ctx = null
@@ -726,6 +748,7 @@ fun App(
                         val selectableEntries = menuEntries.filter {
                             it is CtxMenuEntry.ActionHeader || it is CtxMenuEntry.Action ||
                                 it is CtxMenuEntry.TagActions || it is CtxMenuEntry.CollapseActions ||
+                                it is CtxMenuEntry.SequenceActions ||
                                 it is CtxMenuEntry.ProcessActions ||
                                 it is CtxMenuEntry.VideoActions ||
                                 it is CtxMenuEntry.SelectionActions || it is CtxMenuEntry.SourceActions ||
@@ -766,6 +789,7 @@ fun App(
                                                     is CtxMenuEntry.Action -> it.onClick()
                                                     is CtxMenuEntry.TagActions -> it.onInclude()
                                                     is CtxMenuEntry.CollapseActions -> it.onToStart?.invoke()
+                                                    is CtxMenuEntry.SequenceActions -> it.onStart()
                                                     is CtxMenuEntry.ProcessActions ->
                                                         it.onShowMap?.invoke() ?: it.onHideMap?.invoke()
                                                             ?: it.onShowName?.invoke() ?: it.onHideName?.invoke()
@@ -816,6 +840,13 @@ fun App(
                                                 onToStart = e.onToStart,
                                                 onToEnd = e.onToEnd,
                                                 onSelected = e.onSelected,
+                                            )
+                                        is CtxMenuEntry.SequenceActions ->
+                                            CtxSequenceActions(
+                                                highlighted = e === selectedEntry,
+                                                onStart = e.onStart,
+                                                onAsyncStart = e.onAsyncStart,
+                                                onEnd = e.onEnd,
                                             )
                                         is CtxMenuEntry.ProcessActions ->
                                             CtxProcessActions(
@@ -1391,6 +1422,78 @@ fun App(
                                 danger = true
                             ) { state.confirmClearFilter() }
                             DialogActionButton("Cancel", active = false) { state.cancelClearFilter() }
+                        }
+                    }
+                }
+            }
+
+            // Wave 2.2: raised by AppState.toggleTag/addPkgPrefix BEFORE mutating, only on a real
+            // conflict (see PendingTagPrefixConflict's own doc) — the frequent, non-conflicting
+            // path never shows this. "Show only the selected classes" is the highlighted (active)
+            // button since it's today's unchanged narrowing behavior — the safe default.
+            state.pendingTagPrefixConflict?.let { pending ->
+                Dialog(onDismissRequest = { state.cancelTagPrefixConflict() }) {
+                    val tc2 = tc()
+                    var dontAskAgain by remember(pending) { mutableStateOf(false) }
+                    val prefixLabel = when (pending) {
+                        is PendingTagPrefixConflict.AddingPrefix -> pending.prefix
+                        is PendingTagPrefixConflict.CheckingTag -> pending.prefixes.sorted().joinToString(", ")
+                    }
+                    val bodyText = when (pending) {
+                        is PendingTagPrefixConflict.AddingPrefix ->
+                            "\"${pending.prefix}\" already has one or more of its classes individually selected. " +
+                                "A package prefix only shows the whole package while none of its classes are " +
+                                "selected on their own — right now it would only show those already-picked classes."
+                        is PendingTagPrefixConflict.CheckingTag ->
+                            "\"${pending.tag}\" falls under the already-selected package prefix \"$prefixLabel\". " +
+                                "Selecting it on its own narrows that prefix down to just the classes you pick, " +
+                                "instead of showing the whole package."
+                    }
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Package prefix and class both selected", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(bodyText, color = tc2.td, fontSize = 11.sp, maxLines = 5)
+                        Spacer(Modifier.height(14.dp))
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = dontAskAgain,
+                                onCheckedChange = { dontAskAgain = it },
+                                colors = CheckboxDefaults.colors(checkedColor = tc2.ac, uncheckedColor = tc2.td, checkmarkColor = tc2.bg),
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            AppText(
+                                "Don't ask again",
+                                color = tc2.td,
+                                fontSize = 11.sp,
+                                modifier = Modifier.clickable { dontAskAgain = !dontAskAgain },
+                            )
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton(
+                                    "Only selected classes",
+                                    active = true,
+                                ) { state.resolveTagPrefixConflict(showWholePackage = false, dontAskAgain = dontAskAgain) }
+                                DialogActionButton(
+                                    "Whole package",
+                                    active = false,
+                                ) { state.resolveTagPrefixConflict(showWholePackage = true, dontAskAgain = dontAskAgain) }
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                DialogActionButton("Cancel", active = false) { state.cancelTagPrefixConflict() }
+                            }
                         }
                     }
                 }

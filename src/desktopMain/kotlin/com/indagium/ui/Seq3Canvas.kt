@@ -1735,7 +1735,7 @@ private fun Seq3CanvasContextMenu(
                     icon = Icons.Outlined.Layers,
                     label = "Group as",
                     submenu = Seq3FragmentKind.entries.map { kind ->
-                        kind.name.lowercase() to { seq3GroupMessages(state, session, view, selectedIds, kind) }
+                        CtxSubmenuOption(kind.name.lowercase()) { seq3GroupMessages(state, session, view, selectedIds, kind) }
                     },
                     preferLeft = submenuOpensLeft,
                     onClick = { seq3GroupMessages(state, session, view, selectedIds, Seq3FragmentKind.LOOP) },

@@ -31,6 +31,15 @@ private const val ALPHA_SEARCH_CURRENT_DARK = 0.55f
 private const val ALPHA_WARN_BG_LIGHT = 0.16f
 private const val ALPHA_WARN_BG_DARK = 0.22f
 
+// Timestamp/pid-tid CELL background wash behind a thread-scoped ("async") sequence row
+// (LogViewer.kt's LogRow, applied to item.scopedSeqColor — see that field's own doc). Reuses
+// ALPHA_WARN_BG_LIGHT/DARK's exact split for the same reason: a translucent wash needs more
+// opacity to register on a dark panel and would read as a near-solid block at the same alpha on a
+// light one. Kept as its own named pair (not a literal reuse of ALPHA_WARN_BG_*) since the two
+// washes are semantically unrelated even though they landed on the same tuned values.
+private const val ALPHA_SEQ_CELL_BG_LIGHT = 0.16f
+private const val ALPHA_SEQ_CELL_BG_DARK = 0.22f
+
 data class ThemeColors(
     val bg: Color, val p: Color, val p2: Color, val br: Color,
     val tx: Color, val ts: Color, val td: Color,
@@ -49,6 +58,10 @@ data class ThemeColors(
     // like every other ThemeColors field: this never touches AutosaveCodec (verified — that codec
     // has no ThemeColors reference at all) or AutosaveGoldenV1Test.
     val warn: Color, val warnBg: Color, val ok: Color,
+    // See ALPHA_SEQ_CELL_BG_LIGHT/DARK's own doc — applied by LogRow to item.scopedSeqColor to
+    // produce the ts/pid-tid cell background wash. A Float, not a Color, since it's combined with a
+    // different colour per sequence (SEQ_COLORS), not one fixed per-theme hue.
+    val seqCellBgAlpha: Float,
 )
 
 // Relative luminance of a packed 0xAARRGGBB background — lets theme() pick light- vs dark-tuned
@@ -86,6 +99,7 @@ private fun theme(
         warn = Color(seq2),
         warnBg = Color(seq2).copy(alpha = if (light) ALPHA_WARN_BG_LIGHT else ALPHA_WARN_BG_DARK),
         ok = Color(seq1),
+        seqCellBgAlpha = if (light) ALPHA_SEQ_CELL_BG_LIGHT else ALPHA_SEQ_CELL_BG_DARK,
     )
 }
 

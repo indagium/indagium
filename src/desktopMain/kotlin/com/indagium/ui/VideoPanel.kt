@@ -82,7 +82,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
-import com.indagium.debug.AppLogger
 import com.indagium.model.LogTab
 import com.indagium.model.VideoAttachment
 import com.indagium.model.VideoSource
@@ -675,26 +674,6 @@ private fun VideoTransportBar(
     val seekReady = controller.seekReadiness == VideoSeekReadiness.READY
     val durationF = controller.durationMs.coerceAtLeast(1L).toFloat()
     val sliderValueMs = dragPositionMs ?: controller.positionMs
-    // Temporary diagnostic breadcrumb for the same reported Linux symptom the openGrabber
-    // breadcrumbs cover — those proved the controller's durationMs/seekReadiness gets set
-    // correctly within milliseconds, every time, so the previous fix (which only removed a
-    // redundant AppState.videoController re-resolve — never changed which controller instance
-    // gets returned, since getOrPut already returned the same instance either way) could not
-    // have been the actual fix. This logs identityHashCode alongside the values so a mismatch
-    // against openGrabber's controller — a different instance entirely — would be conclusive
-    // proof of a stale/orphaned controller reference, not just "the UI hasn't recomposed yet".
-    // SideEffect (not a plain call in the composable body) is the Compose-idiomatic way to log a
-    // value exactly once per successful composition, after this scope's reads have been recorded
-    // by the snapshot system — the same reads that determine whether a later state write actually
-    // triggers a recomposition of this scope at all.
-    SideEffect {
-        AppLogger.info(
-            "video",
-            "VideoTransportBar render: controller=${System.identityHashCode(controller)} " +
-                "durationMs=${controller.durationMs} seekReadiness=${controller.seekReadiness} " +
-                "positionMs=${controller.positionMs} error=${controller.error}",
-        )
-    }
     val sliderColors = SliderDefaults.colors(thumbColor = tc.ac, activeTrackColor = tc.ac, inactiveTrackColor = tc.br)
     val sliderInteractionSource = remember { MutableInteractionSource() }
     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {

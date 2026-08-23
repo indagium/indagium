@@ -171,7 +171,11 @@ private fun passesTagOrKeywordFilter(entry: LogEntry, filter: Filter, regexConte
         }
     }
 
-private fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
+// internal (not private): AppState's tag-prefix/specific-class conflict detector (Wave 2.2) needs
+// the exact same "does this tag fall under this prefix" rule passesTagOrKeywordFilter uses above,
+// so a prefix and a tag are never judged to conflict (or not) by two independently-maintained
+// definitions of "under".
+internal fun tagMatchesPrefix(tag: String, prefix: String): Boolean =
     tag == prefix || tag.startsWith("$prefix.")
 
 private fun matchesRule(
@@ -240,12 +244,27 @@ private class TabComputeCache(
     // an end pattern can swallow most of a 10M-line file, making these worth memoizing too.
     val seqOwnerBySwallowed: Map<Int, String>?,
     val seqChildBits: java.util.BitSet?,
+    // Task 4: crossing top-level sequence pairs on DIFFERENT threads, straight out of the
+    // crossing-resolution pass just below (never a second scan) — see cachedCrossingThreadHintsFor's
+    // own doc for why this rides along in the cache instead of being recomputed by FilterPanel.
+    val crossingThreadHints: List<CrossingThreadHint>,
     // The full result of the last compute, kept so a single stack-group toggle can splice member
     // rows in/out instead of re-materializing millions of LogItems (see spliceStackToggle).
     val items: List<LogItem>?,
     val expanded: Set<String>,
     val manualBlocks: List<ManualCollapseBlock>,
 )
+
+// Task 4: one crossing top-level-sequence pair (utils/Filter.kt's seqHostsSeqDirect resolution)
+// whose start entries sit on DIFFERENT threads — precisely the "two parallel runs interleaved"
+// case Wave 2.1 thread-scoping exists to separate; a pair on the SAME tid is left out entirely
+// (scoping both to that one shared tid wouldn't separate them — see the filter at its one call
+// site below). Carries each side's own defId + that SPECIFIC occurrence's own tid rather than a
+// gid: FilterPanel's "scope both" action mutates the underlying SequenceDefs directly, and a def
+// with multiple occurrences in the log needs to know WHICH occurrence's tid crossed here — the
+// def's OWN first match overall (what Task 3's "turn scoping on" resolves) is not necessarily the
+// same run that's crossing in THIS pair.
+data class CrossingThreadHint(val hostDefId: String, val hostTid: Int, val guestDefId: String, val guestTid: Int)
 
 private val computeCacheByTab = java.util.concurrent.ConcurrentHashMap<String, TabComputeCache>()
 
@@ -282,6 +301,20 @@ fun cachedVisibleEntriesFor(tab: LogTab, applyFilter: Boolean): List<LogEntry>? 
             it.stackGroupsRef === tab.analysis.stackTraceGroups &&
             it.filter == tab.filter
     }?.visible
+
+// Task 4: read-only peek at the crossing-different-thread sequence pairs found by this tab's last
+// computeItems(tab, applyFilter) call — see CrossingThreadHint's own doc for the field shape and
+// TabComputeCache's doc for why this rides along in the SAME cache entry instead of FilterPanel
+// re-deriving it (which would mean re-running SeqComputer's whole scan just to answer "should I
+// show a hint?"). Same contract as cachedSeqGroupsFor/cachedVisibleEntriesFor: null means "no
+// cheap answer available right now" (cache cold/stale) — a caller must treat that as "don't show a
+// hint yet," never as "no crossings exist." Pure read, same three guarantees as its siblings.
+fun cachedCrossingThreadHintsFor(tab: LogTab, applyFilter: Boolean): List<CrossingThreadHint>? =
+    computeCacheByTab["${tab.id}#$applyFilter"]?.takeIf {
+        it.logData === tab.logData &&
+            it.stackGroupsRef === tab.analysis.stackTraceGroups &&
+            it.filter == tab.filter
+    }?.crossingThreadHints
 
 // Fast path for the single most common expand/collapse: toggling one stack-trace ("crash")
 // block. Its rendered footprint is strictly local — the header flips its `expanded` flag and the
@@ -526,11 +559,24 @@ internal const val CANCELLATION_CHECK_INTERVAL = 4096
 fun computeItems(tab: LogTab, applyFilter: Boolean, cancellationCheck: CancellationCheck = NoCancellationCheck): List<LogItem> =
     computeItems(tab, applyFilter, cancellationCheck, RegexEvaluationContext())
 
+// storeInCache defaults true for every existing caller of this overload except the probing ones
+// below (LogViewer.kt's expansionAndIndexForEntry, AppState.kt's visibleExpandableGroupIds /
+// scheduleSearchRecompute), which pass a HYPOTHETICAL tab.copy(expanded = ...) — not the tab's
+// actually-rendered fold state — purely to test "does entryId become visible if I open this
+// group?" or to search over a fully-expanded copy. The cache is keyed "$tabId#$applyFilter" only
+// (deliberately NOT including `expanded` — see the cacheKey doc below), so writing a probe's
+// result there used to clobber whatever the real render path had cached for tab.expanded, making
+// its `prior.expanded` disagree with the next real toggle's tab.expanded by more than the one gid
+// spliceStackToggle requires, silently falling back to a full recompute on almost every toggle
+// after a probe ran. Probe callers pass storeInCache = false instead: they still READ a warm cache
+// (harmless, and lets them reuse the splice fast path too) but never WRITE their speculative result
+// into it.
 internal fun computeItems(
     tab: LogTab,
     applyFilter: Boolean,
     regexContext: RegexEvaluationContext,
-): List<LogItem> = computeItems(tab, applyFilter, NoCancellationCheck, regexContext)
+    storeInCache: Boolean = true,
+): List<LogItem> = computeItems(tab, applyFilter, NoCancellationCheck, regexContext, storeInCache)
 
 @Suppress("CyclomaticComplexMethod", "LongMethod")
 internal fun computeItems(
@@ -538,8 +584,14 @@ internal fun computeItems(
     applyFilter: Boolean,
     cancellationCheck: CancellationCheck,
     regexContext: RegexEvaluationContext,
+    storeInCache: Boolean = true,
 ): List<LogItem> {
     val sequences = tab.filter.sequences
+    // Deliberately NOT keyed on tab.expanded — see spliceStackToggle just above, whose entire
+    // point is finding THIS SAME cache entry across an expanded-set change so a single group
+    // toggle can splice member rows in/out instead of re-running the whole computation. That
+    // sharing is also exactly why storeInCache exists: a probing caller must not overwrite this
+    // entry with a result built from a hypothetical expanded set (see the doc above).
     val cacheKey = "${tab.id}#$applyFilter"
     val prior = computeCacheByTab[cacheKey]?.takeIf {
         it.logData === tab.logData &&
@@ -551,8 +603,15 @@ internal fun computeItems(
     var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
     var fullSeqOwner: Map<Int, String>? = prior?.seqOwnerBySwallowed
     var fullSeqChildBits: java.util.BitSet? = prior?.seqChildBits
+    // Task 4: NOT memoized the way fullSeqGroups etc. are — recomputed fresh below whenever the
+    // main (non-splice, non-early-return) path runs, since it's cheap (bounded by sequence-group
+    // COUNT, not file size — see the crossing-resolution block's own doc). Defaults to prior's
+    // value purely so the splice-toggle fast path (just below) carries it forward unchanged,
+    // matching how that path leaves every OTHER seq-derived field untouched too.
+    var crossingThreadHints: List<CrossingThreadHint> = prior?.crossingThreadHints ?: emptyList()
 
     fun storeCache(items: List<LogItem>) {
+        if (!storeInCache) return
         if (regexContext.hasTimedOut) {
             computeCacheByTab.remove(cacheKey)
             return
@@ -566,6 +625,7 @@ internal fun computeItems(
             filteredStackGroups = fullFilteredStackGroups,
             seqOwnerBySwallowed = fullSeqOwner,
             seqChildBits = fullSeqChildBits,
+            crossingThreadHints = crossingThreadHints,
             items = items,
             expanded = tab.expanded,
             manualBlocks = tab.manualBlocks,
@@ -676,6 +736,75 @@ internal fun computeItems(
 
     val topLevelManualCandidates = selectTopLevelManualRanges(data.size, allManualRanges)
 
+    // ── Resolve top-level sequence-vs-sequence hosting (crossing sequences) ──────────────────────
+    // assignParents (SeqComputer.kt) only nests a candidate that's fully CONTAINED in another
+    // (child.endExclusive <= parent.endExclusive); two roots whose ranges partially overlap
+    // ("cross" — neither contains the other) both surface here as independent top-level SeqGroups.
+    // Left alone they'd both land in topChildren with overlapping [start, end) ranges, which is
+    // exactly what used to make renderRange silently drop every row from the swallowed one's start
+    // to its own end.
+    //
+    // A CHAIN (A crosses B crosses C, three parallel threads each recording a sequence — the
+    // originally reported scenario), not a flat fan-out: each root hosts at most its own single
+    // NEXT unclaimed crossing partner (`break` after attaching one), and a root already claimed as
+    // a guest is still walked as a potential HOST on its own turn (no "already hosted, skip" guard
+    // on `a`) — that's what lets B both be nested under A *and* itself host C. This is provably
+    // exhaustive for top-level roots: if two roots B and D both cross the same A, both ranges must
+    // contain the point just before A's end, so B and D necessarily cross each other too (neither
+    // can contain the other — both are roots) — top-level crossings among non-containing roots are
+    // therefore always resolvable as one linear, start-ordered chain, never a "fork." An earlier
+    // flat version (all hosted directly under the first starter) tried to make this cheaper by
+    // folding the whole chain under one host, but that stranded the tail of a chain three or more
+    // deep: a collapsed middle host's swallow walk only has as much room as ITS OWN parent's
+    // recursion `hi`, and a flat fan-out gives no single level enough room to reach a
+    // grandchild's territory. Chaining sidesteps that entirely — see seqEffectiveEnd (recursive,
+    // just below) and the `hi` passed to a SeqC's own recursion in renderRange (now
+    // seqEffectiveEnd, not endExclusive) for the other half of the fix.
+    //
+    // Does not touch either side's own reported header count (see the "never changes either side's
+    // own count" note on the sequence-vs-manual resolution just below) — a collapsed host still
+    // only *hides* its own declared children (which may, incidentally, include a hosted guest's own
+    // header — see the doc on renderRange's SeqC branch); a hosted guest's tail beyond ALL its
+    // ancestors' declared ends has no header left to hide under, so it falls through and renders as
+    // plain rows instead (see the renderRange fallback fix).
+    val seqHostsSeqDirect = HashMap<String, MutableList<SeqGroup>>()
+    val seqHostedBySeqGid = HashSet<String>()
+    run {
+        val roots = seqGroups.sortedBy { rootIdxOf(it.rid) }
+        // Task 4: collected in the SAME pass that resolves crossing hosting above — no second
+        // walk over the sequence groups, let alone a second scan of the log. `a`/`b` are exactly
+        // the two SeqGroups just found to cross; their own root entries (a.rid/b.rid) are each
+        // that occurrence's OWN start line, so tab.rmap gives the exact tid THIS crossing pair
+        // sits on — not just "some" match of either def elsewhere in the file (that's Task 3's
+        // resolveSequenceStartTid, a different question). A pair whose starts share one tid is
+        // filtered out here, not left for FilterPanel to filter: scoping both to the same shared
+        // tid wouldn't separate them (see CrossingThreadHint's own doc).
+        val hints = ArrayList<CrossingThreadHint>()
+        for (i in roots.indices) {
+            val a = roots[i]
+            for (j in i + 1 until roots.size) {
+                val b = roots[j]
+                if (b.gid in seqHostedBySeqGid) continue // already claimed earlier in the chain
+                val b0 = rootIdxOf(b.rid)
+                // Sorted by start: once a root starts at/after `a`'s own declared end, nothing
+                // further can cross `a` either (its own end, not the chain's overall effective
+                // end — each host only ever looks for a partner crossing ITS OWN span; a partner
+                // crossing further down the chain is `b`'s problem to find on `b`'s own turn).
+                if (b0 >= a.endExclusive) break
+                if (b.endExclusive <= a.endExclusive) continue // contained (shouldn't happen among roots; defensive)
+                seqHostsSeqDirect.getOrPut(a.gid) { mutableListOf() } += b
+                seqHostedBySeqGid += b.gid
+                val hostTid = tab.rmap[a.rid]?.tid
+                val guestTid = tab.rmap[b.rid]?.tid
+                if (hostTid != null && guestTid != null && hostTid != guestTid) {
+                    hints += CrossingThreadHint(a.defId, hostTid, b.defId, guestTid)
+                }
+                break // exactly one direct guest per host — see the class doc above for why that's exhaustive
+            }
+        }
+        crossingThreadHints = hints
+    }
+
     // ── Resolve sequence-vs-manual-block hosting ──────────────────────────────────────────────
     // Top-level SeqGroups never contain one another (SeqComputer only exposes roots at this
     // level), and topLevelManualCandidates never overlap each other (by construction above) — so
@@ -697,6 +826,10 @@ internal fun computeItems(
         val m0 = m.range.first
         val m1 = m.range.last + 1
         for (sg in seqGroups) {
+            // Already hosted by another crossing top-level sequence above — that host now owns
+            // where it renders; leave it alone rather than layering a second, conflicting hosting
+            // resolution on top (which would render it twice, once under each host).
+            if (sg.gid in seqHostedBySeqGid) continue
             val s0 = rootIdxOf(sg.rid)
             val s1 = sg.endExclusive
             if (s1 <= m0 || m1 <= s0) continue
@@ -727,19 +860,40 @@ internal fun computeItems(
     }
 
     val topLevelManual = topLevelManualCandidates.filterNot { it.block.id in manualHostedGid }
-    val topLevelSeqGroups = seqGroups.filterNot { it.gid in seqHostedByManualGid }
+    val topLevelSeqGroups = seqGroups.filterNot { it.gid in seqHostedByManualGid || it.gid in seqHostedBySeqGid }
 
+    // Recursive: a hosted guest can itself host a further guest (the chain resolved above), so
+    // this must walk all the way down the chain, not just one hop — `seqEffectiveEnd(it)` on the
+    // direct guest, not `it.endExclusive`. seqHostedBySeqGid marks every guest at most once, so
+    // this DAG is a forest of simple chains and always terminates.
     fun seqEffectiveEnd(sg: SeqGroup): Int =
-        maxOf(sg.endExclusive, seqHostsManualDirect[sg.gid]?.maxOfOrNull { it.range.last + 1 } ?: 0)
+        maxOf(
+            sg.endExclusive,
+            seqHostsManualDirect[sg.gid]?.maxOfOrNull { it.range.last + 1 } ?: 0,
+            seqHostsSeqDirect[sg.gid]?.maxOfOrNull { seqEffectiveEnd(it) } ?: 0,
+        )
 
     fun manualEffectiveEnd(m: ManualRange): Int =
         maxOf(m.range.last + 1, manualHostsSeq[m.block.id]?.maxOfOrNull { it.endExclusive } ?: 0)
 
+    // Bound up to which an index still "inside" the currently-open (childPtr) child's span should
+    // be silently swallowed (hidden by its collapse) rather than falling through to a plain Row.
+    // For SeqC/NestedC this is just their own `.end` — never stretched by hosting a crossing
+    // partner (see ChildRef.SeqC/NestedC), so no distinction is needed there. For ManualC it must
+    // be the block's own DECLARED end, never the stretched `.end` used only for the outer sibling
+    // walk (childPtr-advance, just below): an EXPANDED ManualC always jumps `idx` straight past its
+    // full effective extent itself (see the ManualC branch), so this helper is only ever consulted
+    // for one while COLLAPSED — and a collapsed header hides only its OWN declared content, never a
+    // hosted guest's extra tail past it (that tail has no header of its own left to hide under, so
+    // it must fall through and render — see the ManualC branch's collapsed case for why).
+    fun swallowBoundFor(c: ChildRef): Int = if (c is ChildRef.ManualC) c.declaredEnd else c.end
+
     // ── Unified recursive renderer ────────────────────────────────────────────────────────────
-    // Walks index range [lo, hi) into `data`, rendering `children` (sorted by start, non-
-    // overlapping at this level) wherever their start position falls, and plain/stack-header rows
-    // everywhere else. `hi` is a soft bound: if an expanded child's own true end extends past it
-    // (the crossing case resolved above), that child is still rendered in full via recursion and
+    // Walks index range [lo, hi) into `data`, rendering `children` (sorted by start; crossing
+    // siblings are already folded into one another by the hosting resolution above, so at any
+    // given level they don't overlap) wherever their start position falls, and plain/stack-header
+    // rows everywhere else. `hi` is a soft bound: if an expanded child's own true end extends past
+    // it (the crossing case resolved above), that child is still rendered in full via recursion and
     // the cursor simply jumps to its true end, which is >= hi — the `while (idx < hi)` loop then
     // exits on its own next check, no special-casing needed.
     //
@@ -749,7 +903,29 @@ internal fun computeItems(
     // declared end — manual blocks are a deliberate, harder collapse than sequences and already
     // fully hid their interior (including any escaped stack trace within it) before this change;
     // preserved as-is rather than changed as a side effect of this fix.
-    fun renderRange(lo: Int, hi: Int, indent: Int, ambientColor: Color?, children: List<ChildRef>): List<LogItem> {
+    // scopeTid/foreignIndent/foreignColor describe the single thread-scoped ancestor whose
+    // EXPANDED interior this particular call is directly walking (set only on the recursive call
+    // made just below for that ancestor's own content — never propagated further down through a
+    // nested child's own recursion, which instead computes its own scopeTid from ITS OWN def and
+    // uses THIS level's indent/ambientColor as its own foreign fallback, one level at a time).
+    // SeqComputer's childIds already excludes a foreign-tid entry from the group's reported plain
+    // children for exactly the same reason this exists: an entry whose tid doesn't match scopeTid
+    // fell inside the index span by coincidence, not because it's part of the run, so it must
+    // render as a plain row at the ENCLOSING level's indent/color rather than nested and tinted.
+    // Threading this down as call parameters (rather than, say, pre-filtering the range before
+    // recursing) keeps the single index-walk loop below as the one place that decides where each
+    // row lands, so it stays trivially compatible with the crossing-chain/manual-hosting resolution
+    // already layered on top of it.
+    fun renderRange(
+        lo: Int,
+        hi: Int,
+        indent: Int,
+        ambientColor: Color?,
+        children: List<ChildRef>,
+        scopeTid: Int? = null,
+        foreignIndent: Int = indent,
+        foreignColor: Color? = ambientColor,
+    ): List<LogItem> {
         val items = ArrayList<LogItem>(hi - lo)
         var childPtr = 0
         var idx = lo
@@ -772,15 +948,34 @@ internal fun computeItems(
                     val exp = sg.gid in tab.expanded
                     val totalCh = sg.plain.size + sg.nested.sumOf { ng -> 1 + ng.ch.size }
                     val color = defMap[sg.defId]?.color ?: SEQ_COLORS.first()
-                    items += LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color)
+                    items += LogItem.SeqHeader(entry, sg.gid, indent, exp, totalCh, color, defMap[sg.defId]?.scopeTid)
                     if (exp) {
                         val kids = (
                             sg.nested.map { ng -> ChildRef.NestedC(ng, rootIdxOf(ng.rid)) } +
                                 (seqHostsManualDirect[sg.gid].orEmpty()).map { m ->
                                     ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m))
+                                } +
+                                (seqHostsSeqDirect[sg.gid].orEmpty()).map { hosted ->
+                                    ChildRef.SeqC(hosted, rootIdxOf(hosted.rid))
                                 }
                         ).sortedBy { it.start }
-                        items += renderRange(idx + 1, sg.endExclusive, indent + 1, color, kids)
+                        // hi = seqEffectiveEnd(sg), NOT sg.endExclusive: when sg is itself a link
+                        // in a chain (hosts a guest which may host a further guest), a COLLAPSED
+                        // guest doesn't jump — it relies on this recursion's own idx walk (the
+                        // fallback swallow, bounded by swallowBoundFor) to keep going long enough
+                        // to reach whatever falls through past its own declared end. Capping hi at
+                        // sg's own declared end stranded that walk one level up from where a
+                        // three-or-more-deep chain's tail actually lands — the collapsed guest's
+                        // OWN swallow would exit into this recursion's `while (idx < hi)` check,
+                        // which used to fail immediately, silently dropping everything from there
+                        // to sg's true effective end with no row, no header, and no count. A fully
+                        // EXPANDED sg still jumps `idx` straight past hi on its own (see just
+                        // below), so widening hi here is a no-op for that case and only matters for
+                        // the collapsed one.
+                        items += renderRange(
+                            idx + 1, seqEffectiveEnd(sg), indent + 1, color, kids,
+                            scopeTid = defMap[sg.defId]?.scopeTid, foreignIndent = indent, foreignColor = ambientColor,
+                        )
                         idx = seqEffectiveEnd(sg)
                     } else {
                         idx += 1
@@ -791,12 +986,15 @@ internal fun computeItems(
                     val ng = child.ng
                     val exp = ng.gid in tab.expanded
                     val color = defMap[ng.defId]?.color ?: ambientColor ?: SEQ_COLORS.first()
-                    items += LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color)
+                    items += LogItem.SeqHeader(entry, ng.gid, indent, exp, ng.ch.size, color, defMap[ng.defId]?.scopeTid)
                     if (exp) {
                         val kids = nestedHostsManual[ng.gid].orEmpty()
                             .map { m -> ChildRef.ManualC(m, m.range.last + 1, m.range.last + 1) }
                             .sortedBy { it.start }
-                        items += renderRange(idx + 1, ng.endExclusive, indent + 1, color, kids)
+                        items += renderRange(
+                            idx + 1, ng.endExclusive, indent + 1, color, kids,
+                            scopeTid = defMap[ng.defId]?.scopeTid, foreignIndent = indent, foreignColor = ambientColor,
+                        )
                         idx = ng.endExclusive
                     } else {
                         idx += 1
@@ -821,8 +1019,21 @@ internal fun computeItems(
                         // already displays that entry.
                         val inner = renderRange(mr.range.first, mr.range.last + 1, indent + 1, block.color, kids)
                         items += inner.filterNot { it is LogItem.Row && it.entry.id == block.anchorId }
-                        idx = child.declaredEnd
+                        // Jump past the FULL effective extent, including a hosted crossing
+                        // sequence's tail beyond this block's own declared end — the soft-bound
+                        // recursion just above already rendered every row in it (renderRange's own
+                        // "hi is a soft bound" doc). Jumping only to declaredEnd here would leave
+                        // that tail's indices still inside this ManualC's [start, end) span, which
+                        // the swallow fallback below would then re-swallow — or, worse, re-render as
+                        // duplicate plain rows once the collapsed-vs-expanded distinction is added.
+                        idx = manualEffectiveEnd(mr)
                     } else {
+                        // Collapsed: hide only this block's OWN declared interior. A hosted crossing
+                        // sequence's extra tail beyond declaredEnd is NOT this block's content — it
+                        // belongs to the guest, whose own header sits inside the now-hidden declared
+                        // range and so can't show either; that tail falls through the swallow
+                        // fallback below (bounded by declaredEnd, not the stretched `.end`) and
+                        // renders as plain rows instead of silently vanishing.
                         idx = child.declaredEnd
                     }
                 }
@@ -847,14 +1058,47 @@ internal fun computeItems(
                     idx += 1
                 }
 
-                childPtr < children.size && idx >= children[childPtr].start && idx < children[childPtr].end -> {
-                    idx += 1 // covered by the current child's interior (collapsed, not yet reached its end)
+                childPtr < children.size && idx >= children[childPtr].start && idx < swallowBoundFor(children[childPtr]) -> {
+                    // Covered by the current child's own declared interior while COLLAPSED (an
+                    // EXPANDED child instead jumps `idx` straight past its range, so this branch is
+                    // only ever reached for a collapsed one — see the SeqC/NestedC/ManualC branches
+                    // above). A collapse hides only what the child actually owns: for a thread-scoped
+                    // SeqC/NestedC, an entry on a foreign tid was never part of its run (same
+                    // childIds exclusion SeqComputer applies to the group's reported count), so it
+                    // must still render here — at THIS level's own indent/color, i.e. exactly the
+                    // fallback a plain row at this level already gets in the `else` branch below.
+                    val c = children[childPtr]
+                    val cScopeTid = when (c) {
+                        is ChildRef.SeqC -> defMap[c.sg.defId]?.scopeTid
+                        is ChildRef.NestedC -> defMap[c.ng.defId]?.scopeTid
+                        is ChildRef.ManualC -> null // manual blocks are never thread-scoped
+                    }
+                    if (cScopeTid != null && entry.tid != cScopeTid) {
+                        items += LogItem.Row(entry, indent, ambientColor)
+                    }
+                    idx += 1
                 }
 
                 stackClaimedIds.get(entry.id) -> idx += 1 // stack-trace member row, shown only under its header
 
                 else -> {
-                    items += LogItem.Row(entry, indent, ambientColor)
+                    // scopeTid/foreignIndent/foreignColor (only non-null/non-default when this call
+                    // is directly walking a thread-scoped ancestor's EXPANDED interior — see the doc
+                    // on renderRange's parameters) route a foreign-tid entry to the ENCLOSING level
+                    // instead of nesting/tinting it as part of the run it doesn't belong to.
+                    if (scopeTid != null && entry.tid != scopeTid) {
+                        items += LogItem.Row(entry, foreignIndent, foreignColor)
+                    } else {
+                        // scopeTid != null here means entry.tid == scopeTid (the branch above
+                        // already peeled off the mismatch case) — a genuine member of the
+                        // thread-scoped sequence whose expanded interior this recursion is
+                        // directly walking, at exactly the color that member's own row already
+                        // renders with. Carried separately so LogRow can tint ts/pid/tid too,
+                        // without confusing it for an ordinary/unscoped sequence's member (see
+                        // LogItem.Row.scopedSeqColor's own doc).
+                        val scopedColor = if (scopeTid != null) ambientColor else null
+                        items += LogItem.Row(entry, indent, ambientColor, scopedColor)
+                    }
                     idx += 1
                 }
             }
