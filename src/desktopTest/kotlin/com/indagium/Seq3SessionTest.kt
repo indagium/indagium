@@ -7,6 +7,8 @@ import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.parseSeq3Note
+import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
@@ -220,6 +222,90 @@ class Seq3SessionTest {
         assertEquals(listOf(first), state.seq3Sessions.sessions.map { it.id })
         assertEquals(first, state.seq3Sessions.activeSessionId)
         assertEquals(ActiveSurface.Diagram3(first), state.activeSurface)
+    }
+
+    // ── From notes (Diagram library's "+ diagram" → "From notes") ──────────────────────────────
+
+    private fun taggedEntries(): List<LogEntry> = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "Alpha", "alpha does a"),
+        LogEntry(2, "10:00:00.100", LogLevel.I, "Beta", "beta does b"),
+    )
+
+    @Test
+    fun beginFromNotesOnATabWithNoUsableNotedLinesOpensNothing() {
+        // state()'s tab is built via mkTab, whose Annotations start with no blocks at all — nothing
+        // for seq3NotesSelection to find.
+        val state = state()
+
+        val id = state.seq3Sessions.beginFromNotes("log")
+
+        assertNull(id)
+        assertTrue(state.seq3Sessions.sessions.isEmpty())
+    }
+
+    @Test
+    fun beginFromNotesRangesOverExactlyTheNotedLinesAndAnchorsOneNotePerCuratedBlock() {
+        val tab = mkTab("notes-log", "sample.log", taggedEntries()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note(id = "n1", text = "investigate alpha"),
+                    AnnBlock.LogRef(id = "b1", logIds = listOf(1), caption = "alpha ref"),
+                    // A blank-captioned block with no preceding note still contributes its line to
+                    // the range, but must not add a second Seq3Note.
+                    AnnBlock.LogRef(id = "b2", logIds = listOf(2), caption = ""),
+                ),
+            ),
+        )
+        val state = stateFor(tab)
+
+        val id = state.seq3Sessions.beginFromNotes(tab.id)!!
+
+        assertEquals(
+            Seq3Range.Ids(1, 2, setOf(1, 2)),
+            state.seq3Sessions.sessions.single { it.id == id }.range,
+            "range must be exactly the noted lines, not the span between them",
+        )
+
+        awaitGenerated(state, id)
+        val document = state.seq3Sessions.sessions.single { it.id == id }.document
+
+        val note = document.notes.single()
+        assertEquals("investigate alpha\n\nalpha ref", note.text)
+        val anchoredMessage = document.messages.single { it.id == note.messageIds.single() }
+        assertTrue(anchoredMessage.occurrences.any { it.entryId == 1 }, "note must anchor to the message carrying b1's first (and only) log line")
+    }
+
+    @Test
+    fun editingASeededNoteThenRegeneratingKeepsTheEditAndDoesNotDuplicateIt() {
+        // Regression coverage for the bug where `publishGenerated` handed `applySeq3NoteSeeds` the
+        // freshly generated document (which never carries notes of its own — see that function's
+        // own doc) instead of carrying the session's already-seeded notes forward: the idempotent
+        // "user edits win" branch could never engage on the real Seq3Session call path, only in the
+        // pure-function unit tests. This drives the same scenario through Seq3Session itself.
+        val tab = mkTab("notes-log", "sample.log", taggedEntries()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note(id = "n1", text = "investigate alpha"),
+                    AnnBlock.LogRef(id = "b1", logIds = listOf(1), caption = "alpha ref"),
+                ),
+            ),
+        )
+        val state = stateFor(tab)
+        val id = state.seq3Sessions.beginFromNotes(tab.id)!!
+        awaitGenerated(state, id)
+        val seededNoteId = state.seq3Sessions.sessions.single { it.id == id }.document.notes.single().id
+
+        assertTrue(
+            state.seq3Sessions.applyCommand(id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetNoteText(seededNoteId, "the user's own rewrite"))),
+        )
+
+        state.seq3Sessions.requestGenerate(id)
+        awaitGenerated(state, id)
+
+        val document = state.seq3Sessions.sessions.single { it.id == id }.document
+        assertEquals(1, document.notes.size, "a regenerate must not duplicate the seeded note")
+        assertEquals(seededNoteId, document.notes.single().id)
+        assertEquals("the user's own rewrite", document.notes.single().text, "a canvas edit must survive a regenerate")
     }
 
     // ── Source-tab-close independence (SAAD §11.6 / SeqDiagramCoordinator.sourceTabClosed) ───────

@@ -333,6 +333,10 @@ internal fun CompareView(
                                     onNavigateDiagramLine = { entryId -> state.navigateToLogLine(leftTab.id, entryId) },
                                     diagramLibraryItems = state.seq3Sessions.libraryForTab(leftTab),
                                     onCreateDiagram = { state.seq3Sessions.begin(leftTab.id, leftTab.selected) },
+                                    onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(leftTab.id) },
+                                    // See FileView.kt's identical call site for why this is keyed,
+                                    // not recomputed on every recomposition.
+                                    notesDiagramSummary = remember(leftTab.annotations, leftTab.logData) { seq3NotesSelection(leftTab) },
                                     onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, leftTab.id) },
                                     onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
                                     width = state.annotationPanelWidth,

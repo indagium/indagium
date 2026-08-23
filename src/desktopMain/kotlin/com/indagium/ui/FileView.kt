@@ -317,6 +317,11 @@ internal fun FileView(
                         onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
                         diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
                         onCreateDiagram = { state.seq3Sessions.begin(tab.id, tab.selected) },
+                        onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
+                        // seq3NotesSelection is a cheap list walk, but keyed on the two inputs it
+                        // actually reads so it isn't rerun on every recomposition (e.g. a selection
+                        // drag or an unrelated panel resize) — see that function's own doc.
+                        notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
                         onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
                         onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
                         width = state.annotationPanelWidth,
