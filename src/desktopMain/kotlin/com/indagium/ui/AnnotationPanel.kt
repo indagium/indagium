@@ -438,6 +438,16 @@ fun AnnotationPanel(
     // it stays a UI leaf and the caller owns source-identity scoping and workspace transitions.
     diagramLibraryItems: List<DiagramLibraryItem> = emptyList(),
     onCreateDiagram: () -> Unit = {},
+    // "From notes" — the Diagram library's `+ diagram` menu's second option. Generates a v3
+    // diagram from exactly the log lines curated into this tab's Notes document instead of the
+    // current log-viewer selection; see Seq3Session.beginFromNotes and ui/Seq3NotesSelection.kt.
+    // Defaulted (with notesDiagramSummary below) so every existing call site and the test harness
+    // keep compiling — the file's existing convention for every other diagram-library param above.
+    onCreateDiagramFromNotes: () -> Unit = {},
+    // Precomputed by the caller (FileView/CompareView), not this panel — the panel stays a UI leaf
+    // that only renders counts, it never walks tab.annotations itself. Null reads the same as "no
+    // notes have been curated yet" for the popup's disabled-row/subtitle logic.
+    notesDiagramSummary: Seq3NotesSelection? = null,
     onOpenDiagramLibraryItem: (id: String) -> Unit = {},
     onDeleteDiagramLibraryItem: (id: String) -> Unit = {},
     width: Float,
@@ -913,6 +923,9 @@ fun AnnotationPanel(
                     expanded = diagramLibraryExpanded,
                     onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
                     onCreate = onCreateDiagram,
+                    onCreateFromNotes = onCreateDiagramFromNotes,
+                    selectedLineCount = tab.selected.size,
+                    notesDiagramSummary = notesDiagramSummary,
                     onOpen = onOpenDiagramLibraryItem,
                     onRequestDelete = { pendingDiagramLibraryDeleteId = it },
                 )
@@ -1242,16 +1255,38 @@ private fun DiagramLibrarySection(
     expanded: Boolean,
     onToggle: () -> Unit,
     onCreate: () -> Unit,
+    onCreateFromNotes: () -> Unit,
+    // Read straight off `tab.selected` by the caller — this section doesn't own the log-viewer
+    // selection, it only reports its size in the popup's "From selection" subtitle.
+    selectedLineCount: Int,
+    notesDiagramSummary: Seq3NotesSelection?,
     onOpen: (String) -> Unit,
     onRequestDelete: (String) -> Unit,
 ) {
     val tc = tc()
+    // Local, not lifted to AppState like RecentNotesPopup's own open flag: nothing outside this
+    // section needs to know the create menu is open (no keyboard shortcut targets it the way
+    // KeyboardTargetKind.NoteRecentNotes does for RecentNotesPopup), so there's nothing to gain
+    // from threading it through AnnotationPanel's params and every call site.
+    var createMenuOpen by remember { mutableStateOf(false) }
     SectionHeader(
         "Diagram library",
         trailing = {
             AppText(items.size.toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             Spacer(Modifier.width(8.dp))
-            LabelIconButton("+ diagram", fontSize = 10.sp, onClick = onCreate)
+            Box {
+                LabelIconButton("+ diagram", fontSize = 10.sp, onClick = { createMenuOpen = true })
+                if (createMenuOpen) {
+                    CreateDiagramPopup(
+                        selectedLineCount = selectedLineCount,
+                        notesDiagramSummary = notesDiagramSummary,
+                        onCreateFromSelection = { createMenuOpen = false; onCreate() },
+                        onCreateFromNotes = { createMenuOpen = false; onCreateFromNotes() },
+                        onDismiss = { createMenuOpen = false },
+                        tc = tc,
+                    )
+                }
+            }
         },
         expanded = expanded,
         onToggle = onToggle,
@@ -1332,6 +1367,108 @@ private fun DiagramLibrarySection(
                         .width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
+            }
+        }
+    }
+}
+
+/**
+ * The Diagram library's `+ diagram` two-option menu — "From selection" (the existing behaviour,
+ * unchanged) and "From notes" (generates from exactly the log lines curated into this tab's Notes
+ * document, see `Seq3Session.beginFromNotes`). Modeled directly on [RecentNotesPopup] below (same
+ * `Popup` alignment/offset/`PopupProperties(focusable = true)`, bordered `Box`, hover rows, Esc/
+ * Enter/arrow-key roving) rather than a split button: the trailing slot this renders into already
+ * sits inside [SectionHeader]'s own `HoverBox(onClick = onToggle)`, so a single click target that
+ * consumes its own tap (as [LabelIconButton]'s `clickable` already does) is the least fragile way
+ * to avoid also toggling the section underneath it.
+ *
+ * Each row's grey subtitle is how the user is told, BEFORE creating, what a click will produce —
+ * in particular, the notes row's `"· K cross-file skipped"` suffix is the only place a compare-
+ * mode cross-file annotation's exclusion is surfaced at all (see `Seq3NotesSelection.
+ * skippedCrossFileCount`'s own doc). The notes row disables itself (greyed, non-clickable, and
+ * excluded from arrow-key roving via [RovingItem.enabled]) when there is nothing to draw.
+ */
+@Composable
+private fun CreateDiagramPopup(
+    selectedLineCount: Int,
+    notesDiagramSummary: Seq3NotesSelection?,
+    onCreateFromSelection: () -> Unit,
+    onCreateFromNotes: () -> Unit,
+    onDismiss: () -> Unit,
+    tc: ThemeColors,
+) {
+    val density = LocalDensity.current.density
+    // Null reads the same as "nothing curated yet" (the caller computes this off tab.annotations
+    // and may not have run it before the first composition) — never crashes into a stale-looking
+    // enabled row with no data behind it.
+    val notesEntryCount = notesDiagramSummary?.entryIds?.size ?: 0
+    val notesEnabled = notesEntryCount > 0
+    val notesSubtitle = if (!notesEnabled) {
+        "no log lines in notes"
+    } else {
+        buildString {
+            append("$notesEntryCount lines from ${notesDiagramSummary!!.usedBlockCount} note blocks")
+            if (notesDiagramSummary.skippedCrossFileCount > 0) {
+                append(" · ${notesDiagramSummary.skippedCrossFileCount} cross-file skipped")
+            }
+        }
+    }
+    val selectionSubtitle = if (selectedLineCount > 0) "$selectedLineCount selected lines" else "whole visible view"
+    val rovingRows = listOf(RovingItem("selection", enabled = true), RovingItem("notes", enabled = notesEnabled))
+    Popup(
+        alignment = Alignment.TopEnd,
+        offset = IntOffset(0, (34 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
+    ) {
+        val popupFr = remember { FocusRequester() }
+        var selectedIdx by remember { mutableStateOf(0) }
+        LaunchedEffect(Unit) { runCatching { popupFr.requestFocus() } }
+        Box(
+            Modifier.width(260.dp)
+                .background(tc.p, RoundedCornerShape(7.dp))
+                .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                .focusRequester(popupFr)
+                .focusable()
+                .onPreviewKeyEvent { ev ->
+                    if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    when (ev.key) {
+                        Key.DirectionDown -> { selectedIdx = rovingMove(rovingRows, selectedIdx, +1, wrap = true); true }
+                        Key.DirectionUp -> { selectedIdx = rovingMove(rovingRows, selectedIdx, -1, wrap = true); true }
+                        Key.Enter, Key.NumPadEnter -> {
+                            when (rovingRows.getOrNull(selectedIdx)?.id) {
+                                "selection" -> onCreateFromSelection()
+                                "notes" -> if (notesEnabled) onCreateFromNotes()
+                            }
+                            true
+                        }
+                        Key.Escape -> { onDismiss(); true }
+                        else -> false
+                    }
+                },
+        ) {
+            Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth(),
+                    forceHover = selectedIdx == 0,
+                    onClick = onCreateFromSelection,
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        AppText("From selection", color = tc.tx, fontSize = 11.sp)
+                        AppText(selectionSubtitle, color = tc.td, fontSize = 9.sp)
+                    }
+                }
+                Divider()
+                HoverBox(
+                    modifier = Modifier.fillMaxWidth(),
+                    forceHover = selectedIdx == 1,
+                    onClick = if (notesEnabled) onCreateFromNotes else null,
+                ) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        AppText("From notes", color = if (notesEnabled) tc.tx else tc.td, fontSize = 11.sp)
+                        AppText(notesSubtitle, color = tc.td, fontSize = 9.sp)
+                    }
+                }
             }
         }
     }

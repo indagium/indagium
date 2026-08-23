@@ -14,11 +14,13 @@ import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3GenerateOptions
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3NoteSeed
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
 import com.indagium.diagram3.Seq3UndoEntry
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
+import com.indagium.diagram3.applySeq3NoteSeeds
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
 import com.indagium.diagram3.matchOneMessage
@@ -130,6 +132,22 @@ data class Seq3WorkspaceSession(
     /** Dialect used by the explicit note action. Changing it never mutates the document or writes
      *  an annotation by itself. */
     val dialect: Seq3Dialect = Seq3Dialect.MERMAID,
+    /** Notes-panel prose to re-anchor onto this session's document every time [Seq3Session.
+     *  publishGenerated] runs — set once by [Seq3Session.beginFromNotes], empty for every other
+     *  session (an ordinary [Seq3Session.begin] or [Seq3Session.beginEdit]). Two production paths
+     *  reach [publishGenerated] with a non-empty [noteSeeds]: the initial generate
+     *  [Seq3Session.beginFromNotes] itself kicks off, and a later range-change regenerate
+     *  ([Seq3Session.updateRangeAndRegenerate]) on that same session. The workspace's own
+     *  "Regenerate" button ([Seq3Session.requestRegenReview]/[Seq3Session.applyRegenReview]) is a
+     *  DIFFERENT path — it never calls [publishGenerated] — so it never reads [noteSeeds] at all;
+     *  these notes simply ride along on [Seq3WorkspaceSession.document] itself there, the same way
+     *  any other note or fragment survives that reviewed-diff regeneration. See
+     *  [com.indagium.diagram3.applySeq3NoteSeeds]'s own doc for the anchoring/idempotency rules.
+     *  Deliberately runtime-only (never encoded by [com.indagium.diagram3.Seq3Codec], never part of
+     *  [Seq3WorkspaceSession.document] itself): a session restored after a restart (via
+     *  [Seq3Session.openLibraryItem]) keeps its notes in the saved document but loses the ability to
+     *  re-anchor them to a fresh generate — exactly like any hand-added note today. */
+    val noteSeeds: List<Seq3NoteSeed> = emptyList(),
 )
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
@@ -239,14 +257,39 @@ class Seq3Session(
      */
     fun begin(tabId: String, selectedIds: Set<Int> = emptySet()): String? {
         val tab = appState.tab(tabId) ?: return null
-        val range = rangeFor(tab, selectedIds)
+        return begin(tab, rangeFor(tab, selectedIds), emptyList())
+    }
+
+    /**
+     * Opens a new workspace over exactly the log lines curated into [tabId]'s Notes document —
+     * the Diagram library's "From notes" action ([AnnotationPanel]'s `+ diagram` menu). Range is
+     * the EXACT noted lines ([Seq3Range.Ids.selectedIds]), never the span between them: a curated
+     * set can legitimately skip long stretches the user never annotated, and drawing those in would
+     * defeat the point of generating from curation instead of a fresh selection. Each block's prose
+     * rides along as a [Seq3WorkspaceSession.noteSeeds] entry, applied to the generated document by
+     * [publishGenerated]. Returns null when [tabId] isn't live tab, or when [seq3NotesSelection]
+     * finds no usable noted lines at all (nothing to draw) — the panel is expected to have already
+     * disabled the menu row in that case, but this stays the authoritative guard.
+     */
+    fun beginFromNotes(tabId: String): String? {
+        val tab = appState.tab(tabId) ?: return null
+        val selection = seq3NotesSelection(tab)
+        if (selection.entryIds.isEmpty()) return null
+        val range = Seq3Range.Ids(selection.entryIds.min(), selection.entryIds.max(), selection.entryIds)
+        return begin(tab, range, selection.seeds)
+    }
+
+    // Shared body for [begin] and [beginFromNotes] — everything about opening a fresh workspace
+    // (title, library scoping, activeSurface, kicking off the first generate) is identical between
+    // the two; only the range and the notes-derived seeds differ.
+    private fun begin(tab: LogTab, range: Seq3Range, seeds: List<Seq3NoteSeed>): String {
         val id = "seq3-${UUID.randomUUID()}"
         // Unique against THIS exact log's own library entries (not the whole library) — two
         // different logs are free to each have their own "Untitled diagram".
         val title = defaultSeq3Title(libraryStore.forSource(sourceIdentity(tab)).map { it.title }.toSet())
         val session = Seq3WorkspaceSession(
             id = id,
-            sourceTabId = tabId,
+            sourceTabId = tab.id,
             // A new document starts with no theme override (null = follow the app theme); the
             // theme is chosen per diagram from the workspace title bar's theme picker. There is
             // no Settings-level default for this — an existing document opened by
@@ -258,6 +301,7 @@ class Seq3Session(
             ),
             range = range,
             generateOptions = Seq3GenerateOptions(sourceFile = File(tab.filename).name),
+            noteSeeds = seeds,
         )
         sessions = sessions + session
         activeSessionId = id
@@ -443,8 +487,23 @@ class Seq3Session(
         if (generations[id]?.get() != generation) return
         replace(id) { current ->
             // A freshly generated document's title is empty (Seq3Generator never invents one); keep
-            // whatever the user already typed rather than blanking it on every regenerate.
-            val document = fresh.copy(title = current.document.title.ifBlank { fresh.title })
+            // whatever the user already typed rather than blanking it on every regenerate. Notes-
+            // panel seeds (beginFromNotes) are applied here, before the baseline snapshot below and
+            // everything downstream of `document` — the library encode, the live-linked note sync,
+            // a later confirm — so they all already see the seeded notes with no further change.
+            // `fresh` itself never carries notes (`generateSeq3` doesn't produce any), so hand
+            // `applySeq3NoteSeeds` the PREVIOUSLY seeded notes from `current.document` to update in
+            // place — this is what lets its idempotent branch (user edits on the canvas win) engage
+            // at all; without it every regenerate would look like the very first seed application.
+            // Deliberately scoped to only the notes this session's own `noteSeeds` minted (matched
+            // by id) — a hand-added canvas note is not resurrected here, matching every session's
+            // existing behaviour of a raw regenerate otherwise dropping fragments/notes wholesale.
+            // A no-op (returns `fresh` unchanged) for the overwhelming majority of sessions, whose
+            // `noteSeeds` is the empty-list default.
+            val seededNoteIds = current.noteSeeds.mapTo(HashSet()) { it.id }
+            val previouslySeededNotes = current.document.notes.filter { it.id in seededNoteIds }
+            val document = applySeq3NoteSeeds(fresh.copy(notes = previouslySeededNotes), current.noteSeeds)
+                .copy(title = current.document.title.ifBlank { fresh.title })
             generatedBaselines[id] = document
             val tab = current.sourceTabId?.let(appState::tab)
             val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
