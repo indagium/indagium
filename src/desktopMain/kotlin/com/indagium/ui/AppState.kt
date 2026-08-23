@@ -47,6 +47,7 @@ import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.ArchiveFormat
+import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -98,11 +99,13 @@ import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.pruneUnreferencedArchiveVideos
 import com.indagium.utils.recoverLogRefRows
 import com.indagium.utils.requiresSplitPrompt
+import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
 import com.indagium.utils.scanFolderForLogs
 import com.indagium.utils.splitFileToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
+import com.indagium.utils.tagMatchesPrefix
 import com.indagium.utils.truncateAtSeparator
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
@@ -661,7 +664,69 @@ internal const val AUTOSAVE_MAGIC_CURRENT = "indagium-cache-v1"
 private const val AUTOSAVE_MAGIC_LEGACY_OPENLOG2 = "openLog2-cache-v1"
 internal val AUTOSAVE_MAGIC_ACCEPTED = setOf(AUTOSAVE_MAGIC_CURRENT, AUTOSAVE_MAGIC_LEGACY_OPENLOG2)
 
-data class PendingSequenceStart(val text: String, val tag: String)
+// scopeTid: non-null when the user chose "Set async sequence start" instead of the plain
+// "Set sequence start" — carried through completeSequenceEndFromCtx into addSequence's own
+// scopeTid parameter (Wave 2.1). null keeps today's unscoped behavior.
+data class PendingSequenceStart(val text: String, val tag: String, val scopeTid: Int? = null)
+
+// ── Tag prefix / specific-class conflict (Wave 2.2) ────────────────────────────────────────────
+//
+// A package prefix admits everything under it ONLY while no specific child tag under it is
+// separately selected (Filter.kt's passesTagOrKeywordFilter — the `scopedActiveTags.isEmpty()`
+// condition, verified at Filter.kt:143-167). So adding `com.myapp.package` as a prefix while
+// `com.myapp.package.Example1` is already an active tag silently narrows the prefix to admit only
+// that one class — `Example2` under the same package stops passing with no visible warning. The
+// same narrowing happens in reverse: checking a specific class already covered by an active
+// prefix silently narrows that prefix too. [AppState.toggleTag]/[AppState.addPkgPrefix] detect
+// this before mutating and raise one of these instead of mutating blind.
+
+/** Raised by [AppState.toggleTag]/[AppState.addPkgPrefix] when the mutation about to happen would
+ *  conflict with an existing prefix/tag selection — see the section doc above. Resolved via
+ *  [AppState.resolveTagPrefixConflict] (either choice) or [AppState.cancelTagPrefixConflict]. */
+sealed interface PendingTagPrefixConflict {
+    val tabId: String
+
+    /** Raised by [AppState.addPkgPrefix]: [prefix] is the one about to be added. */
+    data class AddingPrefix(override val tabId: String, val prefix: String) : PendingTagPrefixConflict
+
+    /** Raised by [AppState.toggleTag]: [tag] is the one the user just checked; [prefixes] is
+     *  every currently-active prefix it falls under (almost always exactly one, but a filter can
+     *  technically hold more than one prefix along the same package's ancestry chain — e.g. both
+     *  "com.myapp" and "com.myapp.package" active at once). */
+    data class CheckingTag(override val tabId: String, val tag: String, val prefixes: Set<String>) : PendingTagPrefixConflict
+}
+
+/** True when adding [prefix] to a filter's pkgPrefixes would conflict with an already-selected
+ *  child tag under it. Pure and side-effect-free (no [AppState] dependency) so a test can assert
+ *  it directly, in both directions, without a composition.
+ *
+ *  No "already resolved, nothing would change" case to guard against here, unlike
+ *  [tagPrefixConflictsOnCheckingTag] below — [prefix] is by construction NOT yet in the filter's
+ *  pkgPrefixes (addPkgPrefix is only ever reached for a prefix the panel doesn't already show as
+ *  a chip; FilterPanel has no "re-add an existing prefix" control), so every call here evaluates
+ *  a genuinely fresh (prefix-absent, current-activeTags) pairing. There is no persistent "already
+ *  narrowed" state on this side the way an already-active prefix persists across repeated
+ *  [AppState.toggleTag] calls for different tags — each add-prefix conflict is a first encounter
+ *  for that exact prefix, so repeating the check here can't spam the way the checking-tag path
+ *  did. */
+internal fun tagPrefixConflictsOnAddingPrefix(prefix: String, activeTags: Set<String>): Boolean =
+    activeTags.any { tag -> tagMatchesPrefix(tag, prefix) }
+
+/** True when checking [tag] would conflict with an already-active package prefix — but ONLY for
+ *  a prefix that is currently in "admit everything under me" mode, i.e. [activeTags] contains no
+ *  OTHER tag already scoped under it. This is the exact `scopedActiveTags.isEmpty()` condition
+ *  Filter.kt's passesTagOrKeywordFilter uses to decide whether a prefix currently admits its
+ *  whole package (Filter.kt:156-158) — reusing it here means the detector and the filter
+ *  semantics can never drift apart.
+ *
+ *  Once a prefix has already been narrowed (by an earlier resolved conflict, or by any other
+ *  already-active tag under it), checking ANOTHER tag under that same prefix changes nothing
+ *  about its behavior — it only widens the narrowed set, which is not a surprise worth a modal.
+ *  Without this check, every tag click after the first under an active prefix would re-prompt,
+ *  turning "select five classes under this package" into five consecutive dialogs — exactly the
+ *  frequent workflow this feature must stay out of the way of. */
+internal fun tagPrefixConflictsOnCheckingTag(tag: String, pkgPrefixes: Set<String>, activeTags: Set<String>): Boolean =
+    pkgPrefixes.any { prefix -> tagMatchesPrefix(tag, prefix) && activeTags.none { at -> tagMatchesPrefix(at, prefix) } }
 
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
@@ -1699,6 +1764,11 @@ class AppState(
     val archiveCacheSizeBytes: Long get() = temporaryDataSizeBytes
     var pendingSequenceStart by mutableStateOf<PendingSequenceStart?>(null)
 
+    /** Wave 2.2: non-null while [toggleTag]/[addPkgPrefix] have detected a real conflict and are
+     *  waiting on the user's choice — see [PendingTagPrefixConflict]'s own doc for why this exists
+     *  and [resolveTagPrefixConflict]/[cancelTagPrefixConflict] for how it's resolved. */
+    var pendingTagPrefixConflict by mutableStateOf<PendingTagPrefixConflict?>(null)
+
     // See PendingNoteOverwrite's doc comment / autoExportAnnotations. Dismissing (Dialog's
     // onDismissRequest, or the explicit "Cancel" button) must only set this back to null — never a
     // permanent silent no-save decision — so the very next annotation edit re-prompts instead of
@@ -2257,6 +2327,26 @@ class AppState(
     }
 
     fun toggleTag(tabId: String, tag: String) {
+        // Conflict check only applies to the ADDING transition — unchecking a tag never narrows
+        // anything, it only ever widens (or is neutral), so there's nothing to warn about there.
+        val f = tab(tabId)?.filter
+        if (f != null && tag !in f.activeTags && !settings.suppressTagPrefixConflictPrompt &&
+            tagPrefixConflictsOnCheckingTag(tag, f.pkgPrefixes, f.activeTags)
+        ) {
+            // Only the prefixes still in "admit everything" mode (no other activeTag scoped
+            // under them yet) are a real conflict — an already-narrowed prefix's behavior doesn't
+            // change by adding one more tag to its already-narrowed set, so it's excluded here
+            // too, matching tagPrefixConflictsOnCheckingTag's own condition exactly.
+            val conflictingPrefixes = f.pkgPrefixes.filterTo(mutableSetOf()) { prefix ->
+                tagMatchesPrefix(tag, prefix) && f.activeTags.none { at -> tagMatchesPrefix(at, prefix) }
+            }
+            pendingTagPrefixConflict = PendingTagPrefixConflict.CheckingTag(tabId, tag, conflictingPrefixes)
+            return
+        }
+        applyToggleTag(tabId, tag)
+    }
+
+    private fun applyToggleTag(tabId: String, tag: String) {
         upFlt(tabId) { f ->
             val adding = tag !in f.activeTags
             f.copy(
@@ -2265,6 +2355,46 @@ class AppState(
             )
         }
         tagUsage = tagUsage + (tag to ((tagUsage[tag] ?: 0) + 1))
+    }
+
+    /** "Show only the selected classes" (today's narrowing behavior, unchanged) vs "Show the
+     *  whole package" (clears every activeTag under the conflicting prefix(es), so the prefix
+     *  admits the whole package again per Filter.kt's `scopedActiveTags.isEmpty()` rule) — see
+     *  [PendingTagPrefixConflict]'s own doc. [dontAskAgain] persists the choice to skip this
+     *  dialog on every future conflict, independent of which resolution the user picked here. */
+    fun resolveTagPrefixConflict(showWholePackage: Boolean, dontAskAgain: Boolean) {
+        val pending = pendingTagPrefixConflict
+        if (dontAskAgain) updateSettings { it.copy(suppressTagPrefixConflictPrompt = true) }
+        when (pending) {
+            is PendingTagPrefixConflict.AddingPrefix -> {
+                applyAddPkgPrefix(pending.tabId, pending.prefix)
+                if (showWholePackage) {
+                    upFlt(pending.tabId) { f ->
+                        f.copy(activeTags = f.activeTags.filterNot { tagMatchesPrefix(it, pending.prefix) }.toSet())
+                    }
+                }
+            }
+            is PendingTagPrefixConflict.CheckingTag -> {
+                if (showWholePackage) {
+                    // Deliberately does NOT call applyToggleTag — adding the just-checked tag
+                    // would put it right back under one of these prefixes, recreating the exact
+                    // conflict this resolves. "Whole package" means the click doesn't narrow at
+                    // all: every activeTag under any of the conflicting prefixes is cleared so
+                    // each prefix goes back to admitting everything beneath it.
+                    upFlt(pending.tabId) { f ->
+                        f.copy(activeTags = f.activeTags.filterNot { at -> pending.prefixes.any { pfx -> tagMatchesPrefix(at, pfx) } }.toSet())
+                    }
+                } else {
+                    applyToggleTag(pending.tabId, pending.tag)
+                }
+            }
+            null -> {}
+        }
+        pendingTagPrefixConflict = null
+    }
+
+    fun cancelTagPrefixConflict() {
+        pendingTagPrefixConflict = null
     }
 
     fun clearTags(tabId: String) = upFlt(tabId) { it.copy(activeTags = emptySet()) }
@@ -2319,10 +2449,18 @@ class AppState(
     fun toggleKwInTagRx(tabId: String) = upFlt(tabId) { it.copy(kwInTagRegex = !it.kwInTagRegex) }
 
     fun addPkgPrefix(tabId: String, v: String) {
-        if (v.isNotBlank()) upFlt(tabId) {
-            val prefix = v.trim()
-            it.copy(pkgPrefixes = it.pkgPrefixes + prefix, excludePkgPrefixes = it.excludePkgPrefixes - prefix)
+        if (v.isBlank()) return
+        val prefix = v.trim()
+        val f = tab(tabId)?.filter
+        if (f != null && !settings.suppressTagPrefixConflictPrompt && tagPrefixConflictsOnAddingPrefix(prefix, f.activeTags)) {
+            pendingTagPrefixConflict = PendingTagPrefixConflict.AddingPrefix(tabId, prefix)
+            return
         }
+        applyAddPkgPrefix(tabId, prefix)
+    }
+
+    private fun applyAddPkgPrefix(tabId: String, prefix: String) = upFlt(tabId) {
+        it.copy(pkgPrefixes = it.pkgPrefixes + prefix, excludePkgPrefixes = it.excludePkgPrefixes - prefix)
     }
 
     fun removePkgPrefix(tabId: String, v: String) = upFlt(tabId) { it.copy(pkgPrefixes = it.pkgPrefixes - v) }
@@ -2588,6 +2726,9 @@ class AppState(
         endText: String? = null,
         endIsRegex: Boolean = false,
         endTag: String? = null,
+        // Wave 2.1 "async" sequences — appended last so every existing positional call site
+        // (addSeqFromCtx, addSequenceVariant, tests) keeps compiling unchanged and stays unscoped.
+        scopeTid: Int? = null,
     ) {
         if (text.isBlank()) return
         upFlt(tabId) { f ->
@@ -2605,6 +2746,7 @@ class AppState(
                     endMatchText = endText?.takeIf { it.isNotBlank() },
                     endIsRegex = endIsRegex,
                     endTag = endTag?.trim()?.takeIf { it.isNotBlank() },
+                    scopeTid = scopeTid,
                 )
             )
         }
@@ -2654,6 +2796,46 @@ class AppState(
     fun setSequenceColor(tabId: String, id: String, color: Color) {
         upFlt(tabId) { f ->
             f.copy(sequences = f.sequences.map { if (it.id == id) it.copy(color = color) else it })
+        }
+    }
+
+    // Task 3: switch an EXISTING sequence between unscoped and thread-scoped from the sequences
+    // panel — "Set async sequence start" (setAsyncSequenceStartFromCtx above) only offers scoping
+    // at CREATION time, from a specific log row's own tid. Here there's no clicked row to read a
+    // tid from, so switching TO scoped resolves the tid a fresh scan of this tab's own logData for
+    // this def's start pattern (utils/SeqComputer.kt's resolveSequenceStartTid — same match rule
+    // SeqComputer itself would use to open a group today, since it's unscoped up to this call).
+    // NEVER silently leaves the def unscoped-but-user-thinks-it's-scoped: when nothing matches,
+    // the def is left untouched and this returns false so the caller (FilterPanel) can say so
+    // rather than pretending the switch happened. Switching to unscoped (scoped = false) always
+    // succeeds — there's nothing to resolve, just clear the field.
+    fun setSequenceScoped(tabId: String, id: String, scoped: Boolean): Boolean {
+        val t = tab(tabId) ?: return false
+        val def = t.filter.sequences.firstOrNull { it.id == id } ?: return false
+        if (!scoped) {
+            upFlt(tabId) { f -> f.copy(sequences = f.sequences.map { if (it.id == id) it.copy(scopeTid = null) else it }) }
+            return true
+        }
+        val resolvedTid = resolveSequenceStartTid(t.logData, def) ?: return false
+        upFlt(tabId) { f -> f.copy(sequences = f.sequences.map { if (it.id == id) it.copy(scopeTid = resolvedTid) else it }) }
+        return true
+    }
+
+    // Task 4: apply a CrossingThreadHint (utils/Filter.kt) — pins BOTH sides of a crossing pair to
+    // the tid ALREADY resolved for that specific occurrence (the hint carries it, computed once as
+    // part of computeItems' own crossing-resolution pass — see the hint's own doc for why that's a
+    // different, more specific answer than setSequenceScoped(..., true)'s fresh whole-file scan).
+    // A single upFlt so both sides land together — never a state where only one side got scoped
+    // because the tab was mutated between two separate calls.
+    fun scopeCrossingThreadPair(tabId: String, hint: CrossingThreadHint) {
+        upFlt(tabId) { f ->
+            f.copy(sequences = f.sequences.map {
+                when (it.id) {
+                    hint.hostDefId -> it.copy(scopeTid = hint.hostTid)
+                    hint.guestDefId -> it.copy(scopeTid = hint.guestTid)
+                    else -> it
+                }
+            })
         }
     }
 
@@ -3305,7 +3487,11 @@ class AppState(
         var expanded = t.expanded
         while (true) {
             fun idsFrom(applyFilter: Boolean): Set<String> =
-                computeItems(t.copy(expanded = expanded), applyFilter, regexContext)
+                // storeInCache = false: this walks a HYPOTHETICAL, progressively-more-expanded
+                // copy of `t`, never the tab's actually-rendered fold state — storing it would
+                // clobber the render path's own cache entry for `t.expanded` (see the doc on the
+                // computeItems overload this calls).
+                computeItems(t.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
                     .mapNotNull { item ->
                         when (item) {
                             is LogItem.SeqHeader -> item.gid
@@ -4676,7 +4862,10 @@ class AppState(
             val regexContext = RegexEvaluationContext()
             val fullyExpanded = visibleExpandableGroupIds(t)
             ensureActive()
-            val searchItems = computeItems(t.copy(expanded = fullyExpanded), applyFilter = true, regexContext)
+            // storeInCache = false: `t` carries the search-only effectiveSearchFilter and a
+            // fully-expanded fold state, neither of which is what's actually rendered — see the
+            // doc above computeItems' storeInCache parameter.
+            val searchItems = computeItems(t.copy(expanded = fullyExpanded), applyFilter = true, regexContext, storeInCache = false)
             ensureActive()
             val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext)
             ensureActive()
@@ -4832,12 +5021,25 @@ class AppState(
         ctx = null
     }
 
+    /** Wave 2.1: the thread-scoped ("async") counterpart of [setSequenceStartFromCtx] — same
+     *  capture, but remembers the clicked entry's [LogEntry.tid] so [completeSequenceEndFromCtx]
+     *  can pin the resulting [SequenceDef] to that one thread. Use when two interleaved runs of
+     *  the same start/end pattern (e.g. two overlapping requests) would otherwise merge into one
+     *  crossing group that can't be attributed to either run. */
+    fun setAsyncSequenceStartFromCtx() {
+        val c = ctx ?: return
+        val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        pendingSequenceStart = PendingSequenceStart(text, entry.tag, entry.tid)
+        ctx = null
+    }
+
     fun completeSequenceEndFromCtx() {
         val c = ctx ?: return
         val start = pendingSequenceStart ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
         val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
-        addSequence(c.tabId, start.text, false, newSeqColor, start.tag, text, false, entry.tag)
+        addSequence(c.tabId, start.text, false, newSeqColor, start.tag, text, false, entry.tag, start.scopeTid)
         pendingSequenceStart = null
         ctx = null
     }
@@ -4928,7 +5130,7 @@ class AppState(
         val t = emptyWorkspaceTab().copy(id = "t$n")
         synchronized(stateLock) {
             tabs = tabs + t
-            activeTabId = t.id
+            setActiveSurfaceToTab(t.id)
         }
     }
 
@@ -4937,6 +5139,21 @@ class AppState(
             activeTabId = tabId
             activeSurface = ActiveSurface.Log(tabId)
         }
+    }
+
+    // Every file-open path (plain file, already-open file, merge, archive entry, split part,
+    // case-library notes-only tab, addTab) must flip `activeSurface` back to the log tab it just
+    // created or activated — otherwise a diagram surface stays on screen (App.kt's render switch
+    // keys off activeSurface alone, not activeTabId) even though a new/different log tab is now
+    // "active". Unlike `activateTab`, this helper does NOT take `stateLock` itself: most call
+    // sites already run inside a `synchronized(stateLock) { ... }` block (mkTab publish paths),
+    // and re-entering the lock there would be redundant (Kotlin's `synchronized` is reentrant, so
+    // it wouldn't deadlock, but the couple of call sites that run outside any lock — e.g. the
+    // "already open" short-circuit — don't need one either, matching their prior unlocked
+    // `activeTabId = ...` assignment).
+    private fun setActiveSurfaceToTab(tabId: String) {
+        activeTabId = tabId
+        activeSurface = ActiveSurface.Log(tabId)
     }
 
     fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
@@ -5038,7 +5255,7 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
-                    activeTabId = t.id
+                    setActiveSurfaceToTab(t.id)
                 }
                 finishLoading()
                 published = true
@@ -5263,7 +5480,7 @@ class AppState(
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            activeTabId = existing.id; return existing.id
+            setActiveSurfaceToTab(existing.id); return existing.id
         }
         // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
@@ -5313,7 +5530,7 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
-                    activeTabId = t.id
+                    setActiveSurfaceToTab(t.id)
                 }
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -5640,7 +5857,7 @@ class AppState(
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
-                    activeTabId = t.id
+                    setActiveSurfaceToTab(t.id)
                 }
                 AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -5742,7 +5959,7 @@ class AppState(
         val path = file.absolutePath
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            activeTabId = existing.id
+            setActiveSurfaceToTab(existing.id)
             return
         }
         rememberRecentFile(file)
@@ -5767,7 +5984,7 @@ class AppState(
             )
         synchronized(stateLock) {
             tabs = tabs + t
-            activeTabId = t.id
+            setActiveSurfaceToTab(t.id)
         }
         autoLoadOwnNotesIfAny(tabId)
     }
@@ -6580,7 +6797,7 @@ class AppState(
             val t = emptyWorkspaceTab().copy(id = "t$n", filename = preview.title)
             synchronized(stateLock) {
                 tabs = tabs + t
-                activeTabId = t.id
+                setActiveSurfaceToTab(t.id)
             }
             caseLibraryNotesOnlyLoadingId = null
             openNoteFile(t.id, noteFile)
@@ -7936,6 +8153,15 @@ class AppState(
                 val activeDiagramToken = keyLines.firstOrNull { it.substringBefore('\t') == "activeDiagram" }
                     ?.substringAfter('\t', "")?.unb64().orEmpty()
                 restoreActiveDiagram(activeDiagramToken)
+                // Wave 2.5: queue-panel section/height/width preferences, keyed by the same
+                // libraryItemId restoreDiagramTabs just reopened sessions for — must run after it
+                // for that lookup to resolve, same ordering requirement as restoreActiveDiagram
+                // just above. Absent on a legacy cache (no "seq3View" key) or one written before
+                // this field existed; restoreSeq3ViewToken's own blank-token guard makes that a
+                // no-op, leaving every session's queue panel at its constructed default.
+                val seq3ViewToken = keyLines.firstOrNull { it.substringBefore('\t') == "seq3View" }
+                    ?.substringAfter('\t', "")?.unb64().orEmpty()
+                restoreSeq3ViewToken(seq3ViewToken)
             }
             // Tab strip order (WP-diagram-restore follow-up): must also run after both tabs and
             // any diagram sessions above exist — see restoreTabOrder's own doc. Unconditional
@@ -8113,6 +8339,7 @@ class AppState(
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")
         appendLine("diagramTabs\t${diagramTabsToken().b64()}")
         appendLine("activeDiagram\t${activeDiagramToken().b64()}")
+        appendLine("seq3View\t${seq3ViewToken().b64()}")
         appendLine("tabOrder\t${tabOrderToken().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }

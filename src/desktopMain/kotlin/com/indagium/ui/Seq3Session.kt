@@ -202,7 +202,12 @@ class Seq3Session(
      * View state is kept with the open workspace rather than with its Compose composition. The
      * active-surface switch removes the workspace from composition, so a `remember(sessionId)`
      * inside [Seq3Workspace] would lose zoom and the other view preferences every time the user
-     * visited another tab. The state is still ephemeral: closing the workspace drops it here.
+     * visited another tab. Most of the state here is still ephemeral: closing the workspace drops
+     * it from this map. The exception (Wave 2.5) is the queue panel's own section open/expanded
+     * flags and heights plus the panel width — those survive a full app restart too, via
+     * `seq3ViewToken()`/`restoreSeq3ViewToken()` (AutosaveCodec.kt), which read/write them back
+     * into whichever [Seq3ViewState] this map hands out for a session's id — see the EXCEPTION
+     * note on [Seq3ViewState] itself for which fields and why.
      */
     private val workspaceViewStates = ConcurrentHashMap<String, Seq3ViewState>()
 

@@ -27,9 +27,11 @@ import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material.icons.outlined.Badge
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FindInPage
+import androidx.compose.material.icons.outlined.Flag
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
@@ -1395,6 +1397,66 @@ internal fun CtxCollapseActions(
     }
 }
 
+// Mirrors CtxCollapseActions's own shape (header + one row of Ghost buttons) — replaces what used
+// to be a single "Set sequence ▶" flyout (Start / Async start / End behind a submenu) with the same
+// always-visible inline row the "Tag" and "Collapse" blocks above already use, per the user's own
+// request to match that established convention rather than hide these three behind a flyout.
+// "End" follows CtxCollapseActions' nullable-lambda convention exactly: the call site passes null
+// when no sequence start is pending, and this renders that as a visibly-disabled (not omitted)
+// button — same "shown but disabled beats silently doing nothing" rule CollapseActions itself
+// documents, and the same rule the pre-inline flyout's own CtxSubmenuOption("End", enabled = ...)
+// followed.
+@Composable
+internal fun CtxSequenceActions(
+    highlighted: Boolean = false,
+    onStart: () -> Unit,
+    onAsyncStart: () -> Unit,
+    onEnd: (() -> Unit)? = null,
+) {
+    val tc = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverBg = tc.hv,
+        forceHover = highlighted,
+    ) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 3.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            AppText("Sequence", color = tc.tx, fontSize = 12.sp, modifier = Modifier.padding(start = 10.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(start = 10.dp, end = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CtxActionSlot(CTX_SEQUENCE_BUTTON_WIDTH) {
+                    AppButton(
+                        "Start", onClick = onStart, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.PlayArrow, horizontalPadding = 4.dp,
+                    )
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_SEQUENCE_ASYNC_BUTTON_WIDTH) {
+                    AppButton(
+                        "Async start", onClick = onAsyncStart, variant = ButtonVariant.Ghost,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.PlayArrow, horizontalPadding = 4.dp,
+                    )
+                }
+                CtxActionDivider(tc)
+                CtxActionSlot(CTX_SEQUENCE_BUTTON_WIDTH) {
+                    AppButton(
+                        "End", onClick = onEnd ?: {}, variant = ButtonVariant.Ghost, enabled = onEnd != null,
+                        modifier = Modifier.fillMaxWidth().height(26.dp),
+                        leadingIcon = Icons.Outlined.Flag, horizontalPadding = 4.dp,
+                    )
+                }
+            }
+        }
+    }
+}
+
 // Mirrors CtxCollapseActions's own shape (header + one or two rows of Ghost buttons) — merges what
 // used to be two adjacent blocks for the SAME process ("Threads" with its Show/Hide map pair, and a
 // separate "Process name" with its own Show/Hide name pair) into one "Process" section, since a user
@@ -1637,6 +1699,25 @@ private val CTX_ACTION_BUTTON_WIDTH = 78.dp
 // wraps a third onto its own row rather than trying to fit 3 across).
 private val CTX_THREADS_BUTTON_WIDTH = 100.dp
 
+// CtxSequenceActions' own widths. Three slots (not Tag/Collapse's two-plus-a-wide-highlight-slot)
+// have to share the SAME 252dp row budget those blocks already fill exactly (menuWidth 276dp minus
+// the Column's 6dp+6dp padding minus the Row's 10dp+2dp padding) — reusing CTX_ACTION_BUTTON_WIDTH
+// (78dp, sized for Tag/Collapse's own single- and two-word labels) for all three would overrun that
+// budget by 14dp the moment the middle slot is widened for "Async start" (see below), pushing the
+// row past the menu's own right edge. "Start"/"End" are short enough (5 and 3 letters) to stay
+// fully legible well below 78dp, so they're the ones that give up the shared width here — NOT
+// "Async start", which is the label that actually needs the room. Sized with a few dp of slack
+// over what "Start"/"End" ask for at this menu's 12sp Ghost-button font, not tuned to the exact
+// truncation edge, since font-metrics estimation from a comment is not a substitute for opening the
+// menu and looking.
+private val CTX_SEQUENCE_BUTTON_WIDTH = 64.dp
+
+// "Async start" is a two-word label that overruns CTX_ACTION_BUTTON_WIDTH's 78dp (mirrors
+// CTX_THREADS_BUTTON_WIDTH's own reasoning for "Show map"/"Hide map") — 108dp is CTX_SEQUENCE_
+// BUTTON_WIDTH's freed-up budget (242dp for three slots, minus 64dp+64dp for Start/End) rounded
+// down to a comfortable value, not the tightest width that happens to fit.
+private val CTX_SEQUENCE_ASYNC_BUTTON_WIDTH = 108.dp
+
 // Video (CtxVideoActions) has exactly 2 slots, and "Link to 12:34" runs measurably longer than
 // most other Ghost-button labels in this menu (a fixed "Link to " prefix plus a variable mm:ss
 // timestamp) — 78dp clipped its trailing digits on longer recordings, so this gets its own, wider
@@ -1735,6 +1816,15 @@ private fun CtxHighlightAction(
 // onClick, which still fires from anywhere else on the row (matching today's one-click behavior).
 internal val CTX_SUBMENU_WIDTH = 240.dp
 
+// One row inside a CtxItemWithSubmenu flyout. [enabled] defaults true — every pre-existing caller
+// (match-scope variants, fragment-kind grouping) built its options from data that's always
+// actionable, so they keep compiling/rendering unchanged. false is for an option that's always
+// SHOWN (never omitted from the list — omitting it would silently look like it doesn't exist)
+// but currently not actionable, e.g. "End" in the "Set sequence ▶" flyout (App.kt) while no
+// sequence start is pending — rendered greyed-out and non-clickable, mirroring CtxItem's own
+// enabled-vs-disabled styling rather than inventing a second convention for the same idea.
+internal data class CtxSubmenuOption(val label: String, val enabled: Boolean = true, val onClick: () -> Unit)
+
 // Grace period between the pointer leaving both the ▶ trigger and the popup, and the popup
 // actually closing — without it, crossing the (small) visual gap between trigger and popup would
 // close the menu before the pointer ever reaches it.
@@ -1744,7 +1834,7 @@ internal const val CTX_SUBMENU_CLOSE_DELAY_MS = 200L
 internal fun CtxItemWithSubmenu(
     icon: ImageVector,
     label: String,
-    submenu: List<Pair<String, () -> Unit>>,
+    submenu: List<CtxSubmenuOption>,
     highlighted: Boolean = false,
     preferLeft: Boolean = false,
     onClick: () -> Unit,
@@ -1819,20 +1909,26 @@ internal fun CtxItemWithSubmenu(
                         .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
                         .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
                 ) {
-                    submenu.forEach { (optLabel, optOnClick) ->
+                    submenu.forEach { option ->
+                        // Same enabled-vs-disabled styling CtxItem uses (muted tc.td text, no
+                        // hover feedback, no click) — a disabled option (e.g. "End" with no
+                        // pending sequence start) stays visible so its unavailability is legible
+                        // rather than silently vanishing from the list.
                         HoverBox(
                             modifier = Modifier.fillMaxWidth(),
-                            onClick = { submenuOpen = false; optOnClick() },
+                            hoverBg = if (option.enabled) tc.hv else Color.Transparent,
+                            onClick = if (option.enabled) ({ submenuOpen = false; option.onClick() }) else null,
                         ) {
                             // Only long variant labels (a long tag/package prefix, or an
                             // untruncated message) actually get ellipsized in this fixed-width
                             // popup — onTextLayout reports whether *this* label did, so short
                             // labels that already fit in full don't get a redundant tooltip.
-                            var isTruncated by remember(optLabel) { mutableStateOf(false) }
+                            var isTruncated by remember(option.label) { mutableStateOf(false) }
+                            val optionTextColor = if (option.enabled) tc.tx else tc.td
                             val labelText: @Composable () -> Unit = {
                                 Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)) {
                                     AppText(
-                                        optLabel, color = tc.tx, fontSize = 12.sp, maxLines = 1,
+                                        option.label, color = optionTextColor, fontSize = 12.sp, maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                         onTextLayout = { result -> isTruncated = result.hasVisualOverflow },
                                     )
@@ -1847,7 +1943,7 @@ internal fun CtxItemWithSubmenu(
                                                 .padding(horizontal = 8.dp, vertical = 4.dp)
                                                 .widthIn(max = 320.dp),
                                         ) {
-                                            AppText(optLabel, color = tc.tx, fontSize = 11.sp, maxLines = 4)
+                                            AppText(option.label, color = tc.tx, fontSize = 11.sp, maxLines = 4)
                                         }
                                     },
                                 ) {
@@ -1892,6 +1988,14 @@ internal sealed class CtxMenuEntry {
         val onToStart: (() -> Unit)? = null,
         val onToEnd: (() -> Unit)? = null,
         val onSelected: (() -> Unit)? = null,
+    ) : CtxMenuEntry()
+
+    // Start / Async start are always available; onEnd is null (rendered disabled, not omitted —
+    // see CtxSequenceActions' own doc) whenever no sequence start is currently pending.
+    data class SequenceActions(
+        val onStart: () -> Unit,
+        val onAsyncStart: () -> Unit,
+        val onEnd: (() -> Unit)? = null,
     ) : CtxMenuEntry()
 
     // The merged tid-map + process-name section for one row's process (see CtxProcessActions —
@@ -1943,7 +2047,7 @@ internal sealed class CtxMenuEntry {
         val icon: ImageVector,
         val label: String,
         val onClick: () -> Unit,
-        val submenu: List<Pair<String, () -> Unit>>,
+        val submenu: List<CtxSubmenuOption>,
     ) : CtxMenuEntry()
 
     object Divider : CtxMenuEntry()

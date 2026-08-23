@@ -20,6 +20,7 @@ import com.indagium.ui.comparePickerOrderAfterOverflowSelection
 import com.indagium.ui.effectiveLogWrapLimitChars
 import com.indagium.ui.expansionAndIndexForEntry
 import com.indagium.ui.isCrashGroupRow
+import com.indagium.ui.isItemPlacementConverged
 import com.indagium.ui.keyboardCopyTextForLogPanel
 import com.indagium.ui.logItemStableKey
 import com.indagium.ui.mkTab
@@ -430,6 +431,53 @@ class SplitViewAndTabRegressionTest {
         val anchorIndex = centerAnchorIndex(index = 14, viewportHeight = 16 * 32, visibleItemSizes = currentSplitViewportRows)
 
         assertEquals(6, anchorIndex)
+    }
+
+    // 1.3(d): isItemPlacementConverged is centerOnItem's stopping condition, extracted as a pure
+    // function the same way centerAnchorIndex above is. Covers the normal (fits-in-viewport) case
+    // from both sides plus the tall-row case (wrap-on-overflow can make a single row taller than
+    // the viewport — see the function's doc for why "top pinned at 0" is the best available
+    // placement there, not "fits entirely").
+    @Test
+    fun itemPlacementConvergedForNormalRowCenteredInViewport() {
+        // A 32px row sitting mid-viewport (offset 84 .. 116 inside a 200px viewport) fits
+        // entirely, so this is already converged.
+        assertTrue(isItemPlacementConverged(offset = 84, size = 32, viewportHeight = 200))
+    }
+
+    @Test
+    fun itemPlacementNotConvergedWhenRowPartlyAboveViewport() {
+        // Negative offset means the row's top has scrolled above the viewport start.
+        assertFalse(isItemPlacementConverged(offset = -10, size = 32, viewportHeight = 200))
+    }
+
+    @Test
+    fun itemPlacementNotConvergedWhenRowPartlyBelowViewport() {
+        // offset + size spills past viewportHeight.
+        assertFalse(isItemPlacementConverged(offset = 190, size = 32, viewportHeight = 200))
+    }
+
+    @Test
+    fun itemPlacementConvergedForRowExactlyViewportHeight() {
+        // size == viewportHeight is the boundary between the two branches of the predicate;
+        // pinned at the top it fits exactly, so it must converge either way it's evaluated.
+        assertTrue(isItemPlacementConverged(offset = 0, size = 200, viewportHeight = 200))
+    }
+
+    @Test
+    fun itemPlacementConvergedForRowTallerThanViewportWithTopAtZero() {
+        // A single very-long wrapped line (raw stack trace / JSON dump / base64 blob) can be
+        // taller than the whole viewport. There is no placement that shows all of it, so pinning
+        // its top edge at the viewport top is the best available placement and must converge.
+        assertTrue(isItemPlacementConverged(offset = 0, size = 5000, viewportHeight = 200))
+    }
+
+    @Test
+    fun itemPlacementNotConvergedForTallRowScrolledPastItsTop() {
+        // Same oversized row, but scrolled so its top has already moved above the viewport start
+        // (offset negative) — its beginning is hidden, which is exactly what this predicate must
+        // reject even though "fits entirely" could never be satisfied for a row this tall.
+        assertFalse(isItemPlacementConverged(offset = -50, size = 5000, viewportHeight = 200))
     }
 
     @Test

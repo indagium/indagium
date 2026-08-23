@@ -195,4 +195,121 @@ class DiagramTabAutosaveTest {
 
         assertEquals(listOf(TabRef.Log("log")), restored.tabOrder)
     }
+
+    // ── Queue-panel view state (Wave 2.5) ───────────────────────────────────────────────────────
+    //
+    // The Messages/Lifelines/Artifacts section open/expanded flags, their drag-resized heights,
+    // and the panel width used to be documented as deliberately ephemeral (Seq3ViewState's own
+    // header) — these prove the "seq3View" autosave key carved out for them round-trips, and that
+    // a cache written before the key existed degrades to the same constructed defaults rather than
+    // crashing or leaving a partially-decoded state.
+
+    @Test
+    fun seq3ViewStatePersistsQueuePanelLayoutAcrossARestart() {
+        val dir = createTempDirectory("openlog-diagram-view-restore").toFile()
+        val logFile = File(dir, "app.log").apply { writeText("x") }
+        val cacheFile = File(dir, "state.cache")
+        val libraryFile = File(dir, "library.cache")
+
+        val state = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile))
+        state.tabs = listOf(mkTab("log", "app.log", twoTagEntries()).copy(sourcePath = logFile.absolutePath))
+        state.activateTab("log")
+        val sessionId = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, sessionId)
+        val libraryItemId = state.seq3Sessions.sessions.single().libraryItemId!!
+
+        // Flip every persisted field away from its constructed default so a bug that silently no-
+        // ops the restore (leaving defaults in place) can't pass this test by accident.
+        val view = state.seq3Sessions.viewState(sessionId)!!
+        view.messagesSectionOpen = false
+        view.messagesExpanded = false
+        view.lifelinesSectionOpen = false
+        view.lifelinesExpanded = false
+        view.artifactsSectionOpen = false
+        view.artifactsExpanded = true
+        view.lifelinesSectionHeightDp = 300f
+        view.artifactsSectionHeightDp = 250f
+        view.panelWidthDp = 450f
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
+        val restoredSessionId = restored.seq3Sessions.sessions.single { it.libraryItemId == libraryItemId }.id
+        val restoredView = restored.seq3Sessions.viewState(restoredSessionId)!!
+
+        assertEquals(false, restoredView.messagesSectionOpen)
+        assertEquals(false, restoredView.messagesExpanded)
+        assertEquals(false, restoredView.lifelinesSectionOpen)
+        assertEquals(false, restoredView.lifelinesExpanded)
+        assertEquals(false, restoredView.artifactsSectionOpen)
+        assertEquals(true, restoredView.artifactsExpanded)
+        assertEquals(300f, restoredView.lifelinesSectionHeightDp)
+        assertEquals(250f, restoredView.artifactsSectionHeightDp)
+        assertEquals(450f, restoredView.panelWidthDp)
+    }
+
+    @Test
+    fun aStoredHeightOutsideTheLiveDragBoundsIsReClampedOnRestoreNotTrustedVerbatim() {
+        // Guards the "re-clamp through the existing helpers rather than trusting stored values"
+        // requirement: hand-write a seq3View token whose heights sit outside what a live divider
+        // drag could ever produce, and confirm restore pulls them back in bounds instead of
+        // reproducing the out-of-range value.
+        val dir = createTempDirectory("openlog-diagram-view-restore-clamp").toFile()
+        val logFile = File(dir, "app.log").apply { writeText("x") }
+        val cacheFile = File(dir, "state.cache")
+        val libraryFile = File(dir, "library.cache")
+
+        val state = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile))
+        state.tabs = listOf(mkTab("log", "app.log", twoTagEntries()).copy(sourcePath = logFile.absolutePath))
+        state.activateTab("log")
+        val sessionId = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, sessionId)
+        val view = state.seq3Sessions.viewState(sessionId)!!
+        view.lifelinesSectionHeightDp = 9999f
+        view.artifactsSectionHeightDp = -50f
+        view.panelWidthDp = 1f
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
+        val restoredView = restored.seq3Sessions.viewState(restored.seq3Sessions.sessions.single().id)!!
+
+        assertTrue(restoredView.lifelinesSectionHeightDp < 9999f, "must be clamped to the live drag's max, not stored verbatim")
+        assertTrue(restoredView.artifactsSectionHeightDp > -50f, "must be clamped to the live drag's min, not stored verbatim")
+        assertTrue(restoredView.panelWidthDp > 1f, "panel width must be clamped to PANEL_WIDTH_MIN_DP, not stored verbatim")
+    }
+
+    @Test
+    fun legacyCacheWithNoSeq3ViewKeyRestoresQueuePanelLayoutToConstructedDefaults() {
+        val dir = createTempDirectory("openlog-diagram-view-restore-legacy").toFile()
+        val logFile = File(dir, "app.log").apply { writeText("x") }
+        val cacheFile = File(dir, "state.cache")
+        val libraryFile = File(dir, "library.cache")
+
+        val state = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile))
+        state.tabs = listOf(mkTab("log", "app.log", twoTagEntries()).copy(sourcePath = logFile.absolutePath))
+        state.activateTab("log")
+        val sessionId = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, sessionId)
+        state.autosaveNow()
+
+        // Strip the "seq3View" line out of the cache file to simulate a cache written before this
+        // key existed — same "delete one key, keep the rest" technique the sibling diagramTabs
+        // tests above rely on implicitly via a fresh cache, made explicit here since this key must
+        // specifically be ABSENT rather than merely empty.
+        val lines = cacheFile.readLines().filterNot { it.substringBefore('\t') == "seq3View" }
+        cacheFile.writeText(lines.joinToString("\n") + "\n")
+
+        val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
+
+        assertEquals(1, restored.seq3Sessions.sessions.size, "fixture precondition: the diagram tab itself must still reopen")
+        val restoredView = restored.seq3Sessions.viewState(restored.seq3Sessions.sessions.single().id)!!
+        assertEquals(true, restoredView.messagesSectionOpen)
+        assertEquals(true, restoredView.messagesExpanded)
+        assertEquals(true, restoredView.lifelinesSectionOpen)
+        assertEquals(true, restoredView.lifelinesExpanded)
+        assertEquals(true, restoredView.artifactsSectionOpen)
+        assertEquals(false, restoredView.artifactsExpanded)
+        assertEquals(220f, restoredView.lifelinesSectionHeightDp)
+        assertEquals(200f, restoredView.artifactsSectionHeightDp)
+        assertEquals(392f, restoredView.panelWidthDp)
+    }
 }

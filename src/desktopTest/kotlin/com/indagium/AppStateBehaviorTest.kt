@@ -34,6 +34,7 @@ import com.indagium.model.SourceLogConfiguration
 import com.indagium.model.SourceWrapperRule
 import com.indagium.model.ThemePreset
 import com.indagium.ui.AUTOSAVE_MAGIC_CURRENT
+import com.indagium.ui.ActiveSurface
 import com.indagium.ui.AppState
 import com.indagium.ui.DesktopStorage
 import com.indagium.ui.FilterSearchRequest
@@ -5771,6 +5772,76 @@ class AppStateBehaviorTest {
         assertTrue(state.sequences.single().enabled)
     }
 
+    // ── Task 3: switching an existing sequence's scope from the sequences panel ───────────────
+
+    @Test
+    fun setSequenceScopedTrueResolvesTheStartMatchsOwnTidFromLogData() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Other", "noise", tid = 999),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Auth", "flow started", tid = 4241),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "flow finished", tid = 4241),
+        )
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", logs))
+        state.addSequence(state.tabs.single().id, "flow started", false, Color.Red, "Auth")
+        val id = state.sequences.single().id
+        assertEquals(null, state.sequences.single().scopeTid)
+
+        val result = state.setSequenceScoped(state.tabs.single().id, id, true)
+
+        assertTrue(result)
+        assertEquals(4241, state.sequences.single().scopeTid)
+    }
+
+    @Test
+    fun setSequenceScopedTrueLeavesTheDefUnscopedWhenNothingMatches() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "Other", "nothing relevant here", tid = 100))
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", logs))
+        state.addSequence(state.tabs.single().id, "flow started", false, Color.Red, "Auth")
+        val id = state.sequences.single().id
+
+        val result = state.setSequenceScoped(state.tabs.single().id, id, true)
+
+        assertFalse(result)
+        assertEquals(null, state.sequences.single().scopeTid, "a failed resolution must never silently scope to an arbitrary tid")
+    }
+
+    @Test
+    fun setSequenceScopedFalseClearsAnExistingScopeTid() {
+        val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 4241))
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", logs))
+        state.addSequence(state.tabs.single().id, "flow started", false, Color.Red, "Auth")
+        val id = state.sequences.single().id
+        assertTrue(state.setSequenceScoped(state.tabs.single().id, id, true))
+        assertEquals(4241, state.sequences.single().scopeTid)
+
+        val result = state.setSequenceScoped(state.tabs.single().id, id, false)
+
+        assertTrue(result)
+        assertEquals(null, state.sequences.single().scopeTid)
+    }
+
+    @Test
+    fun scopeCrossingThreadPairPinsBothSidesToTheirOwnResolvedTid() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "A start", false, Color.Red, "SeqA", "A end", false, "SeqA")
+        state.addSequence(tabId, "B start", false, Color.Blue, "SeqB", "B end", false, "SeqB")
+        val (aId, bId) = state.sequences.map { it.id }
+
+        state.scopeCrossingThreadPair(
+            tabId,
+            com.indagium.utils.CrossingThreadHint(hostDefId = aId, hostTid = 100, guestDefId = bId, guestTid = 200),
+        )
+
+        val byId = state.sequences.associateBy { it.id }
+        assertEquals(100, byId.getValue(aId).scopeTid)
+        assertEquals(200, byId.getValue(bId).scopeTid)
+    }
+
     // ── Annotation block manipulation ─────────────────────────────────────────
 
     @Test
@@ -6585,6 +6656,51 @@ class AppStateBehaviorTest {
         waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
 
         assertEquals(mapOf(12345 to "com.example.app"), state.tabs.single().analysis.processNames)
+    }
+
+    // ── 2.4: opening a file must reclaim activeSurface from a diagram ──────
+
+    @Test
+    fun openingAFileWhileADiagramSurfaceIsActiveSwitchesToTheNewLogTab() {
+        // Regression: activeSurface (not activeTabId) is the sole discriminator App.kt uses to
+        // decide what to render. Every open path used to write activeTabId only, so dropping a
+        // new file while a sequence-diagram tab was on screen left the diagram showing even
+        // though a brand new log tab had just been created and "activated".
+        val dir = createTempDirectory("openlog-diagram-then-open").toFile()
+        val logFile = File(dir, "app.log").apply {
+            writeText("06-26 10:00:00.000  7  7 I App: hello\n")
+        }
+        val state = AppState(File(dir, "state.cache"))
+        state.activeSurface = ActiveSurface.Diagram3("fake-session")
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
+
+        val newTabId = state.tabs.single().id
+        assertEquals(newTabId, state.activeTabId)
+        assertEquals(ActiveSurface.Log(newTabId), state.activeSurface)
+    }
+
+    @Test
+    fun reopeningAnAlreadyOpenFileWhileADiagramSurfaceIsActiveSwitchesToTheExistingTabWithoutDuplicating() {
+        val dir = createTempDirectory("openlog-diagram-then-reopen").toFile()
+        val logFile = File(dir, "app.log").apply {
+            writeText("06-26 10:00:00.000  7  7 I App: hello\n")
+        }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openFile(logFile)
+        waitUntil { !state.isLoading && state.tabs.isNotEmpty() }
+        val existingTabId = state.tabs.single().id
+
+        // Simulate a diagram surface taking over the content area after the file was opened.
+        state.activeSurface = ActiveSurface.Diagram3("fake-session")
+
+        state.openFile(logFile)
+
+        assertEquals(1, state.tabs.size, "must switch to the existing tab, not create a duplicate")
+        assertEquals(existingTabId, state.activeTabId)
+        assertEquals(ActiveSurface.Log(existingTabId), state.activeSurface)
     }
 
     // ── Process-name display mode: per-tab, not global ─────

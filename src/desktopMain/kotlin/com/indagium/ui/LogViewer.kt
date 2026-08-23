@@ -75,6 +75,12 @@ private const val LOADING_GRACE_MS = 250L
 private const val SPLICE_SUMMARY_GUARD_MIN_ITEMS = 4096
 private const val DOUBLE_CLICK_WINDOW_MS = 500L
 
+// Upper bound for awaitExpandedAt below — the recompute it waits on has no fixed budget of its own
+// (LOADING_GRACE_MS only governs when the LOADING line starts showing, not how long the compute is
+// allowed to take), so this exists purely as a last-resort escape hatch against hanging forever on
+// a target that — through some bug elsewhere — never actually lands, not as a "typical" duration.
+private const val EXPANSION_AWAIT_TIMEOUT_MS = 5000L
+
 // Δt gutter cell (LogRow's deltaMs param) tints itself this color when the gap since the previous
 // visible row is at least this long — a fixed v1 threshold; a user-configurable one is out of scope
 // (see the plan's "Out of scope" list).
@@ -290,8 +296,12 @@ internal class ComputedLogItems(
 
 private val EMPTY_SUMMARY = summarizeItems(emptyList())
 
+// Returns the backing State object itself (read with `by`, not `=`, at call sites — see those
+// call sites' comments) rather than unwrapping it, specifically so a LaunchedEffect elsewhere in
+// this file can `snapshotFlow { computedItems.expandedAt }` and wait on the REAL recompute landing
+// instead of guessing a fixed delay — see centerOnItem's callers and CHANGE 4/1.3(b)'s doc.
 @Composable
-private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): ComputedLogItems {
+private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): State<ComputedLogItems> {
     val dataSize = tab.logData.size
     val lastId = tab.logData.lastOrNull()?.id
     val filter = tab.filter
@@ -302,19 +312,21 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
     // recompute rows or alter folding when their Settings rule list changes.
     val stackTraceGroups = analysis.stackTraceGroups
     val analysisPending = analysis.pending
-    if (!tab.largeFileMode) {
-        return remember(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
-            val items = computeItems(tab, applyFilter)
-            ComputedLogItems(items, summarizeItems(items), loading = false, expandedAt = expanded)
-        }
-    }
 
-    var computed by remember(tab.id, applyFilter) {
+    // Async + cancellable for every tab, not only largeFileMode ones (P-01): a keyword/tag filter
+    // edit on a perfectly ordinary log still re-runs computeItems over the whole file, and doing
+    // that synchronously inside composition pins the UI thread for however long the regex chain
+    // takes — the same freeze class as FilterPanel's unifiedCandidates, just triggered by
+    // committing a filter change instead of typing a search. The LOADING_GRACE_MS window below
+    // means a fast recompute (the overwhelming majority on a normal-sized file) still swaps in
+    // within the same frame or two, with no visible loading flash — see the largeFileMode
+    // behavior this now applies to every tab, unchanged in shape.
+    val computedState = remember(tab.id, applyFilter) {
         mutableStateOf(ComputedLogItems(emptyList(), EMPTY_SUMMARY, loading = true, expandedAt = null))
     }
     LaunchedEffect(tab.id, dataSize, lastId, filter, expanded, manualBlocks, stackTraceGroups, analysisPending, applyFilter) {
         val snapshot = tab.copy(selected = emptySet())
-        val previous = computed
+        val previous = computedState.value
         coroutineScope {
             val deferred = async(Dispatchers.Default) {
                 // P-01: without this, a superseded computation (this LaunchedEffect's own
@@ -332,17 +344,37 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): Compute
             // expanded-only changes) swap in without ever flashing the loading line; only
             // genuinely slow recomputes show it.
             val quick = withTimeoutOrNull(LOADING_GRACE_MS) { deferred.await() }
-            computed = quick ?: run {
+            computedState.value = quick ?: run {
                 // Preserve expandedAt from the previous (now-stale) result rather than resetting it —
                 // this placeholder still carries the OLD list, so its staleness must still be
                 // computed against whatever `expanded` it actually reflects, not wiped to null (which
                 // would make an already-known-stale list look "unknown" instead).
-                computed = ComputedLogItems(computed.items, computed.summary, loading = true, expandedAt = computed.expandedAt)
+                computedState.value = ComputedLogItems(
+                    computedState.value.items, computedState.value.summary,
+                    loading = true, expandedAt = computedState.value.expandedAt,
+                )
                 deferred.await()
             }
         }
     }
-    return computed
+    return computedState
+}
+
+// Replaces the old blind `delay(80)` after an onToggleGroup burst (1.3(b)): that guessed a fixed
+// 80ms while rememberComputedLogItems' own async recompute is allowed up to LOADING_GRACE_MS
+// (250ms) before even showing a loading state, and unboundedly longer than that on a genuinely
+// slow file — a caller that resumed after 80ms and immediately scrolled/centered was frequently
+// racing a computation that hadn't landed yet, resolving its target index against the OLD item
+// list. Waits on the real signal instead: `expandedAtProvider` reads a `by`-delegated
+// computedItems/computedAllItems.expandedAt (see rememberComputedLogItems's doc), which
+// snapshotFlow can observe change to exactly `target` once the fresh list is in. Falls back after
+// EXPANSION_AWAIT_TIMEOUT_MS so a caller can never hang forever if the recompute never converges
+// (defensive only — see that constant's doc).
+private suspend fun awaitExpandedAt(target: Set<String>, expandedAtProvider: () -> Set<String>?) {
+    if (expandedAtProvider() == target) return
+    withTimeoutOrNull(EXPANSION_AWAIT_TIMEOUT_MS) {
+        snapshotFlow(expandedAtProvider).first { it == target }
+    }
 }
 
 // The first frame while the off-thread width calculation runs. This is the usual short
@@ -473,7 +505,7 @@ internal fun expansionAndIndexForEntry(
         if (!passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext)) return null
     }
     var expanded = tab.expanded
-    var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+    var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
     repeat(24) {
         // CORE RULE: expand only folds that HIDE the target. Never expand the header that DISPLAYS
         // it. A header shows the SAME entry id whether it's folded or open (SeqHeader/StackTraceHeader
@@ -496,7 +528,7 @@ internal fun expansionAndIndexForEntry(
                 .firstOrNull { it.gid !in expanded && entryId in it.memberIds }?.gid
             if (owningStackGid != null) {
                 expanded = expanded + owningStackGid
-                candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+                candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
                 return@repeat
             }
             // Sequence containment gets the same cheap treatment as stack traces just above, via
@@ -532,7 +564,7 @@ internal fun expansionAndIndexForEntry(
                 }
                 if (gidToOpen != null) {
                     expanded = expanded + gidToOpen
-                    candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+                    candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
                     return@repeat
                 }
             }
@@ -569,10 +601,10 @@ internal fun expansionAndIndexForEntry(
         // fallback is likewise load-bearing for that same nested case: verification can legitimately
         // fail for every ranked candidate on a single round, and we still need to make progress.
         val groupToOpen = ranked.firstOrNull { gid ->
-            computeItems(tab.copy(expanded = expanded + gid), applyFilter, regexContext).anyEntry(entryId)
+            computeItems(tab.copy(expanded = expanded + gid), applyFilter, regexContext, storeInCache = false).anyEntry(entryId)
         } ?: ranked.firstOrNull() ?: return null
         expanded = expanded + groupToOpen
-        candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext)
+        candidateItems = computeItems(tab.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
     }
     return null
 }
@@ -667,17 +699,28 @@ fun buildFullLineAnnotation(
 // characters, TID starts at the same offset either way. [pidFieldWidth] is always exactly 5 (the
 // original padStart(5) width) in mode OFF and in any tab where the longest known name is no wider
 // than 5 chars, so this reproduces the pre-feature output byte-for-byte in both cases.
+// [cellBg] — null for every pre-existing caller, so this reproduces the pre-feature render
+// byte-for-byte otherwise — paints a background wash behind the ts span and, separately, behind
+// the whole pid/tid span (LogRow passes item.scopedSeqColor.copy(alpha = tc.seqCellBgAlpha) for a
+// thread-scoped/"async" sequence row; see that field's own doc). Two SEPARATE SpanStyle
+// backgrounds, one per field, rather than one background spanning the "  " gap between them — same
+// two-cell shape the foreground tint (tsColor/pidColor, already computed per-field by the caller)
+// already implies. Applied first, before the caller's own highlighter/keyword/search addStyle
+// passes below run — later-added spans paint on top (see this function's own doc), so a highlighter
+// hit, keyword-regex hit, or Find match landing on the ts/pid text still visually wins over this
+// wash exactly as before this feature existed.
 private fun AnnotatedString.Builder.appendTsPidTid(
     entry: LogEntry,
     tsColor: Color,
     pidColor: Color,
     processDisplay: String?,
     pidFieldWidth: Int,
+    cellBg: Color? = null,
 ) {
-    withStyle(SpanStyle(color = tsColor)) { append(entry.ts) }
+    withStyle(SpanStyle(color = tsColor, background = cellBg ?: Color.Unspecified)) { append(entry.ts) }
     if (entry.pid > 0) {
         append("  ")
-        withStyle(SpanStyle(color = pidColor)) {
+        withStyle(SpanStyle(color = pidColor, background = cellBg ?: Color.Unspecified)) {
             if (processDisplay != null) {
                 append(middleEllipsis(processDisplay, pidFieldWidth).padEnd(pidFieldWidth))
             } else {
@@ -792,8 +835,11 @@ internal fun buildFullLineAnnotation(
     // byte-for-byte; see appendTsPidTid's own doc for how they combine.
     processDisplay: String? = null,
     pidFieldWidth: Int = 5,
+    // See appendTsPidTid's own doc — null (every pre-existing caller) reproduces the pre-feature
+    // render byte-for-byte.
+    cellBg: Color? = null,
 ): AnnotatedString = buildAnnotatedString {
-    appendTsPidTid(entry, tsColor, pidColor, processDisplay, pidFieldWidth)
+    appendTsPidTid(entry, tsColor, pidColor, processDisplay, pidFieldWidth, cellBg)
     append("  ")
     withStyle(SpanStyle(color = entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
         append(entry.level.key.toString())
@@ -1018,7 +1064,10 @@ fun LogViewer(
     val mono      = monoFont()
     val toolbarDensity = LocalDensity.current
     val scrollStates = scrollStateStore ?: remember { LogViewerScrollStateStore() }
-    val computedItems = rememberComputedLogItems(tab, true)
+    // `by`, not `=`: keeps this a live-readable delegated property so the LaunchedEffects further
+    // down can snapshotFlow { computedItems.expandedAt } and wait on the real recompute landing —
+    // see rememberComputedLogItems's doc.
+    val computedItems by rememberComputedLogItems(tab, true)
     val items = computedItems.items
     val itemsVersion = items.size to items.lastOrNull()?.let(::logItemEntryId)
     val visCnt = computedItems.summary.visibleEntryCount
@@ -1619,6 +1668,9 @@ fun LogViewer(
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
                                                 hasTidMap = effectiveTab.tidMap != null,
+                                                autoWrap = settings.autoLogRowWrap,
+                                                wrapLimitChars = effectiveWrapLimitChars,
+                                                pidFieldChars = pidFieldChars,
                                             )
                                         is LogItem.ManualHeader ->
                                             ManualHeaderRow(
@@ -1630,6 +1682,9 @@ fun LogViewer(
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
                                                 hasTidMap = effectiveTab.tidMap != null,
+                                                autoWrap = settings.autoLogRowWrap,
+                                                wrapLimitChars = effectiveWrapLimitChars,
+                                                pidFieldChars = pidFieldChars,
                                             )
                                         is LogItem.StackTraceHeader ->
                                             StackTraceHeaderRow(
@@ -1641,6 +1696,9 @@ fun LogViewer(
                                                 deltaSelectionAnchored = deltaAnchorEntryId != null,
                                                 timeDeltaChars = timeDeltaChars,
                                                 hasTidMap = effectiveTab.tidMap != null,
+                                                autoWrap = settings.autoLogRowWrap,
+                                                wrapLimitChars = effectiveWrapLimitChars,
+                                                pidFieldChars = pidFieldChars,
                                             )
                                     }
                                 }
@@ -1712,7 +1770,8 @@ fun LogViewer(
         }
 
         if (tab.showUnfiltered) {
-            val computedAllItems = rememberComputedLogItems(tab, false)
+            // `by`, not `=` — same reason as computedItems above.
+            val computedAllItems by rememberComputedLogItems(tab, false)
             val allItems = computedAllItems.items
             val allItemsVersion = allItems.size to allItems.lastOrNull()?.let(::logItemEntryId)
             // Each panel needs its own bounds map so row IDs from "Original" and "Filtered"
@@ -1735,6 +1794,26 @@ fun LogViewer(
             // toggled back off.
             val filteredLazyState = scrollStates.lazyState("${tab.id}:main")
             val syncScope    = rememberCoroutineScope()
+
+            // Backs the Filtered panel's row-click sync further down (1.3(a)): a click sets this,
+            // and the LaunchedEffect below does the actual resolve+toggle+center, keyed on both the
+            // click and computedAllItems.expandedAt so it correctly RETRIES once a fresh Original
+            // list lands instead of resolving once against a possibly-stale one with no staleness
+            // guard (the bug this replaces — see the itemOnSelRow call site's comment).
+            var rowClickSyncId by remember(tab.id) { mutableStateOf<Int?>(null) }
+            LaunchedEffect(rowClickSyncId, computedAllItems.expandedAt, computedAllItems.loading) {
+                val id = rowClickSyncId ?: return@LaunchedEffect
+                if (computedAllItems.expandedAt != tab.expanded || computedAllItems.loading) return@LaunchedEffect
+                val target = withContext(Dispatchers.Default) {
+                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = computedAllItems.items)
+                }
+                if (target != null) {
+                    (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
+                    awaitExpandedAt(target.expanded) { computedAllItems.expandedAt }
+                    allLazyState.centerOnItem(target.index)
+                }
+                rowClickSyncId = null
+            }
 
             // Independent selection for the "Original" panel so clicks there don't
             // highlight rows in the "Filtered" panel and vice-versa.
@@ -1819,20 +1898,26 @@ fun LogViewer(
                             }
                             if (target != null) {
                                 (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                                if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                                awaitExpandedAt(target.expanded) { computedItems.expandedAt }
                                 opened = opened + target.expanded
                                 filteredIdx = target.index
                             }
                         }
                         if (allIdx == null) {
+                            // tab.copy(expanded = opened): the filtered branch above may already
+                            // have toggled a gid this same effect run — reflect that instead of
+                            // resolving against the pre-toggle expanded set (1.3(c)).
                             val target = withContext(Dispatchers.Default) {
                                 request.logIds.firstNotNullOfOrNull { entryId ->
-                                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
+                                    expansionAndIndexForEntry(
+                                        tab.copy(expanded = opened), applyFilter = false,
+                                        entryId = entryId, currentItems = computedAllItems.items,
+                                    )
                                 }
                             }
                             if (target != null) {
                                 (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                                if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                                awaitExpandedAt(target.expanded) { computedAllItems.expandedAt }
                                 opened = opened + target.expanded
                                 allIdx = target.index
                             }
@@ -1855,26 +1940,45 @@ fun LogViewer(
                         expansionAndIndexForEntry(tab, applyFilter = true, entryId = entryId, currentItems = items)
                     }
                 }
-                val originalTarget = withContext(Dispatchers.Default) {
+                // Existence probe only (1.3(c)) — its .index/.expanded are resolved against the
+                // pre-filteredTarget-toggle expanded set and must never be used directly; see the
+                // real originalTarget recompute further down, after that toggle has landed.
+                val originalTargetProbe = withContext(Dispatchers.Default) {
                     request.logIds.firstNotNullOfOrNull { entryId ->
                         expansionAndIndexForEntry(tab, applyFilter = false, entryId = entryId, currentItems = allItems)
                     }
                 }
-                if (filteredTarget == null && originalTarget == null && stillLoading) {
+                if (filteredTarget == null && originalTargetProbe == null && stillLoading) {
                     return@LaunchedEffect
                 }
-                if (filteredTarget != null || originalTarget != null) {
+                if (filteredTarget != null || originalTargetProbe != null) {
                     localAllSelected = request.logIds.toSet()
                     var opened = tab.expanded
                     filteredTarget?.let { target ->
                         (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                        if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                        awaitExpandedAt(target.expanded) { computedItems.expandedAt }
                         opened = opened + target.expanded
                         filteredLazyState.centerOnItem(target.index)
                     }
+                    var originalTarget: ExpansionAndIndexTarget? = null
+                    if (originalTargetProbe != null) {
+                        // Recomputed AFTER filteredTarget's own toggle has landed (1.3(c)): both
+                        // panels share tab.expanded, so a fold opened above this entry's position in
+                        // the Original list shifts its true index — resolving it up front (like
+                        // originalTargetProbe above) would use a soon-to-be-wrong row count whenever
+                        // that toggle actually inserts rows ahead of it.
+                        originalTarget = withContext(Dispatchers.Default) {
+                            request.logIds.firstNotNullOfOrNull { entryId ->
+                                expansionAndIndexForEntry(
+                                    tab.copy(expanded = opened), applyFilter = false,
+                                    entryId = entryId, currentItems = computedAllItems.items,
+                                )
+                            }
+                        }
+                    }
                     originalTarget?.let { target ->
                         (target.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                        if (target.expanded != opened) kotlinx.coroutines.delay(80)
+                        awaitExpandedAt(target.expanded) { computedAllItems.expandedAt }
                         opened = opened + target.expanded
                         allLazyState.centerOnItem(target.index)
                     }
@@ -1926,7 +2030,7 @@ fun LogViewer(
                         // enough change that centering (like any other reveal-and-jump) reads
                         // right, unlike the minimal-scroll branch below.
                         (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                        kotlinx.coroutines.delay(80)
+                        awaitExpandedAt(filteredTarget.expanded) { computedItems.expandedAt }
                         opened = opened + filteredTarget.expanded
                         filteredLazyState.centerOnItem(filteredTarget.index)
                     } else {
@@ -1936,8 +2040,14 @@ fun LogViewer(
                         scrollForCursor(filteredLazyState, syncScope, filteredTarget.index, navScrollMargin)
                     }
                 }
+                // tab.copy(expanded = opened) / computedAllItems.items: resolved AFTER
+                // filteredTarget's own toggle (if any) has landed, not against the pre-toggle
+                // expanded set — see 1.3(c).
                 val originalTarget = withContext(Dispatchers.Default) {
-                    expansionAndIndexForEntry(tab, applyFilter = false, entryId = request.entryId, currentItems = allItems)
+                    expansionAndIndexForEntry(
+                        tab.copy(expanded = opened), applyFilter = false,
+                        entryId = request.entryId, currentItems = computedAllItems.items,
+                    )
                 }
                 if (originalTarget != null) {
                     // Original panel has its own independent selection (localAllSelected) — keep it
@@ -1945,7 +2055,7 @@ fun LogViewer(
                     localAllSelected = setOf(request.entryId)
                     if (originalTarget.expanded != opened) {
                         (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                        kotlinx.coroutines.delay(80)
+                        awaitExpandedAt(originalTarget.expanded) { computedAllItems.expandedAt }
                         opened = opened + originalTarget.expanded
                         allLazyState.centerOnItem(originalTarget.index)
                     } else {
@@ -1984,16 +2094,21 @@ fun LogViewer(
                 }
                 if (originalTarget != null) {
                     (originalTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                    if (originalTarget.expanded != opened) kotlinx.coroutines.delay(80)
+                    awaitExpandedAt(originalTarget.expanded) { computedAllItems.expandedAt }
                     opened = opened + originalTarget.expanded
                     allLazyState.centerOnItem(originalTarget.index)
                 }
+                // tab.copy(expanded = opened) / computedItems.items: resolved AFTER originalTarget's
+                // own toggle (if any) has landed — see 1.3(c).
                 val filteredTarget = withContext(Dispatchers.Default) {
-                    expansionAndIndexForEntry(tab, applyFilter = true, entryId = targetId, currentItems = items)
+                    expansionAndIndexForEntry(
+                        tab.copy(expanded = opened), applyFilter = true,
+                        entryId = targetId, currentItems = computedItems.items,
+                    )
                 }
                 if (filteredTarget != null) {
                     (filteredTarget.expanded - opened).forEach { gid -> onToggleGroup(gid) }
-                    if (filteredTarget.expanded != opened) kotlinx.coroutines.delay(80)
+                    awaitExpandedAt(filteredTarget.expanded) { computedItems.expandedAt }
                     filteredLazyState.centerOnItem(filteredTarget.index)
                 }
             }
@@ -2086,16 +2201,13 @@ fun LogViewer(
                             onSelRow(id, multi, range)
                             if (!multi && !range) {
                                 localAllSelected = setOf(id)
-                                syncScope.launch {
-                                    val target = withContext(Dispatchers.Default) {
-                                        expansionAndIndexForEntry(tab, applyFilter = false, entryId = id, currentItems = allItems)
-                                    }
-                                    if (target != null) {
-                                        (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                                        if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
-                                        allLazyState.centerOnItem(target.index)
-                                    }
-                                }
+                                // Resolved by the rowClickSync LaunchedEffect below, not inline in
+                                // this callback (1.3(a)) — that used to run on syncScope with no
+                                // staleness guard, so a click landing inside the 250ms
+                                // LOADING_GRACE_MS window right after ANY expand (exactly what
+                                // pressing an Issues-panel entry does) would resolve against a
+                                // stale allItems and scroll to the wrong row with no retry.
+                                rowClickSyncId = id
                             }
                         },
                         itemOnSelRowRange = { ids ->
@@ -2150,7 +2262,7 @@ fun LogViewer(
                         }
                         if (target != null) {
                             (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                            if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                            awaitExpandedAt(target.expanded) { computedItems.expandedAt }
                             mainLazyState.followItem(target.index)
                             followedIdx = target.index
                         }
@@ -2177,7 +2289,7 @@ fun LogViewer(
                 }
                 if (target != null) {
                     (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                    if (target.expanded != tab.expanded) kotlinx.coroutines.delay(80)
+                    awaitExpandedAt(target.expanded) { computedItems.expandedAt }
                     mainLazyState.centerOnItem(target.index)
                     satisfiedAnnotationNavId = request.id
                 }
@@ -2212,7 +2324,7 @@ fun LogViewer(
                 if (target != null) {
                     if (target.expanded != tab.expanded) {
                         (target.expanded - tab.expanded).forEach { gid -> onToggleGroup(gid) }
-                        kotlinx.coroutines.delay(80)
+                        awaitExpandedAt(target.expanded) { computedItems.expandedAt }
                         mainLazyState.centerOnItem(target.index)
                     } else {
                         scrollForCursor(mainLazyState, searchNavScope, target.index, navScrollMargin)
@@ -2258,9 +2370,14 @@ fun LogViewer(
     }
 }
 
-// Centers `index` in the viewport instead of just scrolling it into view. Scrolling to a fixed
-// "-N rows" margin above the target only approximates centering and drifts whenever rows have
-// different heights (a SeqHeader vs. a plain Row) or the viewport is resized.
+// Row-count-based centering fallback, used only when centerOnItem's own pixel-offset approach
+// (below) fails to converge within CENTER_ON_ITEM_MAX_ROUNDS — see that function's doc for why the
+// pixel-offset approach is preferred: this one drifts whenever the rows above the target are a
+// different average height than the ones the estimate was based on (a SeqHeader vs. a plain Row,
+// wrapped multi-line rows vs. single-line ones). Averages whatever's visible AT AND BELOW the
+// target after a scrollToItem(index) and walks back by roughly that many rows' worth of pixels —
+// approximate (row heights vary), but was the primary mechanism before 1.3(d); kept only as a
+// last-resort fallback now.
 //
 // Deliberately avoids scrollBy() for the correction: scrollToItem(index) has one unambiguous,
 // documented effect — the given index lands at the very top of the viewport — but a follow-up
@@ -2306,9 +2423,77 @@ internal fun isAtLastRow(lastVisibleIndex: Int?, lastRowIndex: Int): Boolean =
 // offset — scrollToItem(spacerIndex, 0) is a harmless no-op until real layout info exists.
 internal fun newestRowScrollOffset(viewportHeight: Int): Int = if (viewportHeight <= 0) 0 else -viewportHeight
 
+// 1.3(d): centerAnchorIndex's row-count-based backward walk (averaging the height of whatever
+// happened to be visible AT AND BELOW the target after a first plain scrollToItem(index)) drifts
+// badly whenever the rows above the target are a different shape than the rows below it — wrapped
+// multi-line rows above, single-line rows below made avgRowHeight too small, so the walk-back
+// landed far too early and the target ended up entirely below the viewport. Prefer the exact form
+// followItem (below) already uses successfully instead: scrollToItem(index, scrollOffset =
+// -(viewportHeight / 2)) works in real pixels, not an estimated row count, so it isn't fooled by
+// non-uniform row heights. One call is usually enough, but the first jump can land into
+// previously-unmeasured rows whose estimated height Compose's lazy layout guessed at — a follow-up
+// round re-issues the same call with the now-measured, more accurate layout, iterated up to
+// CENTER_ON_ITEM_MAX_ROUNDS and stopping the moment the target is verified converged (see
+// isItemPlacementConverged). The old average-height walk is kept only as a last-resort fallback
+// for the rare case this never converges.
+private const val CENTER_ON_ITEM_MAX_ROUNDS = 3
+
+// A small pixel slack for the "pinned to the top" tolerance below — scrollToItem(index,
+// scrollOffset = 0) should land the target's top exactly at 0, but a sub-pixel rounding or a
+// layout pass that hasn't fully settled yet could leave it off by a hair; a few px is still
+// visually indistinguishable from pinned.
+private const val TALL_ROW_TOP_TOLERANCE_PX = 4
+
+// Whether `offset`/`size` (a LazyListItemInfo's own offset and size, relative to the viewport
+// start) represents a placement worth stopping the centerOnItem correction loop at. Extracted as a
+// pure function (mirroring centerAnchorIndex above) so it's unit-testable without the surrounding
+// Compose scroll machinery.
+//
+// A row that fits entirely within the viewport converges once it actually does (offset >= 0 and
+// its bottom edge at/before viewportHeight) — the normal case. But a single log row CAN be taller
+// than the viewport: with wrap-on-overflow enabled, a very long line (a raw stack trace, a JSON
+// dump, a base64 blob — item 3 of the original bug report is literally about long lines, so these
+// are exactly the tabs where navigation gets used) wraps to more visual lines than the window is
+// tall. For such a row, "fits entirely" can never be satisfied — checking for it anyway burned
+// every round on a no-op scrollToItem(index, -(viewportHeight/2)) call (the same placement each
+// time, since nothing about the measurement changes) and then fell through to the average-height
+// fallback, which 1.3(d) established is the LESS accurate placement, actively making the already-
+// centered-as-well-as-possible row worse. Once a row is known taller than the viewport there is no
+// placement that shows all of it, so the best available one is its top edge pinned at the viewport
+// top (offset ~= 0) — that's the part of a long line a reader wants first, and centering it would
+// instead push the beginning off-screen above.
+internal fun isItemPlacementConverged(offset: Int, size: Int, viewportHeight: Int): Boolean {
+    if (viewportHeight <= 0) return true // nothing meaningful to converge against
+    return if (size >= viewportHeight) {
+        kotlin.math.abs(offset) <= TALL_ROW_TOP_TOLERANCE_PX
+    } else {
+        offset >= 0 && offset + size <= viewportHeight
+    }
+}
+
 private suspend fun LazyListState.centerOnItem(index: Int) {
-    scrollToItem(index)
-    withFrameNanos { }
+    repeat(CENTER_ON_ITEM_MAX_ROUNDS) {
+        val info = layoutInfo
+        val viewportHeight = info.viewportEndOffset - info.viewportStartOffset
+        if (viewportHeight <= 0) {
+            scrollToItem(index)
+            return
+        }
+        // Once a previous round has actually measured the target as taller than the viewport,
+        // stop trying to CENTER it — pin its top edge to the viewport top instead (see
+        // isItemPlacementConverged's doc for why centering it would be strictly worse).
+        val knownTooTall = info.visibleItemsInfo.firstOrNull { it.index == index }
+            ?.let { it.size >= viewportHeight } == true
+        scrollToItem(index, scrollOffset = if (knownTooTall) 0 else -(viewportHeight / 2))
+        withFrameNanos { }
+        val after = layoutInfo
+        val afterViewportHeight = after.viewportEndOffset - after.viewportStartOffset
+        val target = after.visibleItemsInfo.firstOrNull { it.index == index } ?: return@repeat
+        if (isItemPlacementConverged(target.offset, target.size, afterViewportHeight)) return
+    }
+    // Fallback: the iterative pixel-offset approach above never converged — fall back to the
+    // original average-row-height backward walk rather than leaving the target wherever the last
+    // round's scrollToItem happened to land.
     val info = layoutInfo
     val visible = info.visibleItemsInfo
     if (visible.isEmpty()) return
@@ -2366,6 +2551,13 @@ internal fun rankCollapsedHeadersByProximity(headers: List<Pair<String, Int>>, e
 // the other scroll effects above — pressing an arrow/page key away from the last row suspends
 // tail-follow. Deliberate: the keyboard is the most explicit possible "I'm looking at this row"
 // signal there is.
+// 1.3(d): the `+ margin - visible.size + 1` arithmetic assumes the rows about to be scrolled INTO
+// view are the same height as the ones already on screen — wrong whenever they aren't (e.g. the
+// cursor moving from a run of single-line rows into a run of wrapped multi-line ones), landing
+// short of or past the intended margin. Re-verify against the REAL post-scroll layout and correct
+// again if needed, same iterate-and-verify shape as centerOnItem above, capped the same way.
+private const val SCROLL_FOR_CURSOR_MAX_ROUNDS = 3
+
 private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, targetItemsIdx: Int, margin: Int) {
     val visible = lazyState.layoutInfo.visibleItemsInfo
     if (visible.isEmpty()) {
@@ -2374,13 +2566,31 @@ private fun scrollForCursor(lazyState: LazyListState, scope: CoroutineScope, tar
     }
     val firstVisible = visible.first().index
     val lastVisible = visible.last().index
-    val target = when {
+    // Already comfortably within the margin band: the pre-existing no-scroll contract (see the
+    // class doc above) — a cursor move inside the middle never triggers a scroll at all.
+    if (targetItemsIdx in (firstVisible + margin)..(lastVisible - margin)) return
+    val firstGuess = when {
         targetItemsIdx < firstVisible + margin -> (targetItemsIdx - margin).coerceAtLeast(0)
-        targetItemsIdx > lastVisible - margin -> (targetItemsIdx + margin - visible.size + 1).coerceAtLeast(0)
-        else -> return
+        else -> (targetItemsIdx + margin - visible.size + 1).coerceAtLeast(0)
     }
-    if (target == firstVisible) return
-    scope.launch { lazyState.scrollToItem(target) }
+    if (firstGuess == firstVisible) return
+    scope.launch {
+        var next = firstGuess
+        repeat(SCROLL_FOR_CURSOR_MAX_ROUNDS) {
+            lazyState.scrollToItem(next)
+            withFrameNanos { }
+            val after = lazyState.layoutInfo.visibleItemsInfo
+            if (after.isEmpty()) return@launch
+            val afterFirst = after.first().index
+            val afterLast = after.last().index
+            if (targetItemsIdx in (afterFirst + margin)..(afterLast - margin)) return@launch
+            next = when {
+                targetItemsIdx < afterFirst + margin -> (targetItemsIdx - margin).coerceAtLeast(0)
+                else -> (targetItemsIdx + margin - after.size + 1).coerceAtLeast(0)
+            }
+            if (next == afterFirst) return@launch
+        }
+    }
 }
 
 // Bundles the keyboard selection's anchor (fixed end of a shift-extend range) and cursor
@@ -2655,17 +2865,34 @@ private fun LogRow(
         pidFieldXRange?.let { (start, end) -> pointerInsidePidFieldX(hoverPointerX, start, end) } == true
 
     val isCrashGroupRow = isCrashGroupRow(item.groupColor, highlightEntireCrashGroup)
+    // Toned exactly like the sequence header's own ts/pid-tid cells (HeaderPidTidCell's call site
+    // uses sc.copy(.7f) — see that composable's doc) so a row belonging to a THREAD-SCOPED
+    // sequence's run is visibly distinguishable at a glance from the interleaved foreign-thread
+    // lines around it, which stay in the ordinary muted tc.td. null (the ordinary/unscoped case,
+    // and every foreign-thread row) falls straight through to tc.td unchanged. Left at 0.7 even now
+    // that cellBg below adds a background wash of the SAME colour underneath: the wash sits at
+    // tc.seqCellBgAlpha (0.16-0.22, tuned per light/dark — see that field's own doc), a big enough
+    // alpha gap under this 0.7 foreground that the text stays legible rather than reading as one
+    // muddy same-hue-on-itself block, in both light and dark themes.
+    val tsColor = item.scopedSeqColor?.copy(alpha = 0.7f) ?: tc.td
+    val pidColor = item.scopedSeqColor?.copy(alpha = 0.7f) ?: tc.td.copy(0.5f)
+    // Background companion to tsColor/pidColor above — same null-for-unscoped fallthrough, but
+    // Color.Unspecified (SpanStyle's own "no paint" value) rather than a theme colour, since an
+    // unscoped/ordinary row must not get any cell fill at all (pixel-identical to before this was
+    // added). See appendTsPidTid's own doc for why this is two separate per-field washes rather
+    // than one spanning the "  " gap between them.
+    val cellBg = item.scopedSeqColor?.copy(alpha = tc.seqCellBgAlpha)
     val annoLine = remember(
-        tab.id, entry, tab.filter, tc.td, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap, searchHighlight,
-        processDisplay, pidFieldChars,
+        tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
+        searchHighlight, processDisplay, pidFieldChars,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
         val built = buildFullLineAnnotation(
             entry,
             tab.filter.highlighters,
-            tc.td,
-            tc.td.copy(0.5f),
+            tsColor,
+            pidColor,
             tagColor,
             msgColor,
             tab.filter,
@@ -2676,6 +2903,7 @@ private fun LogRow(
             // why that matters for drag-selection.
             processDisplay = processDisplay,
             pidFieldWidth = pidFieldChars,
+            cellBg = cellBg,
         )
         if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
     }
@@ -3111,6 +3339,91 @@ private fun HeaderTimeDeltaCell(
     }
 }
 
+// Shared PID/TID cell for the three group/collapse header row types below. Body rows render their
+// PID/TID inside LogRow's single BasicTextField (appendTsPidTid), so this is a separate composable
+// rather than a shared helper called from both places — but it deliberately mirrors that same
+// "pid tid" text shape (pid padStart to the tab's uniform pidFieldChars, tid always padStart(5))
+// and sits in the same left-to-right slot (right after the timestamp+level text, before the tag),
+// so a header's PID/TID lands in the same column body rows use. Unlike LogRow, a header never
+// resolves a process display name here — headers already carry enough distinct text (chevron,
+// tag, message, entry/frame count) that adding name resolution's own width churn wasn't worth it
+// for a single anchor entry; the bare numbers are enough to show which thread/process this group's
+// anchor line belongs to. `entry.pid <= 0` (RAW-fallback lines) omits the cell entirely, matching
+// LogRow's own `if (entry.pid > 0)` guard in appendTsPidTid.
+@Composable
+private fun HeaderPidTidCell(entry: LogEntry, color: Color, mono: FontFamily, pidFieldChars: Int) {
+    if (entry.pid <= 0) return
+    AppText(
+        "${entry.pid.toString().padStart(pidFieldChars)} ${entry.tid.toString().padStart(5)}",
+        color = color, fontSize = 11.sp, fontFamily = mono, maxLines = 1, overflow = TextOverflow.Clip,
+    )
+}
+
+// Compact "this run is pinned to one thread" marker for a thread-scoped (Wave 2.1 "async")
+// SequenceDef's header — the ONLY visible cue that distinguishes it from an ordinary sequence
+// before this, a user had no way to tell from the log view alone why two interleaved runs of the
+// same flow rendered as separate groups. item.scopeTid is always the header entry's own tid when
+// set (the start pattern only matches on that thread to begin with — see SeqComputer's
+// matchesSeqText), so this doesn't need its own tid lookup, just item.scopeTid itself. Rendered in
+// the sequence's own color (sc) with a filled pill background so it reads as a distinct badge next
+// to the plain-text PID/TID cell rather than more of the same muted metadata.
+@Composable
+private fun ScopeTidBadge(scopeTid: Int?, color: Color, mono: FontFamily) {
+    if (scopeTid == null) return
+    Box(
+        Modifier.background(color.copy(alpha = 0.18f), RoundedCornerShape(4.dp))
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    ) {
+        AppText("tid $scopeTid", color = color, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.Bold)
+    }
+}
+
+// Shared message cell for the three group/collapse header row types below. Unlike LogRow's message
+// (an AnnotatedString rendered through a real BasicTextField — see the comment above LogRow's
+// autoWrap param), headers render msg as plain AppText, so it never picked up either of LogRow's
+// two wrap behaviors: Auto mode's reliance on real font-measured width, or Manual mode's fixed-
+// chars-per-line break. This mirrors both: in Auto mode msg is left untouched and AppText's own
+// softWrap does the wrapping against the Row's real available width, same mechanism LogRow's Auto
+// path uses (minus the zero-estimation-error nuance that only matters for BasicTextField's caret/
+// selection math, which a header — not editable, not selectable text — doesn't need); in Manual
+// mode msg is pre-broken with visualLogLineForWrapLimit at wrapLimitChars, the SAME helper LogRow's
+// Manual path (AnnotatedString overload) uses, so a header wraps at the same fixed column the body
+// rows below it do, rather than at whatever width happens to remain after the tag/timestamp
+// columns eat into the Row. Capped at 3 lines with an ellipsis so one very long header can't
+// dominate the visible row budget, and the full, un-wrapped, un-truncated line is always one hover
+// away via the tooltip — same TooltipArea shape as VideoPanel.kt's fullPath tooltip.
+@Composable
+private fun RowScope.HeaderMessageCell(
+    msg: String,
+    color: Color,
+    mono: FontFamily,
+    tc: ThemeColors,
+    autoWrap: Boolean,
+    wrapLimitChars: Int,
+) {
+    val displayMsg = remember(msg, autoWrap, wrapLimitChars) {
+        if (autoWrap) msg else visualLogLineForWrapLimit(msg, wrapLimitChars)
+    }
+    TooltipArea(
+        tooltip = {
+            Box(
+                Modifier.background(tc.p2, CORNER_SM)
+                    .border(0.5.dp, tc.br, CORNER_SM)
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .widthIn(max = 480.dp),
+            ) {
+                AppText(msg, color = tc.tx, fontSize = 11.sp, maxLines = 16, overflow = TextOverflow.Ellipsis)
+            }
+        },
+        modifier = Modifier.weight(1f),
+    ) {
+        AppText(
+            displayMsg, color = color, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+            maxLines = 3, overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
 @Composable
 private fun SeqHeaderRow(
     item: LogItem.SeqHeader,
@@ -3134,6 +3447,16 @@ private fun SeqHeaderRow(
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
     hasTidMap: Boolean = false,
+    // Threaded in from the same settings.autoLogRowWrap / effectiveWrapLimitChars the LazyColumn's
+    // itemsIndexed lambda already computes for LogRow (see the call site above) — see
+    // HeaderMessageCell's own doc for why the header message needs both to wrap "the same way body
+    // rows do" instead of the plain-AppText single-line clip it used to get.
+    autoWrap: Boolean = false,
+    wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
+    // Same per-tab uniform width LogRow's own PID cell uses (LogViewer's pidFieldCharWidth) — see
+    // HeaderPidTidCell's own doc for why this stays a bare-number cell rather than also resolving
+    // a process display name.
+    pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
     val sc  = item.color
@@ -3210,10 +3533,11 @@ private fun SeqHeaderRow(
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
+        ScopeTidBadge(item.scopeTid, sc, mono)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
-        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        HeaderMessageCell(item.entry.msg, sc, mono, tc, autoWrap, wrapLimitChars)
         if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)
     }
 }
@@ -3236,6 +3560,10 @@ private fun ManualHeaderRow(
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
     hasTidMap: Boolean = false,
+    // See SeqHeaderRow's identical params / HeaderMessageCell's doc.
+    autoWrap: Boolean = false,
+    wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
+    pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
     val sc = item.color
@@ -3309,10 +3637,10 @@ private fun ManualHeaderRow(
         }
         AppText(label, color = sc, fontSize = 11.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
-        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        HeaderMessageCell(item.entry.msg, sc, mono, tc, autoWrap, wrapLimitChars)
         if (!item.expanded) AppText("${item.count} entries", color = sc.copy(.6f), fontSize = 11.sp)
     }
 }
@@ -3337,6 +3665,10 @@ private fun StackTraceHeaderRow(
     deltaSelectionAnchored: Boolean = false,
     timeDeltaChars: Int = 1,
     hasTidMap: Boolean = false,
+    // See SeqHeaderRow's identical params / HeaderMessageCell's doc.
+    autoWrap: Boolean = false,
+    wrapLimitChars: Int = MIN_WRAP_LIMIT_CHARS,
+    pidFieldChars: Int = 5,
 ) {
     val density = LocalDensity.current.density
     val sc = DANGER_RED
@@ -3413,10 +3745,10 @@ private fun StackTraceHeaderRow(
         if (item.indent > 0) Spacer(Modifier.width(INDENT_STEP * item.indent))
         CollapseChevron(expanded = item.expanded, color = sc, mono = mono, onClick = { onToggleGroup(item.gid) })
         AppText("${item.entry.ts}  ${item.entry.level.key}", color = sc.copy(.7f), fontSize = 11.sp, fontFamily = mono)
+        HeaderPidTidCell(item.entry, sc.copy(.7f), mono, pidFieldChars)
         AppText("${item.entry.tag}:", color = sc, fontSize = 11.sp, fontFamily = mono,
             modifier = Modifier.widthIn(min = 120.dp, max = 520.dp), overflow = TextOverflow.Clip)
-        AppText(item.entry.msg, color = sc, fontSize = 12.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f), overflow = TextOverflow.Clip)
+        HeaderMessageCell(item.entry.msg, sc, mono, tc, autoWrap, wrapLimitChars)
         if (!item.expanded) AppText("${item.count} frames", color = sc.copy(.6f), fontSize = 11.sp)
     }
 }

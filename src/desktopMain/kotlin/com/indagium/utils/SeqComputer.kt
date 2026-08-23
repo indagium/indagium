@@ -40,12 +40,12 @@ private class SeqScan(
             val entry = logData[idx]
             val hay = "${entry.tag} ${entry.msg}"
             val startDef = enabled.firstOrNull {
-                matchesSeqText(entry, hay, it.matchText, it.isRegex, it.tag, regexContext)
+                matchesSeqText(entry, hay, it.matchText, it.isRegex, it.tag, it.scopeTid, regexContext)
             }
             if (startDef != null) candidates += SeqCandidate(idx, startDef)
             for (def in endDefs) {
                 val endText = def.endMatchText ?: continue
-                if (matchesSeqText(entry, hay, endText, def.endIsRegex, def.endTag, regexContext)) {
+                if (matchesSeqText(entry, hay, endText, def.endIsRegex, def.endTag, def.scopeTid, regexContext)) {
                     endIdxByDef.getOrPut(def.id) { mutableListOf() } += idx
                 }
             }
@@ -53,16 +53,44 @@ private class SeqScan(
     }
 }
 
+// scopeTid (Wave 2.1 "async" sequences): when a def pins its scan to one thread, an entry from
+// any other thread fails the match outright — for the START pattern this stops a different
+// thread's coincidental text match from opening a new group; for the END pattern (same def,
+// second call site below) it stops a different thread's end line from closing a group that isn't
+// "its" run. null (the common, unscoped case) leaves matching exactly as it always was.
 private fun matchesSeqText(
     entry: LogEntry,
     hay: String,
     text: String,
     isRegex: Boolean,
     tag: String?,
+    scopeTid: Int?,
     regexContext: RegexEvaluationContext,
 ): Boolean {
     if (tag != null && entry.tag != tag) return false
+    if (scopeTid != null && entry.tid != scopeTid) return false
     return containsPattern(hay, text, isRegex, regexContext = regexContext)
+}
+
+// Task 3 (FilterPanel "switch to thread-scoped" control): resolves the tid the sequence WOULD be
+// pinned to if the user turns scoping on now — the tid of the first log entry def's own start
+// pattern matches. Deliberately reuses matchesSeqText with scopeTid forced to null: that's exactly
+// the check a start candidate gets today when def is still unscoped (the case being switched FROM),
+// so "first match" here means the same entry SeqComputer itself would open a group on. Returns null
+// when nothing matches at all — the caller must leave the def unscoped and say so rather than
+// picking an arbitrary/zero tid.
+internal fun resolveSequenceStartTid(
+    logData: List<LogEntry>,
+    def: SequenceDef,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): Int? {
+    for (entry in logData) {
+        val hay = "${entry.tag} ${entry.msg}"
+        if (matchesSeqText(entry, hay, def.matchText, def.isRegex, def.tag, scopeTid = null, regexContext)) {
+            return entry.tid
+        }
+    }
+    return null
 }
 
 // First element of the ascending list strictly greater than idx, or null.
@@ -128,10 +156,16 @@ internal fun computeSeqGroups(
         if (c.parent >= 0) childrenByParent.getOrPut(c.parent) { mutableListOf() } += ci
     }
 
-    // Entry ids inside the candidate's range not covered by any direct child's range.
+    // Entry ids inside the candidate's range not covered by any direct child's range. When the
+    // owning def is thread-scoped (scopeTid != null), an entry from any OTHER thread is excluded
+    // even though it falls inside the index range — it renders as a plain row outside the group
+    // instead of being silently swallowed into a run that isn't "its" thread. The candidate's own
+    // start entry (c.idx) already satisfied this same tid check in matchesSeqText, so only the
+    // rest of the range needs it here.
     fun childIds(ci: Int): List<Int> {
         val c = candidates[ci]
         val offset = c.idx
+        val scopeTid = c.def.scopeTid
         val covered = BitSet(c.endExclusive - offset)
         childrenByParent[ci]?.forEach { childCi ->
             val child = candidates[childCi]
@@ -139,6 +173,7 @@ internal fun computeSeqGroups(
         }
         return (c.idx + 1 until c.endExclusive)
             .filter { !covered.get(it - offset) }
+            .filter { scopeTid == null || logData[it].tid == scopeTid }
             .map { logData[it].id }
     }
 

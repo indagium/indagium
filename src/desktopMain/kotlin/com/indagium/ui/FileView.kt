@@ -97,6 +97,8 @@ internal fun BoundFilterPanel(
         onUpdateSeq = { id, text, rx, tag, endText, endRx, endTag ->
             state.updateSequence(tab.id, id, text, rx, tag, endText, endRx, endTag)
         },
+        onSetSeqScoped = { id, scoped -> state.setSequenceScoped(tab.id, id, scoped) },
+        onScopeCrossingThreadPair = { hint -> state.scopeCrossingThreadPair(tab.id, hint) },
         onToggleManualCollapse = { state.toggleManualCollapse(tab.id, it) },
         onRemoveManualCollapse = { state.removeManualCollapse(tab.id, it) },
         onSetManualBlockColor = { id, c -> state.setManualBlockColor(tab.id, id, c) },

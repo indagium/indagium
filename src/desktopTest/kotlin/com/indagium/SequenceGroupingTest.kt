@@ -12,7 +12,9 @@ import com.indagium.model.SequenceDef
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.mkTab
 import com.indagium.utils.CancellationCheck
+import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.cachedCrossingThreadHintsFor
 import com.indagium.utils.computeItems
 import com.indagium.utils.computeSeqGroups
 import kotlin.test.Test
@@ -59,6 +61,199 @@ class SequenceGroupingTest {
 
         assertEquals(listOf(1), groups.map { it.rid })
         assertEquals(listOf(2, 3, 4), groups.single().plain)
+    }
+
+    // ── Wave 2.1: thread-scoped ("async") sequences ─────────────────────────────────────────────
+    //
+    // scopeTid narrows a SequenceDef to one thread on top of (never instead of) tag scoping: a
+    // start logged by thread A could otherwise be closed by an end from thread B, and two
+    // interleaved runs of the same flow become one crossing group the user can't attribute to
+    // either run. These cover the three places SeqComputer applies it (start match, end match,
+    // childIds) plus a regression guard that the null (unscoped) default is unaffected.
+
+    @Test
+    fun scopeTidNarrowsWhichEntryCanStartASequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 200),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Auth", "flow started", tid = 100),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "flow finished", tid = 100),
+        )
+        val sequence = SequenceDef(
+            id = "auth-flow", matchText = "flow started", priority = 1, color = Color.Red,
+            endMatchText = "flow finished", scopeTid = 100,
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        // The identical "flow started" text from tid 200 never opens a group at all — it's
+        // ignored outright as a candidate, the same way a tag mismatch already is.
+        assertEquals(listOf(2), groups.map { it.rid })
+    }
+
+    @Test
+    fun scopeTidNarrowsWhichEntryCanEndASequence() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Auth", "flow finished", tid = 200), // false end: wrong thread
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "middle work", tid = 100),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Auth", "flow finished", tid = 100), // real end
+        )
+        val sequence = SequenceDef(
+            id = "auth-flow", matchText = "flow started", priority = 1, color = Color.Red,
+            endMatchText = "flow finished", scopeTid = 100,
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1), groups.map { it.rid })
+        // The tid-200 "flow finished" is ignored outright as an end candidate — the group closes
+        // at the real (tid-100) end two lines later, not prematurely at entry 2. Entry 2 itself is
+        // additionally excluded from `plain` by the childIds tid filter proven separately below.
+        assertEquals(listOf(3, 4), groups.single().plain)
+    }
+
+    @Test
+    fun scopeTidExcludesOtherThreadsEntriesFromChildIds() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Worker", "unrelated noise from another thread", tid = 200),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "same-thread middle event", tid = 100),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Auth", "flow finished", tid = 100),
+        )
+        val sequence = SequenceDef(
+            id = "auth-flow", matchText = "flow started", priority = 1, color = Color.Red,
+            endMatchText = "flow finished", scopeTid = 100,
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(1), groups.map { it.rid })
+        // Entry 2 falls inside the group's index range but came from a different thread — it must
+        // render as a plain row OUTSIDE the group, not be silently swallowed into this run.
+        assertEquals(listOf(3, 4), groups.single().plain)
+    }
+
+    @Test
+    fun unscopedSequenceStillSwallowsEntriesFromEveryThreadRegressionGuard() {
+        // scopeTid defaults to null (unscoped) — an interleaved line from a different thread must
+        // still be swallowed exactly as it always was, with no behavior change for every existing
+        // (unscoped) SequenceDef.
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 100),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Worker", "interleaved from another thread", tid = 200),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "flow finished", tid = 100),
+        )
+        val sequence = SequenceDef(
+            id = "auth-flow", matchText = "flow started", priority = 1, color = Color.Red,
+            endMatchText = "flow finished",
+        )
+
+        val groups = computeSeqGroups(logs, listOf(sequence))
+
+        assertEquals(listOf(2, 3), groups.single().plain)
+    }
+
+    // ── renderRange's own scopeTid handling (bug: computeSeqGroups already excluded a foreign-tid
+    // entry from `plain`/`ch`, but the RENDERER never consulted scopeTid at all — every index in
+    // [start, endExclusive) rendered nested and sequence-tinted regardless, which is what the user
+    // actually saw: a foreign-thread line rendered inside an async sequence it wasn't part of). ──
+
+    private fun asyncScopeLogs() = listOf(
+        LogEntry(1, "t", LogLevel.I, "Other", "before",       pid = 9, tid = 200),
+        LogEntry(2, "t", LogLevel.I, "Seq",   "touch start",  pid = 1, tid = 100),
+        LogEntry(3, "t", LogLevel.I, "Other", "foreign work", pid = 9, tid = 200),
+        LogEntry(4, "t", LogLevel.I, "Mine",  "own work",     pid = 1, tid = 100),
+        LogEntry(5, "t", LogLevel.I, "Seq",   "touch end",    pid = 1, tid = 100),
+        LogEntry(6, "t", LogLevel.I, "Other", "after",        pid = 9, tid = 200),
+    )
+
+    private fun asyncScopeTab(expanded: Set<String>): LogTab {
+        val logs = asyncScopeLogs()
+        return LogTab(
+            id = "log", filename = "t.log", logData = logs, rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(
+                SequenceDef("s", "touch start", priority = 1, color = Color.Red, tag = "Seq",
+                    endMatchText = "touch end", endTag = "Seq", scopeTid = 100),
+            )),
+            expanded = expanded,
+        )
+    }
+
+    @Test
+    fun expandedAsyncSequenceRendersAForeignThreadRowOutsideTheGroupAtTheEnclosingLevel() {
+        val tab = asyncScopeTab(expanded = setOf("sg_s_2"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val foreign = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 3 }
+        assertEquals(0, foreign.indent, "foreign-tid row must render at the enclosing (non-nested) indent")
+        assertEquals(null, foreign.groupColor, "foreign-tid row must not be tinted with the async sequence's color")
+        val ownThread = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 4 }
+        assertEquals(1, ownThread.indent, "same-tid row must still render nested inside the async sequence")
+        assertEquals(Color.Red, ownThread.groupColor, "same-tid row must still be tinted with the sequence's color")
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+    }
+
+    @Test
+    fun expandedAsyncSequenceTintsOnlyGenuineMembersScopedSeqColor() {
+        // Task: "color the timestamp and pid/tid too" for a row belonging to a thread-scoped
+        // ("async") sequence. LogRow reads LogItem.Row.scopedSeqColor (not groupColor alone,
+        // which an ordinary/unscoped sequence's member also carries) to decide whether to tint
+        // those columns — this is the pure-logic half of that decision, computed in renderRange.
+        val tab = asyncScopeTab(expanded = setOf("sg_s_2"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val ownThread = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 4 }
+        assertEquals(Color.Red, ownThread.scopedSeqColor, "genuine same-tid member must carry the sequence's color for ts/pid/tid tinting")
+        val foreign = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 3 }
+        assertEquals(null, foreign.scopedSeqColor, "foreign-tid row must stay untinted — that contrast is the whole point")
+        val before = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 1 }
+        assertEquals(null, before.scopedSeqColor, "a top-level row outside any sequence must never be tinted")
+    }
+
+    @Test
+    fun ordinaryUnscopedSequenceMembersAreNotMarkedAsScopedSeqColor() {
+        // Contrast case for the above: an ORDINARY (unscoped, scopeTid == null) sequence's member
+        // keeps today's appearance exactly — groupColor is still set (the indent/bar already say
+        // it belongs), but scopedSeqColor stays null so LogRow does NOT additionally tint ts/pid/tid.
+        val logs = listOf(
+            LogEntry(1, "t", LogLevel.I, "Seq", "flow start", pid = 1, tid = 100),
+            LogEntry(2, "t", LogLevel.I, "Seq", "flow child", pid = 1, tid = 100),
+        )
+        val tab = LogTab(
+            id = "log", filename = "t.log", logData = logs, rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(
+                SequenceDef("s", "flow start", priority = 1, color = Color.Blue, tag = "Seq"),
+            )),
+            expanded = setOf("sg_s_1"),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val member = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 2 }
+        assertEquals(Color.Blue, member.groupColor, "unscoped member still carries groupColor as before")
+        assertEquals(null, member.scopedSeqColor, "unscoped member must NOT be marked for the extra ts/pid/tid tint")
+    }
+
+    @Test
+    fun collapsedAsyncSequenceStillRendersForeignThreadRowsInItsSpan() {
+        val tab = asyncScopeTab(expanded = emptySet())
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val header = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 2 }
+        assertFalse(header.expanded)
+        // Only the two same-tid entries (id 4, the own-thread work, and id 5, the end line itself)
+        // are actually hidden by the collapse — id 3 (tid 200) was never this run's content, so it
+        // must render even while the group is collapsed.
+        assertEquals(2, header.count)
+        val foreign = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 3 }
+        assertEquals(0, foreign.indent)
+        assertEquals(null, foreign.groupColor)
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(1, 3, 6), rows) // id 5 (the end line) is folded into the header itself
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
     }
 
     @Test
@@ -734,5 +929,450 @@ class SequenceGroupingTest {
 
         assertEquals(listOf(1, 2, 3), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
         assertTrue(items.filterIsInstance<LogItem.ManualHeader>().isEmpty())
+    }
+
+    // ── Crossing top-level sequences (data-loss regression) ──────────────────────────────────
+    //
+    // assignParents (SeqComputer.kt) only nests a candidate that's FULLY CONTAINED in another; two
+    // sequences whose ranges partially overlap ("cross" — neither contains the other) both survive
+    // as independent top-level SeqGroups and used to both land in renderRange's topChildren with
+    // overlapping [start, end) ranges. That silently dropped every row from the swallowed one's own
+    // start through its own end: no header, no row, not even folded into a count — gone.
+    //
+    // Shared fixture for the tests below: A = ids [1..5] (endMatchText "A end" on id 5), B = ids
+    // [3..6] (endMatchText "B end" on id 6). B's start (id 3) falls inside A's still-open range and
+    // B's end (id 6) falls past A's own end — a genuine crossing, not a containment, in either
+    // direction. A starts first, so A is expected to host B's full extent, nested one level in.
+
+    private fun crossingSequenceLogs() = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "SeqA", "A start"),
+        LogEntry(2, "10:00:00.100", LogLevel.I, "Mid", "between"),
+        LogEntry(3, "10:00:00.200", LogLevel.I, "SeqB", "B start"),
+        LogEntry(4, "10:00:00.300", LogLevel.I, "Mid", "between"),
+        LogEntry(5, "10:00:00.400", LogLevel.I, "SeqA", "A end"),
+        LogEntry(6, "10:00:00.500", LogLevel.I, "SeqB", "B end"),
+    )
+
+    private fun crossingSequenceDefs(): List<SequenceDef> {
+        val a = SequenceDef("seqA", "A start", priority = 1, color = Color.Red, tag = "SeqA", endMatchText = "A end", endTag = "SeqA")
+        val b = SequenceDef("seqB", "B start", priority = 2, color = Color.Blue, tag = "SeqB", endMatchText = "B end", endTag = "SeqB")
+        return listOf(a, b)
+    }
+
+    // Every entry in `data` appears exactly once in the output: as a Row, as a header's own row,
+    // or accounted for inside a COLLAPSED header's `count`. SeqHeader/StackTraceHeader.count is the
+    // number of children BELOW the header (the header's own row is separate — see e.g.
+    // startEndSequenceCanUseDifferentTagsAndIncludesEndLine); ManualHeader.count is the block's
+    // whole declared range, which DOES include its own anchor row (see
+    // manualCollapseToEndHidesRowsAfterAnchor), hence the -1 there. This catches a dropped row (the
+    // sum comes up short) and a duplicated one (rendered ids aren't distinct) even in shapes the
+    // targeted assertions elsewhere in this file don't happen to look at.
+    private fun assertEveryEntryAccountedForExactlyOnce(totalEntries: Int, items: List<LogItem>) {
+        val renderedIds = mutableListOf<Int>()
+        var hidden = 0
+        items.forEach { item ->
+            when (item) {
+                is LogItem.Row -> renderedIds += item.entry.id
+                is LogItem.SeqHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hidden += item.count
+                }
+                is LogItem.StackTraceHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hidden += item.count
+                }
+                is LogItem.ManualHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hidden += item.count - 1
+                }
+            }
+        }
+        assertEquals(renderedIds.size, renderedIds.toSet().size, "an entry id was rendered more than once")
+        assertEquals(
+            totalEntries,
+            renderedIds.size + hidden,
+            "some entries are neither rendered nor accounted for in a collapsed group's count",
+        )
+    }
+
+    private fun crossingSequenceTab(expanded: Set<String>): LogTab {
+        val logs = crossingSequenceLogs()
+        return LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = crossingSequenceDefs()),
+            expanded = expanded,
+        )
+    }
+
+    // ── Task 4: crossing-different-thread detection (CrossingThreadHint) ──────────────────────
+    //
+    // Reuses the SAME crossing pair computeItems' own hosting-resolution pass already finds above
+    // (crossingSequenceLogs/crossingSequenceDefs: A hosts B, a genuine crossing) — these tests only
+    // add tid to the two roots to prove the hint is correctly gated on the roots' own tids, not a
+    // second detection pass.
+
+    @Test
+    fun crossingSequencesOnDifferentThreadsProduceACrossingThreadHint() {
+        val logs = crossingSequenceLogs().map {
+            when (it.id) {
+                1 -> it.copy(tid = 100) // A's own start
+                3 -> it.copy(tid = 200) // B's own start
+                else -> it
+            }
+        }
+        val tab = LogTab(
+            id = "log", filename = "test.log", logData = logs, rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = crossingSequenceDefs()),
+        )
+
+        computeItems(tab, applyFilter = true) // warms the cache cachedCrossingThreadHintsFor peeks
+        val hints = cachedCrossingThreadHintsFor(tab, applyFilter = true)
+
+        assertEquals(listOf(CrossingThreadHint("seqA", 100, "seqB", 200)), hints)
+    }
+
+    @Test
+    fun crossingSequencesOnTheSameThreadProduceNoHint() {
+        // crossingSequenceTab's fixture leaves every entry at the LogEntry default tid (0) — A and
+        // B still cross (this exact fixture is what crossingTopLevelSequences* above exercises),
+        // but scoping both to the one shared tid they're already both on wouldn't separate them,
+        // so no hint should be offered.
+        val tab = crossingSequenceTab(expanded = emptySet())
+
+        computeItems(tab, applyFilter = true)
+        val hints = cachedCrossingThreadHintsFor(tab, applyFilter = true)
+
+        assertEquals(emptyList(), hints)
+    }
+
+    @Test
+    fun crossingTopLevelSequencesAreAccountedForExactlyOnceInAllFourExpansionCombinations() {
+        val allCombos = listOf(
+            emptySet(), setOf("sg_seqA_1"), setOf("sg_seqB_3"), setOf("sg_seqA_1", "sg_seqB_3"),
+        )
+        for (expanded in allCombos) {
+            val tab = crossingSequenceTab(expanded)
+            val items = computeItems(tab, applyFilter = true)
+            assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+        }
+    }
+
+    @Test
+    fun crossingTopLevelSequencesBothExpandedNestTheLaterStartingOneUnderTheEarlier() {
+        val tab = crossingSequenceTab(setOf("sg_seqA_1", "sg_seqB_3"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headerA = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 1 }
+        val headerB = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 3 }
+        assertEquals(0, headerA.indent)
+        assertEquals(1, headerB.indent) // nested one level inside A, past A's own declared end
+        assertTrue(items.indexOf(headerB) > items.indexOf(headerA))
+        // Own reported counts are unaffected by hosting (matches the sequence-vs-manual precedent):
+        // A's own plain children (ids 2, 3, 4, 5 — SeqComputer has no notion of the crossing).
+        assertEquals(4, headerA.count)
+        assertEquals(3, headerB.count) // B's own plain children: ids 4, 5, 6
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(2, 4, 5, 6), rows) // ids 1 and 3 render as headers, not rows
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+    }
+
+    @Test
+    fun crossingTopLevelSequencesHostExpandedGuestCollapsedHidesOnlyTheGuestsOwnChildren() {
+        val tab = crossingSequenceTab(setOf("sg_seqA_1"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headerB = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 3 }
+        assertFalse(headerB.expanded)
+        assertEquals(3, headerB.count) // ids 4, 5, 6 — still B's own true count, not truncated
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(2), rows) // id 3 is B's header; ids 4-6 are folded into headerB's count
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+    }
+
+    @Test
+    fun crossingTopLevelSequencesCollapsedHostHidesItsOwnSpanButTheGuestsTailStillRenders() {
+        // A collapsed OUTER header hides its whole subtree unconditionally (matching
+        // seqGroupExpansionIds' documented behavior for containment) regardless of B's own expanded
+        // flag — B's own header never gets a chance to show. But B's tail past A's own declared end
+        // (id 6) is not part of what A's collapse declares as hidden (A's count is unaffected by
+        // hosting), so it must still render rather than silently vanish.
+        for (expanded in listOf(emptySet(), setOf("sg_seqB_3"))) {
+            val tab = crossingSequenceTab(expanded)
+
+            val items = computeItems(tab, applyFilter = true)
+
+            val headerA = items.filterIsInstance<LogItem.SeqHeader>().single()
+            assertEquals(1, headerA.entry.id)
+            assertFalse(headerA.expanded)
+            assertEquals(4, headerA.count) // ids 2, 3, 4, 5 — A's own plain children, B's rid included
+            val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+            assertEquals(listOf(6), rows) // B's tail beyond A's own end, with nowhere left to hide
+            assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+        }
+    }
+
+    @Test
+    fun collapsedManualBlockHostingACrossingSequenceStillRendersTheSequencesTail() {
+        // Mirror of the sequence-hosts-manual crossing tests above, but for the direction the bug
+        // report specifically called out: a MANUAL block starts first and hosts a sequence whose own
+        // true end (no end pattern configured, so it runs to end-of-log) extends past the manual
+        // block's declared end. Manual is left COLLAPSED — before the fix, ManualC.end at Filter.kt
+        // was stretched to the sequence's endExclusive but the collapsed path jumped straight to
+        // declaredEnd, so :850's fallthrough silently swallowed every index in between.
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "before"),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Seq", "flow start"),
+            LogEntry(3, "10:00:00.200", LogLevel.I, "Seq", "flow child"),
+            LogEntry(4, "10:00:00.300", LogLevel.I, "App", "after"),
+        )
+        // Manual range is just [id1, id2] — the sequence (no end pattern) runs from id2 to
+        // end-of-log (id4), well past the manual block's own declared end.
+        val block = ManualCollapseBlock("m1", 1, ManualCollapseDirection.RANGE, color = Color.Red, endId = 2)
+        val sequence = SequenceDef("flow", "flow start", priority = 1, color = Color.Blue, tag = "Seq")
+        val tab = LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = listOf(sequence)),
+            expanded = emptySet(), // manual block left collapsed
+            manualBlocks = listOf(block),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val manualHeader = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertFalse(manualHeader.expanded)
+        assertEquals(1, manualHeader.entry.id)
+        assertEquals(2, manualHeader.count) // its own declared range only: ids 1 and 2
+        assertTrue(items.filterIsInstance<LogItem.SeqHeader>().isEmpty()) // the sequence's own header sits inside the hidden manual range
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(3, 4), rows) // the sequence's tail, with no header left to hide it under
+        assertEveryEntryAccountedForExactlyOnce(logs.size, items)
+    }
+
+    // ── Chained (3+) crossing sequences (data-loss regression, chained) ──────────────────────
+    //
+    // The two-way fix above folds a crossing pair by having whichever starts first host the
+    // other's full extent. That alone is not enough for a CHAIN of three or more mutually
+    // crossing sequences (A crosses B, B crosses C, ... — the actually-reported scenario: three
+    // parallel threads each recording a sequence, so each thread's sequence overlaps its
+    // neighbor's but not necessarily the one after that). A flat "fold everyone under the first
+    // starter" resolution stranded the tail of a chain three deep: a COLLAPSED middle host doesn't
+    // jump past its own declared end (only an EXPANDED one does), it relies on its *parent's*
+    // recursion `idx` walk to keep going — and that parent's recursion used to be bounded by the
+    // parent's own declared end, not the full chain's effective end, so the walk ran out of room
+    // one level too soon. Fixed by (a) resolving the hosting as a genuine CHAIN — each host claims
+    // only its own immediate next unclaimed crossing partner, so B is nested under A and ALSO
+    // hosts C, rather than both B and C being flattened as siblings under A — and (b) widening the
+    // `hi` passed to a SeqC's own recursion in renderRange to its full recursive seqEffectiveEnd,
+    // not just its own declared end, so a collapsed link's swallow walk has room to reach whatever
+    // falls through past the end of the whole chain it anchors.
+    //
+    // Shared 3-way fixture: A = ids [1..5] ("A end" on id 5), B = ids [3..8] ("B end" on id 8),
+    // C = ids [6..10] ("C end" on id 10). A crosses B (B starts inside A, ends past it); B crosses
+    // C (C starts inside B, ends past it); A and C never directly overlap at all — this is exactly
+    // the shape a flat single-host resolution cannot represent correctly.
+
+    private fun chainedThreeWaySequenceLogs() = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "SeqA", "A start"),
+        LogEntry(2, "10:00:00.100", LogLevel.I, "Mid", "between"),
+        LogEntry(3, "10:00:00.200", LogLevel.I, "SeqB", "B start"),
+        LogEntry(4, "10:00:00.300", LogLevel.I, "Mid", "between"),
+        LogEntry(5, "10:00:00.400", LogLevel.I, "SeqA", "A end"),
+        LogEntry(6, "10:00:00.500", LogLevel.I, "SeqC", "C start"),
+        LogEntry(7, "10:00:00.600", LogLevel.I, "Mid", "between"),
+        LogEntry(8, "10:00:00.700", LogLevel.I, "SeqB", "B end"),
+        LogEntry(9, "10:00:00.800", LogLevel.I, "Mid", "between"),
+        LogEntry(10, "10:00:00.900", LogLevel.I, "SeqC", "C end"),
+    )
+
+    private fun chainedThreeWaySequenceDefs(): List<SequenceDef> = listOf(
+        SequenceDef("seqA", "A start", priority = 1, color = Color.Red, tag = "SeqA", endMatchText = "A end", endTag = "SeqA"),
+        SequenceDef("seqB", "B start", priority = 2, color = Color.Blue, tag = "SeqB", endMatchText = "B end", endTag = "SeqB"),
+        SequenceDef("seqC", "C start", priority = 3, color = Color.Green, tag = "SeqC", endMatchText = "C end", endTag = "SeqC"),
+    )
+
+    private fun chainedThreeWayTab(expanded: Set<String>): LogTab {
+        val logs = chainedThreeWaySequenceLogs()
+        return LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = chainedThreeWaySequenceDefs()),
+            expanded = expanded,
+        )
+    }
+
+    @Test
+    fun chainedThreeWaySequencesAreAccountedForExactlyOnceAcrossExpansionCombinations() {
+        val allCombos = listOf(
+            emptySet(),
+            setOf("sg_seqA_1"),
+            setOf("sg_seqA_1", "sg_seqB_3"),
+            setOf("sg_seqA_1", "sg_seqB_3", "sg_seqC_6"),
+            setOf("sg_seqB_3", "sg_seqC_6"), // B and C open but their host A never expanded
+            setOf("sg_seqA_1", "sg_seqC_6"), // A and C open, middle link B left collapsed
+        )
+        for (expanded in allCombos) {
+            val tab = chainedThreeWayTab(expanded)
+            val items = computeItems(tab, applyFilter = true)
+            assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+        }
+    }
+
+    @Test
+    fun chainedThreeWaySequencesAllExpandedNestEachOneLevelDeeperThanTheLast() {
+        val tab = chainedThreeWayTab(setOf("sg_seqA_1", "sg_seqB_3", "sg_seqC_6"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headerA = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 1 }
+        val headerB = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 3 }
+        val headerC = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 6 }
+        assertEquals(0, headerA.indent)
+        assertEquals(1, headerB.indent) // nested under A
+        assertEquals(2, headerC.indent) // nested under B, which is nested under A
+        assertTrue(items.indexOf(headerA) < items.indexOf(headerB))
+        assertTrue(items.indexOf(headerB) < items.indexOf(headerC))
+        // Own reported counts are unaffected by hosting (matches the two-way precedent): each
+        // header's count is exactly its own SeqComputer-declared plain children.
+        assertEquals(4, headerA.count) // ids 2, 3, 4, 5
+        assertEquals(5, headerB.count) // ids 4, 5, 6, 7, 8
+        assertEquals(4, headerC.count) // ids 7, 8, 9, 10
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(2, 4, 5, 7, 8, 9, 10), rows) // ids 1, 3, 6 render as headers, not rows
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+    }
+
+    @Test
+    fun chainedThreeWaySequencesAllCollapsedHidesTheWholeChainUnderTheOutermostHeader() {
+        val tab = chainedThreeWayTab(emptySet())
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headerA = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(1, headerA.entry.id)
+        assertFalse(headerA.expanded)
+        assertEquals(4, headerA.count) // ids 2, 3, 4, 5 — A's own declared span only
+        // Everything past A's own declared end (id 6 onward) has no header left to hide under —
+        // it falls through and renders as plain rows, same as the two-way precedent.
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(6, 7, 8, 9, 10), rows)
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+    }
+
+    @Test
+    fun chainedThreeWaySequencesOutermostExpandedMiddleCollapsedHidesTheInnermostEntirely() {
+        // A expanded, B collapsed: this is the exact shape that used to drop ids 9 and 10 — B's
+        // collapsed swallow walk runs inside A's OWN recursion, which is now widened to
+        // seqEffectiveEnd(A) so it has room to reach past B's declared end into C's tail. C's own
+        // header (id 6) has nowhere else to go: it sits inside B's own declared span, so it's
+        // silently absorbed into B's count like any other entry there — C's own `expanded` flag is
+        // irrelevant, matching the pre-existing "collapsed OUTER hides its whole subtree
+        // unconditionally" rule (seqGroupExpansionIds' own doc).
+        for (expanded in listOf(setOf("sg_seqA_1"), setOf("sg_seqA_1", "sg_seqC_6"))) {
+            val tab = chainedThreeWayTab(expanded)
+
+            val items = computeItems(tab, applyFilter = true)
+
+            val headerA = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 1 }
+            val headerB = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 3 }
+            assertTrue(headerA.expanded)
+            assertFalse(headerB.expanded)
+            assertEquals(4, headerA.count)
+            assertEquals(5, headerB.count) // ids 4, 5, 6, 7, 8 — includes C's own header id, id 6
+            assertTrue(items.none { it is LogItem.SeqHeader && it.entry.id == 6 }) // C's header never shows
+            val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+            assertEquals(listOf(2, 9, 10), rows) // ids 9, 10: C's tail past B's own declared end
+            assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+        }
+    }
+
+    // ── 4-way chain — generalization check ────────────────────────────────────────────────────
+    //
+    // A crosses B crosses C crosses D. If the chained-hosting fix is genuinely general (not just
+    // patched for depth 3), this must be lossless too; if it only special-cased three links, this
+    // is exactly what would catch it.
+
+    private fun chainedFourWaySequenceLogs() = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "SeqA", "A start"),
+        LogEntry(2, "10:00:00.100", LogLevel.I, "Mid", "between"),
+        LogEntry(3, "10:00:00.200", LogLevel.I, "SeqB", "B start"),
+        LogEntry(4, "10:00:00.300", LogLevel.I, "Mid", "between"),
+        LogEntry(5, "10:00:00.400", LogLevel.I, "SeqA", "A end"),
+        LogEntry(6, "10:00:00.500", LogLevel.I, "SeqC", "C start"),
+        LogEntry(7, "10:00:00.600", LogLevel.I, "Mid", "between"),
+        LogEntry(8, "10:00:00.700", LogLevel.I, "SeqB", "B end"),
+        LogEntry(9, "10:00:00.800", LogLevel.I, "SeqD", "D start"),
+        LogEntry(10, "10:00:00.900", LogLevel.I, "Mid", "between"),
+        LogEntry(11, "10:00:01.000", LogLevel.I, "SeqC", "C end"),
+        LogEntry(12, "10:00:01.100", LogLevel.I, "Mid", "between"),
+        LogEntry(13, "10:00:01.200", LogLevel.I, "SeqD", "D end"),
+    )
+
+    private fun chainedFourWaySequenceDefs(): List<SequenceDef> = listOf(
+        SequenceDef("seqA", "A start", priority = 1, color = Color.Red, tag = "SeqA", endMatchText = "A end", endTag = "SeqA"),
+        SequenceDef("seqB", "B start", priority = 2, color = Color.Blue, tag = "SeqB", endMatchText = "B end", endTag = "SeqB"),
+        SequenceDef("seqC", "C start", priority = 3, color = Color.Green, tag = "SeqC", endMatchText = "C end", endTag = "SeqC"),
+        SequenceDef("seqD", "D start", priority = 4, color = Color.Magenta, tag = "SeqD", endMatchText = "D end", endTag = "SeqD"),
+    )
+
+    private fun chainedFourWayTab(expanded: Set<String>): LogTab {
+        val logs = chainedFourWaySequenceLogs()
+        return LogTab(
+            id = "log",
+            filename = "test.log",
+            logData = logs,
+            rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = chainedFourWaySequenceDefs()),
+            expanded = expanded,
+        )
+    }
+
+    @Test
+    fun chainedFourWaySequencesAreAccountedForExactlyOnceAcrossExpansionCombinations() {
+        val a = "sg_seqA_1"
+        val b = "sg_seqB_3"
+        val c = "sg_seqC_6"
+        val d = "sg_seqD_9"
+        val allCombos = listOf(
+            emptySet(),
+            setOf(a, b, c, d),
+            setOf(a),
+            setOf(a, b),
+            setOf(a, b, c),
+            setOf(a, c), // gaps in the chain: middle links left collapsed
+            setOf(b, d), // host A never opened at all
+        )
+        for (expanded in allCombos) {
+            val tab = chainedFourWayTab(expanded)
+            val items = computeItems(tab, applyFilter = true)
+            assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
+        }
+    }
+
+    @Test
+    fun chainedFourWaySequencesAllExpandedNestFourLevelsDeep() {
+        val tab = chainedFourWayTab(setOf("sg_seqA_1", "sg_seqB_3", "sg_seqC_6", "sg_seqD_9"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headerA = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 1 }
+        val headerB = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 3 }
+        val headerC = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 6 }
+        val headerD = items.filterIsInstance<LogItem.SeqHeader>().single { it.entry.id == 9 }
+        assertEquals(listOf(0, 1, 2, 3), listOf(headerA.indent, headerB.indent, headerC.indent, headerD.indent))
+        assertEquals(
+            listOf(headerA, headerB, headerC, headerD),
+            listOf(headerA, headerB, headerC, headerD).sortedBy { items.indexOf(it) },
+        )
+        assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
     }
 }
