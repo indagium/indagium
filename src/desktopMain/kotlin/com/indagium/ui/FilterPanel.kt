@@ -214,6 +214,10 @@ private fun accumulateContextualAndMsgs(
     )
 }
 
+// Message-candidate labels (stems and full messages alike) are truncated to this many
+// characters — long enough to stay recognizable, short enough to keep the suggestion list scannable.
+private const val CANDIDATE_LABEL_MAX_CHARS = 80
+
 // Off-thread body of unifiedCandidates (composable wrapper further down). Identical output to the
 // original ~7-pass version — see the two helpers above for where the passes were collapsed — kept
 // as a plain function so it's callable from a background dispatcher with no Compose dependency.
@@ -285,16 +289,16 @@ internal fun computeUnifiedCandidatesSync(
     // the plain-text stem heuristic, which only makes sense for non-regex prefix search.
     fun stemsAndFulls(msgs: List<String>): List<String> {
         val leads = if (filter.kwInTagRegex) {
-            msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(80) }
+            msgs.mapNotNull { msg -> firstRegexMatch(msg, msgRuleSearch, regexContext = regexContext)?.take(CANDIDATE_LABEL_MAX_CHARS) }
                 .distinct()
         } else {
             msgs.map { msg ->
                 val sepIdx = msg.indexOfFirst { it == ':' || it == '(' }
-                if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(80)
-                else msg.take(80)
+                if (sepIdx > 0) msg.substring(0, sepIdx).trim().takeIf { it.isNotBlank() } ?: msg.take(CANDIDATE_LABEL_MAX_CHARS)
+                else msg.take(CANDIDATE_LABEL_MAX_CHARS)
             }.distinct()
         }
-        val fulls = msgs.map { it.take(80) }.distinct().filter { it !in leads }
+        val fulls = msgs.map { it.take(CANDIDATE_LABEL_MAX_CHARS) }.distinct().filter { it !in leads }
         return leads + fulls
     }
 

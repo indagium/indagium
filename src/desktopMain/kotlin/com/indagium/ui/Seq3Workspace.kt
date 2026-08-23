@@ -736,6 +736,7 @@ private val TITLE_FIELD_MAX_WIDTH = 420.dp
 private val TITLE_FIELD_MIN_WIDTH = 96.dp
 private val TITLE_FIELD_HEIGHT = 24.dp
 private const val TITLE_MAX_VISIBLE_CHARS = 56
+
 // Compose's density is already applied to this estimate. The old 7.2dp/character value made a
 // short title reserve roughly twice its rendered width on Retina displays, leaving the pencil
 // visibly detached from the name. Keep a little trailing room for the text caret/ellipsis while
@@ -855,6 +856,10 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
 
 // ── Shared ephemeral view state (queue<->canvas) ──────────────────────────────────────────────
 
+/** One exact row drawn by the canvas. A null occurrence id identifies a standalone/authored row;
+ *  a non-null id distinguishes one occurrence from the other rows of the same repeated message. */
+internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryId: Int?)
+
 /**
  * Session-scoped VIEW state shared between [Seq3QueuePanel] and [Seq3Canvas] —
  * filter/sort/selection/hover/zoom/focused message. Deliberately never part of
@@ -876,24 +881,25 @@ internal fun seq3ClampDividerWidth(current: Float, delta: Float, min: Float, max
  * deliberate ephemerality every other field in this class still has. Nothing else here changes:
  * selection/hover/zoom/filter/sort still reset to defaults on reopen, same as before.
  */
-/** One exact row drawn by the canvas. A null occurrence id identifies a standalone/authored row;
- *  a non-null id distinguishes one occurrence from the other rows of the same repeated message. */
-internal data class Seq3CanvasRowRef(val messageId: String, val occurrenceEntryId: Int?)
-
 internal class Seq3ViewState {
     var selection by mutableStateOf(Seq3Selection())
+
     /** Expanded repeated-message rows in the queue. This is view state only; grouping remains part
      *  of the durable message and the extracted occurrence command is the only document edit. */
     var expandedOccurrenceMessageIds by mutableStateOf<Set<String>>(emptySet())
+
     /** Which of [expandedOccurrenceMessageIds] was opened BY a canvas click rather than by the user
      *  reaching for the queue's own toggle — see [seq3AutoExpandOccurrences]. At most one, and only
      *  while it is still the group the canvas is pointing at. */
     var autoExpandedOccurrenceMessageId by mutableStateOf<String?>(null)
+
     /** Expanded per-message Pattern/Label details. This is independent from occurrence expansion
      *  so both disclosures can remain open at once, with details rendered first. */
     var expandedInfoMessageIds by mutableStateOf<Set<String>>(emptySet())
+
     /** Independent checkbox state for the evidence rows shown inside an expanded group. */
     var selectedOccurrenceIds by mutableStateOf<Set<String>>(emptySet())
+
     /** The queue row selected by its message body. When set, the canvas emphasizes this exact
      *  occurrence instead of every drawn occurrence owned by the message. */
     var selectedOccurrenceMessageId by mutableStateOf<String?>(null)
@@ -917,6 +923,7 @@ internal class Seq3ViewState {
 
     /** Canvas double-click inline label editor target (spec §04). */
     var editingLabelMessageId by mutableStateOf<String?>(null)
+
     /** The exact repeated occurrence whose label editor is open; prevents one editor per drawn
      *  occurrence when a message is expanded on the canvas. */
     var editingLabelOccurrenceEntryId by mutableStateOf<Int?>(null)
@@ -927,19 +934,24 @@ internal class Seq3ViewState {
      *  `focusedMessageId` counterpart) — set by a plain click on the row body, independent from
      *  the checkbox-driven [selectedLifelineIds] below. */
     var selectedLifelineId by mutableStateOf<String?>(null)
+
     /** Lifelines checked in the panel for a multi-lifeline operation such as Merge. */
     var selectedLifelineIds by mutableStateOf<Set<String>>(emptySet())
+
     /** Two-way row<->column hover for the Lifelines panel section, mirroring
      *  [hoveredMessageId] for the Messages queue. */
     var hoveredLifelineId by mutableStateOf<String?>(null)
 
     /** Rectangle currently being dragged on the canvas to select multiple message rows. */
     var canvasSelectionRect by mutableStateOf<Seq3Box?>(null)
+
     /** Once enabled by the toolbar toggle, primary-button drags pan the view. */
     var canvasPanMode by mutableStateOf(false)
+
     /** True when the current message selection came from a marquee, which may intentionally span
      * hidden/non-rendered rows while still representing one visible rectangle on the canvas. */
     var selectionFromMarquee by mutableStateOf(false)
+
     /** Exact rows selected by the canvas rectangle. Kept separate from queue checkbox selection:
      *  a repeated queue message can contribute one selected arrow without selecting all of its
      *  other occurrences. */
@@ -954,10 +966,12 @@ internal class Seq3ViewState {
 
     /** Right-click menu state for a canvas message row. */
     var canvasContextMenuMessageId by mutableStateOf<String?>(null)
+
     /** Exact repeated occurrence under the right-clicked canvas arrow, when there is one. */
     var canvasContextMenuOccurrenceEntryId by mutableStateOf<Int?>(null)
     var canvasContextMenuOffset by mutableStateOf(IntOffset.Zero)
     var canvasContextMenuCanvasPoint by mutableStateOf(Seq3Box(0.0, 0.0, 0.0, 0.0))
+
     /** WP7 item 5 (canvas half): the empty-canvas right-click menu ("Add note here") — open when
      *  the click hit no message row. Mutually exclusive with [canvasContextMenuMessageId]; shares
      *  [canvasContextMenuOffset]/[canvasContextMenuCanvasPoint] for position since only one of the
@@ -1015,17 +1029,22 @@ internal class Seq3ViewState {
      *  to draw that fragment's bracket with the same accent-stroke emphasis a selected message row
      *  already gets. */
     var selectedFragmentId by mutableStateOf<String?>(null)
+
     /** The note counterpart of [selectedFragmentId] above — same contract. */
     var selectedNoteId by mutableStateOf<String?>(null)
+
     /** Two-way row<->canvas hover for a Fragments & notes panel row, mirroring
      *  [hoveredMessageId]/[hoveredLifelineId]. Panel-only; never enters the saved diagram or undo
      *  history. WP7: consumed by `Seq3Canvas` the same way [selectedFragmentId] is. */
     var hoveredFragmentId by mutableStateOf<String?>(null)
+
     /** The note counterpart of [hoveredFragmentId] above — same contract. */
     var hoveredNoteId by mutableStateOf<String?>(null)
+
     /** The delay counterpart of [selectedFragmentId] above — same contract, backing the Artifacts
      *  panel's own delay row (delays moved there from being canvas/context-menu-only). */
     var selectedDelayId by mutableStateOf<String?>(null)
+
     /** The delay counterpart of [hoveredFragmentId] above — same contract. */
     var hoveredDelayId by mutableStateOf<String?>(null)
 
@@ -1200,6 +1219,11 @@ internal fun seq3BeginLabelRename(view: Seq3ViewState, document: Seq3Document, m
     return true
 }
 
+// Default size for a free-floating note placed via a click (canvas empty-context-menu or the
+// panel's "+ note" button) — a fixed starting box the user is free to resize afterward.
+private const val SEQ3_DEFAULT_NOTE_WIDTH_DP = 220.0
+private const val SEQ3_DEFAULT_NOTE_HEIGHT_DP = 72.0
+
 internal fun seq3AddNote(
     state: AppState,
     session: Seq3WorkspaceSession,
@@ -1219,8 +1243,8 @@ internal fun seq3AddNote(
         messageIds = ids,
         x = placement?.x,
         y = placement?.y,
-        width = placement?.let { 220.0 },
-        height = placement?.let { 72.0 },
+        width = placement?.let { SEQ3_DEFAULT_NOTE_WIDTH_DP },
+        height = placement?.let { SEQ3_DEFAULT_NOTE_HEIGHT_DP },
     )
     val applied = state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(ids.toSet(), Seq3BulkAction.Note(note)))
     if (applied) {
@@ -1231,6 +1255,8 @@ internal fun seq3AddNote(
     }
     return applied
 }
+
+private const val SEQ3_DEFAULT_NOTE_PLACEMENT_TOP_MARGIN_DP = 24.0
 
 /** Default free-floating placement for the Fragments & notes panel header's "+ note" button
  *  (`Seq3QueuePanel.kt`'s `Seq3FragmentsAndNotesSection`) when nothing is selected. The canvas's
@@ -1243,9 +1269,8 @@ internal fun seq3AddNote(
  *  from going negative). */
 internal fun seq3DefaultNotePlacement(document: Seq3Document): Seq3Box {
     val layout = Seq3RenderCache.layout(document)
-    val noteWidth = 220.0
-    val x = ((layout.width - noteWidth) / 2.0).coerceAtLeast(0.0)
-    val y = 24.0
+    val x = ((layout.width - SEQ3_DEFAULT_NOTE_WIDTH_DP) / 2.0).coerceAtLeast(0.0)
+    val y = SEQ3_DEFAULT_NOTE_PLACEMENT_TOP_MARGIN_DP
     return Seq3Box(x, y, 0.0, 0.0)
 }
 

@@ -94,9 +94,11 @@ class SequenceGroupingTest {
     fun scopeTidNarrowsWhichEntryCanEndASequence() {
         val logs = listOf(
             LogEntry(1, "10:00:00.000", LogLevel.I, "Auth", "flow started", tid = 100),
-            LogEntry(2, "10:00:00.100", LogLevel.I, "Auth", "flow finished", tid = 200), // false end: wrong thread
+            // false end: wrong thread
+            LogEntry(2, "10:00:00.100", LogLevel.I, "Auth", "flow finished", tid = 200),
             LogEntry(3, "10:00:00.200", LogLevel.I, "Auth", "middle work", tid = 100),
-            LogEntry(4, "10:00:00.300", LogLevel.I, "Auth", "flow finished", tid = 100), // real end
+            // real end
+            LogEntry(4, "10:00:00.300", LogLevel.I, "Auth", "flow finished", tid = 100),
         )
         val sequence = SequenceDef(
             id = "auth-flow", matchText = "flow started", priority = 1, color = Color.Red,
@@ -1140,7 +1142,8 @@ class SequenceGroupingTest {
             logData = logs,
             rmap = logs.associateBy { it.id },
             filter = Filter(sequences = listOf(sequence)),
-            expanded = emptySet(), // manual block left collapsed
+            // manual block left collapsed
+            expanded = emptySet(),
             manualBlocks = listOf(block),
         )
 
@@ -1217,8 +1220,10 @@ class SequenceGroupingTest {
             setOf("sg_seqA_1"),
             setOf("sg_seqA_1", "sg_seqB_3"),
             setOf("sg_seqA_1", "sg_seqB_3", "sg_seqC_6"),
-            setOf("sg_seqB_3", "sg_seqC_6"), // B and C open but their host A never expanded
-            setOf("sg_seqA_1", "sg_seqC_6"), // A and C open, middle link B left collapsed
+            // B and C open but their host A never expanded
+            setOf("sg_seqB_3", "sg_seqC_6"),
+            // A and C open, middle link B left collapsed
+            setOf("sg_seqA_1", "sg_seqC_6"),
         )
         for (expanded in allCombos) {
             val tab = chainedThreeWayTab(expanded)
@@ -1301,6 +1306,9 @@ class SequenceGroupingTest {
     // patched for depth 3), this must be lossless too; if it only special-cased three links, this
     // is exactly what would catch it.
 
+    // Sequential fixture entry ids (1..13) — literal by design, same as every other fixture in
+    // this file; 11 alone falls outside config/detekt.yml's MagicNumber ignoreNumbers range.
+    @Suppress("MagicNumber")
     private fun chainedFourWaySequenceLogs() = listOf(
         LogEntry(1, "10:00:00.000", LogLevel.I, "SeqA", "A start"),
         LogEntry(2, "10:00:00.100", LogLevel.I, "Mid", "between"),
@@ -1348,8 +1356,10 @@ class SequenceGroupingTest {
             setOf(a),
             setOf(a, b),
             setOf(a, b, c),
-            setOf(a, c), // gaps in the chain: middle links left collapsed
-            setOf(b, d), // host A never opened at all
+            // gaps in the chain: middle links left collapsed
+            setOf(a, c),
+            // host A never opened at all
+            setOf(b, d),
         )
         for (expanded in allCombos) {
             val tab = chainedFourWayTab(expanded)

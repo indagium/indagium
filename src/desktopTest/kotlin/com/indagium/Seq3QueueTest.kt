@@ -90,7 +90,11 @@ class Seq3QueueTest {
         assertEquals(1, counts.needsTarget, "m2's own missing target is unaffected by an unrelated delay")
         assertEquals(1, counts.edited)
         assertEquals(1, counts.hidden)
-        assertEquals(listOf("m1", "m3", "m2", "m4"), seq3QueueRows(withDelays, Seq3Filter.ALL).map { it.id }, "the message queue itself must not gain or lose a row")
+        assertEquals(
+            listOf("m1", "m3", "m2", "m4"),
+            seq3QueueRows(withDelays, Seq3Filter.ALL).map { it.id },
+            "the message queue itself must not gain or lose a row",
+        )
     }
 
     @Test

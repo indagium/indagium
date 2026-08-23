@@ -60,7 +60,6 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
-import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode

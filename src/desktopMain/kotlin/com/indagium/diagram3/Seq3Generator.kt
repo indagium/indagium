@@ -415,6 +415,10 @@ private fun resolveCallbackRegistrarFirstIndexByTag(resolved: List<LogEntry>, op
     return firstIndexByTag
 }
 
+// Walks the evidence sources (adjacent-entry thread-handoff, correlation tokens, callback
+// registration) in a fixed priority order, each an independent early-return branch — splitting
+// this into sub-functions would just relocate the same priority chain, not simplify it.
+@Suppress("CyclomaticComplexMethod")
 private fun inferTarget(
     tag: String,
     group: List<LogEntry>,
@@ -659,13 +663,16 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
         orderPin = null,
     )
     val remainingMessages = document.messages.toMutableList().apply { removeAt(sourceIndex) }
+
     fun entryIdOf(message: Seq3Message): Int = message.occurrences.firstOrNull()?.entryId ?: Int.MAX_VALUE
+
     fun comesAfter(left: Seq3Message, right: Seq3Message): Boolean {
         val leftTimestamp = left.primaryTimestampMillis ?: Long.MAX_VALUE
         val rightTimestamp = right.primaryTimestampMillis ?: Long.MAX_VALUE
         return leftTimestamp > rightTimestamp ||
             (leftTimestamp == rightTimestamp && entryIdOf(left) > entryIdOf(right))
     }
+
     fun insertChronologically(message: Seq3Message) {
         val index = remainingMessages.indexOfFirst { comesAfter(it, message) }
             .takeIf { it >= 0 } ?: remainingMessages.size
@@ -679,6 +686,7 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
     } else {
         (ids + newMessageId).distinct().sortedBy { remainingMessages.indexOfFirst { message -> message.id == it } }
     }
+
     fun repointOccurrenceRefs(refs: List<Seq3OccurrenceRef>): List<Seq3OccurrenceRef> =
         refs.map { ref ->
             if (ref.messageId == messageId && ref.entryId == entryId) {

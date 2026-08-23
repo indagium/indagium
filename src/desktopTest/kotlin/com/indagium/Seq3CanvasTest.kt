@@ -1,5 +1,7 @@
 package com.indagium
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.unit.IntOffset
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3FontRole
@@ -18,38 +20,36 @@ import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
-import com.indagium.ui.Seq3DragEndpoint
+import com.indagium.ui.SEQ3_BAND_START_Y_TOLERANCE
+import com.indagium.ui.SEQ3_ROW_HIT_Y_TOLERANCE
 import com.indagium.ui.Seq3CanvasRowRef
+import com.indagium.ui.Seq3DragEndpoint
 import com.indagium.ui.Seq3EndpointSide
+import com.indagium.ui.seq3ActorGlyphGeometry
 import com.indagium.ui.seq3ArrowEndpointAt
+import com.indagium.ui.seq3ArrowStrokeWidths
+import com.indagium.ui.seq3ContextMenuOffset
 import com.indagium.ui.seq3CrossingLabel
 import com.indagium.ui.seq3DragPreview
 import com.indagium.ui.seq3FitHeightZoom
 import com.indagium.ui.seq3FitWidthZoom
-import com.indagium.ui.SEQ3_BAND_START_Y_TOLERANCE
-import com.indagium.ui.SEQ3_ROW_HIT_Y_TOLERANCE
+import com.indagium.ui.seq3FragmentIsEmphasized
 import com.indagium.ui.seq3IsEmptyCanvasBackground
 import com.indagium.ui.seq3LifelineDropIndex
 import com.indagium.ui.seq3NearestLifelineId
+import com.indagium.ui.seq3NoteIsEmphasized
 import com.indagium.ui.seq3PointInBox
 import com.indagium.ui.seq3PointerPxToLayoutUnits
 import com.indagium.ui.seq3ReorderLifelineIds
 import com.indagium.ui.seq3ResolveDragEndpoint
 import com.indagium.ui.seq3RowAt
 import com.indagium.ui.seq3RowIsEmphasized
-import com.indagium.ui.seq3RowsInSelection
 import com.indagium.ui.seq3RowRefsInSelection
+import com.indagium.ui.seq3RowsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
-import com.indagium.ui.seq3ArrowStrokeWidths
-import com.indagium.ui.seq3ActorGlyphGeometry
-import com.indagium.ui.seq3ContextMenuOffset
-import com.indagium.ui.seq3FragmentIsEmphasized
-import com.indagium.ui.seq3NoteIsEmphasized
-import com.indagium.ui.seq3ZoomPercentLabel
 import com.indagium.ui.seq3ZoomByWheel
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.unit.IntOffset
+import com.indagium.ui.seq3ZoomPercentLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -688,5 +688,4 @@ class Seq3CanvasTest {
 
         assertTrue(!seq3IsEmptyCanvasBackground(layout, (row.fromX + row.toX) / 2, row.y, SEQ3_BAND_START_Y_TOLERANCE))
     }
-
 }

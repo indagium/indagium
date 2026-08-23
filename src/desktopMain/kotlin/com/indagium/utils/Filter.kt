@@ -233,6 +233,9 @@ private fun idBitSet(entries: List<LogEntry>): java.util.BitSet {
 // Keyed per (tab, applyFilter) since the split "Original" panel computes applyFilter=false
 // alongside the main panel's true. Invalidated by identity checks (logData/analysis are
 // replaced wholesale on reload/tailing) plus Filter equality, and dropped on tab close.
+// Each field is an independent piece of the last computeItems() result — bundling any subset
+// into a nested type would just move the same values one level deeper without reducing them.
+@Suppress("LongParameterList")
 private class TabComputeCache(
     val logData: List<LogEntry>,
     val stackGroupsRef: List<StackTraceGroup>,
@@ -578,7 +581,10 @@ internal fun computeItems(
     storeInCache: Boolean = true,
 ): List<LogItem> = computeItems(tab, applyFilter, NoCancellationCheck, regexContext, storeInCache)
 
-@Suppress("CyclomaticComplexMethod", "LongMethod")
+// LoopWithTooManyJumpStatements: the crossing-thread-hint scan's inner loop uses continue/break
+// as independent early-outs (already-claimed guest, sorted-start cutoff, contained pair) — see
+// the comments at each jump site just below for what each one skips and why.
+@Suppress("CyclomaticComplexMethod", "LongMethod", "LoopWithTooManyJumpStatements")
 internal fun computeItems(
     tab: LogTab,
     applyFilter: Boolean,

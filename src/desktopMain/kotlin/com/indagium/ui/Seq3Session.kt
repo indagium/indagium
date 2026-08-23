@@ -161,6 +161,7 @@ private fun restoreGeneratedAuthoring(document: Seq3Document, baseline: Seq3Docu
     return document.copy(
         messages = document.messages.map { message ->
             val generated = baselineById[message.id] ?: return@map message
+
             fun comparable(value: Seq3Message) = value.copy(
                 authoring = Seq3Authoring.AUTO,
                 visibility = Seq3Visibility.VISIBLE,

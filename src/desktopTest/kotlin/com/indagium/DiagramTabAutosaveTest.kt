@@ -95,7 +95,11 @@ class DiagramTabAutosaveTest {
         val restored = AppState(cacheFile, diagramLibraryStore = DiagramLibraryStore(libraryFile), restoreOnCreate = true)
 
         assertTrue(restored.seq3Sessions.sessions.isEmpty(), "nothing to reopen — no diagram was ever open")
-        assertNull(restored.activeSurface, "no diagram tab data at all (not even an empty \"diagramTabs\" line worth acting on) — activeSurface keeps its plain default, same as before this feature existed")
+        assertNull(
+            restored.activeSurface,
+            "no diagram tab data at all (not even an empty \"diagramTabs\" line worth acting on) — " +
+                "activeSurface keeps its plain default, same as before this feature existed",
+        )
     }
 
     @Test

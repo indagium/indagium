@@ -370,11 +370,29 @@ private fun prefixSeq3EmissionLabels(emissions: List<Seq3Emission>, showSequence
         when (emission) {
             is Seq3Emission.Arrow -> {
                 callNumber++
-                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+                emission.copy(
+                    label = seq3PrefixedLabel(
+                        emission.label,
+                        callNumber,
+                        emission.rawTimestamp,
+                        emission.timestampMillis,
+                        showSequenceNumbers,
+                        showTimestamps,
+                    ),
+                )
             }
             is Seq3Emission.NeedsTarget -> {
                 callNumber++
-                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+                emission.copy(
+                    label = seq3PrefixedLabel(
+                        emission.label,
+                        callNumber,
+                        emission.rawTimestamp,
+                        emission.timestampMillis,
+                        showSequenceNumbers,
+                        showTimestamps,
+                    ),
+                )
             }
             is Seq3Emission.NoteLine, is Seq3Emission.Elided -> emission
         }

@@ -249,6 +249,7 @@ class Seq3QueuePanelTest {
     // `rowHeightOf` produces.
 
     private val lifelineRowHeights = mapOf("A" to 64f, "B" to 132f, "C" to 64f, "D" to 64f)
+
     private fun lifelineRowHeight(id: String) = lifelineRowHeights.getValue(id)
 
     @Test
