@@ -37,6 +37,7 @@ enum class Seq3FontRole(val basePointSize: Double) {
     FRAGMENT(11.0),
     NOTE(11.0),
     STUB(10.0),
+
     // User-observed correction: a delay's label used to share NOTE's 11pt, which read as too
     // small/easy to miss floating alone in an otherwise-empty band — bumped to LIFELINE's size,
     // the largest role already in use, rather than inventing a new number.
@@ -636,7 +637,13 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
     }
     return when (message.repeat) {
         Seq3Repeat.EVERY -> occurrences.map { occ ->
-            arrow(occurrenceLabel(message, occ), 1, occ.entryId, seq3EmissionTimestamp(message, occ.timestampMillis), seq3EmissionRawTimestamp(message, occ.rawTimestamp))
+            arrow(
+                occurrenceLabel(message, occ),
+                1,
+                occ.entryId,
+                seq3EmissionTimestamp(message, occ.timestampMillis),
+                seq3EmissionRawTimestamp(message, occ.rawTimestamp),
+            )
         }
         Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, ::arrow)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
@@ -651,7 +658,13 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
             )
         } else {
             occurrences.map { occ ->
-                arrow(occurrenceLabel(message, occ), 1, occ.entryId, seq3EmissionTimestamp(message, occ.timestampMillis), seq3EmissionRawTimestamp(message, occ.rawTimestamp))
+                arrow(
+                    occurrenceLabel(message, occ),
+                    1,
+                    occ.entryId,
+                    seq3EmissionTimestamp(message, occ.timestampMillis),
+                    seq3EmissionRawTimestamp(message, occ.rawTimestamp),
+                )
             }
         }
     }
@@ -729,15 +742,42 @@ private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers:
         when (emission) {
             is Emission.Arrow -> {
                 callNumber++
-                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+                emission.copy(
+                    label = seq3PrefixedLabel(
+                        emission.label,
+                        callNumber,
+                        emission.rawTimestamp,
+                        emission.timestampMillis,
+                        showSequenceNumbers,
+                        showTimestamps,
+                    ),
+                )
             }
             is Emission.Self -> {
                 callNumber++
-                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+                emission.copy(
+                    label = seq3PrefixedLabel(
+                        emission.label,
+                        callNumber,
+                        emission.rawTimestamp,
+                        emission.timestampMillis,
+                        showSequenceNumbers,
+                        showTimestamps,
+                    ),
+                )
             }
             is Emission.Stub -> {
                 callNumber++
-                emission.copy(label = seq3PrefixedLabel(emission.label, callNumber, emission.rawTimestamp, emission.timestampMillis, showSequenceNumbers, showTimestamps))
+                emission.copy(
+                    label = seq3PrefixedLabel(
+                        emission.label,
+                        callNumber,
+                        emission.rawTimestamp,
+                        emission.timestampMillis,
+                        showSequenceNumbers,
+                        showTimestamps,
+                    ),
+                )
             }
             is Emission.Note, is Emission.Elision -> emission
         }
@@ -1013,7 +1053,22 @@ private fun buildArrowRow(e: Emission.Arrow, req: RowRequirement, lifelineIndex:
     val centerX = (fromX + toX) / 2
     val labelBox = Seq3Box(centerX - req.labelWidth / 2, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
     val badgeBox = if (e.repeatCount > 1) Seq3Box(labelBox.x + labelBox.width + BADGE_PAD_H, labelBox.y, req.badgeWidth, BADGE_H) else null
-    val arrow = Seq3ArrowRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.kind, e.fromLifelineId, e.toLifelineId, fromX, toX, e.label, labelBox, e.repeatCount, badgeBox)
+    val arrow = Seq3ArrowRow(
+        e.messageId,
+        y,
+        e.entryId,
+        e.timestampMillis,
+        e.rawTimestamp,
+        e.kind,
+        e.fromLifelineId,
+        e.toLifelineId,
+        fromX,
+        toX,
+        e.label,
+        labelBox,
+        e.repeatCount,
+        badgeBox,
+    )
     return BuiltRow(arrow, ROW_H, max(fromX, toX))
 }
 
@@ -1023,7 +1078,21 @@ private fun buildSelfRow(e: Emission.Self, req: RowRequirement, lifelineIndex: M
     val loopH = max(SELF_EXTRA, ROW_H / 2)
     val labelBox = Seq3Box(x + SELF_LOOP_W + LABEL_PAD, y, req.labelWidth, loopH)
     val badgeBox = if (e.repeatCount > 1) Seq3Box(labelBox.x + labelBox.width + BADGE_PAD_H, y, req.badgeWidth, BADGE_H) else null
-    val row = Seq3SelfLoopRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, x, y + loopH, SELF_LOOP_W, e.label, labelBox, e.repeatCount, badgeBox)
+    val row = Seq3SelfLoopRow(
+        e.messageId,
+        y,
+        e.entryId,
+        e.timestampMillis,
+        e.rawTimestamp,
+        e.fromLifelineId,
+        x,
+        y + loopH,
+        SELF_LOOP_W,
+        e.label,
+        labelBox,
+        e.repeatCount,
+        badgeBox,
+    )
     val rightEdge = x + SELF_LOOP_W + LABEL_PAD + req.labelWidth + (badgeBox?.width ?: 0.0)
     return BuiltRow(row, ROW_H + loopH, rightEdge)
 }
@@ -1047,7 +1116,20 @@ private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: M
     val pillWidth = req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H
     val labelBox = Seq3Box(rightAlignX - req.labelWidth, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
     val pill = Seq3Box(rightAlignX - pillWidth, y + STUB_LABEL_PILL_GAP, pillWidth, PILL_H)
-    val row = Seq3UnresolvedStubRow(e.messageId, y, e.entryId, e.timestampMillis, e.rawTimestamp, e.fromLifelineId, fromX, stubEndX, e.label, labelBox, pill, e.repeatCount)
+    val row = Seq3UnresolvedStubRow(
+        e.messageId,
+        y,
+        e.entryId,
+        e.timestampMillis,
+        e.rawTimestamp,
+        e.fromLifelineId,
+        fromX,
+        stubEndX,
+        e.label,
+        labelBox,
+        pill,
+        e.repeatCount,
+    )
     val pitch = ROW_H / 2 + STUB_LABEL_PILL_GAP + PILL_H + ROW_H / 2
     // Unlike the old right-pointing stub, this row no longer extends past its own lifeline's
     // center on the right — its rightmost touched x is simply fromX (rowXExtent already reports

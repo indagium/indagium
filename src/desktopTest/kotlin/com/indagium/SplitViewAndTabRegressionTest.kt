@@ -13,6 +13,7 @@ import com.indagium.ui.AnnotationNavigationTarget
 import com.indagium.ui.AppState
 import com.indagium.ui.DANGER_RED
 import com.indagium.ui.LogViewerScrollStateStore
+import com.indagium.ui.TabRef
 import com.indagium.ui.annotationNavigationTarget
 import com.indagium.ui.browserTabOrderDuringDrag
 import com.indagium.ui.centerAnchorIndex
@@ -30,10 +31,8 @@ import com.indagium.ui.partitionTabOrder
 import com.indagium.ui.reconcileTabOrder
 import com.indagium.ui.splitTabsForVisibility
 import com.indagium.ui.stripVisualWrapBreaks
-import com.indagium.ui.TabRef
 import com.indagium.ui.tabOrderAfterVisibleReorder
 import com.indagium.ui.tabRenderX
-
 import com.indagium.ui.visibleRowRangeIds
 import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.utils.computeItems

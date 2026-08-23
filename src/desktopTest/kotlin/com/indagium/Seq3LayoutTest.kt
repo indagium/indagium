@@ -10,15 +10,12 @@ import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3Fragment
-import com.indagium.ui.Seq3ViewState
-import com.indagium.ui.seq3CanGroupSelection
-import com.indagium.ui.seq3FragmentSpanFor
-import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3LifelineSegment
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -30,10 +27,13 @@ import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.Seq3LifelineSegment
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.seq3LifelineSegments
+import com.indagium.ui.Seq3ViewState
+import com.indagium.ui.seq3CanGroupSelection
+import com.indagium.ui.seq3FragmentSpanFor
+import com.indagium.ui.seq3RowRefsInSelection
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -682,7 +682,11 @@ class Seq3LayoutTest {
 
         val row = layout.rows.single() as Seq3ArrowRow
         assertEquals(4, row.repeatCount)
-        assertEquals("onScreenChanged: MEDIA|onScreenChanged: HOME", row.label, "a collapsed row with <=3 distinct values must show a compact A|B|C summary, not a raw {token}")
+        assertEquals(
+            "onScreenChanged: MEDIA|onScreenChanged: HOME",
+            row.label,
+            "a collapsed row with <=3 distinct values must show a compact A|B|C summary, not a raw {token}",
+        )
     }
 
     @Test
@@ -833,7 +837,8 @@ class Seq3LayoutTest {
         assertTrue(delayBox.box.y >= firstOccurrenceRow.y, "the band must sit at or after the FIRST occurrence it was anchored to")
         assertTrue(
             secondOccurrenceRow.y >= delayBox.box.y + delayBox.box.height,
-            "the SECOND occurrence must be pushed below the whole band, not sit above/inside it — the delay belongs between the two occurrences, not after both",
+            "the SECOND occurrence must be pushed below the whole band, not sit above/inside it — " +
+                "the delay belongs between the two occurrences, not after both",
         )
     }
 
@@ -966,7 +971,6 @@ class Seq3LayoutTest {
         }
     }
 
-
     @Test
     fun aMarqueeAcrossTheCanvasFramesOnlyTheRowsItCovered() {
         // Drives the REAL marquee pipeline end to end: layout -> seq3RowRefsInSelection(rect) ->
@@ -1003,7 +1007,6 @@ class Seq3LayoutTest {
             span.occurrenceRefs.sortedBy { it.entryId },
         )
     }
-
 
     @Test
     fun tickingOccurrencesGroupsOnlyThoseMessagesNotTheirWholeContainer() {
@@ -1071,7 +1074,6 @@ class Seq3LayoutTest {
         assertEquals(setOf("one", "two"), span.referencedMessageIds())
     }
 
-
     @Test
     fun aRubberBandTakesOnlyTheArrowsItsEdgesEnclose() {
         // Rows sit ROW_H (42) apart and a CLICK target is padded by 18 either side, so reusing the
@@ -1098,5 +1100,4 @@ class Seq3LayoutTest {
 
         assertEquals(listOf("r2", "r3"), picked)
     }
-
 }

@@ -262,7 +262,14 @@ private fun unapplied(document: Seq3Document, reason: String) = Seq3BulkResult(d
  * unapplied result carrying [Seq3BulkResult.reason]) when the selection or payload is invalid —
  * the same "invalid selection is always a safe no-op" contract
  * `diagram.applyManualMessageBulkAction` held itself to.
+ *
+ * The `when (action)` below is the single dispatch point for every Seq3BulkAction variant —
+ * each branch is an independent, already-minimal edit; splitting them out would just relocate
+ * the same dispatch, not simplify it. The exemption-list condition just under this signature is
+ * the same story: one `!is` check per action variant that legitimately skips the "selection
+ * required" gate (see the comment directly above it for why each is exempt).
  */
+@Suppress("CyclomaticComplexMethod", "ComplexCondition")
 fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction): Seq3BulkResult {
     val selected = document.messages.filter { it.id in selectedIds }
     // [SetFragmentLabel]/[SetNoteText] name their target by [fragmentId]/[noteId], not by the

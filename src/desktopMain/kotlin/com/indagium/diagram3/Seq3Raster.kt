@@ -182,6 +182,11 @@ private const val ACTOR_GLYPH_W = 16.0
 private const val ACTOR_GLYPH_H = 26.0
 private const val ACTOR_GLYPH_GAP = 4.0
 
+// Fractions of the glyph's own dimensions — mirrors Seq3Canvas.kt's seq3ActorGlyphGeometry (same
+// two constant names) so both renderers draw the identical stick figure.
+private const val ACTOR_GLYPH_LEG_SPLIT_FRACTION = 0.28
+private const val ACTOR_GLYPH_ARM_FRACTION = 0.35
+
 private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme) {
     g.color = Color(theme.background, true)
     g.fillRect(0, 0, layout.width.roundToInt(), layout.height.roundToInt())
@@ -257,12 +262,12 @@ private fun paintActorGlyph(g: Graphics2D, col: Seq3LifelineColumn, theme: Seq3R
     val headR = ACTOR_GLYPH_W / 4
     val headCenterY = glyphTop + headR
     val bodyTop = headCenterY + headR
-    val legSplit = glyphBottom - ACTOR_GLYPH_H * 0.28
+    val legSplit = glyphBottom - ACTOR_GLYPH_H * ACTOR_GLYPH_LEG_SPLIT_FRACTION
     g.color = Color(theme.headerBorder, true)
     g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
     g.draw(java.awt.geom.Ellipse2D.Double(cx - headR, headCenterY - headR, headR * 2, headR * 2))
     g.draw(java.awt.geom.Line2D.Double(cx, bodyTop, cx, legSplit))
-    val armY = bodyTop + (legSplit - bodyTop) * 0.35
+    val armY = bodyTop + (legSplit - bodyTop) * ACTOR_GLYPH_ARM_FRACTION
     g.draw(java.awt.geom.Line2D.Double(cx - ACTOR_GLYPH_W / 2, armY, cx + ACTOR_GLYPH_W / 2, armY))
     g.draw(java.awt.geom.Line2D.Double(cx, legSplit, cx - ACTOR_GLYPH_W / 2, glyphBottom))
     g.draw(java.awt.geom.Line2D.Double(cx, legSplit, cx + ACTOR_GLYPH_W / 2, glyphBottom))

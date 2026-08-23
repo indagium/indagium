@@ -402,7 +402,6 @@ internal fun invalidatesDecodedState(transition: PlaybackTransition, kind: Decod
     PlaybackTransition.RATE_CHANGE -> kind == DecodedStateKind.AUDIO_CARRYOVER
 }
 
-
 /**
  * Step 5 of the duration-recovery chain (see [scanDurationMs]'s KDoc for earlier metadata steps): raises
  * [currentDurationMs] to [positionMs] whenever real playback has moved past what's currently

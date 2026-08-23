@@ -21,6 +21,7 @@ class ScopedSeqCellBackgroundTest {
     private val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Tag", "hello world", pid = 123, tid = 456)
     private val tsSpanEnd = entry.ts.length
     private val pidFieldStart = entry.ts.length + 2
+
     // Default pidFieldWidth (5) + " " + 5-digit-padded tid = 11 chars after pidFieldStart.
     private val pidTidSpanEnd = pidFieldStart + 11
 

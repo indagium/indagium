@@ -2,12 +2,12 @@ package com.indagium
 
 import com.indagium.ui.Seq3KeyAction
 import com.indagium.ui.Seq3PanelSection
+import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.seq3ClampArtifactsHeight
 import com.indagium.ui.seq3ClampDividerWidth
 import com.indagium.ui.seq3ClampLifelinesHeight
-import com.indagium.ui.seq3KeyAction
-import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.seq3DragArtifactsBoundary
+import com.indagium.ui.seq3KeyAction
 import com.indagium.ui.seq3PanelWeightedSection
 import com.indagium.ui.seq3PanelWeightedSectionFor
 import kotlin.test.Test

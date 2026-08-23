@@ -11,11 +11,16 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Visibility
+import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -62,16 +67,16 @@ import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
-import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Match
+import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
+import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
 import com.indagium.diagram3.parseSeq3Timestamp
@@ -82,14 +87,9 @@ import com.indagium.diagram3.seq3Select
 import com.indagium.diagram3.seq3SuggestedDelays
 import com.indagium.model.LogEntry
 import kotlinx.coroutines.delay
-import java.awt.Cursor as AwtCursor
 import java.util.UUID
 import kotlin.math.roundToInt
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.OpenInNew
-import androidx.compose.material.icons.outlined.Visibility
-import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.material.icons.outlined.Info
+import java.awt.Cursor as AwtCursor
 
 private const val ADD_HINT_DURATION_MS = 2_500L
 private const val ADD_ROW_RANGE_LIMIT = 2_000
@@ -98,6 +98,8 @@ private const val SEQ3_LIFELINES_MIN_HEIGHT_DP = 120f
 private const val SEQ3_LIFELINES_MAX_HEIGHT_DP = 420f
 private const val SEQ3_ARTIFACTS_MIN_HEIGHT_DP = 100f
 private const val SEQ3_ARTIFACTS_MAX_HEIGHT_DP = 360f
+private const val MILLIS_PER_SECOND = 1_000L
+private const val SECONDS_PER_MINUTE = 60L
 private val SEQ3_ACTION_BADGE_SIZE = 24.dp
 private val SEQ3_SUBMESSAGE_ROW_HEIGHT = 44.dp
 
@@ -322,47 +324,47 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
             Column(Modifier.weight(1f).fillMaxWidth()) {
                 Seq3QueueHeader(state, session, counts, view)
                 Column(Modifier.weight(1f).fillMaxWidth()) {
-                if (counts.needsTarget > 0) {
-                    Seq3NeedsTargetBanner(counts.needsTarget) {
-                        // Spec §05: the banner is what starts the guided pass. `startSeq3GuidedPass`
-                        // returns null only when nothing is unresolved — unreachable here, since this
-                        // banner is itself gated on needsTarget > 0.
-                        view.guidedPass = startSeq3GuidedPass(document)
-                        runCatching { view.focusRequester.requestFocus() }
-                    }
-                }
-                // WP11 auto-suggest: OFFER, never insert silently — see Seq3DelaySuggest.kt's own
-                // header for the "manual insert plus auto-suggest" decision this implements.
-                val delaySuggestions = remember(document, view.dismissedDelaySuggestionAfterIds) {
-                    seq3SuggestedDelays(document).filterNot { it.afterMessageId in view.dismissedDelaySuggestionAfterIds }
-                }
-                delaySuggestions.firstOrNull()?.let { suggestion ->
-                    Seq3DelaySuggestionBanner(
-                        suggestion = suggestion,
-                        moreCount = delaySuggestions.size - 1,
-                        onInsert = { seq3InsertDelayAfter(state, session, suggestion.afterMessageId) },
-                        onDismiss = { view.dismissedDelaySuggestionAfterIds = view.dismissedDelaySuggestionAfterIds + suggestion.afterMessageId },
-                    )
-                }
-                Seq3FilterChipsRow(view, counts)
-                Seq3FilterTextAndSortRow(view)
-                Box(Modifier.weight(1f)) {
-                    LazyColumn(
-                        Modifier.fillMaxSize().padding(end = 6.dp),
-                        state = listState,
-                        verticalArrangement = Arrangement.spacedBy(4.dp),
-                    ) {
-                        items(rows, key = Seq3Message::id) { message ->
-                            Seq3QueueRow(state, session, view, document, message, visibleIds)
+                    if (counts.needsTarget > 0) {
+                        Seq3NeedsTargetBanner(counts.needsTarget) {
+                            // Spec §05: the banner is what starts the guided pass. `startSeq3GuidedPass`
+                            // returns null only when nothing is unresolved — unreachable here, since this
+                            // banner is itself gated on needsTarget > 0.
+                            view.guidedPass = startSeq3GuidedPass(document)
+                            runCatching { view.focusRequester.requestFocus() }
                         }
                     }
-                    VerticalScrollbar(
-                        adapter = rememberScrollbarAdapter(listState),
-                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-                        style = appScrollbarStyle(tc),
-                    )
-                }
-                Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
+                    // WP11 auto-suggest: OFFER, never insert silently — see Seq3DelaySuggest.kt's own
+                    // header for the "manual insert plus auto-suggest" decision this implements.
+                    val delaySuggestions = remember(document, view.dismissedDelaySuggestionAfterIds) {
+                        seq3SuggestedDelays(document).filterNot { it.afterMessageId in view.dismissedDelaySuggestionAfterIds }
+                    }
+                    delaySuggestions.firstOrNull()?.let { suggestion ->
+                        Seq3DelaySuggestionBanner(
+                            suggestion = suggestion,
+                            moreCount = delaySuggestions.size - 1,
+                            onInsert = { seq3InsertDelayAfter(state, session, suggestion.afterMessageId) },
+                            onDismiss = { view.dismissedDelaySuggestionAfterIds = view.dismissedDelaySuggestionAfterIds + suggestion.afterMessageId },
+                        )
+                    }
+                    Seq3FilterChipsRow(view, counts)
+                    Seq3FilterTextAndSortRow(view)
+                    Box(Modifier.weight(1f)) {
+                        LazyColumn(
+                            Modifier.fillMaxSize().padding(end = 6.dp),
+                            state = listState,
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(rows, key = Seq3Message::id) { message ->
+                                Seq3QueueRow(state, session, view, document, message, visibleIds)
+                            }
+                        }
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(listState),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                            style = appScrollbarStyle(tc),
+                        )
+                    }
+                    Seq3QueueFooter(counts) { view.regenerateSheetOpen = true }
                 }
             }
         } else if (messagesVisible) {
@@ -761,7 +763,11 @@ private fun Seq3LifelineRow(
     onRemove: () -> Unit,
     onMoveTagOut: (String) -> Unit,
     dragHandleModifier: Modifier,
-    isDragging: Boolean,
+    // Unused inside this composable (the caller already applies the drag scale/zIndex/background
+    // itself — see this doc's own "owns no drag state" note above) but kept in the signature to
+    // mirror the caller's full drag-state contract for this row, the same shape a future in-row
+    // drag affordance would need.
+    @Suppress("UnusedParameter") isDragging: Boolean,
 ) {
     val tc = tc()
     val selected = lifeline.id in view.selectedLifelineIds
@@ -1471,9 +1477,9 @@ private fun Seq3NeedsTargetBanner(count: Int, onFixThese: () -> Unit) {
  *  `[#n] [ts]`-style HH:MM:SS.mmm (this is a DURATION, not a point in time, so that format would
  *  misleadingly imply precision this coarse threshold doesn't have). */
 private fun seq3FormatGapDuration(millis: Long): String {
-    val totalSeconds = millis / 1000
-    val minutes = totalSeconds / 60
-    val seconds = totalSeconds % 60
+    val totalSeconds = millis / MILLIS_PER_SECOND
+    val minutes = totalSeconds / SECONDS_PER_MINUTE
+    val seconds = totalSeconds % SECONDS_PER_MINUTE
     return if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
 }
 
@@ -1664,7 +1670,7 @@ private fun Seq3FragmentsAndNotesSection(
                 Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState())) {
                     document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
                     document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
-                    document.delays.forEach { delayItem -> Seq3DelayRenameRow(state, session, view, document, delayItem) }
+                    document.delays.forEach { delayItem -> Seq3DelayRenameRow(state, session, view, delayItem) }
                 }
             }
         }
@@ -1801,7 +1807,7 @@ private fun Seq3NoteRenameRow(state: AppState, session: Seq3WorkspaceSession, vi
  *  so that badge — accurate for a fragment's span or a note's attachment — has nothing to count
  *  here. */
 @Composable
-private fun Seq3DelayRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, document: Seq3Document, delayItem: Seq3Delay) {
+private fun Seq3DelayRenameRow(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState, delayItem: Seq3Delay) {
     var editing by remember(delayItem.id) { mutableStateOf(false) }
     var text by remember(delayItem.id) { mutableStateOf(delayItem.label) }
 
@@ -1988,7 +1994,11 @@ private fun Seq3ArtifactRow(
                                 ToolbarBtn(
                                     label = "Op",
                                     showLabel = true,
-                                    tooltip = if (hideKindLabel) "Kind word hidden on canvas — click to show it" else "Kind word shown on canvas — click to hide it",
+                                    tooltip = if (hideKindLabel) {
+                                        "Kind word hidden on canvas — click to show it"
+                                    } else {
+                                        "Kind word shown on canvas — click to hide it"
+                                    },
                                     active = hideKindLabel,
                                     contentPadding = PaddingValues(horizontal = 5.dp, vertical = 0.dp),
                                     modifier = Modifier.height(SEQ3_ACTION_BADGE_SIZE),
@@ -2230,7 +2240,7 @@ private fun Seq3QueueRow(
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
-                }
+            }
         }
     }
 }

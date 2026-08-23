@@ -213,6 +213,9 @@ private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Out
     return if (result.applied) applied(result.document, bulkLabel(command.action)) else unapplied(document, result.reason ?: "Not applied")
 }
 
+// One label string per Seq3BulkAction variant — a flat, exhaustive `when` is the simplest
+// possible shape for this mapping; splitting it up would only scatter the same list.
+@Suppress("CyclomaticComplexMethod")
 private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.SetFrom -> "Set from"
     is Seq3BulkAction.SetTo -> "Set target"
@@ -329,7 +332,9 @@ private fun dispatchMoveOccurrenceBack(document: Seq3Document, command: Seq3Comm
     val targetId = moved.movedOutFromMessageId ?: return unapplied(document, "Message was not moved out")
     if (document.messages.none { it.id == targetId }) return unapplied(document, "Original message group is unavailable")
     val result = applySeq3BulkAction(document, setOf(targetId, moved.id), Seq3BulkAction.Merge(targetId))
-    return if (result.applied) applied(result.document, "Move occurrence back") else {
+    return if (result.applied) {
+        applied(result.document, "Move occurrence back")
+    } else {
         unapplied(document, result.reason ?: "Move back was rejected")
     }
 }
@@ -452,6 +457,7 @@ private fun mergeLifelines(document: Seq3Document, keepId: String, mergeIds: Set
         return unapplied(document, "Unknown lifeline to merge")
     }
     val mergedTags = document.lifelines.filter { it.id in mergeIds }.flatMapTo(keep.tagIds.toMutableSet()) { it.tagIds }
+
     fun repoint(id: String?): String? = if (id != null && id in mergeIds) keepId else id
     val survivingLifelines = document.lifelines
         .filterNot { it.id in mergeIds }

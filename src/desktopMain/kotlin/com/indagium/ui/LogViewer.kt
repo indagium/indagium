@@ -817,6 +817,9 @@ internal fun processNamesVisible(mode: ProcessNameMode, manualPicks: Set<Int>): 
 internal fun toggledProcessNameMode(current: ProcessNameMode, manualPicks: Set<Int>): ProcessNameMode =
     if (processNamesVisible(current, manualPicks)) ProcessNameMode.OFF else ProcessNameMode.ALL
 
+// Each parameter is an independently-set rendering input (colors, filter context, field widths)
+// with no natural grouping that wouldn't just move the same 12 values into a throwaway wrapper.
+@Suppress("LongParameterList")
 internal fun buildFullLineAnnotation(
     entry: LogEntry,
     highlighters: List<Highlighter>,

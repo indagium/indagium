@@ -21,25 +21,53 @@ class Seq3LabelSummaryTest {
 
     @Test
     fun neitherToggleOnLeavesTheLabelByteIdentical() {
-        val result = seq3PrefixedLabel("hello", sequenceNumber = 3, rawTimestamp = "10:00:00.000", timestampMillis = 1_000L, showSequenceNumbers = false, showTimestamps = false)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = 3,
+            rawTimestamp = "10:00:00.000",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+        )
         assertEquals("hello", result)
     }
 
     @Test
     fun numberOnlyPrefixesJustTheCallNumber() {
-        val result = seq3PrefixedLabel("hello", sequenceNumber = 3, rawTimestamp = "10:00:00.000", timestampMillis = 1_000L, showSequenceNumbers = true, showTimestamps = false)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = 3,
+            rawTimestamp = "10:00:00.000",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = true,
+            showTimestamps = false,
+        )
         assertEquals("[#3] hello", result)
     }
 
     @Test
     fun timestampOnlyPrefixesJustTheClockTime() {
-        val result = seq3PrefixedLabel("hello", sequenceNumber = 3, rawTimestamp = "10:00:00.000", timestampMillis = 1_000L, showSequenceNumbers = false, showTimestamps = true)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = 3,
+            rawTimestamp = "10:00:00.000",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = false,
+            showTimestamps = true,
+        )
         assertEquals("[10:00:00.000] hello", result)
     }
 
     @Test
     fun bothOnPrefixesTheNumberBeforeTheTimestamp() {
-        val result = seq3PrefixedLabel("hello", sequenceNumber = 3, rawTimestamp = "10:00:00.000", timestampMillis = 1_000L, showSequenceNumbers = true, showTimestamps = true)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = 3,
+            rawTimestamp = "10:00:00.000",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = true,
+            showTimestamps = true,
+        )
         assertEquals("[#3] [10:00:00.000] hello", result)
     }
 
@@ -47,13 +75,27 @@ class Seq3LabelSummaryTest {
     fun numberOnIsANoOpWhenTheRowHasNoAssignedNumber() {
         // A Note/Elision row is never assigned a sequence number by either caller — sequenceNumber
         // is null in that case even with the toggle on, and this must not print a bare "[#null]".
-        val result = seq3PrefixedLabel("hello", sequenceNumber = null, rawTimestamp = "", timestampMillis = null, showSequenceNumbers = true, showTimestamps = false)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = true,
+            showTimestamps = false,
+        )
         assertEquals("hello", result)
     }
 
     @Test
     fun timestampOnFallsBackSilentlyWhenNeitherRawNorMillisIsAvailable() {
-        val result = seq3PrefixedLabel("hello", sequenceNumber = null, rawTimestamp = "", timestampMillis = null, showSequenceNumbers = false, showTimestamps = true)
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = false,
+            showTimestamps = true,
+        )
         assertEquals("hello", result, "a brief/RAW row with no parseable timestamp must not print an empty '[]' tag")
     }
 

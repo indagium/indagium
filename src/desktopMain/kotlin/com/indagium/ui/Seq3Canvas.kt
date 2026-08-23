@@ -7,9 +7,9 @@ package com.indagium.ui
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.HorizontalScrollbar
 import androidx.compose.foundation.ScrollState
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
@@ -23,13 +23,13 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -56,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -66,15 +67,14 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.DpOffset
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
@@ -83,29 +83,28 @@ import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
-import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3DelayBox
-import com.indagium.diagram3.seq3LifelineSegments
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3ElisionRow
 import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3FragmentBox
 import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Layout
 import com.indagium.diagram3.Seq3LifelineColumn
 import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
-import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
-import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.seq3ArrowStyle
+import com.indagium.diagram3.seq3LifelineSegments
 import com.indagium.diagram3.seq3Select
 import kotlin.math.max
 import kotlin.math.min
@@ -129,6 +128,10 @@ private const val MIN_ZOOM = 0.1f
 private const val MAX_ZOOM = 4f
 private const val MIN_FIT_ZOOM = 0.15f
 private const val MAX_FIT_ZOOM = 2.5f
+
+// Floor for density/zoom before dividing by them in seq3PointerPxToLayoutUnits — guards against a
+// division blow-up, not a meaningful measurement in its own right.
+private const val SEQ3_MIN_SAFE_DENSITY_OR_ZOOM = 0.001f
 private const val DRAG_CLICK_THRESHOLD_PX = 6f
 private const val DOUBLE_CLICK_WINDOW_MS = 350L
 private const val PERCENT = 100
@@ -175,6 +178,10 @@ internal fun Seq3Canvas(state: AppState, session: Seq3WorkspaceSession, view: Se
     }
 }
 
+// Every clause below gates a distinct, independently-necessary reason a message may NOT be
+// force-expanded to Seq3Repeat.EVERY for this selection — collapsing any of them would either
+// crash (no toLifelineId/single occurrence) or silently no-op (already EVERY / a NOTE row).
+@Suppress("ComplexCondition")
 private fun seq3CanvasDocumentForSelection(
     document: Seq3Document,
     selectedMessageId: String?,
@@ -433,7 +440,13 @@ private fun Seq3CanvasContent(
 
 /** Ctrl/Cmd-wheel zooms the diagram while an unmodified wheel keeps scrolling the canvas. This
  * modifier sits outside the scroll containers and listens in the Initial pass, so the scroll
- * modifier cannot consume a modified wheel event before the zoom gesture sees it. */
+ * modifier cannot consume a modified wheel event before the zoom gesture sees it.
+ *
+ * Each `continue` in the loop below is an independent "this pointer event isn't a modified
+ * scroll, keep waiting for the next one" early-out on the same await loop — the standard shape
+ * for a Compose `awaitPointerEventScope` gesture loop, not something worth restructuring
+ * pre-release. */
+@Suppress("LoopWithTooManyJumpStatements")
 @Composable
 private fun seq3ZoomWheelModifier(view: Seq3ViewState, sessionId: String): Modifier {
     val currentView = rememberUpdatedState(view)
@@ -460,6 +473,10 @@ private fun seq3ZoomWheelModifier(view: Seq3ViewState, sessionId: String): Modif
 // composables' own `session` param) — see CLAUDE.md's "ID collisions across tabs" gotcha: without
 // it, two open v3 workspaces would share pointerInput coroutines keyed only by `document`/`layout`
 // identity, which can collide once two documents happen to structurally `equals()` each other.
+// The gesture loop below is the standard multi-branch `awaitPointerEventScope` shape (press,
+// drag, release, each its own early-out) — restructuring it days before release is exactly the
+// kind of change likely to introduce a regression in canvas hit-testing.
+@Suppress("LoopWithTooManyJumpStatements")
 @Composable
 private fun seq3CanvasGestureModifier(
     state: AppState,
@@ -505,10 +522,12 @@ private fun seq3CanvasGestureModifier(
             var selectionAdditive = false
             var selectionRange = false
             var childOwnsGesture = false
+
             fun panViewportPosition(position: Offset): Offset = Offset(
                 position.x - currentHScroll.value.value,
                 position.y - currentVScroll.value.value,
             )
+
             fun registerMessageClick(now: Long, id: String): Boolean {
                 val doubleClick = now - lastClickTimeMs <= DOUBLE_CLICK_WINDOW_MS && lastClickMessageId == id
                 lastClickTimeMs = now
@@ -941,6 +960,10 @@ private fun boxesIntersect(a: Seq3Box, b: Seq3Box): Boolean =
 
 // ── Line/shape drawing — everything from `Seq3Layout`'s own unit-less coordinates ─────────────
 
+// The single canvas draw pass necessarily takes every hover/selection/drag input it renders an
+// emphasis state for, and branches on each row kind in turn — splitting it would scatter the
+// "what does THIS row look like right now" decision across multiple functions days before release.
+@Suppress("LongParameterList", "CyclomaticComplexMethod")
 private fun DrawScope.drawSeq3Diagram(
     layout: Seq3Layout,
     tc: ThemeColors,
@@ -1107,18 +1130,6 @@ private const val ARROW_REFERENCE_WIDTH_DP = 1.5f
 private const val ARROW_THIN_WIDTH_DP = 1f
 
 /**
- * Item 10 (phase-5/WP2 fix): this used to always draw a solid line with a filled triangular head,
- * never reading [Seq3ArrowRow.kind] at all — RETURN/ASYNC looked identical to CALL on screen while
- * already differing in the exported PNG (Seq3Raster's `strokeFor`/`drawArrowhead` DID branch on
- * kind). Now both renderers consume the exact same [seq3ArrowStyle] descriptor, so they can never
- * drift apart again.
- *
- * [strokeWidth] is the caller's hover/selection EMPHASIS signal (`drawSeq3Diagram` still passes the
- * same `1.5.dp.toPx()` / `2.dp.toPx()` pair it always did) — see [ARROW_REFERENCE_WIDTH_DP]'s own
- * doc for how this function re-expresses it as a ratio and re-applies that ratio on top of THIS
- * kind's own base weight, rather than discarding the caller's emphasis behaviour outright.
- */
-/**
  * Pure ratio math extracted out of [drawSeq3Arrow] so [Seq3CanvasTest] can pin it down without a
  * live Compose `DrawScope`/`Density` — [emphasisWidth]/[referenceWidth]/[thinWidth] are meant to
  * be called with values in the SAME unit (this file always passes already-`.dp.toPx()`-resolved
@@ -1141,6 +1152,18 @@ internal fun seq3ArrowStrokeWidths(
     return lineWidth to headWidth
 }
 
+/**
+ * Item 10 (phase-5/WP2 fix): this used to always draw a solid line with a filled triangular head,
+ * never reading [Seq3ArrowRow.kind] at all — RETURN/ASYNC looked identical to CALL on screen while
+ * already differing in the exported PNG (Seq3Raster's `strokeFor`/`drawArrowhead` DID branch on
+ * kind). Now both renderers consume the exact same [seq3ArrowStyle] descriptor, so they can never
+ * drift apart again.
+ *
+ * [strokeWidth] is the caller's hover/selection EMPHASIS signal (`drawSeq3Diagram` still passes the
+ * same `1.5.dp.toPx()` / `2.dp.toPx()` pair it always did) — see [ARROW_REFERENCE_WIDTH_DP]'s own
+ * doc for how this function re-expresses it as a ratio and re-applies that ratio on top of THIS
+ * kind's own base weight, rather than discarding the caller's emphasis behaviour outright.
+ */
 private fun DrawScope.drawSeq3Arrow(row: Seq3ArrowRow, color: Color, strokeWidth: Float) {
     val style = seq3ArrowStyle(row.kind)
     val referenceWidthPx = ARROW_REFERENCE_WIDTH_DP.dp.toPx()
@@ -2213,6 +2236,11 @@ private const val SEQ3_ACTOR_GLYPH_RESERVE_DP = 30f
 private const val ACTOR_GLYPH_W_DP = 16f
 private const val ACTOR_GLYPH_H_DP = 26f
 
+// Fractions of the glyph's own dimensions — the leg-split point sits this far up from the glyph's
+// bottom, and the arm band sits this far down between bodyTop and legSplit.
+private const val ACTOR_GLYPH_LEG_SPLIT_FRACTION = 0.28f
+private const val ACTOR_GLYPH_ARM_FRACTION = 0.35f
+
 /** Pure geometry for the actor stick-figure glyph, extracted out of [drawSeq3ActorGlyph] so
  *  [Seq3CanvasTest] can pin it down without a live Compose `DrawScope`/`Density`. Mirrors
  *  Seq3Raster's own `paintActorGlyph` math exactly, substituting a local origin of `glyphTop = 0`
@@ -2234,8 +2262,8 @@ internal fun seq3ActorGlyphGeometry(
     val headCenterY = headR
     val bodyTop = headCenterY + headR
     val glyphBottom = glyphHeightPx
-    val legSplit = glyphBottom - glyphHeightPx * 0.28f
-    val armY = bodyTop + (legSplit - bodyTop) * 0.35f
+    val legSplit = glyphBottom - glyphHeightPx * ACTOR_GLYPH_LEG_SPLIT_FRACTION
+    val armY = bodyTop + (legSplit - bodyTop) * ACTOR_GLYPH_ARM_FRACTION
     return Seq3ActorGlyphGeometry(
         headR = headR,
         headCenterY = headCenterY,
@@ -2541,8 +2569,8 @@ internal fun seq3FitWidthZoom(contentWidth: Double, viewportWidth: Double): Floa
 
 /** Converts a pointer coordinate from physical pixels on the zoomed canvas to layout units. */
 internal fun seq3PointerPxToLayoutUnits(pointerPx: Float, density: Float, zoom: Float): Double {
-    val safeDensity = density.coerceAtLeast(0.001f)
-    val safeZoom = zoom.coerceAtLeast(0.001f)
+    val safeDensity = density.coerceAtLeast(SEQ3_MIN_SAFE_DENSITY_OR_ZOOM)
+    val safeZoom = zoom.coerceAtLeast(SEQ3_MIN_SAFE_DENSITY_OR_ZOOM)
     return pointerPx.toDouble() / safeDensity / safeZoom
 }
 

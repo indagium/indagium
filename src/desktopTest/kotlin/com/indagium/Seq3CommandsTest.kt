@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3CommandResult
@@ -11,7 +12,6 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
-import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3RegenDecision
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command

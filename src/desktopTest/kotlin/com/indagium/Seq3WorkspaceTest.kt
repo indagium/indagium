@@ -1,11 +1,6 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Document
-import com.indagium.diagram3.Seq3Lifeline
-import com.indagium.diagram3.Seq3Match
-import com.indagium.diagram3.Seq3Message
-import com.indagium.diagram3.Seq3Occurrence
-import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.LogEntry
@@ -19,13 +14,13 @@ import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.applySeq3Escape
 import com.indagium.ui.mkTab
 import com.indagium.ui.seq3AddNote
-import com.indagium.ui.seq3AutoExpandOccurrences
-import com.indagium.ui.seq3DisownAutoExpand
 import com.indagium.ui.seq3ArtifactsSectionVisible
+import com.indagium.ui.seq3AutoExpandOccurrences
 import com.indagium.ui.seq3ClearSelection
 import com.indagium.ui.seq3CopyTargetLabel
 import com.indagium.ui.seq3CopyTargetText
 import com.indagium.ui.seq3DefaultNotePlacement
+import com.indagium.ui.seq3DisownAutoExpand
 import com.indagium.ui.seq3PaneSegments
 import com.indagium.ui.seq3PanelVisible
 import com.indagium.ui.seq3PrefixToggleSegments
@@ -42,6 +37,10 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
+
+// Default poll timeout for the [await] helper below.
+private const val DEFAULT_AWAIT_TIMEOUT_MS = 4_000L
+private const val NANOS_PER_MILLI = 1_000_000L
 
 /** WP-panel-toggle: covers the four `Seq3Workspace.kt`/`Seq3QueuePanel.kt` fixes —
  *  toggle-to-deselect for the panel's fragment/note/lifeline rows, Escape clearing them, the
@@ -73,8 +72,8 @@ class Seq3WorkspaceTest {
 
     private fun state(): AppState = stateFor(mkTab("log", "sample.log", twoTagEntries()))
 
-    private fun await(timeoutMs: Long = 4_000, condition: () -> Boolean) {
-        val deadline = System.nanoTime() + timeoutMs * 1_000_000L
+    private fun await(timeoutMs: Long = DEFAULT_AWAIT_TIMEOUT_MS, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + timeoutMs * NANOS_PER_MILLI
         while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
         assertTrue(condition(), "condition did not become true within ${timeoutMs}ms")
     }
@@ -540,5 +539,4 @@ class Seq3WorkspaceTest {
 
         assertEquals(emptySet(), view.expandedOccurrenceMessageIds, "re-clicking must not turn it into a sticky expansion")
     }
-
 }

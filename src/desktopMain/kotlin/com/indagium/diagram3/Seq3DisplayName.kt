@@ -83,6 +83,7 @@ private fun seq3EllipsizeToWidth(text: String, tm: Seq3TextMetrics, maxWidth: Do
  */
 fun seq3WrapDisplayName(displayName: String, maxWidth: Double, tm: Seq3TextMetrics): List<String> {
     val safeWidth = if (maxWidth.isFinite() && maxWidth > 0) maxWidth else 1.0
+
     fun widthOf(s: String) = tm.width(Seq3FontRole.LIFELINE, s)
 
     val chunks = ArrayDeque(seq3DotChunks(displayName))
