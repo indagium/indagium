@@ -4,6 +4,7 @@ import com.indagium.diagram3.Seq3CaptureSource
 import com.indagium.diagram3.Seq3TokenizeInput
 import com.indagium.diagram3.matchesText
 import com.indagium.diagram3.tokenizeSeq3Messages
+import com.indagium.diagram3.tokenizeSeq3MessagesFullPath
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -208,5 +209,62 @@ class Seq3TokenizerTest {
                 "extraction diverged for: $text",
             )
         }
+    }
+
+    // ── PERF: single-occurrence short-circuit must be a no-op on the result (P3b) ──────────────
+    //
+    // tokenizeSeq3Messages(tag, [one]) now returns from an early branch instead of running
+    // compileNamedValuePattern/compileSingleRunPattern at all -- see that branch's own comment for
+    // the two independent arguments proving both compilers were always forced onto the identical
+    // literal-template answer for a single occurrence anyway. This proves it empirically rather
+    // than by argument alone: every corpus line, run through BOTH the short-circuited public
+    // function and tokenizeSeq3MessagesFullPath (the never-short-circuiting internal seam), must
+    // agree on match (tag/template/captures), captured values, and error.
+
+    @Test
+    fun theSingleOccurrenceShortCircuitAgreesWithTheFullCompilePathAcrossARealisticCorpus() {
+        val corpus = listOf(
+            // Reused verbatim from theBoundedPatternExtractsIdenticalPairsToTheUnboundedOneAcross
+            // ARealisticCorpus above -- every shape that file already cares about.
+            "attach deviceKey=usb-dev-016",
+            "state: on ready: true",
+            "push seq=4821, retries=2; final=true",
+            "message=\"user said hello world\" priority=high",
+            "note='single quoted value here' level=2",
+            "screen.mode=on screen-mode=1",
+            "just a plain sentence with no pairs at all",
+            "final status=done",
+            "token=Binder@7 " + "detail".repeat(80),
+            // Single-occurrence-specific edge shapes not already covered above.
+            "no operator characters anywhere in this whole line at all",
+            "device connected id=42",
+            "quoted empty value: \"\"",
+            "trailing pair with nothing after it key=value",
+            "dotted.and-hyphenated.key=value here too",
+        )
+        for (text in corpus) {
+            val short = tokenizeSeq3Messages("A", listOf(input(1, text)))
+            val full = tokenizeSeq3MessagesFullPath("A", listOf(input(1, text)))
+            assertEquals(full.match, short.match, "match diverged for: $text")
+            assertEquals(full.captureValuesByOccurrence, short.captureValuesByOccurrence, "captured values diverged for: $text")
+            assertEquals(full.error, short.error, "error diverged for: $text")
+            // Pin what the short-circuit is actually claiming, not just that it agrees with itself.
+            assertEquals(text, short.match?.template, "a single occurrence must always template to its own literal text: $text")
+            assertTrue(short.match?.captures.orEmpty().isEmpty(), "a single occurrence must never produce a capture: $text")
+        }
+    }
+
+    @Test
+    fun theSingleOccurrenceShortCircuitStillRunsTheExistingValidationGuardsFirst() {
+        // The short-circuit sits AFTER the blank-id/empty-text guards in source order -- pinned so
+        // a future edit can't accidentally move it above them and silently skip validation.
+        assertEquals(
+            "Every occurrence must have a stable id",
+            tokenizeSeq3Messages("A", listOf(Seq3TokenizeInput("", "device connected id=42"))).error,
+        )
+        assertEquals(
+            "Empty occurrence text cannot be tokenized",
+            tokenizeSeq3Messages("A", listOf(input(1, ""))).error,
+        )
     }
 }
