@@ -1,10 +1,16 @@
 package com.indagium
 
+import com.indagium.diagram3.Seq3Capture
 import com.indagium.diagram3.Seq3CaptureSource
+import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3TokenizeInput
+import com.indagium.diagram3.compileNamedValuePattern
+import com.indagium.diagram3.isGenericValueSet
 import com.indagium.diagram3.matchesText
+import com.indagium.diagram3.sanitizeCaptureName
 import com.indagium.diagram3.tokenizeSeq3Messages
 import com.indagium.diagram3.tokenizeSeq3MessagesFullPath
+import com.indagium.diagram3.unquote
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -266,5 +272,112 @@ class Seq3TokenizerTest {
             "Empty occurrence text cannot be tokenized",
             tokenizeSeq3Messages("A", listOf(input(1, ""))).error,
         )
+    }
+
+    // ── PERF: compileNamedValuePattern's redundant-recomputation fix must be a no-op (P3b) ─────
+    //
+    // The BATCHED path (a tag's occurrences share a shape, buildMessages calls tokenizeSeq3Messages
+    // once with every occurrence) is the COMMON case -- the whole reason the tokenizer exists is to
+    // collapse a shared shape into one message. compileNamedValuePattern used to recompute the same
+    // O(occurrences x keys) `valuesFor` scan from scratch at every call site (up to 3x per varying
+    // name) and re-ran NAMED_VALUE.findAll over every occurrence a SECOND time when building
+    // `values`, even though `matches` already held that exact result. Neither redundancy changed
+    // what gets returned -- both are memoize-or-reuse fixes over pure, already-computed values, not
+    // logic changes -- so [oldCompileNamedValuePattern] below is a byte-for-byte copy of the
+    // PRE-fix algorithm (kept here, not imported, for the same reason
+    // theBoundedPatternExtractsIdenticalPairsToTheUnboundedOneAcrossARealisticCorpus above keeps
+    // its own old/new regex copies: proving the fix changed nothing needs an independent
+    // computation to diff against, not just a second look at the same one). It calls the REAL,
+    // unchanged `sanitizeCaptureName`/`isGenericValueSet`/`unquote` -- only the redundant-scan
+    // shape of `compileNamedValuePattern` itself is duplicated.
+
+    /** Verbatim pre-PERF-fix `compileNamedValuePattern`: `valuesFor` recomputed from scratch on
+     *  every call (no `valuesByName` memoization), and `values` re-ran a NAMED_VALUE findAll per
+     *  occurrence instead of reusing `matches`. The tokenizer's real `NAMED_VALUE` regex is
+     *  file-private, so this copy drives its matches through [newNamedValuePattern] instead --
+     *  already proven byte-for-byte identical to production's `NAMED_VALUE` by
+     *  theBoundedPatternExtractsIdenticalPairsToTheUnboundedOneAcrossARealisticCorpus above, so
+     *  substituting it here changes nothing about what this duplicate computes. */
+    private fun oldCompileNamedValuePattern(
+        tag: String,
+        occurrences: List<Seq3TokenizeInput>,
+    ): Pair<Seq3Match, Map<String, Map<String, String>>>? {
+        val matches = occurrences.map { newNamedValuePattern.findAll(it.text).toList() }
+        if (matches.any { it.isEmpty() }) return null
+        val firstKeys = matches.first().map { it.groupValues[1] }
+        if (matches.any { it.map { part -> part.groupValues[1] } != firstKeys }) return null
+
+        fun valuesFor(name: String): Set<String> =
+            matches.map { parts -> unquote(parts.first { part -> part.groupValues[1] == name }.groupValues[3]) }.toSet()
+
+        val varyingNames = firstKeys.filter { valuesFor(it).size > 1 }
+        if (varyingNames.isEmpty()) {
+            val exact = Seq3Match(tag = tag, template = occurrences.first().text)
+            return exact to occurrences.associate { it.occurrenceId to emptyMap() }
+        }
+        if (varyingNames.any { name -> isGenericValueSet(valuesFor(name)) || valuesFor(name).any(String::isEmpty) }) return null
+
+        val usedCaptureNames = mutableSetOf<String>()
+        val sanitizedNames = varyingNames.associateWith { sanitizeCaptureName(it, usedCaptureNames) }
+
+        val first = occurrences.first().text
+        val replacements = matches.first().mapNotNull { part ->
+            val name = part.groupValues[1]
+            name.takeIf { it in varyingNames }?.let { part.groups[3]!!.range to "{${sanitizedNames.getValue(it)}}" }
+        }.sortedByDescending { it.first.first }
+        var template = first
+        replacements.forEach { (range, replacement) -> template = template.replaceRange(range, replacement) }
+        val captures = varyingNames.map { Seq3Capture(sanitizedNames.getValue(it), Seq3CaptureSource.NAMED_VALUE) }
+        val values = occurrences.associate { occ ->
+            val parts = newNamedValuePattern.findAll(occ.text).toList()
+            occ.occurrenceId to varyingNames.associate { name ->
+                sanitizedNames.getValue(name) to unquote(parts.first { it.groupValues[1] == name }.groupValues[3])
+            }
+        }
+        return Seq3Match(tag = tag, template = template, captures = captures) to values
+    }
+
+    @Test
+    fun theRedundantRecomputationFixAgreesWithThePreFixAlgorithmAcrossAGroupedCorpus() {
+        val groupedCorpus = listOf(
+            "collapses on ONE shared varying key" to listOf(
+                input(1, "attach deviceKey=usb-dev-016"),
+                input(2, "attach deviceKey=usb-dev-017"),
+                input(3, "attach deviceKey=usb-dev-018"),
+            ),
+            "MULTIPLE named values per line, one of them varying" to listOf(
+                input(1, "push seq=4821, retries=2; final=true"),
+                input(2, "push seq=91, retries=2; final=true"),
+                input(3, "push seq=500217, retries=2; final=true"),
+            ),
+            "a quoted value alongside a varying one" to listOf(
+                input(1, "message=\"hello world\" priority=high seq=1"),
+                input(2, "message=\"hello world\" priority=high seq=2"),
+            ),
+            "a dotted/hyphenated key that must sanitize" to listOf(
+                input(1, "screen.mode=on screen-mode=1"),
+                input(2, "screen.mode=off screen-mode=2"),
+            ),
+            "no variation at all (every value identical)" to listOf(
+                input(1, "state: on ready: true"),
+                input(2, "state: on ready: true"),
+            ),
+            // The two cases the algorithm deliberately bails on (returns null) -- must stay null.
+            "bails: the varying value is generic-only (true/false)" to listOf(
+                input(1, "connected=true"),
+                input(2, "connected=false"),
+            ),
+            "bails: a quoted-empty value among the varying ones" to listOf(
+                input(1, "state: \"\""),
+                input(2, "state: on"),
+            ),
+        )
+        for ((label, occurrences) in groupedCorpus) {
+            val before = oldCompileNamedValuePattern("A", occurrences)
+            val after = compileNamedValuePattern("A", occurrences)
+            assertEquals(before?.first, after?.first, "match diverged for [$label]")
+            assertEquals(before?.second, after?.second, "captured values diverged for [$label]")
+            assertEquals(before == null, after == null, "null (bail-out) vs non-null diverged for [$label]")
+        }
     }
 }
