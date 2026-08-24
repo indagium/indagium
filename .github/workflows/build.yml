@@ -61,16 +61,16 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: '21'
           distribution: 'temurin'
 
       - name: Restore Gradle cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.gradle/caches
@@ -99,7 +99,7 @@ jobs:
       # has nothing worth keeping here.
       - name: Upload test report
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: desktop-test-report
           path: |
@@ -115,7 +115,7 @@ jobs:
         run: ./gradlew dependencies --configuration desktopRuntimeClasspath > dependency-report.txt
 
       - name: Upload dependency report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: dependency-report
           path: dependency-report.txt
@@ -137,10 +137,10 @@ jobs:
         shell: bash
 
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -160,7 +160,7 @@ jobs:
       # arm64 job restoring x86_64 native jars (bytedeco/FFmpeg) from the amd64 job and failing to
       # link against them.
       - name: Restore Gradle cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/.gradle/caches
@@ -199,7 +199,7 @@ jobs:
       # this step runs once per matrix leg and upload-artifact rejects duplicate names in one run.
       - name: Upload test report
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: video-duration-test-report-${{ matrix.artifact_name }}
           path: |
@@ -356,7 +356,7 @@ jobs:
           flatpak uninstall --user -y com.indagium.Indagium
 
       - name: Upload artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: ${{ matrix.artifact_name }}
           path: ${{ matrix.artifact_path }}
@@ -374,7 +374,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
 
@@ -385,7 +385,7 @@ jobs:
       # updater selects the matching release asset for .deb/AppImage launches; Flatpak updates are
       # intentionally delegated to Flatpak itself.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           files: artifacts/**/*
           generate_release_notes: true

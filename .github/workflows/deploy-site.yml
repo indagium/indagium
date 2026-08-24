@@ -25,17 +25,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
       - name: Prepare website artifact
         run: |
           mkdir -p _site
           rsync -a --exclude='*.mov' site/ _site/
       - name: Upload website
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: _site
       - name: Deploy website
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
