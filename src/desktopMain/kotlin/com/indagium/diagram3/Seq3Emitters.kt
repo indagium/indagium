@@ -215,7 +215,9 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                     toIdx,
                     collapsedRepeatLabel(message, occurrences),
                     message.kind,
-                    occurrences.size,
+                    // COUNT, not "how many rows do I draw" — see Seq3Layout.expandForLayout's
+                    // identical COLLAPSE_ABOVE branch for why this reads totalOccurrenceCount.
+                    message.totalOccurrenceCount ?: occurrences.size,
                     occurrences.first().entryId,
                     seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
                     seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
@@ -256,7 +258,8 @@ private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int
             ),
         )
     }
-    val elided = occurrences.size - 2
+    // COUNT, not "how many rows do I draw" — see Seq3Layout.firstLastEmissions's identical comment.
+    val elided = (message.totalOccurrenceCount ?: occurrences.size) - 2
     return buildList {
         val first = occurrences.first()
         add(

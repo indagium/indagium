@@ -10,12 +10,15 @@ import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.SequenceDef
 import com.indagium.model.StackTraceGroup
 import com.indagium.ui.mkTab
+import com.indagium.utils.SELECTION_EXPANSION_MAX_IDS
 import com.indagium.utils.cachedVisibleEntriesFor
 import com.indagium.utils.expandSelectionThroughCollapsedBlocks
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 // Pure utils/Filter.kt coverage for expandSelectionThroughCollapsedBlocks — no Compose, no
 // AppState. Fixture shapes mirror SequenceGroupingTest.kt / FilterBehaviorTest.kt so a reader
@@ -29,7 +32,7 @@ class FoldSelectionExpansionTest {
         val tab = mkTab("log", "test.log", entries("A" to "one", "A" to "two"))
 
         val selected = setOf(1)
-        val result = expandSelectionThroughCollapsedBlocks(tab, selected)
+        val result = expandSelectionThroughCollapsedBlocks(tab, selected).ids
 
         // No fold matched anything, so the fast path must hand back the exact same instance rather
         // than an equal-but-freshly-allocated copy — proving no scan ran at all.
@@ -41,7 +44,7 @@ class FoldSelectionExpansionTest {
         val tab = mkTab("log", "test.log", entries("A" to "one"))
         val selected = emptySet<Int>()
 
-        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected))
+        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected).ids)
     }
 
     @Test
@@ -49,7 +52,7 @@ class FoldSelectionExpansionTest {
         val tab = mkTab("log", "test.log", entries("A" to "1", "A" to "2", "A" to "3", "A" to "4", "A" to "5"))
             .copy(manualBlocks = listOf(ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_START)))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3)).ids
 
         // The whole reason this function exists: TO_START's swallowed ids are strictly LOWER than
         // the only selectable (anchor) row, so a naive min..max span could never reach them.
@@ -61,7 +64,7 @@ class FoldSelectionExpansionTest {
         val tab = mkTab("log", "test.log", entries("A" to "1", "A" to "2", "A" to "3", "A" to "4", "A" to "5"))
             .copy(manualBlocks = listOf(ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_END)))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3)).ids
 
         assertEquals(setOf(3, 4, 5), result)
     }
@@ -71,7 +74,7 @@ class FoldSelectionExpansionTest {
         val tab = mkTab("log", "test.log", entries("A" to "1", "A" to "2", "A" to "3", "A" to "4", "A" to "5"))
             .copy(manualBlocks = listOf(ManualCollapseBlock("m1", 4, ManualCollapseDirection.RANGE, endId = 2)))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(4))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(4)).ids
 
         // anchorId(4) > endId(2): Filter.kt's manualRangesFor takes min/max of the two resolved
         // indices, so the range still comes out ascending.
@@ -84,7 +87,7 @@ class FoldSelectionExpansionTest {
             .copy(manualBlocks = listOf(ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_START, enabled = false)))
 
         val selected = setOf(2)
-        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected))
+        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected).ids)
     }
 
     @Test
@@ -96,7 +99,7 @@ class FoldSelectionExpansionTest {
             )
 
         val selected = setOf(2)
-        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected))
+        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected).ids)
     }
 
     @Test
@@ -112,7 +115,7 @@ class FoldSelectionExpansionTest {
             )
 
         val selected = setOf(2)
-        assertEquals(selected, expandSelectionThroughCollapsedBlocks(tab, selected))
+        assertEquals(selected, expandSelectionThroughCollapsedBlocks(tab, selected).ids)
     }
 
     @Test
@@ -123,7 +126,7 @@ class FoldSelectionExpansionTest {
             analysis = LogAnalysis(stackTraceGroups = listOf(StackTraceGroup(gid = "st_2", rid = 2, memberIds = listOf(3, 4)))),
         )
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2)).ids
 
         assertEquals(setOf(2, 3, 4), result)
     }
@@ -137,7 +140,7 @@ class FoldSelectionExpansionTest {
         ).copy(expanded = setOf("st_2"))
 
         val selected = setOf(2)
-        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected))
+        assertSame(selected, expandSelectionThroughCollapsedBlocks(tab, selected).ids)
     }
 
     @Test
@@ -154,7 +157,7 @@ class FoldSelectionExpansionTest {
         )
         val tab = mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(outer, inner)))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(1))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(1)).ids
 
         // rid 1's own plain ids (5, 6) plus the whole nested child it owns — its header row (2) AND
         // its ch (3, 4) — matching what SequenceGroupingTest's computeSeqGroups asserts this same
@@ -181,7 +184,7 @@ class FoldSelectionExpansionTest {
             expanded = setOf("sg_outer_1"),
         )
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2)).ids
 
         assertEquals(setOf(2, 3, 4), result)
     }
@@ -194,7 +197,7 @@ class FoldSelectionExpansionTest {
         // computeItems(tab, true) was never called, so there's nothing to memoize yet.
         assertNull(cachedVisibleEntriesFor(tab, applyFilter = true))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(2)).ids
 
         assertEquals(setOf(1, 2), result)
     }
@@ -210,7 +213,7 @@ class FoldSelectionExpansionTest {
             analysis = LogAnalysis(stackTraceGroups = listOf(StackTraceGroup(gid = "st_3", rid = 3, memberIds = listOf(4, 5)))),
         ).copy(manualBlocks = listOf(ManualCollapseBlock("m1", 6, ManualCollapseDirection.TO_END)))
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(1, 3, 6))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(1, 3, 6)).ids
 
         assertEquals(setOf(1, 3, 4, 5, 6, 7, 8), result)
     }
@@ -231,8 +234,43 @@ class FoldSelectionExpansionTest {
             manualBlocks = listOf(ManualCollapseBlock("m1", 3, ManualCollapseDirection.TO_START)),
         )
 
-        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3))
+        val result = expandSelectionThroughCollapsedBlocks(tab, setOf(3)).ids
 
         assertEquals(setOf(1, 2, 3), result)
+    }
+
+    // W4: TO_START/TO_END on a huge tab can resolve to the entire file (`0..anchor` or
+    // `anchor..lastIndex`) — these two guard the SELECTION_EXPANSION_MAX_IDS bound that exists to
+    // stop that from allocating a multi-hundred-MB boxed set on the composition thread.
+
+    @Test
+    fun manualBlockOverBudgetSignalsBoundExceededAndKeepsOnlyBoundaryIds() {
+        val n = SELECTION_EXPANSION_MAX_IDS + 5
+        val logs = (1..n).map { LogEntry(it, "10:00:00.000", LogLevel.I, "A", "line $it") }
+        val tab = mkTab("log", "test.log", logs)
+            .copy(manualBlocks = listOf(ManualCollapseBlock("m1", n, ManualCollapseDirection.TO_START)))
+
+        val expansion = expandSelectionThroughCollapsedBlocks(tab, setOf(n))
+
+        // Not enumerated — the point of the bound — but the range's own endpoints (the file's first
+        // id and the anchor itself) are still present so Seq3Session.rangeFor can still compute the
+        // correct from/to span without them.
+        assertTrue(expansion.boundExceeded)
+        assertTrue(1 in expansion.ids)
+        assertTrue(n in expansion.ids)
+        assertTrue(expansion.ids.size < SELECTION_EXPANSION_MAX_IDS)
+    }
+
+    @Test
+    fun manualBlockAtExactlyTheBudgetStillExpandsInFull() {
+        val n = SELECTION_EXPANSION_MAX_IDS
+        val logs = (1..n).map { LogEntry(it, "10:00:00.000", LogLevel.I, "A", "line $it") }
+        val tab = mkTab("log", "test.log", logs)
+            .copy(manualBlocks = listOf(ManualCollapseBlock("m1", n, ManualCollapseDirection.TO_START)))
+
+        val expansion = expandSelectionThroughCollapsedBlocks(tab, setOf(n))
+
+        assertFalse(expansion.boundExceeded)
+        assertEquals(n, expansion.ids.size)
     }
 }

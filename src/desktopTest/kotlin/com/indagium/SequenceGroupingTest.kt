@@ -1385,4 +1385,75 @@ class SequenceGroupingTest {
         )
         assertEveryEntryAccountedForExactlyOnce(tab.logData.size, items)
     }
+
+    // ── W5: O(roots²) crossing resolution — cost fix, must not change behaviour ────────────────
+    //
+    // Generalizes chainedFourWaySequenceLogs to N mutually-crossing roots: root k's start falls
+    // inside root (k-1)'s still-open range and root k's end falls past root (k-1)'s own end — the
+    // same "open, mid, open, mid, close-the-earlier-one" interleaving as the 3-/4-way fixtures
+    // above, just repeated. Event shape: open(0), mid, open(1), mid, close(0), then for each
+    // further k: open(k), mid, close(k-1); finally mid, close(N-1).
+    private fun manyCrossingChainFixture(n: Int): Pair<List<LogEntry>, List<SequenceDef>> {
+        data class Ev(val kind: Char, val k: Int)
+        val events = mutableListOf<Ev>()
+        events += Ev('O', 0)
+        events += Ev('M', -1)
+        events += Ev('O', 1)
+        events += Ev('M', -1)
+        events += Ev('C', 0)
+        for (k in 2 until n) {
+            events += Ev('O', k)
+            events += Ev('M', -1)
+            events += Ev('C', k - 1)
+        }
+        events += Ev('M', -1)
+        events += Ev('C', n - 1)
+        val logs = events.mapIndexed { idx, ev ->
+            val id = idx + 1
+            when (ev.kind) {
+                'O' -> LogEntry(id, "10:00:00.${id}00", LogLevel.I, "Seq${ev.k}", "S${ev.k} start")
+                'C' -> LogEntry(id, "10:00:00.${id}00", LogLevel.I, "Seq${ev.k}", "S${ev.k} end")
+                else -> LogEntry(id, "10:00:00.${id}00", LogLevel.I, "Mid", "between")
+            }
+        }
+        val defs = (0 until n).map { k ->
+            SequenceDef("seq$k", "S$k start", priority = k + 1, color = Color.Red, tag = "Seq$k", endMatchText = "S$k end", endTag = "Seq$k")
+        }
+        return logs to defs
+    }
+
+    @Test
+    fun manyCrossingRootsResolveToTheSameChainRegardlessOfHowManyPriorRootsAreAlreadyClaimed() {
+        // The claimed-guest `continue` used to run BEFORE the sorted-start `break`, so once a root
+        // (`a`) started claiming guests, a long run of already-claimed roots after it was walked
+        // all the way to the end of `roots` on every outer iteration instead of stopping at the
+        // first root starting past a.endExclusive — O(roots²) instead of O(roots) total. This
+        // fixture's long chain of mutually-crossing roots (each one claimed as a guest by its
+        // predecessor, then itself walked as a host on its own turn) is exactly the shape that made
+        // the old ordering expensive. Asserting the resolved chain here pins that reordering the two
+        // checks changed only cost, not which root ends up hosting which guest.
+        val n = 200
+        val (logs, defs) = manyCrossingChainFixture(n)
+        val startIdByK = (0 until n).associateWith { k -> logs.first { it.tag == "Seq$k" && it.msg == "S$k start" }.id }
+        val allGids = (0 until n).map { k -> "sg_seq${k}_${startIdByK.getValue(k)}" }
+        val tab = LogTab(
+            id = "log", filename = "test.log", logData = logs, rmap = logs.associateBy { it.id },
+            filter = Filter(sequences = defs), expanded = allGids.toSet(),
+        )
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val headers = allGids.map { gid -> items.filterIsInstance<LogItem.SeqHeader>().single { it.gid == gid } }
+        // Each root, once resolved, is nested exactly one level deeper than the one before it — a
+        // genuine chain, never a flat fan-out (see seqHostsSeqDirect's own doc in Filter.kt).
+        assertEquals((0 until n).toList(), headers.map { it.indent })
+        // And in document order: root k's header renders strictly before root k+1's.
+        for (k in 0 until n - 1) assertTrue(items.indexOf(headers[k]) < items.indexOf(headers[k + 1]))
+        assertEveryEntryAccountedForExactlyOnce(logs.size, items)
+
+        // Fully collapsed too — the fold-hosting bookkeeping this loop feeds is unaffected by the
+        // reorder either way.
+        val collapsedItems = computeItems(tab.copy(expanded = emptySet()), applyFilter = true)
+        assertEveryEntryAccountedForExactlyOnce(logs.size, collapsedItems)
+    }
 }

@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.diagram3.MAX_SEQ3_HEADER_CHARS
 import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3GenerateOptions
@@ -8,12 +9,16 @@ import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.addSeq3MessageFromSelection
+import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
+import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import kotlin.system.measureTimeMillis
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class Seq3GeneratorTest {
@@ -306,5 +311,126 @@ class Seq3GeneratorTest {
         // Exactly one Cpu message (its own occurrences already merge on their own, unaffected by
         // this fix) and it must NOT sit between two halves of the now-unfragmented Usb message.
         assertEquals(2, doc.messages.size)
+    }
+
+    // ── W1a: document-wide occurrence budget (see docs/plans/prepare-plan-to-fix-binary-wreath.md) ──
+
+    @Test
+    fun aFiftyThousandEntryRangeStaysWithinTheHeaderBoundAndReportsItsTrueOccurrenceCount() {
+        // One tag, one shape (only the digit run varies) — groupByShape/the tokenizer merge every
+        // occurrence into ONE Seq3Message, exactly the shape that used to blow past
+        // MAX_SEQ3_HEADER_CHARS before W1a (2 000 occurrences already measured at 671 KB, well over
+        // the 512 KB bound; 50 000 measured at 16.9 MB in the pre-fix probe).
+        val entryCount = 50_000
+        val entries = (1..entryCount).map { i -> entry(i, formatMillisOfDay(i.toLong()), "A", "processed item $i of batch") }
+
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+
+        val message = doc.messages.single()
+        assertEquals(entryCount, message.totalOccurrenceCount, "must report the TRUE pre-trim count, not the trimmed one")
+        assertTrue(message.occurrences.size < entryCount, "the water-fill budget must have actually trimmed something")
+
+        val encoded = encodeSeq3Note(doc)
+        assertTrue(encoded.length < MAX_SEQ3_HEADER_CHARS, "encoded note must stay under the codec's own decode bound")
+        val parsed = assertNotNull(parseSeq3Note(encoded), "an in-budget note must round-trip back through parseSeq3Note")
+        assertEquals(entryCount, parsed.document.messages.single().totalOccurrenceCount)
+    }
+
+    // ── W1a follow-up: byte-aware budget (occurrence COUNT alone is not the actual header cost) ──
+
+    @Test
+    fun rangesWithLongOrdinaryLogLinesStayWithinTheHeaderBoundInsteadOfOnlyBeingCappedByCount() {
+        // Reproduces the exact gap a count-only budget left open: at this size (1 000 entries, 5
+        // tags, 600-char lines — a stack trace, a JSON payload, a dumpsys dump, all ordinary
+        // logcat content) each tag's ~200 occurrences fit comfortably under the OLD count-only
+        // allowance (1 200 / 5 messages = 240 per message, so nothing was even trimmed) and STILL
+        // encoded to ~795 KB, well over MAX_SEQ3_HEADER_CHARS (measured against the pre-fix
+        // algorithm). The byte-aware budget must trim where the count-only one wouldn't, so the
+        // header still fits.
+        val tagCount = 5
+        val tags = (0 until tagCount).map { ('A' + it).toString() }
+        val entries = (1..1_000).map { i ->
+            val tagIdx = i % tagCount
+            entry(i, formatMillisOfDay(i.toLong()), tags[tagIdx], paddedMessage(i, LONG_LINE_LENGTH), pid = 100 + tagIdx, tid = 200 + tagIdx)
+        }
+
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+
+        assertTrue(doc.messages.isNotEmpty())
+        val encoded = encodeSeq3Note(doc)
+        assertTrue(
+            encoded.length < MAX_SEQ3_HEADER_CHARS,
+            "encoded note (${encoded.length} chars) must stay under the codec's own decode bound for ordinary long lines",
+        )
+        assertNotNull(parseSeq3Note(encoded), "an in-budget note must round-trip back through parseSeq3Note")
+    }
+
+    // ── PERF regression: NAMED_VALUE's O(tail length²) backtracking fix (Seq3Tokenizer.kt) ──────
+
+    @Test
+    fun generatingOverManyDelimiterlessTailLinesStaysWellUnderTheQuadraticBlowupThreshold() {
+        // Pins the fix at the level a caller actually feels it. This exact shape — a short
+        // "key=value" prefix followed by ~580 characters of unbroken, delimiter-less text — is
+        // precisely what made Seq3Tokenizer.kt's NAMED_VALUE regex quadratic before the fix
+        // (measured directly against the isolated pattern: 9.2s total for this size on the
+        // unbounded pattern; see that file's own comment for the full per-length table). The
+        // threshold is deliberately loose — not a tight millisecond bound — so this stays robust on
+        // a slow or loaded CI machine; the point being pinned is "not quadratic," not "exactly this
+        // fast."
+        val tagCount = 5
+        val tags = (0 until tagCount).map { ('A' + it).toString() }
+        val entries = (1..1_000).map { i ->
+            val tagIdx = i % tagCount
+            entry(
+                i, formatMillisOfDay(i.toLong()), tags[tagIdx], delimiterlessTailMessage(i, LONG_LINE_LENGTH),
+                pid = 100 + tagIdx, tid = 200 + tagIdx,
+            )
+        }
+
+        val elapsedMs = measureTimeMillis { generateSeq3(entries, Seq3Range.VisibleView) }
+
+        assertTrue(
+            elapsedMs < PERF_REGRESSION_THRESHOLD_MS,
+            "generateSeq3 took ${elapsedMs}ms over 1000 delimiterless-tail lines " +
+                "(threshold ${PERF_REGRESSION_THRESHOLD_MS}ms) — NAMED_VALUE's bounding may have regressed",
+        )
+    }
+
+    /** A short "key=value" prefix followed by an unbroken (no spaces, no '='/':' ) run of text —
+     *  the exact shape that turned NAMED_VALUE.findAll quadratic before the fix: a value followed
+     *  by a long tail with no further delimiter forces the lookahead to scan the whole tail
+     *  looking for the next pair, over and over, from every position findAll tries. */
+    private fun delimiterlessTailMessage(i: Int, targetLen: Int): String {
+        val head = "token=v%05d ".format(i)
+        val tailLen = (targetLen - head.length).coerceAtLeast(0)
+        val tail = buildString { while (length < tailLen) append("detail") }.take(tailLen)
+        return head + tail
+    }
+
+    /** Fixed-length synthetic log line with a FIXED-WIDTH (zero-padded) counter, so total message
+     *  length — and therefore its masked shape — never depends on how many digits the counter
+     *  itself has: groupByShape/the tokenizer merge every occurrence of a tag into one
+     *  [Seq3Message] regardless of how long [targetLen] makes the line, exactly like a real
+     *  repeated call whose payload differs in length-irrelevant detail (a changing id, a changing
+     *  timestamp embedded in a dump). */
+    private fun paddedMessage(i: Int, targetLen: Int): String {
+        val head = "processed item %05d of batch ".format(i)
+        return head + "y".repeat((targetLen - head.length).coerceAtLeast(0))
+    }
+
+    private fun formatMillisOfDay(millis: Long): String {
+        val hh = millis / MILLIS_PER_HOUR
+        val mm = (millis % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE
+        val ss = (millis % MILLIS_PER_MINUTE) / MILLIS_PER_SECOND
+        val ms = millis % MILLIS_PER_SECOND
+        return "%02d:%02d:%02d.%03d".format(hh, mm, ss, ms)
+    }
+
+    private companion object {
+        const val MILLIS_PER_SECOND = 1_000L
+        const val MILLIS_PER_MINUTE = 60_000L
+        const val MILLIS_PER_HOUR = 3_600_000L
+        const val LONG_LINE_LENGTH = 600
+        const val PERF_REGRESSION_THRESHOLD_MS = 2_000L
     }
 }

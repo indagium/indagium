@@ -749,6 +749,15 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // what "Open existing notes" loads.
 data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String, val pendingTab: LogTab)
 
+/** W0: the shared "operation not possible" popup for the sequence-diagram v3 chain (see
+ *  `docs/plans/prepare-plan-to-fix-binary-wreath.md`'s W0/W1). [Seq3Session] raises this whenever a
+ *  diagram genuinely cannot be saved (over the codec's size bound, or the diagram library is full)
+ *  instead of letting an `IllegalArgumentException` escape from a background coroutine (the
+ *  original "Generating…" hang) or a Compose event handler (a UI-thread crash). [detail] is an
+ *  optional dimmed second line for a figure the [body] prose already states in words (e.g. the exact
+ *  byte counts) — most notices have nothing further to add and leave it null. */
+data class DiagramNotice(val title: String, val body: String, val detail: String? = null)
+
 /** How AppState.beginLogRelink ("Locate log…", Change 2b/2c) should finish attaching notes to the
  *  tab it just opened, once verification clears it (immediately, or after the user confirms a
  *  mismatch warning). Mirrors the two "Locate log…" entry points: [CaseLibraryNote] re-reads the
@@ -1768,6 +1777,14 @@ class AppState(
      *  waiting on the user's choice — see [PendingTagPrefixConflict]'s own doc for why this exists
      *  and [resolveTagPrefixConflict]/[cancelTagPrefixConflict] for how it's resolved. */
     var pendingTagPrefixConflict by mutableStateOf<PendingTagPrefixConflict?>(null)
+
+    /** W0/W1c: non-null while [Seq3Session] wants to tell the user a diagram operation could not be
+     *  completed (over-budget save, full library) — see [DiagramNotice]'s own doc. Written from
+     *  `Seq3Session`'s IO-dispatcher coroutines as well as its UI-thread `applyCommand` path; both
+     *  are safe (SAAD §12.6, `mutableStateOf` is snapshot-safe from any thread). Cleared only by the
+     *  dialog's own "OK" button ([App.kt]) — never auto-dismissed, so a fast-moving user can't miss
+     *  it. */
+    var pendingDiagramNotice by mutableStateOf<DiagramNotice?>(null)
 
     // See PendingNoteOverwrite's doc comment / autoExportAnnotations. Dismissing (Dialog's
     // onDismissRequest, or the explicit "Cancel" button) must only set this back to null — never a

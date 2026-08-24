@@ -322,13 +322,23 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
     val scanned = state.seq3Sessions.scannedEntryCount(session.id)
     val shown = document.messages.count { it.visibility == Seq3Visibility.VISIBLE }
     val hidden = document.messages.size - shown
+    // W1a's deliberate tradeoff (Seq3Generator.applySeq3OccurrenceBudget's own doc): a diagram over
+    // a very wide range keeps only a first/last window of a repeated call's evidence rather than
+    // every occurrence. Surface it here — the one place a document-wide elision fact is visible —
+    // rather than annotating every trimmed row individually.
+    val elidedOccurrences = document.messages.sumOf { message ->
+        // Null (the overwhelming majority) contributes nothing — only a message W1a actually
+        // trimmed has a non-null totalOccurrenceCount to diff against what's left.
+        message.totalOccurrenceCount?.let { total -> (total - message.occurrences.size).coerceAtLeast(0) } ?: 0
+    }
+    val elidedSuffix = if (elidedOccurrences > 0) " · $elidedOccurrences occurrences elided" else ""
     Row(
         Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText(
-            "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden",
+            "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden$elidedSuffix",
             color = tc.ts, fontSize = 10.sp,
         )
         Seq3CanvasZoomToolbarControls(view)

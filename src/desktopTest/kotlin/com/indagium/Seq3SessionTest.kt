@@ -1,11 +1,17 @@
 package com.indagium
 
+import com.indagium.diagram3.MAX_SEQ3_HEADER_CHARS
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
 import com.indagium.diagram3.Seq3Command
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3Match
+import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Range
+import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
@@ -43,6 +49,10 @@ class Seq3SessionTest {
         const val NANOS_PER_MILLI = 1_000_000L
         const val SHARED_PID = 7
         const val SHARED_TID = 11
+        const val MILLIS_PER_SECOND = 1_000L
+        const val MILLIS_PER_MINUTE = 60_000L
+        const val MILLIS_PER_HOUR = 3_600_000L
+        const val LONG_LINE_LENGTH = 600
     }
 
     private fun await(timeoutMs: Long = 4_000, condition: () -> Boolean) {
@@ -74,8 +84,8 @@ class Seq3SessionTest {
 
     private fun state(): AppState = stateFor(mkTab("log", "sample.log", twoTagEntries()))
 
-    private fun awaitGenerated(state: AppState, id: String) =
-        await { state.seq3Sessions.sessions.firstOrNull { it.id == id }?.generating == false }
+    private fun awaitGenerated(state: AppState, id: String, timeoutMs: Long = 4_000) =
+        await(timeoutMs) { state.seq3Sessions.sessions.firstOrNull { it.id == id }?.generating == false }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────────────────────
 
@@ -480,6 +490,70 @@ class Seq3SessionTest {
         assertTrue(state.tab("log")!!.annotations.blocks.isEmpty(), "opening/generating a diagram must never write a note by itself")
     }
 
+    // ── W3: markDirty's own library write is debounced, not synchronous ────────────────────────
+
+    @Test
+    fun rapidEditsCoalesceIntoOneDraftSaveInsteadOfOnePerEdit() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val runsBeforeEdits = state.seq3Sessions.draftSaveRunCount.get()
+        val lifelineIds = state.seq3Sessions.sessions.single().document.lifelines.map { it.id }
+        assertTrue(lifelineIds.size >= 2, "need at least two lifelines to exercise a real edit")
+
+        // A burst of edits inside the debounce window — dragging a canvas endpoint fires
+        // applyCommand (and therefore markDirty) many times in quick succession.
+        repeat(5) {
+            state.seq3Sessions.applyCommand(
+                id,
+                Seq3Command.ReorderLifelines(if (it % 2 == 0) lifelineIds.reversed() else lifelineIds),
+            )
+        }
+        // Immediately after the burst nothing has run yet — this is the actual measurement that
+        // the save moved off the edit itself, not an assertion of intent: before W3 this would
+        // already be non-zero here, since autoSaveDraftToLibrary ran synchronously inside markDirty.
+        assertEquals(runsBeforeEdits, state.seq3Sessions.draftSaveRunCount.get(), "the draft save must not run synchronously with the edit")
+
+        await(timeoutMs = 4_000) { state.seq3Sessions.draftSaveRunCount.get() > runsBeforeEdits }
+        // Give a stray second dispatch (there should not be one) time to also land before asserting
+        // the final count — a fixed sleep here, not a race, since we already know at least one run
+        // happened and are only checking that a SECOND one doesn't sneak in afterward.
+        Thread.sleep(200)
+
+        assertEquals(
+            runsBeforeEdits + 1,
+            state.seq3Sessions.draftSaveRunCount.get(),
+            "a burst of edits inside the debounce window must coalesce into exactly ONE draft save",
+        )
+        val session = state.seq3Sessions.sessions.single()
+        assertEquals(
+            lifelineIds.reversed(),
+            session.document.lifelines.sortedBy { it.ordinal }.map { it.id },
+            "the coalesced save must reflect the LATEST edit",
+        )
+    }
+
+    @Test
+    fun closingASessionFlushesAPendingDraftSaveInsteadOfDroppingIt() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val lifelineIds = state.seq3Sessions.sessions.single().document.lifelines.map { it.id }
+        state.seq3Sessions.applyCommand(id, Seq3Command.ReorderLifelines(lifelineIds.reversed()))
+        val libraryItemId = requireNotNull(state.seq3Sessions.sessions.single().libraryItemId)
+
+        // Well inside the debounce window — nothing has been written to the library for THIS edit
+        // yet (the item on disk still reflects generation's own original document).
+        state.seq3Sessions.close(id)
+
+        val stored = requireNotNull(state.seq3Sessions.libraryForTab(state.tab("log")!!).single { it.id == libraryItemId })
+        assertEquals(
+            lifelineIds.reversed(),
+            stored.parsed?.document?.lifelines?.sortedBy { it.ordinal }?.map { it.id },
+            "close() must flush a pending draft save rather than silently dropping the last edit",
+        )
+    }
+
     @Test
     fun draftSavedTimestampComesFromTheInjectedClockNotWallClock() {
         val state = state()
@@ -670,6 +744,9 @@ class Seq3SessionTest {
         assertEquals(Seq3AttachmentMode.LINKED, parseSeq3Note(before)?.attachment?.mode)
 
         state.seq3Sessions.updateTitle(id, "Live title")
+        // W3: syncLiveLinkedNote now rides the same debounce as autoSaveDraftToLibrary — settle it
+        // deterministically rather than sleeping past DRAFT_SAVE_DEBOUNCE_MS.
+        state.seq3Sessions.flush(id)
 
         val after = (state.tab("log")!!.annotations.blocks.single { it.id == blockId } as com.indagium.model.AnnBlock.Note).text
         assertTrue(after != before)
@@ -693,6 +770,7 @@ class Seq3SessionTest {
         assertNotNull(reopenedId)
         assertTrue(reopenedId != originalId)
         state.seq3Sessions.updateTitle(reopenedId, "Reopened live title")
+        state.seq3Sessions.flush(reopenedId)
 
         val note = state.tab("log")!!.annotations.blocks.single { it.id == blockId } as com.indagium.model.AnnBlock.Note
         assertEquals("Reopened live title", parseSeq3Note(note.text)?.document?.title)
@@ -817,6 +895,153 @@ class Seq3SessionTest {
 
         assertEquals(before, state.seq3Sessions.sessions.single().document)
         assertFalse(state.seq3Sessions.canUndo(id))
+    }
+
+    // ── W1: the blocker (docs/plans/prepare-plan-to-fix-binary-wreath.md) ──────────────────────────
+
+    private fun formatMillisOfDay(millis: Long): String {
+        val hh = millis / MILLIS_PER_HOUR
+        val mm = (millis % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE
+        val ss = (millis % MILLIS_PER_MINUTE) / MILLIS_PER_SECOND
+        val ms = millis % MILLIS_PER_SECOND
+        return "%02d:%02d:%02d.%03d".format(hh, mm, ss, ms)
+    }
+
+    /** Fixed-length, fixed-width-counter synthetic log line — see Seq3GeneratorTest's identical
+     *  helper for why the counter is zero-padded rather than left variable-width. */
+    private fun paddedMessage(i: Int, targetLen: Int): String {
+        val head = "processed item %05d of batch ".format(i)
+        return head + "y".repeat((targetLen - head.length).coerceAtLeast(0))
+    }
+
+    @Test
+    fun beginOverA3000EntryTabReachesGeneratingFalseWithANonNullLibraryItemId() {
+        // This exact assertion FAILED before W1a/W1c: a range this size produced an over-budget
+        // header, `DiagramLibraryStore.save`'s `require(item.snapshot.parsed() != null)` threw from
+        // inside `publishGenerated`'s `replace(id) { ... }` lambda, the assignment never landed, and
+        // `generating` stayed latched at `true` forever with a null `libraryItemId` — see the plan's
+        // own PROBE output (`PROBE n=3000 stillGenerating=true lifelines=0 messages=0 libraryItemId=null`).
+        val entries = (1..3_000).map { i -> LogEntry(i, formatMillisOfDay(i.toLong()), LogLevel.I, "A", "processed item $i of batch") }
+        val state = stateFor(mkTab("log", "sample.log", entries))
+
+        val id = state.seq3Sessions.begin("log")!!
+        awaitGenerated(state, id)
+
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        assertFalse(session.generating)
+        assertNotNull(session.libraryItemId, "an in-budget diagram must actually reach the library")
+        assertNull(state.pendingDiagramNotice, "a diagram that fits the budget must never raise the W0 popup")
+    }
+
+    @Test
+    fun applyingADeliberatelyOverBudgetDocumentSetsTheNoticeClearsGeneratingAndNeverThrows() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        // Built directly as Kotlin objects, not decoded through the codec — a decode this large
+        // would just return null (MAX_SEQ3_HEADER_CHARS is a DECODE bound), so this is the only way
+        // to get a live session actually holding an in-memory document too big to SAVE: the
+        // "genuinely extreme case" W1c's pre-flight check exists for (many distinct message shapes,
+        // which the W1a occurrence budget alone cannot bound — see Seq3Generator's own doc).
+        val hugeDocument = Seq3Document(
+            title = "Huge",
+            lifelines = listOf(Seq3Lifeline("L", "L", setOf("L"), 0)),
+            messages = (1..6_000).map { i ->
+                Seq3Message(
+                    id = "msg-$i",
+                    match = Seq3Match("L", "distinct shape $i"),
+                    fromLifelineId = "L",
+                    toLifelineId = null,
+                    labelTemplate = "distinct shape $i",
+                    occurrences = listOf(Seq3Occurrence(i, i.toLong(), "00:00:00.000", 0, 0, 'I', "distinct shape number $i, padded out with extra text")),
+                )
+            },
+        )
+        assertTrue(encodeSeq3Note(hugeDocument).length > MAX_SEQ3_HEADER_CHARS, "fixture must actually be oversized")
+
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.ReplaceDocument(hugeDocument)), "applying must not throw and must report success")
+        // W3: markDirty's own library write is now debounced off the edit itself — the rejection
+        // (and the popup it raises) lands ~DRAFT_SAVE_DEBOUNCE_MS later, not synchronously.
+        await { state.pendingDiagramNotice != null }
+
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        assertFalse(session.generating, "the canvas must never stay latched on \"Generating…\"")
+        assertFalse(session.regenBuilding)
+        val notice = assertNotNull(state.pendingDiagramNotice, "an over-budget save must raise the W0 popup instead of throwing")
+        assertTrue(notice.title.isNotBlank())
+        assertTrue(notice.body.isNotBlank())
+    }
+
+    @Test
+    fun beginOverLongOrdinaryLogLinesEndsWithANonNullLibraryItemIdAndNoNotice() {
+        // Pins the BYTE dimension specifically, not just occurrence COUNT: 600-char lines (a
+        // stack trace, a JSON payload, dumpsys output — all ordinary logcat content) are exactly
+        // the case a count-only occurrence budget missed — at this size each tag's occurrences fit
+        // comfortably under the count-only allowance (nothing even got trimmed) and STILL encoded
+        // well past MAX_SEQ3_HEADER_CHARS, so this diagram used to be refused outright instead of
+        // degrading. Five tags, distinct pid/tid per tag, mirrors the reproduction fixture without
+        // tripping the generator's (pre-existing, unrelated) thread-handoff inference cost.
+        val tagCount = 5
+        val tags = (0 until tagCount).map { ('A' + it).toString() }
+        val entries = (1..1_000).map { i ->
+            val tagIdx = i % tagCount
+            LogEntry(i, formatMillisOfDay(i.toLong()), LogLevel.I, tags[tagIdx], paddedMessage(i, LONG_LINE_LENGTH), pid = 100 + tagIdx, tid = 200 + tagIdx)
+        }
+        val state = stateFor(mkTab("log", "sample.log", entries))
+
+        val id = state.seq3Sessions.begin("log")!!
+        // Long lines make a full generate pass (tokenizing/grouping 600-char text) noticeably
+        // slower than the suite's other, short-line fixtures — a generous timeout, not a longer
+        // debounce or extra work.
+        awaitGenerated(state, id, timeoutMs = 15_000)
+
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        assertFalse(session.generating)
+        assertNotNull(session.libraryItemId, "600-char log lines are ordinary content and must still reach the library")
+        assertNull(state.pendingDiagramNotice, "an in-budget diagram must never raise the W0 popup")
+    }
+
+    @Test
+    fun repeatedEditsOnAnOverBudgetSessionReportTheSameRejectionOnlyOnce() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        val hugeDocument = Seq3Document(
+            title = "Huge",
+            lifelines = listOf(Seq3Lifeline("L", "L", setOf("L"), 0)),
+            messages = (1..6_000).map { i ->
+                Seq3Message(
+                    id = "msg-$i",
+                    match = Seq3Match("L", "distinct shape $i"),
+                    fromLifelineId = "L",
+                    toLifelineId = null,
+                    labelTemplate = "distinct shape $i",
+                    occurrences = listOf(Seq3Occurrence(i, i.toLong(), "00:00:00.000", 0, 0, 'I', "distinct shape number $i, padded out with extra text")),
+                )
+            },
+        )
+        assertTrue(state.seq3Sessions.applyCommand(id, Seq3Command.ReplaceDocument(hugeDocument)))
+        // W3: wait for the (now debounced) draft save to actually run rather than asserting
+        // synchronously — see applyingADeliberatelyOverBudgetDocumentSetsTheNoticeClearsGeneratingAndNeverThrows.
+        await { state.pendingDiagramNotice != null }
+        assertNotNull(state.pendingDiagramNotice, "the first rejection must surface the popup")
+        val runsAfterFirstRejection = state.seq3Sessions.draftSaveRunCount.get()
+        // Mirrors App.kt's OK button: dismissing only clears the field, never a permanent
+        // "stop telling me" decision.
+        state.pendingDiagramNotice = null
+
+        // Still the same oversized document (only the title changed) -> autoSaveDraftToLibrary
+        // re-attempts the save and is rejected again with the SAME category. Wait for THAT SPECIFIC
+        // debounced attempt to actually complete (not just "hasn't fired yet") before asserting the
+        // dedupe held — draftSaveRunCount is exact instrumentation for this, unlike a fixed sleep.
+        state.seq3Sessions.updateTitle(id, "Still huge")
+        await { state.seq3Sessions.draftSaveRunCount.get() > runsAfterFirstRejection }
+
+        assertNull(state.pendingDiagramNotice, "the same rejection category must not re-nag on every subsequent edit")
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        assertFalse(session.generating, "generating must stay cleared regardless of the anti-nag dedupe")
     }
 
     // ── Status-bar support ───────────────────────────────────────────────────────────────────────

@@ -1498,6 +1498,31 @@ fun App(
                 }
             }
 
+            // W0: the shared "operation not possible" popup — see AppState.DiagramNotice's own
+            // doc. Copies pendingTagPrefixConflict's shape above: a plain Dialog, title + body +
+            // an optional dimmed detail line, one button that just clears the field.
+            state.pendingDiagramNotice?.let { notice ->
+                Dialog(onDismissRequest = { state.pendingDiagramNotice = null }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(notice.title, color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(notice.body, color = tc2.td, fontSize = 11.sp, maxLines = 6)
+                        notice.detail?.let { detail ->
+                            Spacer(Modifier.height(6.dp))
+                            AppText(detail, color = tc2.ts, fontSize = 10.sp, maxLines = 3)
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            DialogActionButton("OK", active = true) { state.pendingDiagramNotice = null }
+                        }
+                    }
+                }
+            }
+
             state.pendingDeleteFilterId?.let { filterId ->
                 val draftName = state.filterDraftsByTab.values.find { it.id == filterId }?.name
                 val filterName = state.savedFilters.find { it.id == filterId }?.name
