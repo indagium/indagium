@@ -203,9 +203,16 @@ private val CAPTURE_TOKEN = Regex("\\{([A-Za-z_][A-Za-z0-9_]*)}")
 // for a different purpose: rejecting weak CORRELATION evidence, not gating tokenizer captures).
 private val GENERIC_NAMED_VALUES = setOf("true", "false", "0", "null", "none", "unknown", "")
 
-private fun isGenericValueSet(values: Set<String>): Boolean = values.all { it.lowercase() in GENERIC_NAMED_VALUES }
+internal fun isGenericValueSet(values: Set<String>): Boolean = values.all { it.lowercase() in GENERIC_NAMED_VALUES }
 
-private fun compileNamedValuePattern(
+/**
+ * `internal`, not `private` — same test-seam reasoning as [tokenizeSeq3MessagesFullPath]:
+ * `Seq3TokenizerTest`'s PERF-fix equivalence proof calls this directly (the real, current
+ * implementation) and diffs its result against a byte-for-byte copy of the PRE-fix algorithm kept
+ * in the test file, across a realistic multi-occurrence corpus. No production caller reaches this
+ * except through [tokenizeSeq3MessagesFullPath]/[tokenizeSeq3Messages].
+ */
+internal fun compileNamedValuePattern(
     tag: String,
     occurrences: List<Seq3TokenizeInput>,
 ): Pair<Seq3Match, Map<String, Map<String, String>>>? {
@@ -214,8 +221,17 @@ private fun compileNamedValuePattern(
     val firstKeys = matches.first().map { it.groupValues[1] }
     if (matches.any { it.map { part -> part.groupValues[1] } != firstKeys }) return null
 
-    fun valuesFor(name: String): Set<String> =
-        matches.map { parts -> unquote(parts.first { part -> part.groupValues[1] == name }.groupValues[3]) }.toSet()
+    // (PERF) Computed ONCE per distinct key name here, then read by every call site below —
+    // `valuesFor` used to recompute this same O(occurrences x keys) scan from scratch at every
+    // call: once building `varyingNames`, then AGAIN inside the generic/empty-value check just
+    // below (up to twice more per varying name, since `||` only short-circuits the second call,
+    // not the first). Same result either way — every call site only ever passes a name drawn from
+    // `firstKeys`, and this map covers exactly that domain — just computed once.
+    val valuesByName = firstKeys.associateWith { name ->
+        matches.mapTo(LinkedHashSet()) { parts -> unquote(parts.first { part -> part.groupValues[1] == name }.groupValues[3]) }
+    }
+
+    fun valuesFor(name: String): Set<String> = valuesByName.getValue(name)
 
     val varyingNames = firstKeys.filter { valuesFor(it).size > 1 }
     if (varyingNames.isEmpty()) {
@@ -257,18 +273,22 @@ private fun compileNamedValuePattern(
     var template = first
     replacements.forEach { (range, replacement) -> template = template.replaceRange(range, replacement) }
     val captures = varyingNames.map { Seq3Capture(sanitizedNames.getValue(it), Seq3CaptureSource.NAMED_VALUE) }
-    val values = occurrences.associate { input ->
-        val parts = NAMED_VALUE.findAll(input.text).toList()
+    // (PERF) `matches` already holds this exact NAMED_VALUE.findAll result per occurrence — see
+    // its own declaration above — and `matches` was built via `occurrences.map { ... }`, so the two
+    // lists are positionally aligned (same source list, same order, never reordered afterward).
+    // Zipping them here reuses that result instead of re-running the regex over every occurrence a
+    // second time.
+    val values = occurrences.zip(matches) { input, parts ->
         input.occurrenceId to varyingNames.associate { name ->
             sanitizedNames.getValue(name) to unquote(parts.first { it.groupValues[1] == name }.groupValues[3])
         }
-    }
+    }.toMap()
     return Seq3Match(tag = tag, template = template, captures = captures) to values
 }
 
 /** Sanitises a NAMED_VALUE key into the charset [CAPTURE_TOKEN] recognises (`.`/`-` -> `_`), and
  *  de-dupes against [used] with a numeric suffix — same idiom as `Seq3Emitters.sanitizedAliases`. */
-private fun sanitizeCaptureName(rawName: String, used: MutableSet<String>): String {
+internal fun sanitizeCaptureName(rawName: String, used: MutableSet<String>): String {
     val base = rawName.replace(CAPTURE_NAME_INVALID_CHAR, "_")
     var candidate = base
     var suffix = 2
@@ -346,6 +366,6 @@ private fun commonSuffix(a: String, b: String): Int {
     return index
 }
 
-private fun unquote(value: String): String = value
+internal fun unquote(value: String): String = value
     .removePrefix("\"").removeSuffix("\"")
     .removePrefix("'").removeSuffix("'")
