@@ -344,6 +344,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     "themePresetName" to d.themePresetName,
     "showSequenceNumbers" to d.showSequenceNumbers,
     "showTimestamps" to d.showTimestamps,
+    // Append-last (CLAUDE.md invariant): P3a's message-count-cap elision count, added at the end
+    // of the map so every already-written note keeps decoding unchanged.
+    "elidedMessageCount" to d.elidedMessageCount,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -391,6 +394,10 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         themePresetName = boundedString(map.str("themePresetName")),
         showSequenceNumbers = map.bool("showSequenceNumbers") ?: false,
         showTimestamps = map.bool("showTimestamps") ?: false,
+        // Append-last (CLAUDE.md invariant): absent on any note written before P3a existed, which
+        // decodes to null — "generation never dropped a message" — exactly like every other
+        // optional field's old-note default.
+        elidedMessageCount = map.int("elidedMessageCount"),
     )
 }
 

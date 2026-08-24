@@ -444,6 +444,14 @@ data class Seq3Document(
     /** Item 7 (WP10): prefix every drawn call's label with its `[HH:MM:SS.mmm]` timestamp — same
      *  export-parity reasoning as [showSequenceNumbers]. */
     val showTimestamps: Boolean = false,
+    /** Appended LAST (see CLAUDE.md's "append-last field versioning" invariant). Null means
+     *  "generation never dropped a message" — every document written before P3a existed, and every
+     *  document generated under the message-count cap, decodes/behaves unchanged. Non-null records
+     *  how many messages `Seq3Generator.generateSeq3`'s document-wide message-count cap dropped
+     *  BEFORE this document was built, so the canvas status bar can report the true pre-cap total
+     *  the same way [Seq3Message.totalOccurrenceCount] reports a message's true pre-trim occurrence
+     *  count — see that field's own doc for the identical reasoning one level down. */
+    val elidedMessageCount: Int? = null,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
