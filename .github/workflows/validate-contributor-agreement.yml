@@ -12,6 +12,11 @@ jobs:
   validate:
     name: Validate contributor acknowledgements
     runs-on: ubuntu-latest
+    # A bot cannot read or sign the Contributor License Grant, so bot-authored PRs (e.g.
+    # Dependabot) skip this job entirely rather than failing it. `user.type` is populated by
+    # GitHub from the PR payload and cannot be spoofed by a human contributor, unlike
+    # `github.actor`, which would only cover one specific bot account.
+    if: github.event.pull_request.user.type != 'Bot'
     steps:
       - name: Require contributor acknowledgements
         uses: actions/github-script@v7
