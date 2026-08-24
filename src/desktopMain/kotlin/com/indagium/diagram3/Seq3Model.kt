@@ -184,6 +184,17 @@ data class Seq3Message(
     val manualTimestampMillis: Long? = null,
     /** The timestamp text entered by the author, if it cannot or should not be normalized to millis. */
     val manualRawTimestamp: String = "",
+    /** Appended LAST (see CLAUDE.md's "append-last token/field versioning" invariant — inserting a
+     *  field anywhere else in this class or in `Seq3Codec`'s field handling breaks every existing
+     *  autosave and saved note). Null means "[occurrences] is complete" — every document ever
+     *  written before this field existed decodes unchanged. Non-null records the TRUE occurrence
+     *  count `Seq3Generator`'s document-wide water-fill budget measured BEFORE trimming
+     *  [occurrences] down to a first/last window, so a consumer that wants "how many times did this
+     *  really happen" (the `×n` badge, an elision row) can still report the honest number even
+     *  though the persisted evidence list itself is smaller. Consumers that instead want "how many
+     *  rows do I have evidence to draw" keep reading `occurrences.size` — see Seq3Generator.kt's own
+     *  header for the exact line between the two. */
+    val totalOccurrenceCount: Int? = null,
 ) {
     /** True for an author-created message without log evidence. Generated messages always retain
      *  at least one occurrence, so this is the durable distinction used by custom-only actions. */

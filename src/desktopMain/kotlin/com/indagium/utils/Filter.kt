@@ -438,6 +438,27 @@ private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>)
     return result
 }
 
+// W4: a single collapsed TO_START/TO_END manual block on a 10M-line tab resolves to `0..anchor`
+// (or `anchor..lastIndex`) — the entire file. Enumerating that many ids used to cost a 40MB
+// IntArray, a ~200MB boxed ArrayList (`IntRange.map`), and a ~400MB LinkedHashSet, all on the
+// composition thread, before any diagram code ran. 200_000 is comfortably above any selection a
+// person actually makes by hand (a boxed HashSet<Int> at that size is ~12MB, sub-50ms) while
+// staying far below the multi-million-id case that froze or OOM'd the app.
+const val SELECTION_EXPANSION_MAX_IDS = 200_000
+
+/**
+ * Result of [expandSelectionThroughCollapsedBlocks]. [ids] is the expanded selection, identical to
+ * the input [Set] instance when nothing needed expanding. [boundExceeded] is true when a matched,
+ * currently-collapsed manual block's hidden range was too large to enumerate within
+ * [SELECTION_EXPANSION_MAX_IDS] — [ids] then carries only that block's two boundary ids (still
+ * enough to fix the overall min/max span) rather than its full interior. The sole caller,
+ * [com.indagium.ui.Seq3Session.rangeFor], must treat that case as the plain inclusive span (the
+ * same thing an empty [com.indagium.diagram3.Seq3Range.Ids.selectedIds] already means) rather than
+ * read [ids] as the curated, exact selection — passing just the two boundary ids as `selectedIds`
+ * would silently narrow the diagram to those two lines instead of everything between them.
+ */
+data class SelectionExpansion(val ids: Set<Int>, val boundExceeded: Boolean = false)
+
 /**
  * Expands a row selection so selecting a collapsed header means what it looks like it means:
  * every line that fold hides — identical to what the user would have selected after uncollapsing
@@ -452,11 +473,12 @@ private fun selectTopLevelManualRanges(dataSize: Int, ranges: List<ManualRange>)
  * Ordered so the cheap, common cases never pay for the expensive one: stack-trace and sequence
  * membership are answered straight off ids the group models already carry (no index arithmetic
  * needed), so only a matched, currently-collapsed manual block pays for resolving the visible-entry
- * index space and calling [manualRangesFor]. Returns the identical [selected] instance when nothing
- * expands, so a plain-row selection allocates nothing on this path.
+ * index space and calling [manualRangesFor]. Returns the identical [selected] instance (wrapped,
+ * `boundExceeded = false`) when nothing expands, so a plain-row selection allocates nothing beyond
+ * the wrapper on this path.
  */
-fun expandSelectionThroughCollapsedBlocks(tab: LogTab, selected: Set<Int>, applyFilter: Boolean = true): Set<Int> {
-    if (selected.isEmpty()) return selected
+fun expandSelectionThroughCollapsedBlocks(tab: LogTab, selected: Set<Int>, applyFilter: Boolean = true): SelectionExpansion {
+    if (selected.isEmpty()) return SelectionExpansion(selected)
 
     // Resolved at most once, and only if a fold actually needs it. Both the manual-block and the
     // sequence-group phase below want the visible list, so asking each of them independently
@@ -471,11 +493,11 @@ fun expandSelectionThroughCollapsedBlocks(tab: LogTab, selected: Set<Int>, apply
     // blocks, then sequence groups) — each just contributes ids to add, so splitting them out
     // keeps this function's own complexity low without changing what gets expanded or when
     // visible() first gets called.
-    val toAdd = stackTraceExpansionIds(tab, selected) +
-        manualBlockExpansionIds(tab, selected, ::visible) +
-        seqGroupExpansionIds(tab, selected, applyFilter, ::visible)
+    val manual = manualBlockExpansionIds(tab, selected, ::visible)
+    val toAdd = stackTraceExpansionIds(tab, selected) + manual.ids + seqGroupExpansionIds(tab, selected, applyFilter, ::visible)
 
-    return if (toAdd.isEmpty()) selected else LinkedHashSet(selected).apply { addAll(toAdd) }
+    val ids = if (toAdd.isEmpty()) selected else LinkedHashSet(selected).apply { addAll(toAdd) }
+    return SelectionExpansion(ids, manual.boundExceeded)
 }
 
 // Stack traces: same access pattern as expansionAndIndexForEntry's largeFileMode branch
@@ -492,18 +514,39 @@ private fun stackTraceExpansionIds(tab: LogTab, selected: Set<Int>): List<Int> {
 // resolution needed — and only pay for indexOfId/manualRangesFor if any actually matched. In
 // practice the cache below is warm: the user just clicked a collapsed header, which is what ran
 // computeItems(tab, applyFilter) in the first place.
-private fun manualBlockExpansionIds(tab: LogTab, selected: Set<Int>, visible: () -> List<LogEntry>): List<Int> {
+// W4: bundles the manual-block phase's contribution with whether it had to stop short of full
+// enumeration — see SelectionExpansion's doc for why the caller needs both.
+private class ManualExpansionIds(val ids: List<Int>, val boundExceeded: Boolean)
+
+private fun manualBlockExpansionIds(tab: LogTab, selected: Set<Int>, visible: () -> List<LogEntry>): ManualExpansionIds {
     val collapsedManual = tab.manualBlocks.filter { it.enabled && it.anchorId in selected && it.id !in tab.expanded }
-    if (collapsedManual.isEmpty()) return emptyList()
+    if (collapsedManual.isEmpty()) return ManualExpansionIds(emptyList(), false)
     val visibleEntries = visible()
     val ids = IntArray(visibleEntries.size) { visibleEntries[it].id }
 
     fun indexOfId(id: Int): Int? = java.util.Arrays.binarySearch(ids, id).takeIf { it >= 0 }
+    // `ids` is already the id-per-index array built above for indexOfId's binary search, so
+    // slicing straight out of it below costs no extra boxing beyond what landing the ints in
+    // `result` (a List<Int>) always needs — no intermediate `IntRange.map` ArrayList<Integer>.
     val result = mutableListOf<Int>()
+    var budget = SELECTION_EXPANSION_MAX_IDS
+    var boundExceeded = false
     manualRangesFor(collapsedManual, visibleEntries.lastIndex, ::indexOfId).forEach { mr ->
-        result += mr.range.map { visibleEntries[it].id }
+        val size = mr.range.last - mr.range.first + 1
+        if (size > budget) {
+            // Over budget: don't enumerate, but still contribute this range's own endpoints so
+            // the caller's min/max span calculation stays correct without materializing what's
+            // between them. See SelectionExpansion's doc — the caller must treat this as "fell
+            // back to the plain span," not as "the exact selection is these two ids."
+            boundExceeded = true
+            result += ids[mr.range.first]
+            result += ids[mr.range.last]
+        } else {
+            for (i in mr.range) result += ids[i]
+            budget -= size
+        }
     }
-    return result
+    return ManualExpansionIds(result, boundExceeded)
 }
 
 // Sequence groups, including nested children — only when sequence folding is on at all,
@@ -790,13 +833,20 @@ internal fun computeItems(
             val a = roots[i]
             for (j in i + 1 until roots.size) {
                 val b = roots[j]
-                if (b.gid in seqHostedBySeqGid) continue // already claimed earlier in the chain
                 val b0 = rootIdxOf(b.rid)
                 // Sorted by start: once a root starts at/after `a`'s own declared end, nothing
                 // further can cross `a` either (its own end, not the chain's overall effective
                 // end — each host only ever looks for a partner crossing ITS OWN span; a partner
                 // crossing further down the chain is `b`'s problem to find on `b`'s own turn).
+                // Evaluated BEFORE the claimed-guest check below: roots are sorted by start, so
+                // this cutoff holds regardless of whether `b` happens to be already claimed — a
+                // claimed root past the cutoff still can't cross `a`, and a run of claimed roots
+                // right after `a` must not be walked past this point to the end of `roots` (W5;
+                // was previously ordered after the claimed-guest `continue`, making the loop
+                // O(roots) per host instead of O(1) amortized in the common case of a long run of
+                // already-claimed roots).
                 if (b0 >= a.endExclusive) break
+                if (b.gid in seqHostedBySeqGid) continue // already claimed earlier in the chain
                 if (b.endExclusive <= a.endExclusive) continue // contained (shouldn't happen among roots; defensive)
                 seqHostsSeqDirect.getOrPut(a.gid) { mutableListOf() } += b
                 seqHostedBySeqGid += b.gid

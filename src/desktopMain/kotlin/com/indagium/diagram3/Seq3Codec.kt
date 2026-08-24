@@ -57,7 +57,10 @@ private const val MAX_SEQ3_FRAGMENTS = 128
 private const val MAX_SEQ3_NOTES = 400
 private const val MAX_SEQ3_DELAYS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
-private const val MAX_SEQ3_HEADER_CHARS = 512 * 1024
+
+// internal, not private: DiagramLibraryStore.rejectionFor (W1c) reads this to report the exact
+// limit in a TooLarge popup without duplicating the number.
+internal const val MAX_SEQ3_HEADER_CHARS = 512 * 1024
 private const val MAX_SEQ3_SOURCE_CHARS = 2 * 1024 * 1024
 private const val MAX_SEQ3_STRING_CHARS = 16 * 1024
 
@@ -226,6 +229,33 @@ fun parseSeq3Note(text: String): ParsedSeq3? {
         attachment = attachment,
     )
 }
+
+/**
+ * The header's JSON span in chars, or null when [encoded] doesn't even have a well-formed marker/
+ * tail pair — nothing to measure, same "not a v3 note" case [parseSeq3Note] itself degrades on.
+ * Deliberately just the marker-scanning half of [parseSeq3Note] (no `Json.decode`, no document
+ * rebuild) — [seq3NoteWithinBounds] exists so a caller (W1c: [com.indagium.ui.DiagramLibraryStore.
+ * rejectionFor]) can reject an oversized document BEFORE paying for a full decode, the same way
+ * [parseSeq3Note] itself checks `jsonText.length` before calling `Json.decode`.
+ */
+fun seq3HeaderJsonChars(encoded: String): Int? {
+    val trimmed = encoded.trimStart()
+    if (!trimmed.startsWith(MARKER_HEAD)) return null
+    val afterHead = trimmed.substring(MARKER_HEAD.length)
+    val spaceIdx = afterHead.indexOf(' ')
+    if (spaceIdx <= 0) return null
+    val rest = afterHead.substring(spaceIdx + 1)
+    val tailIdx = rest.indexOf(MARKER_TAIL)
+    if (tailIdx < 0) return null
+    return tailIdx
+}
+
+/** Cheap pre-flight gate for W1c: true when [encoded] would still decode past [parseSeq3Note]'s own
+ *  `jsonText.length > MAX_SEQ3_HEADER_CHARS` bound. A caller that isn't even a well-formed v3 note
+ *  ([seq3HeaderJsonChars] returns null) has nothing oversized to reject, so this returns true —
+ *  matching [parseSeq3Note]'s "not a diagram note" case, which this function is never meant to
+ *  gate. */
+fun seq3NoteWithinBounds(encoded: String): Boolean = (seq3HeaderJsonChars(encoded) ?: 0) <= MAX_SEQ3_HEADER_CHARS
 
 /** Returns [noteText] rewritten with a new caption, or null for a non-v3-diagram note. Mirrors
  *  `diagram.updateDiagramNoteCaption`: re-encodes the whole note from the parsed document/dialect/
@@ -500,6 +530,9 @@ private fun messageToMap(m: Seq3Message): Map<String, Any?> = mapOf(
     "occurrences" to m.occurrences.map(::occurrenceToMap),
     "manualTimestampMillis" to m.manualTimestampMillis,
     "manualRawTimestamp" to m.manualRawTimestamp,
+    // Append-last (CLAUDE.md invariant): a new field goes at the END of the map, never inserted
+    // earlier, so every already-written note keeps decoding unchanged.
+    "totalOccurrenceCount" to m.totalOccurrenceCount,
 )
 
 private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
@@ -524,6 +557,9 @@ private fun messageFromMap(map: Map<String, Any?>): Seq3Message? {
         occurrences = occurrenceMaps.mapNotNull(::occurrenceFromMap),
         manualTimestampMillis = (map["manualTimestampMillis"] as? Number)?.toLong(),
         manualRawTimestamp = boundedString(map.str("manualRawTimestamp")) ?: "",
+        // Missing (every note written before W1a) or unparsable both decode to null — "occurrences
+        // is complete" — matching this field's own pre-existing default.
+        totalOccurrenceCount = map.int("totalOccurrenceCount"),
     )
 }
 

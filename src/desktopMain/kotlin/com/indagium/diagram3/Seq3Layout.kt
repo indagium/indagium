@@ -650,7 +650,10 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
             listOf(
                 arrow(
                     collapsedRepeatLabel(message, occurrences),
-                    occurrences.size,
+                    // COUNT, not "how many rows do I draw" (this branch always draws exactly one) —
+                    // read the true pre-trim total (W1a) when generation elided evidence, so the
+                    // badge never under-reports how many times this call actually happened.
+                    message.totalOccurrenceCount ?: occurrences.size,
                     occurrences.first().entryId,
                     seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
                     seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
@@ -687,7 +690,10 @@ private fun firstLastEmissions(
             ),
         )
     }
-    val elided = occurrences.size - 2
+    // COUNT, not "how many rows do I draw" — this function always draws exactly first + elision +
+    // last regardless of list size. Read the true pre-trim total (W1a) when generation elided
+    // evidence, so the elision row's own count never under-reports what got dropped.
+    val elided = (message.totalOccurrenceCount ?: occurrences.size) - 2
     return buildList {
         add(
             arrow(

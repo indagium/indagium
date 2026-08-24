@@ -13,6 +13,8 @@ import com.indagium.ui.DiagramLibraryAttachment
 import com.indagium.ui.DiagramLibrarySnapshot
 import com.indagium.ui.DiagramLibraryStatus
 import com.indagium.ui.DiagramLibraryStore
+import com.indagium.ui.DiagramSaveRejectedException
+import com.indagium.ui.DiagramSaveRejection
 import com.indagium.ui.DiagramSourceIdentity
 import com.indagium.ui.MAX_DIAGRAM_LIBRARY_ATTACHMENTS_PER_ITEM
 import com.indagium.ui.MAX_DIAGRAM_LIBRARY_DESCRIPTION_CHARS
@@ -176,6 +178,70 @@ class Seq3LibraryStoreTest {
         }
         assertFailsWith<IllegalArgumentException> { store.save(valid.copy(attachments = attachments)) }
         assertEquals(listOf(valid.id), store.all().map { it.id })
+    }
+
+    // ── W2: refuse a NEW item at the library cap; an UPDATE must keep working there ────────────
+
+    @Test
+    fun tryCreateAtTheLibraryCapReturnsLibraryFullWithoutThrowing() {
+        val file = File(createTempDirectory("seq3-library-cap-create").toFile(), "diagram-library-v1")
+        val store = DiagramLibraryStore(file)
+        repeat(MAX_DIAGRAM_LIBRARY_ITEMS) { index ->
+            store.create("Item $index", "", source, snapshot("Item $index"), now = index.toLong())
+        }
+
+        val result = store.tryCreate("One too many", "", source, snapshot("One too many"))
+
+        assertTrue(result.isFailure)
+        val rejection = (result.exceptionOrNull() as? DiagramSaveRejectedException)?.rejection
+        assertEquals(DiagramSaveRejection.LibraryFull, rejection)
+        assertEquals(MAX_DIAGRAM_LIBRARY_ITEMS, store.all().size, "a rejected create must not grow the library")
+    }
+
+    @Test
+    fun tryUpdateOnAnExistingItemStillSucceedsAtTheLibraryCap() {
+        val file = File(createTempDirectory("seq3-library-cap-update").toFile(), "diagram-library-v1")
+        val store = DiagramLibraryStore(file)
+        val items = List(MAX_DIAGRAM_LIBRARY_ITEMS) { index ->
+            store.create("Item $index", "", source, snapshot("Item $index"), now = index.toLong())
+        }
+
+        // update() does not grow the item count — this must succeed even though the library is
+        // already at MAX_DIAGRAM_LIBRARY_ITEMS (the W2 "editing an existing diagram still saves
+        // when the library is full" contract).
+        val result = store.tryUpdate(items.first().id) { it.copy(title = "Renamed while full") }
+
+        assertNotNull(result)
+        assertTrue(result.isSuccess)
+        assertEquals("Renamed while full", result.getOrNull()?.title)
+        assertEquals(MAX_DIAGRAM_LIBRARY_ITEMS, store.all().size)
+        assertEquals("Renamed while full", DiagramLibraryStore(file).get(items.first().id)?.title, "the rename must survive a reload")
+    }
+
+    // ── W3: the disk write no longer runs under the in-memory lock ─────────────────────────────
+
+    @Test
+    fun concurrentSavesNeverLeaveTheFileReflectingAnOlderSnapshotThanTheLastCompletedWrite() {
+        val file = File(createTempDirectory("seq3-library-concurrent-writes").toFile(), "diagram-library-v1")
+        val store = DiagramLibraryStore(file)
+        val concurrency = 24
+        // Every thread does its own mutate-then-persist; none of them touch a shared counter, so
+        // this only proves what W3 actually promises — the file on disk, once every thread has
+        // joined, matches the full in-memory state (no writer's disk write ever clobbers a LATER
+        // one with a snapshot captured before writeLock was actually acquired).
+        val threads = (0 until concurrency).map { index ->
+            Thread { store.create("Item $index", "", source, snapshot("Item $index"), now = index.toLong()) }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(10_000) }
+
+        assertEquals(concurrency, store.all().size, "every concurrent create must land in memory")
+        val restored = DiagramLibraryStore(file)
+        assertEquals(
+            concurrency,
+            restored.all().size,
+            "the file on disk must reflect every concurrent write, never an earlier subset of them",
+        )
     }
 
     @Test

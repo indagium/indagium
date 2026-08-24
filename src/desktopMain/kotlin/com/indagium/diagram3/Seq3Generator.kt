@@ -33,6 +33,75 @@ import com.indagium.utils.parseMillisOfDay
 
 private const val CANCELLATION_CHECK_INTERVAL = 512
 
+// ── W1a: document-wide occurrence budget ────────────────────────────────────────────────────
+//
+// `Seq3Occurrence` carries the full log-line `text` and `Seq3Codec.documentToMap` persists every
+// occurrence of every message, so the encoded note's size is driven almost entirely by total
+// occurrence BYTES, not occurrence COUNT — a log of 600-char stack-trace/JSON-payload/dumpsys lines
+// (entirely ordinary logcat content) costs ~4x the header budget a plain 150-char line does for the
+// exact same occurrence count. An earlier version of this budget capped COUNT alone
+// (SEQ3_OCCURRENCE_BUDGET_TOTAL occurrences, split evenly across messages); that undercounted the
+// actual cost for any log with long lines and made the W1c pre-flight popup the NORMAL outcome
+// instead of the rare backstop it's meant to be (measured: 5 tags x 600-char lines, budgeted to
+// exactly 1 200 occurrences by the count-only version, still encoded to 977 KB — nearly double
+// MAX_SEQ3_HEADER_CHARS). This version budgets BYTES (estimated cheaply, never by encoding-and-
+// measuring — see [estimatedSeq3OccurrenceBytes]) with a COUNT ceiling alongside it, so a log of
+// very short lines still can't produce tens of thousands of arrows and a multi-second layout pass
+// just because they're individually cheap. A PER-MESSAGE cap alone (of either unit) still doesn't
+// bound the document: message COUNT also grows with range (a 200k-entry probe range produced 1 559
+// messages), so both budgets are split document-wide, water-filled evenly across however many
+// messages this generation produced — see [applySeq3OccurrenceBudget]'s own doc for the algorithm.
+
+// 256 KB — deliberately HALF of Seq3Codec's own MAX_SEQ3_HEADER_CHARS (512 KB), not the whole
+// thing: the other half is headroom for everything else the header carries alongside occurrences
+// (lifelines, fragments, notes, delays, every message's own template/labelTemplate/match, and a
+// sparse Seq3Range.Ids.selectedIds that W1b couldn't collapse to an empty set). Occurrence bytes
+// are the dominant cost for any log with real content, so budgeting half the ceiling to them alone
+// still leaves an ordinary diagram — even a wide one — comfortably inside the full bound.
+private const val SEQ3_OCCURRENCE_BUDGET_BYTES = 256 * 1_024
+
+// Upper bound on total KEPT occurrences regardless of how cheap they are in bytes — a log of short,
+// near-identical lines (a tight polling loop, a heartbeat) is individually inexpensive per the byte
+// budget above but still shouldn't draw tens of thousands of arrows: `Seq3Layout.layoutSeq3` is
+// O(rows), and a diagram nobody can visually parse past a few hundred arrows isn't more USEFUL for
+// having more of them. This is the same value the count-only budget used before this fix — it now
+// plays a narrower, purely-count role alongside (never instead of) the byte budget above.
+private const val SEQ3_OCCURRENCE_COUNT_CEILING = 1_200
+
+// Floor on the per-message allowance either water-fill can hand out — "first and last" is the
+// smallest window that still shows a repeated call's start and end. Keeps both budgets from
+// collapsing every message to zero evidence when a single generation produces many more messages
+// than either budget has room for (BUDGET / messageCount rounds to 0), and is small enough that
+// even the floor itself (worst case: every one of SEQ3_OCCURRENCE_COUNT_CEILING messages floored)
+// costs at most a few hundred KB — see [applySeq3OccurrenceBudget]'s own doc.
+private const val SEQ3_MIN_OCCURRENCES_PER_MESSAGE = 2
+
+// Measured fixed per-occurrence JSON cost (Seq3Codec.occurrenceToMap's keys/punctuation plus
+// `entryId`/`timestampMillis`/`rawTimestamp`/`pid`/`tid`/`level`) — probed end-to-end at three text
+// lengths: 80 chars -> 288 B/occurrence (+208 overhead), 600 chars -> 814 B/occurrence (+214),
+// 2 000 chars -> 2 232 B/occurrence (+232). The overhead drifts up slightly with text length (JSON
+// string-escaping of quotes/backslashes scales with content), so this rounds UP from the observed
+// range rather than averaging it — overestimating an occurrence's cost only trims a little more
+// than strictly necessary; UNDERestimating it is what lets a document sneak past the real 512 KB
+// bound, which is the exact defect being fixed here.
+private const val SEQ3_OCCURRENCE_OVERHEAD_BYTES = 230
+
+// Same reasoning as SEQ3_OCCURRENCE_OVERHEAD_BYTES, sized for one captureValues map entry's own
+// `"key":"value",` JSON cost beyond the two strings' own lengths.
+private const val SEQ3_CAPTURE_ENTRY_OVERHEAD_BYTES = 8
+
+/**
+ * Cheap per-occurrence cost estimate used ONLY to size the water-fill budget below — never an exact
+ * count (that would mean encoding-and-measuring every occurrence, an O(total occurrences) pass of
+ * JSON building this function exists specifically to avoid). See SEQ3_OCCURRENCE_OVERHEAD_BYTES's
+ * own doc for where the constants come from.
+ */
+private fun estimatedSeq3OccurrenceBytes(occurrence: Seq3Occurrence): Int {
+    var bytes = SEQ3_OCCURRENCE_OVERHEAD_BYTES + occurrence.text.length
+    occurrence.captureValues.forEach { (key, value) -> bytes += key.length + value.length + SEQ3_CAPTURE_ENTRY_OVERHEAD_BYTES }
+    return bytes
+}
+
 /**
  * Builds a [Seq3Document] from [entries] restricted to [range]. [entries] plays the role
  * `diagram.SeqDiagramBuilder`'s `allVisible` did: whichever raw-or-filtered view the caller wants
@@ -93,6 +162,7 @@ fun generateSeq3(
     val ordered = messages
         .sortedWith(compareBy({ it.occurrences.first().timestampMillis ?: Long.MAX_VALUE }, { it.occurrences.first().entryId }))
         .mapIndexed { index, message -> message.copy(id = "msg-${index + 1}") }
+        .let(::applySeq3OccurrenceBudget)
 
     return Seq3Document(
         title = options.title,
@@ -101,6 +171,70 @@ fun generateSeq3(
         lifelines = lifelines,
         messages = ordered,
         defaultRepeat = options.defaultRepeat,
+    )
+}
+
+/**
+ * Water-fills [SEQ3_OCCURRENCE_BUDGET_BYTES] estimated bytes AND [SEQ3_OCCURRENCE_COUNT_CEILING]
+ * occurrences across [ordered] — whichever bound binds first for a given message — every message
+ * gets an equal share of each (both floored at [SEQ3_MIN_OCCURRENCES_PER_MESSAGE]), and a message
+ * whose real evidence exceeds its share is trimmed down to a first/last window — the earliest and
+ * latest occurrences, which is what a reader most wants from a repeated call anyway ("when did this
+ * start, when did it last happen"). [Seq3Message.totalOccurrenceCount] records the pre-trim count so
+ * nothing downstream (the `×n` badge, an elision row, "N occurrences elided" in the status bar)
+ * silently under-reports how many times the call actually happened — see that field's own doc.
+ *
+ * Deterministic and order-stable by construction: both shares depend only on `ordered.size`, and
+ * [trimSeq3MessageOccurrences] reads the already-sorted per-message occurrence list in place — two
+ * calls over the same [ordered] list always produce byte-identical output, no randomness, no
+ * dependence on any map's iteration order.
+ *
+ * A message already at or under both shares is returned unchanged (same instance) — the common case
+ * (an ordinary log under budget never trims at all) costs one size check per message, not a full
+ * list rebuild or a single estimated-bytes call.
+ */
+private fun applySeq3OccurrenceBudget(ordered: List<Seq3Message>): List<Seq3Message> {
+    if (ordered.isEmpty()) return ordered
+    val byteShare = (SEQ3_OCCURRENCE_BUDGET_BYTES / ordered.size).coerceAtLeast(SEQ3_MIN_OCCURRENCES_PER_MESSAGE * SEQ3_OCCURRENCE_OVERHEAD_BYTES)
+    val countShare = (SEQ3_OCCURRENCE_COUNT_CEILING / ordered.size).coerceAtLeast(SEQ3_MIN_OCCURRENCES_PER_MESSAGE)
+    return ordered.map { message -> trimSeq3MessageOccurrences(message, byteShare, countShare) }
+}
+
+/**
+ * Trims one message's [Seq3Message.occurrences] to whichever of [byteShare]/[countShare] binds
+ * first, walking outward from both ends (alternating so growth stays balanced rather than
+ * exhausting one side first) rather than encoding-and-measuring — an O(kept-count) walk, never
+ * O(total occurrences), so a message that's over budget by 100x doesn't cost 100x more to trim.
+ * Below [SEQ3_MIN_OCCURRENCES_PER_MESSAGE] occurrences there's nothing to trim regardless of either
+ * budget (the floor IS the whole list already).
+ */
+private fun trimSeq3MessageOccurrences(message: Seq3Message, byteShare: Int, countShare: Int): Seq3Message {
+    val occurrences = message.occurrences
+    if (occurrences.size <= SEQ3_MIN_OCCURRENCES_PER_MESSAGE) return message
+    val maxKeep = minOf(occurrences.size, countShare.coerceAtLeast(SEQ3_MIN_OCCURRENCES_PER_MESSAGE))
+    var keptBytes = estimatedSeq3OccurrenceBytes(occurrences.first()) + estimatedSeq3OccurrenceBytes(occurrences.last())
+    var kept = SEQ3_MIN_OCCURRENCES_PER_MESSAGE
+    var nextFrontIdx = 1
+    var nextBackIdx = occurrences.size - 2
+    var growFromFront = true
+    while (kept < maxKeep && nextFrontIdx <= nextBackIdx) {
+        val idx = if (growFromFront) nextFrontIdx else nextBackIdx
+        val cost = estimatedSeq3OccurrenceBytes(occurrences[idx])
+        // The floor (first+last) is kept unconditionally above; every occurrence beyond it must
+        // still fit the byte share, so a per-message allowance that's already spent on huge
+        // individual occurrences stops growing here rather than blowing past the document budget.
+        if (keptBytes + cost > byteShare) break
+        keptBytes += cost
+        kept++
+        if (growFromFront) nextFrontIdx++ else nextBackIdx--
+        growFromFront = !growFromFront
+    }
+    if (kept >= occurrences.size) return message
+    val keepFirst = (kept + 1) / 2
+    val keepLast = kept - keepFirst
+    return message.copy(
+        occurrences = occurrences.take(keepFirst) + occurrences.takeLast(keepLast),
+        totalOccurrenceCount = occurrences.size,
     )
 }
 

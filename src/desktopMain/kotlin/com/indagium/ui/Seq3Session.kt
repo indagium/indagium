@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.indagium.debug.AppLogger
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
 import com.indagium.diagram3.Seq3AttachmentMetadata
@@ -235,6 +236,18 @@ class Seq3Session(
      *  second copy of the diagram note. */
     private val generatedBaselines = ConcurrentHashMap<String, Seq3Document>()
 
+    /** W1c anti-nag: the dedupe key ([DiagramSaveRejection.dedupeKey]) of the last rejection
+     *  [reportSaveRejection] actually surfaced for this session, if any. Without this, an
+     *  over-budget session re-triggers [saveToLibrary]/[syncLiveLinkedNote] on every subsequent
+     *  edit (`markDirty`'s own debounce-free autosave), each one rejected again, each one
+     *  reopening the SAME popup the user just dismissed. Cleared on a later successful save (the
+     *  problem this session had is no longer true) and on [close] (no session, nothing to
+     *  remember). Keyed by category rather than the rejection's exact payload — two `TooLarge`
+     *  reports in a row for the same session almost never carry byte-for-byte identical counts
+     *  (the user's still-oversized document keeps changing size as they edit it), so exact value
+     *  equality would defeat the dedupe almost every time. */
+    private val lastReportedRejectionKey = ConcurrentHashMap<String, String>()
+
     internal fun viewState(id: String): Seq3ViewState? {
         if (session(id) == null) return null
         return workspaceViewStates.computeIfAbsent(id) { Seq3ViewState() }
@@ -370,11 +383,18 @@ class Seq3Session(
      *  concern, mirroring [SeqDiagramCoordinator.requestCloseWorkspace]'s three-way prompt) — a
      *  caller that wants to warn on [Seq3WorkspaceSession.dirty] checks it before calling this. */
     fun close(id: String) {
+        // W3: flush BEFORE tearing anything down — a pending debounced draft save is the only
+        // persistence an unconfirmed edit has, so closing (workspace tab close, or app quit) within
+        // DRAFT_SAVE_DEBOUNCE_MS of the last edit must not silently drop it.
+        flush(id)
         generateJobs.remove(id)?.cancel()
         revertJobs.remove(id)?.cancel()
+        draftSaveJobs.remove(id)?.cancel()
+        draftSaveGenerations.remove(id)
         generations.remove(id)
         workspaceViewStates.remove(id)
         generatedBaselines.remove(id)
+        lastReportedRejectionKey.remove(id)
         sessions = sessions.filterNot { it.id == id }
         if (activeSessionId == id) {
             val next = sessions.lastOrNull()?.id
@@ -422,8 +442,28 @@ class Seq3Session(
     }
 
     private fun rangeFor(tab: LogTab, selectedIds: Set<Int>): Seq3Range {
-        val effective = expandSelectionThroughCollapsedBlocks(tab, selectedIds)
-        return if (effective.isNotEmpty()) Seq3Range.Ids(effective.min(), effective.max(), effective) else Seq3Range.VisibleView
+        val expansion = expandSelectionThroughCollapsedBlocks(tab, selectedIds)
+        val effective = expansion.ids
+        if (effective.isEmpty()) return Seq3Range.VisibleView
+        val from = effective.min()
+        val to = effective.max()
+        // W4: a manual block too large to enumerate (Filter.kt's SELECTION_EXPANSION_MAX_IDS)
+        // reports only its own boundary ids in `effective`, not its full interior — passing that
+        // as `selectedIds` below would curate the diagram down to just those two lines instead of
+        // the whole fold. Fall back to the plain span exactly like the contiguous case does; a
+        // range this wide that still can't be diagrammed gets caught downstream by the codec's own
+        // header-size gate (W1c), which pops up an explanatory notice instead of hanging.
+        if (expansion.boundExceeded) return Seq3Range.Ids(from, to)
+        // W1b: a CONTIGUOUS selection (every id in [from, to] is present) is exactly what the plain
+        // inclusive span already means — Seq3Range.Ids's own doc: "empty [selectedIds] preserves the
+        // plain inclusive-span behaviour" — so persist an EMPTY set instead of every id individually.
+        // This is the common case (a drag selection, "select all", a whole-tab generate) and removes
+        // the note's second-biggest unbounded contributor after occurrence text: on a 10M-line tab, an
+        // all-visible-lines selection would otherwise persist ~10M ints into every saved note. A
+        // SPARSE selection (the set's size doesn't match the span) still needs the explicit ids to
+        // reproduce exactly what the user picked; if that's large enough to matter, the codec's own
+        // header-size gate (W1c) catches it.
+        return if (effective.size == to - from + 1) Seq3Range.Ids(from, to) else Seq3Range.Ids(from, to, effective)
     }
 
     // ── Generate pipeline: debounced, conflated, cancellable (SAAD §10.2) ──────────────────────
@@ -486,35 +526,45 @@ class Seq3Session(
     // Split out so requestGenerate itself stays under detekt's function-length/complexity budget.
     private fun publishGenerated(id: String, generation: Long, fresh: Seq3Document) {
         if (generations[id]?.get() != generation) return
-        replace(id) { current ->
-            // A freshly generated document's title is empty (Seq3Generator never invents one); keep
-            // whatever the user already typed rather than blanking it on every regenerate. Notes-
-            // panel seeds (beginFromNotes) are applied here, before the baseline snapshot below and
-            // everything downstream of `document` — the library encode, the live-linked note sync,
-            // a later confirm — so they all already see the seeded notes with no further change.
-            // `fresh` itself never carries notes (`generateSeq3` doesn't produce any), so hand
-            // `applySeq3NoteSeeds` the PREVIOUSLY seeded notes from `current.document` to update in
-            // place — this is what lets its idempotent branch (user edits on the canvas win) engage
-            // at all; without it every regenerate would look like the very first seed application.
-            // Deliberately scoped to only the notes this session's own `noteSeeds` minted (matched
-            // by id) — a hand-added canvas note is not resurrected here, matching every session's
-            // existing behaviour of a raw regenerate otherwise dropping fragments/notes wholesale.
-            // A no-op (returns `fresh` unchanged) for the overwhelming majority of sessions, whose
-            // `noteSeeds` is the empty-list default.
-            val seededNoteIds = current.noteSeeds.mapTo(HashSet()) { it.id }
-            val previouslySeededNotes = current.document.notes.filter { it.id in seededNoteIds }
-            val document = applySeq3NoteSeeds(fresh.copy(notes = previouslySeededNotes), current.noteSeeds)
-                .copy(title = current.document.title.ifBlank { fresh.title })
-            generatedBaselines[id] = document
-            val tab = current.sourceTabId?.let(appState::tab)
-            val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
-            val libraryItemId = tab?.let {
-                saveToLibrary(current, it, encodeSeq3Note(document, current.dialect, exportMode = exportMode))?.id
-            }
-            current.copy(
+        val current = session(id) ?: return
+        // A freshly generated document's title is empty (Seq3Generator never invents one); keep
+        // whatever the user already typed rather than blanking it on every regenerate. Notes-
+        // panel seeds (beginFromNotes) are applied here, before the baseline snapshot below and
+        // everything downstream of `document` — the library encode, the live-linked note sync,
+        // a later confirm — so they all already see the seeded notes with no further change.
+        // `fresh` itself never carries notes (`generateSeq3` doesn't produce any), so hand
+        // `applySeq3NoteSeeds` the PREVIOUSLY seeded notes from `current.document` to update in
+        // place — this is what lets its idempotent branch (user edits on the canvas win) engage
+        // at all; without it every regenerate would look like the very first seed application.
+        // Deliberately scoped to only the notes this session's own `noteSeeds` minted (matched
+        // by id) — a hand-added canvas note is not resurrected here, matching every session's
+        // existing behaviour of a raw regenerate otherwise dropping fragments/notes wholesale.
+        // A no-op (returns `fresh` unchanged) for the overwhelming majority of sessions, whose
+        // `noteSeeds` is the empty-list default.
+        val seededNoteIds = current.noteSeeds.mapTo(HashSet()) { it.id }
+        val previouslySeededNotes = current.document.notes.filter { it.id in seededNoteIds }
+        val document = applySeq3NoteSeeds(fresh.copy(notes = previouslySeededNotes), current.noteSeeds)
+            .copy(title = current.document.title.ifBlank { fresh.title })
+        generatedBaselines[id] = document
+        val tab = current.sourceTabId?.let(appState::tab)
+        val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+        // Deliberately called BEFORE the replace() below, not nested inside its lambda: `replace`
+        // is `sessions = sessions.map { ... }` over a snapshot taken when the outer call starts, so
+        // a REJECTED saveToLibrary calling its own reportSaveRejection -> replace(id) { ... } from
+        // INSIDE this function's own replace lambda would have its effect silently overwritten the
+        // instant the outer map's result gets assigned back to `sessions` — regenBuilding=false in
+        // particular would never stick. Calling it here, then reading the session fresh via `latest`
+        // in the one replace() call below, means whichever one runs last (this call's own
+        // saveToLibrary, or a concurrently superseded generation) is what sticks — never a lost
+        // write. See this phase's PR review for the exact hazard.
+        val libraryItemId = tab?.let {
+            saveToLibrary(current, it, encodeSeq3Note(document, current.dialect, exportMode = exportMode))?.id
+        }
+        replace(id) { latest ->
+            latest.copy(
                 document = document,
                 generating = false,
-                libraryItemId = libraryItemId ?: current.libraryItemId,
+                libraryItemId = libraryItemId ?: latest.libraryItemId,
                 exportMode = exportMode,
             )
         }
@@ -622,8 +672,68 @@ class Seq3Session(
     // action. The separate diagram-library draft is synchronized by [autoSaveDraftToLibrary].
     private fun markDirty(id: String) {
         replace(id) { it.copy(dirty = true) }
+        scheduleDraftSave(id)
+    }
+
+    // W3: autoSaveDraftToLibrary (encode + validate + rewrite the WHOLE library file) plus
+    // syncLiveLinkedNote (parse every note block in the tab, encode AGAIN, rewrite the WHOLE
+    // library file a second time) used to run synchronously inside markDirty — which applyCommand
+    // calls from a pointer/keyboard handler on the Compose UI thread. Measured ~15ms encode+parse
+    // at 1,400 occurrences, doubled, plus two full-file rewrites: a 40-80ms hitch per canvas edit
+    // that grows with LIBRARY size, not diagram size. Debounced the same way [requestGenerate]
+    // debounces a full regenerate — cancel-and-relaunch on [scope], a per-session Job in
+    // [draftSaveJobs] — so a burst of edits (dragging an endpoint) collapses into one disk write.
+    //
+    // [draftSaveGenerations] is the conflation guard: cancelling a Job that has already moved past
+    // its `delay()` suspension point (into the synchronous save work) does not interrupt it, so a
+    // pathological back-to-back edit could otherwise let two dispatches both reach [runDraftSave].
+    // Each dispatch captures its OWN generation number when scheduled; [runDraftSave] only proceeds
+    // if it is still the latest, so at most one of the two actually does the work — never zero
+    // (whichever loses the race is redundant, not lost: it always reads the CURRENT session state,
+    // never a stale snapshot, so any dispatch that DOES run is always up to date).
+    private val draftSaveJobs = ConcurrentHashMap<String, Job>()
+    private val draftSaveGenerations = ConcurrentHashMap<String, AtomicLong>()
+
+    /** Test-visible instrumentation, mirrors [generateRunCount]'s identical role: counts actual
+     *  [autoSaveDraftToLibrary]/[syncLiveLinkedNote] executions (post-debounce or via [flush]), so a
+     *  test can assert a burst of edits coalesces into ONE run instead of one per edit. */
+    internal val draftSaveRunCount = AtomicLong()
+
+    private fun scheduleDraftSave(id: String) {
+        val generation = draftSaveGenerations.computeIfAbsent(id) { AtomicLong() }.incrementAndGet()
+        draftSaveJobs.remove(id)?.cancel()
+        val job = scope.launch {
+            delay(DRAFT_SAVE_DEBOUNCE_MS)
+            coroutineContext.ensureActive()
+            runDraftSave(id, generation)
+        }
+        draftSaveJobs[id] = job
+        // Self-cleans once done so a later flush() can tell "nothing pending" (map has no entry)
+        // apart from "the debounced job already ran" (same state) — `remove(id, job)` only clears
+        // the entry if it STILL points at this exact job, so a newer dispatch's entry is never
+        // clobbered by an older one finishing late.
+        job.invokeOnCompletion { draftSaveJobs.remove(id, job) }
+    }
+
+    private fun runDraftSave(id: String, generation: Long) {
+        if (draftSaveGenerations[id]?.get() != generation) return
+        draftSaveRunCount.incrementAndGet()
         autoSaveDraftToLibrary(id)
         syncLiveLinkedNote(id)
+    }
+
+    /** Runs any pending debounced draft save immediately instead of waiting out
+     *  [DRAFT_SAVE_DEBOUNCE_MS] — called from [confirm], [attach] and [close] so an edit made in the
+     *  last [DRAFT_SAVE_DEBOUNCE_MS] before any of those is never silently dropped. A no-op when
+     *  nothing is pending (the debounced job already ran, or no edit has happened yet).
+     *  `internal`, not `private`, purely so [Seq3SessionTest] can settle a pending draft save
+     *  deterministically instead of a real-time sleep — mirrors [generateRunCount]'s identical
+     *  test-visibility rationale. */
+    internal fun flush(id: String) {
+        val pending = draftSaveJobs.remove(id) ?: return
+        pending.cancel()
+        val generation = draftSaveGenerations.computeIfAbsent(id) { AtomicLong() }.incrementAndGet()
+        runDraftSave(id, generation)
     }
 
     /** Keeps the diagram library useful as a real draft library. A workspace gets a record as soon
@@ -658,6 +768,11 @@ class Seq3Session(
         val current = session(id) ?: return null
         val tabId = current.sourceTabId ?: return null
         if (current.document.lifelines.isEmpty()) return null
+        // W3: run any still-pending debounced draft save now rather than leaving it to fire later
+        // against whatever session state exists AFTER this confirm — avoids a redundant write
+        // chasing this one a moment later, and guarantees the library draft never lags behind an
+        // explicit note-writing action.
+        flush(id)
         // Sticky per-session: seeded from the global default only the FIRST time (a brand-new
         // session's exportMode starts null); every later confirm on this session — including one
         // reached via beginEdit/openLibraryItem, which seed it from the note/item's own already-
@@ -693,18 +808,119 @@ class Seq3Session(
         return blockId
     }
 
+    /**
+     * W1c: routed through [DiagramLibraryStore.tryCreate]/[DiagramLibraryStore.tryUpdate] instead of
+     * the throwing [DiagramLibraryStore.create]/[DiagramLibraryStore.update] — every one of this
+     * function's four callers (generation just landed, an edit's autosave, an explicit confirm, an
+     * explicit attach) runs on either a background coroutine or a UI-thread command handler, and an
+     * escaping `IllegalArgumentException` from either is exactly the original blocker bug (a
+     * permanently latched "Generating…", or a crashed window). A rejection reports through
+     * [reportSaveRejection] and this returns null, same as the pre-existing "nothing to return"
+     * contract every caller already handles with `?.`/`?:`.
+     */
     private fun saveToLibrary(current: Seq3WorkspaceSession, tab: LogTab, encodedNote: String): DiagramLibraryItem? {
         val title = current.document.title.ifBlank { "Untitled diagram" }
         val snapshot = DiagramLibrarySnapshot(encodedNote)
-        val saved = if (current.libraryItemId == null || libraryStore.get(current.libraryItemId) == null) {
-            libraryStore.create(title, "", sourceIdentity(tab), snapshot)
+        val result = if (current.libraryItemId == null || libraryStore.get(current.libraryItemId) == null) {
+            libraryStore.tryCreate(title, "", sourceIdentity(tab), snapshot)
         } else {
-            libraryStore.update(current.libraryItemId) { item ->
+            libraryStore.tryUpdate(current.libraryItemId) { item ->
                 item.copy(title = title, source = sourceIdentity(tab), snapshot = snapshot, updatedAt = clock())
             }
         }
+        val rejection = result.toDiagramSaveRejection()
+        if (rejection != null) {
+            reportSaveRejection(current.id, rejection)
+            return null
+        }
+        // A save that succeeds after a previously reported rejection means whatever was wrong
+        // (an over-wide range, a full library) is no longer true — forget it, so a LATER
+        // rejection of the same category (the user grows the range again) surfaces fresh instead
+        // of staying suppressed by the anti-nag dedupe below.
+        lastReportedRejectionKey.remove(current.id)
+        val saved = result?.getOrNull()
         libraryRevision++
         return saved ?: current.libraryItemId?.let(libraryStore::get)
+    }
+
+    /** Unwraps a `try*` [DiagramLibraryStore] call's [Result] into the [DiagramSaveRejection] it
+     *  failed with, or null on success/no-op — the one place [saveToLibrary] and [syncLiveLinkedNote]
+     *  turn a caught exception back into a typed reason instead of duplicating the same `as?` cast.
+     *  Almost always a [DiagramSaveRejectedException] ([DiagramLibraryStore.rejectionFor] already
+     *  screened the save before `trySave` attempted it); the generic [DiagramSaveRejection.Invalid]
+     *  fallback exists only in case the underlying `save()` throws for a reason `rejectionFor`'s
+     *  mirrored checks didn't anticipate, so an unknown failure still gets reported/logged/unlatched
+     *  instead of silently swallowed. */
+    private fun Result<DiagramLibraryItem>?.toDiagramSaveRejection(): DiagramSaveRejection? {
+        val exception = this?.exceptionOrNull() ?: return null
+        return (exception as? DiagramSaveRejectedException)?.rejection
+            ?: DiagramSaveRejection.Invalid(exception.message ?: "Diagram could not be saved")
+    }
+
+    /** [syncLiveLinkedNote]'s own `try*` unwrap (kept out of that function's body purely to keep its
+     *  own return-statement count under detekt's limit): a rejection routes through
+     *  [reportSaveRejection] and both "nothing to return" cases — a genuine rejection, or a null
+     *  [Result] meaning [DiagramLibraryStore.tryUpdate]'s id no longer exists — collapse to a single
+     *  null, so the caller's own `?: return` is the one early exit for either. */
+    private fun resolveLibraryWrite(id: String, result: Result<DiagramLibraryItem>?): DiagramLibraryItem? {
+        val rejection = result.toDiagramSaveRejection()
+        if (rejection != null) {
+            reportSaveRejection(id, rejection)
+            return null
+        }
+        // Same "the problem is gone, forget it" reasoning as saveToLibrary's own success path.
+        lastReportedRejectionKey.remove(id)
+        return result?.getOrNull()
+    }
+
+    /** Stable category for [lastReportedRejectionKey] — see that field's own doc for why this is
+     *  keyed by CATEGORY rather than the rejection's exact payload. */
+    private fun DiagramSaveRejection.dedupeKey(): String = when (this) {
+        is DiagramSaveRejection.TooLarge -> "TooLarge"
+        DiagramSaveRejection.LibraryFull -> "LibraryFull"
+        is DiagramSaveRejection.Invalid -> "Invalid:$reason"
+    }
+
+    /**
+     * W0/W1c's central error path. Every chain that can hit a [DiagramSaveRejection] — [saveToLibrary]
+     * (backing [publishGenerated], [autoSaveDraftToLibrary], [confirm], [attach]) and
+     * [syncLiveLinkedNote]'s own direct [DiagramLibraryStore.tryUpdate] call — routes here instead of
+     * letting the rejection propagate as a thrown exception. Does all three things the W0/W1 brief
+     * requires of every failure path: sets [AppState.pendingDiagramNotice] with a plain-English,
+     * actionable reason, logs via [AppLogger.error] (an operational fact only — never log content,
+     * matching [AppLogger]'s own "never user log rows" contract), and clears `generating`/
+     * `regenBuilding` so the canvas can never stay latched on "Generating…" — the exact blocker bug.
+     *
+     * The notice/log are skipped — but `generating`/`regenBuilding` are ALWAYS still cleared,
+     * unconditionally — when this exact category was the last thing reported for [id]
+     * ([lastReportedRejectionKey]): a still-oversized document keeps re-hitting `saveToLibrary` on
+     * every subsequent edit (`markDirty` has no debounce of its own yet — W3), and re-showing the
+     * identical popup on every keystroke is worse than showing it once and letting the user act.
+     */
+    private fun reportSaveRejection(id: String, rejection: DiagramSaveRejection) {
+        val key = rejection.dedupeKey()
+        if (lastReportedRejectionKey.put(id, key) != key) {
+            val notice = when (rejection) {
+                is DiagramSaveRejection.TooLarge -> {
+                    val scanned = scannedEntryCount(id)
+                    DiagramNotice(
+                        title = "Diagram too large to save",
+                        body = "This range is too large to diagram. It scanned $scanned lines and the saved " +
+                            "diagram would be ${formatByteSize(rejection.encodedChars.toLong())}, over the " +
+                            "${formatByteSize(rejection.limitChars.toLong())} limit. Select a smaller range and try again.",
+                    )
+                }
+                DiagramSaveRejection.LibraryFull -> DiagramNotice(
+                    title = "Diagram library is full",
+                    body = "The diagram library is full ($MAX_DIAGRAM_LIBRARY_ITEMS of $MAX_DIAGRAM_LIBRARY_ITEMS). " +
+                        "Delete diagrams you no longer need from the library panel, then try again.",
+                )
+                is DiagramSaveRejection.Invalid -> DiagramNotice(title = "Couldn't save diagram", body = rejection.reason)
+            }
+            appState.pendingDiagramNotice = notice
+            AppLogger.error("diagram3", "Diagram save rejected for session $id: $rejection")
+        }
+        replace(id) { it.copy(generating = false, regenBuilding = false) }
     }
 
     /** Explicitly attaches the current workspace as an immutable note snapshot. */
@@ -718,6 +934,7 @@ class Seq3Session(
         val tabId = current?.sourceTabId
         val tab = current?.sourceTabId?.let(appState::tab)
         if (current == null || tabId == null || tab == null || current.document.lifelines.isEmpty()) return null
+        flush(id) // W3: see confirm()'s identical call for why.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
         val item = saveToLibrary(current, tab, plainText) ?: return null
@@ -764,10 +981,15 @@ class Seq3Session(
             sourceOverride = parsed.source,
         )
         val blockId = appState.addNoteBlock(tabId, text, afterBlockId) ?: return null
-        libraryStore.addAttachment(
-            libraryItemId,
-            DiagramLibraryAttachment(tabId, blockId, kind, attachedAt),
-        )
+        // W2: DiagramLibraryStore.addAttachment is now non-throwing (routes through tryUpdate) — a
+        // full per-item/library attachment cap, or a snapshot that has drifted out of bounds since
+        // it was saved, quietly skips the library back-reference rather than crashing; the note
+        // itself (already written above) is unaffected either way. No session is in scope here to
+        // hang a W0 popup off of (this helper backs the standalone attachLibrarySnapshot/
+        // attachLibraryLink entry points as well as attach()), so this only logs for observability.
+        if (libraryStore.addAttachment(libraryItemId, DiagramLibraryAttachment(tabId, blockId, kind, attachedAt)) == null) {
+            AppLogger.error("diagram3", "Diagram attachment not recorded in library for item $libraryItemId (cap or invalid snapshot)")
+        }
         libraryRevision++
         return blockId
     }
@@ -791,14 +1013,18 @@ class Seq3Session(
         if (linkedNotes.isEmpty()) return
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
         val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
-        val updated = libraryStore.update(libraryItemId) { item ->
+        // W1c: tryUpdate, not update — this write can hit the same size/library-full rejections as
+        // saveToLibrary (see that function's own doc), and it runs from publishGenerated/markDirty,
+        // exactly the chains W1c requires never to let an IllegalArgumentException escape.
+        val result = libraryStore.tryUpdate(libraryItemId) { item ->
             item.copy(
                 title = current.document.title.ifBlank { item.title },
                 source = sourceIdentity(tab),
                 snapshot = DiagramLibrarySnapshot(plainText),
                 updatedAt = clock(),
             )
-        } ?: return
+        }
+        val updated = resolveLibraryWrite(id, result) ?: return
         linkedNotes.forEach { (blockId, parsed, attachment) ->
             val linkedText = encodeSeq3Note(
                 current.document,
@@ -1098,6 +1324,10 @@ class Seq3Session(
 
     private companion object {
         const val GENERATE_DEBOUNCE_MS = 180L
+
+        // W3: SAAD §12.5's debounce inventory table ("Diagram draft save") documents this figure —
+        // update it there too if this ever changes.
+        const val DRAFT_SAVE_DEBOUNCE_MS = 400L
         const val MAX_UNDO_DEPTH = 50
     }
 }

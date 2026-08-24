@@ -161,4 +161,52 @@ class Seq3TokenizerTest {
         val names = result.match!!.captures.map { it.name }
         assertEquals(names.size, names.distinct().size, "sanitized capture names must stay unique even when two raw keys collide after sanitizing; got $names")
     }
+
+    // ── PERF: NAMED_VALUE bounding must not change what it extracts ────────────────────────────
+    //
+    // Seq3Tokenizer.kt's NAMED_VALUE gained possessive, length-capped quantifiers to fix an O(tail
+    // length²) backtracking blowup (see that file's own comment on the pattern for the full
+    // diagnosis and measured numbers). The OLD/NEW patterns below are byte-for-byte copies of the
+    // pre-fix and post-fix regex source — duplicated here, not imported, because NAMED_VALUE is
+    // file-private — so this test can prove the bound changed nothing about what a WELL-FORMED
+    // line (every real key and value far under the new caps) extracts, across every shape this
+    // file's own tests already care about: plain pairs, colon-separated, comma/semicolon-delimited,
+    // quoted values with embedded spaces, single-quoted, dotted/hyphenated keys, no pairs at all, a
+    // trailing pair with nothing after it, and the specific delimiterless-tail shape that motivated
+    // the fix (which the OLD pattern still gets right — it's just slow).
+    private val oldNamedValuePattern = Regex(
+        "([A-Za-z_][A-Za-z0-9_.-]*)\\s*(=|:)\\s*(\"[^\"]*\"|'[^']*'|[^=,:;\\s)]+)" +
+            "(?=\\s+(?:[A-Za-z_][A-Za-z0-9_.-]*\\s*(?:=|:))|\\s*$|[,;)])",
+    )
+    private val newNamedValuePattern = Regex(
+        "([A-Za-z_][A-Za-z0-9_.-]{0,64}+)\\s*+(=|:)\\s*+(\"[^\"]*\"|'[^']*'|[^=,:;\\s)]{1,256}+)" +
+            "(?=\\s++(?:[A-Za-z_][A-Za-z0-9_.-]{0,64}+\\s*+(?:=|:))|\\s*+$|[,;)])",
+    )
+
+    /** (key, operator, rawValue) triples — everything a consumer of NAMED_VALUE actually reads
+     *  (groups 1-3) — for every match [pattern] finds in [text], in order. */
+    private fun namedValuePairs(pattern: Regex, text: String): List<Triple<String, String, String>> =
+        pattern.findAll(text).map { Triple(it.groupValues[1], it.groupValues[2], it.groupValues[3]) }.toList()
+
+    @Test
+    fun theBoundedPatternExtractsIdenticalPairsToTheUnboundedOneAcrossARealisticCorpus() {
+        val corpus = listOf(
+            "attach deviceKey=usb-dev-016",
+            "state: on ready: true",
+            "push seq=4821, retries=2; final=true",
+            "message=\"user said hello world\" priority=high",
+            "note='single quoted value here' level=2",
+            "screen.mode=on screen-mode=1",
+            "just a plain sentence with no pairs at all",
+            "final status=done",
+            "token=Binder@7 " + "detail".repeat(80),
+        )
+        for (text in corpus) {
+            assertEquals(
+                namedValuePairs(oldNamedValuePattern, text),
+                namedValuePairs(newNamedValuePattern, text),
+                "extraction diverged for: $text",
+            )
+        }
+    }
 }

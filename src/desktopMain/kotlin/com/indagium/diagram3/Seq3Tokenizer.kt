@@ -98,8 +98,58 @@ fun matchesText(match: Seq3Match, text: String): Map<String, String>? {
     return declaredNames.associateWith(valuesByToken::getValue)
 }
 
+// (PERF) Bounds on NAMED_VALUE's runs — see the four constants just below for why each exists and
+// why each length was chosen. Same class of problem as utils/TextMatch.kt's regex-match budget
+// (SEC-2): java.util.regex has no built-in step budget, so an unbounded run next to an ambiguous
+// lookahead can backtrack character-by-character from EVERY findAll start position. Unlike
+// TextMatch's case (an arbitrary user-authored pattern against arbitrary text, bounded generically
+// by a wall-clock deadline), NAMED_VALUE is one fixed, hand-written pattern against log message
+// text this file already understands the shape of — so the fix here is structural (possessive
+// quantifiers + realistic length caps on THIS pattern) rather than a generic runtime budget.
+//
+// Measured: a "key=value <long delimiter-less tail>" line — the value's own greedy backtracking
+// combined with the lookahead's unbounded scan for the next "=" turns one findAll call into O(tail
+// length²) work (924ms at 2402 chars vs 29ms after this fix — see the plan this shipped from for
+// the full table). Doesn't reproduce when the tail runs straight to end-of-string (the `\s*$`
+// lookahead branch succeeds immediately, no scan needed), which is why short/delimiter-terminated
+// lines were never seen to be slow.
+private const val NAMED_KEY_MAX_CHARS = 64
+private const val NAMED_VALUE_MAX_CHARS = 256
+private const val NAMED_VALUE_LOOKAHEAD_KEY_MAX_CHARS = 64
+
+// The bound that actually fixes the asymptotics: the lookahead's own key-scan run, `{0,64}+`
+// possessive. A possessive quantifier never backtracks (commits to its match, right or wrong), so
+// a failed lookahead now costs O(64) — not O(remaining line length) — regardless of what follows.
+// Bounded to 64 (not just possessive) because a possessive quantifier still SCANS its full run
+// before failing; capping the run length is what keeps that scan itself short. No real log key is
+// remotely close to 64 characters, so this never rejects a genuine "another key=value pair follows"
+// lookahead — it only shortens how far a FAILED lookahead has to look before giving up.
+//
+// Group 1 (the KEY capture) and group 3 (the VALUE capture) are bounded and possessive for the
+// same reason, deliberately, not left unbounded-but-possessive: a possessive quantifier alone stops
+// ONE attempt from backtracking, but findAll still retries the whole pattern from every subsequent
+// start position, so an unbounded possessive run of identifier-only characters with no delimiter
+// (e.g. a long dotted/hyphenated token, or minified data with no spaces) would still cost O(run
+// length) PER start position inside that run — O(run length²) overall, the same shape of blowup
+// this fix exists to close, just moved from the lookahead to the key/value scan itself. Bounding
+// both closes that path too:
+//   - KEY (64 chars): generous for any real tag/field name this app parses (including a dotted
+//     Android class-style key like "screen.mode"); a genuinely longer key just isn't recognised as
+//     a NAMED_VALUE key here — matchesText/compileSingleRunPattern still have a shot at the same
+//     occurrences via the positional-run fallback, so this is graceful degradation, never data loss.
+//   - VALUE (256 chars, unquoted branch only): the quoted branches (`"[^"]*"`/`'[^']*'`) are NOT
+//     bounded — a long quoted string is exactly where genuinely long values live in practice (a
+//     path, a URL, a JSON fragment) and quoting already gives the engine an unambiguous end anchor,
+//     so it never backtracks the way the unquoted run does. Only the *unquoted* value run is capped:
+//     256 comfortably covers every observed unquoted token shape (ids, hashes, enum names, short
+//     paths) in this app's log content, and an unquoted run past that length is a low-confidence
+//     "value" to begin with — this pattern declines it rather than silently truncating the capture
+//     (a truncated capture would misreport the value; declining it falls back to the positional-run
+//     compiler or a literal per-occurrence message, both of which carry the FULL text).
 private val NAMED_VALUE = Regex(
-    "([A-Za-z_][A-Za-z0-9_.-]*)\\s*(=|:)\\s*(\"[^\"]*\"|'[^']*'|[^=,:;\\s)]+)(?=\\s+(?:[A-Za-z_][A-Za-z0-9_.-]*\\s*(?:=|:))|\\s*$|[,;)])",
+    "([A-Za-z_][A-Za-z0-9_.-]{0,$NAMED_KEY_MAX_CHARS}+)\\s*+(=|:)\\s*+" +
+        "(\"[^\"]*\"|'[^']*'|[^=,:;\\s)]{1,$NAMED_VALUE_MAX_CHARS}+)" +
+        "(?=\\s++(?:[A-Za-z_][A-Za-z0-9_.-]{0,$NAMED_VALUE_LOOKAHEAD_KEY_MAX_CHARS}+\\s*+(?:=|:))|\\s*+$|[,;)])",
 )
 private val CAPTURE_TOKEN = Regex("\\{([A-Za-z_][A-Za-z0-9_]*)}")
 

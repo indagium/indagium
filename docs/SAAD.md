@@ -1218,7 +1218,7 @@ store, active loads, video controllers, and MCP client tracking.
 
 ### 12.5 Debounce inventory
 
-Six independent debounces exist. They are listed together because their interaction is not obvious
+Eight independent debounces exist. They are listed together because their interaction is not obvious
 from any single file:
 
 | Debounce | Interval | Where | Collapses |
@@ -1229,7 +1229,7 @@ from any single file:
 | Tail re-analysis | 1500 ms | `ui/TailCoordinator.kt:128` | Continuous appends into periodic crash re-detection |
 | AI UI update | 75 ms | `ai/AiSidebarRuntime.kt:281-288` | Token deltas, so Markdown is not reparsed per token |
 | Diagram session generate | 180 ms | `ui/Seq3Session.kt` | Range/option edits into one cancellable `generateSeq3` build; never metadata-only edits |
-| Diagram session draft-saved | 400 ms | `ui/Seq3Session.kt` | Settles the canvas status bar's "Draft saved Nm ago" after the last edit |
+| Diagram draft save | 400 ms | `ui/Seq3Session.kt` (`markDirty`/`scheduleDraftSave`) | A burst of canvas edits (`applyCommand`) into one `autoSaveDraftToLibrary` + `syncLiveLinkedNote` pass instead of one per edit; `flush()` runs any pending save immediately on `confirm`/`attach`/`close` so nothing is lost |
 | Loading indicator grace | 250 ms | `ui/LogViewer.kt:72` | Suppresses a flashing spinner for sub-quarter-second recomputes |
 
 ### 12.6 Threading map
@@ -2135,7 +2135,7 @@ enough that a naive implementation does not merely run slowly, it exhausts heap.
 - **Cancellable recomputation** — a superseded `computeItems` stops within 4096 items ([§12.3](#123-cancellation-of-computeitems)).
 - **Large-file mode** — a per-tab flag above a size threshold that switches the viewer to the
   cancellable async path.
-- **Six independent debounces** ([§12.5](#125-debounce-inventory)).
+- **Eight independent debounces** ([§12.5](#125-debounce-inventory)).
 
 Detailed measurements and the reasoning behind several of these choices are in
 [perf-large-files.md](perf-large-files.md).

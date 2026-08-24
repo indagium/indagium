@@ -2476,7 +2476,11 @@ private fun Seq3RowPatternLine(message: Seq3Message, collapsedCount: Int?) {
                 }
             }
         }
-        val count = collapsedCount ?: message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE }
+        // COUNT, not "how many rows do I draw" — same totalOccurrenceCount fallback as
+        // seq3CollapsedOccurrenceCount above for the non-collapsed (e.g. EVERY-mode) case.
+        val count = collapsedCount
+            ?: message.totalOccurrenceCount
+            ?: message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE }
         if (count > 1) AppText("×$count", color = tc.ts, fontSize = 10.sp)
     }
 }
@@ -2769,7 +2773,13 @@ internal fun seq3CanSwapEndpoints(message: Seq3Message): Boolean =
  *  [Seq3Repeat.COLLAPSE_ABOVE]. */
 internal fun seq3CollapsedOccurrenceCount(message: Seq3Message): Int? =
     message.occurrences.count { it.visibility == Seq3Visibility.VISIBLE }.let { visibleCount ->
-        if (message.repeat == Seq3Repeat.COLLAPSE_ABOVE && visibleCount > message.repeatThreshold) visibleCount else null
+        if (message.repeat == Seq3Repeat.COLLAPSE_ABOVE && visibleCount > message.repeatThreshold) {
+            // COUNT, not "how many rows do I draw" (this is always exactly one collapsed row) —
+            // read the true pre-trim total (W1a) when generation elided evidence.
+            message.totalOccurrenceCount ?: visibleCount
+        } else {
+            null
+        }
     }
 
 internal sealed class Seq3TemplateSegment {
