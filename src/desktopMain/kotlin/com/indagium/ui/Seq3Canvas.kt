@@ -331,14 +331,20 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
         // trimmed has a non-null totalOccurrenceCount to diff against what's left.
         message.totalOccurrenceCount?.let { total -> (total - message.occurrences.size).coerceAtLeast(0) } ?: 0
     }
-    val elidedSuffix = if (elidedOccurrences > 0) " · $elidedOccurrences occurrences elided" else ""
+    val elidedOccurrencesSuffix = if (elidedOccurrences > 0) " · $elidedOccurrences occurrences elided" else ""
+    // P3a: generation's document-wide message-count cap (Seq3Generator.applySeq3MessageCountBudget)
+    // drops whole messages rather than trimming their occurrences — surfaced here the same way, one
+    // more clause in the same status line rather than a second banner.
+    val elidedMessages = document.elidedMessageCount ?: 0
+    val elidedMessagesSuffix = if (elidedMessages > 0) " · $elidedMessages messages elided" else ""
     Row(
         Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AppText(
-            "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden$elidedSuffix",
+            "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden" +
+                "$elidedOccurrencesSuffix$elidedMessagesSuffix",
             color = tc.ts, fontSize = 10.sp,
         )
         Seq3CanvasZoomToolbarControls(view)

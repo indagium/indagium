@@ -365,6 +365,83 @@ class Seq3GeneratorTest {
         assertNotNull(parseSeq3Note(encoded), "an in-budget note must round-trip back through parseSeq3Note")
     }
 
+    // ── P3a: document-wide message-count cap (see docs/plans/prepare-plan-to-fix-binary-wreath.md) ──
+
+    @Test
+    fun aRangeOfAllDissimilarLinesStaysWithinTheHeaderBoundAndReportsItsTrueMessageCount() {
+        // Reproduces the exact gap MAX_SEQ3_MESSAGES (decode-only) left open: every one of these
+        // 1 000 lines masks to its own distinct shape (a non-digit "word" varies per entry, so
+        // messageShapeKey never collapses two of them together), so `buildMessages`' per-entry
+        // fallback emits ONE single-occurrence message per entry — exactly the shape W1a's own
+        // occurrence budget cannot trim (trimSeq3MessageOccurrences returns early at <=
+        // SEQ3_MIN_OCCURRENCES_PER_MESSAGE). Before P3a this produced 1 000 messages and an encoded
+        // note several times over MAX_SEQ3_HEADER_CHARS.
+        val entryCount = 1_000
+        val entries = (1..entryCount).map { i -> entry(i, formatMillisOfDay(i.toLong()), "A", dissimilarMessage(i, LONG_LINE_LENGTH)) }
+
+        val doc = generateSeq3(entries, Seq3Range.VisibleView)
+
+        assertTrue(doc.messages.size < entryCount, "the message-count cap must have actually dropped something")
+        assertEquals(
+            entryCount - doc.messages.size,
+            doc.elidedMessageCount,
+            "elidedMessageCount must report the TRUE number of messages the cap dropped",
+        )
+        val encoded = encodeSeq3Note(doc)
+        assertTrue(
+            encoded.length < MAX_SEQ3_HEADER_CHARS,
+            "encoded note (${encoded.length} chars) must stay under the codec's own decode bound for an all-dissimilar range",
+        )
+        val parsed = assertNotNull(parseSeq3Note(encoded), "an in-budget note must round-trip back through parseSeq3Note")
+        assertEquals(doc.elidedMessageCount, parsed.document.elidedMessageCount, "the elided count itself must round-trip")
+    }
+
+    @Test
+    fun messageCountCapPrefersTheMostRepeatedMessagesOverSingleOccurrenceNoise() {
+        // A handful of genuinely repeated calls (real signal) plus far more than the cap's worth of
+        // single-occurrence noise (the exact shape of `buildMessages`' fallback). The cap must keep
+        // the repeated calls — the more useful thing to show on a canvas — rather than dropping them
+        // in favor of whichever noise happened to sort first.
+        val repeatedTags = (0 until 3).map { "Repeated$it" }
+        val repeated = repeatedTags.flatMapIndexed { tagIdx, tag ->
+            (0 until 20).map { occ ->
+                entry(
+                    tagIdx * 1_000 + occ + 1, formatMillisOfDay((tagIdx * 1_000 + occ).toLong()), tag,
+                    "steady poll tick $occ",
+                )
+            }
+        }
+        val noiseCount = 500
+        val noise = (0 until noiseCount).map { i ->
+            entry(10_000 + i, formatMillisOfDay((10_000 + i).toLong()), "Noise", dissimilarMessage(i, 80))
+        }
+
+        val doc = generateSeq3(repeated + noise, Seq3Range.VisibleView)
+
+        repeatedTags.forEach { tag ->
+            val lifeline = doc.lifelines.singleOrNull { it.name == tag }
+            assertNotNull(lifeline, "$tag must still rank as a lifeline")
+            val message = doc.messages.singleOrNull { it.fromLifelineId == lifeline.id }
+            assertNotNull(message, "$tag's repeated message must survive the message-count cap")
+        }
+    }
+
+    /** Distinct per-entry, non-digit "word" so messageShapeKey never masks two entries to a shared
+     *  placeholder — every entry lands in its own shape group, so `buildMessages`' fallback emits
+     *  one single-occurrence message per entry, exactly [SEQ3_MAX_MESSAGES]'s own reproduction case. */
+    private fun dissimilarMessage(i: Int, targetLen: Int): String {
+        val letters = "abcdefghijklmnopqrstuvwxyz"
+        val word = buildString {
+            var n = i + 1
+            while (n > 0) {
+                append(letters[n % letters.length])
+                n /= letters.length
+            }
+        }
+        val head = "event kind $word detail "
+        return head + "x".repeat((targetLen - head.length).coerceAtLeast(0))
+    }
+
     // ── PERF regression: NAMED_VALUE's O(tail length²) backtracking fix (Seq3Tokenizer.kt) ──────
 
     @Test

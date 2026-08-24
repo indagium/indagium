@@ -159,10 +159,14 @@ fun generateSeq3(
     // by that occurrence's LogEntry.id as the deterministic tiebreak for same-millisecond rows —
     // "No layout concerns here" per this phase's brief; a caller wanting a different VIEW order
     // (by lifeline, by occurrence count, by state) sorts this list itself (Seq3Queue, phase 2).
-    val ordered = messages
+    val chronological = messages
         .sortedWith(compareBy({ it.occurrences.first().timestampMillis ?: Long.MAX_VALUE }, { it.occurrences.first().entryId }))
         .mapIndexed { index, message -> message.copy(id = "msg-${index + 1}") }
-        .let(::applySeq3OccurrenceBudget)
+    // P3a: cap message COUNT before the occurrence budget runs — see [applySeq3MessageCountBudget]'s
+    // own doc for why the asymmetry this closes (MAX_SEQ3_MESSAGES enforced only on decode) needs a
+    // cap here rather than a bigger occurrence budget, and why it must run first.
+    val (capped, elidedMessageCount) = applySeq3MessageCountBudget(chronological)
+    val ordered = applySeq3OccurrenceBudget(capped)
 
     return Seq3Document(
         title = options.title,
@@ -171,7 +175,58 @@ fun generateSeq3(
         lifelines = lifelines,
         messages = ordered,
         defaultRepeat = options.defaultRepeat,
+        elidedMessageCount = elidedMessageCount.takeIf { it > 0 },
     )
+}
+
+// ── P3a: document-wide message-count cap ────────────────────────────────────────────────────
+//
+// MAX_SEQ3_MESSAGES (Seq3Codec.kt) bounds decode only — nothing bounded message count at
+// GENERATION, the same encode/decode asymmetry W1a fixed for occurrence bytes. W1a's own budget
+// cannot cover this case: [trimSeq3MessageOccurrences] returns early once a message is already at
+// or below [SEQ3_MIN_OCCURRENCES_PER_MESSAGE] (2), so a SINGLE-occurrence message is never
+// trimmed — and a single-occurrence message is exactly what `buildMessages`' fallback emits ONE OF
+// per entry whenever a shape-group shares no provable pattern (this file, `buildMessages`'s second
+// `return`). Measured directly (a throwaway probe test built and deleted while sizing this
+// constant, mirroring how SEQ3_OCCURRENCE_OVERHEAD_BYTES was calibrated): 1 000 dissimilar 600-char
+// lines under one tag -> 1 000 single-occurrence messages, each encoding to ~2 945 chars. That
+// number is far higher than a same-sized occurrence alone (~814 B, see
+// SEQ3_OCCURRENCE_OVERHEAD_BYTES's own doc) because a single-occurrence message writes its raw
+// text into the JSON THREE separate times — Seq3Match.template, Seq3Message.labelTemplate, and the
+// lone Seq3Occurrence.text — none of which the occurrence-byte budget's estimator ever looks at,
+// since a message that never enters [trimSeq3MessageOccurrences]'s trim path contributes nothing
+// to that budget's accounting.
+//
+// 150 keeps the measured worst case (150 x ~2 945 chars =~ 431 KB) comfortably under
+// MAX_SEQ3_HEADER_CHARS (512 KB) with ~18% margin left for everything else the header still carries
+// (lifelines, the range object, document-level keys) — well below the 5 000-message decode bound
+// (3% of it), and in line with this package's existing readability posture: a diagram with hundreds
+// of arrows is already at the edge of what a reader can follow (SEQ3_OCCURRENCE_COUNT_CEILING
+// caps document-wide occurrence COUNT, across every message, at 1 200 for the identical reason).
+private const val SEQ3_MAX_MESSAGES = 150
+
+/**
+ * Caps [chronological] at [SEQ3_MAX_MESSAGES] messages, keeping the highest-evidence ones and
+ * dropping the rest. A message repeated many times is the more useful thing to keep on the canvas
+ * than one that fired once — see [SEQ3_MAX_MESSAGES]'s own doc for why "most repeated" is also,
+ * in the exact pathological case this cap exists for, the same as "earliest in log-clock order":
+ * `buildMessages`' fallback produces messages that ALL have exactly one occurrence, so the priority
+ * key ties, and the deterministic secondary sort below (original chronological position) resolves
+ * every tie by keeping the first [SEQ3_MAX_MESSAGES] in time order — never a guess, never dependent
+ * on any map's iteration order.
+ *
+ * Returns the possibly-trimmed list alongside how many messages were dropped, so the caller can
+ * report the true pre-cap total (mirrors [Seq3Message.totalOccurrenceCount]'s own "record what
+ * was really there" contract, one level up).
+ */
+private fun applySeq3MessageCountBudget(chronological: List<Seq3Message>): Pair<List<Seq3Message>, Int> {
+    if (chronological.size <= SEQ3_MAX_MESSAGES) return chronological to 0
+    val keptIds = chronological.withIndex()
+        .sortedWith(compareByDescending<IndexedValue<Seq3Message>> { it.value.occurrences.size }.thenBy { it.index })
+        .take(SEQ3_MAX_MESSAGES)
+        .mapTo(HashSet()) { it.value.id }
+    val kept = chronological.filter { it.id in keptIds }
+    return kept to (chronological.size - kept.size)
 }
 
 /**
