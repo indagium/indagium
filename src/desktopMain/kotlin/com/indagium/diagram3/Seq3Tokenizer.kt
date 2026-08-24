@@ -54,6 +54,51 @@ fun tokenizeSeq3Messages(tag: String, occurrences: List<Seq3TokenizeInput>): Seq
         return Seq3TokenizeResult(error = "Empty occurrence text cannot be tokenized")
     }
 
+    // (PERF) A single occurrence has nothing to vary against, so both compilers below are
+    // PROVABLY forced onto their own literal-template branch regardless of what the text contains
+    // — this short-circuits straight to that always-identical answer instead of paying for
+    // NAMED_VALUE.findAll's real (bounded, but non-trivial — measured ~270 us for a 600-char line)
+    // scan just to reach it. Two independent arguments, either of which alone would suffice:
+    //   - compileNamedValuePattern: `varyingNames = firstKeys.filter { valuesFor(it).size > 1 }`.
+    //     With exactly one occurrence, every `valuesFor(name)` maps over a ONE-element `matches`
+    //     list, so it is always a one-element set — `size > 1` can never hold, so `varyingNames`
+    //     is always empty, so it always takes the `if (varyingNames.isEmpty())` branch and returns
+    //     `Seq3Match(tag, template = occurrences.first().text)` with no captures. This holds
+    //     whether NAMED_VALUE finds zero, one, or many key/value pairs in the text — the "many
+    //     pairs" case just means `firstKeys` is longer, not that any of them varies.
+    //   - If NAMED_VALUE finds NO pairs at all, `compileNamedValuePattern` returns null first (its
+    //     own `matches.any { it.isEmpty() }` guard) and `compileSingleRunPattern` runs instead: for
+    //     one occurrence, `commonPrefix(first, first) == first.length` and `texts.all { it == first
+    //     }` are both trivially true (the list holds exactly one text, being compared to itself),
+    //     so it takes its OWN "no variation" branch and returns the identical
+    //     `Seq3Match(tag, template = first)` with no captures.
+    //   - Both branches also agree on `captureValuesByOccurrence`: `occurrences.associate { it.
+    //     occurrenceId to emptyMap() }` in both cases, and the caller-side `matchesText` check
+    //     below would trivially pass too (`declaredNames.isEmpty()` -> `text == match.template`,
+    //     true by construction) — nothing downstream of this point can ever disagree.
+    // See Seq3TokenizerTest's own corpus-driven proof comparing this path against the full one —
+    // if a future change to either compiler ever breaks this equivalence, that test catches it
+    // before this comment does.
+    if (occurrences.size == 1) {
+        val only = occurrences.single()
+        return Seq3TokenizeResult(
+            match = Seq3Match(tag = tag, template = only.text),
+            captureValuesByOccurrence = mapOf(only.occurrenceId to emptyMap()),
+        )
+    }
+
+    return tokenizeSeq3MessagesFullPath(tag, occurrences)
+}
+
+/**
+ * The pre-short-circuit compile path: always runs `compileNamedValuePattern`/
+ * `compileSingleRunPattern`/`matchesText` regardless of [occurrences]' size, never taking the
+ * single-occurrence fast path above. `internal`, not `private`, purely so
+ * `Seq3TokenizerTest`'s equivalence proof can call it directly with a single occurrence and
+ * compare its result against [tokenizeSeq3Messages]' actual (short-circuited) one — this is the
+ * ONLY reason this seam exists; every real caller goes through [tokenizeSeq3Messages].
+ */
+internal fun tokenizeSeq3MessagesFullPath(tag: String, occurrences: List<Seq3TokenizeInput>): Seq3TokenizeResult {
     val named = compileNamedValuePattern(tag, occurrences)
     val candidate = named ?: compileSingleRunPattern(tag, occurrences)
         ?: return Seq3TokenizeResult(
