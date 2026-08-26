@@ -5,6 +5,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -128,6 +129,41 @@ class CodexAppServerClientTest {
             listOf("initialize", "initialized", "thread/start", "thread/resume", "turn/start", "turn/interrupt"),
             process.sentMethods,
         )
+    }
+
+    @Test
+    fun startThreadSendsStructuredApprovalPolicy() = runBlocking {
+        lateinit var process: FakeProcess
+        process = FakeProcess { line ->
+            val message = Json.parseToJsonElement(line).jsonObject
+            if (message["method"]?.jsonPrimitive?.content == "thread/start") {
+                val policy = message["params"]!!.jsonObject["approvalPolicy"]!!.jsonObject
+                assertEquals(true, policy["granular"]!!.jsonObject["mcp_elicitations"]!!.jsonPrimitive.boolean)
+                process.respond("""{"id":${message["id"]},"result":{"thread":{"id":"thread-1"}}}""")
+            }
+        }
+
+        CodexAppServerClient(process).use { client ->
+            client.startThread(CodexThreadOptions(approvalPolicy = codexManagedMcpApprovalPolicy()))
+        }
+        Unit
+    }
+
+    @Test
+    fun initializeSendsExperimentalCapabilityForManagedMcpPolicy() = runBlocking {
+        lateinit var process: FakeProcess
+        process = FakeProcess { line ->
+            val message = Json.parseToJsonElement(line).jsonObject
+            if (message["method"]?.jsonPrimitive?.content == "initialize") {
+                assertEquals(true, message["params"]!!.jsonObject["capabilities"]!!.jsonObject["experimentalApi"]!!.jsonPrimitive.boolean)
+                process.respond("""{"id":${message["id"]},"result":{}}""")
+            }
+        }
+
+        CodexAppServerClient(process).use { client ->
+            client.initialize(capabilities = codexManagedMcpCapabilities())
+        }
+        Unit
     }
 
     @Test
