@@ -102,12 +102,12 @@ internal class AccountAgentRunner(
             environment = codexManagedMcpEnvironment(lease.token),
             scope = scope,
         ).use { client ->
-            client.initialize()
+            client.initialize(capabilities = codexManagedMcpCapabilities())
             val thread = client.startThread(
                 CodexThreadOptions(
                     cwd = workspace.toString(),
                     model = profile.model.takeIf(String::isNotBlank),
-                    approvalPolicy = "never",
+                    approvalPolicy = codexManagedMcpApprovalPolicy(),
                     sandbox = "read-only",
                     ephemeral = true,
                 ),
@@ -320,12 +320,32 @@ internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKi
 internal fun codexManagedMcpConfig(url: String): List<String> = listOf(
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.url=\"$url\"",
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.bearer_token_env_var=\"$CODEX_INDAGIUM_MCP_TOKEN_ENV\"",
-    // `approval_mode` is not a key Codex's app-server recognizes; in app-server mode Codex always
-    // delegates tool-call approval to the host via `mcpServer/elicitation/request`; see
-    // [decideCodexElicitation]. Indagium itself routes sensitive actions through
-    // AiToolExecutionCoordinator, so auto-approving Codex's side of that handshake is correct.
-    "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.approval_mode=\"never\"",
 )
+
+/**
+ * Lets Codex ask this host to approve calls to the per-run Indagium MCP server, but retains the
+ * read-only sandbox and rejects every other approval category. The host only accepts the managed
+ * server's elicitation in [decideCodexElicitation], and [AiToolExecutionCoordinator] still asks
+ * the user before any sensitive Indagium operation.
+ *
+ * A blanket `never` policy used to work because older Codex versions still surfaced MCP tool-call
+ * elicitations. Current versions reject the call before sending that request, so it prevents even
+ * read-only evidence gathering.
+ */
+internal fun codexManagedMcpApprovalPolicy(): JsonObject = buildJsonObject {
+    put("granular", buildJsonObject {
+        put("mcp_elicitations", true)
+        put("rules", false)
+        put("sandbox_approval", false)
+        put("request_permissions", false)
+        put("skill_approval", false)
+    })
+}
+
+/** Granular approval policies are an opt-in app-server capability. */
+internal fun codexManagedMcpCapabilities(): JsonObject = buildJsonObject {
+    put("experimentalApi", true)
+}
 
 internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
     mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)

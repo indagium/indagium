@@ -64,7 +64,12 @@ data class CodexClientInfo(
 data class CodexThreadOptions(
     val cwd: String? = null,
     val model: String? = null,
-    val approvalPolicy: String? = null,
+    /**
+     * Codex accepts both legacy string policies and the structured granular policy. Keeping this
+     * as JSON prevents the host from flattening a policy such as `{ granular: ... }` into a
+     * string, which would silently fall back to a different approval behavior.
+     */
+    val approvalPolicy: JsonElement? = null,
     val sandbox: String? = null,
     val ephemeral: Boolean? = null,
 )

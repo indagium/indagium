@@ -2,6 +2,7 @@ package com.indagium.ai
 
 import com.indagium.model.AiProviderKind
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
@@ -57,11 +58,26 @@ class AccountAgentRunnerTest {
             listOf(
                 "--config", "mcp_servers.indagium.url=\"http://127.0.0.1:41723/mcp\"",
                 "--config", "mcp_servers.indagium.bearer_token_env_var=\"INDAGIUM_MCP_TOKEN\"",
-                "--config", "mcp_servers.indagium.approval_mode=\"never\"",
             ),
             codexManagedMcpConfig("http://127.0.0.1:41723/mcp"),
         )
         assertEquals(mapOf("INDAGIUM_MCP_TOKEN" to "temporary-token"), codexManagedMcpEnvironment("temporary-token"))
+    }
+
+    @Test
+    fun codexManagedMcpApprovalPolicyAllowsOnlyMcpElicitations() {
+        val policy = codexManagedMcpApprovalPolicy().getValue("granular").jsonObject
+
+        assertEquals(true, policy["mcp_elicitations"]?.jsonPrimitive?.boolean)
+        assertEquals(false, policy["rules"]?.jsonPrimitive?.boolean)
+        assertEquals(false, policy["sandbox_approval"]?.jsonPrimitive?.boolean)
+        assertEquals(false, policy["request_permissions"]?.jsonPrimitive?.boolean)
+        assertEquals(false, policy["skill_approval"]?.jsonPrimitive?.boolean)
+    }
+
+    @Test
+    fun codexManagedMcpCapabilitiesOptIntoExperimentalAppServerFeatures() {
+        assertEquals(true, codexManagedMcpCapabilities()["experimentalApi"]?.jsonPrimitive?.boolean)
     }
 
     // Regression guard for the "one shared constant" invariant described on MANAGED_MCP_SERVER_NAME
