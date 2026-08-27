@@ -13,6 +13,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -1954,6 +1955,50 @@ class SourceIndexerTest {
         assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["collect"])
         assertEquals(InvocationKind.CALLBACK_REGISTRATION, kinds["collectLatest"])
         assertEquals(InvocationKind.SYNCHRONOUS, kinds["ordinary"])
+    }
+
+    // Enumeration used to run before the first cancellation check, so a root whose directory listing
+    // was slow (a network/VDI mount) could not be cancelled at all — the scan had to finish walking
+    // the whole tree first.
+    @Test
+    fun cancellationDuringDirectoryEnumerationAbortsBeforeAnyFileIsRead() {
+        val dir = createTempDirectory("openlog-src-cancel-walk")
+        repeat(40) { i -> dir.write("pkg$i/File$i.kt", "class File$i { fun run() { Log.d(\"T$i\", \"m\") } }") }
+        var discovered = 0
+
+        assertFailsWith<SourceIndexCancelledException> {
+            SourceIndexer.build(
+                roots = listOf(dir.toFile()),
+                // Cancel as soon as the walk has found something — i.e. while it is still
+                // enumerating, long before the read phase that used to own the first check.
+                cancellationCheck = { discovered > 0 },
+                discoveryProgress = { discovered = it },
+            )
+        }
+    }
+
+    @Test
+    fun cancellationBeforeAnythingIsDiscoveredAbortsImmediately() {
+        val dir = createTempDirectory("openlog-src-cancel-immediate")
+        dir.write("Only.kt", "class Only { fun run() { Log.d(\"T\", \"m\") } }")
+
+        assertFailsWith<SourceIndexCancelledException> {
+            SourceIndexer.build(roots = listOf(dir.toFile()), cancellationCheck = { true })
+        }
+    }
+
+    @Test
+    fun discoveryProgressReportsTheFinalSourceFileCount() {
+        val dir = createTempDirectory("openlog-src-discovery")
+        repeat(5) { i -> dir.write("pkg$i/File$i.kt", "class File$i { fun run() { Log.d(\"T$i\", \"m\") } }") }
+        dir.write("notes.txt", "not a source file")
+        dir.write("build/Generated.kt", "class Generated { fun run() { Log.d(\"G\", \"m\") } }")
+        var lastReported = 0
+
+        val index = SourceIndexer.build(roots = listOf(dir.toFile()), discoveryProgress = { lastReported = it })
+
+        assertEquals(5, lastReported)
+        assertEquals(5, index.fileMeta.size)
     }
 }
 

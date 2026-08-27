@@ -50,9 +50,12 @@ private class ProgressTracker(totalFiles: Int, phaseCount: Int, private val onPr
 
     private companion object {
         const val EMIT_EVERY_N_UNITS = 25
-        const val EMIT_INTERVAL_NANOS = 100_000_000L
     }
 }
+
+// Minimum wall-clock gap between progress emits, shared by ProgressTracker and build()'s
+// discovery-phase reporting.
+private const val EMIT_INTERVAL_NANOS = 100_000_000L
 
 /** Builds a [SourceIndex] by scanning `.kt`/`.java` files under [roots] for android.util.Log
  *  and Timber call sites — pure text/regex/brace-matching, no compiler or parser dependency
@@ -80,26 +83,58 @@ object SourceIndexer {
     // calls, extraction — see the phase-by-phase comments in build() below.
     private const val PHASE_COUNT = 6
 
+    @Suppress("LongParameterList")
     fun build(
         roots: List<File>,
         progress: ((scanned: Int, total: Int) -> Unit)? = null,
         options: SourceIndexBuildOptions = SourceIndexBuildOptions(),
         cancellationCheck: () -> Boolean = { false },
+        /** Called while the roots are still being enumerated, before the file count — and so any
+         *  meaningful (scanned, total) — is known. Directory enumeration is the one phase whose
+         *  cost is pure filesystem latency, which on a network-mounted root can be most of the
+         *  whole build; without this the UI sat on a bare "Indexing source…" for all of it. */
+        discoveryProgress: ((found: Int) -> Unit)? = null,
     ): SourceIndex {
-        val canonicalRoots = roots.mapNotNull(::canonicalFileOrNull).distinctBy { it.path }
-        val files = canonicalRoots.flatMap { collectSourceFiles(it) }.distinctBy { it.path }
-        val tracker = ProgressTracker(files.size, PHASE_COUNT, progress)
-
         fun checkCancelled() {
             if (cancellationCheck()) throw SourceIndexCancelledException()
         }
+
+        val canonicalRoots = roots.mapNotNull(::canonicalFileOrNull).distinctBy { it.path }
+        checkCancelled()
+        var discovered = 0
+        var lastDiscoveryEmit = 0L
+        val files = canonicalRoots
+            .flatMap { root ->
+                collectSourceFiles(root, ::checkCancelled) {
+                    // Throttled like ProgressTracker's emits, for the same reason: the walk is
+                    // sequential, so this is one Compose state write per accepted file otherwise.
+                    discovered++
+                    val now = System.nanoTime()
+                    if (now - lastDiscoveryEmit >= EMIT_INTERVAL_NANOS) {
+                        lastDiscoveryEmit = now
+                        discoveryProgress?.invoke(discovered)
+                    }
+                }
+            }
+            .distinctBy { it.path }
+        if (discovered > 0) discoveryProgress?.invoke(discovered)
+        val tracker = ProgressTracker(files.size, PHASE_COUNT, progress)
+
+        // collectSourceFiles already canonicalized every entry and verified it is contained in a
+        // root. Keeping the per-file authorization check (the read and extract phases both re-ran
+        // it) as a set lookup rather than a fresh `File.canonicalFile` call removes two filesystem
+        // round-trips per file — negligible locally, but on an SMB/VDI-mounted source folder those
+        // two extra resolutions per file were a large fraction of the whole build. Membership in
+        // this set is also a strictly stronger guarantee than re-canonicalizing: it says the
+        // traversal itself authorized exactly this path.
+        val authorizedPaths = files.mapTo(HashSet(files.size * 2)) { it.path }
 
         checkCancelled()
 
         // Phase 1/6: read every file's text (pure I/O, independent per file).
         val readResults = files.parallelStream().map { candidate ->
             checkCancelled()
-            val pathAndText = readSourceFileText(candidate, canonicalRoots)
+            val pathAndText = readSourceFileText(candidate, authorizedPaths)
             tracker.advance()
             pathAndText
         }.collect(java.util.stream.Collectors.toList())
@@ -160,7 +195,7 @@ object SourceIndexer {
         val extractionResults = files.parallelStream().map { candidate ->
             checkCancelled()
             val result = extractFileCallSites(
-                candidate, canonicalRoots, texts, globalConstants, wrapperRules,
+                candidate, authorizedPaths, texts, globalConstants, wrapperRules,
                 methodsByFile, declarationTablesByFile, callsByMethodForSites,
             )
             tracker.advance()
@@ -220,19 +255,19 @@ object SourceIndexer {
     // purely to keep build()'s own complexity/length down; each does exactly what its inline
     // block used to.
 
-    // Re-resolve and re-check immediately before reading. collectSourceFiles already returns
-    // canonical contained files, but keeping the authorization at the read boundary prevents a
-    // future traversal refactor from weakening this invariant.
-    private fun readSourceFileText(candidate: File, canonicalRoots: List<File>): Pair<String, String>? =
+    // Re-check immediately before reading. collectSourceFiles already returns canonical contained
+    // files, but keeping the authorization at the read boundary prevents a future traversal
+    // refactor from weakening this invariant.
+    private fun readSourceFileText(candidate: File, authorizedPaths: Set<String>): Pair<String, String>? =
         runCatching {
-            val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
-            file.path to file.readText()
+            if (candidate.path !in authorizedPaths) return@runCatching null
+            candidate.path to candidate.readText()
         }.onFailure { e -> AppLogger.error("source-index", "Failed to read source file", e) }.getOrNull()
 
     @Suppress("LongParameterList")
     private fun extractFileCallSites(
         candidate: File,
-        canonicalRoots: List<File>,
+        authorizedPaths: Set<String>,
         texts: Map<String, String>,
         globalConstants: Map<String, String>,
         wrapperRules: List<SourceWrapperRule>,
@@ -240,7 +275,8 @@ object SourceIndexer {
         declarationTablesByFile: Map<String, DeclarationTables>,
         callsByMethodForSites: Map<String, List<SourceDirectCall>>,
     ): FileExtractionResult? = runCatching {
-        val file = canonicalFileUnderRoots(candidate, canonicalRoots) ?: return@runCatching null
+        if (candidate.path !in authorizedPaths) return@runCatching null
+        val file = candidate
         val text = texts[file.path] ?: return@runCatching null
         val isJavaFile = file.extension.equals("java", true)
         val fileSites = extractCallSites(
@@ -421,21 +457,35 @@ object SourceIndexer {
         }.toByteArray(Charsets.UTF_8),
     ).take(12).joinToString("") { (it.toInt() and BYTE_MASK).toString(16).padStart(2, '0') }
 
-    private fun collectSourceFiles(root: File): List<File> {
+    // Enumeration is the one build phase that is pure filesystem latency, and on a network-mounted
+    // root it can dominate everything else — so it takes [checkCancelled] (previously the walk ran
+    // before the first cancellation check, making a slow root uninterruptible) and reports each
+    // accepted file through [onDiscovered] so the UI can show that it is making progress before a
+    // total exists. The name filters are evaluated before `Files.isSymbolicLink` and the
+    // containment check so a skipped directory (build/, .git/, node_modules/) costs no extra
+    // filesystem round-trips at all.
+    private fun collectSourceFiles(
+        root: File,
+        checkCancelled: () -> Unit,
+        onDiscovered: () -> Unit,
+    ): List<File> {
         if (!root.exists() || !root.isDirectory) return emptyList()
+        val roots = listOf(root)
         return root.walkTopDown()
             .onEnter { directory ->
+                checkCancelled()
                 directory == root || (
                     directory.name !in SKIP_DIR_NAMES &&
                         directory.name !in TEST_SOURCE_DIR_NAMES &&
                         !directory.name.startsWith(".") &&
                         !Files.isSymbolicLink(directory.toPath()) &&
-                        canonicalFileUnderRoots(directory, listOf(root)) != null
+                        canonicalFileUnderRoots(directory, roots) != null
                 )
             }
             .mapNotNull { candidate ->
-                if (!candidate.isFile || candidate.extension.lowercase() !in SOURCE_EXTENSIONS) return@mapNotNull null
-                canonicalFileUnderRoots(candidate, listOf(root))
+                checkCancelled()
+                if (candidate.extension.lowercase() !in SOURCE_EXTENSIONS || !candidate.isFile) return@mapNotNull null
+                canonicalFileUnderRoots(candidate, roots)?.also { onDiscovered() }
             }
             .toList()
     }

@@ -272,6 +272,31 @@ class SourceIndexAppStateTest {
     private fun newState(dir: File, sourceIndexFile: File = File(dir, "source-index")) =
         AppState(autosaveFile = File(dir, "state.cache"), sourceIndexFile = sourceIndexFile)
 
+    // The stuck-loading dialog's "Cancel loading" used to only cancel file loads. A source reindex
+    // holds the same loading overlay but is not an activeLoad, so cancelling hid the overlay while
+    // the scan kept running — the folder stayed in indexingFolders with its Reindex button disabled
+    // until the scan finished on its own, which on a network-mounted root is exactly the case the
+    // dialog exists for.
+    @Test
+    fun cancelAllLoadsAlsoCancelsAnInFlightSourceReindex() {
+        val dir = createTempDirectory("openlog-src-cancel-all-loads").toFile()
+        val srcDir = File(dir, "src").apply { mkdirs() }
+        repeat(60) { i ->
+            File(srcDir, "File$i.kt").writeText("class File$i { fun run() { Log.d(\"T$i\", \"m\") } }")
+        }
+        val state = newState(dir)
+        state.updateSettings { it.copy(sourceFolders = listOf(srcDir.absolutePath)) }
+        val rootAbs = File(srcDir.absolutePath).canonicalFile.absolutePath
+
+        state.reindexSources(srcDir.absolutePath)
+        state.cancelAllLoads()
+
+        assertTrue(rootAbs in state.cancelledIndexingFolders || rootAbs !in state.indexingFolders)
+        // The scan must actually unwind and release the folder, not merely be flagged.
+        waitUntil { rootAbs !in state.indexingFolders }
+        assertTrue(state.cancelledIndexingFolders.isEmpty())
+    }
+
     @Test
     fun settingsRoundTripPreservesSourceFolders() {
         val dir = createTempDirectory("openlog-src-settings").toFile()

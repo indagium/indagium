@@ -1443,6 +1443,11 @@ private fun SourceCodeSettingsSection(state: AppState) {
     ) {
         AppButton("Register source code", onClick = { state.pickSourceFolder() })
     }
+    // The "N files changed — reindex recommended" hint stats every indexed file, so it is computed
+    // off the UI thread (see AppState.refreshChangedFileCounts) and only re-checked when this
+    // section is actually shown — never per recomposition, which on a network-mounted source
+    // folder froze the dialog.
+    LaunchedEffect(state.settings.sourceFolders) { state.refreshChangedFileCounts() }
     SettingsScrollableRows {
         if (state.settings.sourceFolders.isEmpty()) {
             AppText(
