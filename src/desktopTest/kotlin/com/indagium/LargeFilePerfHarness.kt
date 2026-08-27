@@ -34,8 +34,8 @@ private const val CANCEL_AFTER_MS = 5L
 
 // Manual performance harness — skipped unless -Dindagium.perf.file=<path> (or the legacy
 // -Dopenlog.perf.file spelling) points at a fixture
-// (see docs/perf-large-files.md for how the ~1.5GB fixture is generated). Deliberately not part
-// of the normal suite: it needs a multi-GB heap and minutes of wall time.
+// of roughly 1.5 GB. Deliberately not part of the normal suite: it needs a multi-GB heap and
+// minutes of wall time.
 class LargeFilePerfHarness {
     private fun seqDef(matchText: String) = SequenceDef(
         id = "s1",

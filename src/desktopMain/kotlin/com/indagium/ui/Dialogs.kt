@@ -432,10 +432,9 @@ internal fun SplitDialogTextField(
     )
 }
 
-// How long isLoading must stay continuously true before the watchdog offers to intervene. Big
-// real files legitimately take a few seconds (see docs/perf-large-files.md); 30s is comfortably
-// past that so this doesn't fire on normal big-file loads, only on something that's actually
-// stuck.
+// How long isLoading must stay continuously true before the watchdog offers to intervene. Large
+// real files legitimately take a few seconds; 30s is comfortably past that so this doesn't fire
+// on normal big-file loads, only on something that's actually stuck.
 internal const val STUCK_LOADING_PROMPT_DELAY_MS = 30_000L
 
 @Composable
