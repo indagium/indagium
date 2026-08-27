@@ -159,6 +159,11 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+// Upper bound on AppState.canonicalPathCache. One entry per distinct source path ever resolved;
+// a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
+// then simply stops growing (later paths still resolve, just uncached).
+private const val CANONICAL_PATH_CACHE_MAX = 200_000
+
 // Auto-export runs on Dispatchers.IO, whose workers can finish two consecutive edits out of order.
 // Keep one write lane per output file and let a queued newer snapshot supersede an older one before
 // it reaches disk, so a stale Markdown/.ann pair cannot overwrite the latest annotation state.
@@ -1893,6 +1898,13 @@ class AppState(
     // for a stuck parser/extractor to observe coroutine cancellation.
     fun cancelAllLoads() {
         activeLoads.keys.toList().forEach { cancelActiveLoad(it) }
+        // A source reindex is not an activeLoad, but it does hold the loading overlay up — so
+        // without this the StuckLoadingDialog's "Cancel loading" hid the overlay and left the
+        // scan running, with its progress callback still writing loadingStatus and the folder
+        // stuck in indexingFolders (its Reindex button disabled) until the scan finally ended.
+        synchronized(stateLock) {
+            cancelledIndexingFolders = cancelledIndexingFolders + indexingFolders
+        }
         clearLoadingState()
     }
 
@@ -7641,9 +7653,29 @@ class AppState(
             sourceIndex = index
             sourceResolver = LogSourceResolver(index)
         }
+        // Stat every indexed file for the "N files changed" hint off-thread, once per published
+        // index, instead of once per Settings recomposition on the UI thread.
+        refreshChangedFileCounts()
     }
 
-    private fun canonicalSourcePath(path: String): String = runCatching {
+    // `File.canonicalFile` is a filesystem round-trip, and since JDK 12 the JDK's own canonical
+    // path cache is off by default, so every call really does hit the disk. That is a rounding
+    // error on a local SSD and a disaster on a Windows VDI / SMB-redirected source folder, where
+    // one resolution can cost milliseconds: sourceRootForPath below is invoked once per index
+    // record (tens of thousands of times per reindex merge and per Settings status render), and
+    // each invocation used to canonicalize the path plus every registered root. Memoizing the
+    // path -> canonical mapping for the process turns that back into a handful of real syscalls.
+    // Canonicalization of a given path is stable for a session in every way that matters here
+    // (source trees don't get re-symlinked underneath a running scan), and the cache is bounded
+    // so a long-lived session indexing many trees can't grow it without limit.
+    private val canonicalPathCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun canonicalSourcePath(path: String): String =
+        canonicalPathCache[path] ?: computeCanonicalSourcePath(path).also {
+            if (canonicalPathCache.size < CANONICAL_PATH_CACHE_MAX) canonicalPathCache[path] = it
+        }
+
+    private fun computeCanonicalSourcePath(path: String): String = runCatching {
         File(path).canonicalFile.absolutePath
     }.getOrElse {
         File(path).absoluteFile.toPath().normalize().toString()
@@ -7654,10 +7686,14 @@ class AppState(
         .distinct()
 
     /** Path-aware containment avoids both sibling-prefix matches (`/src` vs `/src2`) and symlink
-     * escapes. SourceIndexer/Store persist the same canonical representation. */
-    private fun isUnderSourceRoot(path: String, rootAbs: String): Boolean {
-        val candidate = File(canonicalSourcePath(path)).toPath()
-        val root = File(canonicalSourcePath(rootAbs)).toPath()
+     * escapes. SourceIndexer/Store persist the same canonical representation.
+     *
+     * Takes two already-canonical paths: every caller is a loop over thousands of index records,
+     * and canonicalizing the root once outside the loop rather than once per record is the whole
+     * point — `File.canonicalFile` is a filesystem round-trip. */
+    private fun isUnderCanonicalRoot(canonicalPath: String, canonicalRoot: String): Boolean {
+        val candidate = File(canonicalPath).toPath()
+        val root = File(canonicalRoot).toPath()
         return candidate == root || candidate.startsWith(root)
     }
 
@@ -7665,22 +7701,32 @@ class AppState(
     // source root with a different logging configuration). A source file belongs to the most
     // specific matching root; using the first configured folder would validate nested-module
     // sites against the wrong configuration fingerprint and make source actions appear disabled.
-    private fun sourceRootForPath(path: String): String? = registeredSourceRoots()
-        .asSequence()
-        .filter { root -> isUnderSourceRoot(path, root) }
-        .maxByOrNull { File(it).toPath().nameCount }
+    private fun sourceRootForPath(path: String): String? =
+        sourceRootForPath(path, registeredSourceRoots())
 
-    private fun belongsToSourceFolder(path: String, rootAbs: String): Boolean {
-        val canonicalRoot = canonicalSourcePath(rootAbs)
-        val registeredRoots = registeredSourceRoots()
-        return if (canonicalRoot in registeredRoots) {
-            sourceRootForPath(path) == canonicalRoot
+    // Overload taking a pre-resolved root list. Every bulk caller (the reindex merge, the prune,
+    // the per-folder status) resolves the roots once up front and passes them in; re-deriving
+    // them per record is what made those loops scale with filesystem latency rather than with
+    // the number of records.
+    private fun sourceRootForPath(path: String, roots: List<String>): String? {
+        if (roots.isEmpty()) return null
+        val canonical = canonicalSourcePath(path)
+        return roots.asSequence()
+            .filter { root -> isUnderCanonicalRoot(canonical, root) }
+            .maxByOrNull { File(it).toPath().nameCount }
+    }
+
+    private fun belongsToSourceFolder(path: String, rootAbs: String): Boolean =
+        belongsToSourceFolder(path, canonicalSourcePath(rootAbs), registeredSourceRoots())
+
+    private fun belongsToSourceFolder(path: String, canonicalRoot: String, roots: List<String>): Boolean =
+        if (canonicalRoot in roots) {
+            sourceRootForPath(path, roots) == canonicalRoot
         } else {
             // Persisted-index inspection can happen before autosaved settings finish restoring;
             // preserve the status API's historical folder-scoped behavior in that case.
-            isUnderSourceRoot(path, canonicalRoot)
+            isUnderCanonicalRoot(canonicalSourcePath(path), canonicalRoot)
         }
-    }
 
     private fun fileChangedSince(path: String, meta: FileMeta): Boolean {
         val file = File(path)
@@ -7691,14 +7737,15 @@ class AppState(
     private fun pruneSourceIndexForRegisteredFolders() {
         val pruned = synchronized(stateLock) {
             val current = sourceIndex ?: return
-            val registeredRoots = registeredSourceRoots().toSet()
-            val methods = current.methods.filter { sourceRootForPath(it.filePath) != null }
+            val rootList = registeredSourceRoots()
+            val registeredRoots = rootList.toSet()
+            val methods = current.methods.filter { sourceRootForPath(it.filePath, rootList) != null }
             val methodIds = methods.mapTo(HashSet()) { it.id }
             SourceIndex(
                 version = SOURCE_INDEX_VERSION,
-                roots = registeredSourceRoots(),
-                sites = current.sites.filter { sourceRootForPath(it.filePath) != null },
-                fileMeta = current.fileMeta.filterKeys { sourceRootForPath(it) != null },
+                roots = rootList,
+                sites = current.sites.filter { sourceRootForPath(it.filePath, rootList) != null },
+                fileMeta = current.fileMeta.filterKeys { sourceRootForPath(it, rootList) != null },
                 builtAt = current.builtAt,
                 rootBuiltAt = current.rootBuiltAt.filterKeys { it in registeredRoots },
                 rootConfigFingerprints = current.rootConfigFingerprints.filterKeys { it in registeredRoots },
@@ -7706,9 +7753,7 @@ class AppState(
                 calls = current.calls.filter { call ->
                     call.callerMethodId in methodIds && call.candidateCalleeMethodIds.any { it in methodIds }
                 },
-                operations = current.operations.filter { operation ->
-                    current.methods.any { it.id == operation.methodId && sourceRootForPath(it.filePath) != null }
-                },
+                operations = current.operations.filter { it.methodId in methodIds },
                 revision = current.revision,
             )
         }
@@ -7724,7 +7769,8 @@ class AppState(
         val index = sourceIndex ?: return SourceIndexStatus()
         val rootAbs = canonicalSourcePath(folder)
         val builtAt = index.rootBuiltAt[rootAbs] ?: return SourceIndexStatus()
-        val metaEntries = index.fileMeta.filterKeys { belongsToSourceFolder(it, rootAbs) }
+        val roots = registeredSourceRoots()
+        val metaEntries = index.fileMeta.filterKeys { belongsToSourceFolder(it, rootAbs, roots) }
         val configurationChanged = index.rootConfigFingerprints[rootAbs] !=
             sourceConfigurationFingerprint(
                 sourceConfigurationsForFolder(rootAbs),
@@ -7732,11 +7778,63 @@ class AppState(
             )
         return SourceIndexStatus(
             fileCount = metaEntries.size,
-            siteCount = if (configurationChanged) 0 else index.sites.count { belongsToSourceFolder(it.filePath, rootAbs) },
+            siteCount = if (configurationChanged) {
+                0
+            } else {
+                index.sites.count { belongsToSourceFolder(it.filePath, rootAbs, roots) }
+            },
             builtAt = builtAt,
-            changedFileCount = metaEntries.count { (path, meta) -> fileChangedSince(path, meta) },
+            // Deliberately NOT recomputed here: see changedFileCount's own doc. Stat-ing every
+            // indexed file is filesystem work proportional to the tree, and this function runs
+            // in a Compose composable body (SettingsDialog's SourceFolderRow) on the UI thread,
+            // once per recomposition. On a network-mounted source folder that alone froze the
+            // Settings dialog for minutes. The count is refreshed off-thread by
+            // refreshChangedFileCounts() instead.
+            changedFileCount = cachedChangedFileCount(rootAbs),
             configurationChanged = configurationChanged,
         )
+    }
+
+    // Per-root "how many indexed files have drifted on disk" counts, refreshed off the UI thread
+    // (refreshChangedFileCounts) rather than recomputed inside sourceIndexStatusForFolder.
+    private var changedFileCounts by mutableStateOf<Map<String, Int>>(emptyMap())
+
+    // A root with no cached count yet reads as 0 for this frame and schedules the real count.
+    // That happens on the first status read after startup, where the index can be published
+    // before the autosaved sourceFolders list has finished restoring.
+    private fun cachedChangedFileCount(rootAbs: String): Int {
+        changedFileCounts[rootAbs]?.let { return it }
+        refreshChangedFileCounts()
+        return 0
+    }
+
+    // Collapses the refreshes that a burst of status reads (one per registered folder, per
+    // recomposition) would otherwise each launch — the work is identical for all of them.
+    private val changedFileCountRefreshInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** Recomputes [changedFileCounts] on [ioScope]. Cheap on a local disk, three stat calls per
+     *  indexed file on a network share — which is exactly why it must never run on the UI thread.
+     *  Called after a publish, when the Settings source section opens, and on the first status
+     *  read for a root with no cached count. */
+    fun refreshChangedFileCounts() {
+        if (!changedFileCountRefreshInFlight.compareAndSet(false, true)) return
+        ioScope.launch {
+            try {
+                val index = sourceIndex ?: return@launch
+                val roots = registeredSourceRoots()
+                // Folders the status API can be asked about are the registered ones plus whatever
+                // the persisted index still records — the two differ while autosaved settings are
+                // still restoring, and belongsToSourceFolder handles that case explicitly.
+                val subjects = (roots + index.rootBuiltAt.keys).distinct()
+                changedFileCounts = subjects.associateWith { root ->
+                    index.fileMeta.count { (path, meta) ->
+                        belongsToSourceFolder(path, root, roots) && fileChangedSince(path, meta)
+                    }
+                }
+            } finally {
+                changedFileCountRefreshInFlight.set(false)
+            }
+        }
     }
 
     // Single-flight per folder: a second call for the same folder while its scan is already
@@ -7763,7 +7861,11 @@ class AppState(
                     val configs = sourceConfigurationsForFolder(rootAbs)
                     SourceIndexer.build(
                         roots = listOf(File(rootAbs)),
-                        progress = { scanned, total -> loadingStatus = "Indexing source… ($scanned/$total)" },
+                        progress = { scanned, total ->
+                            if (rootAbs !in cancelledIndexingFolders) {
+                                loadingStatus = "Indexing source… ($scanned/$total)"
+                            }
+                        },
                         options = SourceIndexBuildOptions(
                             wrapperRules = configs.flatMap { it.wrapperRules },
                             autoDiscover = settings.sourceAutoDiscoveryEnabled,
@@ -7776,6 +7878,15 @@ class AppState(
                         // caught below like any other build failure — partial stays null, so the
                         // merge/save block is skipped and nothing partial is ever persisted.
                         cancellationCheck = { rootAbs in cancelledIndexingFolders },
+                        // Enumerating a network-mounted root can take longer than the indexing
+                        // that follows it; without this the overlay showed a bare
+                        // "Indexing source…" with no numbers for that whole stretch, which is
+                        // indistinguishable from a hang.
+                        discoveryProgress = { found ->
+                            if (rootAbs !in cancelledIndexingFolders) {
+                                loadingStatus = "Scanning source folder… ($found files)"
+                            }
+                        },
                     )
                 }.onFailure { error ->
                     if (error is SourceIndexCancelledException) {
@@ -7786,73 +7897,30 @@ class AppState(
                 }.getOrNull()
                 if (partial != null) {
                     val mergedAt = System.currentTimeMillis()
-                    val merged = synchronized(stateLock) {
-                        val registeredRoots = registeredSourceRoots().toSet()
-                        if (rootAbs !in registeredRoots) return@synchronized null
-                        val current = sourceIndex
-                        // Preserve sites from another still-registered root, including a nested
-                        // root with its own configuration, while dropping stale removed folders.
-                        val keptSites = current?.sites.orEmpty().filter {
-                            sourceRootForPath(it.filePath)?.let { owner -> owner != rootAbs } == true
-                        }
-                        val keptMeta = current?.fileMeta.orEmpty().filterKeys {
-                            sourceRootForPath(it)?.let { owner -> owner != rootAbs } == true
-                        }
-                        val rebuiltSites = partial.sites.filter { sourceRootForPath(it.filePath) == rootAbs }
-                        val rebuiltMeta = partial.fileMeta.filterKeys { sourceRootForPath(it) == rootAbs }
-                        val keptMethods = current?.methods.orEmpty().filter {
-                            sourceRootForPath(it.filePath)?.let { owner -> owner != rootAbs } == true
-                        }
-                        val rebuiltMethods = partial.methods.filter { sourceRootForPath(it.filePath) == rootAbs }
-                        val allMethods = (keptMethods + rebuiltMethods).distinctBy { it.id }
-                        val methodIds = allMethods.mapTo(HashSet()) { it.id }
-                        // A partial scan owns every call/operation whose *caller* method is in
-                        // this root.  Keeping the old records and then distincting by id leaves
-                        // deleted/rewritten call sites alive after a per-root reindex.  Calls from
-                        // another root into this one are retained: that other root remains their
-                        // source of truth and will be reindexed independently.
-                        val currentMethodRoot = current?.methods.orEmpty().associate { method ->
-                            method.id to sourceRootForPath(method.filePath)
-                        }
-                        val keptCalls = current?.calls.orEmpty().filter { call ->
-                            currentMethodRoot[call.callerMethodId] != rootAbs
-                        }
-                        val rebuiltCalls = partial.calls.filter { call ->
-                            partial.methods.any { it.id == call.callerMethodId && sourceRootForPath(it.filePath) == rootAbs }
-                        }
-                        val allCalls = (keptCalls + rebuiltCalls)
-                            .filter { call ->
-                                call.callerMethodId in methodIds && call.candidateCalleeMethodIds.any { it in methodIds }
-                            }
-                            .distinctBy { it.id }
-                        val keptOperations = current?.operations.orEmpty().filter { operation ->
-                            currentMethodRoot[operation.methodId] != rootAbs
-                        }
-                        val rebuiltOperations = partial.operations.filter { operation ->
-                            partial.methods.any { it.id == operation.methodId && sourceRootForPath(it.filePath) == rootAbs }
-                        }
-                        val allOperations = (keptOperations + rebuiltOperations)
-                            .filter { it.methodId in methodIds }
-                            .distinctBy { it.id }
-                        SourceIndex(
-                            version = SOURCE_INDEX_VERSION,
-                            roots = registeredSourceRoots(),
-                            sites = keptSites + rebuiltSites,
-                            fileMeta = keptMeta + rebuiltMeta,
-                            builtAt = mergedAt,
-                            rootBuiltAt = current?.rootBuiltAt.orEmpty().filterKeys { it in registeredRoots } + (rootAbs to mergedAt),
-                            rootConfigFingerprints = current?.rootConfigFingerprints.orEmpty().filterKeys { it in registeredRoots } +
-                                (rootAbs to sourceConfigurationFingerprint(
-                                    sourceConfigurationsForFolder(rootAbs),
-                                    settings.sourceAutoDiscoveryEnabled,
-                                )),
-                            methods = allMethods,
-                            calls = allCalls,
-                            operations = allOperations,
-                            revision = partial.revision,
-                        )
+                    // The merge itself runs OUTSIDE stateLock. It walks every record of both the
+                    // old and the new index (tens of thousands for a real project) and classifies
+                    // each by owning root, so holding the lock across it froze every UI-thread
+                    // state read for the whole duration — which on a network-mounted source
+                    // folder was minutes, and looked exactly like a hung app. Only the snapshot
+                    // read and the final publish take the lock; publishSourceIndex re-checks that
+                    // the root is still registered, so a folder removed mid-merge is still
+                    // dropped rather than resurrected.
+                    val snapshot = synchronized(stateLock) {
+                        val roots = registeredSourceRoots()
+                        if (rootAbs !in roots) null else roots to sourceIndex
                     }
-                    if (merged != null) {
+                    val merged = snapshot?.let { (rootList, current) ->
+                        loadingStatus = "Indexing source… merging"
+                        mergeReindexedRoot(rootAbs, rootList, current, partial, mergedAt)
+                    }
+                    // Re-check registration after the unlocked merge: the folder may have been
+                    // removed from Settings while it ran, and a removed folder must not have its
+                    // records written back. The same check also covers cancellation, which is
+                    // polled inside build() but can also arrive during the merge.
+                    val stillWanted = synchronized(stateLock) {
+                        rootAbs in registeredSourceRoots() && rootAbs !in cancelledIndexingFolders
+                    }
+                    if (merged != null && stillWanted) {
                         runCatching { SourceIndexStore.save(merged, sourceIndexFile) }
                             .onFailure { error -> AppLogger.error("source-index", "Failed to save source index", error) }
                         publishSourceIndex(merged)
@@ -7867,6 +7935,85 @@ class AppState(
                 finishLoading()
             }
         }
+    }
+
+    /** Folds a single root's freshly built [partial] index into [current], the whole-app index.
+     *
+     *  Pure over its arguments (it takes the registered-root list and the current index as
+     *  snapshots) so [reindexSources] can run it without holding `stateLock` — see the note at
+     *  its call site.
+     *
+     *  Every classification here is done with an id->root map built once, rather than by
+     *  re-deriving a record's owning root inside a `partial.methods.any { … }` scan per record.
+     *  Those scans were O(calls x methods) and O(operations x methods); on a 13k-operation index
+     *  that is ~50M iterations, and each surviving match paid a `File.canonicalFile` filesystem
+     *  round-trip. Same result, one linear pass. */
+    @Suppress("LongParameterList")
+    private fun mergeReindexedRoot(
+        rootAbs: String,
+        rootList: List<String>,
+        current: SourceIndex?,
+        partial: SourceIndex,
+        mergedAt: Long,
+    ): SourceIndex {
+        val registeredRoots = rootList.toSet()
+        // Preserve sites from another still-registered root, including a nested root with its own
+        // configuration, while dropping stale removed folders.
+        val keptSites = current?.sites.orEmpty().filter {
+            sourceRootForPath(it.filePath, rootList)?.let { owner -> owner != rootAbs } == true
+        }
+        val keptMeta = current?.fileMeta.orEmpty().filterKeys {
+            sourceRootForPath(it, rootList)?.let { owner -> owner != rootAbs } == true
+        }
+        val rebuiltSites = partial.sites.filter { sourceRootForPath(it.filePath, rootList) == rootAbs }
+        val rebuiltMeta = partial.fileMeta.filterKeys { sourceRootForPath(it, rootList) == rootAbs }
+        val keptMethods = current?.methods.orEmpty().filter {
+            sourceRootForPath(it.filePath, rootList)?.let { owner -> owner != rootAbs } == true
+        }
+        val rebuiltMethods = partial.methods.filter { sourceRootForPath(it.filePath, rootList) == rootAbs }
+        val allMethods = (keptMethods + rebuiltMethods).distinctBy { it.id }
+        val methodIds = allMethods.mapTo(HashSet()) { it.id }
+        // A partial scan owns every call/operation whose *caller* method is in this root. Keeping
+        // the old records and then distincting by id leaves deleted/rewritten call sites alive
+        // after a per-root reindex. Calls from another root into this one are retained: that other
+        // root remains their source of truth and will be reindexed independently.
+        val currentMethodRoot = current?.methods.orEmpty().associate { method ->
+            method.id to sourceRootForPath(method.filePath, rootList)
+        }
+        val rebuiltRootMethodIds = rebuiltMethods.mapTo(HashSet()) { it.id }
+        val keptCalls = current?.calls.orEmpty().filter { call ->
+            currentMethodRoot[call.callerMethodId] != rootAbs
+        }
+        val rebuiltCalls = partial.calls.filter { it.callerMethodId in rebuiltRootMethodIds }
+        val allCalls = (keptCalls + rebuiltCalls)
+            .filter { call ->
+                call.callerMethodId in methodIds && call.candidateCalleeMethodIds.any { it in methodIds }
+            }
+            .distinctBy { it.id }
+        val keptOperations = current?.operations.orEmpty().filter { operation ->
+            currentMethodRoot[operation.methodId] != rootAbs
+        }
+        val rebuiltOperations = partial.operations.filter { it.methodId in rebuiltRootMethodIds }
+        val allOperations = (keptOperations + rebuiltOperations)
+            .filter { it.methodId in methodIds }
+            .distinctBy { it.id }
+        return SourceIndex(
+            version = SOURCE_INDEX_VERSION,
+            roots = rootList,
+            sites = keptSites + rebuiltSites,
+            fileMeta = keptMeta + rebuiltMeta,
+            builtAt = mergedAt,
+            rootBuiltAt = current?.rootBuiltAt.orEmpty().filterKeys { it in registeredRoots } + (rootAbs to mergedAt),
+            rootConfigFingerprints = current?.rootConfigFingerprints.orEmpty().filterKeys { it in registeredRoots } +
+                (rootAbs to sourceConfigurationFingerprint(
+                    sourceConfigurationsForFolder(rootAbs),
+                    settings.sourceAutoDiscoveryEnabled,
+                )),
+            methods = allMethods,
+            calls = allCalls,
+            operations = allOperations,
+            revision = partial.revision,
+        )
     }
 
     // Settings "Cancel" button beside a folder's "Reindex" — a no-op unless that folder's scan is
