@@ -640,6 +640,7 @@ private val SEQUENCE_ITEM_SCHEMA = ObjectArrayItemSchema(
         "matchText" to "string", "isRegex" to "boolean", "endMatchText" to "string",
         "endIsRegex" to "boolean", "tag" to "string", "endTag" to "string",
         "priority" to "integer", "enabled" to "boolean", "id" to "string",
+        "scopeTid" to "integer",
     ),
     required = listOf("matchText"),
     descriptions = mapOf(
@@ -652,6 +653,9 @@ private val SEQUENCE_ITEM_SCHEMA = ObjectArrayItemSchema(
         "priority" to "Nesting priority among sequences; defaults to list order when omitted.",
         "enabled" to "Whether the sequence is active (default true).",
         "id" to "Stable id; auto-generated when omitted. Color is always server-assigned, not client-supplied.",
+        "scopeTid" to "Thread id (\"async\"/thread-scoped sequence): when set, pins both the start/end match and " +
+            "every swallowed entry to this exact tid, so interleaved lines from other threads stay outside the " +
+            "group instead of being absorbed into it. Omit (or null) for an ordinary unscoped sequence.",
     ),
 )
 
@@ -1173,6 +1177,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "tabId" to "string", "matchText" to "string", "isRegex" to "boolean",
             "endMatchText" to "string", "endIsRegex" to "boolean", "tag" to "string",
             "endTag" to "string", "priority" to "integer", "enabled" to "boolean",
+            "scopeTid" to "integer",
             required = listOf("tabId", "matchText"),
             descriptions = mapOf(
                 "matchText" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("matchText"),
@@ -1183,6 +1188,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "endTag" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("endTag"),
                 "priority" to "Nesting priority; defaults to after every existing sequence when omitted.",
                 "enabled" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("enabled"),
+                "scopeTid" to SEQUENCE_ITEM_SCHEMA.descriptions.getValue("scopeTid"),
             ),
         ),
     ),
