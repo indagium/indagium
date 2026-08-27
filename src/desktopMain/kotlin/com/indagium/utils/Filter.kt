@@ -750,12 +750,6 @@ internal fun computeItems(
     }
     val stackGroupByRid = stackGroups.associateBy { it.rid }
     val nestedStackGroupByRid = (allStackGroups - stackGroups.toSet()).associateBy { it.rid }
-    val stackClaimedIds = java.util.BitSet().also { bits ->
-        allStackGroups.forEach { g ->
-            bits.set(g.rid)
-            g.memberIds.forEach(bits::set)
-        }
-    }
 
     // Kept in the memoization cache for TabComputeCache's shape/downstream tooling, though the
     // recursive renderer below no longer needs a global "is this id swallowed by some sequence"
@@ -944,6 +938,21 @@ internal fun computeItems(
     // it must fall through and render — see the ManualC branch's collapsed case for why).
     fun swallowBoundFor(c: ChildRef): Int = if (c is ChildRef.ManualC) c.declaredEnd else c.end
 
+    // A member row is skippable only once its group's header has actually been emitted into
+    // `items` — never on the mere fact that it belongs to *some* stack-trace group (that global
+    // question is exactly what the old `stackClaimedIds` bitset got wrong: header emission is
+    // positional, pre-emptable by a container branch starting at the same index or jumped over by
+    // a collapsed ManualC, so a member could be marked "claimed" and skipped even though nothing
+    // ever rendered its header). Populated at emission time in the two stack-header branches below
+    // (both collapsed and expanded — a collapsed header's own `count` already accounts for its
+    // members, and expanding it later must be able to reveal them), then consulted by the member
+    // skip branch. Shared across every recursion level, which is safe because renderRange's walk is
+    // globally monotone in index and a member's index is always strictly greater than its group's
+    // `rid` index (computeStackTraceGroups only ever appends members after the trigger, and the
+    // prelude-promoted case sets `rid` to the line before the trigger) — so "was this group's
+    // header emitted?" is always settled by the time any of its members is reached.
+    val membersUnderEmittedStackHeader = java.util.BitSet()
+
     // ── Unified recursive renderer ────────────────────────────────────────────────────────────
     // Walks index range [lo, hi) into `data`, rendering `children` (sorted by start; crossing
     // siblings are already folded into one another by the hosting resolution above, so at any
@@ -1098,6 +1107,10 @@ internal fun computeItems(
                     val stg = stackGroupByRid.getValue(entry.id)
                     val exp = stg.gid in tab.expanded
                     items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    // Mark members as owned by an emitted header regardless of `exp` — a collapsed
+                    // header's count already accounts for them, and expanding it later must be able
+                    // to reveal them via this same bitset.
+                    stg.memberIds.forEach(membersUnderEmittedStackHeader::set)
                     if (exp) {
                         stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
                     }
@@ -1108,6 +1121,9 @@ internal fun computeItems(
                     val stg = nestedStackGroupByRid.getValue(entry.id)
                     val exp = stg.gid in tab.expanded
                     items += LogItem.StackTraceHeader(entry, stg.gid, indent, exp, stg.memberIds.size)
+                    // See the sibling stackGroupByRid branch above: mark unconditionally, not only
+                    // when exp.
+                    stg.memberIds.forEach(membersUnderEmittedStackHeader::set)
                     if (exp) {
                         stg.memberIds.forEach { id -> tab.rmap[id]?.let { items += LogItem.Row(it, indent + 1, DANGER_RED) } }
                     }
@@ -1135,7 +1151,14 @@ internal fun computeItems(
                     idx += 1
                 }
 
-                stackClaimedIds.get(entry.id) -> idx += 1 // stack-trace member row, shown only under its header
+                // Skip only if this member's OWN group header was actually emitted above — not
+                // merely because the entry belongs to some stack-trace group. A header can be
+                // pre-empted by a container branch starting at the same index (SeqC/NestedC/ManualC
+                // above) or jumped over entirely by a collapsed ManualC's jump to declaredEnd; in
+                // either case membersUnderEmittedStackHeader was never set for this id, so the
+                // member falls through to the `else` branch below and renders as a plain row at the
+                // current level instead of vanishing with no header left to reveal it.
+                membersUnderEmittedStackHeader.get(entry.id) -> idx += 1 // stack-trace member row, shown only under its emitted header
 
                 else -> {
                     // scopeTid/foreignIndent/foreignColor (only non-null/non-default when this call
