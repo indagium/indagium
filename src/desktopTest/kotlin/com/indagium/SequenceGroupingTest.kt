@@ -933,6 +933,262 @@ class SequenceGroupingTest {
         assertTrue(items.filterIsInstance<LogItem.ManualHeader>().isEmpty())
     }
 
+    // ── Stack-trace member skip must be ownership-aware, not global (row-loss regression) ─────
+    //
+    // Filter.kt used to decide "skip this stack-trace member row" from a single global bitset of
+    // every id any StackTraceGroup ever claimed — regardless of whether that group's own
+    // StackTraceHeader actually got emitted. Header emission is positional (a container branch
+    // starting at the same index can pre-empt it, or a collapsed ManualC can jump straight over
+    // it), so a member could be claimed and skipped with no header left anywhere to reveal it —
+    // gone with no row and no count. Shared fixture for the tests below: a plain line, a
+    // "FATAL EXCEPTION: main" trigger, its exception-class follow-up line, four "at ..." frames
+    // (all unconditional continuations, satisfying computeStackTraceGroups' Rule C), then three
+    // more plain lines — all on the same (default) pid/tid so the whole dump is one group:
+    // rid = 2 ("st_2"), memberIds = [3, 4, 5, 6, 7].
+
+    private fun crashDumpLogs() = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "App", "plain before"),
+        LogEntry(2, "10:00:00.100", LogLevel.E, "AndroidRuntime", "FATAL EXCEPTION: main"),
+        LogEntry(3, "10:00:00.200", LogLevel.E, "AndroidRuntime", "java.lang.NullPointerException: boom"),
+        LogEntry(4, "10:00:00.300", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onCreate(Main.java:10)"),
+        LogEntry(5, "10:00:00.400", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onResume(Main.java:20)"),
+        LogEntry(6, "10:00:00.500", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onStart(Main.java:30)"),
+        LogEntry(7, "10:00:00.600", LogLevel.E, "AndroidRuntime", "    at com.app.Main.onStop(Main.java:40)"),
+        // Doubles as the "endMatchText" target for the expanded/collapsed-sequence tests below —
+        // an ordinary plain line the manual-block-only tests never look at.
+        LogEntry(8, "10:00:00.700", LogLevel.I, "App", "after the dump"),
+        LogEntry(9, "10:00:00.800", LogLevel.I, "App", "plain after 2"),
+        LogEntry(10, "10:00:00.900", LogLevel.I, "App", "plain after 3"),
+    )
+
+    // Set-based sibling to assertEveryEntryAccountedForExactlyOnce (above): that helper sums
+    // header `count`s, which double-counts an id that's both folded into a collapsed header's
+    // count AND rendered again as its own escaped header — exactly the accepted-duplicate shape
+    // below — so it can't be used on these fixtures. This instead resolves *which ids* a
+    // collapsed header hides (from the tab's own analysis.stackTraceGroups, a fresh
+    // computeSeqGroups() over tab.filter.sequences — SeqGroup isn't cached on LogAnalysis, unlike
+    // stack groups — and the manual block's own resolved range) and asserts only coverage
+    // (rendered ∪ hidden == every id), never uniqueness — so the accepted duplicates still pass.
+    private fun assertNoEntryDisappears(tab: LogTab, items: List<LogItem>) {
+        val stackGroupsByGid = tab.analysis.stackTraceGroups.associateBy { it.gid }
+        val seqHiddenIdsByGid = mutableMapOf<String, Set<Int>>()
+        computeSeqGroups(tab.logData, tab.filter.sequences).forEach { sg ->
+            seqHiddenIdsByGid[sg.gid] = sg.plain.toSet() + sg.nested.flatMap { ng -> listOf(ng.rid) + ng.ch }
+            sg.nested.forEach { ng -> seqHiddenIdsByGid[ng.gid] = ng.ch.toSet() }
+        }
+        val manualBlocksById = tab.manualBlocks.filter { it.enabled }.associateBy { it.id }
+        val idsById = tab.logData.map { it.id }
+
+        fun manualHiddenIds(block: ManualCollapseBlock): Set<Int> {
+            val anchorIdx = idsById.indexOf(block.anchorId)
+            val range = when (block.direction) {
+                ManualCollapseDirection.TO_START -> 0..anchorIdx
+                ManualCollapseDirection.TO_END -> anchorIdx..idsById.lastIndex
+                ManualCollapseDirection.RANGE -> {
+                    val endIdx = idsById.indexOf(block.endId)
+                    minOf(anchorIdx, endIdx)..maxOf(anchorIdx, endIdx)
+                }
+            }
+            // The header itself already displays/renders the anchor entry, same -1 the count-based
+            // helper above applies for ManualHeader.
+            return range.map { idsById[it] }.toSet() - block.anchorId
+        }
+
+        val renderedIds = mutableSetOf<Int>()
+        val hiddenIds = mutableSetOf<Int>()
+        items.forEach { item ->
+            when (item) {
+                is LogItem.Row -> renderedIds += item.entry.id
+                is LogItem.SeqHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hiddenIds += seqHiddenIdsByGid[item.gid].orEmpty()
+                }
+                is LogItem.StackTraceHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hiddenIds += stackGroupsByGid[item.gid]?.memberIds.orEmpty()
+                }
+                is LogItem.ManualHeader -> {
+                    renderedIds += item.entry.id
+                    if (!item.expanded) hiddenIds += manualBlocksById[item.gid]?.let(::manualHiddenIds).orEmpty()
+                }
+            }
+        }
+        assertEquals(
+            tab.logData.map { it.id }.toSet(),
+            renderedIds + hiddenIds,
+            "some entries are neither rendered nor accounted for by a collapsed header that could reveal them",
+        )
+    }
+
+    @Test
+    fun collapsedManualBlockCuttingAStackDumpStillRendersTheDumpTail() {
+        // RANGE 1..4 collapses over the crash trigger (id 2) and two of its members (ids 3, 4),
+        // ending in the MIDDLE of the dump — the group's StackTraceHeader is jumped over entirely
+        // (never reached, never emitted), so its remaining members (5, 6, 7) must fall through and
+        // render as plain rows rather than vanish with no header left to reveal them.
+        val logs = crashDumpLogs()
+        val block = ManualCollapseBlock("m1", 1, ManualCollapseDirection.RANGE, endId = 4)
+        val tab = mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        val header = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(1, header.entry.id) // RANGE 1..4's anchor is id 1 itself — no leading plain row
+        assertFalse(header.expanded)
+        assertEquals(4, header.count)
+        assertTrue(items.filterIsInstance<LogItem.StackTraceHeader>().isEmpty())
+        assertEquals(listOf(5, 6, 7, 8, 9, 10), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        assertNoEntryDisappears(tab, items)
+    }
+
+    @Test
+    fun collapsedManualBlockStartingOnTheCrashHeaderStillRendersTheDumpTail() {
+        // Same defect, the block starting exactly ON the crash trigger this time (RANGE 2..4):
+        // the ManualC branch pre-empts the stack-header branch at that shared index, so again no
+        // StackTraceHeader is ever emitted and 5, 6, 7 must still render.
+        val logs = crashDumpLogs()
+        val block = ManualCollapseBlock("m1", 2, ManualCollapseDirection.RANGE, endId = 4)
+        val tab = mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.StackTraceHeader>().isEmpty())
+        assertEquals(listOf(1, 5, 6, 7, 8, 9, 10), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        assertNoEntryDisappears(tab, items)
+    }
+
+    @Test
+    fun expandedSequenceStartingOnACrashHeaderStillRendersTheDumpRows() {
+        // The sequence's own start pattern matches the crash trigger line itself, so the
+        // ChildRef.SeqC branch pre-empts the stack-header branch at that index — no
+        // StackTraceHeader is ever emitted for this group. Expanded, the dump's rows must still
+        // render as this sequence's own (untinted-red) plain children, not vanish.
+        val logs = crashDumpLogs()
+        val seq = SequenceDef(
+            "crashSeq", "FATAL EXCEPTION", priority = 1, color = Color.Red, tag = "AndroidRuntime",
+            endMatchText = "after the dump", endTag = "App",
+        )
+        val tab = mkTab("log", "test.log", logs)
+            .copy(filter = Filter(sequences = listOf(seq)), expanded = setOf("sg_crashSeq_2"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.StackTraceHeader>().isEmpty())
+        val seqHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(2, seqHeader.entry.id)
+        assertTrue(seqHeader.expanded)
+        val rows = items.filterIsInstance<LogItem.Row>().map { it.entry.id }
+        assertEquals(listOf(3, 4, 5, 6, 7), rows.filter { it in 3..7 })
+        assertNoEntryDisappears(tab, items)
+    }
+
+    @Test
+    fun collapsedSequenceStartingOnACrashHeaderAccountsForDumpRowsInItsCount() {
+        // Collapsed counterpart of the test above: the escaped-header defect only bites the
+        // EXPANDED case (a header that's never emitted can't be "expanded" — see the plan). While
+        // collapsed, the sequence's own swallow walk hides its interior the ordinary way and its
+        // count already accounts for every dump row plus the end-of-sequence line.
+        val logs = crashDumpLogs()
+        val seq = SequenceDef(
+            "crashSeq", "FATAL EXCEPTION", priority = 1, color = Color.Red, tag = "AndroidRuntime",
+            endMatchText = "after the dump", endTag = "App",
+        )
+        val tab = mkTab("log", "test.log", logs).copy(filter = Filter(sequences = listOf(seq)))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        assertTrue(items.filterIsInstance<LogItem.StackTraceHeader>().isEmpty())
+        val seqHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertFalse(seqHeader.expanded)
+        assertEquals(6, seqHeader.count) // ids 3-7 (the dump) plus id 8, the end-of-sequence line
+        assertEquals(listOf(1, 9, 10), items.filterIsInstance<LogItem.Row>().map { it.entry.id })
+        assertNoEntryDisappears(tab, items)
+    }
+
+    // ── Accepted duplicates (NOT this fix's target — see the plan's Non-goals) ────────────────
+    //
+    // Both cases below are pre-existing, deliberate overlaps: a container whose header is emitted
+    // at the SAME index as a stack-trace trigger, both expanded, renders that one entry twice —
+    // once as the container's own header/row, once as the stack trace's header. De-duplicating
+    // these would require knowing at emission time whether a later container header will really
+    // render, which the ascending index walk can't answer yet. Pinned here so a future change to
+    // this area has to decide about them consciously instead of accidentally fixing (or worsening)
+    // them as a side effect.
+
+    @Test
+    fun knownDuplicateExpandedManualBlockAnchoredOnACrashHeaderRendersItTwice() {
+        val logs = crashDumpLogs()
+        val block = ManualCollapseBlock("m1", 2, ManualCollapseDirection.TO_END, color = Color.Red)
+        val tab = mkTab("log", "test.log", logs)
+            .copy(manualBlocks = listOf(block), expanded = setOf(block.id, "st_2"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        // id 2 renders BOTH as the ManualHeader's own entry AND as the nested StackTraceHeader's
+        // entry (the manual block's inner recursion re-evaluates the stack-header branch, and
+        // renderRange's Row-only filter for the anchor doesn't strip a header).
+        val manualHeader = items.filterIsInstance<LogItem.ManualHeader>().single()
+        assertEquals(2, manualHeader.entry.id)
+        val stackHeader = items.filterIsInstance<LogItem.StackTraceHeader>().single()
+        assertEquals(2, stackHeader.entry.id)
+    }
+
+    @Test
+    fun knownDuplicateSequenceStartingOnAStackMemberRendersItTwice() {
+        val logs = crashDumpLogs()
+        // Starts on id 5, a MEMBER of the crash dump (not its trigger) — a different overlap shape
+        // from the tests above, where the sequence and the stack trigger share an index.
+        val seq = SequenceDef("resumeSeq", "onResume", priority = 1, color = Color.Blue, tag = "AndroidRuntime")
+        val tab = mkTab("log", "test.log", logs)
+            .copy(filter = Filter(sequences = listOf(seq)), expanded = setOf("st_2", "sg_resumeSeq_5"))
+
+        val items = computeItems(tab, applyFilter = true)
+
+        // id 5 renders BOTH as one of the expanded StackTraceHeader's own member rows (emitted
+        // directly from stg.memberIds, independent of the main index walk) AND, when the main walk
+        // itself later reaches index 5, as its own SeqHeader.
+        val memberRow = items.filterIsInstance<LogItem.Row>().single { it.entry.id == 5 }
+        assertEquals(DANGER_RED, memberRow.groupColor)
+        val seqHeader = items.filterIsInstance<LogItem.SeqHeader>().single()
+        assertEquals(5, seqHeader.entry.id)
+    }
+
+    @Test
+    fun stackTraceUnderACollapsingManualBlockNeverLosesAnEntryAcrossExpansionCombinations() {
+        // The bitset that marks "this member's header was emitted" must be shared across every
+        // recursion level (renderRange's walk is globally monotone in index — see the comment in
+        // Filter.kt), because an expanded ManualC's inner recursion can emit a stack header whose
+        // members extend past the block's own declared end: those members are rendered right there
+        // (from stg.memberIds, not from the inner recursion's own bounded index walk) and must
+        // still be correctly skipped once the OUTER walk reaches their own index afterward — a
+        // per-level-local bitset would double-render them instead.
+        val logs = crashDumpLogs()
+        // RANGE 1..4: covers the crash trigger (id 2) and two of its members (3, 4); members 5-7
+        // fall outside the block's own declared range but inside the stack group.
+        val block = ManualCollapseBlock("m1", 1, ManualCollapseDirection.RANGE, endId = 4)
+        val allCombos = listOf(
+            emptySet(), setOf(block.id), setOf("st_2"), setOf(block.id, "st_2"),
+        )
+        for (expanded in allCombos) {
+            val tab = mkTab("log", "test.log", logs).copy(manualBlocks = listOf(block), expanded = expanded)
+            val items = computeItems(tab, applyFilter = true)
+            assertNoEntryDisappears(tab, items)
+            // The other half of the shared-bitset claim, which assertNoEntryDisappears (coverage
+            // only, never uniqueness — see its doc) can't make: no id renders twice. This fixture
+            // has none of the accepted-duplicate overlaps pinned above, so every rendered id here
+            // must be distinct — which is exactly what a per-level-local bitset would break.
+            val renderedIds = items.map { item ->
+                when (item) {
+                    is LogItem.Row -> item.entry.id
+                    is LogItem.SeqHeader -> item.entry.id
+                    is LogItem.StackTraceHeader -> item.entry.id
+                    is LogItem.ManualHeader -> item.entry.id
+                }
+            }
+            assertEquals(renderedIds.size, renderedIds.toSet().size, "an entry id was rendered more than once for expanded=$expanded")
+        }
+    }
+
     // ── Crossing top-level sequences (data-loss regression) ──────────────────────────────────
     //
     // assignParents (SeqComputer.kt) only nests a candidate that's FULLY CONTAINED in another; two
