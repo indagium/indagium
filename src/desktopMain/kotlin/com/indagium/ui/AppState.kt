@@ -4756,20 +4756,40 @@ class AppState(
 
     // ── Context menu shortcuts ───────────────────────────────────────
 
-    // Given raw selected text (which may span ts/pid/tid/level/tag/msg),
-    // extract the message portion suitable for pattern matching in entry.msg.
-    private fun extractMsgText(sel: String, entry: LogEntry): String {
+    // The part of a rendered-line selection that lies inside entry.msg, or "" when the
+    // selection does not overlap the message at all (e.g. the user selected a pid or a
+    // timestamp). Exact, not heuristic: the message is the trailing field of the rendered
+    // line (see buildFullLineAnnotation), so a selection either lies wholly inside the
+    // message, or begins left of it and its message part is the longest suffix of the
+    // selection that is a prefix of the message.
+    internal fun messagePartOfSelection(sel: String, msg: String): String {
+        if (msg.contains(sel)) return sel // selection lies entirely within the message
+        for (i in sel.indices) { // longest suffix first
+            val suffix = sel.substring(i)
+            if (msg.startsWith(suffix)) return suffix
+        }
+        return ""
+    }
+
+    // Given raw selected text (which may span ts/pid/tid/level/tag/msg), extract the portion
+    // suitable for pattern matching against `haystack` — the string the caller's matcher will
+    // actually match against (e.g. "$tag $msg" for sequences, or `msg` alone for message rules).
+    private fun extractMsgText(sel: String, entry: LogEntry, haystack: String): String {
         val s = sel.trim()
         if (s.isBlank()) return entry.msg
-        // Selection ends with the full message but has leading noise: return just the message
-        if (s.endsWith(entry.msg) && s.length > entry.msg.length) return entry.msg
         // Selection starts with "tag: " prefix: strip it
         val prefix = "${entry.tag}: "
         if (s.startsWith(prefix)) {
             val rest = s.removePrefix(prefix)
             if (rest.isNotBlank()) return rest
         }
-        return s
+        messagePartOfSelection(s, entry.msg).takeIf { it.isNotBlank() }?.let { return it }
+        // The selection had nothing to do with the message (e.g. pid/timestamp) — if it still
+        // means something against the caller's matcher (e.g. a tag-only selection for a
+        // sequence, whose haystack includes the tag), keep it verbatim.
+        if (haystack.contains(s, ignoreCase = true)) return s
+        // Honest fallback: the selection matches nothing the caller will match against.
+        return entry.msg
     }
 
     // Re-centers the viewport on `entryId` after a ctx-menu action changes the tab's filter
@@ -4962,7 +4982,7 @@ class AppState(
     fun addSeqFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, "${entry.tag} ${entry.msg}")
         addSequence(c.tabId, text, false, newSeqColor, entry.tag); ctx = null
     }
 
@@ -5045,7 +5065,7 @@ class AppState(
     fun setSequenceStartFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, "${entry.tag} ${entry.msg}")
         pendingSequenceStart = PendingSequenceStart(text, entry.tag)
         ctx = null
     }
@@ -5058,7 +5078,7 @@ class AppState(
     fun setAsyncSequenceStartFromCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, "${entry.tag} ${entry.msg}")
         pendingSequenceStart = PendingSequenceStart(text, entry.tag, entry.tid)
         ctx = null
     }
@@ -5067,7 +5087,7 @@ class AppState(
         val c = ctx ?: return
         val start = pendingSequenceStart ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, "${entry.tag} ${entry.msg}")
         addSequence(c.tabId, start.text, false, newSeqColor, start.tag, text, false, entry.tag, start.scopeTid)
         pendingSequenceStart = null
         ctx = null
@@ -5078,7 +5098,7 @@ class AppState(
     fun hideMessagesLikeCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, entry.msg)
         addMessageRule(c.tabId, include = false, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
         ctx = null
     }
@@ -5086,7 +5106,7 @@ class AppState(
     fun showOnlyMessagesLikeCtx() {
         val c = ctx ?: return
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return
-        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry)
+        val text = if (c.selText.isBlank()) entry.msg else extractMsgText(c.selText, entry, entry.msg)
         addMessageRule(c.tabId, include = true, pattern = text, regex = false, tag = entry.tag, packagePrefix = null)
         requestScrollAnchor(c.tabId, c.entryId)
         ctx = null
@@ -5101,7 +5121,7 @@ class AppState(
     fun messageRuleVariantsFromCtx(): List<MessageRuleVariant> {
         val c = ctx ?: return emptyList()
         val entry = tab(c.tabId)?.rmap?.get(c.entryId) ?: return emptyList()
-        val selectedText = c.selText.takeIf { it.isNotBlank() }?.let { extractMsgText(it, entry) }
+        val selectedText = c.selText.takeIf { it.isNotBlank() }?.let { extractMsgText(it, entry, entry.msg) }
         return messageRuleVariantsForEntry(entry, selectedText)
     }
 
