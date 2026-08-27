@@ -7,6 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Never `git push` without asking the user first.**
 - Exception: after a branch has been merged into main, you may ask the user if they want to push main.
 
+## Planning files
+
+When the user asks to create a plan and save it as Markdown without specifying an exact folder,
+save it in `temp_visuals_not_for_git/`. This directory is intentionally ignored by Git. Use a
+user-specified location instead when one is provided.
+
 ## Versioning
 
 The single source of truth for the app version is `app.version` in `gradle.properties`. Whenever that value changes, update in the same commit:

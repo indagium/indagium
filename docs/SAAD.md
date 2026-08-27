@@ -150,7 +150,7 @@ strongest driver in the codebase and it explains, among other things:
 - Parsing being **deliberately sequential** — a parallel implementation benchmarked ~1.7x slower
   (`utils/LogParser.kt:36-38`).
 
-See [§19](#19-performance-and-scalability) for the full treatment. Background: `docs/perf-large-files.md`.
+See [§19](#19-performance-and-scalability) for the full treatment.
 
 ### D2 — Offline and private by default
 
@@ -2137,9 +2137,6 @@ enough that a naive implementation does not merely run slowly, it exhausts heap.
   cancellable async path.
 - **Eight independent debounces** ([§12.5](#125-debounce-inventory)).
 
-Detailed measurements and the reasoning behind several of these choices are in
-[perf-large-files.md](perf-large-files.md).
-
 ---
 
 ## 20. Build, packaging and release
@@ -2489,4 +2486,3 @@ Where to read about a given source file.
 - [mcp/README.md](mcp/README.md) — connecting an external MCP client.
 - [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md) — the tool reference.
 - [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md) — prompt patterns for log analysis.
-- [perf-large-files.md](perf-large-files.md) — large-file performance investigation.

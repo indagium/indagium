@@ -250,8 +250,8 @@ data class LogAnalysis(
     // (e.g. a bare LogTab(...) construction that forgets the field) must read as "not analyzed
     // yet," never as "analyzed, found nothing." With false as the default, that ambiguity was
     // exactly why FilterPanel.kt/Filter.kt/ControlServer.kt each grew a defensive "empty cached
-    // result -> recompute anyway" fallback instead of trusting an empty completed result — see
-    // P-02 in artifacts/review/. Every real completion path (buildLogAnalysis in AppState.kt)
+    // result -> recompute anyway" fallback instead of trusting an empty completed result. Every
+    // real completion path (buildLogAnalysis in AppState.kt)
     // sets this to false explicitly, so flipping the default doesn't change any intentional case.
     val pending: Boolean = true,
 )
