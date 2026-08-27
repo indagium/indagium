@@ -175,7 +175,7 @@ traces — and offers a picker. You can open several at once, each in its own ta
 contains a screen recording, you can attach it to the tab in the same step (see
 [§20](#20-video-sync)).
 
-<!-- GIF-03 · Bug report archive · 12s · drop a .zip → candidate picker appears →
+<!-- GIF-03 · Bug report archive · 6.1s · drop a .zip → candidate picker appears →
      select the logcat entry and a video → both open, video attached -->
 ![Opening an Android bug report archive](images/gif-03-bugreport-zip.gif)
 
@@ -382,7 +382,7 @@ differences.
 vertically, showing the same log filtered on one side and complete on the other. Use it to check
 what your filter is hiding.
 
-<!-- GIF-06 · Compare view · 12s · open two logs → Compare → mirror the filter to the right →
+<!-- GIF-06 · Compare view · 12.4s · open two logs → Compare → mirror the filter to the right →
      scroll both, showing the same filter applied to a good run and a bad run -->
 ![Comparing a working run against a failing one](images/gif-06-compare.gif)
 
@@ -556,7 +556,11 @@ format updates metadata only; it does not rebuild the diagram.
 style (log blocks wrapped in `{code:java}`, images as `!frame-01.jpg!` wiki anchors), automatic block
 numbering, a custom prefix label, and auto-export on every edit.
 
-<!-- GIF-07 · Notes · 18s · select rows → Add annotation → write a sentence →
+<!-- GIF-11 · Sequence-diagram workspace · 20s · open a diagram from selected rows → inspect the
+     message queue and canvas → select the linked queue/canvas interaction → open export choices -->
+![Exploring a sequence-diagram workspace](images/gif-11-sequence-diagram-workspace.gif)
+
+<!-- GIF-07 · Notes · 15s · select rows → Add annotation → write a sentence →
      paste a screenshot → reorder blocks with Alt+arrow → Preview → Copy -->
 ![Building an analysis note and exporting it as Markdown](images/gif-07-notes.gif)
 
@@ -584,7 +588,7 @@ When a message is too generic to identify uniquely (a bare `"done"`), Indagium s
 guessing — matches below a specificity threshold are suppressed when any specific match exists, and
 capped in confidence when none does.
 
-<!-- GIF-08 · Show in code · 12s · right-click a log line → Show code →
+<!-- GIF-08 · Show in code · 5.9s · right-click a log line → Show code →
      popup with the exact method highlighted → Open in editor -->
 ![Jumping from a log line to the code that printed it](images/gif-08-show-in-code.gif)
 
@@ -648,7 +652,7 @@ for the whole recording.
 The player has play/pause, seek, a rate stepper, volume and mute, rotation (for recordings captured
 sideways), and a detach-to-window option.
 
-<!-- GIF-09 · Video sync · 18s · attach a recording → play to the failure moment →
+<!-- GIF-09 · Video sync · 15s · attach a recording → play to the failure moment →
      right-click the matching log row → Link to time → enable Follow log →
      scroll the log and watch the video track it → grab a frame into notes -->
 ![Anchoring a screen recording to the log and following along](images/gif-09-video-sync.gif)
@@ -732,10 +736,12 @@ Account-based agents (Codex, Claude Code) get a fresh empty temporary workspace 
 short-lived tool endpoint that is revoked when the run ends. They receive no source-folder or
 application-workspace access — all evidence reaches them through Indagium's tools.
 
-<!-- GIF-10 · AI assistant · 20s · right-click a crash line → Ask AI → Find root cause →
-     Investigation section streams tool calls → confirmation card appears → Allow →
-     final answer with clickable evidence cards -->
+<!-- GIF-10 · AI assistant · 19s · right-click a crash line → Ask AI → Find root cause →
+     Investigation section streams tool calls while the analysis runs -->
 ![Asking the AI assistant to find a root cause](images/gif-10-ai-assistant.gif)
+
+<!-- GIF-10 result · 12.8s · show the completed analysis in Markdown Preview and copy it -->
+![Reviewing and copying the AI assistant's completed analysis](images/gif-10-ai-assistant-result.gif)
 
 ---
 
