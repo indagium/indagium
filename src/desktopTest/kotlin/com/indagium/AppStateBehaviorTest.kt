@@ -71,8 +71,10 @@ import com.indagium.utils.ZipLogCandidateKind
 import com.indagium.utils.archiveVideoCacheFileName
 import com.indagium.utils.buildMd
 import com.indagium.utils.computeItems
+import com.indagium.utils.computeSeqGroups
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.listArchiveVideoCandidates
+import com.indagium.utils.passesFilter
 import com.indagium.utils.resolveProcessDisplayName
 import com.indagium.video.VideoPlayerController
 import kotlinx.coroutines.delay
@@ -6055,6 +6057,150 @@ class AppStateBehaviorTest {
         state.hideMessagesLikeCtx()
 
         assertEquals("real message", state.tabs.single().filter.messageRules.single().pattern)
+    }
+
+    // Regression guard for the reported bug: right-clicking a row with a selection that starts
+    // mid-tag, crosses the "tag: " colon, and ends mid-word (not at the end of entry.msg) used to
+    // be stored verbatim, producing a sequence/message-rule pattern that could not match anything
+    // — including the very row it was created from. extractMsgText's prefix-based rescue
+    // (messagePartOfSelection) must recover the message-only portion of the selection.
+    @Test
+    fun addSeqFromCtxCrossBoundarySelectionProducesAMatchingSequence() {
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.activeTabId = "t1"
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "viceManager: USB device register")
+
+        state.addSeqFromCtx()
+
+        val sequence = state.sequences.single()
+        assertEquals("USB device register", sequence.matchText)
+        val groups = computeSeqGroups(listOf(entry), listOf(sequence))
+        assertEquals(1, groups.size)
+    }
+
+    @Test
+    fun hideMessagesLikeCtxCrossBoundarySelectionProducesAMatchingRule() {
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "viceManager: USB device register")
+
+        state.hideMessagesLikeCtx()
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals("USB device register", rule.pattern)
+        assertFalse(passesFilter(entry, state.tabs.single().filter))
+    }
+
+    @Test
+    fun extractMsgTextPidOnlySelectionFallsBackToFullMessageInsteadOfAGarbagePattern() {
+        // "4241" is not a real substring of the message except as a coincidental trailing digit
+        // ("totalDevices=1" ends in "1", not "4241") — this pins the prefix-vs-contains decision:
+        // a naive containment check on suffixes could salvage a garbage single-char pattern.
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "4241")
+
+        state.hideMessagesLikeCtx()
+
+        assertEquals(entry.msg, state.tabs.single().filter.messageRules.single().pattern)
+    }
+
+    @Test
+    fun extractMsgTextTimestampOnlySelectionFallsBackToFullMessage() {
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "09:15:00.209")
+
+        state.hideMessagesLikeCtx()
+
+        assertEquals(entry.msg, state.tabs.single().filter.messageRules.single().pattern)
+    }
+
+    @Test
+    fun addSeqFromCtxTagOnlySelectionIsKeptVerbatimAndMatches() {
+        // The sequence haystack is "$tag $msg" (SeqComputer), so a tag-only selection is still a
+        // meaningful pattern there and must be kept as-is rather than falling back to entry.msg.
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.activeTabId = "t1"
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "UsbDeviceManager")
+
+        state.addSeqFromCtx()
+
+        val sequence = state.sequences.single()
+        assertEquals("UsbDeviceManager", sequence.matchText)
+        val groups = computeSeqGroups(listOf(entry), listOf(sequence))
+        assertEquals(1, groups.size)
+    }
+
+    @Test
+    fun hideMessagesLikeCtxTagOnlySelectionFallsBackToFullMessageAndMatches() {
+        // The message-rule haystack is entry.msg alone (Filter.kt), which does NOT contain the
+        // tag, so a tag-only selection must fall back to the full message rather than becoming an
+        // unmatchable pattern.
+        val state = AppState()
+        val entry = LogEntry(
+            1, "09:15:00.209", LogLevel.I, "UsbDeviceManager",
+            "USB device registered: deviceKey=usb-dev-001 totalDevices=1", 4241, 4241,
+        )
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(entry)))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "UsbDeviceManager")
+
+        state.hideMessagesLikeCtx()
+
+        val rule = state.tabs.single().filter.messageRules.single()
+        assertEquals(entry.msg, rule.pattern)
+        assertFalse(passesFilter(entry, state.tabs.single().filter))
+    }
+
+    // ── messagePartOfSelection (direct) ─────────────────────────────────────
+
+    @Test
+    fun messagePartOfSelectionSelectionWhollyInsideMessageReturnsItUnchanged() {
+        val state = AppState()
+        assertEquals(
+            "device register",
+            state.messagePartOfSelection("device register", "USB device registered: deviceKey=usb-dev-001"),
+        )
+    }
+
+    @Test
+    fun messagePartOfSelectionCrossingTagBoundaryReturnsTheMessagePart() {
+        val state = AppState()
+        assertEquals(
+            "USB device register",
+            state.messagePartOfSelection(
+                "viceManager: USB device register",
+                "USB device registered: deviceKey=usb-dev-001 totalDevices=1",
+            ),
+        )
+    }
+
+    @Test
+    fun messagePartOfSelectionNonOverlappingSelectionReturnsEmpty() {
+        val state = AppState()
+        assertEquals("", state.messagePartOfSelection("4241", "USB device registered: totalDevices=1"))
     }
 
     // ── addHlFromCtx ──────────────────────────────────────────────────────────
