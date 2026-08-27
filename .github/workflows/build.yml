@@ -403,7 +403,3 @@ jobs:
             `chmod +x <file>`, or use `flatpak install --user <file>` for a Flatpak bundle. The
             macOS build is unsigned, so Gatekeeper warns on first launch — see the README's
             Installation section for the workaround.
-
-            Updating from **1.6.1 or earlier on Linux ARM64?** Download the `arm64` package by hand
-            this once: that version's updater matched only on the `.deb` extension and will offer
-            you the amd64 build. From 1.7.0 onward it selects by architecture automatically.
