@@ -1236,6 +1236,12 @@ internal class IndagiumToolOperations(
                 endMatchText = m.str("endMatchText")?.takeIf { it.isNotBlank() },
                 endIsRegex = m.bool("endIsRegex") ?: false,
                 endTag = m.str("endTag")?.takeIf { it.isNotBlank() },
+                // Thread-scoped ("async") sequences (Wave 2.1). Without this, any client that
+                // reads a scoped sequence back via get_filter/sequenceDefToMap and later replays
+                // it through set_filter (e.g. to add one more sequence, or edit an unrelated
+                // field) silently rebuilds it unscoped — the def itself never told the client it
+                // was scoped, and even a client that already knew the tid couldn't get it back in.
+                scopeTid = m.int("scopeTid"),
             )
         }
     }
@@ -1782,6 +1788,10 @@ internal class IndagiumToolOperations(
         "id" to s.id, "enabled" to s.enabled, "priority" to s.priority,
         "tag" to s.tag, "matchText" to s.matchText, "isRegex" to s.isRegex,
         "endTag" to s.endTag, "endMatchText" to s.endMatchText, "endIsRegex" to s.endIsRegex,
+        // Thread-scoped ("async") sequences (Wave 2.1). Without this, a client reading the filter
+        // back via get_filter has no way to tell a scoped sequence apart from an ordinary one —
+        // see parseSequences' matching scopeTid field for the write side of this same round trip.
+        "scopeTid" to s.scopeTid,
     )
 
     // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,

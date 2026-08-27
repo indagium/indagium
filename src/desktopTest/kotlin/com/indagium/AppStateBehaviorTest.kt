@@ -49,6 +49,7 @@ import com.indagium.ui.blockOrderDuringDrag
 import com.indagium.ui.consumeFilterSearchRequest
 import com.indagium.ui.cumulativeBlockOffsets
 import com.indagium.ui.emptyWorkspaceTab
+import com.indagium.ui.filterFromAnnotationsToken
 import com.indagium.ui.filterSearchTargetForTab
 import com.indagium.ui.manualCollapseAvailability
 import com.indagium.ui.manualGroupKeyAtY
@@ -5842,6 +5843,157 @@ class AppStateBehaviorTest {
         val byId = state.sequences.associateBy { it.id }
         assertEquals(100, byId.getValue(aId).scopeTid)
         assertEquals(200, byId.getValue(bId).scopeTid)
+    }
+
+    // ── Bug repro: "async sequences are saved in the filter as regular sequence, not as async" ──
+    // Each test below exercises one real end-to-end path a scoped (scopeTid != null) SequenceDef
+    // can travel through, to isolate exactly which one (if any) drops scopeTid.
+
+    @Test
+    fun contextMenuAsyncStartAndEndPinsTheResultingSequenceToTheClickedRowsTid() {
+        val state = AppState()
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Start", "flow begin", tid = 4241),
+                    LogEntry(2, "10:00:00.100", LogLevel.I, "com.app.End", "flow done", tid = 4241),
+                ),
+            ),
+        )
+        state.activeTabId = "log"
+
+        state.ctx = CtxMenuState("log", 1, 0f, 0f, "")
+        state.setAsyncSequenceStartFromCtx()
+        state.ctx = CtxMenuState("log", 2, 0f, 0f, "")
+        state.completeSequenceEndFromCtx()
+
+        val sequence = state.sequences.single()
+        assertEquals("flow begin", sequence.matchText)
+        assertEquals("flow done", sequence.endMatchText)
+        assertEquals(4241, sequence.scopeTid, "async ctx-menu creation must pin scopeTid to the start row's own tid")
+    }
+
+    @Test
+    fun savedFiltersRoundTripScopedSequence() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "start", false, Color.Red, "StartTag", "end", false, "EndTag", scopeTid = 4241)
+        assertEquals(4241, state.sequences.single().scopeTid)
+
+        state.saveFilter(tabId, "with async sequence")
+        state.clearFilter(tabId)
+        state.loadFilter(tabId, state.savedFilters.single())
+
+        val sequence = state.sequences.single()
+        assertEquals("start", sequence.matchText)
+        assertEquals(4241, sequence.scopeTid, "saveFilter -> loadFilter must preserve scopeTid")
+    }
+
+    @Test
+    fun loadFilterByIdPreservesScopedSequence() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "start", false, Color.Red, scopeTid = 777)
+        state.saveFilter(tabId, "with async sequence")
+        val presetId = state.savedFilters.single().id
+        state.clearFilter(tabId)
+
+        assertTrue(state.loadFilterById(tabId, presetId))
+
+        assertEquals(777, state.sequences.single().scopeTid, "loadFilterById must preserve scopeTid")
+    }
+
+    @Test
+    fun exportedFiltersRoundTripScopedSequence() {
+        val source = AppState()
+        source.addTab()
+        source.addSequence(source.tabs.single().id, "start", true, Color.Red, "StartTag", "end", false, "EndTag", scopeTid = 4241)
+        source.saveFilter(source.tabs.single().id, "with async sequence")
+
+        val target = AppState()
+        target.importFilters(source.exportFilters())
+        target.addTab()
+        target.loadFilter(target.tabs.single().id, target.savedFilters.single())
+
+        val sequence = target.sequences.single()
+        assertEquals("start", sequence.matchText)
+        assertEquals(4241, sequence.scopeTid, "export -> import must preserve scopeTid")
+    }
+
+    @Test
+    fun importReviewFlowPreservesScopedSequence() {
+        val source = AppState()
+        source.addTab()
+        source.addSequence(source.tabs.single().id, "start", false, Color.Red, scopeTid = 4241)
+        source.saveFilter(source.tabs.single().id, "with async sequence")
+
+        val target = AppState()
+        target.beginImportFilters(source.exportFilters())
+        val row = target.pendingImportReview!!.rows.single()
+        target.setImportFilterAction(row.rowId, ImportFilterAction.ADD)
+        target.confirmImportFilters()
+        target.addTab()
+        target.loadFilter(target.tabs.single().id, target.savedFilters.single())
+
+        assertEquals(4241, target.sequences.single().scopeTid, "the import REVIEW flow (used by the UI) must preserve scopeTid")
+    }
+
+    @Test
+    fun draftFilterPreservesScopedSequenceAcrossAutosaveRoundTrip() {
+        val dir = createTempDirectory("openlog-async-seq-draft-restore").toFile()
+        val logFile = File(dir, "restore.log").apply {
+            writeText("06-26 10:00:00.000  123  456 I App: flow begin\n")
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(
+            mkTab("log", "restore.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "flow begin", tid = 4241)))
+                .copy(sourcePath = logFile.absolutePath),
+        )
+        state.activeTabId = "log"
+        state.addSequence("log", "flow begin", false, Color.Red, "App", scopeTid = 4241)
+        state.saveFilter("log", "async base")
+        // A further edit after loading a saved filter demotes the tab to an unsaved draft
+        // (updateFilterDraftAfterEdit) — the draft is a snapshot of the CURRENT filter, which
+        // still carries the scoped sequence added above.
+        state.addPkgPrefix("log", "com.example")
+        val draftBeforeSave = state.filterDraftForTab("log")
+        assertEquals(4241, draftBeforeSave?.sequences?.single()?.scopeTid, "editing must produce a draft that itself carries scopeTid")
+
+        state.autosaveNow()
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        val restoredTabId = restored.tabs.single().id
+
+        assertEquals(
+            4241,
+            restored.tabs.single().filter.sequences.single().scopeTid,
+            "the restored TAB's own filter must keep scopeTid",
+        )
+        assertEquals(
+            4241,
+            restored.savedFilters.single().sequences.single().scopeTid,
+            "the restored SAVED-FILTER LIBRARY entry must keep scopeTid",
+        )
+        val restoredDraft = restored.filterDraftForTab(restoredTabId)
+        assertEquals(4241, restoredDraft?.sequences?.single()?.scopeTid, "the restored DRAFT must keep scopeTid")
+    }
+
+    @Test
+    fun scopedSequenceEmbeddedInANoteSurvivesTheAnnotationsToken() {
+        val state = AppState()
+        state.addTab()
+        val tabId = state.tabs.single().id
+        state.addSequence(tabId, "start", false, Color.Red, scopeTid = 4241)
+        val filter = state.tabs.single().filter
+
+        val token = Annotations().annotationsToken(filter = filter)
+        val decoded = token.filterFromAnnotationsToken()
+
+        assertEquals(4241, decoded?.sequences?.single()?.scopeTid, "a filter embedded in a note token must keep scopeTid")
     }
 
     // ── Annotation block manipulation ─────────────────────────────────────────

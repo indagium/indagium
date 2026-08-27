@@ -294,6 +294,65 @@ class IndagiumToolGatewayTest {
         assertEquals(IndagiumToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("add_sequence"))
     }
 
+    // ── Bug repro: "async sequences are saved in the filter as regular sequence, not as async" ──
+    // Every UI-facing round trip (ctx-menu creation, saveFilter/loadFilter, export/import, the
+    // full autosave cycle, notes) preserves scopeTid — see AppStateBehaviorTest's tests under
+    // "Bug repro" for that coverage. The one path that did NOT was the AI/MCP tool gateway's
+    // get_filter/set_filter round trip: sequenceDefToMap (get_filter's DTO) never exposed scopeTid
+    // and parseSequences (set_filter's/add_sequence's constructor) never read it back, so any
+    // client that fetched a scoped sequence and later replayed it through set_filter — e.g. to add
+    // one more sequence, or to change an unrelated field while "preserving" the rest — silently
+    // got back an unscoped one. Both now round-trip scopeTid.
+    @Test
+    fun getFilterExposesScopeTidSoAnAsyncSequenceIsDistinguishableFromAnOrdinaryOne() {
+        state.addSequence("t1", "flow begin", false, Color.Red, "App", scopeTid = 4241)
+        assertEquals(4241, state.tab("t1")!!.filter.sequences.single().scopeTid)
+
+        val result = operations.toolGateway.execute("get_filter", mapOf("tabId" to "t1")) as Map<*, *>
+        val seq = (result["sequences"] as List<*>).single() as Map<*, *>
+
+        assertEquals("flow begin", seq["matchText"])
+        assertEquals(4241, seq["scopeTid"], "get_filter's sequence DTO must expose scopeTid")
+    }
+
+    @Test
+    fun setFilterSequencesRoundTripPreservesScopeTidOnAnExistingAsyncSequence() {
+        // Simulates the realistic AI-agent flow: read the current filter back with get_filter,
+        // then write it (or a lightly-edited copy of it) back with set_filter — e.g. to add one
+        // more sequence, or to change an unrelated field while "preserving" what's already there.
+        state.addSequence("t1", "flow begin", false, Color.Red, "App", scopeTid = 4241)
+        assertEquals(4241, state.tab("t1")!!.filter.sequences.single().scopeTid, "precondition: the sequence starts out async")
+
+        val fetched = operations.toolGateway.execute("get_filter", mapOf("tabId" to "t1")) as Map<*, *>
+        val fetchedSequences = fetched["sequences"] as List<*>
+
+        val saveResult = operations.toolGateway.execute(
+            "set_filter",
+            mapOf("tabId" to "t1", "sequences" to fetchedSequences),
+        ) as Map<*, *>
+        assertEquals(true, saveResult["ok"])
+
+        val savedSequence = state.tab("t1")!!.filter.sequences.single()
+        assertEquals("flow begin", savedSequence.matchText, "the sequence itself must survive the round trip")
+        assertEquals(
+            4241,
+            savedSequence.scopeTid,
+            "set_filter (IndagiumToolOperations.parseSequences) must preserve scopeTid on a round-tripped sequence " +
+                "instead of silently rebuilding it as unscoped",
+        )
+    }
+
+    @Test
+    fun addSequenceRouteAcceptsAnExplicitScopeTid() {
+        val result = operations.toolGateway.execute(
+            "add_sequence",
+            mapOf("tabId" to "t1", "matchText" to "flow begin", "scopeTid" to 4241),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        assertEquals(4241, state.tab("t1")!!.filter.sequences.single().scopeTid)
+    }
+
     @Test
     fun addSequenceRejectsBlankOrMissingMatchTextWithoutChangingSequences() {
         val blank = operations.toolGateway.execute("add_sequence", mapOf("tabId" to "t1", "matchText" to "  ")) as Map<*, *>
