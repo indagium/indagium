@@ -167,7 +167,7 @@ kotlin {
                 implementation(compose.materialIconsExtended)
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
-                implementation("org.tukaani:xz:1.10")
+                implementation("org.tukaani:xz:1.12")
                 // Native MCP server (ControlServer.kt): the app speaks MCP over Streamable HTTP
                 // so clients connect by URL with no Node bridge. The SDK's mcpStreamableHttp {}
                 // helper runs on Ktor (CIO engine); CORS lets browser-based MCP inspectors reach it.
