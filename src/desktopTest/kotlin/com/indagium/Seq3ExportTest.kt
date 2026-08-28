@@ -17,6 +17,8 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.Seq3RenderCache
 import com.indagium.ui.mkTab
+import com.indagium.utils.analysisAttributionHtml
+import com.indagium.utils.analysisAttributionMarkdown
 import com.indagium.utils.annotationDiagramFileName
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
@@ -207,5 +209,23 @@ class Seq3ExportTest {
         assertTrue(html.contains("<pre>"), "expected the source as preformatted text; got:\n$html")
         assertTrue(html.contains("sequenceDiagram"))
         assertFalse(html.contains("indagium:diagram3"))
+    }
+
+    @Test
+    fun analysisExportsCarryTheSharedAttributionFooterInMarkdownAndHtml() {
+        val markdown = buildMd(tabWith(AnnBlock.Note("n0", "Finding")), AppSettings())
+        val indented = buildMd(
+            tabWith(AnnBlock.Note("n0", "Finding")),
+            AppSettings(annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED),
+        )
+        val html = buildAnnotationsHtml(tabWith(AnnBlock.Note("n0", "Finding")), AppSettings())
+        val emptyHtml = buildAnnotationsHtml(tabWith(), AppSettings())
+
+        assertTrue(markdown.contains("---"))
+        assertTrue(markdown.contains(analysisAttributionMarkdown(AnnotationLogBlockStyle.JIRA_JAVA)), "got:\n$markdown")
+        assertTrue(indented.contains(analysisAttributionMarkdown(AnnotationLogBlockStyle.INDENTED)), "got:\n$indented")
+        assertTrue(html.contains("<hr>"))
+        assertTrue(html.contains(analysisAttributionHtml()), "HTML attribution should be linked; got:\n$html")
+        assertTrue(emptyHtml.contains(analysisAttributionHtml()), "empty HTML analyses still need attribution; got:\n$emptyHtml")
     }
 }

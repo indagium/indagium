@@ -89,23 +89,35 @@ private const val MIN_RENDER_SCALE = 0.05f
 private const val PLACEHOLDER_W = 360
 private const val PLACEHOLDER_H = 100
 
+// Kept in logical units, like every other raster dimension. The strip is deliberately outside
+// Seq3Layout's geometry so an opt-in branded export never changes canvas hit targets or the
+// unbranded note preview.
+private const val ATTRIBUTION_FOOTER_H = 24.0
+private const val ATTRIBUTION_FOOTER_PADDING_X = 8.0
+
 /**
  * Renders [layout] into a raster. Never throws and never returns a zero-sized image: an empty
  * layout (see [layoutSeq3]'s own doc for when that happens) renders a small explanatory placeholder
  * instead of an empty canvas, matching `diagram.SeqDiagramRenderer.renderSequenceDiagram`'s posture.
  */
-fun renderSeq3(layout: Seq3Layout, theme: Seq3RasterTheme, scale: Float = 2f): RenderedSeq3 {
+fun renderSeq3(
+    layout: Seq3Layout,
+    theme: Seq3RasterTheme,
+    scale: Float = 2f,
+    footer: String? = null,
+): RenderedSeq3 {
     val safeScale = if (scale.isFinite() && scale > 0f) scale else 1f
-    if (layout.lifelines.isEmpty()) return renderSeq3Placeholder(theme, safeScale)
+    val footerText = footer?.trim()?.takeIf(String::isNotEmpty)
+    if (layout.lifelines.isEmpty()) return renderSeq3Placeholder(theme, safeScale, footerText)
 
     var effectiveScale = safeScale
     var w = (layout.width * effectiveScale).roundToInt().coerceAtLeast(1)
-    var h = (layout.height * effectiveScale).roundToInt().coerceAtLeast(1)
+    var h = ((layout.height + footerHeight(footerText)) * effectiveScale).roundToInt().coerceAtLeast(1)
     if (w > MAX_IMAGE_DIM_PX || h > MAX_IMAGE_DIM_PX) {
         val shrink = minOf(MAX_IMAGE_DIM_PX.toFloat() / w, MAX_IMAGE_DIM_PX.toFloat() / h)
         effectiveScale = (effectiveScale * shrink).coerceAtLeast(MIN_RENDER_SCALE)
         w = (layout.width * effectiveScale).roundToInt().coerceIn(1, MAX_IMAGE_DIM_PX)
-        h = (layout.height * effectiveScale).roundToInt().coerceIn(1, MAX_IMAGE_DIM_PX)
+        h = ((layout.height + footerHeight(footerText)) * effectiveScale).roundToInt().coerceIn(1, MAX_IMAGE_DIM_PX)
     }
 
     val image = BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
@@ -113,28 +125,30 @@ fun renderSeq3(layout: Seq3Layout, theme: Seq3RasterTheme, scale: Float = 2f): R
     try {
         applyRenderingHints(g)
         g.scale(effectiveScale.toDouble(), effectiveScale.toDouble())
-        paintSeq3(g, layout, theme)
+        paintSeq3(g, layout, theme, footerText)
     } finally {
         g.dispose()
     }
     return RenderedSeq3(image, w, h, effectiveScale)
 }
 
-private fun renderSeq3Placeholder(theme: Seq3RasterTheme, scale: Float): RenderedSeq3 {
+private fun renderSeq3Placeholder(theme: Seq3RasterTheme, scale: Float, footer: String?): RenderedSeq3 {
     val w = (PLACEHOLDER_W * scale).roundToInt().coerceAtLeast(1)
-    val h = (PLACEHOLDER_H * scale).roundToInt().coerceAtLeast(1)
+    val h = ((PLACEHOLDER_H + footerHeight(footer)) * scale).roundToInt().coerceAtLeast(1)
     val image = BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB)
     val g = image.createGraphics()
     try {
         applyRenderingHints(g)
+        g.scale(scale.toDouble(), scale.toDouble())
         g.color = Color(theme.background, true)
-        g.fillRect(0, 0, w, h)
+        g.fillRect(0, 0, PLACEHOLDER_W, PLACEHOLDER_H)
         g.color = Color(theme.label, true)
-        g.font = Font(Font.SANS_SERIF, Font.PLAIN, (12 * scale).roundToInt().coerceAtLeast(1))
+        g.font = Font(Font.SANS_SERIF, Font.PLAIN, 12)
         val fm = g.fontMetrics
         val text = "No lifelines to diagram"
         val tw = fm.stringWidth(text)
-        g.drawString(text, ((w - tw) / 2).coerceAtLeast(0), h / 2 + fm.ascent / 2)
+        g.drawString(text, ((PLACEHOLDER_W - tw) / 2).coerceAtLeast(0), PLACEHOLDER_H / 2 + fm.ascent / 2)
+        if (footer != null) paintAttributionFooter(g, PLACEHOLDER_W.toDouble(), PLACEHOLDER_H.toDouble(), theme, footer)
     } finally {
         g.dispose()
     }
@@ -187,7 +201,7 @@ private const val ACTOR_GLYPH_GAP = 4.0
 private const val ACTOR_GLYPH_LEG_SPLIT_FRACTION = 0.28
 private const val ACTOR_GLYPH_ARM_FRACTION = 0.35
 
-private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme) {
+private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme, footer: String?) {
     g.color = Color(theme.background, true)
     g.fillRect(0, 0, layout.width.roundToInt(), layout.height.roundToInt())
 
@@ -197,6 +211,45 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme)
     layout.rows.forEach { paintRow(g, it, theme) }
     layout.notes.forEach { paintNoteBox(g, it, theme) }
     layout.delays.forEach { paintDelayBox(g, it, theme) }
+    if (footer != null) paintAttributionFooter(g, layout.width, layout.height, theme, footer)
+}
+
+private fun footerHeight(footer: String?): Double = if (footer == null) 0.0 else ATTRIBUTION_FOOTER_H
+
+/** Paints a small, self-contained attribution strip below the diagram content. It intentionally
+ *  uses only the raster theme's existing neutral roles, so adding attribution does not introduce a
+ *  second palette or alter the pixels above the strip. [g] is already in logical 1x units. */
+private fun paintAttributionFooter(
+    g: Graphics2D,
+    width: Double,
+    y: Double,
+    theme: Seq3RasterTheme,
+    text: String,
+) {
+    g.color = Color(theme.headerFill, true)
+    g.fillRect(0, y.roundToInt(), width.roundToInt().coerceAtLeast(1), ATTRIBUTION_FOOTER_H.roundToInt())
+    g.color = Color(theme.headerBorder, true)
+    g.stroke = BasicStroke(STROKE_THIN)
+    g.drawLine(0, y.roundToInt(), width.roundToInt().coerceAtLeast(1), y.roundToInt())
+
+    g.color = Color(theme.label, true)
+    g.font = fontFor(Seq3FontRole.BADGE)
+    val fm = g.fontMetrics
+    val availableWidth = (width - ATTRIBUTION_FOOTER_PADDING_X * 2).roundToInt().coerceAtLeast(1)
+    val displayText = ellipsizeFooterText(text, availableWidth, fm)
+    val textWidth = fm.stringWidth(displayText)
+    val baseline = y + (ATTRIBUTION_FOOTER_H - fm.height) / 2.0 + fm.ascent
+    val x = (width - ATTRIBUTION_FOOTER_PADDING_X - textWidth).roundToInt().coerceAtLeast(0)
+    g.drawString(displayText, x, baseline.roundToInt())
+}
+
+private fun ellipsizeFooterText(text: String, maxWidth: Int, metrics: java.awt.FontMetrics): String {
+    if (metrics.stringWidth(text) <= maxWidth) return text
+    val suffix = "…"
+    if (metrics.stringWidth(suffix) > maxWidth) return ""
+    var end = text.length
+    while (end > 0 && metrics.stringWidth(text.substring(0, end) + suffix) > maxWidth) end--
+    return text.substring(0, end) + suffix
 }
 
 // User-observed correction: a plain dash the whole way down didn't distinguish a delay's gap from

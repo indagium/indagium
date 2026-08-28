@@ -23,6 +23,7 @@ import com.indagium.ui.seq3DefaultNotePlacement
 import com.indagium.ui.seq3DisownAutoExpand
 import com.indagium.ui.seq3PaneSegments
 import com.indagium.ui.seq3PanelVisible
+import com.indagium.ui.seq3PngFileName
 import com.indagium.ui.seq3PrefixToggleSegments
 import com.indagium.ui.seq3ToggleFragmentSelection
 import com.indagium.ui.seq3ToggleLifelineSelection
@@ -439,6 +440,7 @@ class Seq3WorkspaceTest {
     @Test
     fun copyTargetLabelsMatchTheMenuTextForEveryTarget() {
         assertEquals("PNG image", seq3CopyTargetLabel(Seq3CopyTarget.PNG_IMAGE))
+        assertEquals("Download PNG", seq3CopyTargetLabel(Seq3CopyTarget.DOWNLOAD_PNG))
         assertEquals("PlantUML source", seq3CopyTargetLabel(Seq3CopyTarget.PLANTUML_SOURCE))
         assertEquals("Mermaid source", seq3CopyTargetLabel(Seq3CopyTarget.MERMAID_SOURCE))
     }
@@ -446,6 +448,14 @@ class Seq3WorkspaceTest {
     @Test
     fun copyTargetTextIsNullForPngSinceThatItemCopiesBytesNotText() {
         assertNull(seq3CopyTargetText(Seq3CopyTarget.PNG_IMAGE, Seq3Document()))
+        assertNull(seq3CopyTargetText(Seq3CopyTarget.DOWNLOAD_PNG, Seq3Document()))
+    }
+
+    @Test
+    fun downloadPngFileNameUsesTheTitleAndSanitizesNativePathCharacters() {
+        assertEquals("Login_flow_v1.png", seq3PngFileName(" Login / flow:v1 "))
+        assertEquals("Sequence_diagram_v3.png", seq3PngFileName(""))
+        assertEquals("Already_named.png", seq3PngFileName("Already_named.PNG"))
     }
 
     @Test

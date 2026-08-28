@@ -41,6 +41,9 @@ fun buildAnnotationsHtml(
     if (tab.annotations.suffix.isNotBlank()) {
         append("<hr><p>").append(escapeHtmlMultiline(tab.annotations.suffix)).append("</p>")
     }
+    // Match buildMd's footer, including for an empty analysis. The helper owns the exact linked
+    // product text so HTML and Markdown cannot drift apart.
+    append(analysisAttributionHtml())
     append("</div>")
 }
 

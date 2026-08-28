@@ -69,6 +69,7 @@ import com.indagium.ui.themeColors
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.analysisAttributionMarkdown
 import com.indagium.utils.archiveVideoCacheFileName
 import com.indagium.utils.buildMd
 import com.indagium.utils.computeItems
@@ -557,7 +558,8 @@ class AppStateBehaviorTest {
 
         assertTrue(md.startsWith("From LOGCAT_example.log\n\n1. Context"))
         assertTrue(md.contains("\n\n2. Evidence"))
-        assertTrue(md.endsWith("Next action"))
+        assertTrue(md.contains("Next action\n\n---"))
+        assertTrue(md.endsWith("${analysisAttributionMarkdown(AnnotationLogBlockStyle.JIRA_JAVA)}\n"))
     }
 
     @Test
@@ -6664,12 +6666,12 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun buildMdEmptyAnnotationsProducesEmptyString() {
+    fun buildMdEmptyAnnotationsStillIdentifiesTheGeneratingTool() {
         val tab = mkTab("t1", "test.log", emptyList()).copy(annotations = Annotations())
 
         val md = buildMd(tab, AppSettings())
 
-        assertEquals("", md)
+        assertEquals("---\n\n${analysisAttributionMarkdown(AnnotationLogBlockStyle.JIRA_JAVA)}\n", md)
     }
 
     @Test

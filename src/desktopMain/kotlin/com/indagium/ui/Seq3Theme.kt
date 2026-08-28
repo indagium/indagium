@@ -14,6 +14,7 @@ import com.indagium.diagram3.renderSeq3
 import com.indagium.diagram3.toPngBytes
 import com.indagium.model.AppSettings
 import com.indagium.model.ThemePreset
+import com.indagium.utils.diagramPngAttributionText
 import kotlin.math.roundToInt
 
 // ── Compose theme -> diagram3 raster theme, and a cache in front of layout + render ────────────
@@ -148,6 +149,11 @@ object Seq3RenderCache {
 
     private data class RenderKey(val layout: Seq3Layout, val theme: Seq3RasterTheme, val scale: Float)
 
+    // A branded PNG has a different height and pixel content from the normal PNG. Keep the
+    // attribution choice in the PNG-tier key (rather than letting a display/render cache entry be
+    // reused) so an export can never accidentally receive an unbranded image, or vice versa.
+    private data class PngKey(val render: RenderKey, val footer: String?)
+
     // Shared across every layout() call in the process: Seq3AwtTextMetrics already caches its own
     // FontMetrics internally (see its own doc), so a second instance here would only duplicate that
     // cache for no benefit — one shared instance also matches layoutSeq3's own "measured exactly
@@ -158,7 +164,7 @@ object Seq3RenderCache {
     private val layoutCache = boundedLru<Seq3Document, Seq3Layout>()
     private val rasterCache = boundedLru<RenderKey, RenderedSeq3>()
     private val displayCache = boundedLru<RenderKey, Seq3Display>()
-    private val pngCache = boundedLru<RenderKey, ByteArray>()
+    private val pngCache = boundedLru<PngKey, ByteArray>()
     private val layoutMissCount = java.util.concurrent.atomic.AtomicInteger()
     private val renderMissCount = java.util.concurrent.atomic.AtomicInteger()
 
@@ -198,13 +204,26 @@ object Seq3RenderCache {
     fun display(document: Seq3Document, theme: Seq3RasterTheme, scale: Float = 2f): Seq3Display =
         display(layout(document), theme, scale)
 
-    fun pngBytes(layout: Seq3Layout, theme: Seq3RasterTheme, scale: Float = 2f): ByteArray {
-        val key = RenderKey(layout, theme, scale)
+    /** Returns a PNG for an external destination. [footer] is opt-in: null is the historical
+     *  unbranded bytes used by on-screen previews/tests, while a non-blank footer gets its own
+     *  raster and cache entry below the diagram content. */
+    fun pngBytes(layout: Seq3Layout, theme: Seq3RasterTheme, scale: Float = 2f, footer: String? = null): ByteArray {
+        val footerText = footer?.trim()?.takeIf(String::isNotEmpty)
+        val key = PngKey(RenderKey(layout, theme, scale), footerText)
         synchronized(pngCache) { pngCache[key] }?.let { return it }
-        val png = render(layout, theme, scale).toPngBytes()
+        val png = if (footerText == null) {
+            render(layout, theme, scale).toPngBytes()
+        } else {
+            renderSeq3(layout, theme, scale, footer = footerText).toPngBytes()
+        }
         synchronized(pngCache) { pngCache[key] = png }
         return png
     }
+
+    /** Branded PNG bytes for a user-facing export/copy destination. On-screen display continues
+     *  through [display] and therefore never receives this footer strip. */
+    fun brandedPngBytes(layout: Seq3Layout, theme: Seq3RasterTheme, scale: Float = 2f): ByteArray =
+        pngBytes(layout, theme, scale, footer = diagramPngAttributionText())
 
     /** Drops everything. Same escape-hatch rationale as [DiagramRenderCache.clear]: only needed if
      *  a future change makes one of the cache keys' equality unreliable. */
