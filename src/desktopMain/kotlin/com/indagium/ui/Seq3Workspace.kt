@@ -320,7 +320,8 @@ private fun Seq3OutputGroup(state: AppState, session: Seq3WorkspaceSession) {
  *  mapping as plain functions the whole way except for the PNG item, which still renders through
  *  [Seq3RenderCache] directly in its own click handler (the same shape [AppState.copyRichPreview]
  *  already uses) since a raster needs a real [Seq3Document] and a resolved theme, not just its own
- *  text. */
+ *  text. The download item hands those exact same branded bytes to [AppState.downloadSeq3Png],
+ *  which owns the native save picker and asynchronous file write. */
 @Composable
 private fun Seq3CopyDropdown(state: AppState, session: Seq3WorkspaceSession) {
     val document = session.document
@@ -343,12 +344,19 @@ private fun Seq3CopyDropdown(state: AppState, session: Seq3WorkspaceSession) {
                     // The only item here that can throw (rasterizing the layout) — wrapped the
                     // same way copyRichPreview's own PNG render is, so a bad document can't crash
                     // the workspace out from under an otherwise plain clipboard action.
-                    Seq3CopyTarget.PNG_IMAGE -> runCatching {
-                        val png = Seq3RenderCache.pngBytes(
+                    Seq3CopyTarget.PNG_IMAGE,
+                    Seq3CopyTarget.DOWNLOAD_PNG -> runCatching {
+                        val png = Seq3RenderCache.brandedPngBytes(
                             Seq3RenderCache.layout(document),
                             resolveSeq3ThemeColors(document, state.settings).toSeq3RasterTheme(),
                         )
-                        state.copyImageToClipboard(png, document.title.ifBlank { "Sequence diagram v3" })
+                        when (target) {
+                            Seq3CopyTarget.PNG_IMAGE -> state.copyImageToClipboard(
+                                png,
+                                document.title.ifBlank { "Sequence diagram v3" },
+                            )
+                            Seq3CopyTarget.DOWNLOAD_PNG -> state.downloadSeq3Png(png, document.title)
+                        }
                     }
                     else -> seq3CopyTargetText(target, document)?.let(state::copyToClipboard)
                 }
@@ -358,22 +366,41 @@ private fun Seq3CopyDropdown(state: AppState, session: Seq3WorkspaceSession) {
     }
 }
 
-/** What `Copy ▾` ([Seq3CopyDropdown]) can put on the clipboard. */
-internal enum class Seq3CopyTarget { PNG_IMAGE, PLANTUML_SOURCE, MERMAID_SOURCE }
+/** What `Copy ▾` ([Seq3CopyDropdown]) can put on the clipboard or save to disk. */
+internal enum class Seq3CopyTarget { PNG_IMAGE, DOWNLOAD_PNG, PLANTUML_SOURCE, MERMAID_SOURCE }
 
 /** [Seq3CopyDropdown]'s menu-item label for each [Seq3CopyTarget]. */
 internal fun seq3CopyTargetLabel(target: Seq3CopyTarget): String = when (target) {
     Seq3CopyTarget.PNG_IMAGE -> "PNG image"
+    Seq3CopyTarget.DOWNLOAD_PNG -> "Download PNG"
     Seq3CopyTarget.PLANTUML_SOURCE -> "PlantUML source"
     Seq3CopyTarget.MERMAID_SOURCE -> "Mermaid source"
 }
 
+/**
+ * Default filename for [Seq3CopyTarget.DOWNLOAD_PNG]. Titles are user-editable, so collapse every
+ * run of characters that is unsafe in a native save dialog (including path separators, control
+ * characters, and Windows-reserved punctuation) to one underscore. Keeping dots and hyphens makes
+ * normal titles readable while the final extension is always the lowercase `.png` expected by the
+ * download action. Pure and filesystem-free so the filename contract stays directly testable.
+ */
+internal fun seq3PngFileName(title: String): String {
+    val safeTitle = title.trim().ifBlank { "Sequence diagram v3" }
+        .replace(Regex("[^a-zA-Z0-9._-]+"), "_")
+        .trim('.', '-', '_')
+        .ifBlank { "sequence_diagram" }
+    val withoutPng = safeTitle.replace(Regex("\\.png$", RegexOption.IGNORE_CASE), "")
+        .ifBlank { "sequence_diagram" }
+    return "$withoutPng.png"
+}
+
 /** Pure "what text does this target copy" half of [Seq3CopyDropdown] — split out so
  *  [Seq3WorkspaceTest] can assert the PlantUML/Mermaid selection without a composition. `null` for
- *  [Seq3CopyTarget.PNG_IMAGE]: that item copies bytes, not text, and is rendered directly by the
- *  click handler instead (see [Seq3CopyDropdown]'s own doc comment for why). */
+ *  [Seq3CopyTarget.PNG_IMAGE] and [Seq3CopyTarget.DOWNLOAD_PNG]: those items operate on bytes, not
+ *  text, and are rendered directly by the click handler instead (see [Seq3CopyDropdown]'s own doc
+ *  comment for why). */
 internal fun seq3CopyTargetText(target: Seq3CopyTarget, document: Seq3Document): String? = when (target) {
-    Seq3CopyTarget.PNG_IMAGE -> null
+    Seq3CopyTarget.PNG_IMAGE, Seq3CopyTarget.DOWNLOAD_PNG -> null
     Seq3CopyTarget.PLANTUML_SOURCE -> document.toPlantUml()
     Seq3CopyTarget.MERMAID_SOURCE -> document.toMermaid()
 }

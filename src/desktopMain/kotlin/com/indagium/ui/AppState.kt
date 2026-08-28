@@ -6075,6 +6075,26 @@ class AppState(
         Toolkit.getDefaultToolkit().systemClipboard.setContents(ImageTransferable(bytes, fallbackText), null)
     }
 
+    /**
+     * Saves branded PNG bytes produced by the sequence-diagram workspace through the native
+     * single-file save picker. The workspace deliberately renders the bytes before calling this,
+     * so Download PNG and Copy PNG image share the exact same theme/layout/branding output rather
+     * than maintaining two subtly different raster paths. The last chosen directory is persisted
+     * as the normal `defaultSaveDir` used by the other analysis exports.
+     */
+    fun downloadSeq3Png(bytes: ByteArray, title: String) {
+        val initialDir = initialDirectoryForPicker(settings.defaultSaveDir?.let(::File))
+        val target = pickSaveFile("Save Sequence Diagram PNG", seq3PngFileName(title), initialDir) ?: return
+        val parent = target.parentFile ?: return
+        updateSettings { it.copy(defaultSaveDir = parent.absolutePath) }
+        ioScope.launch {
+            runCatching { target.writeBytes(bytes) }.fold(
+                onSuccess = { AppLogger.info("export", "Saved sequence diagram PNG to ${target.absolutePath}") },
+                onFailure = { e -> AppLogger.error("export", "Failed to save sequence diagram PNG to ${target.absolutePath}", e) },
+            )
+        }
+    }
+
     // "Copy rich preview" (AnnotationPanel header / MdPreviewDialog) — the whole annotation, as
     // buildAnnotationsHtml() renders it, on the clipboard as text/html with inline <img> data
     // URIs, so a single paste reproduces text *and* pictures. Falls back to the same masked
@@ -6086,7 +6106,10 @@ class AppState(
         // for a document that follows it, so a pasted picture matches what the user is looking at
         // rather than a fixed light palette.
         val html = buildAnnotationsHtml(t, settings) { document ->
-            Seq3RenderCache.pngBytes(Seq3RenderCache.layout(document), resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme())
+            Seq3RenderCache.brandedPngBytes(
+                Seq3RenderCache.layout(document),
+                resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
+            )
         }
         val plainText = maskWordForCopy(buildMd(t, settings), settings)
         Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
@@ -6153,7 +6176,7 @@ class AppState(
         diagrams.forEachIndexed { index, (_, parsed) ->
             if (parsed.exportMode != com.indagium.diagram3.DiagramExportMode.IMAGE) return@forEachIndexed
             val diagramTheme = resolveSeq3ThemeColors(parsed.document, settings).toSeq3RasterTheme()
-            runCatching { Seq3RenderCache.pngBytes(Seq3RenderCache.layout(parsed.document), diagramTheme) }
+            runCatching { Seq3RenderCache.brandedPngBytes(Seq3RenderCache.layout(parsed.document), diagramTheme) }
                 .onSuccess { bytes ->
                     File(framesDir, annotationDiagramFileName(index + 1, t.annotations.frameStamp)).writeBytes(bytes)
                 }

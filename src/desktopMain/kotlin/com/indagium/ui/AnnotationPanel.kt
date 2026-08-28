@@ -2014,7 +2014,7 @@ private fun NoteBlock(
                     // the ambient app theme.
                     Seq3NoteParseCache.parse(block.text)?.document?.let { document ->
                         onCopyDiagramImage(
-                            Seq3RenderCache.pngBytes(
+                            Seq3RenderCache.brandedPngBytes(
                                 Seq3RenderCache.layout(document),
                                 resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
                             ),

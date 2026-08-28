@@ -10,9 +10,13 @@ import com.indagium.ui.Seq3RenderCache
 import com.indagium.ui.resolveSeq3ThemeColors
 import com.indagium.ui.themeColors
 import com.indagium.ui.toSeq3RasterTheme
+import com.indagium.utils.diagramPngAttributionText
+import java.io.ByteArrayInputStream
+import javax.imageio.ImageIO
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -137,6 +141,26 @@ class Seq3ThemeTest {
         assertEquals(1, Seq3RenderCache.layoutMissCountForTest(), "an identical document must reuse the cached layout")
         assertEquals(1, Seq3RenderCache.renderMissCountForTest(), "an identical (layout, theme, scale) must reuse the cached raster")
         assertTrue(first === second || first == second, "cached display results must be stable across calls")
+    }
+
+    @Test
+    fun brandedPngGetsAnOptInFooterWithoutChangingTheOnScreenDisplayOrPlainPngCache() {
+        val document = oneLifelineDocument()
+        val theme = themeColors(ThemePreset.LIGHT).toSeq3RasterTheme()
+        val layout = Seq3RenderCache.layout(document)
+
+        val plainBytes = Seq3RenderCache.pngBytes(layout, theme, scale = 1f)
+        val brandedBytes = Seq3RenderCache.brandedPngBytes(layout, theme, scale = 1f)
+        val brandedAgain = Seq3RenderCache.brandedPngBytes(layout, theme, scale = 1f)
+        val plainImage = ImageIO.read(ByteArrayInputStream(plainBytes))
+        val brandedImage = ImageIO.read(ByteArrayInputStream(brandedBytes))
+        val display = Seq3RenderCache.display(layout, theme, scale = 1f)
+
+        assertEquals("Created with Indagium · indagium.com", diagramPngAttributionText())
+        assertTrue(brandedImage.height > plainImage.height, "branded PNG should add a footer strip")
+        assertFalse(plainBytes.contentEquals(brandedBytes), "branded and plain PNG bytes must stay distinct")
+        assertTrue(brandedBytes.contentEquals(brandedAgain), "the branded PNG should have its own stable cache entry")
+        assertEquals(plainImage.height, display.rendered.heightPx, "on-screen display must remain unbranded")
     }
 
     @Test

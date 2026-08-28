@@ -1344,4 +1344,8 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
     if (tab.annotations.suffix.isNotBlank()) {
         appendLine("---"); appendLine(); append(tab.annotations.suffix)
     }
+    // Keep attribution outside the note body so a copied/exported analysis makes its origin
+    // clear without changing any annotation block's numbering or attachment anchors. This is
+    // intentionally unconditional: even an empty analysis should identify its generating tool.
+    appendAnalysisAttribution(settings.annotationLogBlockStyle)
 }
