@@ -26,6 +26,14 @@ internal enum class LogTextEncoding(
 
 private const val LOG_ENCODING_SAMPLE_BYTES = 8 * 1024
 private const val MIN_UTF16_ZERO_BYTES = 4
+private const val UTF8_BOM_FIRST_BYTE = 0xEF
+private const val UTF8_BOM_SECOND_BYTE = 0xBB
+private const val UTF8_BOM_THIRD_BYTE = 0xBF
+private const val UTF16_BOM_BIG_ENDIAN_FIRST_BYTE = 0xFE
+private const val UTF16_BOM_LITTLE_ENDIAN_FIRST_BYTE = 0xFF
+private const val BYTE_MASK = 0xFF
+private const val UTF16_NUL_SCORE_PENALTY = 20
+private const val UTF16_CONTROL_SCORE_PENALTY = 10
 
 private data class LogTextDecoding(
     val encoding: LogTextEncoding,
@@ -47,15 +55,16 @@ internal fun detectLogTextEncoding(sample: ByteArray): LogTextEncoding {
 }
 
 private fun detectLogTextDecoding(sample: ByteArray): LogTextDecoding {
-    if (sample.startsWithBytes(0xEF, 0xBB, 0xBF)) {
-        return LogTextDecoding(LogTextEncoding.UTF_8_BOM, bomLength = 3)
+    val bomDecoding = when {
+        sample.startsWithBytes(UTF8_BOM_FIRST_BYTE, UTF8_BOM_SECOND_BYTE, UTF8_BOM_THIRD_BYTE) ->
+            LogTextDecoding(LogTextEncoding.UTF_8_BOM, bomLength = 3)
+        sample.startsWithBytes(UTF16_BOM_BIG_ENDIAN_FIRST_BYTE, UTF16_BOM_LITTLE_ENDIAN_FIRST_BYTE) ->
+            LogTextDecoding(LogTextEncoding.UTF_16_BE, bomLength = 2)
+        sample.startsWithBytes(UTF16_BOM_LITTLE_ENDIAN_FIRST_BYTE, UTF16_BOM_BIG_ENDIAN_FIRST_BYTE) ->
+            LogTextDecoding(LogTextEncoding.UTF_16_LE, bomLength = 2)
+        else -> null
     }
-    if (sample.startsWithBytes(0xFE, 0xFF)) {
-        return LogTextDecoding(LogTextEncoding.UTF_16_BE, bomLength = 2)
-    }
-    if (sample.startsWithBytes(0xFF, 0xFE)) {
-        return LogTextDecoding(LogTextEncoding.UTF_16_LE, bomLength = 2)
-    }
+    if (bomDecoding != null) return bomDecoding
 
     val pairLength = sample.size - (sample.size % 2)
     if (pairLength < MIN_UTF16_ZERO_BYTES * 2) return LogTextDecoding(LogTextEncoding.UTF_8)
@@ -135,9 +144,9 @@ private fun scoreUtf16Candidate(text: String): Int {
     var score = stable.count { it == '\n' } * 100
     for (char in stable) {
         score += when {
-            char == '\u0000' -> -20
+            char == '\u0000' -> -UTF16_NUL_SCORE_PENALTY
             char == '\t' || char == '\r' || char == '\n' -> 0
-            char.isISOControl() -> -10
+            char.isISOControl() -> -UTF16_CONTROL_SCORE_PENALTY
             char.isLetterOrDigit() || char in " .,:;!?/\\-_()[]{}@#%+*=<>|\"'" -> 1
             else -> 0
         }
@@ -147,7 +156,7 @@ private fun scoreUtf16Candidate(text: String): Int {
 
 private fun ByteArray.startsWithBytes(vararg expected: Int): Boolean {
     if (size < expected.size) return false
-    return expected.indices.all { index -> (this[index].toInt() and 0xFF) == expected[index] }
+    return expected.indices.all { index -> (this[index].toInt() and BYTE_MASK) == expected[index] }
 }
 
 /**
@@ -172,7 +181,7 @@ private class Utf16BoundaryInputStream(
         while (true) {
             val count = read(one, 0, 1)
             if (count < 0) return -1
-            if (count > 0) return one[0].toInt() and 0xFF
+            if (count > 0) return one[0].toInt() and BYTE_MASK
         }
     }
 
@@ -186,7 +195,7 @@ private class Utf16BoundaryInputStream(
                 if (pendingByte >= 0) {
                     buffer[offset + written++] = pendingByte.toByte()
                 }
-                pendingByte = sourceBuffer[index].toInt() and 0xFF
+                pendingByte = sourceBuffer[index].toInt() and BYTE_MASK
                 totalByteParity = totalByteParity xor 1
             }
             return written
