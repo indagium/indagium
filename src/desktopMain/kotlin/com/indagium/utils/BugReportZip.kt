@@ -390,7 +390,7 @@ private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEn
             } else {
                 val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyList()
                 BoundedInputStream(zf.getInputStream(entry), maxEntryBytes).use { stream ->
-                    parseLogcatLines(stream.bufferedReader().lineSequence())
+                    openLogTextReader(stream).useLines { lines -> parseLogcatLines(lines) }
                 }
             }
         }
@@ -412,7 +412,7 @@ private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate
             } else {
                 val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: return@use emptyList()
                 BoundedInputStream(sevenZ.getInputStream(entry), maxEntryBytes).use { stream ->
-                    parseLogcatLines(stream.bufferedReader().lineSequence())
+                    openLogTextReader(stream).useLines { lines -> parseLogcatLines(lines) }
                 }
             }
         }
@@ -439,7 +439,7 @@ private fun extractSequentialCandidate(
                 // premature close could truncate away. Not `.use {}`'d separately — the outer
                 // openSequentialArchive(...).use{} below already closes `archive` (and therefore
                 // this wrapper's delegate) once the lambda returns.
-                parseLogcatLines(BoundedInputStream(archive, maxEntryBytes).bufferedReader().lineSequence())
+                openLogTextReader(BoundedInputStream(archive, maxEntryBytes)).useLines { lines -> parseLogcatLines(lines) }
             }
         }
     }
@@ -459,7 +459,7 @@ private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, m
             // Not `.use {}`'d separately — see extractSequentialCandidate's identical note on why
             // wrapping `tar` itself (rather than a fresh per-entry stream) is safe for this,
             // the terminal read, and why the outer `.use {}` above is enough cleanup on its own.
-            parseLogcatLines(BoundedInputStream(tar, maxEntryBytes).bufferedReader().lineSequence())
+            openLogTextReader(BoundedInputStream(tar, maxEntryBytes)).useLines { lines -> parseLogcatLines(lines) }
         }
     }
 

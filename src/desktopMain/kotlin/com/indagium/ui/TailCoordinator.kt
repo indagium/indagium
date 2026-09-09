@@ -9,6 +9,7 @@ import com.indagium.utils.computeMessageTemplates
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.detectArchiveFormat
+import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.mergeMessageTemplates
 import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.passesFilter
@@ -60,6 +61,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // there's no way to incrementally re-decompress "whatever got appended to the file since
         // last poll" the way a plain text file's new lines can just be read. Refuse to tail it.
         if (detectArchiveFormat(file) != ArchiveFormat.None) return
+        // FileTailer reads appended bytes as UTF-8. A UTF-16 source would turn every other byte
+        // into NULs and split lines at the wrong byte boundary, so static import supports it but
+        // live watching remains unavailable until a streaming decoder is designed for it.
+        if (isUtf16LogFile(file)) return
         val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
         val job = tailer.start(scope)
         activeTails[tabId] = ActiveTail(tailer, job)

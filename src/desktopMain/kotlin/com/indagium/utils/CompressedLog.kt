@@ -47,7 +47,7 @@ fun openCompressedLogStream(file: File, compressorName: String): InputStream =
 fun parseCompressedLog(file: File, compressorName: String, maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): CompressedLogParse {
     val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
     val counting = CountingInputStream(bounded)
-    val entries = counting.bufferedReader().useLines { lines -> parseLogcatLines(lines) }
+    val entries = openLogTextReader(counting).useLines { lines -> parseLogcatLines(lines) }
     return CompressedLogParse(entries, counting.count)
 }
 

@@ -14,6 +14,7 @@ import com.indagium.utils.openArchiveCandidateStream
 import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry
 import org.apache.commons.compress.archivers.sevenz.SevenZOutputFile
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
@@ -140,6 +141,21 @@ class BugReportZipTest {
         assertEquals("boom", entries[0].msg)
         assertEquals(1, entries[0].id)
         assertEquals(2, entries[1].id)
+    }
+
+    @Test
+    fun archiveCandidateSniffAndExtractionSupportUtf16Be() {
+        val dir = createTempDirectory("openlog-zip-utf16").toFile()
+        val text = "--------- beginning of kernel\n06-26 10:00:00.000  100  100 E App: boom\n"
+        val bytes = byteArrayOf(0xFE.toByte(), 0xFF.toByte()) + text.toByteArray(StandardCharsets.UTF_16BE)
+        val zip = buildZip(dir, "bugreport.zip", mapOf("main_log.txt" to bytes))
+
+        val candidate = listLogcatCandidates(zip).single()
+        val entries = extractCandidate(zip, candidate)
+
+        assertEquals(1, entries.size)
+        assertEquals("boom", entries.single().msg)
+        assertEquals("App", entries.single().tag)
     }
 
     @Test
