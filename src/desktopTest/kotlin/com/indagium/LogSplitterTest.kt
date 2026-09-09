@@ -2,8 +2,8 @@ package com.indagium
 
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.SPLIT_PROMPT_BYTES
-import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.parseLogcat
+import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
