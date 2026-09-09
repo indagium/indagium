@@ -19,24 +19,27 @@ private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:
 
 private const val TEXT_SNIFF_BYTES = 8000
 
-// Sniffs the first few KB for NUL bytes (the same heuristic git/most editors use to
-// distinguish text from binary) so files can be opened by content, not just by extension.
+// Sniffs the first few KB for NUL bytes (the same heuristic git/most editors use to distinguish
+// text from binary), while allowing an aligned UTF-16 layout, so files can be opened by content,
+// not just by extension.
 fun isLikelyTextFile(file: File): Boolean {
     if (!file.isFile) return false
     return runCatching { file.inputStream().use { isLikelyTextStream(it) } }.getOrDefault(false)
 }
 
-// Same NUL-byte sniff as isLikelyTextFile, but for a stream that isn't backed by a File — e.g.
-// a zip entry (see BugReportZip.kt), which can't be opened as a File without extracting it.
+// Same content sniff as isLikelyTextFile, but for a stream that isn't backed by a File — e.g. a
+// zip entry (see BugReportZip.kt), which can't be opened as a File without extracting it.
 fun isLikelyTextStream(stream: InputStream): Boolean =
-    runCatching { stream.readNBytes(TEXT_SNIFF_BYTES).none { it == 0.toByte() } }.getOrDefault(false)
+    runCatching { isLikelyTextSample(stream.readNBytes(TEXT_SNIFF_BYTES)) }.getOrDefault(false)
 
 // Deliberately sequential even for multi-GB files: a byte-range-chunked parallel parse (and a
 // batch-pipeline variant for archive streams) was implemented and benchmarked at ~1.7x SLOWER
 // than this on a 1.5GB/10.6M-line fixture — parsing here is allocation/GC-bound, not CPU-bound,
 // so extra threads just contend on the collector while the id fix-up pass doubles allocations.
 fun parseLogcat(file: File): List<LogEntry> =
-    file.bufferedReader().useLines { lines -> parseLogcatLines(lines) }
+    file.inputStream().use { stream ->
+        openLogTextReader(stream).useLines { lines -> parseLogcatLines(lines) }
+    }
 
 // Reusable core: parseLogcat(file) is the common case, but a bug-report zip entry (BugReportZip.kt)
 // or a live-tailed file (future work) needs to parse a Sequence<String> without a backing File,

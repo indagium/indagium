@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.utils.DEFAULT_SPLIT_POSTFIX
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.planSplitOutputs
+import com.indagium.utils.parseLogcat
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
@@ -82,5 +83,31 @@ class LogSplitterTest {
             val text = file.readText()
             text.isEmpty() || text.endsWith("\n")
         })
+    }
+
+    @Test
+    fun splitUtf16PartsDecodeEvenWhenOnlyTheFirstPartHasTheBom() {
+        val text = buildString {
+            repeat(12) { index ->
+                val message = if (index == 5) "line $index — π" else "line $index"
+                append("06-29 12:34:${(index % 60).toString().padStart(2, '0')}.789 1 1 I App: $message\n")
+            }
+        }
+        val dir = createTempDirectory("openlog-split-utf16").toFile()
+
+        for ((name, charset, bom) in listOf(
+            Triple("be", Charsets.UTF_16BE, byteArrayOf(0xFE.toByte(), 0xFF.toByte())),
+            Triple("le", Charsets.UTF_16LE, byteArrayOf(0xFF.toByte(), 0xFE.toByte())),
+        )) {
+            val sourceBytes = bom + text.toByteArray(charset)
+            val outputs = planSplitOutputs("$name.log", dir, "part", 3)
+            splitStreamToFiles(ByteArrayInputStream(sourceBytes), outputs, sourceBytes.size.toLong())
+
+            assertEquals(sourceBytes.toList(), outputs.flatMap { it.readBytes().toList() }, name)
+            val entries = outputs.flatMap { parseLogcat(it) }
+            assertEquals(12, entries.size, name)
+            assertTrue(entries.all { it.tag == "App" }, name)
+            assertEquals("line 5 — π", entries[5].msg, name)
+        }
     }
 }

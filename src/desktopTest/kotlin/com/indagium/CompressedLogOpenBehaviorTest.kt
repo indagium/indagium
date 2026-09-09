@@ -3,6 +3,7 @@ package com.indagium
 import com.indagium.ui.AppState
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
 import java.io.File
+import java.nio.charset.StandardCharsets
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -109,6 +110,26 @@ class CompressedLogOpenBehaviorTest {
         val state = AppState(File(dir, "state.cache"))
 
         state.openPath(gz)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+
+        state.startTailing(tabId)
+
+        assertFalse(state.tab(tabId)!!.tailing)
+    }
+
+    @Test
+    fun startTailingOnUtf16LogLeavesItNotTailing() {
+        val dir = createTempDirectory("openlog-utf16-tail").toFile()
+        val file = File(dir, "utf16.log").apply {
+            writeBytes(
+                byteArrayOf(0xFE.toByte(), 0xFF.toByte()) +
+                    "06-26 10:00:00.000  100  100 I App: hello\n".toByteArray(StandardCharsets.UTF_16BE),
+            )
+        }
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openPath(file)
         waitUntil { state.tabs.size == 1 && !state.isLoading }
         val tabId = state.tabs.single().id
 

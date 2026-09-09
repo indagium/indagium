@@ -1,14 +1,24 @@
 package com.indagium
 
 import com.indagium.model.LogLevel
+import com.indagium.utils.isLikelyTextFile
+import com.indagium.utils.isLikelyTextStream
+import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseMillisOfDay
+import java.io.ByteArrayInputStream
+import java.nio.charset.StandardCharsets
 import kotlin.io.path.createTempFile
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class LogParserTest {
+    private fun utf16Bytes(text: String, charset: java.nio.charset.Charset, bom: ByteArray): ByteArray =
+        bom + text.toByteArray(charset)
+
     @Test
     fun keepsRawLinesWhenNoLogcatFormatMatches() {
         val file = createTempFile(prefix = "openlog-raw", suffix = ".txt")
@@ -145,6 +155,71 @@ class LogParserTest {
 
         assertEquals(1, entries.size)
         assertEquals("App", entries.single().tag)
+    }
+
+    @Test
+    fun parsesUtf16BeWithBomAndDropsTheKernelSeparator() {
+        val file = createTempFile(prefix = "openlog-utf16be", suffix = ".log")
+        file.toFile().writeBytes(
+            utf16Bytes(
+                "--------- beginning of kernel\n06-29 12:34:56.789 1 1 I App: Started\n",
+                StandardCharsets.UTF_16BE,
+                byteArrayOf(0xFE.toByte(), 0xFF.toByte()),
+            ),
+        )
+
+        val entries = parseLogcat(file.toFile())
+
+        assertEquals(1, entries.size)
+        assertEquals("App", entries.single().tag)
+        assertEquals("Started", entries.single().msg)
+        assertTrue(isLikelyTextFile(file.toFile()))
+        assertTrue(isUtf16LogFile(file.toFile()))
+    }
+
+    @Test
+    fun parsesUtf16LeWithBomAndUtf8WithBom() {
+        val text = "--------- beginning of main\n06-29 12:34:56.789 1 1 I App: Started\n"
+        val utf16Le = createTempFile(prefix = "openlog-utf16le", suffix = ".log").toFile().apply {
+            writeBytes(utf16Bytes(text, StandardCharsets.UTF_16LE, byteArrayOf(0xFF.toByte(), 0xFE.toByte())))
+        }
+        val utf8 = createTempFile(prefix = "openlog-utf8bom", suffix = ".log").toFile().apply {
+            writeBytes(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + text.toByteArray(StandardCharsets.UTF_8))
+        }
+
+        assertEquals("Started", parseLogcat(utf16Le).single().msg)
+        assertEquals("Started", parseLogcat(utf8).single().msg)
+        assertTrue(isUtf16LogFile(utf16Le))
+        assertFalse(isUtf16LogFile(utf8))
+        assertTrue(isLikelyTextStream(ByteArrayInputStream(utf16Le.readBytes())))
+    }
+
+    @Test
+    fun recognizesBomlessUtf16ByItsNulByteLayout() {
+        val text = "06-29 12:34:56.789 1 1 I App: Started\n"
+        val be = createTempFile(prefix = "openlog-utf16be-nobom", suffix = ".log").toFile().apply {
+            writeBytes(text.toByteArray(StandardCharsets.UTF_16BE))
+        }
+        val le = createTempFile(prefix = "openlog-utf16le-nobom", suffix = ".log").toFile().apply {
+            writeBytes(text.toByteArray(StandardCharsets.UTF_16LE))
+        }
+
+        assertEquals("Started", parseLogcat(be).single().msg)
+        assertEquals("Started", parseLogcat(le).single().msg)
+        assertTrue(isLikelyTextFile(be))
+        assertTrue(isLikelyTextFile(le))
+        assertTrue(isUtf16LogFile(be))
+        assertTrue(isUtf16LogFile(le))
+    }
+
+    @Test
+    fun malformedUtf8StillUsesReplacementCharacters() {
+        val file = createTempFile(prefix = "openlog-malformed", suffix = ".log").toFile()
+        file.writeBytes("raw ".toByteArray(StandardCharsets.UTF_8) + byteArrayOf(0xC3.toByte(), 0x28))
+
+        val entry = parseLogcat(file).single()
+
+        assertEquals("raw �(", entry.msg)
     }
 
     @Test

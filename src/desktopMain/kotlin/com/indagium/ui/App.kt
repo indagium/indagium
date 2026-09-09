@@ -51,6 +51,7 @@ import com.indagium.model.*
 import com.indagium.source.SourceCodeView
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.detectArchiveFormat
+import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.tidMapProcessLabel
 import com.indagium.video.formatVideoTimeShort
 import kotlinx.coroutines.delay
@@ -947,7 +948,8 @@ fun App(
                         // offer an action startTailing would silently no-op on.
                         val canTail = remember(ttab.sourcePath) {
                             val p = ttab.sourcePath
-                            p != null && '!' !in p && File(p).isFile && detectArchiveFormat(File(p)) == ArchiveFormat.None
+                            p != null && '!' !in p && File(p).isFile &&
+                                detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
                         }
                         val canSplit = remember(ttab.sourcePath) {
                             ttab.sourcePath?.let { state.splitSourceForPath(it) } != null

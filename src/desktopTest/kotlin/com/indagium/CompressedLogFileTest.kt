@@ -12,6 +12,7 @@ import org.apache.commons.compress.compressors.lzma.LZMACompressorOutputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorOutputStream
 import java.io.File
 import java.io.OutputStream
+import java.nio.charset.StandardCharsets
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -57,6 +58,21 @@ class CompressedLogFileTest {
         val plain = File(dir, "plain.log").apply { writeText(sampleLog) }
 
         assertEquals(parseLogcat(plain), parseLogFile(plain))
+    }
+
+    @Test
+    fun parseCompressedUtf16LogUsesTheSameBomAwareDecoder() {
+        val dir = createTempDirectory("compressed-utf16-log").toFile()
+        val text = "--------- beginning of kernel\n06-26 10:00:00.000  100  200 I App: starting up\n"
+        val bytes = byteArrayOf(0xFF.toByte(), 0xFE.toByte()) + text.toByteArray(StandardCharsets.UTF_16LE)
+        val gz = File(dir, "utf16.log.gz")
+        GzipCompressorOutputStream(gz.outputStream()).use { it.write(bytes) }
+
+        val entries = parseLogFile(gz)
+
+        assertEquals(1, entries.size)
+        assertEquals("App", entries.single().tag)
+        assertEquals("starting up", entries.single().msg)
     }
 
     @Test
