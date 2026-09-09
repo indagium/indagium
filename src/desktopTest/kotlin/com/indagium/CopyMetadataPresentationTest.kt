@@ -55,17 +55,49 @@ class CopyMetadataPresentationTest {
     )
 
     @Test
-    fun selectedCopyUsesActiveAnchorAndTheVisibleColumnOrder() {
+    fun selectedCopyUsesExplicitAnchorAndTheVisibleColumnOrder() {
         val state = AppState()
         state.settings = settings
         state.tabs = listOf(tab().copy(selected = setOf(1)))
 
         assertEquals(
-            "2  +0.250  10:00:00.250  com.example.app 7  E/App  boom",
+            "2  0.000  10:00:00.250  com.example.app 7  E/App  boom",
             state.selectedLinesText("log", explicitIds = setOf(2)),
         )
-        assertTrue(state.selectedLinesMarkdownText("log", explicitIds = setOf(2)).contains("+0.250"))
-        assertTrue(state.selectedLinesMarkdownText("log", explicitIds = setOf(2)).contains("com.example.app 7"))
+        assertEquals(
+            "**[2  0.000  10:00:00.250  com.example.app 7] `E/App`:** boom",
+            state.selectedLinesMarkdownText("log", explicitIds = setOf(2)),
+        )
+    }
+
+    @Test
+    fun selectedOriginalRowsUseTheirLowestExplicitIdAsDeltaAnchor() {
+        val originalRows = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "filtered"),
+            LogEntry(2, "10:00:00.250", LogLevel.W, "Binder", "original one", pid = PROCESS_ID, tid = 7),
+            LogEntry(3, "10:00:01.000", LogLevel.E, "Binder", "original two", pid = PROCESS_ID, tid = 7),
+        )
+        val state = AppState()
+        state.settings = settings
+        state.tabs = listOf(
+            mkTab(
+                "log",
+                "test.log",
+                originalRows,
+                analysis = LogAnalysis(processNames = mapOf(PROCESS_ID to "com.example.app"), pending = false),
+            ).copy(showTimeDelta = true, selected = setOf(1)),
+        )
+
+        assertEquals(
+            "2  0.000  10:00:00.250  com.example.app 7  W/Binder  original one\n" +
+                "3  +0.750  10:00:01.000  com.example.app 7  E/Binder  original two",
+            state.selectedLinesText("log", explicitIds = setOf(2, 3)),
+        )
+        assertEquals(
+            "**[2  0.000  10:00:00.250  com.example.app 7] `W/Binder`:** original one\n" +
+                "**[3  +0.750  10:00:01.000  com.example.app 7] `E/Binder`:** original two",
+            state.selectedLinesMarkdownText("log", explicitIds = setOf(2, 3)),
+        )
     }
 
     @Test

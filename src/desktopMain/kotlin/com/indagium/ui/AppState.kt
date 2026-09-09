@@ -5154,8 +5154,8 @@ class AppState(
     fun selectedLinesText(tabId: String, explicitIds: Set<Int>? = null): String {
         val t = tab(tabId) ?: return ""
         val ids = explicitIds ?: t.selected
-        val visible = visibleEntries(t)
-        val context = LogLinePresentationContext(t, settings, visible, t.selected.ifEmpty { ids })
+        if (ids.isEmpty()) return ""
+        val context = LogLinePresentationContext(t, settings, emptyList(), ids)
         return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { entry ->
             presentLogLine(t, entry, settings, context)
         }
@@ -5164,8 +5164,8 @@ class AppState(
     fun selectedLinesMarkdownText(tabId: String, explicitIds: Set<Int>? = null): String {
         val t = tab(tabId) ?: return ""
         val ids = explicitIds ?: t.selected
-        val visible = visibleEntries(t)
-        val context = LogLinePresentationContext(t, settings, visible, t.selected.ifEmpty { ids })
+        if (ids.isEmpty()) return ""
+        val context = LogLinePresentationContext(t, settings, emptyList(), ids)
         return ids.sorted().mapNotNull { id -> t.rmap[id] }.joinToString("\n") { entry ->
             presentLogLineMarkdown(t, entry, settings, context)
         }
