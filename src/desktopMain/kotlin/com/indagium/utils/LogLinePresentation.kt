@@ -17,6 +17,7 @@ data class LogLinePresentationContext(
 ) {
     private val selectedAnchorId = if (settings.copyTimeDelta && tab.showTimeDelta) deltaAnchorId(selection) else null
     private val selectedAnchorTs = selectedAnchorId?.let { tab.rmap[it]?.ts }
+
     // Selected copies already have a baseline, so they do not need the full visible-entry index.
     // Likewise, when Δt copying is disabled no caller can observe the index. Keep this allocation
     // on the filtered/export path only when Δt is enabled and the ordinary previous-visible-row
