@@ -1858,6 +1858,17 @@ private fun Seq3CanvasContextMenu(
                 view.canvasContextMenuMessageId = null
                 view.canvasContextMenuOccurrenceEntryId = null
             }
+            // WP7 item 1 (canvas half): only offered inside an ALT/PAR/CRITICAL fragment — see
+            // seq3OperandFragmentIdAt's own doc for the "innermost fragment wins" tie-break and why
+            // this can't just always show. Same exact-occurrence-over-message-default anchoring as
+            // "Insert delay after this" just above.
+            seq3OperandFragmentIdAt(document, messageId, occurrenceEntryId)?.let { fragmentId ->
+                CtxItem(Icons.Outlined.Layers, "Begin else branch here") {
+                    seq3AddElseOperand(state, session, fragmentId, messageId, startsAtOccurrenceEntryId = occurrenceEntryId)
+                    view.canvasContextMenuMessageId = null
+                    view.canvasContextMenuOccurrenceEntryId = null
+                }
+            }
             if (seq3CanGroupSelection(document, view, selectedIds)) {
                 CtxDivider()
                 // Replaces the old four "Group as loop/alt/opt/par" rows with every

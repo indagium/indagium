@@ -17,6 +17,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
@@ -690,5 +691,163 @@ class Seq3QueueTest {
         val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.SetRepeat(Seq3Repeat.COLLAPSE_ABOVE, 0))
         assertFalse(result.applied)
         assertEquals(doc, result.document)
+    }
+
+    // ── Fragment operands (WP7) — AddFragmentOperand / SetFragmentOperandGuard /
+    //    RemoveFragmentOperand, the same id-keyed/empty-selection-safe shape as every other
+    //    artifact verb above, targeted by the OPERAND's own id rather than its list position ────
+
+    @Test
+    fun addFragmentOperandAppendsToTheNamedFragmentsElseOperandsIndependentOfSelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "first branch", listOf("m1", "m3"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val operand = Seq3Operand("op1", "else", startsAtMessageId = "m3")
+        // The selection below is unrelated to the fragment's own messageIds, same as
+        // setFragmentLabelRenamesAnExistingFragmentByIdIndependentOfSelection above.
+        val result = applySeq3BulkAction(doc, setOf("m4"), Seq3BulkAction.AddFragmentOperand("frag1", operand))
+        assertTrue(result.applied, result.reason)
+        assertEquals(listOf(operand), result.document.fragments.single().elseOperands)
+    }
+
+    @Test
+    fun addFragmentOperandWorksWithAnEmptySelection() {
+        // This is the test the targetsById refactor exists to protect: before it, a caller firing
+        // this action with nothing selected (the ordinary case — a canvas right-click carries no
+        // queue selection at all) would have silently no-op'd unless this action had been added to
+        // the old hand-maintained exclusion chain.
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.PAR, "first branch", listOf("m1"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("frag1", Seq3Operand("op1", "and", "m1")))
+        assertTrue(result.applied, result.reason)
+        assertEquals(1, result.document.fragments.single().elseOperands.size)
+    }
+
+    @Test
+    fun addFragmentOperandIsASafeNoOpForAnUnknownFragmentId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("no-such-fragment", Seq3Operand("op1", "else", "m1")))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun addFragmentOperandToAnOptOrLoopFragmentStillStoresIt() {
+        // Seq3Fragment.elseOperands' own KDoc: "which kinds this is meaningful for is a UML rule,
+        // deliberately not enforced here" — WP5's emitters/WP7's UI gate on kind, the model does
+        // not, so operands survive a kind change (ALT -> LOOP -> ALT) instead of being silently
+        // dropped the moment the wrong operator is picked first.
+        val optFragment = Seq3Fragment("frag1", Seq3FragmentKind.OPT, "maybe", listOf("m1"))
+        val loopFragment = Seq3Fragment("frag2", Seq3FragmentKind.LOOP, "repeat", listOf("m3"))
+        val doc = baseDocument().copy(fragments = listOf(optFragment, loopFragment))
+
+        val onOpt = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("frag1", Seq3Operand("op1", "else", "m1")))
+        assertTrue(onOpt.applied, onOpt.reason)
+        assertEquals(1, onOpt.document.fragments.first { it.id == "frag1" }.elseOperands.size)
+
+        val onLoop = applySeq3BulkAction(onOpt.document, emptySet(), Seq3BulkAction.AddFragmentOperand("frag2", Seq3Operand("op2", "else", "m3")))
+        assertTrue(onLoop.applied, onLoop.reason)
+        assertEquals(1, onLoop.document.fragments.first { it.id == "frag2" }.elseOperands.size)
+    }
+
+    @Test
+    fun addFragmentOperandRejectsABlankIdBlankGuardOrACollidingOperandId() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "first", listOf("m1"), elseOperands = listOf(Seq3Operand("op1", "else", "m1")))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+
+        val blankId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("frag1", Seq3Operand("", "else", "m3")))
+        assertFalse(blankId.applied)
+        assertEquals(doc, blankId.document)
+
+        val blankGuard = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("frag1", Seq3Operand("op2", "", "m3")))
+        assertFalse(blankGuard.applied)
+        assertEquals(doc, blankGuard.document)
+
+        val collidingId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddFragmentOperand("frag1", Seq3Operand("op1", "else", "m3")))
+        assertFalse(collidingId.applied)
+        assertEquals(doc, collidingId.document)
+    }
+
+    @Test
+    fun setFragmentOperandGuardRenamesOnlyTheNamedOperandByIdIndependentOfSelection() {
+        val fragment = Seq3Fragment(
+            "frag1",
+            Seq3FragmentKind.ALT,
+            "first",
+            listOf("m1", "m3"),
+            elseOperands = listOf(Seq3Operand("op1", "original", "m1"), Seq3Operand("op2", "original", "m3")),
+        )
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentOperandGuard("frag1", "op2", "renamed"))
+        assertTrue(result.applied, result.reason)
+        val operands = result.document.fragments.single().elseOperands
+        assertEquals("original", operands.single { it.id == "op1" }.guard, "editing op2 must not touch op1")
+        assertEquals("renamed", operands.single { it.id == "op2" }.guard)
+    }
+
+    @Test
+    fun setFragmentOperandGuardWorksWithAnEmptySelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.CRITICAL, "first", listOf("m1"), elseOperands = listOf(Seq3Operand("op1", "option", "m1")))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentOperandGuard("frag1", "op1", "renamed option"))
+        assertTrue(result.applied, result.reason)
+        assertEquals("renamed option", result.document.fragments.single().elseOperands.single().guard)
+    }
+
+    @Test
+    fun setFragmentOperandGuardIsASafeNoOpForAnUnknownFragmentOrOperandIdOrABlankGuard() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "first", listOf("m1"), elseOperands = listOf(Seq3Operand("op1", "else", "m1")))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+
+        val unknownFragment = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentOperandGuard("no-such-fragment", "op1", "renamed"))
+        assertFalse(unknownFragment.applied)
+        assertEquals(doc, unknownFragment.document)
+
+        val unknownOperand = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentOperandGuard("frag1", "no-such-operand", "renamed"))
+        assertFalse(unknownOperand.applied)
+        assertEquals(doc, unknownOperand.document)
+
+        val blankGuard = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentOperandGuard("frag1", "op1", ""))
+        assertFalse(blankGuard.applied)
+        assertEquals(doc, blankGuard.document)
+    }
+
+    @Test
+    fun removeFragmentOperandRemovesOnlyTheNamedOperandWhenSeveralShareAGuardString() {
+        // The id-keyed guarantee this whole family exists for: an index-keyed command would have
+        // no way to distinguish these two once they carry the same text.
+        val fragment = Seq3Fragment(
+            "frag1",
+            Seq3FragmentKind.ALT,
+            "first",
+            listOf("m1", "m3"),
+            elseOperands = listOf(Seq3Operand("op1", "else", "m1"), Seq3Operand("op2", "else", "m3")),
+        )
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.RemoveFragmentOperand("frag1", "op1"))
+        assertTrue(result.applied, result.reason)
+        assertEquals(listOf(Seq3Operand("op2", "else", "m3")), result.document.fragments.single().elseOperands)
+    }
+
+    @Test
+    fun removeFragmentOperandWorksWithAnEmptySelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.PAR, "first", listOf("m1"), elseOperands = listOf(Seq3Operand("op1", "and", "m1")))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.RemoveFragmentOperand("frag1", "op1"))
+        assertTrue(result.applied, result.reason)
+        assertTrue(result.document.fragments.single().elseOperands.isEmpty())
+    }
+
+    @Test
+    fun removeFragmentOperandIsASafeNoOpForAnUnknownFragmentOrOperandId() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "first", listOf("m1"), elseOperands = listOf(Seq3Operand("op1", "else", "m1")))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+
+        val unknownFragment = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.RemoveFragmentOperand("no-such-fragment", "op1"))
+        assertFalse(unknownFragment.applied)
+        assertEquals(doc, unknownFragment.document)
+
+        val unknownOperand = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.RemoveFragmentOperand("frag1", "no-such-operand"))
+        assertFalse(unknownOperand.applied)
+        assertEquals(doc, unknownOperand.document)
     }
 }
