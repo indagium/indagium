@@ -3,12 +3,15 @@ package com.indagium
 import com.indagium.diagram3.Seq3Delay
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3FontRole
+import com.indagium.diagram3.Seq3Fragment
+import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.layoutSeq3
@@ -114,6 +117,48 @@ class Seq3RasterTest {
         assertEquals(plainLayout.height, activatedLayout.height, "an activation bar must never grow the diagram's own height")
 
         val rendered = renderSeq3(activatedLayout, Seq3RasterTheme.DEFAULT_LIGHT)
+        val bytes = rendered.toPngBytes()
+        assertTrue(bytes.isNotEmpty())
+        val decoded = ImageIO.read(ByteArrayInputStream(bytes))
+        assertEquals(rendered.widthPx, decoded.width)
+        assertEquals(rendered.heightPx, decoded.height)
+    }
+
+    @Test
+    fun aDocumentWithAFragmentDividerRastersWithoutThrowingAndKeepsTheSameHeight() {
+        // Mirrors aDocumentWithActivationBarsRastersWithoutThrowingAndKeepsTheSameHeight exactly:
+        // a divider is painted INSIDE a fragment box's own already-computed geometry (WP6's own
+        // zero-pitch guard, Seq3LayoutTest.kt), so the rendered image's own height must be
+        // identical with vs without the operand — only the pixels inside that same canvas change.
+        val base = fixedDocument()
+        val withSecondBranch = base.copy(
+            messages = base.messages + Seq3Message(
+                id = "m2",
+                match = Seq3Match("B", "bye"),
+                fromLifelineId = "B",
+                toLifelineId = "A",
+                labelTemplate = "bye",
+                kind = Seq3Kind.RETURN,
+                occurrences = listOf(Seq3Occurrence(2, 2_000L, "10:00:01.000", pid = 1, tid = 1, level = 'I', text = "bye")),
+            ),
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"))),
+        )
+        val withoutOperand = withSecondBranch
+        val withOperand = withSecondBranch.copy(
+            fragments = listOf(
+                withSecondBranch.fragments.single()
+                    .copy(elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2"))),
+            ),
+        )
+        val plainLayout = layout(withoutOperand)
+        val dividedLayout = layout(withOperand)
+        assertTrue(
+            dividedLayout.fragments.single().dividers.isNotEmpty(),
+            "this fixture must actually produce a divider, or the height comparison below would be vacuous",
+        )
+        assertEquals(plainLayout.height, dividedLayout.height, "a fragment divider must never grow the diagram's own height")
+
+        val rendered = renderSeq3(dividedLayout, Seq3RasterTheme.DEFAULT_LIGHT)
         val bytes = rendered.toPngBytes()
         assertTrue(bytes.isNotEmpty())
         val decoded = ImageIO.read(ByteArrayInputStream(bytes))

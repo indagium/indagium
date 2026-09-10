@@ -502,6 +502,31 @@ private fun paintFragment(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3R
     g.font = fontFor(Seq3FontRole.FRAGMENT)
     val fm = g.fontMetrics
     g.drawString(fragment.label, (box.x + 6).roundToInt(), (box.y + fm.ascent + 2).roundToInt())
+    paintFragmentDividers(g, fragment, theme)
+}
+
+/**
+ * WP6: UML operand dividers — this function only PAINTS what [layoutSeq3] already resolved
+ * ([Seq3FragmentDivider]'s own doc), same "geometry decisions live in Seq3Layout, painting
+ * decisions don't" split every other shape in this file follows. A dashed rule across the
+ * fragment box's own width, its guard drawn just above it — SAME font role/color as the
+ * fragment's own label two lines up in [paintFragment] ([Seq3FontRole.FRAGMENT],
+ * [Seq3RasterTheme.fragmentBorder]) and the SAME dash pattern [paintLifelines] already uses
+ * ([DASH_LIFELINE], 4/4) for its own dashed guide line — reused rather than invented, so a
+ * divider doesn't introduce a third dash meaning alongside DASH_LIFELINE/DASH_WARN/DASH_DOTTED.
+ * No new [Seq3RasterTheme] field, per this deliverable's own brief: everything painted here is
+ * already one of [fragmentBorder]'s existing two uses (border stroke, label text).
+ */
+private fun paintFragmentDividers(g: Graphics2D, fragment: Seq3FragmentBox, theme: Seq3RasterTheme) {
+    if (fragment.dividers.isEmpty()) return
+    val box = fragment.box
+    g.color = Color(theme.fragmentBorder, true)
+    g.font = fontFor(Seq3FontRole.FRAGMENT)
+    g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, DASH_LIFELINE, 0f)
+    fragment.dividers.forEach { divider ->
+        g.draw(java.awt.geom.Line2D.Double(box.x, divider.y, box.x + box.width, divider.y))
+        if (divider.guard.isNotBlank()) g.drawString(divider.guard, (box.x + 6).roundToInt(), (divider.y - 3).roundToInt())
+    }
 }
 
 private fun paintNoteBox(g: Graphics2D, note: Seq3NoteBox, theme: Seq3RasterTheme) {

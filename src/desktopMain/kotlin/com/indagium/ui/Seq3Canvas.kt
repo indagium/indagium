@@ -1011,6 +1011,7 @@ private fun DrawScope.drawSeq3Diagram(
             topLeft = topLeft, size = size,
             style = Stroke(width = (if (emphasized) 2 else 1).dp.toPx()),
         )
+        drawSeq3FragmentDividers(fragment, emphasized, dash, tc)
     }
     layout.notes.forEach { note ->
         val emphasized = seq3NoteIsEmphasized(note.noteId, selectedNoteId, hoveredNoteId)
@@ -1174,6 +1175,33 @@ private fun DrawScope.drawSeq3ActivationBars(layout: Seq3Layout, tc: ThemeColors
             // bottom edge — omitted when unmatched, mirroring Seq3Raster.paintActivationBar
             drawLine(color = tc.br, start = Offset(left, bottom), end = Offset(right, bottom), strokeWidth = strokeWidth)
         }
+    }
+}
+
+/**
+ * WP6: UML operand dividers for one fragment — pulled out of [drawSeq3Diagram] itself, same reason
+ * [drawSeq3ActivationBars] above is: keeping that function under this file's detekt `LongMethod`
+ * threshold, not because the branching here is complex (there is none). See [Seq3FragmentDivider]'s
+ * own doc for the geometry itself ([layoutSeq3] already resolved it; this only paints it). The
+ * guard TEXT is drawn by [Seq3FragmentLabelOverlay], this file's established shapes/text split
+ * (that composable's own doc) — the same split [drawSeq3ActivationBars] has nothing to mirror
+ * (a bar carries no text of its own) but every text-bearing shape in this file already follows.
+ * [dash] is passed in rather than recomputed here: it is the SAME `PathEffect` the lifeline
+ * segments below already draw with, and the same pattern `Seq3Raster.paintFragmentDividers` reuses
+ * from its own `DASH_LIFELINE` — the two renderers must draw an identical picture
+ * (`Seq3ArrowStyle.kt`'s own header), so a divider here is never a fresh dash choice, and computing
+ * a second, textually-identical `PathEffect` per fragment would just be the same pattern typed
+ * twice for no reason.
+ */
+private fun DrawScope.drawSeq3FragmentDividers(fragment: Seq3FragmentBox, emphasized: Boolean, dash: PathEffect, tc: ThemeColors) {
+    fragment.dividers.forEach { divider ->
+        drawLine(
+            color = if (emphasized) tc.ac else tc.seq1,
+            start = Offset(fragment.box.x.dp.toPx(), divider.y.dp.toPx()),
+            end = Offset((fragment.box.x + fragment.box.width).dp.toPx(), divider.y.dp.toPx()),
+            strokeWidth = 1.dp.toPx(),
+            pathEffect = dash,
+        )
     }
 }
 
@@ -1561,6 +1589,24 @@ private fun Seq3FragmentLabelOverlay(
                     size = 16.dp,
                 )
             }
+        }
+    }
+    // WP6: guard text for each UML operand divider inside this fragment — the line itself is
+    // drawn in drawSeq3Diagram (this file's established shapes/text split; see that call site's
+    // own comment). Read-only, unlike the fragment's own label chip above: WP7 owns per-operand
+    // edit commands (Seq3Fragment.elseOperands' own doc spells out that asymmetry on purpose), so
+    // there is nothing to double-click into yet. Positioned just above its own divider line,
+    // left-aligned to the fragment box like the box's own label chip is.
+    fragment.dividers.forEach { divider ->
+        if (divider.guard.isNotBlank()) {
+            AppText(
+                divider.guard,
+                color = docTheme.seq1,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                modifier = Modifier.offset(fragment.box.x.dp + 3.dp, divider.y.dp - 13.dp),
+            )
         }
     }
 }
