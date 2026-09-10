@@ -728,7 +728,11 @@ private fun resolveSeq3CustomMessageTarget(spec: Seq3CustomMessageSpec, from: Se
             } else {
                 null
             }
-        Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> when {
+        // WP10: CREATE/DESTROY are ordinary targeted arrows too (unlike WP9's LOST/FOUND) — the
+        // whole point of the feature is a REAL `toLifelineId` naming the constructed/destroyed
+        // lifeline, so they need the exact same "target is required and must exist" validation as
+        // CALL/RETURN/ASYNC, not a new rule.
+        Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.CREATE, Seq3Kind.DESTROY -> when {
             spec.toLifelineId == null -> Seq3CustomMessageResult.Rejected("Target lifeline is required")
             document.lifelines.none { it.id == spec.toLifelineId } -> Seq3CustomMessageResult.Rejected("Unknown target lifeline")
             else -> null
@@ -748,7 +752,9 @@ private fun resolveSeq3CustomMessageTarget(spec: Seq3CustomMessageSpec, from: Se
 private fun seq3CustomMessageTargetValue(spec: Seq3CustomMessageSpec, from: Seq3Lifeline): String? = when (spec.kind) {
     Seq3Kind.SELF -> from.id
     Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> null
-    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> spec.toLifelineId
+    // WP10: CREATE/DESTROY pass the caller-supplied target through unchanged, same as
+    // CALL/RETURN/ASYNC — already proven non-null/known by resolveSeq3CustomMessageTarget above.
+    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.CREATE, Seq3Kind.DESTROY -> spec.toLifelineId
 }
 
 @Suppress("ReturnCount")

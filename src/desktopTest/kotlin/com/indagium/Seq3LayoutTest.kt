@@ -536,7 +536,12 @@ class Seq3LayoutTest {
             fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.LOOP, "retry", listOf("m1"))),
         )
         val layout = layoutSeq3(doc, opts())
-        val headerBandBottom = layout.lifelines.first().lifelineTop
+        // WP10: was `layout.lifelines.first().lifelineTop` — that read only happened to equal the
+        // shared header band's bottom edge because no column could ever differ from another before
+        // create/destroy existed. A CREATEd column now reports its OWN, later, lifelineTop, so
+        // column 0 is no longer a safe stand-in for "the header band bottom" this test actually
+        // means; `Seq3Layout.headerBandBottom` (WP10) is the honest name for that value now.
+        val headerBandBottom = layout.headerBandBottom
         val fragment = layout.fragments.single()
 
         assertTrue(
@@ -559,7 +564,12 @@ class Seq3LayoutTest {
             ),
         )
         val layout = layoutSeq3(doc, opts())
-        val headerBandBottom = layout.lifelines.first().lifelineTop
+        // WP10: was `layout.lifelines.first().lifelineTop` — that read only happened to equal the
+        // shared header band's bottom edge because no column could ever differ from another before
+        // create/destroy existed. A CREATEd column now reports its OWN, later, lifelineTop, so
+        // column 0 is no longer a safe stand-in for "the header band bottom" this test actually
+        // means; `Seq3Layout.headerBandBottom` (WP10) is the honest name for that value now.
+        val headerBandBottom = layout.headerBandBottom
 
         layout.fragments.forEach { fragment ->
             assertTrue(
@@ -614,8 +624,12 @@ class Seq3LayoutTest {
         // headerHeight is ONE shared value: the short-named column's box must be exactly as tall
         // as the wrapped long-named column's, even though its own label is one line.
         assertEquals(shortCol.header.height, longCol.header.height, "every column's header box must share ONE height")
+        // WP10: was `longLayout.lifelines.first().lifelineTop > shortLayout.lifelines.first()
+        // .lifelineTop` — same rot as the two fragment tests above: column 0's lifelineTop is no
+        // longer guaranteed to equal the shared header band now that a CREATEd column can report
+        // its own lower one, so this compares the honestly-named `headerBandBottom` instead.
         assertTrue(
-            longLayout.lifelines.first().lifelineTop > shortLayout.lifelines.first().lifelineTop,
+            longLayout.headerBandBottom > shortLayout.headerBandBottom,
             "wrapping to multiple lines must grow the shared header band",
         )
     }
@@ -639,8 +653,10 @@ class Seq3LayoutTest {
         assertEquals(Seq3LifelineKind.PARTICIPANT, participantCol.kind)
         // The reserve is document-wide (shared geometry), so the PARTICIPANT column also grows.
         assertEquals(actorCol.header.height, participantCol.header.height)
+        // WP10: was `actorLayout.lifelines.first().lifelineTop > plainLayout.lifelines.first()
+        // .lifelineTop` — identical rot/fix as the two tests above.
         assertTrue(
-            actorLayout.lifelines.first().lifelineTop > plainLayout.lifelines.first().lifelineTop,
+            actorLayout.headerBandBottom > plainLayout.headerBandBottom,
             "an ACTOR lifeline anywhere in the document must grow the shared header band for every column",
         )
     }
@@ -1377,5 +1393,127 @@ class Seq3LayoutTest {
             val layout = layoutSeq3(docWith(kind), opts())
             assertEquals(1, layout.fragments.single().dividers.size, "$kind must draw its real operand's divider")
         }
+    }
+
+    // ── WP10: UML create/destroy ────────────────────────────────────────────────────────────────
+
+    @Test
+    fun rowYPositionsAndLayoutHeightAreUnchangedWithAndWithoutACreateMessage() {
+        // Modeled on rowYPositionsAreIdenticalWithActivationsOnAndOff above: headerHeight stays the
+        // shared, all-lifelines-included value and `buildRows`' own y-cursor origin never moves
+        // (this work package's central promise) — only a created column's OWN header box relocates.
+        // Flipping one message's kind from CALL to CREATE must not shift a single row or the
+        // diagram's overall height by even one pixel.
+        fun doc(kind: Seq3Kind) = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", kind = kind, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("m3", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+        )
+        val layoutWithoutCreate = layoutSeq3(doc(Seq3Kind.CALL), opts())
+        val layoutWithCreate = layoutSeq3(doc(Seq3Kind.CREATE), opts())
+
+        assertEquals(
+            layoutWithoutCreate.rows.map { it.y },
+            layoutWithCreate.rows.map { it.y },
+            "a CREATE message must add ZERO vertical pitch to any row — NO ROW MOVES",
+        )
+        assertEquals(layoutWithoutCreate.height, layoutWithCreate.height, "a CREATE message must never reflow the diagram's own height")
+        // Sanity check so the equality above isn't vacuously true because this fixture happens to
+        // leave the CREATE unresolved onto a geometry it doesn't actually touch.
+        val createdColumn = layoutWithCreate.lifelines.single { it.lifelineId == "B" }
+        assertTrue(createdColumn.created, "this fixture's CREATE must actually resolve onto column B")
+        assertTrue(
+            createdColumn.lifelineTop > layoutWithCreate.headerBandBottom,
+            "the created column's own lifelineTop must actually have moved below the shared header band",
+        )
+    }
+
+    @Test
+    fun aCreatedColumnsLifelineTopIsBelowAnOrdinaryColumns() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2)),
+            messages = listOf(
+                message("m1", "A", "C", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", kind = Seq3Kind.CREATE, occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val ordinary = layout.lifelines.single { it.lifelineId == "C" }
+        val created = layout.lifelines.single { it.lifelineId == "B" }
+        assertFalse(ordinary.created, "C is never targeted by a CREATE and must keep the ordinary shared header position")
+        assertTrue(created.created, "B is targeted by m2's CREATE")
+        assertTrue(
+            created.lifelineTop > ordinary.lifelineTop,
+            "a created column's box is drawn LOWER, at its creation row — never at the shared header band ordinary columns use",
+        )
+    }
+
+    @Test
+    fun aDestroyedColumnsLifelineBottomIsAboveTheLastRow() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", kind = Seq3Kind.DESTROY, occurrences = listOf(occurrence(2, ts = 2_000L))),
+                // A row drawn AFTER the destroy: truncating the guide line at the FIRST destroy
+                // targeting a lifeline (instead of the LAST) would hide this row's own evidence —
+                // the exact failure mode this work package's brief rules out.
+                message("m3", "A", "A", kind = Seq3Kind.SELF, occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val destroyed = layout.lifelines.single { it.lifelineId == "B" }
+        val lastRowY = layout.rows.maxOf { it.y }
+        assertTrue(destroyed.destroyed, "B is targeted by m2's DESTROY")
+        assertTrue(
+            destroyed.lifelineBottom < lastRowY,
+            "a destroyed column's guide line must end at its destruction row, above any row drawn after it",
+        )
+    }
+
+    @Test
+    fun laterCreatesAndEarlierDestroysTargetingTheSameLifelineAreIgnored() {
+        // FIRST CREATE wins, LAST DESTROY wins — a redundant second CREATE or an earlier DESTROY
+        // targeting an already-resolved lifeline must not move the resolved row.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("create1", "A", "B", kind = Seq3Kind.CREATE, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("call", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("create2", "A", "B", kind = Seq3Kind.CREATE, occurrences = listOf(occurrence(3, ts = 3_000L))),
+                message("destroy1", "A", "B", kind = Seq3Kind.DESTROY, occurrences = listOf(occurrence(4, ts = 4_000L))),
+                message("destroy2", "A", "B", kind = Seq3Kind.DESTROY, occurrences = listOf(occurrence(5, ts = 5_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val column = layout.lifelines.single { it.lifelineId == "B" }
+        val create1Row = layout.rows.single { it.messageId == "create1" }
+        val destroy2Row = layout.rows.single { it.messageId == "destroy2" }
+        assertEquals(create1Row.y + column.header.height / 2, column.lifelineTop, "the FIRST create wins, not the second")
+        assertEquals(destroy2Row.y, column.lifelineBottom, "the LAST destroy wins, not the first")
+    }
+
+    @Test
+    fun theCreateArrowsToXStopsShortOfTheColumnCentre() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", kind = Seq3Kind.CREATE, occurrences = listOf(occurrence(1, ts = 1_000L))),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single { it.messageId == "m1" } as Seq3ArrowRow
+        val targetColumn = layout.lifelines.single { it.lifelineId == "B" }
+        assertTrue(
+            row.toX < targetColumn.centerX,
+            "a CREATE arrow drawn left-to-right must stop at the target box's near (left) edge, not the column centre (${targetColumn.centerX})",
+        )
     }
 }

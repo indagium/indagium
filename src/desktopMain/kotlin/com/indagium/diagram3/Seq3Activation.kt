@@ -137,7 +137,13 @@ fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List
 
     for (event in events) {
         when (event.kind) {
-            Seq3Kind.CALL -> {
+            // WP10: a CREATE is a real invocation into a concrete `toLifelineId` (the constructed
+            // lifeline), same shape as CALL — the constructor runs, so the callee is genuinely
+            // active. Unlike CALL there is rarely a matching RETURN modeling "construction
+            // finished", so almost every CREATE push lands in rule 1's unmatched fallback and
+            // closes at the callee's own last touching row — which is exactly the existing,
+            // already-correct behavior for any CALL that never got an explicit RETURN.
+            Seq3Kind.CALL, Seq3Kind.CREATE -> {
                 val calleeId = event.toLifelineId ?: continue
                 val stack = openStacks.getOrPut(calleeId) { ArrayDeque() }
                 if (stack.size < SEQ3_MAX_ACTIVATION_DEPTH) stack.addLast(event.index)
@@ -162,7 +168,17 @@ fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List
             // `activationEventOf` already maps their emission to a neutral Seq3Kind.NOTE
             // activation event for the identical reason, so this is the one answer consistent
             // with that precedent, not a new decision made from scratch.
-            Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> Unit // neutral: no push, no pop
+            //
+            // WP10: DESTROY is neutral too, but for a different reason than LOST/FOUND — it does
+            // have a real `toLifelineId` (the destroyed lifeline). RETURN closes a stack keyed by
+            // `fromLifelineId` (the returning callee popping its own frame); DESTROY's sender is
+            // the *destroyer*, not the destroyed lifeline, so it has no stack of its own to pop,
+            // and reaching across to forcibly close whatever the destroyed lifeline happens to
+            // have open is a heuristic this WP's brief explicitly rules out (geometry only —
+            // `Seq3Layout` truncates the destroyed column's guide line at this row regardless of
+            // what the activation machinery does). Any activation still open on the destroyed
+            // lifeline falls through to rule 1's own fallback exactly like an unmatched CALL does.
+            Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND, Seq3Kind.DESTROY -> Unit // neutral: no push, no pop
         }
     }
 

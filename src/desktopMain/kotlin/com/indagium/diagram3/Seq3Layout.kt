@@ -87,6 +87,19 @@ data class Seq3LifelineColumn(
     val header: Seq3Box,
     val lifelineTop: Double,
     val lifelineBottom: Double,
+    /** WP10: true when a `CREATE` arrow targeting this lifeline moved [header]/[lifelineTop] down
+     *  from the shared top margin to the row that constructs it — see [layoutSeq3]'s own
+     *  create/destroy resolution for the exact rule (first CREATE wins). Purely descriptive: no
+     *  renderer branches on it today (both already read [header]/[lifelineTop] unconditionally),
+     *  kept for the same reason [kind] is duplicated here rather than re-read from the document —
+     *  and so a future caller (or a test) never has to reverse-engineer "was this one created?"
+     *  from a `lifelineTop` comparison against the shared header band. */
+    val created: Boolean = false,
+    /** WP10: true when a `DESTROY` arrow targeting this lifeline moved [lifelineBottom] up from
+     *  the diagram's last row to the row that destroys it (last DESTROY wins — see [layoutSeq3]).
+     *  Drives the destroy-X paint in both renderers instead of them re-deriving "was this
+     *  destroyed?" from a `lifelineBottom` comparison against the layout's overall height. */
+    val destroyed: Boolean = false,
 )
 
 /** One drawn row on the canvas. [messageId] is always the owning [Seq3Message.id] so phase 4 can
@@ -304,10 +317,14 @@ data class Seq3LifelineSegment(val fromY: Double, val toY: Double, val isDotted:
 /**
  * Splits one lifeline's full vertical extent ([top]..[bottom]) into alternating
  * [Seq3LifelineSegment]s around every delay it crosses. Every [Seq3DelayBox.box] already spans
- * the FULL diagram width (that struct's own doc), so every lifeline crosses every delay
- * identically — this needs no per-column filtering, just the same [delays] list for every column.
- * A delay whose band falls entirely outside [top]..[bottom] (shouldn't happen — every lifeline
- * spans the whole canvas height — but a defensive clamp costs nothing) contributes no segment.
+ * the FULL diagram width (that struct's own doc), so every lifeline crosses every delay at the
+ * same y — this needs no per-column filtering, just the same [delays] list for every column
+ * clamped to THIS column's own [top]/[bottom] (WP10: no longer the whole canvas height for every
+ * lifeline — a created column's [top] starts at its construction row and a destroyed column's
+ * [bottom] ends at its destruction row, see [Seq3LifelineColumn]/[layoutSeq3]'s own create/destroy
+ * resolution). A delay whose band falls entirely outside [top]..[bottom] (routine now, for any
+ * delay anchored before a lifeline is created or after it is destroyed) contributes no segment —
+ * the `coerceIn` calls below already handle that with no special-casing needed here.
  * Delays are sorted by y first so out-of-order document.delays or overlapping bands (two delays
  * anchored to nearly the same row) still produce a monotonic, non-overlapping segment list.
  */
@@ -348,6 +365,15 @@ data class Seq3Layout(
      *  it — this file's own versioning rule (see the class's own positional construction site in
      *  [layoutSeq3] for why that site never needed to change for this field). */
     val activations: List<Seq3ActivationBar> = emptyList(),
+    /** WP10: `MARGIN + headerHeight` — the shared header band's bottom edge, the same y ordinary
+     *  (non-created) rows/columns already start at. Before create/destroy, a fixed
+     *  `lifelines.first().lifelineTop` happened to equal this for every layout (no column ever
+     *  differed), so several existing tests read it as a stand-in for "the header band bottom" —
+     *  that reading rotted the moment a CREATEd column could report a lifelineTop of its own,
+     *  lower than this shared value. Exposed here explicitly so those tests (and any future one)
+     *  have an honest name for the value they actually mean, instead of reaching into column 0 and
+     *  hoping it was never created. */
+    val headerBandBottom: Double = 0.0,
 )
 
 // ── Layout constants (all unit-less "1x" values — see this file's header) ──────────────────────
@@ -541,8 +567,21 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
         contentRight,
     )
 
-    val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowBuild.rows, headerHeight)
-    val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowBuild.rows, centers, tm)
+    // WP10: which row, if any, creates/destroys each lifeline — see resolveSeq3Lifecycle's own
+    // doc. Pulled into its own function purely to keep layoutSeq3's own Cyclomatic Complexity
+    // under this file's detekt threshold, the identical reason buildActivationBars below is its
+    // own function rather than inlined here.
+    val lifecycle = resolveSeq3Lifecycle(emissions, lifelineIndex, rowBuild.rowYByIndex)
+
+    // WP10: a CREATE arrow's target box is drawn LOWER than `centers[toIdx]`'s usual full-height
+    // position (see the lifelineColumns build below) — see applyCreateArrowStops' own doc. Also
+    // its own function for the same CyclomaticComplexMethod reason as resolveSeq3Lifecycle above.
+    // MUST run before `layoutFragments` below, which consumes `rowBuild.rightExtra`/fragment spans
+    // derived from row x-extents — an unrewritten `toX` would size those against the wrong edge.
+    val rowsWithCreateStop = applyCreateArrowStops(rowBuild.rows, lifelineIndex, centers, headerWidths)
+
+    val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowsWithCreateStop, headerHeight)
+    val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowsWithCreateStop, centers, tm)
 
     // WP2: UML activation bars — see buildActivationBars' own doc. Pulled into its own function
     // (rather than inlined here like the delay-band resolution above it) purely to keep
@@ -563,23 +602,132 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val width = maxOf(rightEdge, noteRight) + MARGIN
     val height = maxOf(rowBuild.bottomY, noteBottom) + BOTTOM_MARGIN
 
+    // headerHeight itself is UNCHANGED by any of this — still computed above over every visible
+    // lifeline (created ones included, so a created lifeline's own wrapped label still contributes
+    // to `maxLabelLineCount` and the shared band stays tall enough) and `buildRows`' own
+    // `y = MARGIN + headerHeight + topGap` origin never moves. Only a created column's OWN header
+    // box relocates, below, from that shared band down to its creation row — NO ROW MOVES.
+    val minLifelineTop = MARGIN + headerHeight
     val lifelineColumns = lifelinesSorted.mapIndexed { i, l ->
-        Seq3LifelineColumn(
-            lifelineId = l.id,
-            label = l.name,
-            labelLines = labelLinesPerLifeline[i],
-            kind = l.kind,
-            centerX = centers[i],
-            // The NAME box sits below the actor-glyph reserve (see Seq3LifelineColumn's own doc):
-            // MARGIN + actorReserve, not just MARGIN, so a participant column also leaves the same
-            // blank band an actor column's stick figure occupies — that's what keeps every chip's
-            // bottom edge (and therefore lifelineTop below) aligned regardless of kind.
-            header = Seq3Box(lefts[i], MARGIN + actorReserve, headerWidths[i], nameBoxHeight),
-            lifelineTop = MARGIN + headerHeight,
-            lifelineBottom = rowBuild.bottomY,
+        resolveSeq3LifelineColumn(
+            i, l, lifecycle, minLifelineTop, rowBuild.bottomY, nameBoxHeight,
+            actorReserve, labelLinesPerLifeline, lefts, headerWidths, centers,
         )
     }
-    return Seq3Layout(width, height, lifelineColumns, rowBuild.rows, fragments, notes, crossingCount, rowBuild.delayBoxes, activationBars)
+    return Seq3Layout(
+        width, height, lifelineColumns, rowsWithCreateStop, fragments, notes, crossingCount,
+        rowBuild.delayBoxes, activationBars, headerBandBottom = minLifelineTop,
+    )
+}
+
+// WP10: which row, if any, creates/destroys each lifeline (by column index). FIRST CREATE wins —
+// a later one targeting an already-constructed lifeline is ignored, the box already exists. LAST
+// DESTROY wins — truncating at the FIRST would hide any row drawn after it, and a too-long
+// lifeline is a strictly better failure than silently hidden evidence (this package's usual
+// "never throw/hide on degenerate input" posture — see Seq3Generator.kt's header). Resolved from
+// `emissions`/`rowYByIndex`, not `rowBuild.rows`, for the same reason `buildActivationBars` below
+// reads `rowYByIndex`: it is keyed by EMISSION index and survives a dropped row, where `rows`' own
+// index does not (RowBuildResult's own "index-space trap" doc). Its own function (like
+// buildActivationBars below it) purely to keep layoutSeq3's own Cyclomatic Complexity under this
+// file's detekt threshold.
+private class Seq3Lifecycle(val createRowYByLifeline: Map<Int, Double>, val destroyRowYByLifeline: Map<Int, Double>)
+
+private fun resolveSeq3Lifecycle(emissions: List<Emission>, lifelineIndex: Map<String, Int>, rowYByIndex: Map<Int, Pair<Double, Double>>): Seq3Lifecycle {
+    val createRowYByLifeline = HashMap<Int, Double>()
+    val destroyRowYByLifeline = HashMap<Int, Double>()
+    emissions.forEachIndexed { i, emission ->
+        if (emission !is Emission.Arrow) return@forEachIndexed
+        val toIdx = lifelineIndex[emission.toLifelineId] ?: return@forEachIndexed
+        val rowY = rowYByIndex[i]?.first ?: return@forEachIndexed
+        when (emission.kind) {
+            Seq3Kind.CREATE -> createRowYByLifeline.putIfAbsent(toIdx, rowY) // first wins
+            Seq3Kind.DESTROY -> destroyRowYByLifeline[toIdx] = rowY // keep overwriting: last wins
+            else -> Unit
+        }
+    }
+    return Seq3Lifecycle(createRowYByLifeline, destroyRowYByLifeline)
+}
+
+// WP10: builds one Seq3LifelineColumn, resolving its create/destroy geometry — pulled out of
+// layoutSeq3's own `lifelineColumns = lifelinesSorted.mapIndexed { ... }` for the identical
+// CyclomaticComplexMethod reason as resolveSeq3Lifecycle/applyCreateArrowStops above (this file's
+// detekt threshold). headerHeight itself is untouched by any of this (layoutSeq3's own doc); only
+// THIS column's header/lifelineTop/lifelineBottom moves off the shared band.
+// every parameter is read-only geometry already computed once in layoutSeq3; bundling them into
+// a struct would just be a second copy of layoutSeq3's own locals.
+@Suppress("LongParameterList")
+private fun resolveSeq3LifelineColumn(
+    i: Int,
+    l: Seq3Lifeline,
+    lifecycle: Seq3Lifecycle,
+    minLifelineTop: Double,
+    naturalBottomY: Double,
+    nameBoxHeight: Double,
+    actorReserve: Double,
+    labelLinesPerLifeline: List<List<String>>,
+    lefts: DoubleArray,
+    headerWidths: List<Double>,
+    centers: DoubleArray,
+): Seq3LifelineColumn {
+    val lifelineBottom = lifecycle.destroyRowYByLifeline[i]?.coerceIn(minLifelineTop, naturalBottomY) ?: naturalBottomY
+    val createRowY = lifecycle.createRowYByLifeline[i]
+    // Created column: the header box CENTRES on the create arrow's y (the UML convention) and the
+    // guide line starts at the box's bottom — exactly [header.y + nameBoxHeight == lifelineTop],
+    // the same invariant the ordinary (non-created) branch below already has ([MARGIN +
+    // actorReserve] + nameBoxHeight == [MARGIN + headerHeight]). Clamping `lifelineTop` first and
+    // deriving `header.y` FROM the clamped value (rather than clamping each independently) is what
+    // keeps that invariant true even at the clamp's own boundary.
+    val lifelineTop = if (createRowY != null) {
+        (createRowY + nameBoxHeight / 2.0).coerceIn(minLifelineTop, lifelineBottom)
+    } else {
+        minLifelineTop
+    }
+    val headerY = if (createRowY != null) lifelineTop - nameBoxHeight else MARGIN + actorReserve
+    return Seq3LifelineColumn(
+        lifelineId = l.id,
+        label = l.name,
+        labelLines = labelLinesPerLifeline[i],
+        kind = l.kind,
+        centerX = centers[i],
+        // The NAME box sits below the actor-glyph reserve (see Seq3LifelineColumn's own doc):
+        // MARGIN + actorReserve, not just MARGIN, so a participant column also leaves the same
+        // blank band an actor column's stick figure occupies — that's what keeps every chip's
+        // bottom edge (and therefore lifelineTop below) aligned regardless of kind. A created
+        // column overrides this with `headerY`, computed above from its own creation row.
+        header = Seq3Box(lefts[i], headerY, headerWidths[i], nameBoxHeight),
+        lifelineTop = lifelineTop,
+        lifelineBottom = lifelineBottom,
+        created = createRowY != null,
+        destroyed = lifecycle.destroyRowYByLifeline.containsKey(i),
+    )
+}
+
+// WP10: a CREATE arrow's target box is drawn LOWER than `centers[toIdx]`'s usual full-height
+// position (see layoutSeq3's lifelineColumns build), and both renderers paint headers BEFORE rows
+// — an unmodified create arrow's `toX` (still the column centre) would draw straight over/through
+// the box it constructs. Rewrite it to stop at the box's own near edge instead — the SAME
+// relationship every other arrow already has with an ordinary column's centre-aligned box, just
+// applied to a box that has moved. A small post-pass over already-built rows, rather than
+// threading the created-row-Y map into `buildArrowRow` itself, because at the point `buildArrowRow`
+// runs no lifeline's create/destroy row is known yet (it can't be: resolving it needs
+// `rowYByIndex`, which `buildRows` only finishes producing once every row is built).
+private fun applyCreateArrowStops(
+    rows: List<Seq3RowGeometry>,
+    lifelineIndex: Map<String, Int>,
+    centers: DoubleArray,
+    headerWidths: List<Double>,
+): List<Seq3RowGeometry> = rows.map { row ->
+    if (row is Seq3ArrowRow && row.kind == Seq3Kind.CREATE) {
+        val toIdx = lifelineIndex[row.toLifelineId] ?: return@map row
+        val boxCenterX = centers[toIdx]
+        val halfWidth = headerWidths[toIdx] / 2.0
+        // Stop at whichever edge faces the sender — the near edge, exactly like any other arrow's
+        // arrowhead sits at the near edge of an ordinary (centre-drawn) box today.
+        val edgeX = if (row.fromX <= boxCenterX) boxCenterX - halfWidth else boxCenterX + halfWidth
+        row.copy(toX = edgeX)
+    } else {
+        row
+    }
 }
 
 // ── Crossing count (design spec §07) ────────────────────────────────────────────────────────
@@ -1323,7 +1471,13 @@ private fun buildSelfRow(e: Emission.Self, req: RowRequirement, lifelineIndex: M
 private fun seq3StubTerminalFor(kind: Seq3Kind): Seq3StubTerminal = when (kind) {
     Seq3Kind.LOST -> Seq3StubTerminal.LOST
     Seq3Kind.FOUND -> Seq3StubTerminal.FOUND
-    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE -> Seq3StubTerminal.DROP_PILL
+    // WP10: an unresolved CREATE/DESTROY (no target lifeline picked yet) is the exact same
+    // "needs target" state a not-yet-targeted CALL/RETURN/ASYNC is in — it still needs a real
+    // lifeline to construct/destroy, it just hasn't been given one. Not LOST/FOUND's bucket: those
+    // are RESOLVED facts with a permanently unobservable other end (Seq3Kind's own doc); an
+    // unresolved CREATE/DESTROY is the opposite — it WILL get a concrete `toLifelineId`, it just
+    // doesn't have one yet, so it reads as amber/pending exactly like the others below.
+    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.CREATE, Seq3Kind.DESTROY -> Seq3StubTerminal.DROP_PILL
 }
 
 private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {

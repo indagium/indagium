@@ -470,6 +470,25 @@ class Seq3CodecTest {
     }
 
     @Test
+    fun createAndDestroyKindsRoundTripByName() {
+        // WP10: same proof as lostAndFoundKindsRoundTripByName just above — Seq3Codec decodes
+        // Seq3Kind generically by name, so no codec change was needed for this work package
+        // either. Unlike LOST/FOUND, CREATE/DESTROY keep fixedDocument()'s own real
+        // `toLifelineId` UNCHANGED rather than forcing it null: it is NOT meaningless for these two
+        // kinds (Seq3Kind's own doc) — the whole point of the feature is a genuine target lifeline
+        // to construct/destroy, so a realistic fixture for either kind always has one.
+        listOf(Seq3Kind.CREATE, Seq3Kind.DESTROY).forEach { kind ->
+            val original = fixedDocument().let { doc ->
+                doc.copy(messages = doc.messages.map { it.copy(kind = kind) })
+            }
+            val parsed = parseSeq3Note(encodeSeq3Note(original))
+            assertNotNull(parsed)
+            assertEquals(original, parsed.document)
+            assertEquals(kind, parsed.document.messages.single().kind)
+        }
+    }
+
+    @Test
     fun hideKindLabelRoundTripsThroughEncodeAndParse() {
         val original = fixedDocument().copy(
             fragments = listOf(

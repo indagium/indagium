@@ -134,7 +134,7 @@ data class Seq3OccurrenceRef(
  *  in to `fromLifelineId` — "something outside the captured system triggered this component."
  *  Reading `fromLifelineId` as the *receiver* for FOUND (rather than adding a nullable source
  *  field) is what keeps both kinds inside the existing one-endpoint model. */
-enum class Seq3Kind { CALL, RETURN, ASYNC, SELF, NOTE, LOST, FOUND }
+enum class Seq3Kind { CALL, RETURN, ASYNC, SELF, NOTE, LOST, FOUND, CREATE, DESTROY }
 
 /** How a run of [Seq3Message.occurrences] draws on the canvas/in exported text.
  *  [Seq3Message.repeatThreshold] only matters for [COLLAPSE_ABOVE] — the other two modes ignore
