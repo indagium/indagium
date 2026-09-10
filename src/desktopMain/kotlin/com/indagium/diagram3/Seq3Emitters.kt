@@ -520,6 +520,137 @@ private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket): List<String> {
     return listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
 }
 
+// ── Fragment operand dividers (WP5) ─────────────────────────────────────────────────────────
+//
+// [Seq3Fragment.elseOperands] is UML's InteractionOperand list minus operand zero (see that
+// field's own doc) — this renders the divider that separates each of THOSE operands from the one
+// before it. Operand zero needs no divider of its own: the fragment's OPEN line, just above,
+// already puts its guard exactly where UML puts operand zero's.
+//
+// The divider keyword is dialect- AND kind-dependent, not just dialect-dependent — the same
+// "genuinely disagree" situation [mermaidFragmentOpenLines]'s own header describes for GROUP:
+//   ALT       -> `else <guard>` in BOTH dialects (UML's own default, which Mermaid borrows too).
+//   PAR       -> `and <guard>` in Mermaid (its own keyword for a parallel branch) but
+//                `else <guard>` in PlantUML (PlantUML has no `and`; every divided operator reuses
+//                `else`).
+//   CRITICAL  -> `option <guard>` in Mermaid; PlantUML has NO divider syntax for `critical` AT
+//                ALL — there is nothing to fall back to, so a `critical` operand's own messages
+//                silently fold into the preceding branch in PlantUML text. The messages
+//                themselves are still emitted in order; only the branch label is lost, which is
+//                exactly what this deliverable calls for, not a bug to paper over.
+//   everything else (OPT/LOOP/BREAK/GROUP) -> no divider in EITHER dialect: UML gives OPT/LOOP/
+//                BREAK exactly one operand, and GROUP isn't a UML combined-fragment operator at
+//                all (see [Seq3FragmentKind]'s own doc) — so a stray `elseOperands` entry left
+//                behind by a kind change (preserved on purpose, see that field's own doc) is
+//                simply never rendered for any of them.
+//
+// DO NOT fold these two into one `when (dialect)` helper — same reasoning as
+// [mermaidFragmentOpenLines]'s own header: PAR and CRITICAL genuinely disagree between dialects,
+// so a "unified" version would just relocate the per-dialect branch one level down instead of
+// removing it, while making it easy to miss that CRITICAL has no PlantUML case at all.
+
+/** Shared keyword+guard formatting only — NOT a dialect branch (see the header above for why the
+ *  two functions below stay separate). Mirrors [fragmentKeywordLine]'s "a blank label leaves the
+ *  bare keyword, no trailing separator" rule for the same reason: a guard is user-typed text and
+ *  can be blank. */
+private fun operandDividerLine(keyword: String, guard: String, escape: (String) -> String): String =
+    if (guard.isBlank()) keyword else "$keyword ${escape(guard)}"
+
+/** Mermaid's divider line for one [Seq3Operand] belonging to a fragment of [kind], or null when
+ *  [kind] has no Mermaid divider at all (every kind but ALT/PAR/CRITICAL — see this section's own
+ *  header table). */
+private fun mermaidFragmentDividerLine(kind: Seq3FragmentKind, guard: String): String? = when (kind) {
+    Seq3FragmentKind.ALT -> operandDividerLine("else", guard, ::mermaidEscape)
+    Seq3FragmentKind.PAR -> operandDividerLine("and", guard, ::mermaidEscape)
+    Seq3FragmentKind.CRITICAL -> operandDividerLine("option", guard, ::mermaidEscape)
+    else -> null
+}
+
+/** PlantUML's divider line for one [Seq3Operand] belonging to a fragment of [kind], or null when
+ *  [kind] has no PlantUML divider — every kind but ALT/PAR, AND (this section's own header table)
+ *  CRITICAL itself: PlantUML has no `critical` divider syntax to fall back to. */
+private fun plantUmlFragmentDividerLine(kind: Seq3FragmentKind, guard: String): String? = when (kind) {
+    Seq3FragmentKind.ALT -> operandDividerLine("else", guard, ::plantUmlEscape)
+    Seq3FragmentKind.PAR -> operandDividerLine("else", guard, ::plantUmlEscape)
+    else -> null
+}
+
+/** One resolved divider: the (normalized, clamped) bracket it opens inside, and the operand
+ *  supplying its guard text. Carries the bracket rather than just the fragment so the emit loop
+ *  can key its dialect-specific divider-line lookup on [Seq3Bracket.fragment].kind without a
+ *  second pass back through `normalizedBrackets`' output. */
+private class Seq3OperandDivider(val bracket: Seq3Bracket, val operand: Seq3Operand)
+
+/** [Seq3Operand.startsAtMessageId]/[Seq3Operand.startsAtOccurrenceEntryId] resolved to an emission
+ *  index — the same two-field occurrence-pinning contract [delayAnchorIndex] resolves for
+ *  [Seq3Delay], reused here for the pinned branch, but NOT for the fallback: a [Seq3Delay] anchors
+ *  AFTER its message's LAST drawn row ([Seq3EmissionPlan.lastIndexByMessage]), while
+ *  [Seq3Operand.startsAtMessageId]'s own doc says the operand begins AT the FIRST drawn row of its
+ *  anchor message, so the un-pinned fallback here is [Seq3EmissionPlan.firstIndexByMessage]. */
+private fun operandAnchorIndex(operand: Seq3Operand, plan: Seq3EmissionPlan): Int? =
+    operand.startsAtOccurrenceEntryId
+        ?.let { entryId -> plan.indexByOccurrence[Seq3OccurrenceRef(operand.startsAtMessageId, entryId)] }
+        ?: plan.firstIndexByMessage[operand.startsAtMessageId]
+
+/**
+ * Resolves every bracket's [Seq3Fragment.elseOperands] to the emission index their divider is
+ * written at, keyed the same way [toMermaid]/[toPlantUml]'s own `opens`/`closes`/`notesByAnchor`
+ * /`delaysByAnchor` already are, so the emit loop can look a divider up by its own
+ * `forEachIndexed` index `i`.
+ *
+ * THE TRAP: [brackets] must be [normalizedBrackets]' NORMALIZED, CLAMPED output — never a
+ * fragment's own raw [fragmentBounds] — because two fragments that CROSS rather than nest get one
+ * of their ends clamped to the other's by that function. Resolving an operand against the raw,
+ * un-clamped bounds would let its divider land past the CLAMPED end, i.e. AFTER the `end` line
+ * [closes] already writes for that bracket — malformed in both dialects, and neither emitter
+ * validates its own output, so this fails completely silently. Below, `index !in bracket.range`
+ * reads the clamped [Seq3Bracket.range] for exactly this reason. Dedicated coverage:
+ * `aDividerOnACrossingFragmentIsClampedAwayRatherThanEmittedAfterEnd` in Seq3EmitterTest.kt.
+ *
+ * The remaining rules, applied in order, each a real pitfall rather than defensive filler:
+ *   - an unresolved anchor (a stale/dangling `startsAtMessageId`) drops the divider — the same
+ *     "a stale anchor drops silently, never fails the whole emission" contract [Seq3Delay]'s own
+ *     doc (and [delayAnchorIndex]'s fallback) already establish for a sibling anchor type.
+ *   - an index equal to the bracket's own start is operand zero's own row — no divider belongs
+ *     there; [Seq3Fragment.label] already carries operand zero's guard on the OPEN line.
+ *   - ties (two operands resolving to the SAME index — e.g. a guard describing an intentionally
+ *     EMPTY branch immediately followed by another) are NOT deduplicated: both are stated user
+ *     intent, and [List.sortedBy] is a stable sort, so [Seq3Fragment.elseOperands]' own declared
+ *     order survives as the tiebreak with no extra comparator key needed.
+ */
+private fun operandDividersByAnchor(brackets: List<Seq3Bracket>, plan: Seq3EmissionPlan): Map<Int, List<Seq3OperandDivider>> {
+    val resolved = ArrayList<Pair<Int, Seq3OperandDivider>>()
+    brackets.forEach { bracket ->
+        bracket.fragment.elseOperands.forEach { operand ->
+            val index = operandAnchorIndex(operand, plan) ?: return@forEach
+            if (index !in bracket.range) return@forEach
+            if (index == bracket.range.first) return@forEach
+            resolved += index to Seq3OperandDivider(bracket, operand)
+        }
+    }
+    return resolved.sortedBy { it.first }.groupBy({ it.first }, { it.second })
+}
+
+// Shared append loop only — NOT a merge of [mermaidFragmentDividerLine]/[plantUmlFragmentDividerLine]
+// themselves (those stay separate; see that pair's own header for why). [dividerLineFor] is the one
+// dialect-specific piece, passed in by reference at each call site, exactly like [appendActivationLines]
+// already takes [indent] as its one per-dialect knob for a shared write loop. Factored out of
+// toMermaid/toPlantUml (rather than left inline) purely to keep both under detekt's
+// CyclomaticComplexMethod threshold — the branching itself already lived in
+// [operandDividersByAnchor]/[mermaidFragmentDividerLine]/[plantUmlFragmentDividerLine]; this loop adds
+// none of its own.
+private fun StringBuilder.appendDividerLines(
+    dividersByAnchor: Map<Int, List<Seq3OperandDivider>>,
+    i: Int,
+    indent: String,
+    dividerLineFor: (Seq3FragmentKind, String) -> String?,
+) {
+    dividersByAnchor[i]?.forEach { divider ->
+        val line = dividerLineFor(divider.bracket.fragment.kind, divider.operand.guard) ?: return@forEach
+        append(indent).append(line).append('\n')
+    }
+}
+
 // ── Notes ────────────────────────────────────────────────────────────────────────────────────
 //
 // A note anchors right after the LAST emission of the LAST message it references, and its span
@@ -725,6 +856,9 @@ fun Seq3Document.toMermaid(): String {
     val brackets = normalizedBrackets(visibleFragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
+    // WP5: resolved against the CLAMPED `brackets` above, not raw fragment bounds — see
+    // operandDividersByAnchor's own "THE TRAP" doc for why that distinction is load-bearing.
+    val dividersByAnchor = operandDividersByAnchor(brackets, plan)
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
@@ -748,6 +882,10 @@ fun Seq3Document.toMermaid(): String {
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 mermaidFragmentOpenLines(b, plan, aliases).forEach { line -> append("    ").append(line).append('\n') }
             }
+            // WP5: an operand's divider begins AT the message it anchors to, so it is written
+            // after any fragment that opens at this same index (the divider's own fragment
+            // included, when its own operand zero starts here) and before the emission's own line.
+            appendDividerLines(dividersByAnchor, i, indent = "    ", dividerLineFor = ::mermaidFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
                     val arrow = when (emission.kind) {
@@ -796,6 +934,9 @@ fun Seq3Document.toPlantUml(): String {
     val brackets = normalizedBrackets(visibleFragments, plan)
     val opens = brackets.groupBy { it.range.first }
     val closes = brackets.groupBy { it.range.last }
+    // WP5: resolved against the CLAMPED `brackets` above, not raw fragment bounds — see
+    // operandDividersByAnchor's own "THE TRAP" doc for why that distinction is load-bearing.
+    val dividersByAnchor = operandDividersByAnchor(brackets, plan)
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
@@ -816,6 +957,9 @@ fun Seq3Document.toPlantUml(): String {
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
                 plantUmlFragmentOpenLines(b).forEach { line -> append(line).append('\n') }
             }
+            // WP5: an operand's divider begins AT the message it anchors to — see toMermaid's
+            // identical comment just above its own dividersByAnchor block.
+            appendDividerLines(dividersByAnchor, i, indent = "", dividerLineFor = ::plantUmlFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
                     val arrow = when (emission.kind) {
