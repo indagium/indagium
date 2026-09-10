@@ -138,6 +138,11 @@ sealed class Seq3Command {
     /** Item 7 (WP10): toggle inline `[HH:MM:SS.mmm]` timestamps — see
      *  [Seq3Document.showTimestamps]'s own doc. */
     data class SetShowTimestamps(val show: Boolean) : Seq3Command()
+
+    /** WP1: toggle UML activation bars (ExecutionSpecifications) — see
+     *  [Seq3Document.showActivations]'s own doc for why this is document-level rather than a view
+     *  flag. No renderer reads this yet (WP2/WP3); this command only flips the stored flag. */
+    data class SetShowActivations(val show: Boolean) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -206,6 +211,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetDocumentTheme -> dispatchSetDocumentTheme(document, command)
     is Seq3Command.SetShowSequenceNumbers -> dispatchSetShowSequenceNumbers(document, command)
     is Seq3Command.SetShowTimestamps -> dispatchSetShowTimestamps(document, command)
+    is Seq3Command.SetShowActivations -> dispatchSetShowActivations(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -554,4 +560,9 @@ private fun dispatchSetShowSequenceNumbers(document: Seq3Document, command: Seq3
 private fun dispatchSetShowTimestamps(document: Seq3Document, command: Seq3Command.SetShowTimestamps): Outcome {
     if (document.showTimestamps == command.show) return unapplied(document, "No change")
     return applied(document.copy(showTimestamps = command.show), "Toggle timestamps")
+}
+
+private fun dispatchSetShowActivations(document: Seq3Document, command: Seq3Command.SetShowActivations): Outcome {
+    if (document.showActivations == command.show) return unapplied(document, "No change")
+    return applied(document.copy(showActivations = command.show), "Toggle activation bars")
 }

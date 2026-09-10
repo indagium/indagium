@@ -287,6 +287,38 @@ class Seq3CodecTest {
         assertFalse(parsed.document.showTimestamps)
     }
 
+    // ── WP1: activation-bars document toggle ────────────────────────────────────────────────────
+
+    @Test
+    fun showActivationsRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(showActivations = true)
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertTrue(parsed.document.showActivations)
+    }
+
+    @Test
+    fun aDocumentMissingTheWp1ActivationsKeyDecodesToFalse() {
+        // A note saved by a build predating WP1 has no "showActivations" key at all.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertFalse(parsed.document.showActivations)
+    }
+
     // ── Delay (WP11) ─────────────────────────────────────────────────────────────────────────
 
     @Test
