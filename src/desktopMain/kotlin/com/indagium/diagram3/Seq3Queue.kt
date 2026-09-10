@@ -413,8 +413,19 @@ private fun applySetFrom(document: Seq3Document, selectedIds: Set<String>, actio
  *  OWN prior `from`) so a stub can never end up with `to` still null after the drop. */
 private fun applySetCaller(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetCaller): Seq3BulkResult {
     if (document.lifelines.none { it.id == action.lifelineId }) return unapplied(document, "Unknown caller lifeline")
+    // Mirrors applySwapEndpoints' own eligibility filter just below: "drop the stub onto a
+    // lifeline to set its caller" is specifically the DROP_PILL terminal's affordance
+    // (Seq3UnresolvedStubRow's own doc) — a LOST/FOUND row draws no drop pill (WP9 Deliverable 2),
+    // so this command should never reach one from the UI. Refusing it defensively here — rather
+    // than silently giving the message a resolved `toLifelineId` while `kind` stays LOST/FOUND —
+    // keeps that contract true even if a future caller ever dispatches this command directly.
+    val eligibleIds = document.messages
+        .filter { it.id in selectedIds && it.kind != Seq3Kind.LOST && it.kind != Seq3Kind.FOUND }
+        .map { it.id }
+        .toSet()
+    if (eligibleIds.isEmpty()) return unapplied(document, "Nothing to set a caller for")
     return Seq3BulkResult(
-        editMessages(document, selectedIds) { message ->
+        editMessages(document, eligibleIds) { message ->
             val callee = message.fromLifelineId
             message.copy(
                 fromLifelineId = action.lifelineId,
@@ -431,8 +442,18 @@ private fun applySetCaller(document: Seq3Document, selectedIds: Set<String>, act
 
 private fun applySetTo(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetTo): Seq3BulkResult {
     if (action.lifelineId != null && document.lifelines.none { it.id == action.lifelineId }) return unapplied(document, "Unknown target lifeline")
+    // Same exclusion as applySetCaller just above, for the same reason: `toLifelineId` is
+    // meaningless for LOST/FOUND (Seq3Kind's own doc), and the QueuePanel's "set target" chip is
+    // already hidden for them (Seq3RowEndpointsLine) — refusing here keeps this command from
+    // corrupting one into a message with both a resolved target AND a LOST/FOUND kind if it is
+    // ever dispatched some other way.
+    val eligibleIds = document.messages
+        .filter { it.id in selectedIds && it.kind != Seq3Kind.LOST && it.kind != Seq3Kind.FOUND }
+        .map { it.id }
+        .toSet()
+    if (eligibleIds.isEmpty()) return unapplied(document, "Nothing to set a target for")
     return Seq3BulkResult(
-        editMessages(document, selectedIds) { m ->
+        editMessages(document, eligibleIds) { m ->
             // Picking a message's own `from` as its `to` must read as a self-call, not an ordinary
             // arrow pointing at itself — same auto-flip [applySeq3GuidedTarget] performs for the
             // guided pass, mirrored here for the Inspector's bulk "Set target" verb.
@@ -455,7 +476,19 @@ private fun applySetTo(document: Seq3Document, selectedIds: Set<String>, action:
 private fun applySetKind(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction.SetKind): Seq3BulkResult =
     Seq3BulkResult(
         editMessages(document, selectedIds) { m ->
-            m.copy(kind = action.kind, toLifelineId = if (action.kind == Seq3Kind.SELF) m.fromLifelineId else m.toLifelineId)
+            m.copy(
+                kind = action.kind,
+                toLifelineId = when (action.kind) {
+                    Seq3Kind.SELF -> m.fromLifelineId
+                    // Switching a message TO lost/found must drop any existing target — leaving a
+                    // stale one in place would produce exactly the inconsistent state
+                    // Seq3Emitters/Seq3ArrowStyle's "LOST/FOUND never actually reach here" comments
+                    // assume never happens (`toLifelineId` is meaningless for these two kinds, same
+                    // as NOTE — see Seq3Kind's own doc).
+                    Seq3Kind.LOST, Seq3Kind.FOUND -> null
+                    else -> m.toLifelineId
+                },
+            )
         },
         applied = true,
     )

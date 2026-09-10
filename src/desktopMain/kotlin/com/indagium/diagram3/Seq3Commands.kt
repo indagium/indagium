@@ -25,6 +25,11 @@ sealed class Seq3Command {
 
     data class GuidedSelfCall(val messageId: String) : Seq3Command()
 
+    /** "Mark as lost" (WP9, spec extension) — the exact structural analogue of [GuidedSelfCall]:
+     *  a one-click verb that resolves the current guided-pass row without picking a target,
+     *  because a lost message genuinely has none to pick. See [applySeq3GuidedMarkAsLost]. */
+    data class GuidedMarkAsLost(val messageId: String) : Seq3Command()
+
     data class GuidedNewLifeline(val messageId: String, val newLifeline: Seq3Lifeline) : Seq3Command()
 
     data class ApplyRegeneration(val review: Seq3RegenReview) : Seq3Command()
@@ -185,6 +190,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.GuidedTarget ->
         applied(applySeq3GuidedTarget(document, command.messageId, command.lifelineId, command.applyToAllOccurrences), "Set target")
     is Seq3Command.GuidedSelfCall -> applied(applySeq3GuidedSelfCall(document, command.messageId), "Make self-call")
+    is Seq3Command.GuidedMarkAsLost -> applied(applySeq3GuidedMarkAsLost(document, command.messageId), "Mark as lost")
     is Seq3Command.GuidedNewLifeline -> applied(applySeq3GuidedNewLifeline(document, command.messageId, command.newLifeline), "Add lifeline")
     is Seq3Command.ApplyRegeneration -> applied(applySeq3Regeneration(document, command.review), "Regenerate")
     is Seq3Command.ReplaceMessage -> dispatchReplaceMessage(document, command)

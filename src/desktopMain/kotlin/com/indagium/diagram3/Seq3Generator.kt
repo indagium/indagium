@@ -711,31 +711,54 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
  * semantic fragment. This supports inserting an authored message into an existing OPT/ALT/LOOP/PAR
  * section without manufacturing a second, overlapping fragment.
  */
+/** [addSeq3CustomMessage]'s own per-kind target validation, pulled out into its own function
+ *  (WP9) once the LOST/FOUND branch pushed the caller over detekt's CyclomaticComplexMethod
+ *  threshold — the logic itself is unchanged from before that branch existed, just no longer
+ *  inline. Returns the resolved `toLifelineId` (nullable) on the right, or a rejection reason on
+ *  the left, so the caller's own early-return shape stays a single `when`. */
+private fun resolveSeq3CustomMessageTarget(spec: Seq3CustomMessageSpec, from: Seq3Lifeline, document: Seq3Document): Seq3CustomMessageResult.Rejected? =
+    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
+    // silently inheriting the CALL/RETURN/ASYNC "ordinary target lifeline" rule.
+    when (spec.kind) {
+        Seq3Kind.NOTE ->
+            if (spec.toLifelineId != null) Seq3CustomMessageResult.Rejected("A note message cannot have a target lifeline") else null
+        Seq3Kind.SELF ->
+            if (spec.toLifelineId != null && spec.toLifelineId != from.id) {
+                Seq3CustomMessageResult.Rejected("A self message must target its source lifeline")
+            } else {
+                null
+            }
+        Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> when {
+            spec.toLifelineId == null -> Seq3CustomMessageResult.Rejected("Target lifeline is required")
+            document.lifelines.none { it.id == spec.toLifelineId } -> Seq3CustomMessageResult.Rejected("Unknown target lifeline")
+            else -> null
+        }
+        // Same shape as NOTE just above: `toLifelineId` is meaningless for LOST/FOUND
+        // (Seq3Kind's own doc), so a caller-supplied target is rejected outright rather than
+        // silently dropped — dropping it would let a custom-message form "succeed" while
+        // quietly ignoring a field the user explicitly filled in.
+        Seq3Kind.LOST, Seq3Kind.FOUND ->
+            if (spec.toLifelineId != null) Seq3CustomMessageResult.Rejected("A lost/found message cannot have a target lifeline") else null
+    }
+
+/** The actual `toLifelineId` value for a validated spec — SELF always resolves to its own
+ *  source, NOTE/LOST/FOUND always resolve to null, and CALL/RETURN/ASYNC pass through whatever
+ *  the caller supplied (already proven non-null/known by [resolveSeq3CustomMessageTarget]). Kept
+ *  separate from that function's rejection check so neither one duplicates the other's `when`. */
+private fun seq3CustomMessageTargetValue(spec: Seq3CustomMessageSpec, from: Seq3Lifeline): String? = when (spec.kind) {
+    Seq3Kind.SELF -> from.id
+    Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> null
+    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> spec.toLifelineId
+}
+
 @Suppress("ReturnCount")
 fun addSeq3CustomMessage(document: Seq3Document, spec: Seq3CustomMessageSpec): Seq3CustomMessageResult {
     val text = spec.text.trim()
     if (text.isEmpty()) return Seq3CustomMessageResult.Rejected("Message text is required")
     val from = document.lifelines.firstOrNull { it.id == spec.fromLifelineId }
         ?: return Seq3CustomMessageResult.Rejected("Unknown source lifeline")
-    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
-    // silently inheriting the CALL/RETURN/ASYNC "ordinary target lifeline" rule.
-    val to = when (spec.kind) {
-        Seq3Kind.NOTE -> {
-            if (spec.toLifelineId != null) return Seq3CustomMessageResult.Rejected("A note message cannot have a target lifeline")
-            null
-        }
-        Seq3Kind.SELF -> {
-            if (spec.toLifelineId != null && spec.toLifelineId != from.id) {
-                return Seq3CustomMessageResult.Rejected("A self message must target its source lifeline")
-            }
-            from.id
-        }
-        Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> {
-            val targetId = spec.toLifelineId ?: return Seq3CustomMessageResult.Rejected("Target lifeline is required")
-            if (document.lifelines.none { it.id == targetId }) return Seq3CustomMessageResult.Rejected("Unknown target lifeline")
-            targetId
-        }
-    }
+    resolveSeq3CustomMessageTarget(spec, from, document)?.let { rejection -> return rejection }
+    val to = seq3CustomMessageTargetValue(spec, from)
     val fragment = spec.fragmentId?.let { id ->
         document.fragments.firstOrNull { it.id == id }
             ?: return Seq3CustomMessageResult.Rejected("Unknown fragment")

@@ -101,6 +101,7 @@ import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
+import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.seq3ArrowStyle
@@ -1075,13 +1076,16 @@ private fun DrawScope.drawSeq3Diagram(
             }
             is Seq3SelfLoopRow -> if (!draggingRow) drawSeq3SelfLoop(row, arrowColor)
             is Seq3UnresolvedStubRow -> if (!draggingRow) {
-                drawLine(
-                    color = tc.warn,
-                    start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx()),
-                    end = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()),
-                    strokeWidth = 1.5.dp.toPx(),
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
-                )
+                when (row.terminal) {
+                    Seq3StubTerminal.DROP_PILL -> drawLine(
+                        color = tc.warn,
+                        start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx()),
+                        end = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()),
+                        strokeWidth = 1.5.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 4.dp.toPx())),
+                    )
+                    Seq3StubTerminal.LOST, Seq3StubTerminal.FOUND -> drawSeq3LostFoundStub(row, arrowColor)
+                }
             }
             is Seq3MessageNoteRow -> {
                 val topLeft = Offset(row.box.x.dp.toPx(), row.box.y.dp.toPx())
@@ -1317,6 +1321,23 @@ private fun DrawScope.drawSeq3DragPreview(
     drawPath(head, color)
 }
 
+/** LOST/FOUND (WP9): a solid line — [seq3ArrowStyle]'s own LOST/FOUND value is `dash = null`, a
+ *  resolved fact, not the amber dashed "needs attention" line DROP_PILL keeps just above — ending
+ *  in a FILLED circle, UML's real lost/found terminal glyph. Filled (unlike a bare open-headed
+ *  arrow) is what reads as "this is the deliberate end of the message", the same choice
+ *  Seq3Raster's `paintLostFoundStubRow` makes for the exported PNG — this file's own header: the
+ *  two renderers must draw the same thing. [color] is the caller's own hover/selection/drag
+ *  `arrowColor`, not a fixed value, so a LOST/FOUND row highlights exactly like every other row. */
+private fun DrawScope.drawSeq3LostFoundStub(row: Seq3UnresolvedStubRow, color: Color) {
+    drawLine(
+        color = color,
+        start = Offset(row.fromX.dp.toPx(), row.y.dp.toPx()),
+        end = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()),
+        strokeWidth = 1.5.dp.toPx(),
+    )
+    drawCircle(color = color, radius = ARROWHEAD_HALF_DP.dp.toPx(), center = Offset(row.stubEndX.dp.toPx(), row.y.dp.toPx()))
+}
+
 private fun DrawScope.drawSeq3SelfLoop(row: Seq3SelfLoopRow, color: Color) {
     val x = row.x.dp.toPx()
     val yTop = row.y.dp.toPx()
@@ -1372,12 +1393,23 @@ private fun Seq3RowOverlay(
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3UnresolvedStubRow -> {
-            Seq3LabelText(row.labelBox, row.label, docTheme.warn)
-            Box(
-                Modifier.offset(row.dropPill.x.dp, row.dropPill.y.dp).size(row.dropPill.width.dp, row.dropPill.height.dp)
-                    .background(docTheme.warnBg, RoundedCornerShape(50)).border(1.dp, docTheme.warn, RoundedCornerShape(50)),
-                contentAlignment = Alignment.Center,
-            ) { AppText("drop on a lifeline", color = docTheme.warn, fontSize = 9.sp, maxLines = 1) }
+            when (row.terminal) {
+                Seq3StubTerminal.DROP_PILL -> {
+                    Seq3LabelText(row.labelBox, row.label, docTheme.warn)
+                    Box(
+                        Modifier.offset(row.dropPill.x.dp, row.dropPill.y.dp).size(row.dropPill.width.dp, row.dropPill.height.dp)
+                            .background(docTheme.warnBg, RoundedCornerShape(50)).border(1.dp, docTheme.warn, RoundedCornerShape(50)),
+                        contentAlignment = Alignment.Center,
+                    ) { AppText("drop on a lifeline", color = docTheme.warn, fontSize = 9.sp, maxLines = 1) }
+                }
+                // LOST/FOUND: plain label in the row's normal (hover/selection-aware) color, no
+                // "drop on a lifeline" pill — the message is already resolved, so offering that
+                // affordance would misrepresent it (Deliverable 2's own framing). The label text
+                // itself still needs to render somewhere, so it keeps using `labelColor`, not
+                // `docTheme.warn` — an amber label without the pill it exists to introduce would
+                // read as a rendering bug, not a deliberate choice.
+                Seq3StubTerminal.LOST, Seq3StubTerminal.FOUND -> Seq3LabelText(row.labelBox, row.label, labelColor)
+            }
             Seq3InlineLabelEditorIfNeeded(state, session, view, row, row.label, row.labelBox)
         }
         is Seq3MessageNoteRow -> {
@@ -2572,7 +2604,14 @@ internal fun seq3ResolveDragEndpoint(layout: Seq3Layout, x: Double, y: Double): 
                     min(kotlin.math.hypot(x - row.x, y - row.y), kotlin.math.hypot(x - row.x, y - row.loopBottomY)),
                 )
             }
-            is Seq3UnresolvedStubRow -> {
+            // WP9: DROP_PILL only. A LOST/FOUND row has no drop pill and is already resolved
+            // (Deliverable 2), so dragging its line must not offer to "set its caller" — that
+            // affordance is exactly what showing no pill is supposed to rule out; see
+            // Seq3UnresolvedStubRow.terminal's own doc and applySetCaller's matching refusal on
+            // the command side (Seq3Queue.kt) for the same decision made twice, defensively.
+            is Seq3UnresolvedStubRow -> if (row.terminal != Seq3StubTerminal.DROP_PILL) {
+                null
+            } else {
                 // WP7 item 2: dragging a stub resolves the CALLER, so this is always a FROM
                 // endpoint (see Seq3DragEndpoint.isStub's own doc for why release must still tell
                 // it apart from an ordinary arrow's FROM handle). The pill sits to the LEFT of

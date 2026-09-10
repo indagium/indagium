@@ -42,6 +42,18 @@ private val SEQ3_DASH_ASYNC = listOf(3f, 3f)
 fun seq3ArrowStyle(kind: Seq3Kind): Seq3ArrowStyle = when (kind) {
     Seq3Kind.RETURN -> Seq3ArrowStyle(dash = SEQ3_DASH_RETURN, filledHead = false, thin = true)
     Seq3Kind.ASYNC -> Seq3ArrowStyle(dash = SEQ3_DASH_ASYNC, filledHead = false, thin = true)
+    // LOST/FOUND never actually draw through this descriptor: they always lay out as a
+    // Seq3UnresolvedStubRow (WP9 Deliverable 2), whose own `terminal` field (DROP_PILL/LOST/FOUND)
+    // is painted directly by Seq3Raster/Seq3Canvas as a line ending in a filled circle — there is
+    // no arrowhead for `filledHead` to gate. Still its OWN branch, not folded into CALL/SELF/NOTE
+    // below by reflex: a lost/found message is a RESOLVED, honest fact (it really happened; only
+    // the other end is unobservable), which reads correctly as a SOLID line — unlike RETURN/
+    // ASYNC's dashed "different arrow kind" semantics above, and unlike the separate amber/dashed
+    // warning styling `Seq3UnresolvedStubRow`'s DROP_PILL terminal keeps for a genuinely
+    // still-unresolved message (that dash lives in Seq3Raster/Seq3Canvas's own DASH_WARN, not
+    // here). The values happen to match CALL's because "solid, filled, thick" is independently the
+    // right answer for a resolved one-way send, not because this is a copy-paste of that branch.
+    Seq3Kind.LOST, Seq3Kind.FOUND -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
     // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
     // silently inheriting the solid-filled-arrow default meant for CALL.
     Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)

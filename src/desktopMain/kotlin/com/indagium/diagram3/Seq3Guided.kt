@@ -132,6 +132,22 @@ fun applySeq3GuidedSelfCall(document: Seq3Document, messageId: String): Seq3Docu
     },
 )
 
+/** "Mark as lost" (WP9, spec extension) — the exact structural analogue of
+ *  [applySeq3GuidedSelfCall] just above: [messageId]'s kind becomes [Seq3Kind.LOST] and its
+ *  target is forced to null. A resolving verb, not a "no-op skip": unlike [skipSeq3Guided] (which
+ *  leaves the row's kind/target untouched so it reappears in a later pass), this one-click choice
+ *  makes the row [Seq3State.AUTO]/[Seq3State.EDITED] for good, the same way choosing a target or
+ *  self-call does — a log in which the true receiver genuinely isn't captured is not a defect to
+ *  revisit, it's the honest answer (see [Seq3Kind]'s own LOST/FOUND doc). `toLifelineId` is set to
+ *  null explicitly rather than left as whatever [messageId] already had — always null already,
+ *  since this only ever fires on a [Seq3State.NEEDS_TARGET] row — so this function stays correct
+ *  even if a future caller applies it outside the guided pass, off a row that already has one. */
+fun applySeq3GuidedMarkAsLost(document: Seq3Document, messageId: String): Seq3Document = document.copy(
+    messages = document.messages.map {
+        if (it.id == messageId) it.copy(toLifelineId = null, kind = Seq3Kind.LOST, authoring = Seq3Authoring.EDITED) else it
+    },
+)
+
 /** "＋ New lifeline" (spec §05): appends [newLifeline] (caller assigns id/ordinal) without
  *  assigning it to [messageId]. Adding a candidate is deliberately separate from choosing a
  *  target: the guided pass must never create a new lifeline and silently retarget the current

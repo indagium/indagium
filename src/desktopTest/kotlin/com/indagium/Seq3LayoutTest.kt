@@ -25,6 +25,7 @@ import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
+import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
@@ -105,6 +106,44 @@ class Seq3LayoutTest {
         assertTrue(stub.dropPill.width > 0 && stub.dropPill.height > 0, "the drop-on-a-lifeline pill must have real geometry")
         assertTrue(stub.dropPill.x >= 0.0, "the pill must never render at a negative x, even on the leftmost (only) lifeline")
         assertTrue(stub.labelBox.x >= 0.0, "the label must never render at a negative x either")
+    }
+
+    // ── LOST / FOUND (WP9) ──────────────────────────────────────────────────────────────────
+
+    @Test
+    fun aLostMessageCarriesTheLostTerminalNotADropPill() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null, kind = Seq3Kind.LOST)))
+        val layout = layoutSeq3(doc, opts())
+
+        val stub = layout.rows.single() as Seq3UnresolvedStubRow
+        assertEquals(Seq3StubTerminal.LOST, stub.terminal)
+        // LOST reuses the same leftward layout an ordinary unresolved stub already has — see
+        // unresolvedMessageDrawsADashedStubNeverNothing just above.
+        assertTrue(stub.stubEndX < stub.fromX, "a LOST stub must extend to the LEFT of its lifeline")
+    }
+
+    @Test
+    fun foundMessageDirectionIsOppositeLost() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null, kind = Seq3Kind.FOUND)))
+        val layout = layoutSeq3(doc, opts())
+
+        val stub = layout.rows.single() as Seq3UnresolvedStubRow
+        assertEquals(Seq3StubTerminal.FOUND, stub.terminal)
+        // The deliberate mirror (Deliverable 2): FOUND must NOT reuse LOST's leftward math.
+        assertTrue(stub.stubEndX > stub.fromX, "a FOUND stub must extend to the RIGHT of its lifeline, opposite LOST")
+    }
+
+    @Test
+    fun aLostRowsLabelAndPillGeometryStayOnScreenWhenMirroredRight() {
+        // FOUND's rightward layout is new code, unlike LOST's reused leftward one — this guards
+        // against the same "negative x on the only lifeline" mistake the DROP_PILL test above
+        // guards against, mirrored to the opposite edge.
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null, kind = Seq3Kind.FOUND)))
+        val layout = layoutSeq3(doc, opts())
+
+        val stub = layout.rows.single() as Seq3UnresolvedStubRow
+        assertTrue(stub.labelBox.x >= stub.fromX, "a FOUND label must sit to the right of its lifeline, not overlap/precede it")
+        assertTrue(stub.labelBox.width > 0, "the label box must have real geometry")
     }
 
     @Test

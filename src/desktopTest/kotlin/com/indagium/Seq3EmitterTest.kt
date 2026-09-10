@@ -130,6 +130,58 @@ class Seq3EmitterTest {
         assertFalse(out.contains("->>"), "a NOTE-kind message must never draw an arrow")
     }
 
+    // ── LOST / FOUND (WP9) ──────────────────────────────────────────────────────────────────
+    //
+    // A LOST/FOUND message also has a null `toLifelineId` (same as the needs-target/NOTE cases
+    // just above) but is a RESOLVED, honest UML shape — never the "N messages need a target"
+    // defect that null target usually means. PlantUML has real grammar for it (verified against
+    // plantuml.com's own "Incoming and outgoing messages" section: `[o->` = found, `->o]` = lost).
+    // Mermaid has no such primitive, so it keeps the stub-note fallback shape but must not say
+    // "needs target" — that wording is exactly what WP9 exists to stop saying about these two.
+
+    @Test
+    fun lostMessageEmitsRealPlantUmlGateSyntax() {
+        val lost = message(kind = Seq3Kind.LOST, to = null, label = "ping")
+        val out = doc(listOf(lost)).toPlantUml()
+
+        assertTrue(out.contains("A ->o]: ping"), "must use PlantUML's real lost-message gate syntax; got:\n$out")
+        assertFalse(out.contains("needs target"), "a lost message is resolved, not a defect; got:\n$out")
+    }
+
+    @Test
+    fun foundMessageEmitsRealPlantUmlGateSyntax() {
+        val found = message(kind = Seq3Kind.FOUND, to = null, label = "tap")
+        val out = doc(listOf(found)).toPlantUml()
+
+        assertTrue(out.contains("[o-> A: tap"), "must use PlantUML's real found-message gate syntax; got:\n$out")
+        assertFalse(out.contains("needs target"), "a found message is resolved, not a defect; got:\n$out")
+    }
+
+    @Test
+    fun lostAndFoundMermaidFallbackDropsNeedsTargetWording() {
+        val lost = message(kind = Seq3Kind.LOST, to = null, label = "ping")
+        val found = message(id = "m2", kind = Seq3Kind.FOUND, to = null, label = "tap")
+        val out = doc(listOf(lost, found)).toMermaid()
+
+        assertTrue(out.contains("· lost"), "got:\n$out")
+        assertTrue(out.contains("· found"), "got:\n$out")
+        assertFalse(
+            out.contains("needs target"),
+            "WP9 exists specifically to stop calling a resolved lost/found message this; got:\n$out",
+        )
+    }
+
+    @Test
+    fun lostMessageIsNotRenderedAsAnOrdinaryArrow() {
+        val lost = message(kind = Seq3Kind.LOST, to = null, label = "ping")
+        val mermaid = doc(listOf(lost)).toMermaid()
+        val plantUml = doc(listOf(lost)).toPlantUml()
+
+        assertFalse(mermaid.contains("A->>B"), "a LOST message must never draw an ordinary arrow to B; got:\n$mermaid")
+        assertFalse(plantUml.contains("A -> B"), "a LOST message must never draw an ordinary arrow to B; got:\n$plantUml")
+        assertTrue(plantUml.contains("->o]"), "must use the real PlantUML lost-message gate syntax; got:\n$plantUml")
+    }
+
     // ── Repeat modes ─────────────────────────────────────────────────────────────────────────
 
     @Test

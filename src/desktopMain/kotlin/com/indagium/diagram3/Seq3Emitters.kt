@@ -81,6 +81,34 @@ private fun plantUmlEscape(text: String): String {
 // label itself — this only ever wraps a repeat-collapse count, never user text.
 private fun repeatSuffix(count: Int): String = if (count > 1) " ×$count" else ""
 
+/** Mermaid has no lost/found primitive (this file's own header: "text dialects have no
+ *  dashed-line primitive worth the trouble") — LOST/FOUND keep the same stub-note fallback shape
+ *  as a genuinely unresolved message ([Seq3Emission.NeedsTarget] covers both), but WP9 exists
+ *  specifically to stop calling a resolved lost/found message "needs target", so the suffix must
+ *  say what actually happened instead. Pulled out of `toMermaid` itself (not just inlined) once
+ *  this branch pushed that function over detekt's CyclomaticComplexMethod threshold. */
+private fun mermaidNeedsTargetSuffix(kind: Seq3Kind): String = when (kind) {
+    Seq3Kind.LOST -> " · lost"
+    Seq3Kind.FOUND -> " · found"
+    else -> " · needs target"
+}
+
+/** PlantUML has REAL grammar for this (verified against plantuml.com's own "Incoming and outgoing
+ *  messages" section, not trusted from memory): `[o->` draws an arrow FROM a filled-circle gate on
+ *  the left edge INTO a participant (found), and `->o]` draws an arrow FROM a participant OUT to a
+ *  filled-circle gate on the right edge (lost). An ordinary still-unresolved CALL/RETURN/ASYNC/SELF
+ *  has no such real syntax to reach for, so it keeps the plain "note right of" fallback. Pulled out
+ *  of `toPlantUml` itself (not just inlined) once this branch pushed that function over detekt's
+ *  CyclomaticComplexMethod threshold — mirrors [mermaidNeedsTargetSuffix]'s own reason. */
+private fun StringBuilder.appendPlantUmlNeedsTargetLine(emission: Seq3Emission.NeedsTarget, aliasOf: (Int) -> String): StringBuilder =
+    when (emission.kind) {
+        Seq3Kind.LOST -> append(aliasOf(emission.fromIdx)).append(" ->o]: ").append(plantUmlEscape(emission.label)).append('\n')
+        Seq3Kind.FOUND -> append("[o-> ").append(aliasOf(emission.fromIdx)).append(": ").append(plantUmlEscape(emission.label)).append('\n')
+        else ->
+            append("note right of ").append(aliasOf(emission.fromIdx)).append(": ")
+                .append(plantUmlEscape(emission.label)).append(" · needs target").append('\n')
+    }
+
 // ── Expand one message into what it actually draws ──────────────────────────────────────────
 
 private sealed class Seq3Emission {
@@ -115,6 +143,13 @@ private sealed class Seq3Emission {
         override val occurrenceEntryId: Int? = null,
         val rawTimestamp: String = "",
         override val timestampMillis: Long? = null,
+        /** Appended last (this file's own field-versioning convention — see Seq3Model.kt's
+         *  "append LAST" doc). Was always implicitly CALL/RETURN/ASYNC/SELF before WP9: a
+         *  genuinely-unresolved message. WP9 routes [Seq3Kind.LOST]/[Seq3Kind.FOUND] through this
+         *  SAME emission (both also have `toLifelineId == null`) so the two dialects can tell a
+         *  real UML lost/found message apart from an ordinary "still needs a target" defect and
+         *  emit real syntax for the former instead of the shared "needs target" fallback note. */
+        val kind: Seq3Kind = Seq3Kind.CALL,
     ) : Seq3Emission()
 
     data class NoteLine(
@@ -173,6 +208,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                 occurrences.firstOrNull()?.entryId,
                 message.primaryRawTimestamp,
                 message.primaryTimestampMillis,
+                message.kind,
             ),
         )
     }
@@ -893,14 +929,23 @@ fun Seq3Document.toMermaid(): String {
                     val arrow = when (emission.kind) {
                         Seq3Kind.RETURN -> "-->>"
                         Seq3Kind.ASYNC -> "-)"
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> "->>"
+                        // LOST/FOUND never actually reach an Arrow emission — expandMessage routes
+                        // any message whose `toLifelineId` is null (which LOST/FOUND always are,
+                        // by construction) to NeedsTarget instead, and that's where their real
+                        // "· lost"/"· found" text lives, just below. This branch only exists
+                        // because Seq3Emission.Arrow.kind's type can't statically rule out a
+                        // document where a LOST/FOUND message was somehow left with a resolved
+                        // `toLifelineId` (Seq3Message never enforces that as an invariant) — a
+                        // defensive fallback for that inconsistent state, not the intended path,
+                        // so it reads as a plain solid call rather than a crash.
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> "->>"
                     }
                     val label = mermaidEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append("    ").append(aliasOf(emission.fromIdx)).append(arrow).append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
                 }
                 is Seq3Emission.NeedsTarget ->
                     append("    Note right of ").append(aliasOf(emission.fromIdx)).append(": ")
-                        .append(mermaidEscape(emission.label)).append(" · needs target").append('\n')
+                        .append(mermaidEscape(emission.label)).append(mermaidNeedsTargetSuffix(emission.kind)).append('\n')
                 is Seq3Emission.NoteLine ->
                     append("    Note over ").append(aliasOf(emission.participantIdx)).append(": ").append(mermaidEscape(emission.text)).append('\n')
                 is Seq3Emission.Elided ->
@@ -969,15 +1014,17 @@ fun Seq3Document.toPlantUml(): String {
                     val arrow = when (emission.kind) {
                         Seq3Kind.RETURN -> "-->"
                         Seq3Kind.ASYNC -> "->>"
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> "->"
+                        // See toMermaid's identical branch: structurally unreachable (LOST/FOUND
+                        // always take the NeedsTarget path just below, which is where their real
+                        // `->o]`/`[o->` gate syntax is emitted) — a defensive fallback only, kept
+                        // here because Seq3Emission.Arrow.kind's type doesn't itself rule it out.
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> "->"
                     }
                     val label = plantUmlEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append(aliasOf(emission.fromIdx)).append(' ').append(arrow).append(' ')
                         .append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
                 }
-                is Seq3Emission.NeedsTarget ->
-                    append("note right of ").append(aliasOf(emission.fromIdx)).append(": ")
-                        .append(plantUmlEscape(emission.label)).append(" · needs target").append('\n')
+                is Seq3Emission.NeedsTarget -> appendPlantUmlNeedsTargetLine(emission, ::aliasOf)
                 is Seq3Emission.NoteLine ->
                     append("note right of ").append(aliasOf(emission.participantIdx)).append(": ").append(plantUmlEscape(emission.text)).append('\n')
                 is Seq3Emission.Elided ->

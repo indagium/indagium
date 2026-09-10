@@ -11,6 +11,7 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3State
 import com.indagium.diagram3.advanceSeq3GuidedPass
 import com.indagium.diagram3.applySeq3Command
+import com.indagium.diagram3.applySeq3GuidedMarkAsLost
 import com.indagium.diagram3.applySeq3GuidedNewLifeline
 import com.indagium.diagram3.applySeq3GuidedSelfCall
 import com.indagium.diagram3.applySeq3GuidedTarget
@@ -174,6 +175,46 @@ class Seq3GuidedTest {
         val m1 = result.messages.single()
         assertEquals("Producer", m1.toLifelineId)
         assertEquals(Seq3Kind.SELF, m1.kind)
+    }
+
+    // ── Mark as lost (WP9) — the exact structural analogue of "Make it a self-call" above ──────
+
+    @Test
+    fun markAsLostResolvesTheMessageWithoutPickingATarget() {
+        val doc = documentWith(needsTargetMessage("m1", "Producer", 1))
+        val result = applySeq3GuidedMarkAsLost(doc, "m1")
+        val m1 = result.messages.single()
+
+        assertEquals(Seq3Kind.LOST, m1.kind)
+        assertNull(m1.toLifelineId, "toLifelineId is meaningless for LOST — see Seq3Kind's own doc")
+        assertTrue(m1.state != Seq3State.NEEDS_TARGET, "the whole point: marking it lost must resolve it")
+    }
+
+    @Test
+    fun theGuidedPassAdvancesPastAMessageMarkedAsLost() {
+        val doc = documentWith(needsTargetMessage("m1", "Producer", 1), needsTargetMessage("m2", "Producer", 2))
+        val state = beginSeq3GuidedPass(doc)!!
+
+        val afterMarkLost = applySeq3GuidedMarkAsLost(doc, "m1")
+        val advanced = advanceSeq3GuidedPass(afterMarkLost, state)
+
+        assertNotNull(advanced)
+        assertEquals("m2", advanced.currentMessageId, "m1 must drop out of the pass once it's resolved")
+        assertEquals(2, advanced.totalAtStart, "progress denominator stays fixed for the whole pass")
+    }
+
+    @Test
+    fun aLostMessageDoesNotCountTowardTheNeedsTargetTotal() {
+        // The exact scenario Seq3Kind's own doc warns about: without excluding LOST from
+        // NEEDS_TARGET, this message would stay in the guided-pass queue forever, inflating the
+        // "N messages need a target" banner it is meant to leave (see Seq3Message.state's doc).
+        val lost = needsTargetMessage("m1", "Producer", 1).copy(kind = Seq3Kind.LOST)
+        val stillUnresolved = needsTargetMessage("m2", "Producer", 2)
+        val state = beginSeq3GuidedPass(documentWith(lost, stillUnresolved))
+
+        assertNotNull(state)
+        assertEquals(listOf("m2"), state.messageIds, "the LOST message must not appear in the pass queue")
+        assertEquals(1, state.totalAtStart)
     }
 
     @Test
