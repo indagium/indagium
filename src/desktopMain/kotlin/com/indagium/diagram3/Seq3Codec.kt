@@ -347,6 +347,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // Append-last (CLAUDE.md invariant): P3a's message-count-cap elision count, added at the end
     // of the map so every already-written note keeps decoding unchanged.
     "elidedMessageCount" to d.elidedMessageCount,
+    // WP1: append-last, same invariant — see Seq3Model.kt's own doc on showActivations for why
+    // defaulting false on decode (below) is load-bearing for every later work package.
+    "showActivations" to d.showActivations,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -398,6 +401,9 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // decodes to null — "generation never dropped a message" — exactly like every other
         // optional field's old-note default.
         elidedMessageCount = map.int("elidedMessageCount"),
+        // WP1: absent on any note written before this field existed, which decodes to false —
+        // activation bars off, byte-identical to every pre-WP1 rendering.
+        showActivations = map.bool("showActivations") ?: false,
     )
 }
 

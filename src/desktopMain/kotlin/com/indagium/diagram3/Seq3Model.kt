@@ -452,6 +452,18 @@ data class Seq3Document(
      *  the same way [Seq3Message.totalOccurrenceCount] reports a message's true pre-trim occurrence
      *  count — see that field's own doc for the identical reasoning one level down. */
     val elidedMessageCount: Int? = null,
+    /** WP1: master on/off switch for drawing UML activation bars (ExecutionSpecifications) —
+     *  see `diagram3.Seq3ActivationSpan`'s own header for what a bar is and why the call/return
+     *  pairing that produces one lives in a file shared by every consumer. Document-level, not
+     *  view-only, for the same reason as [showSequenceNumbers]/[showTimestamps]: canvas, PNG
+     *  export, and both text dialects must all agree on whether bars are present, and a view-only
+     *  toggle could never keep an export in sync with what the panel showed when it was produced.
+     *  Defaults false, and that default is LOAD-BEARING: WP2 (canvas/raster) and WP3 (Mermaid/
+     *  PlantUML emitters) land their rendering behind this flag, so as long as it defaults off, no
+     *  existing test's expected output changes the moment this field exists — every already-written
+     *  note and every already-generated document decodes with activation bars off, exactly like
+     *  before WP1. */
+    val showActivations: Boolean = false,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
