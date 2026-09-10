@@ -205,6 +205,17 @@ data class Seq3ElisionRow(
     override val occurrenceEntryId: Int? get() = null
 }
 
+/** WP6: one resolved UML InteractionOperand divider drawn inside a [Seq3FragmentBox] — real
+ *  geometry for the `else`/`and`/`option` line WP5's emitters already write as text
+ *  (`Seq3Emitters.operandDividersByAnchor`). [y] is the midpoint between the row this operand's
+ *  anchor resolves to and the row immediately before it — see [layoutFragments]' own resolution
+ *  doc for exactly how that row is picked — so the divider sits in the GAP above its own first
+ *  row, never overlapping either row's vertical band. Not a [Seq3RowGeometry] subtype: like
+ *  [Seq3ActivationBar], it adds no pitch of its own and lives entirely inside a fragment box's
+ *  already-computed geometry (see that type's own doc for the identical "why not a row" framing).
+ */
+data class Seq3FragmentDivider(val guard: String, val y: Double)
+
 data class Seq3FragmentBox(
     val fragmentId: String,
     val kind: Seq3FragmentKind,
@@ -218,6 +229,15 @@ data class Seq3FragmentBox(
      *  box's own geometry is unaffected either way; the raster/Mermaid/PlantUML outputs always used
      *  the bare [label], never a "$kind: $label" prefix, so this field has nothing to do there. */
     val hideKindLabel: Boolean = false,
+    /** WP6: UML operand dividers inside this box — see [Seq3FragmentDivider]'s own doc. Empty for
+     *  every kind but ALT/PAR/CRITICAL (UML gives OPT/LOOP/BREAK exactly one operand; GROUP isn't a
+     *  UML operator at all — see [Seq3FragmentKind]'s own doc) and for a fragment whose
+     *  [Seq3Fragment.elseOperands] resolve to nothing inside this box's own CLAMPED range — the
+     *  same "absent list, nothing drawn" default every other optional list on this file's types
+     *  already uses ([Seq3Layout.delays]/[Seq3Layout.activations]). Appended LAST — this file's own
+     *  versioning rule (see [Seq3Layout.activations]' own doc for why that rule matters here too).
+     */
+    val dividers: List<Seq3FragmentDivider> = emptyList(),
 )
 
 data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
@@ -1364,9 +1384,97 @@ private fun layoutFragments(
         val depth = stack.size
         val clamped = Bounds(bounds.fragment, bounds.range.first..clampedEnd)
         stack.addLast(clamped to depth)
-        result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows, minTop)
+        result += fragmentBoxFrom(clamped.fragment, clamped.range, depth, rows, minTop, firstRowIndex)
     }
     return result
+}
+
+// ── WP6: fragment operand dividers ──────────────────────────────────────────────────────────
+//
+// Only ALT/PAR/CRITICAL are UML combined-fragment operators whose second-and-later
+// InteractionOperand gets a divider at all — UML gives OPT/LOOP/BREAK exactly one operand (no
+// `else`), and GROUP isn't a UML operator to begin with (see [Seq3FragmentKind]'s own doc). This is
+// deliberately the SAME three kinds `Seq3Emitters.mermaidFragmentDividerLine`/
+// `plantUmlFragmentDividerLine` gate their per-dialect KEYWORD lookup on, but the canvas is not a
+// dialect: PlantUML happens to have no `critical` divider word to fall back to (that emitter simply
+// returns null for CRITICAL, folding the operand's messages into the preceding branch in TEXT), but
+// the operand itself is real UML and genuinely exists in the document, so the canvas still draws
+// its bracket regardless of which dialect a user might later export to. If this set and the
+// emitters' per-kind table ever disagreed about WHICH kinds admit a divider at all (as opposed to
+// what word each dialect spells it with), that would be real drift; this set exists so the two can
+// only ever disagree about vocabulary, never about which kinds have dividers in the first place.
+private val DIVIDER_FRAGMENT_KINDS = setOf(Seq3FragmentKind.ALT, Seq3FragmentKind.PAR, Seq3FragmentKind.CRITICAL)
+
+/** [Seq3Operand.startsAtMessageId]/[Seq3Operand.startsAtOccurrenceEntryId] resolved to a ROW index
+ *  — this file's OWN index space, [rows] itself (only successfully built rows, i.e. resolved
+ *  lifelines — see [buildRows]' own doc), not `Seq3Emitters`' emission-index space. Mirrors
+ *  [fragmentRowIndices]'s own `exact`-vs-message-id split, one field at a time instead of a whole
+ *  fragment: a pinned occurrence resolves via the identical row-list scan for the exact
+ *  (messageId, entryId) pair that function's `exact` branch already does for a
+ *  [Seq3OccurrenceRef]; the un-pinned fallback is [firstRowIndex] — [Seq3Operand
+ *  .startsAtMessageId]'s own documented contract ("begins at the FIRST drawn row of its anchor
+ *  message") is the exact same contract `Seq3Emitters.operandAnchorIndex` resolves via
+ *  `plan.firstIndexByMessage`, just against this file's row-index space instead of that file's
+ *  emission-index space — the two can never disagree about WHICH row an un-pinned operand starts
+ *  at, only about which index-numbering scheme names it. A dangling anchor (a message id absent
+ *  from the document, or an entryId that never got drawn) resolves to null — "drop this divider,
+ *  never crash" is [Seq3Operand]'s own documented contract, the same one [Seq3Delay]'s anchor
+ *  already follows. */
+private fun resolveOperandAnchorRowIndex(
+    operand: Seq3Operand,
+    firstRowIndex: Map<String, Int>,
+    rows: List<Seq3RowGeometry>,
+): Int? =
+    operand.startsAtOccurrenceEntryId
+        ?.let { entryId ->
+            rows.indexOfFirst { row -> row.messageId == operand.startsAtMessageId && row.occurrenceEntryId == entryId }
+                .takeIf { it >= 0 }
+        }
+        ?: firstRowIndex[operand.startsAtMessageId]
+
+/**
+ * Resolves [fragment]'s [Seq3Fragment.elseOperands] to [Seq3FragmentDivider]s for one already-
+ * CLAMPED bracket [range] — same trap `Seq3Emitters.operandDividersByAnchor`'s own "THE TRAP" doc
+ * describes: [range] here is [layoutFragments]' CLAMPED range (the output of its own clamp-to-
+ * parent walk, kept a THIRD time in this file — see that function's header), never a fragment's
+ * raw, un-clamped [fragmentRowIndices] bounds. Resolving against the raw bounds would let a
+ * crossing fragment's divider land past its own CLAMPED bottom edge — drawn below the bracket that
+ * is supposed to contain it. Dedicated coverage: `aDividerOnACrossingFragmentIsClampedAwayFromTheLayout`
+ * in Seq3LayoutTest.kt (and see that test's own comment for the exact fixture that trips this).
+ *
+ * Applies the same four rules `operandDividersByAnchor` applies on the emitter side, just producing
+ * a row `y` instead of a text line:
+ *  - an unresolved anchor drops the divider ([resolveOperandAnchorRowIndex] returning null);
+ *  - an index outside the CLAMPED [range] drops it (the crossing-fragment trap above);
+ *  - an index equal to [range].first is operand zero's own row — no divider belongs there, since
+ *    the fragment's own box/label already carries operand zero's guard;
+ *  - ties are kept, not deduplicated: two operands resolving to the same row are both real user
+ *    intent (e.g. a guard describing an intentionally empty branch immediately followed by
+ *    another) — [Seq3Fragment.elseOperands]' own declared order survives as the deterministic
+ *    tiebreak via [List.sortedBy]'s stable sort, same as the emitter side relies on.
+ * Gated on [DIVIDER_FRAGMENT_KINDS] — see that set's own doc for why the canvas gates on kind
+ * alone, never per-dialect.
+ */
+private fun fragmentDividers(
+    fragment: Seq3Fragment,
+    range: IntRange,
+    firstRowIndex: Map<String, Int>,
+    rows: List<Seq3RowGeometry>,
+): List<Seq3FragmentDivider> {
+    if (fragment.kind !in DIVIDER_FRAGMENT_KINDS) return emptyList()
+    return fragment.elseOperands
+        .mapNotNull { operand ->
+            val index = resolveOperandAnchorRowIndex(operand, firstRowIndex, rows) ?: return@mapNotNull null
+            if (index !in range) return@mapNotNull null
+            if (index == range.first) return@mapNotNull null
+            // index > range.first (dropped above) and range.first >= 0, so index - 1 is always a
+            // valid, already-built row — never the row before the fragment's own first row.
+            val prevY = rows.getOrNull(index - 1)?.y ?: return@mapNotNull null
+            val curY = rows.getOrNull(index)?.y ?: return@mapNotNull null
+            index to Seq3FragmentDivider(operand.guard, (prevY + curY) / 2.0)
+        }
+        .sortedBy { it.first }
+        .map { it.second }
 }
 
 /** Resolves a fragment to the drawn rows it actually references. Ordinary queue-created
@@ -1403,7 +1511,14 @@ private fun fragmentRowIndices(
 // `depth * FRAGMENT_INSET_PER_DEPTH`) — so a defensive clamp here is the only thing that also
 // covers a nested box, and stays correct even if a future caller ever invokes this without having
 // gone through buildRows' own reserve.
-private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int, rows: List<Seq3RowGeometry>, minTop: Double): Seq3FragmentBox {
+private fun fragmentBoxFrom(
+    fragment: Seq3Fragment,
+    range: IntRange,
+    depth: Int,
+    rows: List<Seq3RowGeometry>,
+    minTop: Double,
+    firstRowIndex: Map<String, Int>,
+): Seq3FragmentBox {
     val spanned = range.mapNotNull { rows.getOrNull(it) }
     val xs = spanned.flatMap { rowXExtent(it) }
     val inset = depth * FRAGMENT_INSET_PER_DEPTH
@@ -1420,6 +1535,7 @@ private fun fragmentBoxFrom(fragment: Seq3Fragment, range: IntRange, depth: Int,
         Seq3Box(left, top, max(1.0, right - left), max(1.0, bottom - top)),
         depth,
         fragment.hideKindLabel,
+        fragmentDividers(fragment, range, firstRowIndex, rows),
     )
 }
 

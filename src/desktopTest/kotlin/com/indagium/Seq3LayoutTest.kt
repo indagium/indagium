@@ -21,6 +21,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
@@ -1188,5 +1189,154 @@ class Seq3LayoutTest {
         assertEquals("B", outer.lifelineId)
         assertEquals("B", inner.lifelineId)
         assertTrue(inner.box.x > outer.box.x, "a deeper (reentrant) activation must be inset further right than its parent")
+    }
+
+    // ── WP6: fragment operand dividers ───────────────────────────────────────────────────────
+
+    @Test
+    fun altWithOneElseOperandProducesOneDividerStrictlyBetweenTheTwoRowsAndInsideTheBox() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            fragments = listOf(
+                Seq3Fragment(
+                    "f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"),
+                    elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val fragment = layout.fragments.single()
+        val divider = fragment.dividers.single()
+        assertEquals("cond1", divider.guard)
+        val y1 = layout.rows.single { it.messageId == "m1" }.y
+        val y2 = layout.rows.single { it.messageId == "m2" }.y
+        assertTrue(divider.y > y1 && divider.y < y2, "the divider must sit strictly between the two rows it separates")
+        assertTrue(
+            divider.y > fragment.box.y && divider.y < fragment.box.y + fragment.box.height,
+            "the divider must sit strictly inside the fragment box's own top and bottom",
+        )
+    }
+
+    @Test
+    fun rowYPositionsAndLayoutHeightAreIdenticalWithAndWithoutOperands() {
+        // The zero-pitch guard, modeled on rowYPositionsAreIdenticalWithActivationsOnAndOff above:
+        // a divider draws INSIDE space rows already occupy, so adding one must never reflow the
+        // diagram — otherwise this file's own fixed-pixel-free "relational" tests would still need
+        // new numbers the moment a document happened to grow an elseOperand.
+        val messages = listOf(
+            message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+            message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+        )
+        val baseFragment = Seq3Fragment("f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"))
+        val docWithout = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = messages,
+            fragments = listOf(baseFragment),
+        )
+        val docWith = docWithout.copy(
+            fragments = listOf(baseFragment.copy(elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")))),
+        )
+        val layoutWithout = layoutSeq3(docWithout, opts())
+        val layoutWith = layoutSeq3(docWith, opts())
+
+        assertEquals(layoutWithout.rows.map { it.y }, layoutWith.rows.map { it.y }, "a divider must add ZERO vertical pitch to any row")
+        assertEquals(layoutWithout.height, layoutWith.height, "adding an operand must never reflow the diagram's own height")
+        // Sanity check so the equality above isn't vacuously true because this fixture happens to
+        // produce no dividers at all.
+        assertTrue(layoutWith.fragments.single().dividers.isNotEmpty(), "this fixture must actually produce a divider when the operand is present")
+    }
+
+    @Test
+    fun aDividerOnACrossingFragmentIsClampedAwayFromTheLayout() {
+        // Mirrors Seq3EmitterTest's aDividerOnACrossingFragmentIsClampedAwayRatherThanEmittedAfterEnd
+        // exactly, on the layout side: X spans m1..m2 (row indices 0..1). Y spans m2..m4 (raw row
+        // indices 1..3). X and Y CROSS rather than nest (Y starts before X ends but ends after X
+        // does), so layoutFragments clamps Y's own range down to X's end (index 1) instead of Y's
+        // raw end (index 3) — see layoutFragments' own clamp-to-parent walk. Y's operand anchors at
+        // m4 (raw row index 3): past the CLAMPED range (1..1), so its divider must be dropped,
+        // never drawn below Y's own (clamped) box bottom.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = (1..4).map { i -> message("m$i", "A", "B", occurrences = listOf(occurrence(i))) },
+            fragments = listOf(
+                Seq3Fragment("x", Seq3FragmentKind.ALT, "xGuard0", listOf("m1", "m2")),
+                Seq3Fragment(
+                    "y", Seq3FragmentKind.ALT, "yGuard0", listOf("m2", "m3", "m4"),
+                    elseOperands = listOf(Seq3Operand("yOp", "yGuard1", startsAtMessageId = "m4")),
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val yBox = layout.fragments.single { it.fragmentId == "y" }
+        assertTrue(
+            yBox.dividers.isEmpty(),
+            "the operand's anchor (m4) falls outside Y's CLAMPED range once X and Y cross — its divider must be dropped, not drawn past Y's own box",
+        )
+    }
+
+    @Test
+    fun aDanglingOperandAnchorDropsItsDividerWithoutThrowing() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            fragments = listOf(
+                Seq3Fragment(
+                    "f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"),
+                    // Names no message in the document at all — the Seq3Delay dangling-anchor
+                    // contract (Seq3Operand's own doc) says this drops THIS divider, never the
+                    // whole layout.
+                    elseOperands = listOf(Seq3Operand("op1", "ghostGuard", startsAtMessageId = "does-not-exist")),
+                ),
+            ),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.fragments.single().dividers.isEmpty(), "a stale anchor must drop its divider silently, never throw")
+        assertEquals(2, layout.rows.size, "the rest of the layout must still build normally")
+    }
+
+    @Test
+    fun optAndLoopWithOperandsPresentProduceNoDividersButAltParCriticalDo() {
+        // The kind gate: UML gives OPT/LOOP/BREAK exactly one operand (no `else`), so a stray
+        // elseOperands entry left behind by a prior kind change (preserved on purpose, per
+        // Seq3Fragment.elseOperands' own doc) must never draw anything. ALT/PAR/CRITICAL are
+        // exercised alongside OPT/LOOP in the SAME fixture (same anchor, same guard) purely so a
+        // "the operand just never resolved" bug can't masquerade as "the kind gate works" — every
+        // one of these anchors is otherwise identical and resolvable.
+        fun docWith(kind: Seq3FragmentKind) = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            fragments = listOf(
+                Seq3Fragment(
+                    "f1", kind, "cond0", listOf("m1", "m2"),
+                    elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+                ),
+            ),
+        )
+
+        listOf(Seq3FragmentKind.OPT, Seq3FragmentKind.LOOP).forEach { kind ->
+            val layout = layoutSeq3(docWith(kind), opts())
+            assertTrue(layout.fragments.single().dividers.isEmpty(), "$kind must never draw a divider, even with elseOperands present")
+        }
+        // The other half of the same gate: the canvas is not a dialect (unlike PlantUML, which has
+        // no `critical` divider keyword — Seq3Emitters.plantUmlFragmentDividerLine's own doc), so
+        // CRITICAL still draws its bracket's genuine operand here.
+        listOf(Seq3FragmentKind.ALT, Seq3FragmentKind.PAR, Seq3FragmentKind.CRITICAL).forEach { kind ->
+            val layout = layoutSeq3(docWith(kind), opts())
+            assertEquals(1, layout.fragments.single().dividers.size, "$kind must draw its real operand's divider")
+        }
     }
 }
