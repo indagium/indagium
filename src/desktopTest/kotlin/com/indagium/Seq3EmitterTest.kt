@@ -707,6 +707,162 @@ class Seq3EmitterTest {
         assertTrue(plantUml.contains("[#2] later-thing"), "got:\n$plantUml")
     }
 
+    // ── Activation bars (WP3) ───────────────────────────────────────────────────────────────────
+
+    @Test
+    fun everyActivateHasAMatchingDeactivateInBothDialects() {
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call1"),
+            message(id = "m2", from = "B", to = "A", kind = Seq3Kind.RETURN, label = "return1"),
+            // Deliberately unmatched: no RETURN ever closes this one. Seq3Activation.kt's rule 1
+            // says an unmatched call still closes at a concrete fallback index rather than being
+            // left open, specifically so this case cannot emit a lone "activate" with no
+            // "deactivate" — which Mermaid rejects as a parse error.
+            message(id = "m3", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call2"),
+        )
+        val document = doc(messages).copy(showActivations = true)
+
+        listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            // Counting trap: the string "deactivate" contains "activate" as a substring, so a
+            // naive `out.count("activate")` over-counts. Count whole LINES that OPEN with each
+            // keyword instead — a "deactivate ..." line never starts with "activate ", so this
+            // sidesteps the substring trap entirely rather than needing a subtraction.
+            val activateCount = out.lines().count { it.trim().startsWith("activate ") }
+            val deactivateCount = out.lines().count { it.trim().startsWith("deactivate ") }
+            assertTrue(activateCount > 0, "$dialect: sanity check that activation lines were actually emitted; got:\n$out")
+            assertEquals(
+                deactivateCount, activateCount,
+                "$dialect: every activate must have a matching deactivate (incl. unmatched calls); broken Mermaid otherwise; got:\n$out",
+            )
+        }
+    }
+
+    @Test
+    fun aBalancedCallReturnPairEmitsActivateAfterTheCallAndDeactivateAfterTheReturnInBothDialects() {
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "callit"),
+            message(id = "m2", from = "B", to = "A", kind = Seq3Kind.RETURN, label = "returnit"),
+        )
+        val document = doc(messages).copy(showActivations = true)
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains("callit\n    activate B\n"), "activate must follow the call line; got:\n$mermaid")
+        assertTrue(mermaid.contains("returnit\n    deactivate B\n"), "deactivate must follow the return line; got:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("callit\nactivate B\n"), "activate must follow the call line; got:\n$plantUml")
+        assertTrue(plantUml.contains("returnit\ndeactivate B\n"), "deactivate must follow the return line; got:\n$plantUml")
+    }
+
+    @Test
+    fun showActivationsFalseEmitsNeitherKeywordInEitherDialect() {
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "callit"),
+            message(id = "m2", from = "B", to = "A", kind = Seq3Kind.RETURN, label = "returnit"),
+        )
+        // showActivations defaults false — this is the default-off guarantee that keeps every
+        // pre-WP3 test's expected output byte-identical.
+        val document = doc(messages)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        // "activate" as a substring also rules out "deactivate" (which contains it), so one
+        // check per dialect covers both keywords.
+        assertFalse(mermaid.contains("activate"), "showActivations=false must emit no activation keyword at all; got:\n$mermaid")
+        assertFalse(plantUml.contains("activate"), "showActivations=false must emit no activation keyword at all; got:\n$plantUml")
+    }
+
+    @Test
+    fun deactivateBeforeActivateWhenASpanClosesAndAnotherOpensAtTheSameEmissionIndex() {
+        val c = Seq3Lifeline("C", "Lifeline C", setOf("C"), 2)
+        val messages = listOf(
+            // B is never RETURNed to, so its span falls back (Seq3Activation.kt rule 1) to
+            // closing at the LAST row that touches B — which is the very next message, because B
+            // is also the CALLER there. That same row's CALL simultaneously opens a brand-new
+            // span on C. So one emission index is both an endIndex (B closing) and a startIndex
+            // (C opening) — appendActivationLines' own doc says deactivate must still be written
+            // first, or the export would nest C's new bar inside B's just-closed one.
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "toB"),
+            message(id = "m2", from = "B", to = "C", kind = Seq3Kind.CALL, label = "toC"),
+        )
+        val document = Seq3Document(lifelines = listOf(a, b, c), messages = messages, showActivations = true)
+
+        listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            val deactivateIdx = out.indexOf("deactivate B")
+            val activateIdx = out.indexOf("activate C")
+            assertTrue(deactivateIdx >= 0, "$dialect: expected B's fallback-closed span; got:\n$out")
+            assertTrue(activateIdx >= 0, "$dialect: expected C's freshly opened span; got:\n$out")
+            assertTrue(
+                deactivateIdx < activateIdx,
+                "$dialect: closing an old bar must be written before opening a new one at the same emission index; got:\n$out",
+            )
+        }
+    }
+
+    /** Walks [out]'s emitted `activate`/`deactivate` lines in order, maintaining a per-alias open
+     *  count exactly like Mermaid's own activation stack would, and asserts:
+     *   - the count for any alias never goes negative (a `deactivate` with nothing open — the
+     *     Mermaid parse failure `appendActivationLines`' doc exists to prevent), and
+     *   - every alias that appeared ends back at zero (no bar left dangling open).
+     *  Deliberately NOT keyword counting (see `everyActivateHasAMatchingDeactivateInBothDialects`
+     *  just above): equal totals do not imply valid ORDER — a document can have exactly as many
+     *  `deactivate` lines as `activate` lines and still open a `deactivate` before its matching
+     *  `activate` exists, which is precisely the pre-fix bug this test is here to catch. */
+    private fun assertValidActivationSequence(out: String, dialect: String) {
+        val openCount = mutableMapOf<String, Int>()
+        for (line in out.lines()) {
+            val trimmed = line.trim()
+            val activate = trimmed.startsWith("activate ")
+            val deactivate = trimmed.startsWith("deactivate ")
+            if (!activate && !deactivate) continue
+            val alias = if (activate) trimmed.removePrefix("activate ") else trimmed.removePrefix("deactivate ")
+            if (activate) {
+                openCount[alias] = (openCount[alias] ?: 0) + 1
+            } else {
+                val depth = (openCount[alias] ?: 0) - 1
+                assertTrue(
+                    depth >= 0,
+                    "$dialect: 'deactivate $alias' with nothing open on $alias — Mermaid tracks activation " +
+                        "as a real stack and rejects exactly this; got:\n$out",
+                )
+                openCount[alias] = depth
+            }
+        }
+        openCount.forEach { (alias, depth) ->
+            assertEquals(0, depth, "$dialect: $alias ended with an unclosed activation bar (depth=$depth); got:\n$out")
+        }
+    }
+
+    @Test
+    fun emittedActivationsFormAValidOpenCloseSequenceInBothDialects() {
+        val c = Seq3Lifeline("C", "Lifeline C", setOf("C"), 2)
+        val d = Seq3Lifeline("D", "Lifeline D", setOf("D"), 3)
+        val e = Seq3Lifeline("E", "Lifeline E", setOf("E"), 4)
+        val messages = listOf(
+            // Nested call/return pair: C's bar (opened+closed here) nests entirely inside B's.
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call1"),
+            message(id = "m2", from = "B", to = "C", kind = Seq3Kind.CALL, label = "call2"),
+            message(id = "m3", from = "C", to = "B", kind = Seq3Kind.RETURN, label = "return1"),
+            message(id = "m4", from = "B", to = "A", kind = Seq3Kind.RETURN, label = "return2"),
+            // Trailing unmatched call: nothing touches C afterward, so Seq3Activation.kt's rule 1
+            // closes its span on its OWN row — the startIndex == endIndex case this test exists
+            // for (this is the report's own "A->>C: unmatchedCall" example, verbatim).
+            message(id = "m5", from = "A", to = "C", kind = Seq3Kind.CALL, label = "unmatchedCall"),
+            // A span opened on an EARLIER row (D's) falls back to closing HERE, at the same
+            // emission index where a DIFFERENT span (E's) opens — D is unmatched and this row is
+            // its own last touch (it is the sender); E then never sees another row either, so E's
+            // own span is itself zero-length. One index exercising both "close an older span,
+            // then open a new one" and "open-then-immediately-close" together.
+            message(id = "m6", from = "B", to = "D", kind = Seq3Kind.CALL, label = "call3"),
+            message(id = "m7", from = "D", to = "E", kind = Seq3Kind.CALL, label = "call4"),
+        )
+        val document = Seq3Document(lifelines = listOf(a, b, c, d, e), messages = messages, showActivations = true)
+
+        listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            assertValidActivationSequence(out, dialect)
+        }
+    }
+
     private class FixedWidthMetrics : Seq3TextMetrics {
         override fun width(role: Seq3FontRole, text: String): Double = text.length * 7.0
 

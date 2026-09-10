@@ -582,6 +582,133 @@ private fun delaySpan(aliases: List<String>): String {
     return if (first == last) first else "$first,$last"
 }
 
+// ── Activation bars (WP3) ────────────────────────────────────────────────────────────────────
+//
+// `Seq3Activation.kt`'s `seq3ActivationSpans` is the ONE shared call/return pairing this file and
+// `Seq3Layout.kt` both build on — see that file's own header for why it must be a single function
+// rather than two independent stack machines. [activationEventOf] below is this file's twin of
+// `Seq3Layout.kt`'s private `activationEventOf`: same neutral treatment of every non-arrow-with-
+// -target row (a [Seq3Emission.NeedsTarget] stub, a [Seq3Emission.NoteLine], an [Seq3Emission
+// .Elided] marker) folded onto `Seq3Kind.NOTE` so `seq3ActivationSpans` treats it as a no-op push
+// /pop — none of them are skipped outright, because skipping would shift every later emission's
+// row index out from under the spans `seq3ActivationSpans` computes for it. `visibleLifelines` is
+// the same list `toMermaid`/`toPlantUml` already build (see `planEmissions`'s own comment on why
+// its index-for-index alignment with `plan.lifelineIndex` is trustworthy), reused here purely to
+// turn a [Seq3Emission.Arrow]'s `fromIdx`/`toIdx` (index space) back into the lifeline id string
+// [Seq3ActivationEvent] wants.
+// Unchecked `visibleLifelines[...]` below, deliberately — unlike `aliasOf`'s `getOrElse` a few
+// screens down, an out-of-range fromIdx/toIdx/participantIdx here is NOT reachable, so a
+// defensive fallback would hide a real bug instead of guarding against one:
+//   - Every Seq3Emission's index fields are produced by `expandMessage` from THIS SAME call's
+//     `lifelineIndex[message.fromLifelineId]`/`[message.toLifelineId]` (planEmissions' own local
+//     `visibleLifelines`, `document.lifelines.filter{VISIBLE}.sortedBy{ordinal}`) — a message
+//     whose lifeline id is NOT in that map short-circuits to `emptyList()`/the NeedsTarget branch
+//     before an Arrow with that index is ever built (see expandMessage's early returns), so every
+//     emitted index is guaranteed to be a valid key into that exact map.
+//   - `toMermaid`/`toPlantUml` build the `visibleLifelines` passed in HERE via the byte-identical
+//     `lifelines.filter{VISIBLE}.sortedBy{ordinal}` expression over the same immutable `this`
+//     document, right after calling `planEmissions(this)` — no mutation happens in between, and
+//     `filter`/`sortedBy` are pure and stable, so this list is element-for-element identical (same
+//     order, same size) to the one `lifelineIndex` was built from. The two are always in the same
+//     index space.
+private fun activationEventOf(index: Int, emission: Seq3Emission, visibleLifelines: List<Seq3Lifeline>): Seq3ActivationEvent = when (emission) {
+    is Seq3Emission.Arrow ->
+        Seq3ActivationEvent(index, emission.messageId, emission.kind, visibleLifelines[emission.fromIdx].id, visibleLifelines[emission.toIdx].id)
+    is Seq3Emission.NeedsTarget ->
+        Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, visibleLifelines[emission.fromIdx].id, null)
+    is Seq3Emission.NoteLine ->
+        Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, visibleLifelines[emission.participantIdx].id, null)
+    is Seq3Emission.Elided ->
+        Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, visibleLifelines[emission.participantIdx].id, null)
+}
+
+/** [activateAt]/[deactivateAt]: activation spans grouped by their start/end emission index — the
+ *  same index space [toMermaid]/[toPlantUml] already walk `plan.emissions.forEachIndexed` over,
+ *  so a caller keys straight off the loop's own `i`, exactly like `opens`/`closes`/`notesByAnchor`
+ *  /`delaysByAnchor`. */
+private class Seq3ActivationMaps(val activateAt: Map<Int, List<Seq3ActivationSpan>>, val deactivateAt: Map<Int, List<Seq3ActivationSpan>>)
+
+/**
+ * Gated on [Seq3Document.showActivations] so a document with the feature off produces two empty
+ * maps and neither dialect's output changes by a single byte from before this work package — the
+ * default-off contract every other WP10/WP11 toggle in this file already keeps.
+ *
+ * Every span [seq3ActivationSpans] returns is built from events at indices `0..plan.emissions
+ * .lastIndex` (one event per emission, via `mapIndexed`), so its `startIndex`/`endIndex` are
+ * always in range — the `filter` below can never actually drop anything from THIS call site. It
+ * stays anyway as this package's usual posture on a geometry/index lookup that could in principle
+ * fail (see `Seq3Layout.kt`'s `buildActivationBars`, which keeps an identical "not expected to be
+ * reachable" `mapNotNull` for the same reason): emitting only one half of a span — an `activate`
+ * with no matching `deactivate`, or vice versa — is not a cosmetic wart, it is a Mermaid PARSE
+ * ERROR, so "drop the whole span" is the only acceptable failure mode here, never "emit half".
+ */
+private fun activationMaps(document: Seq3Document, plan: Seq3EmissionPlan, visibleLifelines: List<Seq3Lifeline>): Seq3ActivationMaps {
+    if (!document.showActivations) return Seq3ActivationMaps(emptyMap(), emptyMap())
+    val events = plan.emissions.mapIndexed { index, emission -> activationEventOf(index, emission, visibleLifelines) }
+    val spans = seq3ActivationSpans(events, plan.emissions.lastIndex)
+        .filter { it.startIndex in plan.emissions.indices && it.endIndex in plan.emissions.indices }
+    return Seq3ActivationMaps(spans.groupBy { it.startIndex }, spans.groupBy { it.endIndex })
+}
+
+// `activate <alias>` / `deactivate <alias>` — unlike GROUP fragments or delays elsewhere in this
+// file, NEITHER dialect lacks this construct, so unlike `mermaidFragmentOpenLines`/
+// `plantUmlFragmentOpenLines` there is no per-dialect fallback to branch on. The two call sites
+// differ only in indentation (Mermaid indents every body line 4 spaces; PlantUML indents nothing
+// — see `toPlantUml`'s existing arrow/note/fragment lines), so that's the only thing left to the
+// caller; the keyword + alias text itself is written once, here.
+//
+// Deliberately NOT the `->>+`/`-->>-` activate-shorthand suffix both dialects also support: a
+// separate `activate`/`deactivate` line is dialect-symmetric and, decisively, never touches the
+// arrow-token `when` blocks in [toMermaid]/[toPlantUml] — exactly the code this package's own
+// comments flag as having drifted between dialects before (see this file's header on
+// `Seq3ArrowStyle.kt`). Folding activation into the arrow token would mean re-deriving, at the
+// arrow's own emission index, spans keyed by a DIFFERENT (start/end) index — needless coupling for
+// no reader-visible difference in the emitted diagram.
+private fun activationKeywordLine(activate: Boolean, alias: String): String = "${if (activate) "activate" else "deactivate"} $alias"
+
+/**
+ * Writes the activation lines for emission index [i], applying [indent] to each — shared by both
+ * dialects (see [activationKeywordLine]'s own doc). Within each of the three groups below, spans
+ * are ordered by [Seq3ActivationSpan.depth] — deactivate deepest-first, activate shallowest-first
+ * — mirroring the existing fragment close/open ordering just above this function
+ * (`closes[i]?.sortedByDescending { it.depth }` / `opens[i]?.sortedBy { it.depth }`) purely for
+ * deterministic, readable output; balance itself does not depend on this ordering.
+ *
+ * The groups at index [i] emit in this order, and the order is not cosmetic — getting it wrong is
+ * either "a bar nests where it shouldn't" or "Mermaid refuses to parse the output":
+ *   1. **deactivate spans that opened on an earlier row** (`startIndex < i`). A `RETURN` that
+ *      closes a bar on some lifeline L, immediately followed by a fresh `CALL` re-entering L, must
+ *      close the old bar before opening the new one: emitting `activate L` first would nest the
+ *      new bar inside the one that just ended, drawing a bar the source diagram never showed.
+ *   2. **activate spans opening at [i].**
+ *   3. **deactivate spans that ALSO opened at [i]** (`startIndex == endIndex == i`) — a
+ *      zero-length span. [seq3ActivationSpans]' rule 1 produces these whenever an unmatched call
+ *      closes on its own row, which is the ordinary case for a trailing or leaf call (nothing
+ *      touches its lifeline afterwards) — and `Seq3Generator.generateSeq3` never mints a `RETURN`,
+ *      so a freshly generated document is all `CALL`s, making trailing unmatched calls the normal
+ *      case, not an edge case. Group 1's "close before open" reasoning assumed the close belongs
+ *      to a span that started on an EARLIER row than the one now opening; a zero-length span
+ *      breaks that premise — it cannot be closed before its own open has been emitted. Running
+ *      this group last, after group 2's activate, is the only ordering where a zero-length span's
+ *      `activate`/`deactivate` pair is emitted open-then-close. Emitting it deactivate-before-
+ *      activate (grouping ALL same-index deactivates before ALL same-index activates, as this
+ *      function used to) issues a `deactivate` for a bar that was never opened — Mermaid tracks
+ *      activation as a real stack and rejects that outright — which is why the pre-fix version of
+ *      this function produced a broken export on essentially every real document with the
+ *      activation toggle on.
+ */
+private fun StringBuilder.appendActivationLines(maps: Seq3ActivationMaps, i: Int, plan: Seq3EmissionPlan, aliases: List<String>, indent: String) {
+    fun aliasOfLifeline(lifelineId: String): String? = plan.lifelineIndex[lifelineId]?.let { aliases.getOrNull(it) }
+    fun emit(activate: Boolean, span: Seq3ActivationSpan) {
+        val alias = aliasOfLifeline(span.lifelineId) ?: return
+        append(indent).append(activationKeywordLine(activate = activate, alias = alias)).append('\n')
+    }
+    val (zeroLength, closingOlder) = maps.deactivateAt[i].orEmpty().partition { it.startIndex == i }
+    closingOlder.sortedByDescending { it.depth }.forEach { emit(activate = false, span = it) }
+    maps.activateAt[i]?.sortedBy { it.depth }?.forEach { emit(activate = true, span = it) }
+    zeroLength.sortedByDescending { it.depth }.forEach { emit(activate = false, span = it) }
+}
+
 // ── Mermaid ──────────────────────────────────────────────────────────────────────────────────
 
 fun Seq3Document.toMermaid(): String {
@@ -601,6 +728,7 @@ fun Seq3Document.toMermaid(): String {
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
+    val activations = activationMaps(this, plan, visibleLifelines)
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
@@ -638,6 +766,10 @@ fun Seq3Document.toMermaid(): String {
                 is Seq3Emission.Elided ->
                     append("    Note right of ").append(aliasOf(emission.participantIdx)).append(": ⋯ ×").append(emission.count).append(" elided\n")
             }
+            // Activation open/close ordering (not a flat deactivate-before-activate rule — see
+            // appendActivationLines' own doc) — must run right after the emission's own line and
+            // before any note anchored to the same index.
+            appendActivationLines(activations, i, plan, aliases, indent = "    ")
             notesByAnchor[i]?.forEach { note ->
                 append("    Note over ").append(noteSpan(note, plan, aliases)).append(": ").append(mermaidEscape(note.text)).append('\n')
             }
@@ -667,6 +799,7 @@ fun Seq3Document.toPlantUml(): String {
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
+    val activations = activationMaps(this, plan, visibleLifelines)
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
@@ -702,6 +835,10 @@ fun Seq3Document.toPlantUml(): String {
                 is Seq3Emission.Elided ->
                     append("note right of ").append(aliasOf(emission.participantIdx)).append(": ⋯ ×").append(emission.count).append(" elided\n")
             }
+            // Activation open/close ordering (not a flat deactivate-before-activate rule — see
+            // appendActivationLines' own doc) — must run right after the emission's own line and
+            // before any note anchored to the same index.
+            appendActivationLines(activations, i, plan, aliases, indent = "")
             notesByAnchor[i]?.forEach { note ->
                 append("note over ").append(noteSpan(note, plan, aliases)).append(": ").append(plantUmlEscape(note.text)).append('\n')
             }
