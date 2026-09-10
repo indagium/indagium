@@ -182,6 +182,116 @@ class Seq3EmitterTest {
         assertTrue(plantUml.contains("->o]"), "must use the real PlantUML lost-message gate syntax; got:\n$plantUml")
     }
 
+    // ── CREATE / DESTROY (WP10) ─────────────────────────────────────────────────────────────
+    //
+    // Unlike LOST/FOUND above, CREATE/DESTROY are ordinary TARGETED arrows — a real `toLifelineId`
+    // naming the constructed/destroyed lifeline (WP10's brief) — so every fixture below keeps the
+    // default `to = "B"`, never forces it null.
+
+    @Test
+    fun createMessageEmitsRealCreateDirectiveInBothDialects() {
+        val create = message(kind = Seq3Kind.CREATE, label = "ctor")
+        val mermaid = doc(listOf(create)).toMermaid()
+        val plantUml = doc(listOf(create)).toPlantUml()
+
+        // Mermaid's real grammar (confirmed against mermaid-js's own sequenceDiagram.jison and its
+        // documented example): `create participant <alias> as <name>`, on the line BEFORE the
+        // message that creates it.
+        assertTrue(mermaid.contains("create participant B as Lifeline B"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("A-->>B: ctor"), "a CREATE arrow reuses RETURN's dashed token (Seq3ArrowStyle); got:\n$mermaid")
+        assertTrue(
+            mermaid.indexOf("create participant B as Lifeline B") < mermaid.indexOf("A-->>B: ctor"),
+            "Mermaid's create directive must precede the creating message; got:\n$mermaid",
+        )
+        // PlantUML's real convention (confirmed against plantuml.com's "Participant creation"
+        // section): bare `create <alias>`, also before the message.
+        assertTrue(plantUml.contains("create B"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("A --> B: ctor"), "got:\n$plantUml")
+        assertTrue(
+            plantUml.indexOf("create B") < plantUml.indexOf("A --> B: ctor"),
+            "PlantUML's create directive must precede the creating message; got:\n$plantUml",
+        )
+    }
+
+    @Test
+    fun destroyMessageEmitsRealDestroyDirectiveInBothDialects() {
+        val destroy = message(kind = Seq3Kind.DESTROY, label = "dtor")
+        val mermaid = doc(listOf(destroy)).toMermaid()
+        val plantUml = doc(listOf(destroy)).toPlantUml()
+
+        // Mermaid's real grammar: `destroy <alias>` — no `as` clause — placed BEFORE the message
+        // that destroys it (confirmed against the jison grammar's `'destroy' actor 'NEWLINE'`
+        // production and mermaid-js's own worked example).
+        assertTrue(mermaid.contains("destroy B"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("A->>B: dtor"), "a DESTROY arrow reuses CALL's plain token; got:\n$mermaid")
+        assertTrue(
+            mermaid.indexOf("destroy B") < mermaid.indexOf("A->>B: dtor"),
+            "Mermaid's destroy directive must precede the destroying message; got:\n$mermaid",
+        )
+        // PlantUML's real convention (plantuml.com's "Lifeline Activation and Destruction"
+        // section): `destroy <alias>` AFTER the message that destroys it — the OPPOSITE ordering
+        // from Mermaid.
+        assertTrue(plantUml.contains("destroy B"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("A -> B: dtor"), "got:\n$plantUml")
+        assertTrue(
+            plantUml.indexOf("destroy B") > plantUml.indexOf("A -> B: dtor"),
+            "PlantUML's destroy directive must follow the destroying message; got:\n$plantUml",
+        )
+    }
+
+    @Test
+    fun createdLifelineIsNotAlsoDeclaredInMermaidsHeaderBlock() {
+        // Hard constraint (WP10 brief): Mermaid errors on a participant that is both header-
+        // declared AND later `create`d — the create grammar reuses the exact same
+        // participant_statement, so declaring it twice is a literal redeclaration. Exact-line
+        // comparison (not `contains`), because "create participant B as Lifeline B" itself
+        // CONTAINS "participant B as Lifeline B" as a substring — a naive `contains` check on the
+        // plain header line would false-pass even if the header block still wrongly declared it.
+        val create = message(kind = Seq3Kind.CREATE, label = "ctor")
+        val lines = doc(listOf(create)).toMermaid().lines().map { it.trim() }
+
+        assertFalse(lines.contains("participant B as Lifeline B"), "B must not ALSO be declared in the header block; lines:\n$lines")
+        assertTrue(lines.contains("create participant B as Lifeline B"), "B must be declared via the create directive instead; lines:\n$lines")
+        // A never has a CREATE targeting it, so it keeps the ordinary header declaration.
+        assertTrue(lines.contains("participant A as Lifeline A"), "an un-created lifeline must keep its ordinary header declaration; lines:\n$lines")
+    }
+
+    @Test
+    fun createdLifelineIsNotAlsoDeclaredInPlantUmlsHeaderBlock() {
+        // Structural parallelism with the Mermaid test above (WP10 brief: "Apply the same skip in
+        // toPlantUml so the two stay structurally parallel") — PlantUML itself does not error on a
+        // double declaration, but this package's emitters must not quietly diverge on WHEN a
+        // participant's box first appears.
+        val create = message(kind = Seq3Kind.CREATE, label = "ctor")
+        val lines = doc(listOf(create)).toPlantUml().lines().map { it.trim() }
+
+        assertFalse(lines.contains("participant \"Lifeline B\" as B"), "B must not ALSO be declared in the header block; lines:\n$lines")
+        assertTrue(lines.contains("create B"), "B must be declared via the create directive instead; lines:\n$lines")
+        assertTrue(lines.contains("participant \"Lifeline A\" as A"), "an un-created lifeline must keep its ordinary header declaration; lines:\n$lines")
+    }
+
+    @Test
+    fun createAndDestroyMessagesNeverEmitJustABareArrowWithoutTheirOwnKeyword() {
+        // Unlike a plain CALL, a CREATE/DESTROY message's whole meaning is "this row is when the
+        // box appears/disappears" — losing the keyword line would silently degrade it back to an
+        // indistinguishable ordinary arrow (exactly the LOST/FOUND regression
+        // lostMessageIsNotRenderedAsAnOrdinaryArrow above guards against, for a different pair of
+        // kinds and a different failure shape: here the arrow itself still draws, but the
+        // create/destroy FACT would be lost without its own keyword line).
+        val create = message(kind = Seq3Kind.CREATE, label = "ctor")
+        val destroy = message(kind = Seq3Kind.DESTROY, label = "dtor")
+
+        val createMermaid = doc(listOf(create)).toMermaid()
+        val createPlantUml = doc(listOf(create)).toPlantUml()
+        val destroyMermaid = doc(listOf(destroy)).toMermaid()
+        val destroyPlantUml = doc(listOf(destroy)).toPlantUml()
+
+        assertTrue(createMermaid.contains("create participant B"), "got:\n$createMermaid")
+        assertTrue(createPlantUml.contains("create B"), "got:\n$createPlantUml")
+        assertTrue(destroyMermaid.contains("destroy B"), "got:\n$destroyMermaid")
+        assertTrue(destroyPlantUml.contains("destroy B"), "got:\n$destroyPlantUml")
+    }
+
     // ── Repeat modes ─────────────────────────────────────────────────────────────────────────
 
     @Test
@@ -1118,3 +1228,4 @@ class Seq3EmitterTest {
         override fun lineHeight(role: Seq3FontRole): Double = 16.0
     }
 }
+

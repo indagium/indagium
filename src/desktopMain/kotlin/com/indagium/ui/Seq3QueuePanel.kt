@@ -1308,7 +1308,11 @@ private fun Seq3AddCustomDialog(
             // TO one of these kinds must drop whatever target was picked for the PREVIOUS kind —
             // leaving it in place would silently resurrect it the moment the user switched back.
             Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> null
-            Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> toId ?: document.lifelines.firstOrNull { it.id != fromId }?.id ?: fromId
+            // WP10: CREATE/DESTROY need a real target exactly like CALL/RETURN/ASYNC — switching
+            // TO one of these kinds should keep whatever target was already picked, or fall back
+            // to the same "first other lifeline" default, not drop it the way NOTE/LOST/FOUND do.
+            Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.CREATE, Seq3Kind.DESTROY ->
+                toId ?: document.lifelines.firstOrNull { it.id != fromId }?.id ?: fromId
         }
     }
 
@@ -1343,7 +1347,11 @@ private fun Seq3AddCustomDialog(
                 // deliberately excludes it) because this dialog is custom-message CREATION, where
                 // authoring any kind from scratch — including one with no target — makes sense.
                 // LOST/FOUND belong in that same "targetless kinds you can author" bucket.
-                options = listOf("call", "return", "async", "self", "note", "lost", "found"),
+                // WP10: "create"/"destroy" appended LAST, matching Seq3Kind.entries' own append-at-
+                // the-end order — this list is positionally zipped against `Seq3Kind.entries` via
+                // `indexOf`/`entries[it]` just below, so it is NOT free-standing text; it must track
+                // the enum's declaration order exactly or `onToggle` would select the wrong kind.
+                options = listOf("call", "return", "async", "self", "note", "lost", "found", "create", "destroy"),
                 selectedIndices = setOf(Seq3Kind.entries.indexOf(kind)),
                 onToggle = { chooseKind(Seq3Kind.entries[it]) },
                 fillWidth = true,

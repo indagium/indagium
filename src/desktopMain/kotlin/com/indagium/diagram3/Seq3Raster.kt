@@ -201,6 +201,12 @@ private const val ACTOR_GLYPH_GAP = 4.0
 private const val ACTOR_GLYPH_LEG_SPLIT_FRACTION = 0.28
 private const val ACTOR_GLYPH_ARM_FRACTION = 0.35
 
+// WP10: the UML destroy marker — an X centred on (centerX, lifelineBottom), same paint-time-only
+// sizing role as ACTOR_GLYPH_W/H above (no Seq3RasterTheme field: this is a size, not a color —
+// see this file's header on why a new theme field is the wrong tool for a shape that needs no new
+// color). Half-width/height of the X's own two diagonals.
+private const val DESTROY_X_HALF = 7.0
+
 private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme, footer: String?) {
     g.color = Color(theme.background, true)
     g.fillRect(0, 0, layout.width.roundToInt(), layout.height.roundToInt())
@@ -272,7 +278,21 @@ private fun paintLifelines(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterT
             g.stroke = if (segment.isDotted) dottedStroke else dashStroke
             g.draw(java.awt.geom.Line2D.Double(l.centerX, segment.fromY, l.centerX, segment.toY))
         }
+        // WP10: the ONLY new paint this work package adds — everything else (header chip, guide
+        // line above) already reads per-column geometry unmodified. Two diagonals through
+        // (centerX, lifelineBottom): SOLID, not the dashed guide-line stroke it terminates — a
+        // destroyed lifeline's end is a resolved fact (same "solid line reads as a resolved thing"
+        // reasoning Seq3ArrowStyle's own WP9 LOST/FOUND comment already applies), and CAP_ROUND at
+        // STROKE_THICK so the X reads clearly at typical export scale instead of two hairlines.
+        if (l.destroyed) paintDestroyX(g, l.centerX, l.lifelineBottom, theme)
     }
+}
+
+private fun paintDestroyX(g: Graphics2D, centerX: Double, centerY: Double, theme: Seq3RasterTheme) {
+    g.color = Color(theme.lifeline, true)
+    g.stroke = BasicStroke(STROKE_THICK, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+    g.draw(java.awt.geom.Line2D.Double(centerX - DESTROY_X_HALF, centerY - DESTROY_X_HALF, centerX + DESTROY_X_HALF, centerY + DESTROY_X_HALF))
+    g.draw(java.awt.geom.Line2D.Double(centerX - DESTROY_X_HALF, centerY + DESTROY_X_HALF, centerX + DESTROY_X_HALF, centerY - DESTROY_X_HALF))
 }
 
 /**
@@ -391,7 +411,11 @@ private fun strokeFor(kind: Seq3Kind): BasicStroke {
         // changes — `style.dash` is already null for both per Seq3ArrowStyle's own [LOST]/[FOUND]
         // branch, so the plain `BasicStroke(width)` below is the only value consistent with it.
         Seq3Kind.LOST, Seq3Kind.FOUND -> BasicStroke(width)
-        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> BasicStroke(width)
+        // WP10: CREATE shares RETURN's dashed style in Seq3ArrowStyle (same cap/join treatment
+        // follows, for the same "one dashed style" reason) — DESTROY shares CALL's plain solid
+        // style, so it takes the same bare `BasicStroke(width)`.
+        Seq3Kind.CREATE -> BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f)
+        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.DESTROY -> BasicStroke(width)
     }
 }
 

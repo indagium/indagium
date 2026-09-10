@@ -1042,6 +1042,13 @@ private fun DrawScope.drawSeq3Diagram(
                 cap = if (segment.isDotted) StrokeCap.Round else StrokeCap.Butt,
             )
         }
+        // WP10: the ONLY new paint this work package adds to this function — the header chip and
+        // the guide line above already read per-column geometry unmodified. Two diagonals through
+        // (centerX, lifelineBottom): SOLID (no pathEffect), not the dashed guide-line style it
+        // terminates — mirrors Seq3Raster.paintDestroyX exactly, same reasoning as that function's
+        // own doc (a destroyed lifeline's end is a resolved fact, reads solid the same way LOST/
+        // FOUND already does — Seq3ArrowStyle's own WP9 comment).
+        if (column.destroyed) drawSeq3DestroyX(column.centerX, column.lifelineBottom, tc.td)
     }
     // WP2: UML activation bars — pulled into its own DrawScope function (drawSeq3ActivationBars,
     // just below) purely to keep drawSeq3Diagram itself under this file's detekt LongMethod
@@ -1226,6 +1233,20 @@ private const val ARROW_REFERENCE_WIDTH_DP = 1.5f
 // Seq3Raster's STROKE_THIN vs STROKE_THICK split (1f vs 1.6f) closely enough that RETURN/ASYNC
 // read visibly thinner than a CALL arrow on screen, matching the exported PNG.
 private const val ARROW_THIN_WIDTH_DP = 1f
+
+// WP10: mirrors Seq3Raster's own DESTROY_X_HALF (7.0) and STROKE_THICK (1.6f) — same size and
+// weight, same "no new theme field" reasoning (a size/weight, not a color).
+private const val DESTROY_X_HALF_DP = 7f
+private const val DESTROY_X_STROKE_WIDTH_DP = 1.6f
+
+private fun DrawScope.drawSeq3DestroyX(centerXDp: Double, centerYDp: Double, color: androidx.compose.ui.graphics.Color) {
+    val cx = centerXDp.dp.toPx()
+    val cy = centerYDp.dp.toPx()
+    val half = DESTROY_X_HALF_DP.dp.toPx()
+    val strokeWidth = DESTROY_X_STROKE_WIDTH_DP.dp.toPx()
+    drawLine(color, Offset(cx - half, cy - half), Offset(cx + half, cy + half), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+    drawLine(color, Offset(cx - half, cy + half), Offset(cx + half, cy - half), strokeWidth = strokeWidth, cap = StrokeCap.Round)
+}
 
 /**
  * Pure ratio math extracted out of [drawSeq3Arrow] so [Seq3CanvasTest] can pin it down without a

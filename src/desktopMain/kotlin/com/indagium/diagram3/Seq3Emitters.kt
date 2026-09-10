@@ -876,6 +876,79 @@ private fun StringBuilder.appendActivationLines(maps: Seq3ActivationMaps, i: Int
     zeroLength.sortedByDescending { it.depth }.forEach { emit(activate = false, span = it) }
 }
 
+// ── WP10: create/destroy directives ─────────────────────────────────────────────────────────
+
+/**
+ * For each lifeline index, the emission index of the `create`/`destroy` directive text should
+ * attach to. Mirrors `Seq3Layout`'s own "which row creates/destroys this lifeline" resolution
+ * exactly (same FIRST-wins for create, LAST-wins for destroy — see that file's doc for why:
+ * truncating early would hide rows drawn after a stray earlier destroy, so the picture and the
+ * exported text must agree on the same authoritative row or they'd silently disagree about when a
+ * lifeline ends), so the emitted `create`/`destroy` keyword always lands on the identical message
+ * that the drawn geometry treats as authoritative.
+ */
+private class Seq3LifecycleMaps(val createAt: Map<Int, Int>, val destroyAt: Map<Int, Int>)
+
+private fun lifecycleMaps(plan: Seq3EmissionPlan): Seq3LifecycleMaps {
+    val createAt = mutableMapOf<Int, Int>()
+    val destroyAt = mutableMapOf<Int, Int>()
+    plan.emissions.forEachIndexed { i, emission ->
+        if (emission !is Seq3Emission.Arrow) return@forEachIndexed
+        when (emission.kind) {
+            Seq3Kind.CREATE -> createAt.putIfAbsent(emission.toIdx, i) // first CREATE wins, later ones ignored
+            Seq3Kind.DESTROY -> destroyAt[emission.toIdx] = i // keep overwriting: last DESTROY wins
+            else -> Unit
+        }
+    }
+    return Seq3LifecycleMaps(createAt, destroyAt)
+}
+
+/** [toMermaid]'s per-lifeline header declaration line — pulled out purely to keep that function's
+ *  own Cyclomatic Complexity under this file's detekt threshold (the same reason
+ *  [appendDividerLines]/[appendActivationLines] already exist as their own functions rather than
+ *  inlined into both dialect functions). Skips the CREATEd lifeline entirely: see the call site's
+ *  own WP10 comment for why (Mermaid parses a participant that is BOTH header-declared and later
+ *  `create`d as an error). */
+private fun StringBuilder.appendMermaidParticipantDeclaration(
+    i: Int,
+    l: Seq3Lifeline,
+    lifecycle: Seq3LifecycleMaps,
+    aliases: List<String>,
+    lifelineDisplaySegments: Int,
+) {
+    if (lifecycle.createAt.containsKey(i)) return
+    // Item: ACTOR lifelines emit Mermaid's own `actor` keyword instead of `participant` — purely a
+    // glyph/export-keyword choice (Seq3LifelineKind's own doc), and the resolved display name
+    // (per-lifeline override, else the document default) rather than the raw name, matching what
+    // the header chip/glyph actually shows on screen.
+    val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
+    val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
+    append("    ").append(keyword).append(' ').append(aliases[i]).append(" as ").append(mermaidEscape(displayName)).append('\n')
+}
+
+/** [toMermaid]'s per-row `create`/`destroy` directive lines — see that function's own call site
+ *  comment for the exact grammar this follows. Pulled into its own function for the identical
+ *  CyclomaticComplexMethod reason as [appendMermaidParticipantDeclaration] above. */
+private fun StringBuilder.appendMermaidLifecycleDirectives(
+    lifecycle: Seq3LifecycleMaps,
+    i: Int,
+    toIdx: Int,
+    visibleLifelines: List<Seq3Lifeline>,
+    lifelineDisplaySegments: Int,
+    aliasOf: (Int) -> String,
+) {
+    if (lifecycle.createAt[toIdx] == i) {
+        val created = visibleLifelines[toIdx]
+        val createdKeyword = if (created.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
+        val createdName = seq3DisplayName(created.name, created.displaySegments, lifelineDisplaySegments)
+        append("    create ").append(createdKeyword).append(' ').append(aliasOf(toIdx))
+            .append(" as ").append(mermaidEscape(createdName)).append('\n')
+    }
+    if (lifecycle.destroyAt[toIdx] == i) {
+        append("    destroy ").append(aliasOf(toIdx)).append('\n')
+    }
+}
+
 // ── Mermaid ──────────────────────────────────────────────────────────────────────────────────
 
 fun Seq3Document.toMermaid(): String {
@@ -899,6 +972,8 @@ fun Seq3Document.toMermaid(): String {
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
     val activations = activationMaps(this, plan, visibleLifelines)
+    // WP10: which emission index owns the `create`/`destroy` directive text for each lifeline.
+    val lifecycle = lifecycleMaps(plan)
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
@@ -906,13 +981,7 @@ fun Seq3Document.toMermaid(): String {
         append("sequenceDiagram\n")
         if (title.isNotBlank()) append("    title ").append(mermaidEscape(title)).append('\n')
         visibleLifelines.forEachIndexed { i, l ->
-            // Item: ACTOR lifelines emit Mermaid's own `actor` keyword instead of `participant` —
-            // purely a glyph/export-keyword choice (Seq3LifelineKind's own doc), and the resolved
-            // display name (per-lifeline override, else the document default) rather than the raw
-            // name, matching what the header chip/glyph actually shows on screen.
-            val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
-            val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
-            append("    ").append(keyword).append(' ').append(aliases[i]).append(" as ").append(mermaidEscape(displayName)).append('\n')
+            appendMermaidParticipantDeclaration(i, l, lifecycle, aliases, lifelineDisplaySegments)
         }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
@@ -924,6 +993,15 @@ fun Seq3Document.toMermaid(): String {
             appendDividerLines(dividersByAnchor, i, indent = "    ", dividerLineFor = ::mermaidFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
+                    // WP10: Mermaid's own grammar requires BOTH `create ...` and `destroy ...` to
+                    // appear on the line immediately BEFORE the message that creates/destroys the
+                    // participant (confirmed against mermaid-js's sequenceDiagram.jison: `destroy`
+                    // is `'destroy' actor 'NEWLINE'` with no trailing message clause of its own —
+                    // it is always its own statement ahead of the next one) — never after, unlike
+                    // PlantUML below. Extracted into its own function (like appendMermaidParticipant
+                    // Declaration above) purely to keep toMermaid's own Cyclomatic Complexity under
+                    // this file's detekt threshold.
+                    appendMermaidLifecycleDirectives(lifecycle, i, emission.toIdx, visibleLifelines, lifelineDisplaySegments, ::aliasOf)
                     // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
                     // instead of silently inheriting the plain "->>" arrow token meant for CALL.
                     val arrow = when (emission.kind) {
@@ -938,7 +1016,17 @@ fun Seq3Document.toMermaid(): String {
                         // `toLifelineId` (Seq3Message never enforces that as an invariant) — a
                         // defensive fallback for that inconsistent state, not the intended path,
                         // so it reads as a plain solid call rather than a crash.
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> "->>"
+                        //
+                        // WP10: CREATE reuses RETURN's dashed-open-arrowhead token because
+                        // `seq3ArrowStyle` already decided CREATE has that exact shape (see that
+                        // file's own WP10 comment) — the text dialects and the picture must draw
+                        // the same arrow, not two independently-chosen ones. DESTROY reuses CALL's
+                        // plain filled-arrowhead token for the identical reason: `seq3ArrowStyle`
+                        // gave DESTROY the ordinary CALL shape, since the "this is a destroy" signal
+                        // is the X drawn on the lifeline (and the `destroy` directive here), not a
+                        // distinct arrowhead.
+                        Seq3Kind.CREATE -> "-->>"
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND, Seq3Kind.DESTROY -> "->>"
                     }
                     val label = mermaidEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append("    ").append(aliasOf(emission.fromIdx)).append(arrow).append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
@@ -968,6 +1056,39 @@ fun Seq3Document.toMermaid(): String {
     }
 }
 
+/** [toPlantUml]'s per-lifeline header declaration line — see [appendMermaidParticipantDeclaration]
+ *  above for the identical CyclomaticComplexMethod reason this is its own function, and the
+ *  call site's own WP10 comment for why a CREATEd lifeline is skipped here too (structural
+ *  parallelism with Mermaid, even though PlantUML itself does not require it). */
+private fun StringBuilder.appendPlantUmlParticipantDeclaration(
+    i: Int,
+    l: Seq3Lifeline,
+    lifecycle: Seq3LifecycleMaps,
+    aliases: List<String>,
+    lifelineDisplaySegments: Int,
+) {
+    if (lifecycle.createAt.containsKey(i)) return
+    // Same ACTOR-vs-participant keyword and resolved-display-name treatment as toMermaid.
+    val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
+    val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
+    append(keyword).append(" \"").append(plantUmlEscape(displayName)).append("\" as ").append(aliases[i]).append('\n')
+}
+
+/** [toPlantUml]'s `create <alias>` line, BEFORE the creating message — see that function's own
+ *  call site comment for the exact PlantUML convention this follows and why it is two separate
+ *  one-line functions rather than one combined helper like Mermaid's
+ *  [appendMermaidLifecycleDirectives] (PlantUML's create/destroy straddle the arrow line instead
+ *  of both sitting before it). */
+private fun StringBuilder.appendPlantUmlCreateDirective(lifecycle: Seq3LifecycleMaps, i: Int, toIdx: Int, aliasOf: (Int) -> String) {
+    if (lifecycle.createAt[toIdx] == i) append("create ").append(aliasOf(toIdx)).append('\n')
+}
+
+/** [toPlantUml]'s `destroy <alias>` line, AFTER the destroying message — see
+ *  [appendPlantUmlCreateDirective] just above for why this is its own function too. */
+private fun StringBuilder.appendPlantUmlDestroyDirective(lifecycle: Seq3LifecycleMaps, i: Int, toIdx: Int, aliasOf: (Int) -> String) {
+    if (lifecycle.destroyAt[toIdx] == i) append("destroy ").append(aliasOf(toIdx)).append('\n')
+}
+
 // ── PlantUML ─────────────────────────────────────────────────────────────────────────────────
 
 fun Seq3Document.toPlantUml(): String {
@@ -988,6 +1109,10 @@ fun Seq3Document.toPlantUml(): String {
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
     val activations = activationMaps(this, plan, visibleLifelines)
+    // WP10: which emission index owns the `create`/`destroy` directive text for each lifeline —
+    // same map, same rule, as toMermaid, so the two dialects never disagree on which row is the
+    // authoritative creation/destruction point.
+    val lifecycle = lifecycleMaps(plan)
 
     fun aliasOf(idx: Int) = aliases.getOrElse(idx) { "p$idx" }
 
@@ -995,10 +1120,7 @@ fun Seq3Document.toPlantUml(): String {
         append("@startuml\n")
         if (title.isNotBlank()) append("title ").append(plantUmlEscape(title)).append('\n')
         visibleLifelines.forEachIndexed { i, l ->
-            // Same ACTOR-vs-participant keyword and resolved-display-name treatment as toMermaid.
-            val keyword = if (l.kind == Seq3LifelineKind.ACTOR) "actor" else "participant"
-            val displayName = seq3DisplayName(l.name, l.displaySegments, lifelineDisplaySegments)
-            append(keyword).append(" \"").append(plantUmlEscape(displayName)).append("\" as ").append(aliases[i]).append('\n')
+            appendPlantUmlParticipantDeclaration(i, l, lifecycle, aliases, lifelineDisplaySegments)
         }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
@@ -1009,6 +1131,15 @@ fun Seq3Document.toPlantUml(): String {
             appendDividerLines(dividersByAnchor, i, indent = "", dividerLineFor = ::plantUmlFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
+                    // WP10: PlantUML's own convention (confirmed against plantuml.com's own
+                    // "Participant creation"/"Lifeline Activation and Destruction" sections) places
+                    // `create <alias>` on the line BEFORE the message that creates it, and
+                    // `destroy <alias>` on the line AFTER the message that destroys it — the
+                    // opposite ordering from Mermaid's `destroy` (which is always pre-message), so
+                    // this is deliberately not a shared helper with toMermaid's version — split into
+                    // two tiny one-line functions (below the arrow line too) purely to keep
+                    // toPlantUml's own Cyclomatic Complexity under this file's detekt threshold.
+                    appendPlantUmlCreateDirective(lifecycle, i, emission.toIdx, ::aliasOf)
                     // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
                     // instead of silently inheriting the plain "->" arrow token meant for CALL.
                     val arrow = when (emission.kind) {
@@ -1018,11 +1149,18 @@ fun Seq3Document.toPlantUml(): String {
                         // always take the NeedsTarget path just below, which is where their real
                         // `->o]`/`[o->` gate syntax is emitted) — a defensive fallback only, kept
                         // here because Seq3Emission.Arrow.kind's type doesn't itself rule it out.
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> "->"
+                        //
+                        // WP10: same reasoning as toMermaid's identical branch — CREATE reuses
+                        // RETURN's dashed token (`seq3ArrowStyle` gave it that exact shape), DESTROY
+                        // reuses CALL's plain token (the `destroy` directive/X carries the meaning,
+                        // not the arrowhead).
+                        Seq3Kind.CREATE -> "-->"
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND, Seq3Kind.DESTROY -> "->"
                     }
                     val label = plantUmlEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append(aliasOf(emission.fromIdx)).append(' ').append(arrow).append(' ')
                         .append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
+                    appendPlantUmlDestroyDirective(lifecycle, i, emission.toIdx, ::aliasOf)
                 }
                 is Seq3Emission.NeedsTarget -> appendPlantUmlNeedsTargetLine(emission, ::aliasOf)
                 is Seq3Emission.NoteLine ->

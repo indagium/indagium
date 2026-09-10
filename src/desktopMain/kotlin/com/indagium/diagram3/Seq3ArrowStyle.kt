@@ -54,7 +54,15 @@ fun seq3ArrowStyle(kind: Seq3Kind): Seq3ArrowStyle = when (kind) {
     // here). The values happen to match CALL's because "solid, filled, thick" is independently the
     // right answer for a resolved one-way send, not because this is a copy-paste of that branch.
     Seq3Kind.LOST, Seq3Kind.FOUND -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
+    // WP10: CREATE follows the UML convention of a dashed line with an open arrowhead pointing at
+    // the box it constructs — the same visual vocabulary RETURN already uses above, reused
+    // because it IS the same shape (a dashed, open-headed arrow), not because this is a fallback.
+    // DESTROY is an ordinary synchronous send (solid/filled/thick, CALL's style) — the UML signal
+    // that the target is gone is the X drawn at the foot of its lifeline (Deliverable 3), which is
+    // a property of the *column*, not of this arrow's own stroke, so DESTROY needs no style of its
+    // own here.
+    Seq3Kind.CREATE -> Seq3ArrowStyle(dash = SEQ3_DASH_RETURN, filledHead = false, thin = true)
     // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
     // silently inheriting the solid-filled-arrow default meant for CALL.
-    Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
+    Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.DESTROY -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
 }
