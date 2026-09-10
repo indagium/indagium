@@ -298,6 +298,31 @@ sealed class Seq3MessageEditResult {
  *  `kind.name.lowercase()` call every other kind shares. */
 enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP }
 
+/** One `else`-divided branch of a combined fragment — a UML InteractionOperand, minus operand
+ *  zero (see [Seq3Fragment.elseOperands] for why operand zero is not represented by this type).
+ *
+ *  Deliberately does **not** carry its own `messageIds`. [Seq3Fragment.messageIds] is documented
+ *  as needing no physical contiguity — a fragment is a *span*, and its membership a *set* — but
+ *  UML operands are an **ordered partition** of that span: `alt` divides its bracket into
+ *  contiguous, sequential branches. If operand A held messages at emission indices {3, 7} and
+ *  operand B held {5, 9}, there would be no valid divider position between them — the branches
+ *  would interleave. A per-operand membership set can therefore express a state no renderer can
+ *  draw. An anchor cannot: it resolves to exactly one index inside the span, or to nothing at all.
+ *
+ *  Anchor resolution follows [Seq3Delay]'s contract exactly: an anchor that no longer names a
+ *  drawn row drops THIS divider and folds its guard's region into the preceding operand, rather
+ *  than failing the fragment or the document — WP5/WP6 own that resolution logic; this type only
+ *  stores the anchor. */
+data class Seq3Operand(
+    val id: String,
+    val guard: String,
+    /** This operand begins at the first drawn row of this message. */
+    val startsAtMessageId: String,
+    /** Pins the divider to one exact occurrence of a repeated message — same reasoning, and the
+     *  same "null means the first/only occurrence" default, as [Seq3Delay.afterOccurrenceEntryId]. */
+    val startsAtOccurrenceEntryId: Int? = null,
+)
+
 /** A labelled fragment box spanning the named messages. [messageIds] need not be a physically
  *  contiguous run of [Seq3Document.messages] — the bracket is drawn from the earliest to the
  *  latest referenced message, same as the old `DiagramFrame`'s bracket-around-a-range approach.
@@ -323,6 +348,37 @@ data class Seq3Fragment(
      *  messages relate to. Canvas-presentation only: [Seq3Layout]/[Seq3Raster] already draw the
      *  bare label with no kind prefix, so this has no effect there or on the emitted text. */
     val hideKindLabel: Boolean = false,
+    /** WP4: the `else` branches after the first, for a combined fragment with two or more UML
+     *  InteractionOperands (`alt`/`else`, `par`/`and`-or-`else`, `critical`/`option` — see the
+     *  "which kinds" paragraph below). [label] is **operand zero's guard** — it always was, in
+     *  UML terms: `alt <label>` already puts the label exactly where UML puts the first operand's
+     *  guard. This field therefore holds only what comes *after* that: an absent/empty list is not
+     *  a migration case to handle, it is the honest, exact description of every fragment ever
+     *  written before this field existed — a single-operand fragment, which renders identically to
+     *  today. That is a stronger backward-compatibility guarantee than the `totalOccurrenceCount` /
+     *  `elidedMessageCount` precedents, which each needed a "null/absent means X" convention on
+     *  top of the bare default — here the bare `emptyList()` default already *is* the correct
+     *  historical meaning, nothing further to reconcile.
+     *
+     *  The one accepted cost: operand zero's guard is edited through the existing
+     *  `SetFragmentLabel` command, while every operand in this list gets its own command in WP7 —
+     *  an intentional asymmetry, not an oversight. The alternative — folding operand zero into
+     *  this list too, as a full `operands: List<Seq3Operand>` — would need a [Seq3Operand] whose
+     *  anchor is meaningless (there is nothing before the first operand to anchor it after),
+     *  i.e. a permanently unrepresentable-but-typeable state. Keeping [label] as operand zero's
+     *  guard is exactly what avoids that.
+     *
+     *  Which kinds this is meaningful for is a UML rule, deliberately **not enforced here**: UML
+     *  gives `OPT`, `LOOP`, `BREAK` exactly one operand (no `else`), and [Seq3FragmentKind.GROUP]
+     *  is not a UML combined-fragment operator at all (see that enum's own doc), so
+     *  [elseOperands] is only ever rendered for `ALT`, `PAR`, `CRITICAL` — WP5's emitters and
+     *  WP7's UI are the ones that gate on kind. A `SetFragmentKind` that moves a fragment away
+     *  from one of those three and back (e.g. `ALT` -> `LOOP` -> `ALT`) preserves [elseOperands]
+     *  across the round trip rather than clearing it — "keep the data, drop the drawing" is the
+     *  rule this whole package already follows for [visibility] and [hideKindLabel], and a kind
+     *  change that quietly discards a user's typed guards the moment they pick the wrong operator
+     *  first would be a worse experience than briefly rendering operands that don't apply yet. */
+    val elseOperands: List<Seq3Operand> = emptyList(),
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct

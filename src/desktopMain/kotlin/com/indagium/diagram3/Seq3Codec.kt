@@ -57,6 +57,10 @@ private const val MAX_SEQ3_FRAGMENTS = 128
 private const val MAX_SEQ3_NOTES = 400
 private const val MAX_SEQ3_DELAYS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
+// WP4: guards are short strings against a 512 KB header cap, so this bound exists to match the
+// existing per-fragment caps' posture (reject a pathological document rather than truncate it
+// silently), not because 32 branches is remotely expected in practice.
+private const val MAX_SEQ3_OPERANDS_PER_FRAGMENT = 32
 
 // internal, not private: DiagramLibraryStore.rejectionFor (W1c) reads this to report the exact
 // limit in a TooLarge popup without duplicating the number.
@@ -378,7 +382,9 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val fragments = fragmentMaps.mapNotNull(::fragmentFromMap)
     val occurrencesWithinBounds = messages.all { it.occurrences.size <= MAX_SEQ3_OCCURRENCES_PER_MESSAGE }
     val fragmentIdsWithinBounds = fragments.all { it.messageIds.size <= MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT }
-    if (!occurrencesWithinBounds || !fragmentIdsWithinBounds) return null
+    // WP4: folded in the same way as fragmentIdsWithinBounds just above.
+    val fragmentOperandsWithinBounds = fragments.all { it.elseOperands.size <= MAX_SEQ3_OPERANDS_PER_FRAGMENT }
+    if (!occurrencesWithinBounds || !fragmentIdsWithinBounds || !fragmentOperandsWithinBounds) return null
 
     return Seq3Document(
         title = boundedString(map.str("title")) ?: "",
@@ -589,6 +595,30 @@ private fun occurrenceRefFromMap(map: Map<String, Any?>): Seq3OccurrenceRef? {
     return Seq3OccurrenceRef(messageId, entryId)
 }
 
+private fun operandToMap(o: Seq3Operand): Map<String, Any?> = mapOf(
+    "id" to o.id,
+    "guard" to o.guard,
+    "startsAtMessageId" to o.startsAtMessageId,
+    "startsAtOccurrenceEntryId" to o.startsAtOccurrenceEntryId,
+)
+
+// Returns null on a missing "id" or "startsAtMessageId" — the same "a malformed element drops
+// out, the document survives" posture as occurrenceRefFromMap just above. This is DELIBERATELY
+// stricter than fragmentFromMap's own unknown-"kind" handling below, which coerces to LOOP rather
+// than dropping the fragment: a fragment with an unrecognised kind is still a fragment worth
+// drawing, but an operand with no anchor is nothing at all — there is no position at which to
+// draw its divider, so there is nothing to keep.
+private fun operandFromMap(map: Map<String, Any?>): Seq3Operand? {
+    val id = boundedString(map.str("id")) ?: return null
+    val startsAtMessageId = boundedString(map.str("startsAtMessageId")) ?: return null
+    return Seq3Operand(
+        id = id,
+        guard = boundedString(map.str("guard")) ?: "",
+        startsAtMessageId = startsAtMessageId,
+        startsAtOccurrenceEntryId = map.int("startsAtOccurrenceEntryId"),
+    )
+}
+
 private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
     mapOf(
         "id" to f.id,
@@ -598,12 +628,21 @@ private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
         "occurrenceRefs" to f.occurrenceRefs.map(::occurrenceRefToMap),
         "visibility" to f.visibility.name,
         "hideKindLabel" to f.hideKindLabel,
+        // WP4: appended last (CLAUDE.md invariant). Absent on every fragment written before this
+        // field existed -> decodes to emptyList() below -> one implicit operand (label is its
+        // guard) -> byte-identical rendering to today. Not a migration case — see Seq3Model.kt's
+        // own doc on this field for why.
+        "elseOperands" to f.elseOperands.map(::operandToMap),
     )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
     val id = boundedString(map.str("id")) ?: return null
     val occurrenceRefMaps = map.mapList("occurrenceRefs").orEmpty()
     if (occurrenceRefMaps.size > MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT) return null
+    // Bound-checked at the document level (documentFromMap's fragmentOperandsWithinBounds), the
+    // same way MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT is — not here, unlike occurrenceRefMaps above,
+    // because that check needs a fully-decoded Seq3Fragment to read .elseOperands.size from.
+    val operandMaps = map.mapList("elseOperands").orEmpty()
     return Seq3Fragment(
         id = id,
         // An unknown/missing kind (e.g. an older build's document, or a GROUP document opened by a
@@ -617,6 +656,9 @@ private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
         // Missing in an older document (WP12 added this field) -> defaults to false, i.e. "show
         // the kind word", matching every fragment that existed before this option did.
         hideKindLabel = map.bool("hideKindLabel") ?: false,
+        // Missing "elseOperands" key (every fragment written before WP4) -> emptyList() -> one
+        // implicit operand whose guard is `label` -> today's exact rendering. See Seq3Model.kt.
+        elseOperands = operandMaps.mapNotNull(::operandFromMap),
     )
 }
 
