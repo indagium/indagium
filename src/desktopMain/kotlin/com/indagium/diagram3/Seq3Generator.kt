@@ -717,6 +717,8 @@ fun addSeq3CustomMessage(document: Seq3Document, spec: Seq3CustomMessageSpec): S
     if (text.isEmpty()) return Seq3CustomMessageResult.Rejected("Message text is required")
     val from = document.lifelines.firstOrNull { it.id == spec.fromLifelineId }
         ?: return Seq3CustomMessageResult.Rejected("Unknown source lifeline")
+    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
+    // silently inheriting the CALL/RETURN/ASYNC "ordinary target lifeline" rule.
     val to = when (spec.kind) {
         Seq3Kind.NOTE -> {
             if (spec.toLifelineId != null) return Seq3CustomMessageResult.Rejected("A note message cannot have a target lifeline")
@@ -728,7 +730,7 @@ fun addSeq3CustomMessage(document: Seq3Document, spec: Seq3CustomMessageSpec): S
             }
             from.id
         }
-        else -> {
+        Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> {
             val targetId = spec.toLifelineId ?: return Seq3CustomMessageResult.Rejected("Target lifeline is required")
             if (document.lifelines.none { it.id == targetId }) return Seq3CustomMessageResult.Rejected("Unknown target lifeline")
             targetId

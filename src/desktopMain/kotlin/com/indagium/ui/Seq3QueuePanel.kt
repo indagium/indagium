@@ -1295,10 +1295,14 @@ private fun Seq3AddCustomDialog(
 
     fun chooseKind(next: Seq3Kind) {
         kind = next
-        when (next) {
-            Seq3Kind.SELF -> toId = fromId
-            Seq3Kind.NOTE -> toId = null
-            else -> if (toId == null) toId = document.lifelines.firstOrNull { it.id != fromId }?.id ?: fromId
+        // Assigned (expression position), not a bare statement `when`: WP8 needs this exhaustive
+        // so a new Seq3Kind forces a decision here instead of silently defaulting to the
+        // CALL/RETURN/ASYNC "pick a target if one isn't already chosen" rule below. A statement-
+        // position `when` would only warn, not fail, when Seq3Kind grows a member.
+        toId = when (next) {
+            Seq3Kind.SELF -> fromId
+            Seq3Kind.NOTE -> null
+            Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> toId ?: document.lifelines.firstOrNull { it.id != fromId }?.id ?: fromId
         }
     }
 

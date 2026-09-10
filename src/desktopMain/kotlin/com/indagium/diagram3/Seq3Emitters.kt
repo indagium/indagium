@@ -888,10 +888,12 @@ fun Seq3Document.toMermaid(): String {
             appendDividerLines(dividersByAnchor, i, indent = "    ", dividerLineFor = ::mermaidFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
+                    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
+                    // instead of silently inheriting the plain "->>" arrow token meant for CALL.
                     val arrow = when (emission.kind) {
                         Seq3Kind.RETURN -> "-->>"
                         Seq3Kind.ASYNC -> "-)"
-                        else -> "->>"
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> "->>"
                     }
                     val label = mermaidEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append("    ").append(aliasOf(emission.fromIdx)).append(arrow).append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
@@ -962,10 +964,12 @@ fun Seq3Document.toPlantUml(): String {
             appendDividerLines(dividersByAnchor, i, indent = "", dividerLineFor = ::plantUmlFragmentDividerLine)
             when (emission) {
                 is Seq3Emission.Arrow -> {
+                    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
+                    // instead of silently inheriting the plain "->" arrow token meant for CALL.
                     val arrow = when (emission.kind) {
                         Seq3Kind.RETURN -> "-->"
                         Seq3Kind.ASYNC -> "->>"
-                        else -> "->"
+                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> "->"
                     }
                     val label = plantUmlEscape(emission.label) + repeatSuffix(emission.repeatCount)
                     append(aliasOf(emission.fromIdx)).append(' ').append(arrow).append(' ')
