@@ -337,10 +337,20 @@ class Seq3EmitterTest {
 
     @Test
     fun everyRealUmlFragmentKindEmitsItsNativeKeywordAndABalancedEnd() {
-        // GROUP is deliberately excluded here — it is not a UML operator and Mermaid has no bare
-        // "group" keyword at all (see groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml below,
-        // which is the dedicated test for its very different, per-dialect shape).
-        (Seq3FragmentKind.entries - Seq3FragmentKind.GROUP).forEach { kind ->
+        // GROUP and the four WP11 kinds (NEG/STRICT/CONSIDER/IGNORE) are deliberately excluded
+        // here. GROUP is not a UML operator at all; NEG/STRICT/CONSIDER/IGNORE ARE real UML
+        // operators but Mermaid's grammar has no keyword for any of them either, so none of these
+        // five emits a bare keyword in Mermaid — see groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml
+        // and negStrictConsiderAndIgnoreDegradeToRectAndNoteOverInMermaidWithTheOperatorWordPreserved
+        // below, the dedicated tests for their very different, per-dialect shape.
+        val mermaidFallbackKinds = setOf(
+            Seq3FragmentKind.GROUP,
+            Seq3FragmentKind.NEG,
+            Seq3FragmentKind.STRICT,
+            Seq3FragmentKind.CONSIDER,
+            Seq3FragmentKind.IGNORE,
+        )
+        (Seq3FragmentKind.entries - mermaidFallbackKinds).forEach { kind ->
             val msg = message()
             val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
             val out = doc(listOf(msg), fragments = listOf(fragment)).toMermaid()
@@ -406,6 +416,48 @@ class Seq3EmitterTest {
         val plantUml = document.toPlantUml()
         assertTrue(plantUml.contains("group billing retry flow\n"), "expected PlantUML's own 'group <label>' verbatim:\n$plantUml")
         assertTrue(plantUml.contains("end\n"), "expected a balanced 'end' in PlantUML:\n$plantUml")
+    }
+
+    @Test
+    fun negStrictConsiderAndIgnoreEmitTheirRealOperatorKeywordInPlantUml() {
+        // WP11: PlantUML needs no per-kind special case for any of these four — `kind.name
+        // .lowercase()` already produces PlantUML's own `neg`/`strict`/`consider`/`ignore`
+        // keyword, the exact same shared path LOOP/ALT/OPT/PAR/BREAK already take.
+        listOf(Seq3FragmentKind.NEG, Seq3FragmentKind.STRICT, Seq3FragmentKind.CONSIDER, Seq3FragmentKind.IGNORE).forEach { kind ->
+            val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
+            val out = doc(listOf(message()), fragments = listOf(fragment)).toPlantUml()
+
+            val keyword = kind.name.lowercase()
+            assertTrue(out.contains("$keyword Retry\n"), "expected '$keyword Retry' in PlantUML:\n$out")
+            assertTrue(out.contains("end\n"), "expected a balanced 'end' in PlantUML:\n$out")
+        }
+    }
+
+    @Test
+    fun negStrictConsiderAndIgnoreDegradeToRectAndNoteOverInMermaidWithTheOperatorWordPreserved() {
+        // WP11: Mermaid's sequence-diagram grammar (loop/alt/else/opt/par/and/critical/option/
+        // break/rect) has no keyword for any of these four real UML operators — a bare `neg`/
+        // `strict`/`consider`/`ignore` is a Mermaid PARSE ERROR, exactly like the bare `group`
+        // that already forced GROUP's own fallback, so all four route through that SAME `rect` +
+        // `Note over` fallback. Unlike GROUP's note (label only — GROUP has no operator word worth
+        // showing), the note here must ALSO carry the operator word: dropping it would erase the
+        // one thing that made picking NEG/CONSIDER over LOOP/GROUP meaningful once Mermaid can no
+        // longer say `neg`/`consider` itself. The negative assertions ARE the point of this test —
+        // a bare fallback keyword is the exact parse error being prevented.
+        listOf(Seq3FragmentKind.NEG, Seq3FragmentKind.STRICT, Seq3FragmentKind.CONSIDER, Seq3FragmentKind.IGNORE).forEach { kind ->
+            val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
+            val out = doc(listOf(message()), fragments = listOf(fragment)).toMermaid()
+
+            val keyword = kind.name.lowercase()
+            assertFalse(out.contains("    $keyword Retry\n"), "bare '$keyword' is a Mermaid parse error; got:\n$out")
+            assertFalse(out.contains("    $keyword\n"), "bare '$keyword' is a Mermaid parse error; got:\n$out")
+            assertTrue(out.contains("    rect rgb("), "expected a 'rect rgb(...)' wrapper in Mermaid:\n$out")
+            assertTrue(out.contains("    end\n"), "expected the rect to close with a balanced 'end' in Mermaid:\n$out")
+            assertTrue(
+                out.contains("    Note over A,B: $keyword Retry\n"),
+                "expected the operator word plus label to survive into the Mermaid fallback note:\n$out",
+            )
+        }
     }
 
     @Test
