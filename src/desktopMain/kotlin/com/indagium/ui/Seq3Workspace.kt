@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.diagram3.SEQ3_OPERAND_FRAGMENT_KINDS
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
@@ -71,6 +72,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3GuidedPassState
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
@@ -940,6 +942,14 @@ internal class Seq3ViewState {
      *  so both disclosures can remain open at once, with details rendered first. */
     var expandedInfoMessageIds by mutableStateOf<Set<String>>(emptySet())
 
+    /** WP7: expanded `else` operand child rows for an ALT/PAR/CRITICAL fragment's Artifacts-panel
+     *  row — the fourth disclosure set, same "keyed by the owning artifact's id, independent of
+     *  every other expansion" shape as [expandedOccurrenceMessageIds]/[expandedInfoMessageIds]
+     *  above. Holds fragment ids, not operand ids: the whole child block (every `else` branch)
+     *  opens/closes together, mirroring how one occurrence toggle opens every occurrence of a
+     *  message rather than one row at a time. */
+    var expandedOperandsFragmentIds by mutableStateOf<Set<String>>(emptySet())
+
     /** Independent checkbox state for the evidence rows shown inside an expanded group. */
     var selectedOccurrenceIds by mutableStateOf<Set<String>>(emptySet())
 
@@ -1344,6 +1354,58 @@ internal fun seq3InsertDelayAfter(
         afterOccurrenceEntryId = afterOccurrenceEntryId,
     )
     return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddDelay(delay)))
+}
+
+// ── Fragment operands (WP7): canvas "Begin `else` branch here" ─────────────────────────────────
+
+/** A fragment "contains" a row by the same rule `Seq3Layout`'s (private, untouchable-by-this-WP)
+ *  `fragmentRowIndices` uses: an exact [Seq3OccurrenceRef] wins for its own message id, and
+ *  [Seq3Fragment.messageIds] only counts for a message that has no occurrence ref of its own (see
+ *  [Seq3Fragment.occurrenceRefs]' own doc — "occurrence references take precedence... for their
+ *  message IDs"). Duplicated here rather than exposed from Seq3Layout.kt because this WP is not
+ *  allowed to touch that file — see its own header note — and the rule is three lines, cheaper to
+ *  restate than to plumb an export through. */
+private fun seq3FragmentContainsRow(fragment: Seq3Fragment, messageId: String, occurrenceEntryId: Int?): Boolean {
+    val exactMessageIds = fragment.occurrenceRefs.mapTo(hashSetOf()) { it.messageId }
+    if (occurrenceEntryId != null && fragment.occurrenceRefs.any { it.messageId == messageId && it.entryId == occurrenceEntryId }) return true
+    return messageId !in exactMessageIds && messageId in fragment.messageIds
+}
+
+/** The fragment the canvas context menu's "Begin `else` branch here" should target for a right-click
+ *  on [messageId] (exact [occurrenceEntryId] when the click hit one specific occurrence), or null
+ *  when there is none — which is what gates the menu item's very presence (task: "only when the
+ *  right-clicked row is inside a fragment whose kind takes operands"). Only [SEQ3_OPERAND_FRAGMENT_KINDS]
+ *  are candidates. When fragments nest (one row inside two or more eligible brackets), the
+ *  INNERMOST one wins — the smallest [seq3FragmentMessageCount], i.e. the most specific bracket the
+ *  user is actually pointing at — mirroring how a right-click on nested UI elements always targets
+ *  the topmost/most specific one, not an ancestor. */
+internal fun seq3OperandFragmentIdAt(document: Seq3Document, messageId: String, occurrenceEntryId: Int?): String? =
+    document.fragments
+        .filter { it.kind in SEQ3_OPERAND_FRAGMENT_KINDS && seq3FragmentContainsRow(it, messageId, occurrenceEntryId) }
+        .minByOrNull { seq3FragmentMessageCount(it) }
+        ?.id
+
+/** Creates a new `else` operand anchored at [startsAtMessageId] (and, when the click hit one exact
+ *  occurrence of a repeated message, [startsAtOccurrenceEntryId] — mirrors [seq3InsertDelayAfter]'s
+ *  own "prefer the exact occurrence, else the message's own default" distinction). [guard] starts as
+ *  a generic placeholder, editable afterward through [Seq3BulkAction.SetFragmentOperandGuard] via
+ *  the Artifacts panel's own operand child row — this function's only job is to create it, matching
+ *  [seq3InsertDelayAfter]'s "caller mints the id, this fires the bulk action" shape. */
+internal fun seq3AddElseOperand(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    fragmentId: String,
+    startsAtMessageId: String,
+    startsAtOccurrenceEntryId: Int? = null,
+    guard: String = "else",
+): Boolean {
+    val operand = Seq3Operand(
+        id = "seq3-operand-${UUID.randomUUID()}",
+        guard = guard,
+        startsAtMessageId = startsAtMessageId,
+        startsAtOccurrenceEntryId = startsAtOccurrenceEntryId,
+    )
+    return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddFragmentOperand(fragmentId, operand)))
 }
 
 /** The individual messages a fragment built from the current selection has to reference. Split out

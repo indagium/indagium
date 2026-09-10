@@ -52,6 +52,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
+import com.indagium.diagram3.SEQ3_OPERAND_FRAGMENT_KINDS
 import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3Authoring
 import com.indagium.diagram3.Seq3BulkAction
@@ -71,6 +72,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
@@ -1748,6 +1750,27 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
                 Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentHideKindLabel(fragment.id, !fragment.hideKindLabel)),
             )
         },
+        operands = fragment.elseOperands,
+        operandsExpanded = fragment.id in view.expandedOperandsFragmentIds,
+        onToggleOperandsExpanded = {
+            view.expandedOperandsFragmentIds = if (fragment.id in view.expandedOperandsFragmentIds) {
+                view.expandedOperandsFragmentIds - fragment.id
+            } else {
+                view.expandedOperandsFragmentIds + fragment.id
+            }
+        },
+        onSetOperandGuard = { operandId, guard ->
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentOperandGuard(fragment.id, operandId, guard)),
+            )
+        },
+        onRemoveOperand = { operandId ->
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.RemoveFragmentOperand(fragment.id, operandId)),
+            )
+        },
     )
 }
 
@@ -1891,6 +1914,15 @@ private fun Seq3ArtifactRow(
     onSetFragmentKind: ((Seq3FragmentKind) -> Unit)? = null,
     hideKindLabel: Boolean = false,
     onToggleHideKindLabel: (() -> Unit)? = null,
+    // WP7: the `else`/`and`/`option` operand child rows — null/no-op for a note or delay row, and
+    // for a fragment kind (OPT/LOOP/BREAK/GROUP) UML gives no `else` divider at all. Renders below
+    // the Row above rather than inside it (see this function's own doc for why appending after the
+    // existing content, rather than threading a new branch through it, is the cheap edit here).
+    operands: List<Seq3Operand> = emptyList(),
+    operandsExpanded: Boolean = false,
+    onToggleOperandsExpanded: (() -> Unit)? = null,
+    onSetOperandGuard: ((operandId: String, guard: String) -> Unit)? = null,
+    onRemoveOperand: ((operandId: String) -> Unit)? = null,
 ) {
     val tc = tc()
     Column(
@@ -2020,6 +2052,134 @@ private fun Seq3ArtifactRow(
                 }
             }
         }
+        // WP7: appended AFTER the Row above, as a sibling inside this same outer Column, rather than
+        // threading a new branch through the Row itself — the Row already fans out on `editing` and
+        // on every fragment-only control, and this doesn't need to share any of that. Gated on
+        // kind: UML gives `alt`/`par`/`critical` an `else`/`and`/`option`
+        // divider and nothing else one, so an OPT/LOOP/BREAK/GROUP row (fragmentKind non-null but
+        // not in SEQ3_OPERAND_FRAGMENT_KINDS) renders nothing here, same as a note or delay row
+        // (fragmentKind null).
+        if (fragmentKind != null && fragmentKind in SEQ3_OPERAND_FRAGMENT_KINDS && onToggleOperandsExpanded != null) {
+            Seq3OperandsBlock(
+                operands = operands,
+                expanded = operandsExpanded,
+                onToggleExpanded = onToggleOperandsExpanded,
+                onSetGuard = onSetOperandGuard ?: { _, _ -> },
+                onRemove = onRemoveOperand ?: {},
+                view = view,
+            )
+        }
+    }
+}
+
+/** [Seq3ArtifactRow]'s appended `else`-branch child block (WP7) — same disclosure-toggle-plus-
+ *  indented-list recipe as the occurrence sub-row list ([Seq3OccurrenceToggle]/`Seq3OccurrenceSubRow`
+ *  above), reused here instead of duplicated because both are "one artifact, N child rows, expand
+ *  to see them" in shape.
+ *
+ *  Presentation choice for operand zero (WP7 deliverable 3's own open question — "make that legible
+ *  rather than confusing"): operand zero's guard IS [Seq3Fragment.label] (see that field's own doc)
+ *  and is already editable one row up via the ordinary ✎ Rename affordance, so this block does NOT
+ *  repeat it as a redundant "first branch" row a user could edit in two places that would need to
+ *  stay in sync. Instead a single caption line says where it lives, then the list below is exactly
+ *  [Seq3Fragment.elseOperands] — the branches this block actually owns. The rejected alternative
+ *  (showing the label as a read-only first entry) would need its own "this one is different, it's
+ *  read-only, edit it elsewhere" explanation anyway, for no reduction in the number of concepts on
+ *  screen. */
+@Composable
+private fun Seq3OperandsBlock(
+    operands: List<Seq3Operand>,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+    onSetGuard: (operandId: String, guard: String) -> Unit,
+    onRemove: (operandId: String) -> Unit,
+    view: Seq3ViewState,
+) {
+    val tc = tc()
+    Column(Modifier.fillMaxWidth().padding(start = 22.dp, top = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Seq3OccurrenceToggle(expanded = expanded) {
+                onToggleExpanded()
+                // Documented scar (CLAUDE.md): this Popup-adjacent clickable steals keyboard focus
+                // and never gives it back on its own — reclaim it exactly like every neighbouring
+                // row in this file does.
+                runCatching { view.focusRequester.requestFocus() }
+            }
+            AppText(
+                if (operands.isEmpty()) "else branches" else "else branches · ${operands.size}",
+                color = tc.td,
+                fontSize = 10.sp,
+            )
+        }
+        if (expanded) {
+            Column(Modifier.fillMaxWidth().padding(start = 22.dp, top = 5.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                AppText(
+                    "The first branch's guard is the fragment's own label, above (✎ Rename)",
+                    color = tc.td,
+                    fontSize = 9.sp,
+                )
+                if (operands.isEmpty()) {
+                    AppText(
+                        "No else branches yet — right-click a row on the canvas inside this fragment " +
+                            "and choose \"Begin else branch here\"",
+                        color = tc.td,
+                        fontSize = 9.sp,
+                    )
+                } else {
+                    operands.forEach { operand ->
+                        Seq3OperandRow(
+                            operand = operand,
+                            onSetGuard = { guard -> onSetGuard(operand.id, guard) },
+                            onRemove = { onRemove(operand.id) },
+                            view = view,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One `else`/`and`/`option` divider row: an editable guard field (commits on Enter, same as
+ *  [Seq3MessageInfo]'s Pattern/Label fields) plus a remove button — the operand counterpart of
+ *  [Seq3ArtifactRow] itself, minus the select/hover/hide chrome an operand doesn't have (it isn't
+ *  its own artifact, just a field of one). */
+@Composable
+private fun Seq3OperandRow(
+    operand: Seq3Operand,
+    onSetGuard: (String) -> Unit,
+    onRemove: () -> Unit,
+    view: Seq3ViewState,
+) {
+    val tc = tc()
+    var guard by remember(operand.id, operand.guard) { mutableStateOf(operand.guard) }
+    Row(
+        Modifier.fillMaxWidth()
+            .clip(CORNER_SM)
+            .background(tc.p2, CORNER_SM)
+            .padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        AppText("else", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.Medium)
+        InlineField(
+            value = guard,
+            onValue = { guard = it },
+            fontSize = 11.sp,
+            modifier = Modifier.weight(1f).height(22.dp).onFocusChanged { view.textFieldFocused = it.hasFocus },
+            onSubmit = { if (guard.isNotBlank()) onSetGuard(guard) },
+        )
+        ToolbarBtn(
+            label = "×",
+            tooltip = "Remove branch",
+            contentPadding = PaddingValues(0.dp),
+            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+            shape = CORNER_SM,
+            onClick = {
+                onRemove()
+                runCatching { view.focusRequester.requestFocus() }
+            },
+        )
     }
 }
 

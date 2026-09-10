@@ -1,6 +1,12 @@
 package com.indagium
 
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3Fragment
+import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3Match
+import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.LogEntry
@@ -21,6 +27,7 @@ import com.indagium.ui.seq3CopyTargetLabel
 import com.indagium.ui.seq3CopyTargetText
 import com.indagium.ui.seq3DefaultNotePlacement
 import com.indagium.ui.seq3DisownAutoExpand
+import com.indagium.ui.seq3OperandFragmentIdAt
 import com.indagium.ui.seq3PaneSegments
 import com.indagium.ui.seq3PanelVisible
 import com.indagium.ui.seq3PngFileName
@@ -548,5 +555,68 @@ class Seq3WorkspaceTest {
         seq3ClearSelection(view)
 
         assertEquals(emptySet(), view.expandedOccurrenceMessageIds, "re-clicking must not turn it into a sticky expansion")
+    }
+
+    // ── seq3OperandFragmentIdAt: WP7's canvas "Begin else branch here" gate ────────────────────
+    //
+    // Pure over a plain Seq3Document, so these need no AppState/session fixture — same shape as
+    // Seq3QueuePanelTest's own coverage of this file's sibling pure helpers.
+
+    private fun msg(id: String, from: String = "A", to: String? = "B") = Seq3Message(id, Seq3Match(from, id), from, to, id)
+
+    private fun operandFixtureDocument(fragments: List<Seq3Fragment> = emptyList()) = Seq3Document(
+        lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+        messages = listOf(msg("m1"), msg("m2")),
+        fragments = fragments,
+    )
+
+    @Test
+    fun operandFragmentIdAtFindsTheContainingAltFragment() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1"))
+        val doc = operandFixtureDocument(listOf(fragment))
+        assertEquals("frag1", seq3OperandFragmentIdAt(doc, "m1", null))
+    }
+
+    @Test
+    fun operandFragmentIdAtIsNullOutsideEveryFragment() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.ALT, "maybe", listOf("m1"))
+        val doc = operandFixtureDocument(listOf(fragment))
+        assertNull(seq3OperandFragmentIdAt(doc, "m2", null), "m2 is not one of frag1's messages")
+    }
+
+    @Test
+    fun operandFragmentIdAtIsNullForAFragmentKindThatTakesNoElseDivider() {
+        // OPT/LOOP/BREAK/GROUP get no else/and/option divider in UML — see
+        // SEQ3_OPERAND_FRAGMENT_KINDS' own doc — so the canvas menu item must not offer one here
+        // even though the row genuinely is inside this fragment.
+        val loop = Seq3Fragment("frag1", Seq3FragmentKind.LOOP, "repeat", listOf("m1"))
+        val doc = operandFixtureDocument(listOf(loop))
+        assertNull(seq3OperandFragmentIdAt(doc, "m1", null))
+    }
+
+    @Test
+    fun operandFragmentIdAtMatchesAnExactOccurrenceRefOverAnUnrelatedMessageId() {
+        // frag1 references m1 ONLY via one exact occurrence (entry 5) — Seq3Fragment's own doc:
+        // "occurrence references take precedence... for their message IDs" — so a different
+        // occurrence of the same message (entry 6) must not match through messageIds, since m1 was
+        // never added there at all.
+        val fragment = Seq3Fragment(
+            "frag1",
+            Seq3FragmentKind.CRITICAL,
+            "atomic",
+            messageIds = emptyList(),
+            occurrenceRefs = listOf(Seq3OccurrenceRef("m1", 5)),
+        )
+        val doc = operandFixtureDocument(listOf(fragment))
+        assertEquals("frag1", seq3OperandFragmentIdAt(doc, "m1", 5))
+        assertNull(seq3OperandFragmentIdAt(doc, "m1", 6))
+    }
+
+    @Test
+    fun operandFragmentIdAtPicksTheInnermostFragmentWhenNested() {
+        val outer = Seq3Fragment("outer", Seq3FragmentKind.ALT, "outer branch", listOf("m1", "m2"))
+        val inner = Seq3Fragment("inner", Seq3FragmentKind.PAR, "inner branch", listOf("m1"))
+        val doc = operandFixtureDocument(listOf(outer, inner))
+        assertEquals("inner", seq3OperandFragmentIdAt(doc, "m1", null), "the more specific (smaller) bracket must win")
     }
 }

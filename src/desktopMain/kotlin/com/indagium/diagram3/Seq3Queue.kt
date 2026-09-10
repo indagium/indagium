@@ -112,6 +112,17 @@ fun seq3Select(
 // the document or changes its position.
 
 sealed class Seq3BulkAction {
+    /** True for actions that name their target by id (a fragment/note/delay/operand id, never a
+     *  message id from the current selection) and never read [applySeq3BulkAction]'s `selectedIds`
+     *  at all. WP7's refactor: this used to be a hand-maintained `action !is X` exclusion chain
+     *  right above the empty-selection guard below — every new id-keyed action had to remember to
+     *  add itself there, and forgetting to is a SILENT no-op that only shows up once a user
+     *  deselects everything before firing the action, easy to miss in manual testing since most
+     *  manual testing happens with something selected. Overriding this property instead means the
+     *  compiler forces every new subclass to make the choice explicitly — `false` is still the safe
+     *  default for the common case (an action that DOES mean "apply to every selected message"). */
+    open val targetsById: Boolean get() = false
+
     data class SetFrom(val lifelineId: String) : Seq3BulkAction()
 
     data class SetTo(val lifelineId: String?) : Seq3BulkAction()
@@ -135,13 +146,26 @@ sealed class Seq3BulkAction {
 
     data object Show : Seq3BulkAction()
 
-    data class Note(val note: Seq3Note) : Seq3BulkAction()
+    data class Note(val note: Seq3Note) : Seq3BulkAction() {
+        // WP7 item 3's free-floating note (empty `messageIds`, explicit x/y) has no message
+        // selection to require — see [applyNote]'s own doc. Not quite "targets by id" like the rest
+        // of this override list (a NEW note mints its own id; it isn't editing an existing target),
+        // but the same "must not be blocked by an empty selection" shape, so it carries the same
+        // flag. An ANCHORED note (non-empty `messageIds`) still has [applyNote]'s own "must span the
+        // selection" check to fail it if the selection is wrong — this flag only lifts the OUTER
+        // "select at least one message" gate, it does not relax that inner contract.
+        override val targetsById: Boolean get() = true
+    }
 
     /** Removes one user-created fragment without touching any of its messages. */
-    data class DeleteFragment(val fragmentId: String) : Seq3BulkAction()
+    data class DeleteFragment(val fragmentId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Removes one user-created note without touching any of its messages. */
-    data class DeleteNote(val noteId: String) : Seq3BulkAction()
+    data class DeleteNote(val noteId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     // ── Fragment/note rename (spec §06's `Group ▾`/`Note` are add-only; these are the missing
     //    edit-in-place counterparts) ───────────────────────────────────────────────────────────
@@ -157,16 +181,22 @@ sealed class Seq3BulkAction {
     /** Renames an EXISTING fragment's label in place. A no-op (unapplied) for an unknown
      *  [fragmentId] — see [applySeq3BulkAction]'s own "invalid selection is always a safe no-op"
      *  contract, extended here to "invalid target id" for a verb that isn't selection-keyed. */
-    data class SetFragmentLabel(val fragmentId: String, val label: String) : Seq3BulkAction()
+    data class SetFragmentLabel(val fragmentId: String, val label: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** WP12: changes an EXISTING fragment's kind in place — today the only way to change a
      *  fragment's kind is delete + re-`Group`. Mirrors [SetFragmentLabel] exactly: same
      *  id-keyed/empty-selection shape, same unknown-id-is-a-safe-no-op contract. */
-    data class SetFragmentKind(val fragmentId: String, val kind: Seq3FragmentKind) : Seq3BulkAction()
+    data class SetFragmentKind(val fragmentId: String, val kind: Seq3FragmentKind) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Renames an EXISTING note's text in place. Same unknown-id-is-a-safe-no-op contract as
      *  [SetFragmentLabel]. */
-    data class SetNoteText(val noteId: String, val text: String) : Seq3BulkAction()
+    data class SetNoteText(val noteId: String, val text: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     // ── Single-message field edits (queue row info — spec §03) ─────────────────────────────────
     //
@@ -205,14 +235,20 @@ sealed class Seq3BulkAction {
     // these two exactly like it already exempts the label/text renames.
 
     /** Shows/hides an EXISTING fragment's box without touching any of its messages. */
-    data class SetFragmentVisibility(val fragmentId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+    data class SetFragmentVisibility(val fragmentId: String, val visibility: Seq3Visibility) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** WP12: toggles an EXISTING fragment's [Seq3Fragment.hideKindLabel] — same id-keyed/
      *  empty-selection shape and unknown-id-is-a-safe-no-op contract as [SetFragmentVisibility]. */
-    data class SetFragmentHideKindLabel(val fragmentId: String, val hide: Boolean) : Seq3BulkAction()
+    data class SetFragmentHideKindLabel(val fragmentId: String, val hide: Boolean) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Shows/hides an EXISTING note's box without touching any of its messages. */
-    data class SetNoteVisibility(val noteId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+    data class SetNoteVisibility(val noteId: String, val visibility: Seq3Visibility) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     // ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────
     //
@@ -227,20 +263,62 @@ sealed class Seq3BulkAction {
      *  including its own fresh id" shape rather than [SetFragmentLabel]'s "rename an existing
      *  one" shape, since this one CREATES rather than edits — but still routes through the same
      *  id-keyed, selection-independent allowlist as the rest of this section. */
-    data class AddDelay(val delay: Seq3Delay) : Seq3BulkAction()
+    data class AddDelay(val delay: Seq3Delay) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Renames an EXISTING delay's label in place. Same unknown-id/blank-label safe-no-op
      *  contract as [SetFragmentLabel]. */
-    data class SetDelayLabel(val delayId: String, val label: String) : Seq3BulkAction()
+    data class SetDelayLabel(val delayId: String, val label: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Removes one delay without touching the message it was anchored after. */
-    data class DeleteDelay(val delayId: String) : Seq3BulkAction()
+    data class DeleteDelay(val delayId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Shows/hides an EXISTING delay's divider without touching the message it's anchored after —
      *  the delay counterpart of [SetFragmentVisibility]/[SetNoteVisibility] above, added when
      *  delays gained their own Artifacts-panel row (with its own hide/show eye button, matching
      *  every other artifact row) instead of being canvas/context-menu-only. */
-    data class SetDelayVisibility(val delayId: String, val visibility: Seq3Visibility) : Seq3BulkAction()
+    data class SetDelayVisibility(val delayId: String, val visibility: Seq3Visibility) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    // ── Fragment operands (WP7 item 1: authoring the `else`/`and`/`option` dividers WP4-WP6
+    //    could already model, emit, and draw but nothing could create or edit) ────────────────────
+    //
+    // Same "identify the target by its own id, entirely independent of the message selection"
+    // shape as [SetFragmentLabel]/[AddDelay] above, and the same unknown-id-is-a-safe-no-op
+    // contract. [Seq3Operand] itself is targeted by ITS OWN id, never by list index — see that
+    // type's own doc for why an index-keyed command would be unsafe under undo/redo interleaving.
+
+    /** Adds a new [Seq3Operand] to an existing fragment's [Seq3Fragment.elseOperands]. Mirrors
+     *  [AddDelay]'s "caller builds the whole artifact, including its own fresh id" shape. Applying
+     *  this to an OPT/LOOP/BREAK/GROUP fragment is deliberately NOT rejected — see
+     *  [Seq3Fragment.elseOperands]'s own doc on "which kinds this is meaningful for is a UML rule,
+     *  deliberately not enforced here": the queue panel and canvas context menu are what gate on
+     *  kind, so a fragment that changes kind later (`SetFragmentKind`) never silently loses operands
+     *  it can no longer draw. */
+    data class AddFragmentOperand(val fragmentId: String, val operand: Seq3Operand) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Edits an EXISTING operand's guard in place, targeted by [operandId] — never by its position
+     *  in [Seq3Fragment.elseOperands], which a concurrent add/remove/undo can shift. Same
+     *  unknown-id-is-a-safe-no-op contract as [SetFragmentLabel]; either an unknown [fragmentId] OR
+     *  an [operandId] not present on that fragment's own list is a no-op. */
+    data class SetFragmentOperandGuard(val fragmentId: String, val operandId: String, val guard: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Removes one operand from a fragment's [Seq3Fragment.elseOperands], targeted by [operandId] —
+     *  same id-keyed guarantee as [SetFragmentOperandGuard]: when several operands happen to share
+     *  an identical (or blank, pre-edit) guard string, only the NAMED one is removed. */
+    data class RemoveFragmentOperand(val fragmentId: String, val operandId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
 
     /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
      *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
@@ -265,31 +343,14 @@ private fun unapplied(document: Seq3Document, reason: String) = Seq3BulkResult(d
  *
  * The `when (action)` below is the single dispatch point for every Seq3BulkAction variant —
  * each branch is an independent, already-minimal edit; splitting them out would just relocate
- * the same dispatch, not simplify it. The exemption-list condition just under this signature is
- * the same story: one `!is` check per action variant that legitimately skips the "selection
- * required" gate (see the comment directly above it for why each is exempt).
+ * the same dispatch, not simplify it. The empty-selection guard just under this signature used to
+ * be a hand-maintained `action !is X` exclusion chain here, one line per id-keyed action — see
+ * [Seq3BulkAction.targetsById]'s own doc for why that shape was replaced with this property.
  */
-@Suppress("CyclomaticComplexMethod", "ComplexCondition")
+@Suppress("CyclomaticComplexMethod")
 fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action: Seq3BulkAction): Seq3BulkResult {
     val selected = document.messages.filter { it.id in selectedIds }
-    // [SetFragmentLabel]/[SetNoteText] name their target by [fragmentId]/[noteId], not by the
-    // message selection (see those variants' own doc) — "select at least one message" would be a
-    // pointless block on a rename that never reads `selectedIds` at all. [SetFragmentKind] is the
-    // same "targets by id, not by selection" shape as [SetFragmentLabel] (WP12) — see that
-    // variant's own doc.
-    // WP7 item 3: [Seq3BulkAction.Note] can now also build a FREE-FLOATING note (empty
-    // `messageIds`, explicit x/y from the empty-canvas "Add note here" menu) — that has no message
-    // selection to require either, the same "targets by its own payload, not by selection" shape
-    // [SetFragmentLabel]/[SetNoteText] already carry. [applyNote] itself still enforces "an
-    // anchored note must span the selection" for the ordinary case.
-    if (selected.isEmpty() && action !is Seq3BulkAction.SetFragmentLabel && action !is Seq3BulkAction.SetNoteText &&
-        action !is Seq3BulkAction.DeleteFragment && action !is Seq3BulkAction.DeleteNote &&
-        action !is Seq3BulkAction.SetFragmentVisibility && action !is Seq3BulkAction.SetNoteVisibility &&
-        action !is Seq3BulkAction.AddDelay && action !is Seq3BulkAction.SetDelayLabel && action !is Seq3BulkAction.DeleteDelay &&
-        action !is Seq3BulkAction.SetDelayVisibility &&
-        action !is Seq3BulkAction.SetFragmentKind && action !is Seq3BulkAction.SetFragmentHideKindLabel &&
-        action !is Seq3BulkAction.Note
-    ) {
+    if (selected.isEmpty() && !action.targetsById) {
         return unapplied(document, "Select at least one message")
     }
     return when (action) {
@@ -317,6 +378,9 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.SetDelayLabel -> applySetDelayLabel(document, action)
         is Seq3BulkAction.DeleteDelay -> applyDeleteDelay(document, action)
         is Seq3BulkAction.SetDelayVisibility -> applySetDelayVisibility(document, action)
+        is Seq3BulkAction.AddFragmentOperand -> applyAddFragmentOperand(document, action)
+        is Seq3BulkAction.SetFragmentOperandGuard -> applySetFragmentOperandGuard(document, action)
+        is Seq3BulkAction.RemoveFragmentOperand -> applyRemoveFragmentOperand(document, action)
         Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
@@ -586,6 +650,83 @@ private fun applySetDelayVisibility(document: Seq3Document, action: Seq3BulkActi
     if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
     return Seq3BulkResult(
         document.copy(delays = document.delays.map { if (it.id == action.delayId) it.copy(visibility = action.visibility) else it }),
+        applied = true,
+    )
+}
+
+/** Combined-fragment kinds that take `else`/`and`/`option` operand dividers in UML — `ALT`, `PAR`,
+ *  `CRITICAL` (see [Seq3Fragment.elseOperands]'s own "which kinds this is meaningful for" doc).
+ *  [applyAddFragmentOperand] deliberately does NOT gate on this (the model "does not enforce the
+ *  kind rule" — same doc); this constant is for the UI layer instead — the queue panel's per-
+ *  operand child rows and the canvas "Begin `else` branch here" context menu item both read it so
+ *  neither offers the affordance on an OPT/LOOP/BREAK/GROUP fragment the renderer wouldn't draw
+ *  dividers for anyway. `internal` (not `private`) so `ui.Seq3QueuePanel`/`ui.Seq3Canvas` share
+ *  this one definition instead of each hand-rolling their own copy of the same three-kind set. */
+internal val SEQ3_OPERAND_FRAGMENT_KINDS = setOf(Seq3FragmentKind.ALT, Seq3FragmentKind.PAR, Seq3FragmentKind.CRITICAL)
+
+/** Adds [Seq3BulkAction.AddFragmentOperand.operand] to the named fragment's
+ *  [Seq3Fragment.elseOperands] — see that action's own doc for why a kind mismatch (e.g. adding to
+ *  an OPT) is not rejected here. Rejects an unknown fragment, a blank operand id/guard, and a
+ *  colliding operand id (mirrors [applyAddDelay]'s own "id already exists" guard) — a fragment with
+ *  two operands sharing one id would make [applySetFragmentOperandGuard]/[applyRemoveFragmentOperand]
+ *  ambiguous about which one they mean. */
+private fun applyAddFragmentOperand(document: Seq3Document, action: Seq3BulkAction.AddFragmentOperand): Seq3BulkResult {
+    val fragment = document.fragments.firstOrNull { it.id == action.fragmentId } ?: return unapplied(document, "Unknown fragment")
+    val operand = action.operand
+    return when {
+        operand.id.isBlank() -> unapplied(document, "Operand id is required")
+        operand.guard.isBlank() -> unapplied(document, "Operand guard is required")
+        fragment.elseOperands.any { it.id == operand.id } -> unapplied(document, "Operand id already exists")
+        else -> Seq3BulkResult(
+            document.copy(
+                fragments = document.fragments.map {
+                    if (it.id == action.fragmentId) it.copy(elseOperands = it.elseOperands + operand) else it
+                },
+            ),
+            applied = true,
+        )
+    }
+}
+
+/** Renames an EXISTING operand's guard in place — the operand counterpart of
+ *  [applySetFragmentLabel]. A safe no-op for an unknown fragment id, an [operandId] the named
+ *  fragment doesn't carry, or a blank guard. Targets [Seq3BulkAction.SetFragmentOperandGuard
+ *  .operandId] by id within [Seq3Fragment.elseOperands], never by list position — see
+ *  [Seq3BulkAction.AddFragmentOperand]'s section header for why. */
+private fun applySetFragmentOperandGuard(document: Seq3Document, action: Seq3BulkAction.SetFragmentOperandGuard): Seq3BulkResult {
+    val fragment = document.fragments.firstOrNull { it.id == action.fragmentId } ?: return unapplied(document, "Unknown fragment")
+    if (fragment.elseOperands.none { it.id == action.operandId }) return unapplied(document, "Unknown operand")
+    if (action.guard.isBlank()) return unapplied(document, "Operand guard is required")
+    return Seq3BulkResult(
+        document.copy(
+            fragments = document.fragments.map { fragment ->
+                if (fragment.id != action.fragmentId) {
+                    fragment
+                } else {
+                    fragment.copy(
+                        elseOperands = fragment.elseOperands.map {
+                            if (it.id == action.operandId) it.copy(guard = action.guard) else it
+                        },
+                    )
+                }
+            },
+        ),
+        applied = true,
+    )
+}
+
+/** Removes one operand by id, leaving every sibling operand — including one with an identical
+ *  guard string — untouched. A safe no-op for an unknown fragment id or an [operandId] the named
+ *  fragment doesn't carry. */
+private fun applyRemoveFragmentOperand(document: Seq3Document, action: Seq3BulkAction.RemoveFragmentOperand): Seq3BulkResult {
+    val fragment = document.fragments.firstOrNull { it.id == action.fragmentId } ?: return unapplied(document, "Unknown fragment")
+    if (fragment.elseOperands.none { it.id == action.operandId }) return unapplied(document, "Unknown operand")
+    return Seq3BulkResult(
+        document.copy(
+            fragments = document.fragments.map {
+                if (it.id == action.fragmentId) it.copy(elseOperands = it.elseOperands.filterNot { operand -> operand.id == action.operandId }) else it
+            },
+        ),
         applied = true,
     )
 }
