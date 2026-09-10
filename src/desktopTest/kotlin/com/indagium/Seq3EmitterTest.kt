@@ -17,6 +17,7 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3Visibility
@@ -302,6 +303,202 @@ class Seq3EmitterTest {
         assertTrue(open >= 0 && close > open, "fragment must be balanced; got:\n$out")
         assertTrue(open < alpha && alpha < close, "scoped occurrence must be inside the fragment; got:\n$out")
         assertTrue(beta > close, "sibling occurrence must stay outside the fragment; got:\n$out")
+    }
+
+    // ── Fragment operand dividers (WP5) ─────────────────────────────────────────────────────────
+    //
+    // Seq3Fragment.label is already operand ZERO's guard (see that field's own doc), so every
+    // fixture below puts operand zero's guard in the fragment's `label` and adds ONE more operand
+    // via elseOperands to exercise the divider itself.
+
+    /** Walks [out]'s emitted lines maintaining fragment-bracket depth (a fragment-open keyword —
+     *  including Mermaid's `rect` for GROUP — increments it, a plain "end" decrements it) and
+     *  asserts every divider line ("else "/"and "/"option ", or the bare keyword) is written
+     *  strictly INSIDE an open bracket — never at depth 0, i.e. never after that bracket's own
+     *  "end" — and that every bracket closes by the end of the document. Same reasoning as
+     *  assertValidActivationSequence below: equal keyword COUNTS don't prove correct ORDER, which
+     *  is exactly what THE TRAP (Seq3Emitters.kt's operandDividersByAnchor doc) can violate — a
+     *  divider resolved against a fragment's raw, un-clamped bounds instead of its normalized
+     *  Seq3Bracket.range can land past a crossing fragment's clamped end. */
+    private fun assertValidFragmentBracketNesting(out: String) {
+        val openKeywords = setOf("alt", "opt", "par", "critical", "break", "loop", "group", "rect")
+        val dividerKeywords = setOf("else", "and", "option")
+        var depth = 0
+        out.lines().forEach { raw ->
+            val line = raw.trim()
+            val firstWord = line.substringBefore(' ')
+            when {
+                line == "end" -> {
+                    assertTrue(depth > 0, "an 'end' with no open fragment bracket; got:\n$out")
+                    depth--
+                }
+                firstWord in openKeywords && (line == firstWord || line.startsWith("$firstWord ")) -> depth++
+                firstWord in dividerKeywords && (line == firstWord || line.startsWith("$firstWord ")) ->
+                    assertTrue(
+                        depth > 0,
+                        "a divider line ('$line') must sit strictly inside an open fragment bracket, never after its 'end'; got:\n$out",
+                    )
+                else -> Unit
+            }
+        }
+        assertEquals(0, depth, "every fragment bracket must close by the end of the document; got:\n$out")
+    }
+
+    @Test
+    fun altWithOneElseOperandEmitsElseGuardBetweenTheTwoBranchesInBothDialects() {
+        val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+        val fragment = Seq3Fragment(
+            "f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"),
+            elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+        )
+        val document = doc(messages, fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        val altOpen = mermaid.indexOf("alt cond0")
+        val elseLine = mermaid.indexOf("else cond1")
+        val branch0 = mermaid.indexOf("branch0")
+        val branch1 = mermaid.indexOf("branch1")
+        val end = mermaid.indexOf("    end\n", elseLine)
+        assertTrue(altOpen in 0 until branch0, "'alt' must open before the first branch; got:\n$mermaid")
+        assertTrue(branch0 in 0 until elseLine, "the 'else' divider must come after the first branch; got:\n$mermaid")
+        assertTrue(elseLine in 0 until branch1, "the 'else' divider must come before the second branch; got:\n$mermaid")
+        assertTrue(branch1 in 0 until end, "the second branch must sit inside the bracket, before 'end'; got:\n$mermaid")
+        assertValidFragmentBracketNesting(mermaid)
+
+        val plantUml = document.toPlantUml()
+        val altOpenP = plantUml.indexOf("alt cond0")
+        val elseLineP = plantUml.indexOf("else cond1")
+        val branch0P = plantUml.indexOf("branch0")
+        val branch1P = plantUml.indexOf("branch1")
+        val endP = plantUml.indexOf("end\n", elseLineP)
+        assertTrue(altOpenP in 0 until branch0P, "got:\n$plantUml")
+        assertTrue(branch0P in 0 until elseLineP, "got:\n$plantUml")
+        assertTrue(elseLineP in 0 until branch1P, "got:\n$plantUml")
+        assertTrue(branch1P in 0 until endP, "got:\n$plantUml")
+        assertValidFragmentBracketNesting(plantUml)
+    }
+
+    @Test
+    fun parEmitsAndInMermaidButElseInPlantUml() {
+        // The whole point of this test: PAR is the one kind where the two dialects genuinely
+        // disagree on the divider KEYWORD itself, not just on escaping — see
+        // mermaidFragmentDividerLine/plantUmlFragmentDividerLine's shared header comment.
+        val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+        val fragment = Seq3Fragment(
+            "f1", Seq3FragmentKind.PAR, "cond0", listOf("m1", "m2"),
+            elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+        )
+        val document = doc(messages, fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains("    and cond1\n"), "PAR's Mermaid divider must be 'and', not 'else'; got:\n$mermaid")
+        assertFalse(mermaid.contains("else"), "got:\n$mermaid")
+        assertValidFragmentBracketNesting(mermaid)
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("else cond1\n"), "PAR's PlantUML divider must be 'else' — PlantUML has no 'and'; got:\n$plantUml")
+        assertFalse(plantUml.contains("\nand "), "got:\n$plantUml")
+        assertValidFragmentBracketNesting(plantUml)
+    }
+
+    @Test
+    fun criticalEmitsOptionInMermaidAndNoDividerAtAllInPlantUml() {
+        val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+        val fragment = Seq3Fragment(
+            "f1", Seq3FragmentKind.CRITICAL, "cond0", listOf("m1", "m2"),
+            elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+        )
+        val document = doc(messages, fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains("    option cond1\n"), "CRITICAL's Mermaid divider must be 'option'; got:\n$mermaid")
+        assertValidFragmentBracketNesting(mermaid)
+
+        val plantUml = document.toPlantUml()
+        assertFalse(
+            plantUml.contains("cond1"),
+            "PlantUML has NO divider syntax for CRITICAL at all — the second operand's guard must not appear anywhere; got:\n$plantUml",
+        )
+        assertTrue(
+            plantUml.contains("branch0") && plantUml.contains("branch1"),
+            "both messages must still be emitted, only the branch label is lost; got:\n$plantUml",
+        )
+        assertValidFragmentBracketNesting(plantUml)
+    }
+
+    @Test
+    fun aDividerOnACrossingFragmentIsClampedAwayRatherThanEmittedAfterEnd() {
+        // X spans m1..m2 (emission indices 0..1). Y spans m2..m4 (raw indices 1..3). X and Y
+        // CROSS rather than nest (Y starts before X ends but ends after X does), so
+        // normalizedBrackets clamps Y's bracket end down to X's own end (index 1) instead of Y's
+        // raw end (index 3) — see Seq3Emitters.kt's normalizedBrackets/operandDividersByAnchor
+        // "THE TRAP" doc. Y's operand anchors at m4 (raw index 3): past the CLAMPED range (1..1),
+        // so its divider must be dropped, never emitted after Y's own (index-1) 'end'.
+        val messages = (1..4).map { i -> message(id = "m$i", label = "step$i", occurrences = listOf(occurrence(i, "step$i"))) }
+        val x = Seq3Fragment("x", Seq3FragmentKind.ALT, "xGuard0", listOf("m1", "m2"))
+        val y = Seq3Fragment(
+            "y", Seq3FragmentKind.ALT, "yGuard0", listOf("m2", "m3", "m4"),
+            elseOperands = listOf(Seq3Operand("yOp", "yGuard1", startsAtMessageId = "m4")),
+        )
+        val document = doc(messages, fragments = listOf(x, y))
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains("yGuard0"), "sanity check: Y's own bracket (operand zero) must still open; got:\n$mermaid")
+        assertFalse(
+            mermaid.contains("yGuard1"),
+            "the operand's anchor (m4, raw index 3) falls outside Y's CLAMPED range (1..1) once X and Y cross — " +
+                "its divider must be dropped, not emitted after Y's 'end'; got:\n$mermaid",
+        )
+        assertValidFragmentBracketNesting(mermaid)
+
+        val plantUml = document.toPlantUml()
+        assertFalse(plantUml.contains("yGuard1"), "same clamp must hold in PlantUML; got:\n$plantUml")
+        assertValidFragmentBracketNesting(plantUml)
+    }
+
+    @Test
+    fun aDanglingOperandAnchorDropsItsDividerWithoutFailingTheEmission() {
+        val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+        val fragment = Seq3Fragment(
+            "f1", Seq3FragmentKind.ALT, "cond0", listOf("m1", "m2"),
+            // Names no message in the document at all — the Seq3Delay dangling-anchor contract
+            // (Seq3Operand's own doc) says this drops THIS divider, not the whole fragment/emission.
+            elseOperands = listOf(Seq3Operand("op1", "ghostGuard", startsAtMessageId = "does-not-exist")),
+        )
+        val document = doc(messages, fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertFalse(mermaid.contains("ghostGuard"), "a stale anchor must drop its divider silently; got:\n$mermaid")
+        assertTrue(mermaid.contains("branch0") && mermaid.contains("branch1"), "the rest of the document must still emit normally; got:\n$mermaid")
+        assertValidFragmentBracketNesting(mermaid)
+
+        val plantUml = document.toPlantUml()
+        assertFalse(plantUml.contains("ghostGuard"), "got:\n$plantUml")
+        assertValidFragmentBracketNesting(plantUml)
+    }
+
+    @Test
+    fun optAndLoopEmitNoDividerEvenWhenOperandsArePresent() {
+        // UML gives OPT/LOOP exactly one operand (no 'else'/'and'/'option') — see
+        // Seq3Fragment.elseOperands' own doc on why a stray entry (e.g. left behind by a kind
+        // change away from ALT/PAR/CRITICAL and back) is preserved, not cleared, but must still
+        // never be RENDERED for a kind UML doesn't allow it on.
+        listOf(Seq3FragmentKind.OPT, Seq3FragmentKind.LOOP).forEach { kind ->
+            val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+            val fragment = Seq3Fragment(
+                "f1", kind, "cond0", listOf("m1", "m2"),
+                elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+            )
+            val document = doc(messages, fragments = listOf(fragment))
+
+            val mermaid = document.toMermaid()
+            assertFalse(mermaid.contains("cond1"), "$kind must emit no divider even though elseOperands is non-empty; got:\n$mermaid")
+            assertValidFragmentBracketNesting(mermaid)
+
+            val plantUml = document.toPlantUml()
+            assertFalse(plantUml.contains("cond1"), "$kind must emit no divider even though elseOperands is non-empty; got:\n$plantUml")
+            assertValidFragmentBracketNesting(plantUml)
+        }
     }
 
     // ── Notes ────────────────────────────────────────────────────────────────────────────────
