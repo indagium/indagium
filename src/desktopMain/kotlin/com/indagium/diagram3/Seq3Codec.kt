@@ -289,6 +289,31 @@ fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): S
     )
 }
 
+/**
+ * Accepts a hand-edited fence as the note's real content, clearing the drift warning
+ * ([ParsedSeq3.sourceHashMatches] is true when the result is re-parsed). Re-encodes with
+ * `sourceOverride = parsed.source` — the exact mechanism [updateSeq3NoteCaption] and
+ * [updateSeq3NoteExportMode] already use to carry a fence through a metadata-only rewrite
+ * unchanged, so the hash recomputed by [encodeSeq3Note] now matches what's on the page.
+ *
+ * Adopting does NOT touch [ParsedSeq3.document] — the model that generated the picture is left
+ * exactly as it was, so a rendered image would still show something the adopted text disagrees
+ * with. The only outcome that leaves the note self-consistent is to ALSO force the note into
+ * [DiagramExportMode.SOURCE], so the card, the Preview dialog and every export (Markdown/MCP)
+ * show the text the user actually wrote instead of a picture that contradicts it — regenerating
+ * the model from the edited text is not something anything does, here or elsewhere: it would
+ * require parsing arbitrary Mermaid/PlantUML, and that parser was deliberately not built (the
+ * emitted text carries no entryId, occurrence or capture data, so a parsed document would be
+ * evidence-free by construction).
+ *
+ * Composed from [updateSeq3NoteExportMode] rather than duplicating its re-encode: forcing
+ * SOURCE mode while carrying [ParsedSeq3.source] through untouched is exactly what that function
+ * already does.
+ *
+ * Returns null for an unparseable note, matching its neighbours' contract.
+ */
+fun adoptSeq3NoteSource(noteText: String): String? = updateSeq3NoteExportMode(noteText, DiagramExportMode.SOURCE)
+
 /** Strips the leading header comment (and the blank line right after it, if any), leaving just the
  *  fenced code block — for Markdown export, where the JSON header would otherwise appear as a stray
  *  HTML comment. Returns [text] unchanged when it isn't a well-formed v3 diagram note, which is
