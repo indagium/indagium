@@ -406,28 +406,41 @@ internal fun seq3CopyTargetText(target: Seq3CopyTarget, document: Seq3Document):
 }
 
 /**
- * Design variant 1a: two independent document-level toggles, now ONE multi-select
+ * Design variant 1a: three independent document-level toggles, now ONE multi-select
  * [SegmentedControl] inside [Seq3DiagramPresentationGroup] — beside the dialect control and
  * [Seq3DocumentThemeDropdown] it visually pairs with ("how does this diagram present itself").
  * Used to be two glyph `#`/`⏱` [ToolbarBtn]s explained only by a tooltip; the segments are now
- * self-describing sample text (`"#n"`/`"⏱ Time"`) so the label itself carries the affordance.
- * [SegmentedControl] renders every option in one font, so the design mock's monospace `#n` is out
- * of reach here without forking the control — not worth it for two labels, so both render in the
- * control's default font. Each segment still dispatches its OWN [Seq3Command]
- * ([Seq3Command.SetShowSequenceNumbers]/[Seq3Command.SetShowTimestamps], via
- * [seq3TogglePrefixSegment]) so `⌘Z` still undoes them independently, and both stay document
- * fields (not view state) for the same reason as before: the canvas, the PNG export, and the
- * exported text must always agree on whether a call's `[#n]`/`[ts]` prefix is showing. Per-segment
- * tooltips are dropped for the same reason as the font: [SegmentedControl] draws its options as
- * one internal Row, so wrapping either sample in its own [TooltipArea] would mean forking the
- * control just for this one call site — the labels are the affordance now.
+ * self-describing sample text (`"#n"`/`"⏱ Time"`/`"▮ Bars"`) so the label itself carries the
+ * affordance. [SegmentedControl] renders every option in one font, so the design mock's monospace
+ * `#n` is out of reach here without forking the control — not worth it for three labels, so all
+ * render in the control's default font. Each segment still dispatches its OWN [Seq3Command]
+ * ([Seq3Command.SetShowSequenceNumbers]/[Seq3Command.SetShowTimestamps]/
+ * [Seq3Command.SetShowActivations], via [seq3TogglePrefixSegment]) so `⌘Z` still undoes them
+ * independently, and all three stay document fields (not view state) for the same reason as
+ * before: the canvas, the PNG export, and the exported text must always agree on whether a call's
+ * `[#n]`/`[ts]` prefix or an activation bar is showing. Per-segment tooltips are dropped for the
+ * same reason as the font: [SegmentedControl] draws its options as one internal Row, so wrapping
+ * any sample in its own [TooltipArea] would mean forking the control just for this one call site
+ * — the labels are the affordance now.
+ *
+ * WP3: the `▮ Bars` segment (index 2) is a plain [Modifier.clickable] under the hood (see
+ * [SegmentedControl]'s own implementation) — CLAUDE.md's documented scar is that ANY clickable
+ * click steals keyboard focus and never gives it back, silently killing this workspace's root
+ * `onPreviewKeyEvent` (Esc included) after the first click. `onToggle` below reclaims it via
+ * [LocalSeq3FocusRequester] the same way [Seq3DropdownButton]'s `closeAndReclaimFocus` does — see
+ * that composition local's own doc for why a call site that already receives it (as this one does,
+ * being a normal descendant of the workspace root) needs no new parameter threaded in for this.
  */
 @Composable
 private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSession) {
+    val focusRequester = LocalSeq3FocusRequester.current
     SegmentedControl(
-        options = listOf("#n", "⏱ Time"),
+        options = listOf("#n", "⏱ Time", "▮ Bars"),
         selectedIndices = seq3PrefixToggleSegments(session.document),
-        onToggle = { index -> seq3TogglePrefixSegment(state, session, index) },
+        onToggle = { index ->
+            seq3TogglePrefixSegment(state, session, index)
+            focusRequester?.let { runCatching { it.requestFocus() } }
+        },
     )
 }
 
@@ -435,16 +448,19 @@ private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSessi
 internal fun seq3PrefixToggleSegments(document: Seq3Document): Set<Int> = buildSet {
     if (document.showSequenceNumbers) add(0)
     if (document.showTimestamps) add(1)
+    if (document.showActivations) add(2)
 }
 
 /** [seq3PrefixToggleSegments]'s toggle half — dispatches the [Seq3Command] the clicked index maps
  *  to. Kept as a plain function so the index<->command mapping is testable without composing
- *  [Seq3InlinePrefixToggles]. */
+ *  [Seq3InlinePrefixToggles] (and, per that composable's own doc, without needing a
+ *  [FocusRequester] just to exercise the command dispatch). */
 internal fun seq3TogglePrefixSegment(state: AppState, session: Seq3WorkspaceSession, index: Int) {
     val document = session.document
     when (index) {
         0 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowSequenceNumbers(!document.showSequenceNumbers))
         1 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowTimestamps(!document.showTimestamps))
+        2 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowActivations(!document.showActivations))
     }
 }
 
