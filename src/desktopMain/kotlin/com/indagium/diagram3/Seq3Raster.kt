@@ -207,6 +207,11 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme,
 
     layout.fragments.forEach { paintFragment(g, it, theme) }
     paintLifelines(g, layout, theme)
+    // WP2: activation bars sit ON TOP of the dashed lifeline (they visually replace it for the
+    // height they cover) but UNDER every arrow — so an arrowhead lands on the bar's own edge
+    // rather than the bar over-painting the arrow it belongs to. That ordering is exactly why this
+    // line is here: after paintLifelines, before the row loop below.
+    layout.activations.forEach { paintActivationBar(g, it, theme) }
     layout.lifelines.forEach { paintHeader(g, it, theme) }
     layout.rows.forEach { paintRow(g, it, theme) }
     layout.notes.forEach { paintNoteBox(g, it, theme) }
@@ -268,6 +273,35 @@ private fun paintLifelines(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterT
             g.draw(java.awt.geom.Line2D.Double(l.centerX, segment.fromY, l.centerX, segment.toY))
         }
     }
+}
+
+/**
+ * WP2: paints one [Seq3ActivationBar] — a filled rect plus a thin border, the standard UML
+ * "execution specification" look. Deliberately uses ONLY [Seq3RasterTheme.headerFill]/
+ * [Seq3RasterTheme.headerBorder], the exact pair [paintHeader] already paints its own chip with —
+ * no new theme field. [paintAttributionFooter]'s own doc makes this identical argument for reusing
+ * an existing neutral role instead of adding one: a new field would drag in
+ * `Seq3ThemeTest.kt`'s 14-assertion round-trip for a bar that needs nothing more expressive than
+ * "a neutral filled rectangle" to read correctly.
+ *
+ * For [Seq3ActivationBar.unmatched], the BOTTOM edge of the border is omitted (fill is still the
+ * full rect) so the bar visually reads as "still open, never actually closed" — no new color, just
+ * one fewer stroked edge, per this work package's brief.
+ */
+private fun paintActivationBar(g: Graphics2D, bar: Seq3ActivationBar, theme: Seq3RasterTheme) {
+    val box = bar.box
+    g.color = Color(theme.headerFill, true)
+    g.fillRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt())
+    g.color = Color(theme.headerBorder, true)
+    g.stroke = BasicStroke(STROKE_THIN)
+    val left = box.x
+    val right = box.x + box.width
+    val top = box.y
+    val bottom = box.y + box.height
+    g.draw(java.awt.geom.Line2D.Double(left, top, right, top)) // top edge
+    g.draw(java.awt.geom.Line2D.Double(left, top, left, bottom)) // left edge
+    g.draw(java.awt.geom.Line2D.Double(right, top, right, bottom)) // right edge
+    if (!bar.unmatched) g.draw(java.awt.geom.Line2D.Double(left, bottom, right, bottom)) // bottom edge — omitted when unmatched
 }
 
 private fun paintHeader(g: Graphics2D, col: Seq3LifelineColumn, theme: Seq3RasterTheme) {

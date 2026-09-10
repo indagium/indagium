@@ -92,6 +92,36 @@ class Seq3RasterTest {
     }
 
     @Test
+    fun aDocumentWithActivationBarsRastersWithoutThrowingAndKeepsTheSameHeight() {
+        // The load-bearing invariant from Seq3Layout's own test carries through to the raster: a
+        // bar is painted ON TOP of existing geometry, never reflowing it, so the rendered image's
+        // own height must be identical on vs off — only the pixels inside that same canvas change.
+        val base = fixedDocument()
+        val withReturn = base.copy(
+            messages = base.messages + Seq3Message(
+                id = "m2",
+                match = Seq3Match("B", "bye"),
+                fromLifelineId = "B",
+                toLifelineId = "A",
+                labelTemplate = "bye",
+                kind = Seq3Kind.RETURN,
+                occurrences = listOf(Seq3Occurrence(2, 2_000L, "10:00:01.000", pid = 1, tid = 1, level = 'I', text = "bye")),
+            ),
+        )
+        val plainLayout = layout(withReturn)
+        val activatedLayout = layout(withReturn.copy(showActivations = true))
+        assertTrue(activatedLayout.activations.isNotEmpty(), "this fixture must actually produce a bar, or the height comparison below would be vacuous")
+        assertEquals(plainLayout.height, activatedLayout.height, "an activation bar must never grow the diagram's own height")
+
+        val rendered = renderSeq3(activatedLayout, Seq3RasterTheme.DEFAULT_LIGHT)
+        val bytes = rendered.toPngBytes()
+        assertTrue(bytes.isNotEmpty())
+        val decoded = ImageIO.read(ByteArrayInputStream(bytes))
+        assertEquals(rendered.widthPx, decoded.width)
+        assertEquals(rendered.heightPx, decoded.height)
+    }
+
+    @Test
     fun differentThemesProduceDifferentBytesForTheSameDocument() {
         val doc = fixedDocument()
         val light = renderSeq3(layout(doc), Seq3RasterTheme.DEFAULT_LIGHT).toPngBytes()

@@ -231,6 +231,29 @@ data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
  *  from. */
 data class Seq3DelayBox(val delayId: String, val label: String, val box: Seq3Box)
 
+/**
+ * A [Seq3ActivationSpan] (WP1's pure call/return pairing, `Seq3Activation.kt`) turned into an
+ * actual rectangle — WP2's ONLY geometry contribution for UML activation bars. [box] is already
+ * the bar's full drawn extent (x, top y, width, height); a renderer paints exactly this rect and
+ * nothing else, the same "geometry decisions live here, painting decisions don't" split every
+ * other box in this file follows (see [Seq3DelayBox]'s own doc for the identical framing).
+ *
+ * [depth] and [unmatched] are carried straight through from [Seq3ActivationSpan] — see that type's
+ * own doc for what each means to a renderer (nested inset; omit the closing edge). This is a
+ * document-level list on [Seq3Layout], not a new [Seq3RowGeometry] subtype: a bar is not a row (it
+ * spans MULTIPLE rows, adds no pitch, and both endpoints of a span can each independently fail to
+ * resolve — see [layoutSeq3]'s own "index-space trap" note) and a new sealed subtype would force
+ * nine exhaustive `when` updates across this file, `Seq3Raster.kt`, and `ui/Seq3Canvas.kt` for a
+ * shape that needs none of that dispatch — exactly why [Seq3DelayBox] already took this shape
+ * instead.
+ */
+data class Seq3ActivationBar(
+    val lifelineId: String,
+    val box: Seq3Box,
+    val depth: Int,
+    val unmatched: Boolean,
+)
+
 /** One vertical run of a lifeline's dashed guide line: the ordinary dash pattern outside a delay
  *  ([isDotted] false), or a denser dotted pattern for the height of one it crosses ([isDotted]
  *  true) — user-observed correction mirroring PlantUML's own `...` convention, where a lifeline
@@ -278,6 +301,13 @@ data class Seq3Layout(
     /** WP11 time-gap markers — see [Seq3DelayBox]'s own doc. Empty for a document with no delays,
      *  same "absent list, nothing drawn" contract as [fragments]/[notes]. */
     val delays: List<Seq3DelayBox> = emptyList(),
+    /** WP2 UML activation bars — see [Seq3ActivationBar]'s own doc. Gated entirely on
+     *  [Seq3Document.showActivations]: empty (and, per [layoutSeq3]'s own gate, never even
+     *  COMPUTED) for a document with the toggle off, the same default-false/zero-cost contract
+     *  every other WP1/WP2 addition in this package follows. Appended LAST, like [delays] above
+     *  it — this file's own versioning rule (see the class's own positional construction site in
+     *  [layoutSeq3] for why that site never needed to change for this field). */
+    val activations: List<Seq3ActivationBar> = emptyList(),
 )
 
 // ── Layout constants (all unit-less "1x" values — see this file's header) ──────────────────────
@@ -341,6 +371,20 @@ private const val DELAY_BAND_H = 34.0
 // the document has any fragment, so a fragment spanning the FIRST message can never claim space
 // that belongs to the header band (item 5's regression — see this file's header/the plan doc).
 private const val FRAGMENT_TOP_RESERVE = ROW_H / 2 + FRAGMENT_LABEL_H + 6.0
+
+// WP2: UML activation-bar geometry. ACTIVATION_W is the bar's own width, centered on its
+// lifeline's centerX like every other on-lifeline element (self-loop origin, note anchor);
+// ACTIVATION_NEST_OFFSET stairsteps each successive [Seq3ActivationSpan.depth] to the right by
+// this much so nested activation reads as nested rectangles, not one solid block over-painted on
+// itself — mirrors FRAGMENT_INSET_PER_DEPTH's identical role for nested fragment brackets, just a
+// smaller value since a bar is much narrower than a fragment box to begin with. ACTIVATION_MIN_H
+// is the floor `layoutSeq3` clamps a bar's height to: a CALL immediately followed by its own
+// RETURN on the very next drawn row would otherwise compute a near-zero-height span (both
+// endpoints landing on adjacent rows, `bottom - top` only a hair over 0) that all but disappears
+// on screen — ROW_H/2 keeps even the shortest real activation visibly a rectangle, not a hairline.
+private const val ACTIVATION_W = 10.0
+private const val ACTIVATION_NEST_OFFSET = 4.0
+private const val ACTIVATION_MIN_H = ROW_H / 2
 
 private const val ELLIPSIS = "…"
 
@@ -460,7 +504,20 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val fragments = layoutFragments(doc.fragments, rowBuild.firstRowIndex, rowBuild.lastRowIndex, rowBuild.rows, headerHeight)
     val notes = layoutNotes(doc.notes, rowBuild.lastRowIndex, rowBuild.rows, centers, tm)
 
-    val rightEdge = maxOf(contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra)
+    // WP2: UML activation bars — see buildActivationBars' own doc. Pulled into its own function
+    // (rather than inlined here like the delay-band resolution above it) purely to keep
+    // layoutSeq3's own Cyclomatic Complexity under this file's detekt threshold — the branching
+    // this needs (the showActivations gate, plus one mapNotNull per dangling-reference check) is
+    // real work, just work that reads more clearly, and counts against a fresh budget, as its own
+    // named function rather than another inline block bolted onto an already-long orchestrator.
+    val activationBars = buildActivationBars(doc, emissions, rowBuild.rowYByIndex, lifelineIndex, centers)
+    // Folded into the existing rightEdge maxOf below with one extra term — a bar on the rightmost
+    // column (nested activation stairstepping it further right still via ACTIVATION_NEST_OFFSET)
+    // must never get clipped, the identical reasoning gapSolve.rightExtra/rowBuild.rightExtra
+    // already apply to a self-loop/note/stub on that same column.
+    val activationRightExtra = activationBars.maxOfOrNull { it.box.x + it.box.width } ?: 0.0
+
+    val rightEdge = maxOf(contentRight, gapSolve.rightExtra + (centers.lastOrNull() ?: 0.0), rowBuild.rightExtra, activationRightExtra)
     val noteRight = notes.maxOfOrNull { it.box.x + it.box.width } ?: 0.0
     val noteBottom = notes.maxOfOrNull { it.box.y + it.box.height } ?: 0.0
     val width = maxOf(rightEdge, noteRight) + MARGIN
@@ -482,7 +539,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
             lifelineBottom = rowBuild.bottomY,
         )
     }
-    return Seq3Layout(width, height, lifelineColumns, rowBuild.rows, fragments, notes, crossingCount, rowBuild.delayBoxes)
+    return Seq3Layout(width, height, lifelineColumns, rowBuild.rows, fragments, notes, crossingCount, rowBuild.delayBoxes, activationBars)
 }
 
 // ── Crossing count (design spec §07) ────────────────────────────────────────────────────────
@@ -724,6 +781,80 @@ private fun firstLastEmissions(
                 seq3EmissionRawTimestamp(message, occurrences.last().rawTimestamp),
             ),
         )
+    }
+}
+
+// ── WP2: Emission -> Seq3ActivationEvent ────────────────────────────────────────────────────
+//
+// `seq3ActivationSpans` (Seq3Activation.kt, WP1) needs one [Seq3ActivationEvent] per drawn row, in
+// row order — exactly what `emissions` (post `seq3ChronologicalOrder`, pre `prefixEmissionLabels`
+// or post it, doesn't matter — this reads no label) already is. [index] is deliberately the
+// position in THIS list, the same index space `rowYByIndex` above is keyed by — see
+// [layoutSeq3]'s own "index-space trap" note for why that space, not `rows`' own, is the one that
+// matters here.
+
+/**
+ * Maps one [Emission] to the bare per-row fact [seq3ActivationSpans] needs. Only [Emission.Arrow]
+ * carries a real UML message [Seq3Kind] (CALL/RETURN/ASYNC) AND both endpoints a bar could
+ * open/close on — every other case in this file's own `Emission` hierarchy maps to
+ * [Seq3Kind.NOTE], [seq3ActivationSpans]' designated neutral no-push/no-pop case:
+ *  - [Emission.Self] never carries a [Seq3Kind] of its own (a same-lifeline call IS the self kind,
+ *    always) — mapped with its real [Seq3Kind.SELF], which [seq3ActivationSpans] already treats as
+ *    neutral, so this is the honest kind rather than a second alias for "neutral".
+ *  - [Emission.Stub] has no `toLifelineId` (design spec: unresolved messages draw as a dashed
+ *    stub with no target) — there is no lifeline a bar could open ON, so it cannot be a CALL/
+ *    RETURN either, regardless of what the underlying message's own (unresolved) kind might be.
+ *  - [Emission.Note]/[Emission.Elision] are annotations, not calls — they carry no execution
+ *    semantics at all.
+ * NONE of these four are skipped, even though all four map to the same neutral kind: every one
+ * still becomes an event so it participates in [seq3ActivationSpans]' rule-1 fallback ("an
+ * unmatched call closes at the last row index that touches its lifeline") — a self-call or note
+ * logged after a lifeline's last real RETURN must still push an unmatched bar's close index out to
+ * cover it, not leave the bar ending one row too early. Skipping these emissions instead of giving
+ * them a neutral event would silently shrink that fallback's own row-order evidence.
+ */
+private fun activationEventOf(index: Int, emission: Emission): Seq3ActivationEvent = when (emission) {
+    is Emission.Arrow -> Seq3ActivationEvent(index, emission.messageId, emission.kind, emission.fromLifelineId, emission.toLifelineId)
+    is Emission.Self -> Seq3ActivationEvent(index, emission.messageId, Seq3Kind.SELF, emission.fromLifelineId, emission.fromLifelineId)
+    is Emission.Stub -> Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, emission.fromLifelineId, null)
+    is Emission.Note -> Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, emission.fromLifelineId, null)
+    is Emission.Elision -> Seq3ActivationEvent(index, emission.messageId, Seq3Kind.NOTE, emission.fromLifelineId, null)
+}
+
+/**
+ * Turns [emissions] into [Seq3ActivationBar]s, entirely gated on [Seq3Document.showActivations] so
+ * an old/toggled-off document allocates NOTHING here — not even the `events` list — matching the
+ * load-bearing invariant this work package's brief calls out: bars must add zero vertical pitch
+ * AND zero cost when off.
+ *
+ * [seq3ActivationSpans] (Seq3Activation.kt, WP1) works in EMISSION-index space — see
+ * [activationEventOf]'s own doc — so [rowYByIndex] (also emission-index-keyed, precisely to make
+ * this lookup possible; see `buildRows`' own doc on why that map exists) converts each span's
+ * start/end index back to real y geometry. A span whose either endpoint's row never got built
+ * (`buildRow` returned null — an unresolvable lifeline) is dropped entirely via `mapNotNull`:
+ * "dangling reference draws nothing, never crash" is this package's documented contract for every
+ * geometry lookup that can fail, the same posture [layoutFragments]/[layoutNotes] already take on
+ * their own dangling references.
+ */
+private fun buildActivationBars(
+    doc: Seq3Document,
+    emissions: List<Emission>,
+    rowYByIndex: Map<Int, Pair<Double, Double>>,
+    lifelineIndex: Map<String, Int>,
+    centers: DoubleArray,
+): List<Seq3ActivationBar> {
+    if (!doc.showActivations) return emptyList()
+    val events = emissions.mapIndexed(::activationEventOf)
+    return seq3ActivationSpans(events, emissions.lastIndex).mapNotNull { span ->
+        val (top, _) = rowYByIndex[span.startIndex] ?: return@mapNotNull null
+        val (_, bottom) = rowYByIndex[span.endIndex] ?: return@mapNotNull null
+        val lifelineIdx = lifelineIndex[span.lifelineId] ?: return@mapNotNull null
+        val x = centers[lifelineIdx] - ACTIVATION_W / 2 + span.depth * ACTIVATION_NEST_OFFSET
+        // max(..., ACTIVATION_MIN_H): a CALL immediately followed by its own RETURN on the very
+        // next drawn row would otherwise compute a near-zero-height span — see ACTIVATION_MIN_H's
+        // own doc.
+        val height = max(bottom - top, ACTIVATION_MIN_H)
+        Seq3ActivationBar(span.lifelineId, Seq3Box(x, top, ACTIVATION_W, height), span.depth, span.unmatched)
     }
 }
 
@@ -995,6 +1126,15 @@ private class RowBuildResult(
     val bottomY: Double,
     val rightExtra: Double,
     val delayBoxes: List<Seq3DelayBox>,
+    // WP2: each successfully-built row's own (top, bottom) y-extent, keyed by its EMISSION index
+    // (the position in the `emissions` list buildRows iterates) — NOT `rows.size`/`rows.lastIndex`,
+    // because a null buildRow result (unresolvable lifeline) skips a `rows` append but NOT an
+    // emissions index, so the two index spaces silently diverge the moment any row is dropped (see
+    // layoutSeq3's own "index-space trap" note). seq3ActivationSpans works entirely in
+    // emission-index space, so this map is the one lookup that lets a span's startIndex/endIndex
+    // resolve back to real geometry without buildRows itself needing to know anything about
+    // activation bars.
+    val rowYByIndex: Map<Int, Pair<Double, Double>> = emptyMap(),
 )
 
 private fun buildRows(
@@ -1020,6 +1160,7 @@ private fun buildRows(
     val delayBoxes = mutableListOf<Seq3DelayBox>()
     val first = HashMap<String, Int>()
     val last = HashMap<String, Int>()
+    val rowYByIndex = HashMap<Int, Pair<Double, Double>>()
     val topGap = if (fragmentsPresent) max(HEADER_TO_ROWS_GAP, FRAGMENT_TOP_RESERVE) else HEADER_TO_ROWS_GAP
     var y = MARGIN + headerHeight + topGap
     var rightExtra = 0.0
@@ -1029,6 +1170,7 @@ private fun buildRows(
         first.getOrPut(emission.messageId) { rows.size }
         rows += built.geometry
         last[emission.messageId] = rows.lastIndex
+        rowYByIndex[i] = rowVerticalExtent(built.geometry)
         y += built.pitch
         rightExtra = max(rightExtra, built.rightEdge)
         delaysByRowIndex[i]?.forEach { delay ->
@@ -1037,7 +1179,24 @@ private fun buildRows(
             y += DELAY_BAND_H
         }
     }
-    return RowBuildResult(rows, first, last, y, rightExtra, delayBoxes)
+    return RowBuildResult(rows, first, last, y, rightExtra, delayBoxes, rowYByIndex)
+}
+
+/**
+ * WP2: a row's own (top, bottom) y-extent — where an activation bar's endpoint lands when this
+ * row is a [Seq3ActivationSpan.startIndex] or [Seq3ActivationSpan.endIndex]. Every row type except
+ * [Seq3SelfLoopRow] is drawn as a single horizontal line AT its own `y` (see
+ * `Seq3Raster.paintArrowRow`'s `Line2D.Double(row.fromX, row.y, row.toX, row.y)`, for instance) —
+ * top and bottom both collapse to that same `y`, which is exactly right: a CALL bar should start
+ * where the arrow LANDS and a RETURN bar should end where the arrow DEPARTS, both at `y`, never at
+ * some padded row-band edge above/below it (that would be the "assume y ± ROW_H/2" shortcut this
+ * function's own call site warns against). [Seq3SelfLoopRow] is the one row with genuine vertical
+ * extent of its own — its loop drops from `y` down to `loopBottomY` — so only that case reports a
+ * real (top, bottom) pair; every other subtype has nothing else honest to report.
+ */
+private fun rowVerticalExtent(geometry: Seq3RowGeometry): Pair<Double, Double> = when (geometry) {
+    is Seq3SelfLoopRow -> geometry.y to geometry.loopBottomY
+    else -> geometry.y to geometry.y
 }
 
 private class BuiltRow(val geometry: Seq3RowGeometry, val pitch: Double, val rightEdge: Double)
