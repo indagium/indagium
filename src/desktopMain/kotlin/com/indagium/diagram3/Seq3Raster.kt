@@ -380,10 +380,12 @@ private fun strokeFor(kind: Seq3Kind): BasicStroke {
     val style = seq3ArrowStyle(kind)
     val width = if (style.thin) STROKE_THIN else STROKE_THICK
     val dash = style.dash?.toFloatArray()
+    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
+    // silently inheriting the plain-BasicStroke default meant for CALL.
     return when (kind) {
         Seq3Kind.RETURN -> BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f)
         Seq3Kind.ASYNC -> BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, dash, 0f)
-        else -> BasicStroke(width)
+        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> BasicStroke(width)
     }
 }
 

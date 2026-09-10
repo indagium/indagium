@@ -42,5 +42,7 @@ private val SEQ3_DASH_ASYNC = listOf(3f, 3f)
 fun seq3ArrowStyle(kind: Seq3Kind): Seq3ArrowStyle = when (kind) {
     Seq3Kind.RETURN -> Seq3ArrowStyle(dash = SEQ3_DASH_RETURN, filledHead = false, thin = true)
     Seq3Kind.ASYNC -> Seq3ArrowStyle(dash = SEQ3_DASH_ASYNC, filledHead = false, thin = true)
-    else -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
+    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
+    // silently inheriting the solid-filled-arrow default meant for CALL.
+    Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> Seq3ArrowStyle(dash = null, filledHead = true, thin = false)
 }
