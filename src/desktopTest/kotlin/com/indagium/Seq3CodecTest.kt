@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.encodeSeq3Note
@@ -506,6 +507,122 @@ class Seq3CodecTest {
 
         assertNotNull(parsed)
         assertFalse(parsed.document.fragments.single().hideKindLabel)
+    }
+
+    // ── Fragment operands (WP4) ─────────────────────────────────────────────────────────────────
+
+    @Test
+    fun aFragmentWithTwoElseOperandsRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            fragments = listOf(
+                Seq3Fragment(
+                    "f1",
+                    Seq3FragmentKind.ALT,
+                    "x > 0", // operand zero's guard — see Seq3Fragment.elseOperands' own doc
+                    listOf("m1"),
+                    elseOperands = listOf(
+                        Seq3Operand("op1", "x == 0", startsAtMessageId = "m1", startsAtOccurrenceEntryId = 42),
+                        Seq3Operand("op2", "x < 0", startsAtMessageId = "m1"),
+                    ),
+                ),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        val operands = parsed.document.fragments.single().elseOperands
+        assertEquals(listOf("op1", "op2"), operands.map { it.id })
+        assertEquals(42, operands.single { it.id == "op1" }.startsAtOccurrenceEntryId)
+        assertNull(operands.single { it.id == "op2" }.startsAtOccurrenceEntryId)
+    }
+
+    @Test
+    fun aFragmentMapWithNoElseOperandsKeyDecodesToAnEmptyListAndReEncodesIdentically() {
+        // The most important test in this section: a fragment saved by any build before WP4 has
+        // no "elseOperands" key at all. It must decode to emptyList() — one implicit operand whose
+        // guard is the existing "label" — and re-encoding that parsed document must be byte-stable
+        // (no spurious key materializes), matching Seq3Fragment.elseOperands' own "not a migration
+        // case" doc.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(mapOf("id" to "f1", "kind" to "ALT", "label" to "x > 0", "messageIds" to listOf<String>())),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertTrue(parsed.document.fragments.single().elseOperands.isEmpty())
+
+        val reEncoded = encodeSeq3Note(parsed.document, Seq3Dialect.MERMAID)
+        val reParsed = parseSeq3Note(reEncoded)
+        assertNotNull(reParsed)
+        assertEquals(parsed.document, reParsed.document, "re-encoding a legacy (no-elseOperands) document must not change what it decodes to")
+        assertTrue(reParsed.document.fragments.single().elseOperands.isEmpty())
+    }
+
+    @Test
+    fun anOperandMapMissingIdOrStartsAtMessageIdDropsThatOperandWithoutFailingTheDocument() {
+        // Deliberate counterpart to aDocumentWithAnUnknownFragmentKindCoercesToLoopRatherThanFailingToParse
+        // above: fragmentFromMap coerces an unrecognised "kind" to LOOP rather than dropping the
+        // fragment (a fragment with a wrong kind is still a fragment worth drawing), but
+        // operandFromMap drops a malformed OPERAND outright — an anchor-less operand is nothing at
+        // all, there is no position at which to draw its divider.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(
+                mapOf(
+                    "id" to "f1",
+                    "kind" to "ALT",
+                    "label" to "x > 0",
+                    "messageIds" to listOf<String>(),
+                    "elseOperands" to listOf(
+                        mapOf("id" to "op-missing-anchor", "guard" to "x == 0"), // no startsAtMessageId
+                        mapOf("guard" to "x < 0", "startsAtMessageId" to "m1"), // no id
+                        mapOf("id" to "op-valid", "guard" to "x < 0", "startsAtMessageId" to "m1"),
+                    ),
+                ),
+            ),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed, "two malformed operands must not fail the whole document")
+        val operands = parsed.document.fragments.single().elseOperands
+        assertEquals(listOf("op-valid"), operands.map { it.id }, "only the well-formed operand survives")
+    }
+
+    @Test
+    fun exceedingTheMaxOperandsPerFragmentIsRejectedTheSameWayTheExistingPerFragmentBoundIs() {
+        // Mirrors tooManyMessagesIsRejectedAtDecode's shape: 33 minimal operand maps, one over
+        // MAX_SEQ3_OPERANDS_PER_FRAGMENT (32), well under MAX_SEQ3_HEADER_CHARS so only the
+        // count bound is exercised.
+        val operands = (0 until 33).map { i -> mapOf("id" to "op$i", "guard" to "g$i", "startsAtMessageId" to "m1") }
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(
+                mapOf("id" to "f1", "kind" to "ALT", "label" to "x > 0", "messageIds" to listOf<String>(), "elseOperands" to operands),
+            ),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val text = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+        assertTrue(Json.encode(header).length < 512 * 1024, "test setup sanity: header must stay under the size bound so only the count bound is exercised")
+
+        assertNull(parseSeq3Note(text), "a fragment declaring more than the per-fragment operand cap must be rejected, not silently truncated")
     }
 
     @Test
