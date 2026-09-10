@@ -449,6 +449,18 @@ private fun normalizedBrackets(fragments: List<Seq3Fragment>, plan: Seq3Emission
 
 private fun fragmentLabel(fragment: Seq3Fragment): String = fragment.label.ifBlank { fragment.kind.name.lowercase() }
 
+// [mermaidFragmentOpenLines]'s non-GROUP branch and [plantUmlFragmentOpenLines] both already write
+// the kind keyword themselves before appending a label — unlike [fragmentLabel] above (kept as-is
+// for Seq3Layout.fragmentBoxFrom parity and the GROUP `Note over` line below, where the kind word
+// is NOT otherwise shown, so falling back to it there is correct), reusing that ifBlank fallback
+// at either of THESE two call sites doubled the kind word into "alt alt" / "loop loop" for a
+// fragment with a blank label. A blank label must render as the bare keyword instead — no trailing
+// separator either, so "alt", never "alt " or "alt alt".
+private fun fragmentKeywordLine(kind: Seq3FragmentKind, label: String, escape: (String) -> String): String {
+    val keyword = kind.name.lowercase()
+    return if (label.isBlank()) keyword else "$keyword ${escape(label)}"
+}
+
 // ── Fragment open lines (WP12) ───────────────────────────────────────────────────────────────
 //
 // Every [Seq3FragmentKind] except [Seq3FragmentKind.GROUP] is a real UML 2.x combined-fragment
@@ -494,7 +506,7 @@ private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPla
             "Note over ${bracketSpan(bracket, plan, aliases)}: ${mermaidEscape(fragmentLabel(fragment))}",
         )
     } else {
-        listOf("${fragment.kind.name.lowercase()} ${mermaidEscape(fragmentLabel(fragment))}")
+        listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::mermaidEscape))
     }
 }
 
@@ -505,7 +517,7 @@ private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPla
  *  needs a real PlantUML-side special case has an obvious place to add it. */
 private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket): List<String> {
     val fragment = bracket.fragment
-    return listOf("${fragment.kind.name.lowercase()} ${plantUmlEscape(fragmentLabel(fragment))}")
+    return listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
 }
 
 // ── Notes ────────────────────────────────────────────────────────────────────────────────────
