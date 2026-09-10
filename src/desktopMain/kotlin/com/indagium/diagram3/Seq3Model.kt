@@ -297,20 +297,36 @@ sealed class Seq3MessageEditResult {
 
 /** The UML fragment shape a selection is grouped into (design spec §06's `Group ▾` verb). Unlike
  *  the old `diagram.DiagramFrame` (a colorless auto-detected bracket with no semantic meaning),
- *  every one of these IS semantic — a user explicitly chose it — so Seq3Emitters renders the
- *  dialect's real `loop`/`alt`/`opt`/`par`/`critical`/`break` block instead of a meaning-free note
- *  pairing.
+ *  every one of these IS semantic — a user explicitly chose it — so Seq3Emitters' PlantUML branch
+ *  renders the dialect's real `kind.name.lowercase()` block for every one of them, GROUP included
+ *  (see that constant's own paragraph below), instead of a meaning-free note pairing.
  *
- *  [GROUP] is the one exception, added for "frame these messages and say what they relate to"
- *  (WP12). It is deliberately **not** a UML 2.x combined-fragment operator — UML defines exactly
- *  twelve (`seq, alt, opt, break, par, strict, loop, critical, neg, assert, ignore, consider`) and
- *  none of them means "these messages relate to X". PlantUML invented `group <label>` for exactly
- *  this case and Seq3Emitters' PlantUML branch reuses that verbatim; Mermaid has no equivalent at
- *  all (the bare word `group` is a Mermaid PARSE ERROR), so Seq3Emitters' Mermaid branch fakes it
- *  with `rect rgb(...) … end` wrapping a `Note over` that carries the label — see that file's own
- *  "Fragment open lines" section for why this needs its own per-dialect branch instead of the
- *  `kind.name.lowercase()` call every other kind shares. */
-enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP }
+ *  [GROUP] is the one member that is **not** a UML 2.x combined-fragment operator at all — added
+ *  for "frame these messages and say what they relate to" (WP12). UML defines exactly twelve
+ *  combined-fragment operators (`seq, alt, opt, break, par, strict, loop, critical, neg, assert,
+ *  ignore, consider`) and none of them means "these messages relate to X". PlantUML invented
+ *  `group <label>` for exactly this case and Seq3Emitters' PlantUML branch reuses that verbatim.
+ *
+ *  [NEG], [STRICT], [CONSIDER] and [IGNORE] (WP11) ARE four of those twelve real UML operators —
+ *  unlike GROUP, PlantUML needs no special case for them either, since `kind.name.lowercase()`
+ *  already produces PlantUML's own `neg`/`strict`/`consider`/`ignore` keyword. Two of the four are
+ *  unexpectedly well suited to a *log* diagram specifically, not just UML completeness: [NEG]
+ *  frames an error path semantically ("this must not happen") instead of leaving it to adjacent
+ *  prose, and [CONSIDER] ("this interaction only accounts for these message types") is literally
+ *  what a filtered log diagram already is — it lets a diagram attached to a ticket admit its own
+ *  lossiness to a reader who never saw the original log. [STRICT] and [IGNORE] round out UML's
+ *  twelve without a log-specific case of their own.
+ *
+ *  Mermaid, though, has a real grammar to satisfy, and its sequence-diagram syntax has keywords for
+ *  only six operators (`loop, alt/else, opt, par/and, critical/option, break`) plus `rect` — a bare
+ *  `group`/`neg`/`strict`/`consider`/`ignore` is a Mermaid PARSE ERROR, not a degraded rendering.
+ *  Seq3Emitters' Mermaid branch therefore fakes ALL FIVE of GROUP/NEG/STRICT/CONSIDER/IGNORE the
+ *  same way: `rect rgb(...) … end` wrapping a `Note over` that carries the label (GROUP) or the
+ *  operator word plus label (the four real operators — the word must survive the degradation, or a
+ *  reader loses the one thing that made picking NEG/CONSIDER over LOOP/GROUP meaningful) — see that
+ *  file's own "Fragment open lines" section for why this needs its own per-dialect branch instead
+ *  of the `kind.name.lowercase()` call the other six kinds share unmodified. */
+enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP, NEG, STRICT, CONSIDER, IGNORE }
 
 /** One `else`-divided branch of a combined fragment — a UML InteractionOperand, minus operand
  *  zero (see [Seq3Fragment.elseOperands] for why operand zero is not represented by this type).

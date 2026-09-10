@@ -497,31 +497,51 @@ private fun fragmentKeywordLine(kind: Seq3FragmentKind, label: String, escape: (
     return if (label.isBlank()) keyword else "$keyword ${escape(label)}"
 }
 
-// ── Fragment open lines (WP12) ───────────────────────────────────────────────────────────────
+// ── Fragment open lines (WP12, WP11) ────────────────────────────────────────────────────────
 //
-// Every [Seq3FragmentKind] except [Seq3FragmentKind.GROUP] is a real UML 2.x combined-fragment
-// operator, and both dialects accept the bare keyword the same way: `kind.name.lowercase()` plus
-// the label, closed by a plain `end`. [Seq3FragmentKind.GROUP] is not a UML operator at all — see
-// that enum constant's own doc — and the two dialects diverge on it:
-//   - PlantUML invented `group <label>` for exactly this, which happens to have the exact same
-//     shape as every other operator (`kind.name.lowercase()` + label), so PlantUML needs no
-//     special case.
-//   - Mermaid has no equivalent, and the bare word `group` is a MERMAID PARSE ERROR. There is
-//     nothing to fall back to but `rect rgb(...)` (still closed by a plain `end`, so the
-//     open/close bracket machinery below is untouched) wrapping a `Note over` that carries the
-//     label, so the label survives even though the construct itself does not exist in Mermaid.
+// Every [Seq3FragmentKind] except the members of [MERMAID_FALLBACK_FRAGMENT_KINDS] is a real UML
+// 2.x combined-fragment operator that BOTH dialects accept the same bare way: `kind.name.lowercase()`
+// plus the label, closed by a plain `end`. The dialects diverge on that fallback set:
+//   - PlantUML needs no special case for ANY of them, GROUP included. GROUP is not a UML operator
+//     at all — see that enum constant's own doc — but PlantUML invented `group <label>` for exactly
+//     this, which happens to have the exact same shape as every real operator
+//     (`kind.name.lowercase()` + label). NEG/STRICT/CONSIDER/IGNORE (WP11) ARE real UML operators,
+//     so PlantUML's own `neg`/`strict`/`consider`/`ignore` keyword falls straight out of that same
+//     shared `kind.name.lowercase()` call — nothing PlantUML-side to add for them either.
+//   - Mermaid has no equivalent for any of the five, and the bare word is a MERMAID PARSE ERROR for
+//     every one of them (its sequence-diagram grammar has keywords for only
+//     `loop/alt/else/opt/par/and/critical/option/break/rect`). There is nothing to fall back to but
+//     `rect rgb(...)` (still closed by a plain `end`, so the open/close bracket machinery below is
+//     untouched) wrapping a `Note over`. For GROUP the note carries just the label (GROUP has no
+//     operator word worth showing — see [Seq3FragmentKind]'s own doc). For the four real operators
+//     the note carries the operator word too (`fragmentKeywordLine`, the SAME "keyword + label, no
+//     doubling for a blank label" formatting the real-operator branch below uses) — dropping it
+//     there would silently erase the one thing that made picking NEG/CONSIDER over LOOP/GROUP
+//     meaningful, since Mermaid's rendered diagram can no longer say so itself.
 //
-// This is the FIRST fragment kind that needs a per-dialect branch, so the branch lives in its own
-// function per dialect rather than as a special case bolted onto a shared `kind.name.lowercase()`
+// GROUP was the FIRST fragment kind that needed a per-dialect branch, so the branch lives in its
+// own function per dialect rather than as a special case bolted onto a shared `kind.name.lowercase()`
 // call. DO NOT collapse [mermaidFragmentOpenLines] back into [plantUmlFragmentOpenLines]'s shape —
 // a future reader who notices they mostly produce "one open line per fragment" will be tempted to
-// "unify" them, and that would silently regress GROUP's Mermaid output back into a parse error.
+// "unify" them, and that would silently regress GROUP's (and now NEG/STRICT/CONSIDER/IGNORE's)
+// Mermaid output back into a parse error.
 
-private const val GROUP_RECT_COLOR = "rgb(240, 240, 240)"
+private const val FALLBACK_RECT_COLOR = "rgb(240, 240, 240)"
+
+/** Fragment kinds whose Mermaid rendering has no real keyword to fall back on — see this section's
+ *  own header for the per-kind reasoning. [Seq3FragmentKind.GROUP] started this set (WP12); WP11
+ *  adds the four real UML operators Mermaid's grammar simply never grew a keyword for. */
+private val MERMAID_FALLBACK_FRAGMENT_KINDS = setOf(
+    Seq3FragmentKind.GROUP,
+    Seq3FragmentKind.NEG,
+    Seq3FragmentKind.STRICT,
+    Seq3FragmentKind.CONSIDER,
+    Seq3FragmentKind.IGNORE,
+)
 
 /** The participant span a fragment's OWN bracket range touches — same idea as [noteSpan], but
  *  computed from a resolved [Seq3Bracket.range] (index space) instead of a note's raw messageIds,
- *  since a GROUP fragment's Mermaid `Note over` must span exactly what the bracket itself spans,
+ *  since a fallback fragment's Mermaid `Note over` must span exactly what the bracket itself spans,
  *  not the fragment's un-clamped [Seq3Fragment.messageIds]. */
 private fun bracketSpan(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: List<String>): String {
     val touched = bracket.range.flatMap { emissionParticipants(plan.emissions[it]) }.distinct().sorted()
@@ -531,15 +551,22 @@ private fun bracketSpan(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: L
     return if (lo == hi) lo else "$lo,$hi"
 }
 
-/** Mermaid's open line(s) for one fragment bracket. Every kind but GROUP is one line; GROUP is two
- *  (`rect` + `Note over`) — see this section's own header for why. Lines carry no indentation or
- *  trailing newline; the caller applies both, same as every other emitted line in [toMermaid]. */
+/** Mermaid's open line(s) for one fragment bracket. Every kind but the [MERMAID_FALLBACK_FRAGMENT_KINDS]
+ *  members is one line; a fallback kind is two (`rect` + `Note over`) — see this section's own
+ *  header for why, and for why GROUP's note carries only the label while the other four fallback
+ *  kinds also carry the operator word. Lines carry no indentation or trailing newline; the caller
+ *  applies both, same as every other emitted line in [toMermaid]. */
 private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: List<String>): List<String> {
     val fragment = bracket.fragment
-    return if (fragment.kind == Seq3FragmentKind.GROUP) {
+    return if (fragment.kind in MERMAID_FALLBACK_FRAGMENT_KINDS) {
+        val noteText = if (fragment.kind == Seq3FragmentKind.GROUP) {
+            mermaidEscape(fragmentLabel(fragment))
+        } else {
+            fragmentKeywordLine(fragment.kind, fragment.label, ::mermaidEscape)
+        }
         listOf(
-            "rect $GROUP_RECT_COLOR",
-            "Note over ${bracketSpan(bracket, plan, aliases)}: ${mermaidEscape(fragmentLabel(fragment))}",
+            "rect $FALLBACK_RECT_COLOR",
+            "Note over ${bracketSpan(bracket, plan, aliases)}: $noteText",
         )
     } else {
         listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::mermaidEscape))

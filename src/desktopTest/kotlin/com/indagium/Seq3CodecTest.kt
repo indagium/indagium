@@ -453,6 +453,23 @@ class Seq3CodecTest {
     }
 
     @Test
+    fun everyNewWp11FragmentKindRoundTripsThroughEncodeAndParse() {
+        // Same proof as everyNewWp12FragmentKindRoundTripsThroughEncodeAndParse just above — no
+        // codec change was needed for WP11 either, since Seq3Codec's fragmentFromMap/fragmentToMap
+        // already decode/encode `kind` generically by name (enumFromName) for every
+        // Seq3FragmentKind, not just the ones that existed when that code was written.
+        listOf(Seq3FragmentKind.NEG, Seq3FragmentKind.STRICT, Seq3FragmentKind.CONSIDER, Seq3FragmentKind.IGNORE).forEach { kind ->
+            val original = fixedDocument().copy(
+                fragments = listOf(Seq3Fragment("f1", kind, "label", listOf("m1"))),
+            )
+            val parsed = parseSeq3Note(encodeSeq3Note(original))
+            assertNotNull(parsed)
+            assertEquals(original, parsed.document)
+            assertEquals(kind, parsed.document.fragments.single().kind)
+        }
+    }
+
+    @Test
     fun lostAndFoundKindsRoundTripByName() {
         // No codec change needed for WP9 (Seq3Codec decodes `Seq3Kind` generically by name — see
         // this file's own `enumFromName` usage) — this test exists to PROVE that, not to exercise
