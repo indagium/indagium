@@ -206,6 +206,23 @@ class Seq3EmitterTest {
     }
 
     @Test
+    fun aBlankFragmentLabelEmitsTheBareKindKeywordNotTheKindWordDoubled() {
+        // Both open-line call sites already prefix the kind word themselves
+        // ("${kind.name.lowercase()} ${fragmentLabel(fragment)}"), so a blank label must not ALSO
+        // fall back to the kind word inside fragmentLabel — that would double it into "loop loop".
+        val fragment = Seq3Fragment("f1", Seq3FragmentKind.LOOP, "", listOf("m1"))
+        val document = doc(listOf(message()), fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertFalse(mermaid.contains("loop loop"), "kind word must not be doubled for a blank label; got:\n$mermaid")
+        assertTrue(mermaid.contains("    loop\n"), "a blank label must leave the bare keyword with no trailing separator; got:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertFalse(plantUml.contains("loop loop"), "kind word must not be doubled for a blank label; got:\n$plantUml")
+        assertTrue(plantUml.contains("loop\n"), "a blank label must leave the bare keyword with no trailing separator; got:\n$plantUml")
+    }
+
+    @Test
     fun groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml() {
         // WP12: GROUP is not a UML operator — PlantUML invented `group <label>` for exactly this,
         // but the bare word `group` is a Mermaid PARSE ERROR, so Mermaid fakes it with
