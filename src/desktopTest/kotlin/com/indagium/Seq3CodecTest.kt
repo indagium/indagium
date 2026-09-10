@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.debug.Json
+import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.Seq3AttachmentMetadata
 import com.indagium.diagram3.Seq3AttachmentMode
 import com.indagium.diagram3.Seq3Authoring
@@ -21,6 +22,7 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.adoptSeq3NoteSource
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.seq3SourceHash
@@ -150,6 +152,97 @@ class Seq3CodecTest {
         assertFalse(parsed.sourceHashMatches)
         assertNotNull(parsed.warning)
         assertEquals(fixedDocument(), parsed.document) // the header's model is untouched by the tamper
+    }
+
+    // ── WP12: adoptSeq3NoteSource — the user's way out of the drift warning above ───────────────
+    // These are the natural counterpart of sourceHashMismatchSetsAWarningButStillReturnsTheDocument:
+    // that test tampers a fence and checks the warning appears; these tamper a fence the same way
+    // and check that adopting it clears the warning while keeping the hand-edited text verbatim.
+
+    @Test
+    fun adoptingADriftedNoteClearsTheSourceHashWarningOnReparse() {
+        val text = encodeSeq3Note(fixedDocument())
+        val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
+        val parsedBeforeAdopt = parseSeq3Note(tampered)
+        assertNotNull(parsedBeforeAdopt)
+        assertFalse(parsedBeforeAdopt.sourceHashMatches, "test setup sanity: the tamper must actually trip the warning")
+
+        val adopted = adoptSeq3NoteSource(tampered)
+        assertNotNull(adopted)
+        val reparsed = parseSeq3Note(adopted)
+        assertNotNull(reparsed)
+        assertTrue(reparsed.sourceHashMatches, "adopting must make the declared hash match the fence it was adopted from")
+        assertNull(reparsed.warning)
+    }
+
+    @Test
+    fun adoptingPreservesTheHandEditedFenceBodyByteForByte() {
+        val text = encodeSeq3Note(fixedDocument())
+        // A deliberately odd body — mixed indentation, a trailing-space line, a blank line in the
+        // middle — so a byte-for-byte comparison actually exercises more than "still has words in
+        // it". This is the whole point of adoptSeq3NoteSource: the text the user wrote must survive
+        // completely untouched, not just "close enough to re-render".
+        val tamperedFence = "sequenceDiagram\n    Note over A: tampered  \n\n  A->>B: hi\n"
+        val tampered = text.replaceFirst(Regex("sequenceDiagram\\n(.|\\n)*?(?=```\\n)"), tamperedFence)
+        val parsedBeforeAdopt = parseSeq3Note(tampered)
+        assertNotNull(parsedBeforeAdopt)
+        assertFalse(parsedBeforeAdopt.sourceHashMatches, "test setup sanity: the tamper must actually trip the warning")
+        // encodeSeq3Note trims trailing newlines off the fenced body before embedding it (see its
+        // own doc) — parsedBeforeAdopt.source already reflects that normalization, so compare
+        // against IT rather than tamperedFence's own raw trailing newline.
+        val expectedBody = parsedBeforeAdopt.source
+
+        val adopted = adoptSeq3NoteSource(tampered)
+        assertNotNull(adopted)
+        val reparsed = parseSeq3Note(adopted)
+        assertNotNull(reparsed)
+        assertEquals(expectedBody, reparsed.source, "the hand-edited fence body must survive adoption byte for byte")
+    }
+
+    @Test
+    fun adoptingSwitchesTheNoteToSourceExportMode() {
+        val text = encodeSeq3Note(fixedDocument(), exportMode = DiagramExportMode.IMAGE)
+        val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
+
+        val adopted = adoptSeq3NoteSource(tampered)
+        assertNotNull(adopted)
+        val reparsed = parseSeq3Note(adopted)
+        assertNotNull(reparsed)
+        // The rendered picture still reflects the untouched document, so leaving exportMode at
+        // IMAGE would keep showing a picture that disagrees with the adopted text — see
+        // adoptSeq3NoteSource's own doc for why SOURCE is the only self-consistent outcome.
+        assertEquals(DiagramExportMode.SOURCE, reparsed.exportMode)
+    }
+
+    @Test
+    fun adoptingPreservesDocumentDialectCaptionAndAttachmentUnchanged() {
+        val attachment = Seq3AttachmentMetadata(
+            diagramId = "diagram-42",
+            mode = Seq3AttachmentMode.LINKED,
+            revision = 17L,
+            attachedAtEpochMs = 1234L,
+        )
+        val text = encodeSeq3Note(
+            fixedDocument(),
+            dialect = Seq3Dialect.PLANTUML,
+            caption = "kept caption",
+            attachment = attachment,
+        )
+        val tampered = text.replaceFirst("@startuml\n", "@startuml\nnote over A: tampered\n")
+
+        val adopted = adoptSeq3NoteSource(tampered)
+        assertNotNull(adopted)
+        val reparsed = parseSeq3Note(adopted)
+        assertNotNull(reparsed)
+        assertEquals(fixedDocument(), reparsed.document)
+        assertEquals(Seq3Dialect.PLANTUML, reparsed.dialect)
+        assertEquals("kept caption", reparsed.caption)
+        assertEquals(attachment, reparsed.attachment)
+    }
+
+    @Test
+    fun adoptSeq3NoteSourceReturnsNullForAnUnparseableNote() {
+        assertNull(adoptSeq3NoteSource("just a plain text note, not a diagram note at all"))
     }
 
     @Test

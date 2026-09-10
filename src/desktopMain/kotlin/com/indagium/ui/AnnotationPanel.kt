@@ -60,6 +60,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.adoptSeq3NoteSource
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode
@@ -2219,6 +2220,50 @@ private fun DiagramNoteView(
     val expandedDiagram = rememberExpandedDiagram(noteText, settings, expanded)
     if (expanded) {
         Spacer(Modifier.height(6.dp))
+        // WP12: the Notes-panel card is the ordinary place a user looks — before this, the drift
+        // warning only ever showed in the Preview dialog (~line 1784, same copy reused verbatim
+        // below), so a hand-edited fence (e.g. via the MCP update_note_block tool) could go
+        // unnoticed here indefinitely. adoptSeq3NoteSource is the way out: see its own KDoc for why
+        // adopting also forces Src export mode rather than leaving IMAGE pointing at a picture that
+        // now disagrees with the text.
+        if (expandedDiagram != null && !expandedDiagram.parsed.sourceHashMatches) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText(
+                    "Diagram source has drifted from its model",
+                    color = tc.td,
+                    fontSize = 10.sp,
+                    modifier = Modifier.weight(1f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                TooltipArea(
+                    tooltip = {
+                        ToolbarTooltip(
+                            "Keeps the hand-edited text exactly as written and switches this " +
+                                "note to Src export. It will not regenerate the picture.",
+                        )
+                    },
+                ) {
+                    Box(
+                        Modifier.clickable {
+                            adoptSeq3NoteSource(noteText)?.let(onUpdateDiagramText)
+                        }.padding(horizontal = 4.dp, vertical = 2.dp),
+                    ) {
+                        AppText(
+                            "Adopt as source",
+                            color = tc.ac,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+        }
         when {
             expandedDiagram == null -> {
                 AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
