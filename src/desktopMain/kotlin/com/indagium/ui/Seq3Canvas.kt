@@ -1041,6 +1041,10 @@ private fun DrawScope.drawSeq3Diagram(
             )
         }
     }
+    // WP2: UML activation bars — pulled into its own DrawScope function (drawSeq3ActivationBars,
+    // just below) purely to keep drawSeq3Diagram itself under this file's detekt LongMethod
+    // threshold; ordering/rationale live on that function's own doc.
+    drawSeq3ActivationBars(layout, tc)
     layout.rows.forEach { row ->
         val draggingMessage = dragPreview?.messageId == row.messageId
         val draggingOccurrenceEntryId = dragPreview?.occurrenceEntryId
@@ -1124,6 +1128,52 @@ private fun DrawScope.drawSeq3Diagram(
             size = Size(rect.width.dp.toPx(), rect.height.dp.toPx()),
             style = Stroke(width = 1.dp.toPx()),
         )
+    }
+}
+
+/**
+ * WP2: UML activation bars — pulled out of [drawSeq3Diagram] itself purely to keep that function
+ * under this file's detekt `LongMethod` threshold; called right where the bars belong in the draw
+ * order, between the lifeline segments and the row loop.
+ *
+ * Drawn AFTER the lifeline segments (a bar visually replaces the dashed line for the height it
+ * covers) but BEFORE every arrow row (so an arrowhead lands on the bar's own edge) —
+ * `Seq3Raster.kt`'s `paintSeq3` keeps the identical order for the identical reason (see
+ * `Seq3ArrowStyle.kt`'s own header: the two renderers must never again disagree about how
+ * something draws). [tc]'s `p2`/`br` is the same fill/border pair the header chip and
+ * `Seq3Raster.paintActivationBar` already use for the identical shape — no new theme role.
+ *
+ * No overlay composable: a bar carries no text of its own, unlike a fragment or note, so it lives
+ * entirely in this shape pass — there is simply nothing for a second, text-only pass to draw,
+ * which is what rules out the delay marker's overlay-only asymmetry here.
+ *
+ * An [Seq3ActivationBar.unmatched] bar omits its bottom edge instead of dashing the border —
+ * mirrors `Seq3Raster.paintActivationBar` exactly, edge for edge (three unconditional `drawLine`
+ * calls plus a fourth gated on `!unmatched`, since Compose's `drawRect` stroke can't omit a single
+ * edge on its own; the fill below stays a full [drawRect] either way). An open-bottomed rectangle
+ * reads as "execution continues past the evidence", which is what `unmatched` means. Dashing is
+ * already this renderer's vocabulary for something else — the unresolved stub's stroke and the
+ * lifeline guide line both dash to say "not yet resolved" — so reusing it here would overload that
+ * meaning instead of adding a distinct one; see `Seq3Raster.kt`'s `paintActivationBar` for the
+ * renderer this is required to stay pixel-structurally in step with.
+ */
+private fun DrawScope.drawSeq3ActivationBars(layout: Seq3Layout, tc: ThemeColors) {
+    layout.activations.forEach { bar ->
+        val topLeft = Offset(bar.box.x.dp.toPx(), bar.box.y.dp.toPx())
+        val size = Size(bar.box.width.dp.toPx(), bar.box.height.dp.toPx())
+        drawRect(color = tc.p2, topLeft = topLeft, size = size)
+        val left = topLeft.x
+        val top = topLeft.y
+        val right = topLeft.x + size.width
+        val bottom = topLeft.y + size.height
+        val strokeWidth = 1.dp.toPx()
+        drawLine(color = tc.br, start = Offset(left, top), end = Offset(right, top), strokeWidth = strokeWidth) // top edge
+        drawLine(color = tc.br, start = Offset(left, top), end = Offset(left, bottom), strokeWidth = strokeWidth) // left edge
+        drawLine(color = tc.br, start = Offset(right, top), end = Offset(right, bottom), strokeWidth = strokeWidth) // right edge
+        if (!bar.unmatched) {
+            // bottom edge — omitted when unmatched, mirroring Seq3Raster.paintActivationBar
+            drawLine(color = tc.br, start = Offset(left, bottom), end = Offset(right, bottom), strokeWidth = strokeWidth)
+        }
     }
 }
 

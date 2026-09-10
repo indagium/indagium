@@ -1100,4 +1100,93 @@ class Seq3LayoutTest {
 
         assertEquals(listOf("r2", "r3"), picked)
     }
+
+    // ── WP2: UML activation bars ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun rowYPositionsAreIdenticalWithActivationsOnAndOff() {
+        // The single most important test in this work package: activation bars are drawn ON TOP
+        // of the existing lifeline/rows and must add ZERO vertical pitch. If they changed pitch,
+        // flipping showActivations would reflow the entire diagram and every OTHER geometry test
+        // in this file would need new numbers the moment the toggle's default ever changed.
+        val baseDoc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("call1", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("call2", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("ret1", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(3, ts = 3_000L))),
+                message("ret2", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(4, ts = 4_000L))),
+            ),
+        )
+        val layoutOff = layoutSeq3(baseDoc.copy(showActivations = false), opts())
+        val layoutOn = layoutSeq3(baseDoc.copy(showActivations = true), opts())
+
+        assertEquals(layoutOff.rows.map { it.y }, layoutOn.rows.map { it.y }, "activation bars must add ZERO vertical pitch to any row")
+        assertEquals(layoutOff.height, layoutOn.height, "toggling activations must never reflow the diagram's own height")
+        // Sanity check so the equality above isn't vacuously true because this fixture happens to
+        // produce no bars at all.
+        assertTrue(layoutOn.activations.isNotEmpty(), "this fixture must actually produce bars when the toggle is on")
+    }
+
+    @Test
+    fun aBalancedCallReturnPairProducesOneActivationBarSpanningCallToReturnOnTheCalleesColumn() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("call", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("ret", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+            showActivations = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val callRow = layout.rows.single { it.messageId == "call" }
+        val returnRow = layout.rows.single { it.messageId == "ret" }
+        val bar = layout.activations.single()
+
+        assertEquals("B", bar.lifelineId, "the CALLEE's column opens the bar, not the caller's")
+        assertEquals(callRow.y, bar.box.y, "the bar must start exactly where the call arrow lands")
+        assertEquals(returnRow.y, bar.box.y + bar.box.height, "the bar must end exactly where the return arrow departs")
+        assertFalse(bar.unmatched, "a real RETURN closed this span")
+    }
+
+    @Test
+    fun showActivationsFalseYieldsAnEmptyActivationsList() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("call", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("ret", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+            showActivations = false,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.activations.isEmpty())
+    }
+
+    @Test
+    fun aNestedCallReturnPairProducesDepthZeroAndOneWithTheDeeperBarOffsetRight() {
+        // Two CALLs into B before either RETURN — the second CALL is a reentrant call while the
+        // first is still executing, so it opens at depth 1; the RETURNs then close LIFO (ret1
+        // closes call2's depth-1 span first, ret2 closes call1's depth-0 span).
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("call1", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("call2", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("ret1", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(3, ts = 3_000L))),
+                message("ret2", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(4, ts = 4_000L))),
+            ),
+            showActivations = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(2, layout.activations.size)
+        val outer = layout.activations.single { it.depth == 0 }
+        val inner = layout.activations.single { it.depth == 1 }
+        assertEquals("B", outer.lifelineId)
+        assertEquals("B", inner.lifelineId)
+        assertTrue(inner.box.x > outer.box.x, "a deeper (reentrant) activation must be inset further right than its parent")
+    }
 }
