@@ -156,7 +156,13 @@ fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List
                     closedSpans += Seq3ActivationSpan(event.fromLifelineId, startIndex, event.index, depth, unmatched = false)
                 } // Rule 2: an empty stack means an unmatched return — dropped, opens/closes nothing.
             }
-            Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE -> Unit // neutral: no push, no pop
+            // WP9 enum append forces a decision here (this file is otherwise off limits per that
+            // package's brief) — LOST/FOUND join the existing neutral bucket, not a new one: both
+            // always have a null `toLifelineId` (same as NOTE) and Seq3Emitters' own
+            // `activationEventOf` already maps their emission to a neutral Seq3Kind.NOTE
+            // activation event for the identical reason, so this is the one answer consistent
+            // with that precedent, not a new decision made from scratch.
+            Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> Unit // neutral: no push, no pop
         }
     }
 

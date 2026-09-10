@@ -385,6 +385,12 @@ private fun strokeFor(kind: Seq3Kind): BasicStroke {
     return when (kind) {
         Seq3Kind.RETURN -> BasicStroke(width, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER, 10f, dash, 0f)
         Seq3Kind.ASYNC -> BasicStroke(width, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, dash, 0f)
+        // Never actually reached: LOST/FOUND always lay out as a Seq3UnresolvedStubRow, painted by
+        // paintStubRow below, not paintArrowRow (this function's only caller). Kept as its own
+        // branch (not folded into CALL/SELF/NOTE) purely so it stays self-documenting if that ever
+        // changes — `style.dash` is already null for both per Seq3ArrowStyle's own [LOST]/[FOUND]
+        // branch, so the plain `BasicStroke(width)` below is the only value consistent with it.
+        Seq3Kind.LOST, Seq3Kind.FOUND -> BasicStroke(width)
         Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE -> BasicStroke(width)
     }
 }
@@ -430,7 +436,19 @@ private fun paintSelfLoopRow(g: Graphics2D, row: Seq3SelfLoopRow, theme: Seq3Ras
     row.badgeBox?.let { paintBadge(g, "×${row.repeatCount}", it, theme) }
 }
 
+// WP9: one row shape, two stories — dispatch on [Seq3UnresolvedStubRow.terminal] rather than
+// duplicating the line-drawing into three copies. See that field's own doc for why this stayed
+// ONE row type instead of a new Seq3RowGeometry subtype.
 private fun paintStubRow(g: Graphics2D, row: Seq3UnresolvedStubRow, theme: Seq3RasterTheme) {
+    when (row.terminal) {
+        Seq3StubTerminal.DROP_PILL -> paintUnresolvedStubRow(g, row, theme)
+        Seq3StubTerminal.LOST, Seq3StubTerminal.FOUND -> paintLostFoundStubRow(g, row, theme)
+    }
+}
+
+/** A genuinely still-unresolved message — the pre-WP9 shape, unchanged: dashed amber line, open
+ *  (outlined, not filled) circle terminal, and the "drop on a lifeline" pill. */
+private fun paintUnresolvedStubRow(g: Graphics2D, row: Seq3UnresolvedStubRow, theme: Seq3RasterTheme) {
     g.color = Color(theme.warn, true)
     g.stroke = BasicStroke(STROKE_THIN, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND, 10f, DASH_WARN, 0f)
     g.draw(java.awt.geom.Line2D.Double(row.fromX, row.y, row.stubEndX, row.y))
@@ -445,6 +463,24 @@ private fun paintStubRow(g: Graphics2D, row: Seq3UnresolvedStubRow, theme: Seq3R
     g.font = fontFor(Seq3FontRole.STUB)
     val fm = g.fontMetrics
     g.drawString(row.label, (pill.x + PILL_ARC / 2).roundToInt(), (pill.y + pill.height / 2 + fm.ascent / 2).roundToInt())
+}
+
+/** LOST/FOUND (WP9): a solid line — [seq3ArrowStyle]'s own LOST/FOUND value is `dash = null,
+ *  thin = false`, a resolved fact, not the amber "needs attention" dash above — ending in a
+ *  FILLED circle, UML's real lost/found terminal glyph and the actual stand-in for an arrowhead
+ *  on a message with only one real endpoint. Filled (not outlined, unlike DROP_PILL's open circle
+ *  above) is what makes the two terminals tell apart at a glance; see Seq3Canvas's
+ *  `Seq3RowOverlay`/draw pass for the identical choice on the Compose side — this file's own
+ *  header: the two renderers must draw the same thing. No pill: the message is already resolved,
+ *  so there is nothing to drop onto a lifeline (Seq3UnresolvedStubRow.terminal's own doc) — just
+ *  the plain label. */
+private fun paintLostFoundStubRow(g: Graphics2D, row: Seq3UnresolvedStubRow, theme: Seq3RasterTheme) {
+    g.color = Color(theme.arrow, true)
+    g.stroke = BasicStroke(STROKE_THICK)
+    g.draw(java.awt.geom.Line2D.Double(row.fromX, row.y, row.stubEndX, row.y))
+    val r = ARROWHEAD_W
+    g.fill(java.awt.geom.Ellipse2D.Double(row.stubEndX - r, row.y - r, r * 2, r * 2))
+    paintLabel(g, row.label, row.labelBox, theme.label, centered = false)
 }
 
 private fun paintMessageNoteRow(g: Graphics2D, row: Seq3MessageNoteRow, theme: Seq3RasterTheme) {

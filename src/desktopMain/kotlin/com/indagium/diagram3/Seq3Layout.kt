@@ -156,11 +156,30 @@ data class Seq3SelfLoopRow(
     val badgeBox: Seq3Box?,
 ) : Seq3RowGeometry()
 
+/** What a [Seq3UnresolvedStubRow] draws at its far ([Seq3UnresolvedStubRow.stubEndX]) end — added
+ *  WP9 so one row shape can serve two different stories without a whole new [Seq3RowGeometry]
+ *  subtype (that would cost nine exhaustive-`when` updates across Seq3Layout/Seq3Raster/Seq3Canvas
+ *  for what is, visually, the same line-plus-terminal row). [DROP_PILL] is the pre-WP9 shape: a
+ *  genuinely unresolved message, dashed amber, ending in the "drop on a lifeline" affordance.
+ *  [LOST]/[FOUND] are UML's own lost/found message terminal — a small FILLED circle, no drop pill
+ *  (the message is already resolved; offering to "drop" it onto a lifeline would misrepresent
+ *  that) — see [Seq3Kind.LOST]/[Seq3Kind.FOUND]'s own doc. */
+enum class Seq3StubTerminal { DROP_PILL, LOST, FOUND }
+
 /** An unresolved ([Seq3Message.toLifelineId] == null) message — design spec §04: "Unresolved
  *  messages draw as a dashed amber stub ending in a `drop on a lifeline` pill — never as nothing."
  *  Always exactly ONE row per message regardless of [Seq3Message.repeat]: there is no second
  *  lifeline to fan the repeat out across yet, so [repeatCount] is carried for the badge instead of
- *  being expanded into multiple stub rows. */
+ *  being expanded into multiple stub rows.
+ *
+ *  WP9: this row shape is now also how [Seq3Kind.LOST]/[Seq3Kind.FOUND] lay out — both also have
+ *  a null `toLifelineId` by construction, and the row is otherwise exactly what a lost/found
+ *  message needs (one real endpoint, a line running off toward the unobservable side). [terminal]
+ *  (appended LAST, per this codebase's field-versioning convention) is the only thing that tells
+ *  the two renderers which of the three stories to paint; [dropPill] stays non-null and populated
+ *  for a LOST/FOUND row too (cheaper than making it nullable for a box neither renderer reads in
+ *  that case) but must not be painted — see Seq3Raster's `paintStubRow`/Seq3Canvas's
+ *  `Seq3RowOverlay` for the actual branch. */
 data class Seq3UnresolvedStubRow(
     override val messageId: String,
     override val y: Double,
@@ -174,6 +193,7 @@ data class Seq3UnresolvedStubRow(
     val labelBox: Seq3Box,
     val dropPill: Seq3Box,
     val repeatCount: Int,
+    val terminal: Seq3StubTerminal = Seq3StubTerminal.DROP_PILL,
 ) : Seq3RowGeometry()
 
 /** A [Seq3Kind.NOTE] message — renders anchored on one lifeline, distinct from a [Seq3NoteBox]
@@ -646,6 +666,9 @@ private sealed class Emission {
         override val entryId: Int?,
         override val timestampMillis: Long?,
         val rawTimestamp: String,
+        /** WP9: which [Seq3StubTerminal] `buildStubRow` should draw — derived from the owning
+         *  message's [Seq3Kind] once, here, rather than re-deriving it at build time. */
+        val kind: Seq3Kind,
     ) : Emission()
 
     data class Note(
@@ -698,6 +721,7 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
                 occ?.entryId,
                 message.primaryTimestampMillis,
                 message.primaryRawTimestamp,
+                message.kind,
             ),
         )
     }
@@ -1293,14 +1317,40 @@ private fun buildSelfRow(e: Emission.Self, req: RowRequirement, lifelineIndex: M
 // layout, so the pill still visually "collects" the label text the same way it always did. The
 // vertical placement (label above the line, pill below, separated by STUB_LABEL_PILL_GAP so their
 // y-ranges never overlap — item 10 of the phase-5 post-ship plan) is unchanged.
+// No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
+// silently inheriting the DROP_PILL terminal meant for a genuinely unresolved CALL/RETURN/ASYNC/
+// SELF. NOTE never reaches buildStubRow (expandForLayout intercepts it into Emission.Note first).
+private fun seq3StubTerminalFor(kind: Seq3Kind): Seq3StubTerminal = when (kind) {
+    Seq3Kind.LOST -> Seq3StubTerminal.LOST
+    Seq3Kind.FOUND -> Seq3StubTerminal.FOUND
+    Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC, Seq3Kind.SELF, Seq3Kind.NOTE -> Seq3StubTerminal.DROP_PILL
+}
+
 private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {
     val idx = lifelineIndex[e.fromLifelineId] ?: return null
     val fromX = centers[idx]
-    val stubEndX = fromX - STUB_W
-    val rightAlignX = stubEndX - LABEL_PAD
+    val terminal = seq3StubTerminalFor(e.kind)
+    // FOUND is the deliberate mirror of DROP_PILL/LOST's leftward layout, not a reuse of it: the
+    // WP7 comment above this function (see its own header on why an ordinary unresolved stub
+    // extends LEFT — "the tag's own lifeline reads as the CALLEE") doesn't apply to FOUND, whose
+    // whole point is the opposite reading ("an external stimulus arrived HERE"). Extending right
+    // keeps a found terminal visually distinct from a lost one at a glance instead of the two
+    // differing only in fill color, and stops the two from ever literally overlapping when a
+    // document has both kinds on adjacent rows of the same lifeline.
+    val extendRight = terminal == Seq3StubTerminal.FOUND
+    val stubEndX = if (extendRight) fromX + STUB_W else fromX - STUB_W
     val pillWidth = req.labelWidth.coerceAtLeast(1.0) + 2 * PILL_PAD_H
-    val labelBox = Seq3Box(rightAlignX - req.labelWidth, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
-    val pill = Seq3Box(rightAlignX - pillWidth, y + STUB_LABEL_PILL_GAP, pillWidth, PILL_H)
+    val labelBox: Seq3Box
+    val pill: Seq3Box
+    if (extendRight) {
+        val leftAlignX = stubEndX + LABEL_PAD
+        labelBox = Seq3Box(leftAlignX, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
+        pill = Seq3Box(leftAlignX, y + STUB_LABEL_PILL_GAP, pillWidth, PILL_H)
+    } else {
+        val rightAlignX = stubEndX - LABEL_PAD
+        labelBox = Seq3Box(rightAlignX - req.labelWidth, y - ROW_H / 2, req.labelWidth, ROW_H / 2)
+        pill = Seq3Box(rightAlignX - pillWidth, y + STUB_LABEL_PILL_GAP, pillWidth, PILL_H)
+    }
     val row = Seq3UnresolvedStubRow(
         e.messageId,
         y,
@@ -1314,12 +1364,15 @@ private fun buildStubRow(e: Emission.Stub, req: RowRequirement, lifelineIndex: M
         labelBox,
         pill,
         e.repeatCount,
+        terminal,
     )
     val pitch = ROW_H / 2 + STUB_LABEL_PILL_GAP + PILL_H + ROW_H / 2
-    // Unlike the old right-pointing stub, this row no longer extends past its own lifeline's
-    // center on the right — its rightmost touched x is simply fromX (rowXExtent already reports
-    // both fromX and the (now leftward) stubEndX for fragment/bounds purposes).
-    return BuiltRow(row, pitch, fromX)
+    // Unlike the old right-pointing stub, a leftward (DROP_PILL/LOST) row no longer extends past
+    // its own lifeline's center on the right — its rightmost touched x is simply fromX. A FOUND
+    // row is the one exception, deliberately: it extends right, so ITS rightmost touched x is the
+    // far end of the stub, not fromX (rowXExtent already reports both fromX and stubEndX for
+    // fragment/bounds purposes regardless of which is numerically larger).
+    return BuiltRow(row, pitch, if (extendRight) stubEndX else fromX)
 }
 
 private fun buildNoteRow(e: Emission.Note, req: RowRequirement, lifelineIndex: Map<String, Int>, centers: DoubleArray, y: Double): BuiltRow? {

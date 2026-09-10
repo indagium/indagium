@@ -122,8 +122,19 @@ data class Seq3OccurrenceRef(
 /** Arrow kind. [NOTE] is a message that renders as a canvas/text note anchored on
  *  [Seq3Message.fromLifelineId] rather than as an arrow at all — [Seq3Message.toLifelineId] is
  *  meaningless for it and emitters must not treat a null target on a NOTE message as
- *  needs-target. */
-enum class Seq3Kind { CALL, RETURN, ASYNC, SELF, NOTE }
+ *  needs-target.
+ *
+ *  [LOST] and [FOUND] are UML's own answer to "sender known, receiver not observable" (and its
+ *  mirror, "receiver known, sender not observable") — appended last so `Seq3QueuePanel`'s
+ *  positional `SegmentedControl` over `entries` keeps CALL/RETURN/ASYNC/SELF/NOTE at their
+ *  existing indices. Exactly like [NOTE], both use ONLY [Seq3Message.fromLifelineId];
+ *  [Seq3Message.toLifelineId] is meaningless for them and is never treated as needs-target
+ *  (see [Seq3Message.state]). [LOST] draws from `fromLifelineId` out to a filled circle — "this
+ *  component sent something; we cannot see who received it." [FOUND] draws from a filled circle
+ *  in to `fromLifelineId` — "something outside the captured system triggered this component."
+ *  Reading `fromLifelineId` as the *receiver* for FOUND (rather than adding a nullable source
+ *  field) is what keeps both kinds inside the existing one-endpoint model. */
+enum class Seq3Kind { CALL, RETURN, ASYNC, SELF, NOTE, LOST, FOUND }
 
 /** How a run of [Seq3Message.occurrences] draws on the canvas/in exported text.
  *  [Seq3Message.repeatThreshold] only matters for [COLLAPSE_ABOVE] — the other two modes ignore
@@ -220,11 +231,14 @@ data class Seq3Message(
      * `model/Model.kt`'s own note on `LogAnalysis.pending`). Deriving it here means it can't drift.
      */
     val state: Seq3State
-        get() = if (toLifelineId == null && kind != Seq3Kind.NOTE) {
+        get() = if (toLifelineId == null && kind != Seq3Kind.NOTE && kind != Seq3Kind.LOST && kind != Seq3Kind.FOUND) {
             // A NOTE renders anchored on `fromLifelineId` and has no target BY DEFINITION (see
-            // [Seq3Kind.NOTE]), so a null target on one is not a defect to be queued. Without this
-            // guard every note would inflate the "N messages need a target" banner and enter the
-            // guided pass as a row the pass structurally cannot resolve.
+            // [Seq3Kind.NOTE]), so a null target on one is not a defect to be queued. LOST and
+            // FOUND are the same story: their null `toLifelineId` is not an unresolved defect,
+            // it's the honest UML shape (lost/found message) — a message whose receiver/sender
+            // genuinely isn't in the captured range. Without this guard every one of them would
+            // inflate the "N messages need a target" banner and enter the guided pass as a row
+            // the pass structurally cannot resolve.
             Seq3State.NEEDS_TARGET
         } else if (authoring == Seq3Authoring.EDITED) {
             Seq3State.EDITED

@@ -453,6 +453,23 @@ class Seq3CodecTest {
     }
 
     @Test
+    fun lostAndFoundKindsRoundTripByName() {
+        // No codec change needed for WP9 (Seq3Codec decodes `Seq3Kind` generically by name — see
+        // this file's own `enumFromName` usage) — this test exists to PROVE that, not to exercise
+        // new code. `toLifelineId` is forced to null on the way in: it's meaningless for LOST/
+        // FOUND (Seq3Kind's own doc), so a realistic fixture for either kind never has one.
+        listOf(Seq3Kind.LOST, Seq3Kind.FOUND).forEach { kind ->
+            val original = fixedDocument().let { doc ->
+                doc.copy(messages = doc.messages.map { it.copy(kind = kind, toLifelineId = null) })
+            }
+            val parsed = parseSeq3Note(encodeSeq3Note(original))
+            assertNotNull(parsed)
+            assertEquals(original, parsed.document)
+            assertEquals(kind, parsed.document.messages.single().kind)
+        }
+    }
+
+    @Test
     fun hideKindLabelRoundTripsThroughEncodeAndParse() {
         val original = fixedDocument().copy(
             fragments = listOf(

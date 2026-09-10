@@ -1274,7 +1274,10 @@ private fun Seq3AddCustomDialog(
             ?.let { Seq3InsertionPosition.AfterMessage(it.id) }
         Seq3CustomPositionMode.INDEX -> positionValue.toIntOrNull()?.let(Seq3InsertionPosition::AtIndex)
     }
-    val validEndpoints = fromId != null && (kind == Seq3Kind.NOTE || toId != null)
+    // NOTE and LOST/FOUND all have a meaningless `toLifelineId` (Seq3Kind's own doc) — same
+    // "no target required" gate for all three, not a NOTE-only special case.
+    val targetless = kind == Seq3Kind.NOTE || kind == Seq3Kind.LOST || kind == Seq3Kind.FOUND
+    val validEndpoints = fromId != null && (targetless || toId != null)
     val canAdd = message.isNotBlank() && validEndpoints && position != null &&
         (position !is Seq3InsertionPosition.AtIndex || position.index in 0..document.messages.size)
 
@@ -1283,7 +1286,7 @@ private fun Seq3AddCustomDialog(
         val selectedPosition = position ?: return null
         return Seq3CustomMessageSpec(
             fromLifelineId = selectedFrom,
-            toLifelineId = if (kind == Seq3Kind.NOTE) null else toId,
+            toLifelineId = if (targetless) null else toId,
             text = message,
             timestampMillis = parseSeq3Timestamp(timestamp),
             rawTimestamp = timestamp,
@@ -1301,7 +1304,10 @@ private fun Seq3AddCustomDialog(
         // position `when` would only warn, not fail, when Seq3Kind grows a member.
         toId = when (next) {
             Seq3Kind.SELF -> fromId
-            Seq3Kind.NOTE -> null
+            // Same as NOTE: `toLifelineId` is meaningless for a lost/found message, so switching
+            // TO one of these kinds must drop whatever target was picked for the PREVIOUS kind —
+            // leaving it in place would silently resurrect it the moment the user switched back.
+            Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND -> null
             Seq3Kind.CALL, Seq3Kind.RETURN, Seq3Kind.ASYNC -> toId ?: document.lifelines.firstOrNull { it.id != fromId }?.id ?: fromId
         }
     }
@@ -1327,13 +1333,17 @@ private fun Seq3AddCustomDialog(
             AppText("Add custom message", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Seq3CustomLifelinePicker("From", document, fromId, Modifier.weight(1f)) { fromId = it; if (kind == Seq3Kind.SELF) toId = it }
-                if (kind != Seq3Kind.NOTE && kind != Seq3Kind.SELF) {
+                if (kind != Seq3Kind.NOTE && kind != Seq3Kind.SELF && kind != Seq3Kind.LOST && kind != Seq3Kind.FOUND) {
                     Seq3CustomLifelinePicker("To", document, toId, Modifier.weight(1f)) { toId = it }
                 }
             }
             AppText("Kind", color = tc.td, fontSize = 10.sp)
             SegmentedControl(
-                options = listOf("call", "return", "async", "self", "note"),
+                // "note" is here (unlike MESSAGE_KIND_OPTIONS' compact per-row menu, which
+                // deliberately excludes it) because this dialog is custom-message CREATION, where
+                // authoring any kind from scratch — including one with no target — makes sense.
+                // LOST/FOUND belong in that same "targetless kinds you can author" bucket.
+                options = listOf("call", "return", "async", "self", "note", "lost", "found"),
                 selectedIndices = setOf(Seq3Kind.entries.indexOf(kind)),
                 onToggle = { chooseKind(Seq3Kind.entries[it]) },
                 fillWidth = true,
@@ -2670,6 +2680,13 @@ private fun Seq3RowEndpointsLine(
             Seq3EndpointChip(document, message.toLifelineId, emphasized = true) { lifelineId ->
                 state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(setOf(message.id), Seq3BulkAction.SetTo(lifelineId)))
             }
+        } else if (message.kind == Seq3Kind.LOST || message.kind == Seq3Kind.FOUND) {
+            // Resolved, not a defect (Seq3Kind's own doc): no "set target" chip — there is
+            // nothing to set — but an honest word beats the row silently trailing off after the
+            // arrow, the same "first-class element, not a gap to fill" reasoning this whole
+            // package exists to apply. Plain secondary text, not the amber warn styling below:
+            // amber means "needs attention", and this row doesn't.
+            AppText(if (message.kind == Seq3Kind.LOST) "lost" else "found", color = tc.ts, fontSize = 10.sp)
         } else if (message.kind != Seq3Kind.NOTE) {
             Seq3DropdownButton(
                 label = "set target", labelColor = tc.warn, fillColor = tc.warnBg, alwaysFilled = true, menuWidth = 150.dp,
@@ -2775,7 +2792,13 @@ private fun Seq3MessageControlsLine(
 }
 
 /** Per-row message kind control. Notes remain supported for custom-message creation, but are not
- * offered as an option in the compact queue menu. */
+ * offered as an option in the compact queue menu. WP9: LOST/FOUND follow the same rule and are
+ * deliberately left OUT of [MESSAGE_KIND_OPTIONS] for the identical reason — flipping an arbitrary
+ * row's kind to "lost" from a dropdown with no other context reads as a stray misclick, not an
+ * intentional authoring choice, the same objection that already kept NOTE out. The sanctioned
+ * entry point for LOST is "Mark as lost" in the guided pass (`ui/Seq3GuidedPass.kt`), an explicit,
+ * one-row-at-a-time verb — and, like NOTE, authoring one from scratch via "Add custom message"
+ * still works (its own SegmentedControl lists all seven kinds). */
 @Composable
 private fun Seq3MessageKindPicker(
     state: AppState,

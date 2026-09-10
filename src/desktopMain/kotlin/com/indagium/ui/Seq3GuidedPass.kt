@@ -395,6 +395,15 @@ private fun Seq3GuidedSecondaryActions(
         Seq3GuidedSecondaryButton("Make it a self-call") {
             applySeq3GuidedChoice(state, session, view, Seq3Command.GuidedSelfCall(message.id))
         }
+        // "Mark as lost" — the exact structural analogue of "Make it a self-call" just above: a
+        // one-click verb that resolves this row without picking a target, because a lost message
+        // genuinely has none to pick. Routed through the same applySeq3GuidedChoice every other
+        // choice here uses, so it gets the focus-reclaim at that function's own requestFocus()
+        // call for free — see this file's header on why a click here must never leave the guided
+        // pass's root key handler unable to hear Esc/1-9 afterward.
+        Seq3GuidedSecondaryButton("Mark as lost") {
+            applySeq3GuidedChoice(state, session, view, Seq3Command.GuidedMarkAsLost(message.id))
+        }
         Spacer(Modifier.weight(1f))
         ToolbarBtn(
             label = "Skip · S",
