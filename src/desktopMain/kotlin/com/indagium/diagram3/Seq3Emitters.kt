@@ -851,6 +851,92 @@ private fun delaySpan(aliases: List<String>): String {
     return if (first == last) first else "$first,$last"
 }
 
+// ── State invariants (WP18) ─────────────────────────────────────────────────────────────────
+//
+// Neither dialect has a StateInvariant construct — both degrade to a note anchored on the ONE
+// lifeline the promoted capture's message logged from ([Seq3Message.fromLifelineId], per
+// [Seq3StateInvariant]'s own doc), consistent with how a [Seq3Delay]/[Seq3FragmentKind.GROUP]
+// already degrade to a note when their own dialect has nothing better for them either. Braces
+// around the value (`{captureName=value}`) are UML's own state-invariant/guard notation — reusing
+// them here is what keeps the degraded form visually distinguishable from an ordinary note, so a
+// reader of the exported text alone can still tell "this is a state assertion" from "this is a
+// comment" (this deliverable's own brief).
+//
+// Unlike [Seq3Delay]/[Seq3Note] (one document-wide anchor each, because their own text is a single
+// constant), a state invariant is anchored at EVERY emission index that draws its message — the
+// row's PER-OCCURRENCE value is the whole point, the identical rule [Seq3StateInvariantBox]
+// (Seq3Layout.kt) already applies to the canvas/PNG counterpart of this same marker.
+
+private data class Seq3StateInvariantLine(val lifelineIdx: Int, val text: String)
+
+/**
+ * Resolves ONE [Seq3StateInvariant] to the `(emission index, line)` pairs it draws — see this
+ * section's own header for the "every drawn row, not just one anchor" reasoning. Mirrors
+ * `buildStateInvariantBoxes` (Seq3Layout.kt) exactly: same "one row standing for MORE occurrences
+ * than it drew needs [collapsedStateInvariantValue]'s summary, everything else is a plain
+ * per-occurrence lookup" rule, just walking [Seq3EmissionPlan.emissions] instead of already-placed
+ * row geometry — the two files stay independent copies by this package's own design (this file's
+ * header: Seq3Emitters is phase-1, not restructured around Seq3Layout's shape), so this is
+ * deliberately its own small function rather than a shared call between the two.
+ *
+ * A dangling [Seq3StateInvariant.messageId] (names no message in the document, or one whose
+ * `fromLifelineId` is hidden/unresolvable) or a [Seq3StateInvariant.captureName] no longer present
+ * on any visible occurrence both resolve to an empty list — the same "never throw" contract
+ * `buildStateInvariantBoxes` documents for itself.
+ */
+private fun stateInvariantLinesForOne(
+    invariant: Seq3StateInvariant,
+    messagesById: Map<String, Seq3Message>,
+    emissionIndicesByMessage: Map<String, List<Int>>,
+    plan: Seq3EmissionPlan,
+): List<Pair<Int, Seq3StateInvariantLine>> {
+    val message = messagesById[invariant.messageId] ?: return emptyList()
+    val lifelineIdx = plan.lifelineIndex[message.fromLifelineId] ?: return emptyList()
+    val indices = emissionIndicesByMessage[invariant.messageId].orEmpty()
+    val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+    // See this section's own header / buildStateInvariantBoxes' identical doc for exactly why this
+    // predicate (not a per-emission-type `when`) is the right "does this one row stand for more
+    // than one occurrence" test.
+    val collapsed = indices.size == 1 && visibleOccurrences.size > 1
+    return indices.mapNotNull { index ->
+        val text = if (collapsed) {
+            collapsedStateInvariantValue(invariant.captureName, visibleOccurrences)
+        } else {
+            val entryId = plan.emissions[index].occurrenceEntryId ?: return@mapNotNull null
+            visibleOccurrences.firstOrNull { it.entryId == entryId }?.captureValues?.get(invariant.captureName)
+        } ?: return@mapNotNull null
+        index to Seq3StateInvariantLine(lifelineIdx, "${invariant.captureName}=$text")
+    }
+}
+
+/** Every VISIBLE [Seq3Document.stateInvariants], resolved and grouped by the emission index each
+ *  line is written at — keyed the same way [toMermaid]/[toPlantUml]'s own `notesByAnchor`/
+ *  `delaysByAnchor` already are, so the emit loop can look lines up by its own `forEachIndexed`
+ *  index `i`. */
+private fun stateInvariantLinesByAnchor(document: Seq3Document, plan: Seq3EmissionPlan): Map<Int, List<Seq3StateInvariantLine>> {
+    if (document.stateInvariants.isEmpty()) return emptyMap()
+    val messagesById = document.messages.associateBy { it.id }
+    val emissionIndicesByMessage = plan.emissions.withIndex().groupBy({ it.value.messageId }, { it.index })
+    return document.stateInvariants
+        .filter { it.visibility == Seq3Visibility.VISIBLE }
+        .flatMap { invariant -> stateInvariantLinesForOne(invariant, messagesById, emissionIndicesByMessage, plan) }
+        .groupBy({ it.first }, { it.second })
+}
+
+/** Shared append loop only — NOT a merge of the two dialects' own formatting (this file's header:
+ *  DO NOT unify per-dialect branches). [lineFor] is the one dialect-specific piece, passed in by
+ *  reference at each call site, exactly like [appendDividerLines]'s own `dividerLineFor`. Pulled out
+ *  of `toMermaid`/`toPlantUml` themselves purely to keep both under detekt's CyclomaticComplexMethod
+ *  threshold — the same reason [appendDividerLines]/[appendActivationLines] already exist as their
+ *  own functions rather than an inline `?.forEach` at the call site. */
+private fun StringBuilder.appendStateInvariantLines(
+    linesByAnchor: Map<Int, List<Seq3StateInvariantLine>>,
+    i: Int,
+    lineFor: (Seq3StateInvariantLine) -> String,
+) {
+    linesByAnchor[i]?.forEach { line -> append(lineFor(line)).append('\n') }
+}
+
 // ── Activation bars (WP3) ────────────────────────────────────────────────────────────────────
 //
 // `Seq3Activation.kt`'s `seq3ActivationSpans` is the ONE shared call/return pairing this file and
@@ -1073,6 +1159,8 @@ fun Seq3Document.toMermaid(): String {
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
+    // WP18: see this file's own "State invariants" header for the degraded-note shape.
+    val stateInvariantsByAnchor = stateInvariantLinesByAnchor(this, plan)
     val activations = activationMaps(this, plan, visibleLifelines)
     // WP10: which emission index owns the `create`/`destroy` directive text for each lifeline.
     val lifecycle = lifecycleMaps(plan)
@@ -1148,6 +1236,8 @@ fun Seq3Document.toMermaid(): String {
             notesByAnchor[i]?.forEach { note ->
                 append("    Note over ").append(noteSpan(note, plan, aliases)).append(": ").append(mermaidEscape(note.text)).append('\n')
             }
+            // WP18: degraded StateInvariant marker — see this file's own "State invariants" header.
+            appendStateInvariantLines(stateInvariantsByAnchor, i) { line -> "    Note over ${aliasOf(line.lifelineIdx)}: {${mermaidEscape(line.text)}}" }
             closes[i]?.sortedByDescending { it.depth }?.forEach { append("    end\n") }
             // WP11: Mermaid has no delay/spacer construct — see this file's own "Time-gap markers"
             // header for why this stays a `Note over`, never "unified" with PlantUML's `...` below.
@@ -1210,6 +1300,9 @@ fun Seq3Document.toPlantUml(): String {
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
+    // WP18: see this file's own "State invariants" header for the degraded-note shape — same map,
+    // same rule, as toMermaid, so the two dialects never disagree on which row a marker attaches to.
+    val stateInvariantsByAnchor = stateInvariantLinesByAnchor(this, plan)
     val activations = activationMaps(this, plan, visibleLifelines)
     // WP10: which emission index owns the `create`/`destroy` directive text for each lifeline —
     // same map, same rule, as toMermaid, so the two dialects never disagree on which row is the
@@ -1277,6 +1370,12 @@ fun Seq3Document.toPlantUml(): String {
             notesByAnchor[i]?.forEach { note ->
                 append("note over ").append(noteSpan(note, plan, aliases)).append(": ").append(plantUmlEscape(note.text)).append('\n')
             }
+            // WP18: degraded StateInvariant marker — see this file's own "State invariants" header.
+            // PlantUML gets no real construct either (that section's own doc), so this reuses the
+            // same "note right of ONE lifeline" fallback shape [Seq3Emission.NoteLine]'s own
+            // PlantUML branch already uses just above, not `note over` — a state invariant decorates
+            // exactly one participant, never a span.
+            appendStateInvariantLines(stateInvariantsByAnchor, i) { line -> "note right of ${aliasOf(line.lifelineIdx)}: {${plantUmlEscape(line.text)}}" }
             // WP17: REF is skipped here, never PlantUML's own generic `end\n` — real PlantUML's
             // `ref over A, B : label` (plantUmlFragmentOpenLines) is a standalone statement, not a
             // block that encloses other statements the way alt/loop/opt/par/critical/group/neg/

@@ -504,6 +504,51 @@ data class Seq3Delay(
     val afterOccurrenceEntryId: Int? = null,
 )
 
+// ── State invariants (WP18) ─────────────────────────────────────────────────────────────────
+//
+// UML puts a `{state}` marker on a lifeline between messages: a StateInvariant, asserting what the
+// participant's state is at that point. The log already carries this — a `NAMED_VALUE` capture
+// (see [Seq3CaptureSource]) retains the key a `key=value` log line was parsed from, so a capture is
+// a genuine candidate for one, and unlike a [Seq3CaptureSource.POSITIONAL_RUN] capture, its key is
+// MEANINGFUL (it says WHAT the state is, not just that something varied there).
+//
+// Promotion is explicit, never auto-detected — this is the user's own decision, and it matches the
+// lesson from A9 (cut precisely because a heuristic over log text mangles more than it helps: no
+// "keys that look state-ish" rule lives anywhere in this package, here included). A document-level
+// list, exactly like [Seq3Delay] just above it and for the identical reason: a state invariant has
+// no endpoints of its own (nothing to draw an arrow between — it decorates ONE lifeline, the one
+// that logged the value) and must never enter the message queue or the "N messages need a target"
+// count. It is also what keeps this off the nine-site [Seq3RowGeometry] subtype tax [Seq3DelayBox]/
+// [Seq3ActivationBar] (Seq3Layout.kt) already avoid for the same shape of reason — see those types'
+// own doc.
+
+/** Promotes one [Seq3Capture] of [messageId]'s [Seq3Message.match] to a UML StateInvariant, drawn
+ *  as a small marker on [messageId]'s OWN [Seq3Message.fromLifelineId] — the component that logged
+ *  the line is the one whose state it is, never [Seq3Message.toLifelineId] (meaningless here the
+ *  same way it is for [Seq3Kind.NOTE]/[Seq3Kind.LOST]/[Seq3Kind.FOUND]).
+ *
+ *  [id] is caller-generated, mirroring [Seq3Delay.id]/[Seq3Fragment.id]/[Seq3Note.id] (all minted
+ *  by the UI layer via `UUID.randomUUID()` before the bulk action that creates them).
+ *
+ *  The rendered text is the promoted capture's PER-OCCURRENCE value (`Seq3Occurrence.captureValues
+ *  [captureName]`), never an authored string — that is the whole point of promoting a capture
+ *  instead of just adding a note: it says something DIFFERENT at each row a repeated message draws,
+ *  rather than repeating one constant. A [messageId] that no longer names a message in the document
+ *  (deleted, merged away) and a [captureName] no longer present on the named message's own
+ *  [Seq3Match.captures] (the pattern was edited after promotion) both draw nothing and never throw
+ *  — the same "a dangling reference draws, never crashes" contract [Seq3Delay.afterMessageId]/
+ *  [Seq3Fragment.refDiagramId] already document for themselves (see [Seq3Codec]'s own
+ *  `occurrenceRefFromMap` posture: a malformed element drops out on DECODE rather than failing the
+ *  whole document; a dangling-but-well-formed one, the case here, drops out on LAYOUT/EXPORT
+ *  instead, same "never crash" outcome either way). */
+data class Seq3StateInvariant(
+    val id: String,
+    val messageId: String,
+    val captureName: String,
+    /** Same meaning as [Seq3Delay.visibility] — see that field's own doc. */
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+)
+
 // ── Range ────────────────────────────────────────────────────────────────────────────────────
 
 /** How [Seq3Generator]'s `generateSeq3` selects which of the supplied entries to scan. Simplified
@@ -603,6 +648,11 @@ data class Seq3Document(
      *  for where the tag is actually composed, and that function's own doc for why it is signed
      *  (`+`/`-`), never clamped. */
     val showElapsed: Boolean = false,
+    /** WP18: UML StateInvariant markers, promoted from log captures by the user — see
+     *  [Seq3StateInvariant]'s own doc for the whole shape and why this is a document-level list, not
+     *  a [Seq3Kind]. Appended LAST (CLAUDE.md's "append-last field versioning" invariant). Defaults
+     *  empty so an old note decodes to its original, marker-free rendering, exactly like [delays]. */
+    val stateInvariants: List<Seq3StateInvariant> = emptyList(),
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────

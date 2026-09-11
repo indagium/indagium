@@ -334,6 +334,26 @@ sealed class Seq3BulkAction {
         override val targetsById: Boolean get() = true
     }
 
+    // ── State invariants (WP18) ─────────────────────────────────────────────────────────────
+    //
+    // Same "identify the target by its own id/param, entirely independent of the message
+    // selection" shape as the Delay verbs above — promotion always names its own [messageId] (the
+    // row the queue panel's "show as state invariant" action was invoked on), so requiring a
+    // non-empty `selectedIds` here would be the same pointless block [AddDelay]'s own doc already
+    // argues against.
+
+    /** Promotes one [Seq3Message.match] capture to a [Seq3StateInvariant] — see that type's own doc
+     *  (Seq3Model.kt) for the UML shape this renders as. Mirrors [AddDelay]'s "caller builds the
+     *  whole artifact, including its own fresh id" shape. */
+    data class AddStateInvariant(val stateInvariant: Seq3StateInvariant) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Un-promotes an existing state invariant, without touching the message/capture it named. */
+    data class DeleteStateInvariant(val stateInvariantId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
     /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
      *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
      *  round-trips. A no-op for [Seq3Kind.NOTE] (a note has no `to` — see [Seq3Kind.NOTE]'s own
@@ -396,6 +416,8 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.AddFragmentOperand -> applyAddFragmentOperand(document, action)
         is Seq3BulkAction.SetFragmentOperandGuard -> applySetFragmentOperandGuard(document, action)
         is Seq3BulkAction.RemoveFragmentOperand -> applyRemoveFragmentOperand(document, action)
+        is Seq3BulkAction.AddStateInvariant -> applyAddStateInvariant(document, action)
+        is Seq3BulkAction.DeleteStateInvariant -> applyDeleteStateInvariant(document, action)
         Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
@@ -712,6 +734,42 @@ private fun applySetDelayVisibility(document: Seq3Document, action: Seq3BulkActi
     if (document.delays.none { it.id == action.delayId }) return unapplied(document, "Unknown delay")
     return Seq3BulkResult(
         document.copy(delays = document.delays.map { if (it.id == action.delayId) it.copy(visibility = action.visibility) else it }),
+        applied = true,
+    )
+}
+
+// ── State invariants (WP18) ─────────────────────────────────────────────────────────────────
+
+/** Adds a new [Seq3StateInvariant] — see [Seq3BulkAction.AddStateInvariant]'s own doc and
+ *  [Seq3StateInvariant]'s own doc (Seq3Model.kt) for the UML shape it renders as. Same validation
+ *  shape as [applyAddDelay]: blank id/capture name, a colliding id, and an unknown
+ *  [Seq3StateInvariant.messageId] are all rejected. One check neither [applyAddDelay] nor any other
+ *  id-keyed add needs: the named capture must actually be one of the target message's OWN
+ *  [Seq3Match.captures] at promotion time — the queue panel picker only ever lists real ones, so
+ *  promoting one it never offered would be a defect in the caller, not a case to degrade
+ *  gracefully. A capture that is still valid now but stops being one LATER (a pattern edit after
+ *  promotion) is a different, ALLOWED case: that is [Seq3StateInvariant.captureName]'s own
+ *  "no longer present" contract — draws nothing, never throws — which is a Seq3Layout/Seq3Emitters
+ *  concern, not something this command rejects retroactively. */
+private fun applyAddStateInvariant(document: Seq3Document, action: Seq3BulkAction.AddStateInvariant): Seq3BulkResult {
+    val invariant = action.stateInvariant
+    val message = document.messages.firstOrNull { it.id == invariant.messageId }
+    return when {
+        invariant.id.isBlank() || invariant.captureName.isBlank() ->
+            unapplied(document, "State invariant id and capture name are required")
+        document.stateInvariants.any { it.id == invariant.id } -> unapplied(document, "State invariant id already exists")
+        message == null -> unapplied(document, "Unknown message")
+        message.match.captures.none { it.name == invariant.captureName } -> unapplied(document, "Unknown capture")
+        else -> Seq3BulkResult(document.copy(stateInvariants = document.stateInvariants + invariant), applied = true)
+    }
+}
+
+/** Un-promotes one state invariant without touching the message/capture it named. Same
+ *  unknown-id-is-a-safe-no-op contract as [applyDeleteDelay]. */
+private fun applyDeleteStateInvariant(document: Seq3Document, action: Seq3BulkAction.DeleteStateInvariant): Seq3BulkResult {
+    if (document.stateInvariants.none { it.id == action.stateInvariantId }) return unapplied(document, "Unknown state invariant")
+    return Seq3BulkResult(
+        document.copy(stateInvariants = document.stateInvariants.filterNot { it.id == action.stateInvariantId }),
         applied = true,
     )
 }

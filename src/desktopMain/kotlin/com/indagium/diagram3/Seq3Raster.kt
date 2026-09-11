@@ -222,6 +222,9 @@ private fun paintSeq3(g: Graphics2D, layout: Seq3Layout, theme: Seq3RasterTheme,
     layout.rows.forEach { paintRow(g, it, theme) }
     layout.notes.forEach { paintNoteBox(g, it, theme) }
     layout.delays.forEach { paintDelayBox(g, it, theme) }
+    // WP18: painted LAST, like layout.delays just above — a state invariant marker sits ON TOP of
+    // whatever row it decorates, never underneath it.
+    layout.stateInvariants.forEach { paintStateInvariantBox(g, it, theme) }
     if (footer != null) paintAttributionFooter(g, layout.width, layout.height, theme, footer)
 }
 
@@ -625,6 +628,29 @@ private fun paintDelayBox(g: Graphics2D, delay: Seq3DelayBox, theme: Seq3RasterT
     val tx = box.x + (box.width - fm.stringWidth(text)) / 2
     val ty = box.y + (box.height + fm.ascent - fm.descent) / 2
     g.drawString(text, tx.roundToInt(), ty.roundToInt())
+}
+
+// WP18: UML draws a StateInvariant as a small rounded box straddling the lifeline — a filled,
+// bordered pill, same visual family as [paintBadge] just above (this deliverable's own brief: use
+// EXISTING neutral roles, never add a [Seq3RasterTheme] field for a shape that needs nothing more
+// expressive than "a neutral filled rounded rect" to read correctly — see [paintActivationBar]'s own
+// identical argument). [theme.badgeBg]/[theme.badgeText] are the exact pair [paintBadge] already
+// paints an occurrence-count chip with; this adds ONE more use of them, plus [theme.headerBorder]
+// (the same neutral border every header chip already draws with) for a thin outline, so the marker
+// reads as its own bordered shape rather than a borderless badge that could be mistaken for one.
+private fun paintStateInvariantBox(g: Graphics2D, marker: Seq3StateInvariantBox, theme: Seq3RasterTheme) {
+    val box = marker.box
+    val arc = BADGE_ARC.toInt()
+    g.color = Color(theme.badgeBg, true)
+    g.fillRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), arc, arc)
+    g.color = Color(theme.headerBorder, true)
+    g.stroke = BasicStroke(STROKE_THIN)
+    g.drawRoundRect(box.x.roundToInt(), box.y.roundToInt(), box.width.roundToInt(), box.height.roundToInt(), arc, arc)
+    g.font = fontFor(Seq3FontRole.BADGE)
+    g.color = Color(theme.badgeText, true)
+    val fm = g.fontMetrics
+    val tx = box.x + (box.width - fm.stringWidth(marker.text)) / 2
+    g.drawString(marker.text, tx.roundToInt(), (box.y + box.height / 2 + fm.ascent / 2).roundToInt())
 }
 
 // ── Real AWT-backed Seq3TextMetrics — the source of truth layoutSeq3 measures against ─────────

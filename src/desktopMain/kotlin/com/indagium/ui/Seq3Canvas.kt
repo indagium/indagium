@@ -57,6 +57,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -101,6 +102,7 @@ import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3SelfLoopRow
+import com.indagium.diagram3.Seq3StateInvariantBox
 import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
@@ -433,6 +435,11 @@ private fun Seq3CanvasContent(
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row, docTheme) }
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
                         layout.delays.forEach { delay -> Seq3DelayLabelOverlay(state, session, view, delay, docTheme) }
+                        // WP18: shape painted in drawSeq3Diagram below (the shapes-vs-text split
+                        // WP6 already established for fragment dividers); the text itself is a
+                        // plain, non-interactive overlay — see Seq3StateInvariantTextOverlay's own
+                        // doc for why this one needs no edit/delete chrome of its own.
+                        layout.stateInvariants.forEach { marker -> Seq3StateInvariantTextOverlay(marker, docTheme) }
                         layout.lifelines.forEach { column -> Seq3LifelineChip(state, session, view, document, layout, column, density, docTheme) }
                     }
                 }
@@ -1108,6 +1115,12 @@ private fun DrawScope.drawSeq3Diagram(
             is Seq3ElisionRow -> Unit // text-only marker, drawn by the overlay composable
         }
     }
+    // WP18: StateInvariant markers — the SHAPE only (this file's established "shape in the draw
+    // pass, text in an overlay" split, WP6's own precedent for fragment dividers); the text itself
+    // is Seq3StateInvariantTextOverlay, drawn in the parent Box alongside every other text overlay.
+    // Drawn AFTER the row loop, mirroring Seq3Raster.paintSeq3's own ordering (layout.stateInvariants
+    // painted last, on top of the row it decorates) — the two renderers must draw the same thing.
+    drawSeq3StateInvariants(layout, tc)
     // User-observed correction: this used to draw a dashed rule spanning the full diagram width
     // for every delay. PlantUML's own `...label...` (plantuml.com's own "Delay" example, compared
     // against directly) draws no divider line at all — only the participants' own lifelines
@@ -1191,6 +1204,25 @@ private fun DrawScope.drawSeq3ActivationBars(layout: Seq3Layout, tc: ThemeColors
             // bottom edge — omitted when unmatched, mirroring Seq3Raster.paintActivationBar
             drawLine(color = tc.br, start = Offset(left, bottom), end = Offset(right, bottom), strokeWidth = strokeWidth)
         }
+    }
+}
+
+/**
+ * WP18: StateInvariant marker shapes — a small filled, bordered, rounded rect straddling the
+ * lifeline, from [Seq3StateInvariantBox]'s own geometry. Mirrors [drawSeq3ActivationBars]'s
+ * shape-only role just above (the text is [Seq3StateInvariantTextOverlay], a plain Compose overlay)
+ * and `Seq3Raster.paintStateInvariantBox`'s own fill/border pair — [tc.p2]/[tc.br] are the SAME
+ * neutral roles [drawSeq3ActivationBars] already paints a bar's fill/border with, and the identical
+ * pair that raster function's own doc argues for reusing rather than adding a new [Seq3RasterTheme]
+ * field — so this adds no new color to either renderer's palette.
+ */
+private fun DrawScope.drawSeq3StateInvariants(layout: Seq3Layout, tc: ThemeColors) {
+    val corner = CornerRadius(3.dp.toPx())
+    layout.stateInvariants.forEach { marker ->
+        val topLeft = Offset(marker.box.x.dp.toPx(), marker.box.y.dp.toPx())
+        val size = Size(marker.box.width.dp.toPx(), marker.box.height.dp.toPx())
+        drawRoundRect(color = tc.p2, topLeft = topLeft, size = size, cornerRadius = corner)
+        drawRoundRect(color = tc.br, topLeft = topLeft, size = size, cornerRadius = corner, style = Stroke(width = 1.dp.toPx()))
     }
 }
 
@@ -1553,6 +1585,26 @@ private fun Seq3BadgeChip(box: Seq3Box, count: Int, docTheme: ThemeColors) {
             .background(docTheme.p2, RoundedCornerShape(3.dp)).border(1.dp, docTheme.br, RoundedCornerShape(3.dp)),
         contentAlignment = Alignment.Center,
     ) { AppText("×$count", color = docTheme.ts, fontSize = 9.sp) }
+}
+
+/**
+ * WP18: the text overlay for one [Seq3StateInvariantBox] — plain, centered, non-interactive. Unlike
+ * [Seq3DelayLabelOverlay]/[Seq3FragmentLabelOverlay], this needs no edit/delete/hover chrome: its
+ * text is DERIVED (a promoted capture's own occurrence value — [Seq3StateInvariantBox]'s own doc),
+ * never authored, so there is nothing here for a user to rename in place. Promoting/un-promoting a
+ * capture happens in the queue panel's row info instead (`ui/Seq3QueuePanel.kt`'s
+ * `Seq3MessageInfo` — Deliverable 4's own home), never on the canvas. No `Modifier.clickable`/
+ * `Popup` here means no CLAUDE.md focus-reclaim dance is needed either — see this project's own
+ * "a dismissed Popup/clicked clickable steals keyboard focus" note for what this composable
+ * deliberately has nothing of.
+ */
+@Composable
+private fun Seq3StateInvariantTextOverlay(marker: Seq3StateInvariantBox, docTheme: ThemeColors) {
+    if (marker.text.isEmpty()) return
+    Box(
+        Modifier.offset(marker.box.x.dp, marker.box.y.dp).size(marker.box.width.dp, marker.box.height.dp),
+        contentAlignment = Alignment.Center,
+    ) { AppText(marker.text, color = docTheme.ts, fontSize = 9.sp, maxLines = 1) }
 }
 
 @Composable

@@ -56,6 +56,9 @@ private const val MAX_SEQ3_CAPTURES_PER_MATCH = 32
 private const val MAX_SEQ3_FRAGMENTS = 128
 private const val MAX_SEQ3_NOTES = 400
 private const val MAX_SEQ3_DELAYS = 400
+// WP18: same posture/bound as MAX_SEQ3_DELAYS just above — a state invariant is the same lightweight
+// "one document-level artifact per promotion" shape, folded into the same document bounds check.
+private const val MAX_SEQ3_STATE_INVARIANTS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
 // WP4: guards are short strings against a 512 KB header cap, so this bound exists to match the
 // existing per-fragment caps' posture (reject a pathological document rather than truncate it
@@ -396,6 +399,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // WP15: append-last, same invariant — see Seq3Model.kt's own doc on showElapsed for why
     // defaulting false on decode (below) is load-bearing.
     "showElapsed" to d.showElapsed,
+    // WP18: append-last, same invariant — see Seq3Model.kt's own doc on stateInvariants for why an
+    // absent key decoding to emptyList() (below) is load-bearing.
+    "stateInvariants" to d.stateInvariants.map(::stateInvariantToMap),
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -407,10 +413,11 @@ private fun withinSeq3DocumentBounds(
     fragmentMaps: List<*>,
     noteMaps: List<*>,
     delayMaps: List<*>,
+    stateInvariantMaps: List<*>,
 ): Boolean =
     lifelineMaps.size <= MAX_SEQ3_LIFELINES && messageMaps.size <= MAX_SEQ3_MESSAGES &&
         fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES &&
-        delayMaps.size <= MAX_SEQ3_DELAYS
+        delayMaps.size <= MAX_SEQ3_DELAYS && stateInvariantMaps.size <= MAX_SEQ3_STATE_INVARIANTS
 
 private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val lifelineMaps = map.mapList("lifelines").orEmpty()
@@ -418,7 +425,10 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val fragmentMaps = map.mapList("fragments").orEmpty()
     val noteMaps = map.mapList("notes").orEmpty()
     val delayMaps = map.mapList("delays").orEmpty()
-    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps)) return null
+    // WP18: appended last, same "fold the new list's own bound into the existing document bounds
+    // check" posture MAX_SEQ3_DELAYS already has (see this file's header).
+    val stateInvariantMaps = map.mapList("stateInvariants").orEmpty()
+    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps, stateInvariantMaps)) return null
 
     val messages = messageMaps.mapNotNull(::messageFromMap)
     val fragments = fragmentMaps.mapNotNull(::fragmentFromMap)
@@ -455,6 +465,11 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // WP15: absent on any note written before this field existed, which decodes to false —
         // elapsed tags off, byte-identical to every pre-WP15 rendering.
         showElapsed = map.bool("showElapsed") ?: false,
+        // WP18: absent "stateInvariants" key (every document written before this field existed) ->
+        // emptyList() -> no markers drawn -> byte-identical rendering to today, same contract as
+        // "delays" just above. A malformed individual element drops out via mapNotNull rather than
+        // failing the whole document (stateInvariantFromMap's own "occurrenceRefFromMap posture").
+        stateInvariants = stateInvariantMaps.mapNotNull(::stateInvariantFromMap),
     )
 }
 
@@ -763,5 +778,29 @@ private fun delayFromMap(map: Map<String, Any?>): Seq3Delay? {
         // Missing (predates this field) or unparsable both fall back to null — "after the last
         // occurrence", this field's own pre-existing default — rather than throwing.
         afterOccurrenceEntryId = map.int("afterOccurrenceEntryId"),
+    )
+}
+
+// ── State invariant (WP18) ──────────────────────────────────────────────────────────────────
+
+private fun stateInvariantToMap(s: Seq3StateInvariant): Map<String, Any?> = mapOf(
+    "id" to s.id,
+    "messageId" to s.messageId,
+    "captureName" to s.captureName,
+    "visibility" to s.visibility.name,
+)
+
+// Same "a malformed element drops out, the document survives" posture as delayFromMap/
+// occurrenceRefFromMap above: a blank/missing id, messageId, or captureName means there is nothing
+// coherent to promote, so the whole element is dropped rather than decoded with a fabricated blank.
+private fun stateInvariantFromMap(map: Map<String, Any?>): Seq3StateInvariant? {
+    val id = boundedString(map.str("id")) ?: return null
+    val messageId = boundedString(map.str("messageId")) ?: return null
+    val captureName = boundedString(map.str("captureName")) ?: return null
+    return Seq3StateInvariant(
+        id = id,
+        messageId = messageId,
+        captureName = captureName,
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }

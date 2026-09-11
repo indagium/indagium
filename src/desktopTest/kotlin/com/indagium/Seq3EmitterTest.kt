@@ -19,6 +19,7 @@ import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
@@ -877,6 +878,89 @@ class Seq3EmitterTest {
         val plantUml = document.toPlantUml()
         assertTrue(plantUml.contains("[#1] first"), "got:\n$plantUml")
         assertTrue(plantUml.contains("[#2] second"), "got:\n$plantUml")
+    }
+
+    // ── State invariants (WP18) — neither dialect has a real construct, both degrade to a note
+    //    anchored on the promoting message's OWN fromLifelineId; see Seq3Emitters.kt's own "State
+    //    invariants" header for why braces (`{captureName=value}`) are what keep the degraded form
+    //    visually distinguishable from an ordinary note. ─────────────────────────────────────────
+
+    private fun stateMatch(from: String) = Seq3Match(tag = from, template = "state", captures = listOf(Seq3Capture("state", Seq3CaptureSource.NAMED_VALUE)))
+
+    @Test
+    fun bothDialectsDegradeAPromotedStateInvariantToABracedNoteOnItsFromLifeline() {
+        val messages = listOf(
+            message(
+                id = "m1",
+                from = "A",
+                to = "B",
+                label = "push",
+                repeat = Seq3Repeat.EVERY,
+                occurrences = listOf(
+                    occurrence(1, "push state=CONNECTING", mapOf("state" to "CONNECTING")),
+                    occurrence(2, "push state=CONNECTED", mapOf("state" to "CONNECTED")),
+                ),
+                match = stateMatch("A"),
+            ),
+        )
+        val document = doc(messages).copy(stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")))
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains("Note over A: {state=CONNECTING}"), "the first row's own value; got:\n$mermaid")
+        assertTrue(mermaid.contains("Note over A: {state=CONNECTED}"), "a message drawing as n rows must show each row's OWN value; got:\n$mermaid")
+        assertFalse(mermaid.contains("Note over B"), "must anchor on the FROM lifeline that logged it, never the target; got:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertTrue(plantUml.contains("note right of A: {state=CONNECTING}"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("note right of A: {state=CONNECTED}"), "got:\n$plantUml")
+        assertFalse(plantUml.contains("note right of B"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun aDanglingStateInvariantMessageIdIsOmittedFromBothDialectsWithoutThrowing() {
+        val messages = listOf(message(id = "m1", label = "step1"))
+        val document = doc(messages).copy(stateInvariants = listOf(Seq3StateInvariant("s1", "no-such-message", "state")))
+
+        assertFalse(document.toMermaid().contains("{state"), "a dangling messageId must draw nothing; got:\n${document.toMermaid()}")
+        assertFalse(document.toPlantUml().contains("{state"), "a dangling messageId must draw nothing; got:\n${document.toPlantUml()}")
+    }
+
+    @Test
+    fun aStateInvariantWhoseCaptureIsNoLongerPresentIsOmittedFromBothDialectsWithoutThrowing() {
+        // The pattern was edited after promotion: this message's match carries no "state" capture,
+        // so no occurrence has a value to show any more.
+        val messages = listOf(message(id = "m1", label = "step1"))
+        val document = doc(messages).copy(stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")))
+
+        assertFalse(document.toMermaid().contains("{state"), "got:\n${document.toMermaid()}")
+        assertFalse(document.toPlantUml().contains("{state"), "got:\n${document.toPlantUml()}")
+    }
+
+    @Test
+    fun aCollapsedStateInvariantRowSummarizesAFewDistinctValues() {
+        val messages = listOf(
+            message(
+                id = "m1",
+                from = "A",
+                to = "B",
+                repeat = Seq3Repeat.COLLAPSE_ABOVE,
+                repeatThreshold = 3,
+                occurrences = listOf(
+                    occurrence(1, "s", mapOf("state" to "OPEN")),
+                    occurrence(2, "s", mapOf("state" to "OPEN")),
+                    occurrence(3, "s", mapOf("state" to "CLOSED")),
+                    occurrence(4, "s", mapOf("state" to "CLOSED")),
+                ),
+                match = stateMatch("A"),
+            ),
+        )
+        val document = doc(messages).copy(stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")))
+
+        val mermaid = document.toMermaid()
+        assertTrue(
+            mermaid.contains("Note over A: {state=OPEN|CLOSED}"),
+            "a collapsed row's few distinct values must summarize A|B, the same shape collapsedRepeatLabel already uses for labels; got:\n$mermaid",
+        )
     }
 
     // ── WP2: task 7 positive coverage ───────────────────────────────────────────────────────────

@@ -21,6 +21,7 @@ import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Repeat
+import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.adoptSeq3NoteSource
 import com.indagium.diagram3.encodeSeq3Note
@@ -538,6 +539,47 @@ class Seq3CodecTest {
 
         assertNotNull(parsed)
         assertTrue(parsed.document.delays.isEmpty())
+    }
+
+    // ── State invariant (WP18) ──────────────────────────────────────────────────────────────
+
+    @Test
+    fun stateInvariantsRoundTripThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            stateInvariants = listOf(
+                Seq3StateInvariant("s1", messageId = "m1", captureName = "deviceKey"),
+                Seq3StateInvariant("s2", messageId = "m1", captureName = "deviceKey", visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals(original.stateInvariants, parsed.document.stateInvariants)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.stateInvariants.single { it.id == "s2" }.visibility)
+        assertEquals("deviceKey", parsed.document.stateInvariants.single { it.id == "s1" }.captureName)
+    }
+
+    @Test
+    fun aDocumentMissingTheStateInvariantsKeyDecodesToAnEmptyList() {
+        // A note saved by a build predating WP18 has no "stateInvariants" key at all — the same
+        // "old document degrades quietly" shape as aDocumentMissingTheDelaysKeyDecodesToAnEmptyList
+        // just above.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertTrue(parsed.document.stateInvariants.isEmpty())
     }
 
     @Test

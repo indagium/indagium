@@ -5,6 +5,8 @@ import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Occurrence
+import com.indagium.diagram3.collapsedStateInvariantValue
 import com.indagium.diagram3.seq3ChronologicalFallbacks
 import com.indagium.diagram3.seq3ChronologicalOrder
 import com.indagium.diagram3.seq3DisplayTimestamp
@@ -361,5 +363,34 @@ class Seq3LabelSummaryTest {
         val document = docOf(msg("a"), msg("b"), msg("c"))
         val ordered = seq3ChronologicalOrder(document, document.messages, { it.id }, { it.manualTimestampMillis }, { null })
         assertEquals(listOf("a", "b", "c"), ordered.map { it.id }, "no timestamp and no fallback: Long.MAX_VALUE ties, so list order (a stable sort) wins")
+    }
+
+    // ── collapsedStateInvariantValue (WP18) ──────────────────────────────────────────────────
+
+    private fun occ(id: Int, value: String?) =
+        Seq3Occurrence(id, null, "", pid = 0, tid = 0, level = 'I', text = "", captureValues = value?.let { mapOf("state" to it) }.orEmpty())
+
+    @Test
+    fun oneDistinctValueSubstitutesItDirectly() {
+        val result = collapsedStateInvariantValue("state", listOf(occ(1, "OPEN"), occ(2, "OPEN")))
+        assertEquals("OPEN", result)
+    }
+
+    @Test
+    fun twoOrThreeDistinctValuesJoinAsAPipeSeparatedSummary() {
+        val result = collapsedStateInvariantValue("state", listOf(occ(1, "OPEN"), occ(2, "CLOSED"), occ(3, "OPEN")))
+        assertEquals("OPEN|CLOSED", result)
+    }
+
+    @Test
+    fun aboveThreeDistinctValuesFallsBackToTheHonestCaptureNamePlaceholder() {
+        val result = collapsedStateInvariantValue("state", (1..4).map { occ(it, "S$it") })
+        assertEquals("{state}", result)
+    }
+
+    @Test
+    fun noOccurrenceCarryingTheCaptureAtAllReturnsNull() {
+        val result = collapsedStateInvariantValue("state", listOf(occ(1, null), occ(2, null)))
+        assertNull(result, "a dangling/renamed capture must resolve to null — nothing to draw — never throw")
     }
 }
