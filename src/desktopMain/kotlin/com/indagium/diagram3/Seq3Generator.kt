@@ -896,6 +896,26 @@ fun setSeq3OccurrenceVisibility(
     return Seq3MessageEditResult.Updated(updated)
 }
 
+private fun seq3EntryIdOf(message: Seq3Message): Int = message.occurrences.firstOrNull()?.entryId ?: Int.MAX_VALUE
+
+/** Used by [moveSeq3OccurrenceOut]'s move-out reinsertion to place the extracted message and the
+ *  shrunken source back into `document.messages` — pulled out to a top-level function (rather than
+ *  a local `fun` closing over that call's state, as it used to be) purely to keep the two extra
+ *  branches this needed for the midnight fix off `moveSeq3OccurrenceOut`'s own cyclomatic
+ *  complexity count; the two functions don't share any state. */
+private fun seq3ComesAfter(left: Seq3Message, right: Seq3Message): Boolean {
+    // Day-unrolled axis (falls back to the wall-clock reading for a message with no elapsedMillis
+    // anywhere in its evidence — see primaryElapsedMillis's own doc). This reinsertion feeds
+    // `document.messages`, the DURABLE order (LOG_ORDER returns it as-is, seq3ChronologicalOrder
+    // tiebreaks on it, seq3ChronologicalFallbacks walks it) — comparing raw millis-of-day here
+    // would misplace a post-midnight extraction below every pre-midnight message, corrupting
+    // stored order rather than just one rendering.
+    val leftTimestamp = left.primaryElapsedMillis ?: left.primaryTimestampMillis ?: Long.MAX_VALUE
+    val rightTimestamp = right.primaryElapsedMillis ?: right.primaryTimestampMillis ?: Long.MAX_VALUE
+    return leftTimestamp > rightTimestamp ||
+        (leftTimestamp == rightTimestamp && seq3EntryIdOf(left) > seq3EntryIdOf(right))
+}
+
 /** Splits one real log occurrence out of a repeated message. The extracted message keeps the
  *  source pattern, endpoints, kind and label, but receives its own stable id and is inserted in
  *  chronological queue position using that occurrence's timestamp. Unknown timestamps sort
@@ -925,17 +945,8 @@ fun moveSeq3OccurrenceOut(document: Seq3Document, messageId: String, entryId: In
     )
     val remainingMessages = document.messages.toMutableList().apply { removeAt(sourceIndex) }
 
-    fun entryIdOf(message: Seq3Message): Int = message.occurrences.firstOrNull()?.entryId ?: Int.MAX_VALUE
-
-    fun comesAfter(left: Seq3Message, right: Seq3Message): Boolean {
-        val leftTimestamp = left.primaryTimestampMillis ?: Long.MAX_VALUE
-        val rightTimestamp = right.primaryTimestampMillis ?: Long.MAX_VALUE
-        return leftTimestamp > rightTimestamp ||
-            (leftTimestamp == rightTimestamp && entryIdOf(left) > entryIdOf(right))
-    }
-
     fun insertChronologically(message: Seq3Message) {
-        val index = remainingMessages.indexOfFirst { comesAfter(it, message) }
+        val index = remainingMessages.indexOfFirst { seq3ComesAfter(it, message) }
             .takeIf { it >= 0 } ?: remainingMessages.size
         remainingMessages.add(index, message)
     }

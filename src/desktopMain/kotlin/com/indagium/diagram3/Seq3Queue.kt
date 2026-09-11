@@ -956,17 +956,25 @@ fun nudgeSeq3OrderPin(document: Seq3Document, messageId: String, direction: Seq3
     if (neighborIdx !in document.messages.indices) return Seq3PinResult(document, false, "No neighbouring message in that direction")
     val message = document.messages[idx]
     val neighbor = document.messages[neighborIdx]
-    // Deliberately still `primaryTimestampMillis`, not the day-unrolled `primaryElapsedMillis`
-    // `firstTimestamp` above now uses. Two reasons: this is an EQUALITY check ("do these two share
-    // an exact clock reading"), not an ordering comparison, so the midnight-rollover argument for
-    // switching axes doesn't apply the same way; and `ts` is persisted into `Seq3OrderPin.
-    // tiedTimestampMillis`, which round-trips through Seq3Codec, so changing the axis here is a
-    // format-compatibility question, not a two-line fix. Known narrow flaw left as-is: two messages
-    // exactly 24h apart share the same millis-of-day clock reading and would be treated as a tie
-    // here even though they are not — because the stored/compared value is the wall-clock reading,
-    // not the unrolled one. Not fixed; flagged for whoever changes `Seq3OrderPin`'s persisted shape.
-    val ts = message.primaryTimestampMillis
-    val neighborTs = neighbor.primaryTimestampMillis
+    // Tie test is now on the day-unrolled elapsed axis (`primaryElapsedMillis`, falling back to
+    // `primaryTimestampMillis` when a message has no unrolled data — an old document, or a fully
+    // custom message with no evidence at all), same as `firstTimestamp` above and the rest of this
+    // fix's reads: a tie means "these two share the same elapsed INSTANT", not merely the same
+    // wall-clock digits. Two messages genuinely 24h apart used to share a millis-of-day reading
+    // and were misdetected as tied; on the elapsed axis they correctly differ.
+    // `Seq3OrderPin.tiedTimestampMillis` stores whichever value the tie was detected on (elapsed,
+    // now), so the persisted record stays self-consistent with what it claims — but that stored
+    // value is purely informational: it round-trips through `Seq3Codec` and is asserted in
+    // `Seq3QueueTest`, and nothing else anywhere reads it back or compares against it. That is
+    // exactly why switching the axis here was safe rather than a format-compatibility question, as
+    // an earlier version of this comment wrongly assumed.
+    // One residual gap, not introduced here: in mixed mode — one message evidence-backed with a
+    // real `elapsedMillis`, the other authored with only a `manualTimestampMillis` — the `?:`
+    // fallback above compares an unrolled value against a bare millis-of-day for the authored side.
+    // That is the same axis mismatch `primaryElapsedMillis`'s own doc already documents for
+    // authored messages, not a new one this tie check invents.
+    val ts = message.primaryElapsedMillis ?: message.primaryTimestampMillis
+    val neighborTs = neighbor.primaryElapsedMillis ?: neighbor.primaryTimestampMillis
     if (ts == null || ts != neighborTs) {
         return Seq3PinResult(document, false, "Order can only be pinned between messages that share an exact timestamp")
     }

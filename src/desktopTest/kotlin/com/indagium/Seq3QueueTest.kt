@@ -38,8 +38,17 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+// Midnight-rollover fixtures for the nudgeSeq3OrderPin elapsed-axis tests below: day-unrolled
+// elapsed millis keep increasing across a rollover even though the raw wall clock (millis-of-day)
+// does not.
+private const val MILLIS_PER_DAY = 86_400_000L
+private const val TWENTY_FOUR_HOURS_APART_WALL_TS = 100L // 00:00:00.100, shared by both occurrences
+private const val SAME_INSTANT_WALL_TS = 100L // 00:00:00.100 on day 1, shared by both occurrences
+private const val SAME_INSTANT_ELAPSED_TS = MILLIS_PER_DAY + SAME_INSTANT_WALL_TS
+
 class Seq3QueueTest {
-    private fun occ(id: Int, ts: Long, text: String = "line $id") = Seq3Occurrence(id, ts, "10:00:00.000", 1, 1, 'I', text)
+    private fun occ(id: Int, ts: Long, text: String = "line $id", elapsed: Long? = null) =
+        Seq3Occurrence(id, ts, "10:00:00.000", 1, 1, 'I', text, elapsedMillis = elapsed)
 
     private fun msg(
         id: String,
@@ -778,6 +787,44 @@ class Seq3QueueTest {
         assertFalse(result.applied)
         assertEquals(doc, result.document)
         assertNull(result.document.messages.first { it.id == "m3" }.orderPin)
+    }
+
+    @Test
+    fun nudgeSeq3OrderPinDoesNotTreatTwoMessagesTwentyFourHoursApartAsTied() {
+        // Both occurrences read 00:00:00.100 on the wall clock (same ts), but one is on day 0 and
+        // the other a full day later on the elapsed axis -- a real 24h-apart pair, not a tie.
+        val earlier = msg("early", "A", "B", listOf(occ(1, TWENTY_FOUR_HOURS_APART_WALL_TS, elapsed = TWENTY_FOUR_HOURS_APART_WALL_TS)))
+        val muchLater = msg(
+            "late", "A", "B",
+            listOf(occ(2, TWENTY_FOUR_HOURS_APART_WALL_TS, elapsed = TWENTY_FOUR_HOURS_APART_WALL_TS + MILLIS_PER_DAY)),
+        )
+        val doc = Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+            messages = listOf(earlier, muchLater),
+        )
+        val result = nudgeSeq3OrderPin(doc, "late", Seq3PinDirection.UP)
+        assertFalse(
+            result.applied,
+            "same millis-of-day reading (00:00:00.100) does not mean the same instant when the two " +
+                "occurrences are 24h apart on the day-unrolled elapsed axis",
+        )
+        assertNull(doc.messages.first { it.id == "late" }.orderPin)
+    }
+
+    @Test
+    fun nudgeSeq3OrderPinStillPinsMessagesThatShareTheSameElapsedInstantAndStoresTheElapsedValue() {
+        // Both occurrences are genuinely simultaneous, one day after ts=0 on the elapsed axis --
+        // tiedTimestampMillis should record that elapsed instant, not the plain ts.
+        val first = msg("first", "A", "B", listOf(occ(1, SAME_INSTANT_WALL_TS, elapsed = SAME_INSTANT_ELAPSED_TS)))
+        val second = msg("second", "A", "B", listOf(occ(2, SAME_INSTANT_WALL_TS, elapsed = SAME_INSTANT_ELAPSED_TS)))
+        val doc = Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+            messages = listOf(first, second),
+        )
+        val result = nudgeSeq3OrderPin(doc, "second", Seq3PinDirection.UP)
+        assertTrue(result.applied, result.reason)
+        assertEquals(SAME_INSTANT_ELAPSED_TS, result.document.messages.first { it.id == "first" }.orderPin?.tiedTimestampMillis)
+        assertEquals(SAME_INSTANT_ELAPSED_TS, result.document.messages.first { it.id == "second" }.orderPin?.tiedTimestampMillis)
     }
 
     @Test
