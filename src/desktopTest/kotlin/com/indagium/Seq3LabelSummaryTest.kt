@@ -365,6 +365,153 @@ class Seq3LabelSummaryTest {
         assertEquals(listOf("a", "b", "c"), ordered.map { it.id }, "no timestamp and no fallback: Long.MAX_VALUE ties, so list order (a stable sort) wins")
     }
 
+    // ── Midnight-rollover fix: elapsed-aware ordering ───────────────────────────────────────────
+    //
+    // Direct tests of primaryElapsedMillis/seq3ChronologicalFallbacks/seq3ChronologicalOrder
+    // together, independent of generateSeq3/Seq3Layout/Seq3Emitters plumbing — those three own the
+    // real end-to-end coverage (Seq3GeneratorTest's headline test, Seq3DelaySuggestTest). These pin
+    // the shared comparator's CONTRACT for the elapsed axis, the same split
+    // chronologicalOrderSortsByTimestampNotByListPosition already draws for the raw-timestamp axis.
+
+    private fun occWithElapsed(entryId: Int, timestampMillis: Long?, elapsedMillis: Long?) =
+        Seq3Occurrence(entryId, timestampMillis, "raw", pid = 0, tid = 0, level = 'I', text = "line$entryId", elapsedMillis = elapsedMillis)
+
+    private fun msgWithOccurrence(id: String, entryId: Int, timestampMillis: Long?, elapsedMillis: Long?) = Seq3Message(
+        id = id,
+        match = Seq3Match(tag = "A", template = id),
+        fromLifelineId = "A",
+        toLifelineId = "B",
+        labelTemplate = id,
+        kind = Seq3Kind.CALL,
+        occurrences = listOf(occWithElapsed(entryId, timestampMillis, elapsedMillis)),
+    )
+
+    // What every real caller (Seq3DelaySuggest.kt, Seq3Layout.kt, Seq3Emitters.kt) actually passes
+    // as `timestampMillisOf` — written once here so a test reads exactly like the production wiring.
+    private fun elapsedOrRaw(m: Seq3Message): Long? = m.primaryElapsedMillis ?: m.primaryTimestampMillis
+
+    @Test
+    fun primaryElapsedMillisPrefersTheUnrolledOccurrenceValueButLeavesPrimaryTimestampMillisAlone() {
+        // "What must NOT change" — displayed wall-clock time stays millis-of-day. primaryElapsedMillis
+        // is a NEW, separate value; the pre-existing primaryTimestampMillis must read back untouched.
+        val message = msgWithOccurrence("m1", entryId = 1, timestampMillis = 100L, elapsedMillis = 86_400_100L)
+        assertEquals(86_400_100L, message.primaryElapsedMillis)
+        assertEquals(100L, message.primaryTimestampMillis, "the raw millis-of-day value must be untouched by adding elapsedMillis")
+    }
+
+    @Test
+    fun chronologicalOrderPrefersElapsedMillisAcrossASimulatedMidnightRollover() {
+        // Same shape as the swapped-blocks bug: raw millis-of-day would sort "post" BEFORE "pre"
+        // (100 < 86_399_900); the day-unrolled elapsed value fixes the axis.
+        val pre = msgWithOccurrence("pre", entryId = 1, timestampMillis = 86_399_900L, elapsedMillis = 86_399_900L)
+        val post = msgWithOccurrence("post", entryId = 2, timestampMillis = 100L, elapsedMillis = 86_400_100L)
+        val document = docOf(pre, post)
+
+        val elapsedAware = seq3ChronologicalOrder(document, document.messages, { it.id }, ::elapsedOrRaw, { null })
+        assertEquals(listOf("pre", "post"), elapsedAware.map { it.id })
+
+        // Sanity check on the fixture itself: sorting by raw timestamp ALONE (the pre-fix axis)
+        // really does produce the swapped order this fix exists to prevent.
+        val rawOnly = seq3ChronologicalOrder(document, document.messages, { it.id }, { it.primaryTimestampMillis }, { null })
+        assertEquals(listOf("post", "pre"), rawOnly.map { it.id }, "test setup sanity: the raw axis alone must reproduce the swapped-blocks bug")
+    }
+
+    @Test
+    fun aDocumentWithNoElapsedMillisAnywhereOrdersExactlyAsBefore() {
+        // An old note (or an entry whose ts never parsed): every occurrence's elapsedMillis is null,
+        // so primaryElapsedMillis is null everywhere too and `elapsedOrRaw` reduces to the exact
+        // pre-fix expression, `primaryTimestampMillis` — ordinary chronological order, unaffected.
+        val later = msgWithOccurrence("later", entryId = 1, timestampMillis = 5_000L, elapsedMillis = null)
+        val earlier = msgWithOccurrence("earlier", entryId = 2, timestampMillis = 1_000L, elapsedMillis = null)
+        val document = docOf(later, earlier) // declared out of order on purpose
+
+        val ordered = seq3ChronologicalOrder(document, document.messages, { it.id }, ::elapsedOrRaw, { null })
+        assertEquals(listOf("earlier", "later"), ordered.map { it.id })
+    }
+
+    @Test
+    fun chronologicalFallbacksInterpolatesInElapsedSpaceNotRawMillisOfDay() {
+        // "before" and "after" straddle a simulated midnight: their RAW millis-of-day values go
+        // DOWN (86_399_000 -> 1_000), but their day-unrolled elapsed values keep climbing
+        // (86_399_000 -> 86_401_000). seq3ChronologicalFallbacks must interpolate on the elapsed
+        // axis — halfway is 86_400_000 — not on the raw axis, where "previous < next" would fail
+        // and silently fall back to the wrong-scale "previous + 1" branch instead.
+        val before = msgWithOccurrence("before", entryId = 1, timestampMillis = 86_399_000L, elapsedMillis = 86_399_000L)
+        val untimestamped = Seq3Message(
+            id = "untimestamped",
+            match = Seq3Match(tag = "A", template = "untimestamped"),
+            fromLifelineId = "A",
+            toLifelineId = "B",
+            labelTemplate = "untimestamped",
+        )
+        val after = msgWithOccurrence("after", entryId = 2, timestampMillis = 1_000L, elapsedMillis = 86_401_000L)
+        val document = docOf(before, untimestamped, after)
+
+        val fallbacks = seq3ChronologicalFallbacks(document)
+
+        assertEquals(86_400_000L, fallbacks["untimestamped"], "must interpolate in elapsed space, not raw millis-of-day space")
+    }
+
+    // ── Authored messages mixed with evidence-backed ones ───────────────────────────────────────
+    //
+    // manualTimestampMillis is a plain millis-of-day value a user types into a picker, with no
+    // calendar date attached — Seq3Message.primaryElapsedMillis's own doc explains why it is reused
+    // AS-IS for ordering (never dropped to null, never guessed at) rather than unrolled.
+
+    @Test
+    fun anAuthoredMessageOrdersCorrectlyAlongsideElapsedAwareEvidenceOnTheSameDay() {
+        // The common, fully-supported case: an authored message's manual timestamp sits, in RAW
+        // millis-of-day terms, on the same day as the evidence around it — ordering is sensible.
+        val evidenceBefore = msgWithOccurrence("evidenceBefore", entryId = 1, timestampMillis = 10_000L, elapsedMillis = 10_000L)
+        val authored = Seq3Message(
+            id = "authored",
+            match = Seq3Match(tag = "A", template = "authored"),
+            fromLifelineId = "A",
+            toLifelineId = "B",
+            labelTemplate = "authored",
+            manualTimestampMillis = 15_000L,
+        )
+        val evidenceAfter = msgWithOccurrence("evidenceAfter", entryId = 2, timestampMillis = 20_000L, elapsedMillis = 20_000L)
+        // Declared out of order on purpose, same as the other ordering tests above.
+        val document = docOf(evidenceAfter, authored, evidenceBefore)
+
+        val ordered = seq3ChronologicalOrder(document, document.messages, { it.id }, ::elapsedOrRaw, { null })
+
+        assertEquals(listOf("evidenceBefore", "authored", "evidenceAfter"), ordered.map { it.id })
+    }
+
+    @Test
+    fun anAuthoredMessagesManualTimestampCanStillMisorderAgainstEvidenceAcrossARealRollover() {
+        // The documented, deliberately-accepted residual gap (Seq3Message.primaryElapsedMillis's own
+        // doc, Seq3DelaySuggest.kt's rewritten comment): manualTimestampMillis has no monotonic
+        // equivalent to compute, so it is compared AS-IS against real day-unrolled evidence. An
+        // authored message meant to represent a moment AFTER a real midnight rollover, but typed as
+        // a small millis-of-day value, still sorts as if it were EARLY on the pre-rollover day —
+        // exactly the swapped-blocks shape every message used to have before this fix. This test
+        // pins that this is the CHOSEN, understood behaviour, not an oversight: it must keep failing
+        // this exact way unless a future change deliberately revisits the decision.
+        val preMidnightEvidence = msgWithOccurrence("preMidnightEvidence", entryId = 1, timestampMillis = 86_399_900L, elapsedMillis = 86_399_900L)
+        // Author intends "shortly after the rollover" but types a small clock value — indistinguishable
+        // from "shortly after midnight the SAME calendar day" once the date is gone.
+        val authoredMeaningAfterRollover = Seq3Message(
+            id = "authoredMeaningAfterRollover",
+            match = Seq3Match(tag = "A", template = "authoredMeaningAfterRollover"),
+            fromLifelineId = "A",
+            toLifelineId = "B",
+            labelTemplate = "authoredMeaningAfterRollover",
+            manualTimestampMillis = 200L,
+        )
+        val document = docOf(preMidnightEvidence, authoredMeaningAfterRollover)
+
+        val ordered = seq3ChronologicalOrder(document, document.messages, { it.id }, ::elapsedOrRaw, { null })
+
+        assertEquals(
+            listOf("authoredMeaningAfterRollover", "preMidnightEvidence"),
+            ordered.map { it.id },
+            "documents the accepted residual gap — see this test's own header",
+        )
+    }
+
     // ── collapsedStateInvariantValue (WP18) ──────────────────────────────────────────────────
 
     private fun occ(id: Int, value: String?) =

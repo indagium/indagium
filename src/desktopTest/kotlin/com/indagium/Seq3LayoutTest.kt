@@ -1020,6 +1020,31 @@ class Seq3LayoutTest {
         )
     }
 
+    // ── Midnight-rollover fix ────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun wp15ElapsedTagMeasuresTheTrueGapAcrossAMidnightRolloverNotASpuriousDayLongOne() {
+        // Same shape as the headline swapped-blocks bug (Seq3GeneratorTest's own headline test):
+        // "post"'s raw millis-of-day (100, i.e. 00:00:00.100) is SMALLER than "pre"'s (86_399_900,
+        // i.e. 23:59:59.900). Populating elapsedMillis fixes BOTH problems this fold cares about —
+        // the DRAW ORDER (checked first) and the elapsed TAG itself, which would otherwise measure
+        // a spurious ~86_399_800ms (~24h) gap instead of the true ~200ms one.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("pre", "A", "B", occurrences = listOf(occurrence(1, ts = 86_399_900L).copy(elapsedMillis = 86_399_900L)), template = "pre"),
+                message("post", "A", "B", occurrences = listOf(occurrence(2, ts = 100L).copy(elapsedMillis = 86_400_100L)), template = "post"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(listOf("pre", "post"), rows.map { it.messageId }, "must draw in true chronological (elapsed) order, not swapped by raw millis-of-day")
+        assertEquals("pre", rows[0].label, "the first drawn row has no predecessor, so no tag")
+        assertTrue(rows[1].label.startsWith("[+0.200] "), "the tag must measure the TRUE ~200ms gap, never a spurious ~24h one; got '${rows[1].label}'")
+    }
+
     @Test
     fun collapseAboveElapsedTagMeasuresGapToTheFirstOfTheCollapsedGroup() {
         // WP16 superseded this exact scenario: a collapsed group above threshold now carries its

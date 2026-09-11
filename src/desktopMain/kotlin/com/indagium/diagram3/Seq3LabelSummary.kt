@@ -90,6 +90,35 @@ internal fun seq3EmissionTimestamp(message: Seq3Message, occurrenceTimestampMill
 internal fun seq3EmissionRawTimestamp(message: Seq3Message, occurrenceRawTimestamp: String): String =
     message.manualRawTimestamp.ifBlank { occurrenceRawTimestamp }
 
+/** Elapsed-timeline counterpart of [seq3EmissionTimestamp] — identical override-wins shape, reading
+ *  [Seq3Occurrence.elapsedMillis] (day-unrolled, monotonic) instead of [Seq3Occurrence.timestampMillis]
+ *  (raw millis-of-day). Used ONLY for ordering and elapsed-gap math — [seq3ChronologicalOrder]'s
+ *  callers below, and each renderer's own WP15 fold (`prefixEmissionLabels`/
+ *  `prefixSeq3EmissionLabels`) — never for what a row actually DISPLAYS, which stays
+ *  [seq3EmissionTimestamp]'s millis-of-day value untouched: unrolled elapsed time is not a
+ *  wall-clock reading and must never be shown as one. [manualTimestampMillis] winning here, exactly
+ *  as it already does in [seq3EmissionTimestamp], is deliberate — see
+ *  [Seq3Message.primaryElapsedMillis]'s own doc for why an authored override has no monotonic
+ *  equivalent to compute and is reused as-is instead of being dropped to null. */
+internal fun seq3EmissionElapsed(message: Seq3Message, occurrenceElapsedMillis: Long?): Long? =
+    message.manualTimestampMillis ?: occurrenceElapsedMillis
+
+/** [seq3EmissionElapsed] applied to EVERY occurrence in [document], keyed by
+ *  [Seq3Occurrence.entryId] — built once per layout/emission pass and shared by
+ *  [seq3ChronologicalOrder]'s `timestampMillisOf` lambda and each renderer's own WP15 fold, so the
+ *  two can never disagree about which axis (elapsed vs. raw millis-of-day) a given row sorts and
+ *  measures gaps on — the same anti-drift purpose every other shared piece in this file serves (see
+ *  this file's header). `entryId` is a safe map key here: it is unique across one tab's `LogParser`
+ *  output, and every occurrence in one [Seq3Document] was built from that one tab's range (see
+ *  `Seq3Generator.generateSeq3`/`addSeq3MessageFromSelection`). A caller looks up by the EMISSION's
+ *  own occurrence entryId and falls back to that emission's already-computed [seq3EmissionTimestamp]
+ *  value on a miss — an old document, an unparseable `ts`, or an emission with no occurrence at all
+ *  (a fully-custom authored row), all of which this map simply has nothing for. */
+internal fun seq3ElapsedByEntryId(document: Seq3Document): Map<Int, Long> =
+    document.messages.flatMap { message ->
+        message.occurrences.mapNotNull { occ -> seq3EmissionElapsed(message, occ.elapsedMillis)?.let { occ.entryId to it } }
+    }.toMap()
+
 /** What a renderer actually shows for one row's timestamp: the real logged text when there is one
  *  (preserves whatever precision/format the source log itself used), else [timestampMillis]
  *  formatted with the same `HH:MM:SS.mmm` convention `utils.parseMillisOfDay` parses (see that
@@ -201,11 +230,23 @@ internal fun seq3PrefixedLabel(
  * `primaryTimestampMillis` never appears in the returned map; a caller falls back to
  * `Long.MAX_VALUE` (sorts last) when a message has neither a real timestamp nor a fallback here
  * (every message in the document is untimestamped, so there is nothing to interpolate between).
+ *
+ * Midnight-rollover fix: interpolates in [Seq3Message.primaryElapsedMillis] space (falling back to
+ * [Seq3Message.primaryTimestampMillis] only where that is null), NOT bare millis-of-day — this has
+ * to agree with whatever axis [seq3ChronologicalOrder]'s own callers sort real messages on, or an
+ * untimestamped message interpolated here in the wrong space could land on the wrong side of a
+ * midnight rollover relative to the real, unrolled neighbours it was meant to sit between. This
+ * function has no way to ask a generic caller what axis it picked (it is hardcoded to
+ * [Seq3Message], not generic over `T` the way [seq3ChronologicalOrder] itself is) — so it is
+ * hand-kept in sync here instead: every caller of [seq3ChronologicalOrder] below passes
+ * `timestampMillisOf = { it.primaryElapsedMillis ?: it.primaryTimestampMillis }` (or the
+ * emission-level equivalent via [seq3ElapsedByEntryId]) for exactly this reason.
  */
 internal fun seq3ChronologicalFallbacks(document: Seq3Document): Map<String, Long> {
-    val primaryTimestamps = document.messages.map { it.primaryTimestampMillis }
+    val primaryTimestamps = document.messages.map { it.primaryElapsedMillis ?: it.primaryTimestampMillis }
     return document.messages.mapIndexedNotNull { index, message ->
-        if (message.primaryTimestampMillis != null) return@mapIndexedNotNull null
+        val ownValue = primaryTimestamps[index]
+        if (ownValue != null) return@mapIndexedNotNull null
         val previous = (index - 1 downTo 0).firstNotNullOfOrNull { primaryTimestamps[it] }
         val next = (index + 1 until primaryTimestamps.size).firstNotNullOfOrNull { primaryTimestamps[it] }
         val fallback = when {
@@ -232,6 +273,15 @@ internal fun seq3ChronologicalFallbacks(document: Seq3Document): Map<String, Lon
  * are not unified into one shared shape) that nonetheless both need this EXACT comparator; this
  * function is the one place it is written down, so the two can never again quietly diverge on
  * ORDER the way they already had on the untimestamped-fallback math itself.
+ *
+ * Midnight-rollover fix: [timestampMillisOf] deciding what "real timestamp" means is exactly what
+ * lets this stay a signature-compatible fix — every caller below now supplies the day-unrolled,
+ * monotonic value ([Seq3Message.primaryElapsedMillis] for a message-level item,
+ * [seq3ElapsedByEntryId]'s lookup, falling back to the emission's own raw `timestampMillis`, for an
+ * emission-level one) instead of bare millis-of-day. This function's own sort/tiebreak LOGIC did
+ * not need to change at all — only what value flows into it — which is also why
+ * [seq3ChronologicalFallbacks] has to be hand-kept agreeing with whatever a given caller passes
+ * here (see that function's own doc).
  */
 internal fun <T> seq3ChronologicalOrder(
     document: Seq3Document,

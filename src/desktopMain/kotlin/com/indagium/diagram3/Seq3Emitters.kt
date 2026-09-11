@@ -381,11 +381,15 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
     // than the canvas for the same document. Every index below is computed AFTER this sort, from
     // FINAL emitted positions, so fragment/note boundary lookups (`firstIndexByMessage` etc.) agree
     // with the row order that actually gets written out.
+    // Midnight-rollover fix: same `entryId`-keyed lookup Seq3Layout.kt's own `layoutSeq3` builds —
+    // see [seq3ElapsedByEntryId]'s own doc for why a map beats adding a field to every `Seq3Emission`
+    // subtype, and why an `occurrenceEntryId` miss safely falls back to `emission.timestampMillis`.
+    val elapsedByEntryId = seq3ElapsedByEntryId(document)
     val emissions = seq3ChronologicalOrder(
         document,
         unordered,
         messageIdOf = { emission -> emission.messageId },
-        timestampMillisOf = { emission -> emission.timestampMillis },
+        timestampMillisOf = { emission -> emission.occurrenceEntryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis },
         entryIdOf = { emission -> emission.occurrenceEntryId },
     )
     val firstIndex = HashMap<String, Int>()
@@ -398,7 +402,7 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
             indexByOccurrence[Seq3OccurrenceRef(emission.messageId, entryId)] = index
         }
     }
-    val prefixed = prefixSeq3EmissionLabels(emissions, document.showSequenceNumbers, document.showTimestamps, document.showElapsed)
+    val prefixed = prefixSeq3EmissionLabels(emissions, document.showSequenceNumbers, document.showTimestamps, document.showElapsed, elapsedByEntryId)
     return Seq3EmissionPlan(lifelineIndex, prefixed, firstIndex, lastIndex, indexByOccurrence)
 }
 
@@ -429,24 +433,38 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
 // isn't shared (this file's own header: Seq3Emitters is phase-1, not restructured around
 // Seq3Layout's shape). What both copies MUST share, and do, is [seq3PrefixedLabel] and
 // [elapsedMillisOfDay] themselves.
+//
+// Midnight-rollover fix: mirrors Seq3Layout.kt's `prefixEmissionLabels` own header exactly —
+// [elapsedMillisOfDay] still performs the subtraction, but the accumulator now reads
+// [orderingValue]'s day-unrolled value (via [elapsedByEntryId]) rather than
+// [Seq3Emission.timestampMillis] directly, for the identical reason: before this fix, a
+// midnight-crossing range had already been drawn in swapped order by the time this fold ran, so
+// the seam's true short gap was never what got measured — a spurious ~24h one was, and
+// [elapsedMillisOfDay]'s own rollover guard could not tell, since both sides it ever saw were
+// already millis-of-day and already mutually "consistent" with the wrong order. Every
+// [seq3PrefixedLabel] call below keeps passing [Seq3Emission.timestampMillis] (never
+// [orderingValue]) for DISPLAY — unchanged, since unrolled elapsed time is not a wall-clock
+// reading.
 private fun prefixSeq3EmissionLabels(
     emissions: List<Seq3Emission>,
     showSequenceNumbers: Boolean,
     showTimestamps: Boolean,
     showElapsed: Boolean,
+    elapsedByEntryId: Map<Int, Long>,
 ): List<Seq3Emission> {
     if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
-    var lastRealTimestampMillis: Long? = null
-    fun elapsedFor(currentTimestampMillis: Long?): Long? {
-        val previous = lastRealTimestampMillis
-        return if (previous != null && currentTimestampMillis != null) elapsedMillisOfDay(previous, currentTimestampMillis) else null
+    var lastRealElapsedMillis: Long? = null
+    fun orderingValue(emission: Seq3Emission): Long? = emission.occurrenceEntryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis
+    fun elapsedFor(currentElapsedMillis: Long?): Long? {
+        val previous = lastRealElapsedMillis
+        return if (previous != null && currentElapsedMillis != null) elapsedMillisOfDay(previous, currentElapsedMillis) else null
     }
     return emissions.map { emission ->
         when (emission) {
             is Seq3Emission.Arrow -> {
                 callNumber++
-                val elapsed = elapsedFor(emission.timestampMillis)
+                val elapsed = elapsedFor(orderingValue(emission))
                 val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
@@ -460,12 +478,12 @@ private fun prefixSeq3EmissionLabels(
                         emission.spanEndTimestampMillis,
                     ),
                 )
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 result
             }
             is Seq3Emission.NeedsTarget -> {
                 callNumber++
-                val elapsed = elapsedFor(emission.timestampMillis)
+                val elapsed = elapsedFor(orderingValue(emission))
                 val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
@@ -478,13 +496,13 @@ private fun prefixSeq3EmissionLabels(
                         showElapsed,
                     ),
                 )
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 result
             }
             is Seq3Emission.NoteLine, is Seq3Emission.Elided -> {
                 // Untagged, but the accumulator still advances — see this function's own header
                 // and Seq3Layout.prefixEmissionLabels' matching comment (rule 4).
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 emission
             }
         }

@@ -1307,6 +1307,36 @@ class Seq3EmitterTest {
     }
 
     @Test
+    fun wp15ElapsedTagMeasuresTheTrueGapAcrossAMidnightRolloverNotASpuriousDayLongOneInBothDialects() {
+        // Mirrors Seq3LayoutTest's identical canvas-level test — same fixture, exercised through the
+        // emitted text instead of row geometry. Raw millis-of-day would sort/measure "post" BEFORE
+        // "pre" and report a spurious ~86_399_800ms (~24h) gap; the day-unrolled elapsedMillis fixes
+        // both the draw order and the tag.
+        val occ1 = Seq3Occurrence(
+            entryId = 1, timestampMillis = 86_399_900L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "pre", elapsedMillis = 86_399_900L,
+        )
+        val occ2 = Seq3Occurrence(
+            entryId = 2, timestampMillis = 100L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "post", elapsedMillis = 86_400_100L,
+        )
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "pre"),
+            message("m2", occurrences = listOf(occ2), label = "post"),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        for ((dialectName, text) in listOf("Mermaid" to document.toMermaid(), "PlantUML" to document.toPlantUml())) {
+            assertTrue(text.contains(": pre"), "$dialectName must draw the pre-midnight row's own label; got:\n$text")
+            assertTrue(
+                text.contains(": [+0.200] post"),
+                "$dialectName must report the TRUE ~200ms gap, never a spurious ~24h one; got:\n$text",
+            )
+            val preIndex = text.indexOf(": pre")
+            val postIndex = text.indexOf(": [+0.200] post")
+            assertTrue(preIndex < postIndex, "$dialectName must draw the pre-midnight row before the post-midnight one:\n$text")
+        }
+    }
+
+    @Test
     fun nullTimestampNeighbourSuppressesTheElapsedTagInEmittedText() {
         // Rule 1, exercised through the emitted text rather than layout row geometry — see
         // Seq3LayoutTest's own test of the identical rule for the full reasoning.
