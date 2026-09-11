@@ -678,6 +678,9 @@ private fun fragmentToMap(f: Seq3Fragment): Map<String, Any?> =
         // guard) -> byte-identical rendering to today. Not a migration case — see Seq3Model.kt's
         // own doc on this field for why.
         "elseOperands" to f.elseOperands.map(::operandToMap),
+        // WP17: appended last in turn, same rule. Absent/null on every fragment written before
+        // this field existed (and on every non-REF fragment) -> decodes to null below.
+        "refDiagramId" to f.refDiagramId,
     )
 
 private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
@@ -704,6 +707,12 @@ private fun fragmentFromMap(map: Map<String, Any?>): Seq3Fragment? {
         // Missing "elseOperands" key (every fragment written before WP4) -> emptyList() -> one
         // implicit operand whose guard is `label` -> today's exact rendering. See Seq3Model.kt.
         elseOperands = operandMaps.mapNotNull(::operandFromMap),
+        // WP17: missing/null "refDiagramId" (every fragment written before this field existed, and
+        // every non-REF fragment ever written) -> null, the same "meaningless for this kind" value
+        // as a REF fragment whose target was never picked or was later deleted from the library —
+        // see Seq3Fragment.refDiagramId's own doc for why those three cases share one value on
+        // purpose.
+        refDiagramId = boundedString(map.str("refDiagramId")),
     )
 }
 

@@ -1164,6 +1164,41 @@ class Seq3Session(
         return libraryStore.forSource(sourceIdentity(tab))
     }
 
+    /** WP17: the `ref` fragment picker's data source — [libraryForTab] above is deliberately NOT
+     *  it. A `ref` box legitimately points at a diagram built from a DIFFERENT log than the one the
+     *  current workspace was generated from (that's the whole point of a cross-reference), so the
+     *  picker needs the same source-agnostic global search [DiagramLibraryStore.search] already
+     *  offers — it had no production call site before this. `@Suppress("UNUSED_VARIABLE")` mirrors
+     *  [libraryForTab]'s own `libraryRevision` read: this bridges the plain disk-backed store's
+     *  mutations into Compose recomposition, same rationale as that function's own doc. */
+    fun searchLibrary(query: String = "", source: DiagramSourceIdentity? = null): List<DiagramLibrarySummary> {
+        @Suppress("UNUSED_VARIABLE")
+        val observedRevision = libraryRevision
+        return libraryStore.search(query, source)
+    }
+
+    /** WP17: the picker's default (no query typed yet) listing — [DiagramLibraryStore.recent] had
+     *  no production call site before this either. Same source-agnostic reasoning as
+     *  [searchLibrary] just above. */
+    fun recentLibrary(limit: Int = 20): List<DiagramLibrarySummary> {
+        @Suppress("UNUSED_VARIABLE")
+        val observedRevision = libraryRevision
+        return libraryStore.recent(limit)
+    }
+
+    /** WP17: a non-mutating lookup for one library item by id — unlike [openLibraryItem] below,
+     *  this never calls `markOpened` and never opens a workspace session; it exists purely so the
+     *  canvas can resolve a [Seq3Fragment.refDiagramId] to a title (or discover it no longer
+     *  resolves) without any side effect, e.g. to decide what to draw for a `ref` box or whether a
+     *  click should do anything. Returns null for an unknown/deleted id — the canvas's own contract
+     *  ("a dangling ref still draws, never crashes") is met by this being a plain nullable read,
+     *  never a throw. */
+    fun libraryItem(id: String): DiagramLibraryItem? {
+        @Suppress("UNUSED_VARIABLE")
+        val observedRevision = libraryRevision
+        return libraryStore.get(id)
+    }
+
     /**
      * Opens a saved diagram from its cached codec snapshot into a fresh workspace — the v3
      * counterpart of [SeqDiagramCoordinator.openLibraryItem]. Supplying a currently open [tabId]

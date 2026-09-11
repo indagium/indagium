@@ -678,6 +678,58 @@ class Seq3CodecTest {
         assertFalse(parsed.document.fragments.single { it.id == "f2" }.hideKindLabel)
     }
 
+    // ── ref / InteractionUse (WP17) ─────────────────────────────────────────────────────────
+
+    @Test
+    fun refFragmentKindRoundTripsByNameLikeEveryOtherKind() {
+        // No codec change was needed for the new kind itself — same proof as
+        // everyNewWp11FragmentKindRoundTripsThroughEncodeAndParse above: fragmentFromMap/
+        // fragmentToMap decode/encode `kind` generically by name for every Seq3FragmentKind.
+        val original = fixedDocument().copy(
+            fragments = listOf(Seq3Fragment("f1", Seq3FragmentKind.REF, "label", listOf("m1"))),
+        )
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals(Seq3FragmentKind.REF, parsed.document.fragments.single().kind)
+    }
+
+    @Test
+    fun refDiagramIdRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            fragments = listOf(
+                Seq3Fragment("f1", Seq3FragmentKind.REF, "billing flow", listOf("m1"), refDiagramId = "550e8400-e29b-41d4-a716-446655440000"),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals("550e8400-e29b-41d4-a716-446655440000", parsed.document.fragments.single().refDiagramId)
+    }
+
+    @Test
+    fun aFragmentMapWithNoRefDiagramIdKeyDecodesToNull() {
+        // A fragment saved by any build before WP17 (and every non-REF fragment ever written) has
+        // no "refDiagramId" key at all — must decode to null, matching Seq3Fragment.refDiagramId's
+        // own "absent -> null, byte-identical rendering to today" doc.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to listOf(mapOf("id" to "f1", "kind" to "REF", "label" to "retry", "messageIds" to listOf<String>())),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertNull(parsed.document.fragments.single().refDiagramId)
+    }
+
     @Test
     fun aDocumentWithAnUnknownFragmentKindCoercesToLoopRatherThanFailingToParse() {
         // Exactly what an OLDER build sees if it opens a document a newer build saved with a kind

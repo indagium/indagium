@@ -253,6 +253,7 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.SetRepeat -> "Set repeat"
     is Seq3BulkAction.SetFragmentVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide fragment" else "Show fragment"
     is Seq3BulkAction.SetFragmentHideKindLabel -> if (action.hide) "Hide fragment kind" else "Show fragment kind"
+    is Seq3BulkAction.SetFragmentRefDiagramId -> if (action.diagramId != null) "Set ref diagram" else "Clear ref diagram"
     is Seq3BulkAction.SetNoteVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide note" else "Show note"
     is Seq3BulkAction.AddDelay -> "Insert delay"
     is Seq3BulkAction.SetDelayLabel -> "Rename delay"

@@ -550,46 +550,57 @@ private fun fragmentKeywordLine(kind: Seq3FragmentKind, label: String, escape: (
     return if (label.isBlank()) keyword else "$keyword ${escape(label)}"
 }
 
-// ── Fragment open lines (WP12, WP11) ────────────────────────────────────────────────────────
+// ── Fragment open lines (WP12, WP11, WP17) ──────────────────────────────────────────────────
 //
 // Every [Seq3FragmentKind] except the members of [MERMAID_FALLBACK_FRAGMENT_KINDS] is a real UML
 // 2.x combined-fragment operator that BOTH dialects accept the same bare way: `kind.name.lowercase()`
 // plus the label, closed by a plain `end`. The dialects diverge on that fallback set:
-//   - PlantUML needs no special case for ANY of them, GROUP included. GROUP is not a UML operator
-//     at all — see that enum constant's own doc — but PlantUML invented `group <label>` for exactly
-//     this, which happens to have the exact same shape as every real operator
+//   - PlantUML needs no special case for GROUP or NEG/STRICT/CONSIDER/IGNORE. GROUP is not a UML
+//     operator at all — see that enum constant's own doc — but PlantUML invented `group <label>`
+//     for exactly this, which happens to have the exact same shape as every real operator
 //     (`kind.name.lowercase()` + label). NEG/STRICT/CONSIDER/IGNORE (WP11) ARE real UML operators,
 //     so PlantUML's own `neg`/`strict`/`consider`/`ignore` keyword falls straight out of that same
-//     shared `kind.name.lowercase()` call — nothing PlantUML-side to add for them either.
-//   - Mermaid has no equivalent for any of the five, and the bare word is a MERMAID PARSE ERROR for
+//     shared `kind.name.lowercase()` call — nothing PlantUML-side to add for them either. REF
+//     (WP17) is the ONE member of this set that DOES need a PlantUML-side special case —
+//     `plantUmlFragmentOpenLines`'s own doc covers the real `ref over A, B : label` syntax and why
+//     its bracket also skips the generic `end` line below.
+//   - Mermaid has no equivalent for any of the six, and the bare word is a MERMAID PARSE ERROR for
 //     every one of them (its sequence-diagram grammar has keywords for only
-//     `loop/alt/else/opt/par/and/critical/option/break/rect`). There is nothing to fall back to but
-//     `rect rgb(...)` (still closed by a plain `end`, so the open/close bracket machinery below is
-//     untouched) wrapping a `Note over`. For GROUP the note carries just the label (GROUP has no
-//     operator word worth showing — see [Seq3FragmentKind]'s own doc). For the four real operators
-//     the note carries the operator word too (`fragmentKeywordLine`, the SAME "keyword + label, no
-//     doubling for a blank label" formatting the real-operator branch below uses) — dropping it
-//     there would silently erase the one thing that made picking NEG/CONSIDER over LOOP/GROUP
-//     meaningful, since Mermaid's rendered diagram can no longer say so itself.
+//     `loop/alt/else/opt/par/and/critical/option/break/rect`, and no `ref` construct at all). There
+//     is nothing to fall back to but `rect rgb(...)` (still closed by a plain `end`, so the
+//     open/close bracket machinery below is untouched) wrapping a `Note over`. For GROUP the note
+//     carries just the label (GROUP has no operator word worth showing — see [Seq3FragmentKind]'s
+//     own doc). For the five real operators (WP11's four plus WP17's REF) the note carries the
+//     operator word too (`fragmentKeywordLine`, the SAME "keyword + label, no doubling for a blank
+//     label" formatting the real-operator branch below uses) — dropping it there would silently
+//     erase the one thing that made picking NEG/CONSIDER/REF over LOOP/GROUP meaningful, since
+//     Mermaid's rendered diagram can no longer say so itself.
 //
 // GROUP was the FIRST fragment kind that needed a per-dialect branch, so the branch lives in its
 // own function per dialect rather than as a special case bolted onto a shared `kind.name.lowercase()`
 // call. DO NOT collapse [mermaidFragmentOpenLines] back into [plantUmlFragmentOpenLines]'s shape —
 // a future reader who notices they mostly produce "one open line per fragment" will be tempted to
-// "unify" them, and that would silently regress GROUP's (and now NEG/STRICT/CONSIDER/IGNORE's)
-// Mermaid output back into a parse error.
+// "unify" them, and that would silently regress GROUP's (and now NEG/STRICT/CONSIDER/IGNORE's, and
+// now REF's real `ref over` syntax) output back into a parse error or the wrong PlantUML keyword.
 
 private const val FALLBACK_RECT_COLOR = "rgb(240, 240, 240)"
 
 /** Fragment kinds whose Mermaid rendering has no real keyword to fall back on — see this section's
  *  own header for the per-kind reasoning. [Seq3FragmentKind.GROUP] started this set (WP12); WP11
- *  adds the four real UML operators Mermaid's grammar simply never grew a keyword for. */
+ *  adds the four real UML operators Mermaid's grammar simply never grew a keyword for. WP17 adds
+ *  [Seq3FragmentKind.REF] for the same "no keyword" reason — Mermaid's sequence-diagram grammar
+ *  has no `ref` construct at all, real or otherwise, so a bare `ref Retry` would be as much a
+ *  Mermaid PARSE ERROR as a bare `group`/`neg` — but REF is NOT like the other four WP11 members
+ *  in one respect: it still falls into the "carries the operator word too" branch below rather
+ *  than GROUP's bare-label branch, since REF (unlike GROUP) IS a real UML operator whose word is
+ *  worth keeping visible after the degradation, exactly like NEG/STRICT/CONSIDER/IGNORE. */
 private val MERMAID_FALLBACK_FRAGMENT_KINDS = setOf(
     Seq3FragmentKind.GROUP,
     Seq3FragmentKind.NEG,
     Seq3FragmentKind.STRICT,
     Seq3FragmentKind.CONSIDER,
     Seq3FragmentKind.IGNORE,
+    Seq3FragmentKind.REF,
 )
 
 /** The participant span a fragment's OWN bracket range touches — same idea as [noteSpan], but
@@ -606,9 +617,9 @@ private fun bracketSpan(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: L
 
 /** Mermaid's open line(s) for one fragment bracket. Every kind but the [MERMAID_FALLBACK_FRAGMENT_KINDS]
  *  members is one line; a fallback kind is two (`rect` + `Note over`) — see this section's own
- *  header for why, and for why GROUP's note carries only the label while the other four fallback
- *  kinds also carry the operator word. Lines carry no indentation or trailing newline; the caller
- *  applies both, same as every other emitted line in [toMermaid]. */
+ *  header for why, and for why GROUP's note carries only the label while the other five fallback
+ *  kinds (WP11's four plus WP17's REF) also carry the operator word. Lines carry no indentation or
+ *  trailing newline; the caller applies both, same as every other emitted line in [toMermaid]. */
 private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: List<String>): List<String> {
     val fragment = bracket.fragment
     return if (fragment.kind in MERMAID_FALLBACK_FRAGMENT_KINDS) {
@@ -630,10 +641,21 @@ private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPla
  *  invented `group <label>` already has the exact `kind.name.lowercase()` + label shape every real
  *  UML operator has. Kept as its own function (rather than inlined at the one call site) so the
  *  per-dialect branch structure is symmetric with [mermaidFragmentOpenLines] and the next kind that
- *  needs a real PlantUML-side special case has an obvious place to add it. */
-private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket): List<String> {
+ *  needs a real PlantUML-side special case has an obvious place to add it — [REF] (WP17) is that
+ *  next kind: unlike every other member, its real PlantUML syntax is `ref over A, B : label`, NOT
+ *  `kind.name.lowercase()` + label (confirmed against plantuml.com's own sequence-diagram
+ *  documentation — see [Seq3FragmentKind.REF]'s own doc for why that page, not a public grammar
+ *  file, is the best available source for this dialect). [plan]/[aliases] are only needed for this
+ *  one branch, to compute the `over A, B` participant span via [bracketSpan] — every other kind
+ *  ignores them, same as [mermaidFragmentOpenLines] already threads both through for its own
+ *  fallback branch's `Note over`. */
+private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: List<String>): List<String> {
     val fragment = bracket.fragment
-    return listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
+    return if (fragment.kind == Seq3FragmentKind.REF) {
+        listOf("ref over ${bracketSpan(bracket, plan, aliases)} : ${plantUmlEscape(fragmentLabel(fragment))}")
+    } else {
+        listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
+    }
 }
 
 // ── Fragment operand dividers (WP5) ─────────────────────────────────────────────────────────
@@ -1204,7 +1226,7 @@ fun Seq3Document.toPlantUml(): String {
         }
         plan.emissions.forEachIndexed { i, emission ->
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
-                plantUmlFragmentOpenLines(b).forEach { line -> append(line).append('\n') }
+                plantUmlFragmentOpenLines(b, plan, aliases).forEach { line -> append(line).append('\n') }
             }
             // WP5: an operand's divider begins AT the message it anchors to — see toMermaid's
             // identical comment just above its own dividersByAnchor block.
@@ -1255,7 +1277,17 @@ fun Seq3Document.toPlantUml(): String {
             notesByAnchor[i]?.forEach { note ->
                 append("note over ").append(noteSpan(note, plan, aliases)).append(": ").append(plantUmlEscape(note.text)).append('\n')
             }
-            closes[i]?.sortedByDescending { it.depth }?.forEach { append("end\n") }
+            // WP17: REF is skipped here, never PlantUML's own generic `end\n` — real PlantUML's
+            // `ref over A, B : label` (plantUmlFragmentOpenLines) is a standalone statement, not a
+            // block that encloses other statements the way alt/loop/opt/par/critical/group/neg/
+            // strict/consider/ignore all are (PlantUML invented `group`, and needs no special case
+            // for it either, for exactly that block shape — see Seq3FragmentKind's own doc).
+            // Writing `end` after a `ref over` line would be an unmatched, unparseable token; the
+            // bracketed messages themselves are still emitted normally just below, in order — only
+            // the (nonexistent) closing keyword is what's skipped.
+            closes[i]?.sortedByDescending { it.depth }?.forEach { b ->
+                if (b.fragment.kind != Seq3FragmentKind.REF) append("end\n")
+            }
             // WP11: PlantUML's REAL delay syntax — `...label...`, no participant reference at all
             // (it draws as a full-width divider natively) — see this file's own "Time-gap markers"
             // header for why this must NOT be folded into the same branch as toMermaid's Note over.

@@ -325,8 +325,29 @@ sealed class Seq3MessageEditResult {
  *  operator word plus label (the four real operators — the word must survive the degradation, or a
  *  reader loses the one thing that made picking NEG/CONSIDER over LOOP/GROUP meaningful) — see that
  *  file's own "Fragment open lines" section for why this needs its own per-dialect branch instead
- *  of the `kind.name.lowercase()` call the other six kinds share unmodified. */
-enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP, NEG, STRICT, CONSIDER, IGNORE }
+ *  of the `kind.name.lowercase()` call the other six kinds share unmodified.
+ *
+ *  [REF] (WP17) is UML's `InteractionUse` — "this region is detailed in another diagram", the
+ *  collapse that keeps a 150-message diagram readable. It is neither of the two buckets above:
+ *  it IS a real UML 2.x concept (unlike GROUP), but unlike NEG/STRICT/CONSIDER/IGNORE its real
+ *  PlantUML syntax is NOT `kind.name.lowercase()` + label — PlantUML's actual grammar is
+ *  `ref over A, B : label` (confirmed against plantuml.com's own sequence-diagram documentation,
+ *  the same rigour WP11 applied to Mermaid's jison grammar; PlantUML publishes no public formal
+ *  grammar file the way mermaid-js does, so its own docs are the best available primary source —
+ *  see Seq3Emitters.kt's `plantUmlFragmentOpenLines` for the special case this forces, and its
+ *  `toPlantUml` for why closing this bracket must NOT emit `end`: `ref over` is a standalone
+ *  statement in real PlantUML, never a block that encloses other statements, so writing an `end`
+ *  after one would be an unmatched, unparseable token). Mermaid has no `ref` keyword at all, so
+ *  it joins the GROUP/NEG/STRICT/CONSIDER/IGNORE fallback set — see
+ *  `MERMAID_FALLBACK_FRAGMENT_KINDS`'s own doc.
+ *
+ *  [Seq3Fragment.refDiagramId] carries WHICH diagram this points at; this enum member only marks
+ *  the shape. Deliberately out of scope for this fragment kind (see that field's own doc): making
+ *  a REF box HIDE the region it brackets, the way UML tooling sometimes collapses the referenced
+ *  interaction away — that is a bigger UX question (does hiding move the messages, just the
+ *  arrows, what does undo look like) than "add a fragment kind that points elsewhere", and is left
+ *  for a future work package to decide deliberately rather than accreting as a side effect here. */
+enum class Seq3FragmentKind { LOOP, ALT, OPT, PAR, CRITICAL, BREAK, GROUP, NEG, STRICT, CONSIDER, IGNORE, REF }
 
 /** One `else`-divided branch of a combined fragment — a UML InteractionOperand, minus operand
  *  zero (see [Seq3Fragment.elseOperands] for why operand zero is not represented by this type).
@@ -409,6 +430,26 @@ data class Seq3Fragment(
      *  change that quietly discards a user's typed guards the moment they pick the wrong operator
      *  first would be a worse experience than briefly rendering operands that don't apply yet. */
     val elseOperands: List<Seq3Operand> = emptyList(),
+    /** WP17: which saved diagram a [Seq3FragmentKind.REF] box points at — a
+     *  [com.indagium.ui.DiagramLibraryItem.id] (a stable UUID minted by
+     *  `ui/DiagramLibraryStore.kt`), the SAME id [Seq3AttachmentMetadata.diagramId] already stores
+     *  and [com.indagium.ui.Seq3Session.openLibraryItem] already knows how to follow — this field
+     *  reuses that id-following machinery rather than inventing a second one. Meaningless for
+     *  every other kind and never read by them. Null covers three cases identically, on purpose,
+     *  none of which is an error: every fragment kind but REF, a REF the user hasn't picked a
+     *  target for yet, and (this field's own contract, matching [Seq3Delay]/[visibility]'s
+     *  "a dangling reference draws, never crashes" rule) a REF whose target was later deleted from
+     *  the library. `Seq3Layout`/`Seq3Raster`/the Mermaid and PlantUML emitters never read this
+     *  field at all — the bracket and label are drawn from [kind]/[label]/[messageIds] exactly
+     *  like any other fragment (see [Seq3FragmentKind.REF]'s own doc: a REF fragment brackets its
+     *  messages, it does not hide them), so a dangling or absent id can never fail layout or
+     *  export; only the interactive canvas overlay (`ui/Seq3Canvas.kt`) resolves it against the
+     *  library, and only to decide what a click does and whether to show a "missing" affordance —
+     *  a resolution failure there is a display choice, not a crash. Appended LAST — this file's own
+     *  versioning rule (see [elseOperands]' own doc for why that rule matters here too); absent on
+     *  every fragment written before this field existed -> decodes to null -> byte-identical
+     *  rendering to today. */
+    val refDiagramId: String? = null,
 )
 
 /** A canvas/text note spanning a selection of messages (design spec §06's `Note` verb) — distinct
