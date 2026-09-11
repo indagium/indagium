@@ -1199,6 +1199,94 @@ class Seq3EmitterTest {
         assertTrue(document.toMermaid().contains(": [+0.140] second"), "got:\n${document.toMermaid()}")
     }
 
+    // ── WP16: the collapsed row's own internal span ─────────────────────────────────────────────
+    //
+    // Mirrors Seq3LayoutTest's own WP16 section — see that file's header comment for the full
+    // gap-vs-span reasoning; both dialects compose the tag through the same shared
+    // seq3PrefixedLabel call (Seq3LabelSummary.kt), so they can never disagree on it either.
+
+    private fun spannedOccurrences(count: Int, startMillis: Long, stepMillis: Long) =
+        (0 until count).map { i ->
+            Seq3Occurrence(entryId = i + 1, timestampMillis = startMillis + i * stepMillis, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "repeated")
+        }
+
+    @Test
+    fun collapseAboveAboveThresholdEmitsTheInternalSpanInsteadOfTheGapInBothDialects() {
+        val occs = spannedOccurrences(5, startMillis = 2_010L, stepMillis = 10L) // 2_010L .. 2_050L
+        val messages = listOf(
+            message("m1", occurrences = listOf(occurrence(0, "prev")), label = "prev", repeat = Seq3Repeat.EVERY),
+            message("m2", occurrences = occs, label = "repeated", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        assertTrue(mermaid.contains(": [over 40ms] repeated"), "got:\n$mermaid")
+        assertTrue(plantUml.contains(": [over 40ms] repeated"), "got:\n$plantUml")
+        assertFalse(mermaid.contains("[+"), "gap and span must never both show; got:\n$mermaid")
+        assertFalse(plantUml.contains("[+"), "gap and span must never both show; got:\n$plantUml")
+    }
+
+    @Test
+    fun collapseAboveOccurrencesSharingOneTimestampEmitsAZeroishSpanNotACrashInBothDialects() {
+        val occs = spannedOccurrences(5, startMillis = 3_000L, stepMillis = 0L) // every occurrence at the same instant
+        val messages = listOf(message("m1", occurrences = occs, label = "repeated", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3))
+        val document = doc(messages).copy(showElapsed = true)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        assertTrue(mermaid.contains(": [over 0ms] repeated"), "got:\n$mermaid")
+        assertTrue(plantUml.contains(": [over 0ms] repeated"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun collapseAboveBelowThresholdEmitsOrdinaryGapTagsNotASpanInBothDialects() {
+        val occs = spannedOccurrences(2, startMillis = 2_000L, stepMillis = 10L)
+        val messages = listOf(
+            message("m1", occurrences = listOf(occurrence(0, "prev")), label = "prev", repeat = Seq3Repeat.EVERY),
+            message("m2", occurrences = occs, label = "repeated", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        assertFalse(mermaid.contains("over"), "below threshold, every occurrence draws its own row with an ordinary gap; got:\n$mermaid")
+        assertFalse(plantUml.contains("over"), "got:\n$plantUml")
+        assertTrue(mermaid.contains("[+"), "an ordinary gap tag must still show; got:\n$mermaid")
+        assertTrue(plantUml.contains("[+"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun showElapsedFalseEmitsNeitherGapNorSpanForACollapsedRowAboveThresholdInBothDialects() {
+        val occs = spannedOccurrences(5, startMillis = 2_010L, stepMillis = 10L)
+        val messages = listOf(message("m1", occurrences = occs, label = "repeated", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3))
+        // showElapsed defaults false — the default-off guarantee, reconfirmed for the span branch.
+        val document = doc(messages)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        assertTrue(mermaid.contains(": repeated"), "got:\n$mermaid")
+        assertFalse(mermaid.contains("[over") || mermaid.contains("[+"), "got:\n$mermaid")
+        assertTrue(plantUml.contains(": repeated"), "got:\n$plantUml")
+        assertFalse(plantUml.contains("[over") || plantUml.contains("[+"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun collapseAboveOccurrencesWithNullTimestampsEmitNoSpanTagInBothDialects() {
+        val occs = (1..5).map { i ->
+            Seq3Occurrence(entryId = i, timestampMillis = null, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "repeated")
+        }
+        val messages = listOf(message("m1", occurrences = occs, label = "repeated", repeat = Seq3Repeat.COLLAPSE_ABOVE, repeatThreshold = 3))
+        val document = doc(messages).copy(showElapsed = true)
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        assertTrue(mermaid.contains(": repeated"), "neither endpoint has a real timestamp: no tag at all; got:\n$mermaid")
+        assertFalse(mermaid.contains("[over") || mermaid.contains("[+"), "got:\n$mermaid")
+        assertTrue(plantUml.contains(": repeated"), "got:\n$plantUml")
+        assertFalse(plantUml.contains("[over") || plantUml.contains("[+"), "got:\n$plantUml")
+    }
+
     // ── WP15 Part 2: no literal {slot} on a NOTE or unresolved-target row ───────────────────────
 
     @Test

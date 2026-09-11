@@ -994,10 +994,12 @@ class Seq3LayoutTest {
 
     @Test
     fun collapseAboveElapsedTagMeasuresGapToTheFirstOfTheCollapsedGroup() {
-        // COLLAPSE_ABOVE above threshold (WP15 brief's own checklist): the whole group draws as ONE
-        // row carrying `occurrences.first().timestampMillis` — its tag is honestly "the gap from the
-        // previous row to the first of these n", never a fabricated internal span (that's WP16, not
-        // this package).
+        // WP16 superseded this exact scenario: a collapsed group above threshold now carries its
+        // OWN internal span (occurrences.first() -> occurrences.last()) and — per WP16's own
+        // gap-vs-span call — shows THAT instead of the gap-to-previous-row. See
+        // collapseAboveAboveThresholdRendersTheInternalSpanInsteadOfTheGapToThePreviousRow below for
+        // the replacement assertion; this test now only pins that the row still draws as ONE row
+        // with the right repeat count, not the (now superseded) exact tag text.
         val occs = (1..5).map { i -> occurrence(i, ts = 2_000L + i * 10L) }
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
@@ -1012,10 +1014,107 @@ class Seq3LayoutTest {
         val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
         assertEquals(2, rows.size, "the collapsed group must still draw as ONE row")
         assertEquals(5, rows[1].repeatCount)
-        assertTrue(
-            rows[1].label.startsWith("[+1.010] "),
-            "gap from 'prev' (1_000L) to the FIRST occurrence of the group (2_010L); got '${rows[1].label}'",
+    }
+
+    // ── WP16: the collapsed row's own internal span ─────────────────────────────────────────────
+    //
+    // A COLLAPSE_ABOVE row above threshold draws ONE row for n occurrences, carrying
+    // `occurrences.first().timestampMillis` as its own position (see WP15's own doc above) — so its
+    // measured `[+...]` gap tag only ever said "how far is this group from the row before it", never
+    // "how long did these n occurrences themselves take". `Emission.Arrow`/`Emission.Self`'s new
+    // `spanEndTimestampMillis` (`occurrences.last().timestampMillis`) closes that gap. Gap-vs-span
+    // call (see Seq3LabelSummary.kt's `seq3PrefixedLabel` doc for the full reasoning): when a span
+    // is available, SHOW THE SPAN ALONE, never both — it is the more informative number and two
+    // duration tags on one label is noise.
+
+    @Test
+    fun collapseAboveAboveThresholdRendersTheInternalSpanInsteadOfTheGapToThePreviousRow() {
+        val occs = (1..5).map { i -> occurrence(i, ts = 2_000L + i * 10L) } // 2_010L .. 2_050L
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(0, ts = 1_000L)), template = "prev"),
+                message("m2", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated"),
+            ),
+            showElapsed = true,
         )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(2, rows.size, "the collapsed group must still draw as ONE row")
+        assertTrue(
+            rows[1].label.startsWith("[over 40ms] "),
+            "the group's own internal span (2_010L -> 2_050L = 40ms), NOT the 1_010ms gap from 'prev'; got '${rows[1].label}'",
+        )
+        assertFalse(rows[1].label.startsWith("[+"), "gap and span must never both show; got '${rows[1].label}'")
+    }
+
+    @Test
+    fun collapseAboveOccurrencesSharingOneTimestampRendersAZeroishSpanNotACrashOrABareBracket() {
+        val occs = (1..5).map { i -> occurrence(i, ts = 3_000L) } // every occurrence at the same instant
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated")),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(1, rows.size)
+        assertEquals("[over 0ms] repeated", rows[0].label, "zero-length span, not a crash or a bare '['")
+    }
+
+    @Test
+    fun collapseAboveBelowThresholdGetsOrdinaryGapTagsNotASpan() {
+        // Below threshold, expandForLayout draws every occurrence as its OWN row (the else branch
+        // in the COLLAPSE_ABOVE `when`) — spanEndTimestampMillis is never set on those, so each row
+        // keeps the ordinary previous-row gap tag WP15 already gave it.
+        val occs = listOf(occurrence(1, ts = 2_000L), occurrence(2, ts = 2_010L))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(0, ts = 1_000L)), template = "prev"),
+                message("m2", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(3, rows.size, "below threshold, both occurrences draw as their own row, not one collapsed row")
+        assertTrue(rows[1].label.startsWith("[+1.000] "), "ordinary gap tag; got '${rows[1].label}'")
+        assertTrue(rows[2].label.startsWith("[+0.010] "), "ordinary gap tag; got '${rows[2].label}'")
+        assertFalse(rows[1].label.contains("over"), "below threshold must never show a span tag")
+        assertFalse(rows[2].label.contains("over"), "below threshold must never show a span tag")
+    }
+
+    @Test
+    fun showElapsedFalseRendersNeitherGapNorSpanForACollapsedRowAboveThreshold() {
+        // The default-off guarantee (WP15's own), reconfirmed for the new span branch: a real,
+        // measurable internal span must still print nothing when showElapsed is off.
+        val occs = (1..5).map { i -> occurrence(i, ts = 2_000L + i * 10L) }
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals("repeated", rows.single().label, "showElapsed defaults false: no [+...] and no [over ...] tag")
+    }
+
+    @Test
+    fun collapseAboveOccurrencesWithNullTimestampsRenderNoSpanTag() {
+        val occs = (1..5).map { i -> occurrence(i, ts = null) }
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated")),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals("repeated", rows.single().label, "neither endpoint has a real timestamp: no tag at all")
     }
 
     // ── WP15 Part 2: no literal {slot} on a NOTE or unresolved-stub row ─────────────────────────

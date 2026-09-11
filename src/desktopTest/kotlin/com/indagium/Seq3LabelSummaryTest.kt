@@ -183,6 +183,100 @@ class Seq3LabelSummaryTest {
         assertEquals("[+0.200] hello", result)
     }
 
+    // ── WP16: the collapsed row's own internal span ─────────────────────────────────────────────
+    //
+    // See this file's own class doc and Seq3Layout.kt's `Emission.Arrow.spanEndTimestampMillis` for
+    // the full "why" — a COLLAPSE_ABOVE row above threshold has no way to say how long its own n
+    // occurrences spanned, only how far it sits from the previous row. These pin seq3PrefixedLabel's
+    // half of that directly: given [timestampMillis] (the row's own/span-start) and
+    // [spanEndTimestampMillis], it renders `over <duration>` via `formatDuration`
+    // (magnitude-only — a span has no before/after side to sign), and — the gap-vs-span call this
+    // work package makes deliberately, not by accident — the span always wins over a simultaneously
+    // available gap: two duration tags on one label would be noise, and the span says something
+    // about the row's own content while the gap only says where it sits.
+
+    @Test
+    fun spanPresentRendersTheSpanInsteadOfTheGapEvenWhenBothAreAvailable() {
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            elapsedMillis = 140L,
+            showElapsed = true,
+            spanEndTimestampMillis = 5_200L,
+        )
+        assertEquals("[over 4.2s] hello", result, "the span (1_000L -> 5_200L) wins over the 140ms gap")
+    }
+
+    @Test
+    fun spanZeroRendersAZeroDurationNotACrashOrABareBracket() {
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = 3_000L,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            showElapsed = true,
+            spanEndTimestampMillis = 3_000L,
+        )
+        assertEquals("[over 0ms] hello", result)
+    }
+
+    @Test
+    fun spanAbsentFallsBackToTheOrdinaryGapTag() {
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            elapsedMillis = 140L,
+            showElapsed = true,
+            spanEndTimestampMillis = null,
+        )
+        assertEquals("[+0.140] hello", result, "no span available: the ordinary gap tag is unaffected")
+    }
+
+    @Test
+    fun showElapsedFalseSuppressesTheSpanTagToo() {
+        // The default-off guarantee, reconfirmed for the span branch (mirrors
+        // elapsedOffLeavesTheLabelUnprefixedEvenWhenAMeasuredGapIsAvailable above).
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = 1_000L,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            showElapsed = false,
+            spanEndTimestampMillis = 5_200L,
+        )
+        assertEquals("hello", result)
+    }
+
+    @Test
+    fun spanRequiresANonNullRowTimestampTooNotJustANonNullSpanEnd() {
+        // A null [timestampMillis] means this row has no real position of its own (e.g. every
+        // occurrence in the group had a null timestamp) — nothing to measure FROM, so no tag at all,
+        // even though [spanEndTimestampMillis] alone is non-null.
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            showElapsed = true,
+            spanEndTimestampMillis = 5_200L,
+        )
+        assertEquals("hello", result, "no fabricated span when the row's own timestamp is unknown")
+    }
+
     // ── seq3DisplayTimestamp ─────────────────────────────────────────────────────────────────
 
     @Test

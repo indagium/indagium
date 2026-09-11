@@ -1,6 +1,8 @@
 package com.indagium.diagram3
 
+import com.indagium.utils.elapsedMillisOfDay
 import com.indagium.utils.formatDelta
+import com.indagium.utils.formatDuration
 
 // ── Message-label helpers shared by Seq3Layout and Seq3Emitters ────────────────────────────────
 //
@@ -112,6 +114,21 @@ private fun seq3FormatMillisOfDay(millis: Long): String {
  * duration, not a directional delta between two specific rows. Returns [label] byte-identical when
  * every toggle is off or no prefix has anything to show, so a caller never needs its own "did
  * anything change" branch.
+ *
+ * [spanEndTimestampMillis] (WP16) is the OTHER duration a collapsed row can show: when a
+ * [Seq3Repeat.COLLAPSE_ABOVE] row above threshold draws N occurrences as one row, [elapsedMillis]
+ * only measures the gap from the PREVIOUS drawn row to the FIRST of these N — the row's own
+ * internal span (how long these N occurrences themselves took) is otherwise invisible. When
+ * [spanEndTimestampMillis] and [timestampMillis] are both present and [showElapsed] is on, this
+ * function shows THAT span instead of the gap — `formatDuration` (magnitude-only), not
+ * `formatDelta`, because a span has no "before/after" side to sign. Deliberate choice, not an
+ * oversight: a collapsed row can in principle have both a real preceding-row gap AND a real
+ * internal span, and this function shows the span ALONE rather than both — it is the more
+ * informative of the two (it says something about what the collapsed row itself contains, not just
+ * where it sits relative to its neighbour) and stacking two duration tags on one label reads as
+ * noise, not signal. Every other emission kind (a plain arrow, a below-threshold occurrence, a
+ * Note/Elision) never has a span end, so this branch is unreachable for them and the existing gap
+ * behaviour is untouched.
  */
 internal fun seq3PrefixedLabel(
     label: String,
@@ -122,11 +139,18 @@ internal fun seq3PrefixedLabel(
     showTimestamps: Boolean,
     elapsedMillis: Long? = null,
     showElapsed: Boolean = false,
+    spanEndTimestampMillis: Long? = null,
 ): String {
     val tags = buildList {
         if (showSequenceNumbers && sequenceNumber != null) add("#$sequenceNumber")
         if (showTimestamps) seq3DisplayTimestamp(rawTimestamp, timestampMillis)?.let(::add)
-        if (showElapsed && elapsedMillis != null) add(formatDelta(elapsedMillis))
+        if (showElapsed) {
+            if (spanEndTimestampMillis != null && timestampMillis != null) {
+                add("over " + formatDuration(elapsedMillisOfDay(timestampMillis, spanEndTimestampMillis)))
+            } else if (elapsedMillis != null) {
+                add(formatDelta(elapsedMillis))
+            }
+        }
     }
     if (tags.isEmpty()) return label
     return tags.joinToString(separator = "") { "[$it] " } + label

@@ -795,6 +795,15 @@ private sealed class Emission {
         override val entryId: Int?,
         override val timestampMillis: Long?,
         val rawTimestamp: String,
+        // WP16: appended LAST (this file's own field-versioning convention — file-local sealed
+        // type, no codec, no round-trip; see this field's twin on [Self] and
+        // Seq3Emitters.kt's `Seq3Emission.Arrow` for the full doc). Non-null ONLY on a
+        // [Seq3Repeat.COLLAPSE_ABOVE] row above threshold, where it is
+        // `occurrences.last().timestampMillis` — the row's own internal span end, as opposed to
+        // [timestampMillis] (the span START, i.e. the first occurrence this row stands for). See
+        // [expandForLayout]'s COLLAPSE_ABOVE branch for where it's set and
+        // [seq3PrefixedLabel]'s doc for how it renders.
+        val spanEndTimestampMillis: Long? = null,
     ) : Emission()
 
     data class Self(
@@ -805,6 +814,8 @@ private sealed class Emission {
         override val entryId: Int?,
         override val timestampMillis: Long?,
         val rawTimestamp: String,
+        // WP16: see [Arrow.spanEndTimestampMillis]'s own doc — identical meaning here.
+        val spanEndTimestampMillis: Long? = null,
     ) : Emission()
 
     data class Stub(
@@ -893,10 +904,25 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
     val occurrences = visibleOccurrences
     val isSelf = message.kind == Seq3Kind.SELF
 
-    fun arrow(label: String, count: Int, entryId: Int?, timestampMillis: Long?, rawTimestamp: String): Emission = if (isSelf) {
-        Emission.Self(message.id, message.fromLifelineId, label, count, entryId, timestampMillis, rawTimestamp)
+    // spanEndTimestampMillis: trailing optional, omitted by every caller except the COLLAPSE_ABOVE
+    // above-threshold branch below — see [Emission.Arrow.spanEndTimestampMillis]'s own doc. Kept as
+    // a 6th default param (not a 6-arg call everywhere) so `::arrow` still adapts to
+    // [firstLastEmissions]'s 5-arg function-type parameter (Kotlin's callable-reference-to-
+    // default-arg-function adaptation), rather than duplicating the isSelf branch a second time.
+    fun arrow(
+        label: String,
+        count: Int,
+        entryId: Int?,
+        timestampMillis: Long?,
+        rawTimestamp: String,
+        spanEndTimestampMillis: Long? = null,
+    ): Emission = if (isSelf) {
+        Emission.Self(message.id, message.fromLifelineId, label, count, entryId, timestampMillis, rawTimestamp, spanEndTimestampMillis)
     } else {
-        Emission.Arrow(message.id, message.fromLifelineId, message.toLifelineId, message.kind, label, count, entryId, timestampMillis, rawTimestamp)
+        Emission.Arrow(
+            message.id, message.fromLifelineId, message.toLifelineId, message.kind,
+            label, count, entryId, timestampMillis, rawTimestamp, spanEndTimestampMillis,
+        )
     }
     if (occurrences.isEmpty()) {
         return listOf(arrow(message.labelTemplate, 1, null, message.primaryTimestampMillis, message.primaryRawTimestamp))
@@ -923,6 +949,15 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
                     occurrences.first().entryId,
                     seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
                     seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
+                    // WP16: the row's own internal span end. `occurrences` here may be a
+                    // trimSeq3MessageOccurrences first/last WINDOW rather than the true full
+                    // evidence (when message.totalOccurrenceCount != null) — but that trim keeps
+                    // exactly the first and last real occurrences (Seq3Generator.kt's
+                    // trimSeq3MessageOccurrences: `occurrences.take(keepFirst) + occurrences
+                    // .takeLast(keepLast)`, itself walking an already-chronologically-sorted list),
+                    // so `.last()` is still the TRUE last occurrence's timestamp even on a trimmed
+                    // message — the span stays honest.
+                    occurrences.last().timestampMillis,
                 ),
             )
         } else {
@@ -1125,6 +1160,7 @@ private fun prefixEmissionLabels(
                         showTimestamps,
                         elapsed,
                         showElapsed,
+                        emission.spanEndTimestampMillis,
                     ),
                 )
                 lastRealTimestampMillis = emission.timestampMillis
@@ -1143,6 +1179,7 @@ private fun prefixEmissionLabels(
                         showTimestamps,
                         elapsed,
                         showElapsed,
+                        emission.spanEndTimestampMillis,
                     ),
                 )
                 lastRealTimestampMillis = emission.timestampMillis

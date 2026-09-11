@@ -136,6 +136,12 @@ private sealed class Seq3Emission {
         override val occurrenceEntryId: Int? = null,
         val rawTimestamp: String = "",
         override val timestampMillis: Long? = null,
+        // WP16: appended LAST (this file's own field-versioning convention — file-local sealed
+        // type, no codec, no round-trip; see Seq3Layout.kt's `Emission.Arrow.spanEndTimestampMillis`
+        // for the full doc — identical meaning here). Non-null ONLY on a [Seq3Repeat.COLLAPSE_ABOVE]
+        // row above threshold, from `occurrences.last().timestampMillis` — set in `expandMessage`'s
+        // COLLAPSE_ABOVE branch.
+        val spanEndTimestampMillis: Long? = null,
     ) : Seq3Emission()
 
     data class NeedsTarget(
@@ -266,6 +272,10 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                     occurrences.first().entryId,
                     seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
                     seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
+                    // WP16: the row's own internal span end — see Seq3Layout.expandForLayout's
+                    // identical COLLAPSE_ABOVE branch (and Seq3Generator's trimSeq3MessageOccurrences)
+                    // for why `.last()` is still the true last occurrence even on a trimmed message.
+                    occurrences.last().timestampMillis,
                 ),
             )
         } else {
@@ -447,6 +457,7 @@ private fun prefixSeq3EmissionLabels(
                         showTimestamps,
                         elapsed,
                         showElapsed,
+                        emission.spanEndTimestampMillis,
                     ),
                 )
                 lastRealTimestampMillis = emission.timestampMillis
