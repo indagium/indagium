@@ -1217,6 +1217,13 @@ fun App(
             // zip-picker and other consequential dialogs below, so an accidental outside click can't
             // silently pick "Cancel" for the user.
             state.pendingNoteOverwrite?.let { pending ->
+                // WP14: pending.handEdit != null is a DIFFERENT origin sharing this same field/
+                // dialog slot — Seq3Session.confirm() about to overwrite a hand-edited diagram
+                // note, not the file-export-target conflict this dialog was originally built for.
+                // See PendingNoteOverwrite.handEdit's own doc for why one field, and
+                // AppState.confirmSeq3NoteOverwrite/keepSeq3NoteText for this branch's own actions
+                // (plain cancelNoteOverwrite covers "Cancel" for both origins unchanged).
+                val handEdit = pending.handEdit
                 Dialog(
                     onDismissRequest = { state.cancelNoteOverwrite() },
                     properties = DialogProperties(dismissOnClickOutside = false),
@@ -1226,48 +1233,91 @@ fun App(
                         Modifier.width(380.dp).background(tc2.p, RoundedCornerShape(8.dp))
                             .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
                     ) {
-                        AppText(
-                            "Existing notes found",
-                            color = tc2.tx,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Spacer(Modifier.height(6.dp))
-                        AppText(
-                            "\"${pending.targetName}\" already has saved notes for this log, from a session that " +
-                                "never opened this file. Nothing is being written to disk while this is open — " +
-                                "choose how to proceed.",
-                            color = tc2.td,
-                            fontSize = 11.sp,
-                            maxLines = 5,
-                        )
-                        Spacer(Modifier.height(14.dp))
-                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                DialogActionButton(
-                                    "Open existing notes",
-                                    active = true,
-                                ) { state.openExistingNoteInsteadOfOverwrite() }
-                                DialogActionButton(
-                                    "Save to a new file",
-                                    active = true,
-                                ) { state.saveNotesToNewNoteFile() }
+                        if (handEdit == null) {
+                            AppText(
+                                "Existing notes found",
+                                color = tc2.tx,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            AppText(
+                                "\"${pending.targetName}\" already has saved notes for this log, from a session that " +
+                                    "never opened this file. Nothing is being written to disk while this is open — " +
+                                    "choose how to proceed.",
+                                color = tc2.td,
+                                fontSize = 11.sp,
+                                maxLines = 5,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    DialogActionButton(
+                                        "Open existing notes",
+                                        active = true,
+                                    ) { state.openExistingNoteInsteadOfOverwrite() }
+                                    DialogActionButton(
+                                        "Save to a new file",
+                                        active = true,
+                                    ) { state.saveNotesToNewNoteFile() }
+                                }
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    DialogActionButton(
+                                        "Overwrite",
+                                        active = true,
+                                        danger = true,
+                                    ) { state.confirmNoteOverwrite() }
+                                    DialogActionButton("Cancel", active = false) { state.cancelNoteOverwrite() }
+                                }
                             }
-                            Row(
-                                Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                DialogActionButton(
-                                    "Overwrite",
-                                    active = true,
-                                    danger = true,
-                                ) { state.confirmNoteOverwrite() }
-                                DialogActionButton("Cancel", active = false) { state.cancelNoteOverwrite() }
+                        } else {
+                            AppText(
+                                "Diagram note was hand-edited",
+                                color = tc2.tx,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            AppText(
+                                "\"${pending.targetName}\"'s Mermaid/PlantUML text was edited by hand since it was " +
+                                    "generated. Confirming now would replace that text with the current diagram " +
+                                    "model. Nothing is being written while this is open — choose how to proceed.",
+                                color = tc2.td,
+                                fontSize = 11.sp,
+                                maxLines = 6,
+                            )
+                            Spacer(Modifier.height(14.dp))
+                            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    DialogActionButton(
+                                        "Overwrite",
+                                        active = true,
+                                        danger = true,
+                                    ) { state.confirmSeq3NoteOverwrite() }
+                                    DialogActionButton(
+                                        "Keep my text",
+                                        active = true,
+                                    ) { state.keepSeq3NoteText() }
+                                }
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    DialogActionButton("Cancel", active = false) { state.cancelNoteOverwrite() }
+                                }
                             }
                         }
                     }

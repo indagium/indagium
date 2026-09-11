@@ -680,6 +680,30 @@ class Seq3SessionTest {
         assertEquals(1, state.tab("log")!!.annotations.blocks.size, "a second confirm must update, not append, the note")
     }
 
+    // WP14 regression guard: the hand-edit drift gate added to confirm() must never engage on the
+    // COMMON path, where nothing was ever hand-edited. Model this directly on
+    // confirmWritesANoteAndASecondConfirmUpdatesTheSameBlock above (also a same-session, two-confirm
+    // sequence) — the only difference from that test is asserting pendingNoteOverwrite explicitly
+    // stays null throughout. See Seq3NoteOverwriteGateTest.kt for the DRIFTED counterpart of this.
+    @Test
+    fun confirmOnANonDriftedNoteWritesImmediatelyWithoutPrompting() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        val firstBlockId = state.seq3Sessions.confirm(id)
+        assertNotNull(firstBlockId)
+        assertNull(state.pendingNoteOverwrite, "an ordinary first confirm must never raise a hand-edit prompt")
+
+        state.seq3Sessions.updateTitle(id, "Regenerated title")
+        val secondBlockId = state.seq3Sessions.confirm(id)
+
+        assertEquals(firstBlockId, secondBlockId, "WP14's drift gate must not turn an un-hand-edited second confirm into a no-op")
+        assertNull(state.pendingNoteOverwrite, "the common path — nothing was ever hand-edited — must never gate behind a prompt")
+        val text = (state.tab("log")!!.annotations.blocks.single { it.id == firstBlockId } as com.indagium.model.AnnBlock.Note).text
+        assertEquals("Regenerated title", parseSeq3Note(text)?.document?.title)
+    }
+
     @Test
     fun generatedDiagramIsAutoSavedToLibraryBeforeAnyNoteIsAttached() {
         val state = state()
@@ -755,6 +779,47 @@ class Seq3SessionTest {
         val reopened = state.seq3Sessions.beginEdit("log", blockId)
         assertEquals(id, reopened, "opening a live-linked note must activate the existing session")
         assertEquals(1, state.seq3Sessions.sessions.size)
+    }
+
+    // WP14: syncLiveLinkedNote runs unattended (off publishGenerated/markDirty), so unlike confirm()
+    // it cannot afford to prompt on a drifted link — it must SKIP just that one note (leaving it
+    // byte-identical) while still syncing every OTHER linked note in the same pass. Two blocks
+    // linked to the SAME library item (attachLiveLink, then a second attachLibraryLink onto the
+    // same id) is what makes "one drifted, one not, same sync pass" observable in a single call.
+    @Test
+    fun syncLiveLinkedNoteSkipsADriftedLinkButStillSyncsAnUndriftedSiblingLink() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+
+        val driftedBlockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))
+        val libraryId = requireNotNull(state.seq3Sessions.sessions.single().libraryItemId)
+        val cleanBlockId = requireNotNull(state.seq3Sessions.attachLibraryLink("log", libraryId, afterBlockId = driftedBlockId))
+        assertFalse(state.seq3Sessions.sessions.single { it.id == id }.linkedNoteDrifted, "sanity: nothing has drifted yet")
+
+        val originalDriftedText = (state.tab("log")!!.annotations.blocks.single { it.id == driftedBlockId } as com.indagium.model.AnnBlock.Note).text
+        val handEditedText = originalDriftedText.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over X: hand-edited\n")
+        assertTrue(handEditedText != originalDriftedText, "test setup sanity: the tamper must actually change the text")
+        state.updateBlock("log", driftedBlockId, handEditedText)
+
+        state.seq3Sessions.updateTitle(id, "Live title after drift")
+        // W3: syncLiveLinkedNote rides the same debounce as autoSaveDraftToLibrary — settle it
+        // deterministically rather than sleeping past DRAFT_SAVE_DEBOUNCE_MS.
+        state.seq3Sessions.flush(id)
+
+        val afterDrifted = (state.tab("log")!!.annotations.blocks.single { it.id == driftedBlockId } as com.indagium.model.AnnBlock.Note).text
+        assertEquals(handEditedText, afterDrifted, "the hand-edited link must stay byte-identical, never re-derived from the document")
+
+        val afterClean = (state.tab("log")!!.annotations.blocks.single { it.id == cleanBlockId } as com.indagium.model.AnnBlock.Note).text
+        assertEquals(
+            "Live title after drift",
+            parseSeq3Note(afterClean)?.document?.title,
+            "the un-hand-edited sibling link must still sync normally in the SAME pass",
+        )
+        assertTrue(
+            state.seq3Sessions.sessions.single { it.id == id }.linkedNoteDrifted,
+            "the session must surface the drift once a sync pass actually sees it",
+        )
     }
 
     @Test

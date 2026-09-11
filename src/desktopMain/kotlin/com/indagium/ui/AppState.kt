@@ -752,7 +752,41 @@ data class PendingFilterRename(val id: String, val currentName: String, val isDr
 // targetName are both the resolved file — targetName (bare, no directory) is what a "keep this
 // name" decision pins on the tab, targetPath (absolute) is what the dialog copy shows the user and
 // what "Open existing notes" loads.
-data class PendingNoteOverwrite(val tabId: String, val targetPath: String, val targetName: String, val pendingTab: LogTab)
+data class PendingNoteOverwrite(
+    val tabId: String,
+    val targetPath: String,
+    val targetName: String,
+    val pendingTab: LogTab,
+    /**
+     * WP14: non-null when this pending decision did NOT come from upAnn's file-export-target gate
+     * above, but from [com.indagium.ui.Seq3Session.confirm] about to silently overwrite a diagram
+     * note whose fence was hand-edited since it was generated (`seq3NoteHasHandEdit`). Reusing this
+     * one field — rather than a second `pendingSeq3NoteOverwrite` — keeps "at most one deferred
+     * note decision is ever on screen" true for both origins, exactly the invariant this class
+     * already enforces for file conflicts; [AppState.confirmSeq3NoteOverwrite]/[keepSeq3NoteText]
+     * are this case's own resolutions, and plain [cancelNoteOverwrite] covers "Cancel" for both.
+     *
+     * [targetPath] is unused (left blank) here — there is no file-target decision to show. [pendingTab]
+     * is set to the tab exactly as already committed (this case never stashes an uncommitted
+     * mutation — the block being protected already exists in `tabs`; the whole point is to NOT call
+     * [AppState.updateBlock] on it yet) and [targetName] doubles as the dialog's display name for
+     * the diagram (the confirming session's document title), the same "name of the thing about to
+     * be overwritten" role it plays for a file conflict. [confirmNoteOverwrite]/
+     * [openExistingNoteInsteadOfOverwrite]/[saveNotesToNewNoteFile] all guard on `handEdit == null`
+     * — they perform actions ("open existing file", "save to a new file") that only make sense for
+     * the file-conflict case above, and must never be reachable via the hand-edit dialog's own
+     * (different) buttons.
+     */
+    val handEdit: PendingHandEditOverwrite? = null,
+)
+
+/** See [PendingNoteOverwrite.handEdit]. [sessionId] is the [com.indagium.ui.Seq3Session]
+ *  workspace whose [com.indagium.ui.Seq3Session.confirm] raised this — resolving "Overwrite" calls
+ *  back into that exact session (not a fresh [tab]/[blockId] lookup) so it can also finish the rest
+ *  of confirm()'s own bookkeeping (dirty flag, library record, live-link sync). [blockId] is kept
+ *  alongside purely so the dialog/tests can identify which note is at stake without reaching into
+ *  [com.indagium.ui.Seq3Session] internals for it. */
+data class PendingHandEditOverwrite(val sessionId: String, val blockId: String)
 
 /** W0: the shared "operation not possible" popup for the sequence-diagram v3 chain (see
  *  `docs/plans/prepare-plan-to-fix-binary-wreath.md`'s W0/W1). [Seq3Session] raises this whenever a
@@ -7402,6 +7436,12 @@ class AppState(
     /** "Overwrite": pin to the name that was about to be overwritten, then let the write proceed. */
     fun confirmNoteOverwrite() {
         val pending = pendingNoteOverwrite ?: return
+        // This is the FILE-conflict dialog's own "Overwrite" — the hand-edit dialog
+        // (PendingNoteOverwrite.handEdit != null) has its own "Overwrite" wired to
+        // confirmSeq3NoteOverwrite instead, which pins nothing and writes a note's text, not a
+        // target filename. A defensive no-op, never expected to fire: App.kt renders a different
+        // button set for that case, so nothing should call this one while it's up.
+        if (pending.handEdit != null) return
         pendingNoteOverwrite = null
         // Commits pending.pendingTab, NOT tab(pending.tabId) — the edit that triggered this prompt
         // was never applied to the live tab (see upAnn/PendingNoteOverwrite), so the live tab is
@@ -7417,6 +7457,9 @@ class AppState(
     /** "Open existing notes": load the file the tab was about to overwrite instead, discarding the unsaved edit that triggered the prompt. */
     fun openExistingNoteInsteadOfOverwrite() {
         val pending = pendingNoteOverwrite ?: return
+        // File-conflict-only action (see confirmNoteOverwrite's identical guard) — the hand-edit
+        // dialog has no "Open existing notes" button.
+        if (pending.handEdit != null) return
         pendingNoteOverwrite = null
         // The edit(s) that TRIGGERED this prompt live only in pending.pendingTab — never committed,
         // see upAnn/PendingNoteOverwrite — and openNoteFile replaces the live tab's whole block list
@@ -7442,6 +7485,9 @@ class AppState(
     /** "Save to a new file": pick the next free "_2"/"_3"/... name and pin to that instead. */
     fun saveNotesToNewNoteFile() {
         val pending = pendingNoteOverwrite ?: return
+        // File-conflict-only action (see confirmNoteOverwrite's identical guard) — the hand-edit
+        // dialog has no "Save to a new file" button.
+        if (pending.handEdit != null) return
         pendingNoteOverwrite = null
         val targetDir = activeNotesDir()
         // Check the .ann sidecar too, not just the .md — a hand-deleted .md with an orphaned
@@ -7452,6 +7498,33 @@ class AppState(
         // Same reasoning as confirmNoteOverwrite: commit pending.pendingTab, the snapshot that
         // actually carries the edit(s) this prompt held back, not the still-unedited live tab.
         upAnn(pending.tabId) { pending.pendingTab.copy(noteTargetName = newName) }
+    }
+
+    // WP14: the hand-edit dialog's own two resolutions (PendingNoteOverwrite.handEdit != null —
+    // see that field's doc). "Cancel" needs no analogue here: plain cancelNoteOverwrite() above
+    // already does exactly the right thing for this case too (null the field, write nothing).
+
+    /** "Overwrite": Seq3Session.confirm() found a drifted note and deferred to here instead of
+     *  silently re-deriving the fence from the document. Delegates the actual write to
+     *  Seq3Session.resolveHandEditOverwrite rather than calling confirm() again — confirm() would
+     *  re-run the very drift check that raised this prompt, against the text this call is about to
+     *  replace, and loop forever. */
+    fun confirmSeq3NoteOverwrite() {
+        val pending = pendingNoteOverwrite ?: return
+        val handEdit = pending.handEdit ?: return
+        pendingNoteOverwrite = null
+        seq3Sessions.resolveHandEditOverwrite(handEdit.sessionId)
+    }
+
+    /** "Keep my text": the opposite of [confirmSeq3NoteOverwrite] — leaves the drifted fence
+     *  untouched. Behaviourally identical to [cancelNoteOverwrite] (nothing is written either way);
+     *  kept as its own named entry point purely so the dialog's two dismissive-looking buttons
+     *  ("Keep my text" vs the bare "Cancel" App.kt renders beside it) stay distinguishable at the
+     *  call site instead of both silently routing through a method named for the OTHER dialog's
+     *  Cancel. */
+    fun keepSeq3NoteText() {
+        if (pendingNoteOverwrite?.handEdit == null) return
+        pendingNoteOverwrite = null
     }
 
     /** Dialog dismissed/cancelled: discard the never-committed mutation that triggered this prompt
@@ -7549,7 +7622,16 @@ class AppState(
     // unrelated tabs' exports for no benefit.
     internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
         val committed = synchronized(stateLock) {
-            val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId }
+            // WP14: `it.handEdit == null` excludes a Seq3Session.confirm() hand-edit conflict
+            // (PendingNoteOverwrite.handEdit) from this fold — unlike the file-conflict case, that
+            // pending never stashed an uncommitted mutation to begin with (the protected block
+            // already exists in `tabs`; confirm() simply never called updateBlock), so there is
+            // nothing here to fold INTO, and folding anyway would mean whatever `fn` computes next
+            // gets silently dropped instead of committed once the diagram prompt resolves (neither
+            // confirmSeq3NoteOverwrite nor keepSeq3NoteText commits `pendingTab` — they were never
+            // written expecting anything to be stashed there). An unrelated edit arriving on this
+            // same tab while that prompt is up therefore just commits normally, like any other tab.
+            val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
             val current = pendingForThisTab?.pendingTab ?: tab(tabId) ?: return
             val next = fn(current)
             when {

@@ -338,6 +338,11 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
     // more clause in the same status line rather than a second banner.
     val elidedMessages = document.elidedMessageCount ?: 0
     val elidedMessagesSuffix = if (elidedMessages > 0) " · $elidedMessages messages elided" else ""
+    // WP14: Seq3Session.syncLiveLinkedNote's own "tell once" policy for a linked note it found
+    // hand-edited and is skipping — see Seq3WorkspaceSession.linkedNoteDrifted's own doc for why a
+    // status-bar clause, not a popup, is the right surface for something that fires on every
+    // background sync rather than one explicit user action.
+    val linkedNoteDriftedSuffix = if (session.linkedNoteDrifted) " · live-linked note has hand edits, not syncing" else ""
     Row(
         Modifier.fillMaxWidth().background(tc.p).padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -345,7 +350,7 @@ private fun Seq3CanvasStatusBar(state: AppState, session: Seq3WorkspaceSession, 
     ) {
         AppText(
             "$shown shown · $scanned scanned · ${document.lifelines.size} lifelines · $hidden hidden" +
-                "$elidedOccurrencesSuffix$elidedMessagesSuffix",
+                "$elidedOccurrencesSuffix$elidedMessagesSuffix$linkedNoteDriftedSuffix",
             color = tc.ts, fontSize = 10.sp,
         )
         Seq3CanvasZoomToolbarControls(view)

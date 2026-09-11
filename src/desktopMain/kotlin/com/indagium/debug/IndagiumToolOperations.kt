@@ -8,6 +8,7 @@ import com.indagium.diagram3.Seq3Dialect
 import com.indagium.diagram3.Seq3GenerateOptions
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.generateSeq3
+import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toSource
 import com.indagium.model.AnnBlock
 import com.indagium.model.CrashSite
@@ -192,7 +193,7 @@ internal class IndagiumToolOperations(
             )
         },
         "update_note_block" to { a ->
-            updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "")
+            updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "", a.bool("force") ?: false)
         },
         "move_note_block" to { a ->
             moveAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.anyInt("delta") ?: 0)
@@ -1434,8 +1435,30 @@ internal class IndagiumToolOperations(
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to id)
     }
 
-    private fun updateAnnotationRoute(tabId: String, blockId: String, text: String): Map<String, Any?> {
-        if (appState.tab(tabId) == null) return mapOf("error" to "no such tab: $tabId")
+    // WP14: update_note_block's own catalogue description ("Update a text note's text or a log
+    // note's caption" — ControlServer.kt) never promised diagram notes. A v3 diagram note's text is
+    // a JSON header carrying the whole Seq3Document plus a hashed fence (diagram3/Seq3Codec.kt's own
+    // header); blind-replacing that with arbitrary text destroys the model, not just the picture —
+    // exactly the class of hand edit AnnotationPanel.kt's own drift-warning comment already names
+    // this tool as a vector for. Rejecting is chosen over the "warning" alternative deliberately: a
+    // warning field still lets the destructive write land, which is useless once the header is
+    // already gone — only refusing (with an explicit `force` escape hatch for a caller that really
+    // means it) actually stops the loss. The check is on the CURRENT block's text, not the incoming
+    // one: a diagram note replaced by ANOTHER diagram note (e.g. a scripted round-trip through
+    // toSource/encodeSeq3Note) is unaffected, and so is every ordinary text/log note — only the
+    // "structured diagram note -> non-diagram text" transition trips the guard.
+    private fun updateAnnotationRoute(tabId: String, blockId: String, text: String, force: Boolean): Map<String, Any?> {
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val existing = tab.annotations.blocks.firstOrNull { it.id == blockId } as? AnnBlock.Note
+        val existingIsDiagram = existing != null && parseSeq3Note(existing.text) != null
+        val incomingIsDiagram = parseSeq3Note(text) != null
+        if (existingIsDiagram && !incomingIsDiagram && !force) {
+            return mapOf(
+                "error" to "refused: block $blockId is a diagram note (indagium:diagram3); update_note_block's " +
+                    "contract is plain text/log notes only. Pass force=true to overwrite it with non-diagram " +
+                    "text anyway — this destroys the diagram's model, not just its picture.",
+            )
+        }
         appState.updateBlock(tabId, blockId, text)
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to blockId)
     }
