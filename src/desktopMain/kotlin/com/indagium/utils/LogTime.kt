@@ -87,6 +87,194 @@ fun deltaMillis(prevTs: String, curTs: String): Long? {
     return elapsedMillisOfDay(prev, cur)
 }
 
+// Cap on how many samples of each kind (applied/suppressed) unrollLogTimeline keeps — the Follow
+// diagnostic dump (AppState.followDiagnostics) only ever shows a handful, and a pathological log
+// with thousands of qualifying rows must not turn every reload into an unbounded list build.
+private const val ROLLOVER_SAMPLE_CAP = 5
+
+// How far unrollLogTimeline's lone-outlier check is willing to scan past a candidate-rollover row
+// for the next PARSEABLE timestamp (skipping TS_UNKNOWN/brief/RAW rows). Bounded so a long run of
+// unparseable rows can't turn the check into an O(n) scan per candidate; when the cap is hit
+// without finding one, the lookahead is treated as unavailable (same as end-of-file) and the old
+// unconditional-rollover behavior applies — never a false "it's fine" reading of missing data.
+private const val ROLLOVER_LOOKAHEAD_SCAN_CAP = 200
+
+/** (id, ts) pair identifying a row that either triggered a committed rollover or was suppressed as
+ *  a lone outlier while unrolling a timeline — see [unrollLogTimeline]. Deliberately just id+ts,
+ *  never message/tag: this exists to be printed in AppState's Follow diagnostic dump, which the
+ *  user hands back over a confidential log. */
+data class RolloverSample(val id: Int, val ts: String)
+
+/**
+ * Result of [unrollLogTimeline]: the day-unrolled elapsed timeline for one sequence of log entries,
+ * plus the rollover diagnostics a caller needs to explain it. [byId] maps each mappable entry id (a
+ * row with a parseable `ts`) to its unrolled elapsed milliseconds, in the same order as the input
+ * entries — entries with an unparseable `ts` (`TS_UNKNOWN`) are simply absent. The remaining fields
+ * mirror AppState's `LogElapsedIndex` rollover fields one for one — [rolloverAppliedCount]/
+ * [rolloverAppliedSamples] and [rolloverSuppressedCount]/[rolloverSuppressedSamples] ALWAYS reflect
+ * what the per-row classifier decided, regardless of [dayOffsetModelValid]; see
+ * [unrollLogTimeline]'s doc comment for the algorithm, the lone-outlier guard, and what
+ * [dayOffsetModelValid] means when false.
+ */
+data class UnrolledLogTimeline(
+    val byId: Map<Int, Long>,
+    val rolloverAppliedCount: Int,
+    val rolloverAppliedSamples: List<RolloverSample>,
+    val rolloverSuppressedCount: Int,
+    val rolloverSuppressedSamples: List<RolloverSample>,
+    val dayOffsetModelValid: Boolean,
+)
+
+// Forward scan from `fromIndex` for the next row with a parseable `ts`, skipping TS_UNKNOWN
+// (blank ts on brief/RAW rows) — bounded by ROLLOVER_LOOKAHEAD_SCAN_CAP. Returns null when the
+// scan runs off the end of the log or hits the cap first, either of which the caller treats as
+// "no confirmation available."
+private fun nextParseableMillis(data: List<LogEntry>, fromIndex: Int): Long? {
+    val limit = minOf(data.size, fromIndex + ROLLOVER_LOOKAHEAD_SCAN_CAP)
+    for (i in fromIndex until limit) {
+        val millis = parseMillisOfDay(data[i].ts)
+        if (millis != TS_UNKNOWN) return millis
+    }
+    return null
+}
+
+/**
+ * Unfolds time-of-day timestamps in log order into an elapsed timeline. Unlike a one-off
+ * `deltaMillis(anchor, row)`, this works in both directions around midnight and across
+ * multiple rollovers while preserving small real backwards jumps. Rows without a timestamp
+ * remain unmappable.
+ *
+ * A backwards jump past half a day is ambiguous on `ts` alone (no date survives parsing — see
+ * parseMillisOfDay): it is either a genuine midnight rollover, or a single anomalous row (a
+ * stale clock, a concatenated bugreport section on a different time base, an out-of-order merge
+ * artifact) that has nothing to do with the next day. Committing +24h for the latter is
+ * permanent and silent — every later row inherits the wrong offset, and Follow (which floors on
+ * this timeline) then strands itself on the last row before the bad one for the rest of
+ * playback, unable to ever reach anything after it. Distinguished here by looking one row
+ * further: a genuine rollover's very next parseable row continues from the LOW post-jump time;
+ * a lone outlier's next row instead resumes close to the PRE-jump baseline, as if the bad row
+ * had never appeared. Only that second, confirming row makes the call — a single sample is
+ * deliberately not enough to accuse a row of being fabricated. When no confirming row exists
+ * (candidate is at/near end of file, or ROLLOVER_LOOKAHEAD_SCAN_CAP is exhausted by unparseable
+ * rows), the old unconditional-rollover behavior applies, since there is nothing to demonstrate
+ * it should be suppressed and the existing real-rollover tests must still pass on a
+ * lookahead-free (2-row) fixture.
+ *
+ * A single accumulating `dayOffset` additionally assumes the log is ONE monotonically-advancing
+ * capture — true for a plain logcat grab, false for an Android bug report, which concatenates
+ * several buffers (main/system/radio/events/kernel) one after another. LogParser drops the
+ * `------ ... LOG ------` separators between them (nothing survives to mark the boundary), and
+ * each buffer restarts at its OWN earlier timestamp for potentially thousands of rows — too many
+ * to be a lone outlier, so the guard above correctly commits the rollover. But that commit is
+ * permanent: every row for the rest of the file inherits +24h, including once a later buffer
+ * resumes at the ORIGINAL (correct) time-of-day, which now reads as tomorrow and can never again
+ * be reached by a floor search. This is not a hypothetical — it is the confirmed mechanism behind
+ * a real report where Follow held ~46s (later, ~24h) behind a correct target.
+ *
+ * Detecting this from `ts` alone (no date survives parsing) leans on one fact: a genuine midnight
+ * crossing never sees the log's raw time-of-day climb back up to (or past) where it was just
+ * before the crossing — that would take another ~24h of real capture. A concatenated buffer's
+ * next segment can and does resume anywhere, including back above the pre-jump point, because its
+ * clock has nothing to do with the previous buffer's. So: once ANY row after the first committed
+ * rollover has a raw time-of-day exceeding that rollover's pre-jump baseline, or a SECOND
+ * candidate rollover ever gets committed, the single-timeline assumption is treated as violated
+ * for the WHOLE file and `dayOffset` is abandoned entirely — every row maps to its bare
+ * millis-of-day instead (`dayOffsetModelValid = false`). Most real logcat captures span far less
+ * than 24h, so raw time-of-day is then exactly the right timeline, multi-buffer or not.
+ *
+ * This does mean a log that both crosses midnight for real AND concatenates buffers (or crosses
+ * midnight twice) cannot be told apart from a multi-buffer log by `ts` alone — genuinely
+ * ambiguous, and resolved here in favor of raw time-of-day, which degrades far more gracefully for
+ * Follow (a floor search that's merely non-monotonic in a few places) than a silent, permanent
+ * +24h would (a floor search that's provably and unrecoverably wrong for the rest of the file).
+ * Deliberately scoped to THIS timeline only, not [deltaMillis] or [com.indagium.utils.LogMerge]'s
+ * own 12h heuristics: those compute one-off deltas between ADJACENT rows for display (the Δt
+ * gutter, a merge sort key) — a wrong call there mislabels one row's shown delta, it does not
+ * accumulate into a permanent, unbounded corruption of everything after it the way this timeline's
+ * running `dayOffset` does, so the failure mode this guards against does not exist there.
+ */
+fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
+    val byId = LinkedHashMap<Int, Long>()
+    var previousMillis: Long? = null
+    var dayOffset = 0L
+    // Same value as elapsedMillisOfDay's HOURS_PER_DAY * MILLIS_PER_HOUR, reused for consistency —
+    // just spelled out with those named constants instead of the caller's original inline literal.
+    val dayMs = HOURS_PER_DAY * MILLIS_PER_HOUR
+    val rolloverSamples = mutableListOf<RolloverSample>()
+    var rolloverCount = 0
+    val suppressedSamples = mutableListOf<RolloverSample>()
+    var suppressedCount = 0
+    // Set on the FIRST committed (non-suppressed) rollover to that row's pre-jump baseline —
+    // see the doc comment above. Once set, every later row (any buffer, any segment) is checked
+    // against this SAME value for the rest of the file, not just the row that set it: a
+    // concatenated buffer resuming above the original time-of-day is the tell, however many rows
+    // later that resumption happens to land.
+    var firstCommittedBaseline: Long? = null
+    var modelInvalidated = false
+    for (i in data.indices) {
+        val entry = data[i]
+        val millis = parseMillisOfDay(entry.ts)
+        if (millis == TS_UNKNOWN) continue
+        firstCommittedBaseline?.let { fcb -> if (millis > fcb) modelInvalidated = true }
+        val baseline = previousMillis
+        // Preserve LogTime.deltaMillis's established interpretation: only a backwards jump
+        // larger than half a day is midnight-shaped at all. Small backwards jumps are real
+        // out-of-order rows/clock corrections, not a fabricated next-day recording, and never
+        // reach this branch.
+        if (baseline != null && millis - baseline < -(dayMs / 2)) {
+            val next = nextParseableMillis(data, i + 1)
+            val resumesPreJumpBaseline = next != null && kotlin.math.abs(next - baseline) <= dayMs / 2
+            val doesNotContinueFromThisRow = next != null && kotlin.math.abs(next - millis) > dayMs / 2
+            if (resumesPreJumpBaseline && doesNotContinueFromThisRow) {
+                // Lone outlier: leave dayOffset (and `previousMillis`, the comparison baseline
+                // for the row after this one) untouched, so the next row is judged against the
+                // same pre-jump baseline this row itself failed to continue from. This row still
+                // gets an elapsed value (so it has *something* mappable), just an unreliable one
+                // — expected to make the caller's `ascending` check false, which is exactly what
+                // routes AppState's floor search to the already-existing linear-scan fallback
+                // instead of silently trusting a corrupted binary search.
+                suppressedCount++
+                if (suppressedSamples.size < ROLLOVER_SAMPLE_CAP) suppressedSamples += RolloverSample(entry.id, entry.ts)
+                byId[entry.id] = dayOffset + millis
+                continue
+            }
+            dayOffset += dayMs
+            rolloverCount++
+            if (rolloverSamples.size < ROLLOVER_SAMPLE_CAP) rolloverSamples += RolloverSample(entry.id, entry.ts)
+            if (firstCommittedBaseline == null) {
+                firstCommittedBaseline = baseline
+            } else {
+                // A second committed rollover is itself invalidating, independent of whether
+                // anything ever climbs back above the first baseline — see doc comment.
+                modelInvalidated = true
+            }
+        }
+        byId[entry.id] = dayOffset + millis
+        previousMillis = millis
+    }
+
+    val dayOffsetModelValid = !modelInvalidated
+    if (!dayOffsetModelValid) {
+        // Discard the dayOffset-accumulated values and rebuild with the offset pinned at 0 for
+        // every row — raw time-of-day, unconditionally. Only paid on this rare path: the common
+        // (single-timeline) case above already built the real result in one pass.
+        byId.clear()
+        for (entry in data) {
+            val millis = parseMillisOfDay(entry.ts)
+            if (millis != TS_UNKNOWN) byId[entry.id] = millis
+        }
+    }
+
+    return UnrolledLogTimeline(
+        byId = byId,
+        rolloverAppliedCount = rolloverCount,
+        rolloverAppliedSamples = rolloverSamples,
+        rolloverSuppressedCount = suppressedCount,
+        rolloverSuppressedSamples = suppressedSamples,
+        dayOffsetModelValid = dayOffsetModelValid,
+    )
+}
+
 // Magnitude-only formatting shared by formatDelta/formatSignedDelta below — "0.140" below a
 // minute, "1m02s" below an hour, "1h02m03s" beyond that (a rollover-corrected delta can
 // theoretically span up to ~24h). Takes the already-absolute value; callers own the sign.
