@@ -88,6 +88,7 @@ import com.indagium.diagram3.seq3QueueRows
 import com.indagium.diagram3.seq3Select
 import com.indagium.diagram3.seq3SuggestedDelays
 import com.indagium.model.LogEntry
+import com.indagium.utils.formatDuration
 import kotlinx.coroutines.delay
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -100,8 +101,6 @@ private const val SEQ3_LIFELINES_MIN_HEIGHT_DP = 120f
 private const val SEQ3_LIFELINES_MAX_HEIGHT_DP = 420f
 private const val SEQ3_ARTIFACTS_MIN_HEIGHT_DP = 100f
 private const val SEQ3_ARTIFACTS_MAX_HEIGHT_DP = 360f
-private const val MILLIS_PER_SECOND = 1_000L
-private const val SECONDS_PER_MINUTE = 60L
 private val SEQ3_ACTION_BADGE_SIZE = 24.dp
 private val SEQ3_SUBMESSAGE_ROW_HEIGHT = 44.dp
 
@@ -344,7 +343,11 @@ internal fun Seq3QueuePanel(state: AppState, session: Seq3WorkspaceSession, view
                         Seq3DelaySuggestionBanner(
                             suggestion = suggestion,
                             moreCount = delaySuggestions.size - 1,
-                            onInsert = { seq3InsertDelayAfter(state, session, suggestion.afterMessageId) },
+                            // Pass the measured gap through as the label — otherwise seq3InsertDelayAfter's
+                            // own literal default ("delay") wins and the number this banner just computed
+                            // (and the user is about to read in the banner text right below) never reaches
+                            // the diagram at all.
+                            onInsert = { seq3InsertDelayAfter(state, session, suggestion.afterMessageId, label = formatDuration(suggestion.gapMillis)) },
                             onDismiss = { view.dismissedDelaySuggestionAfterIds = view.dismissedDelaySuggestionAfterIds + suggestion.afterMessageId },
                         )
                     }
@@ -1497,16 +1500,6 @@ private fun Seq3NeedsTargetBanner(count: Int, onFixThese: () -> Unit) {
     }
 }
 
-/** Formats a millisecond gap the way a human would say it out loud — "42s", "3m 5s" — never
- *  `[#n] [ts]`-style HH:MM:SS.mmm (this is a DURATION, not a point in time, so that format would
- *  misleadingly imply precision this coarse threshold doesn't have). */
-private fun seq3FormatGapDuration(millis: Long): String {
-    val totalSeconds = millis / MILLIS_PER_SECOND
-    val minutes = totalSeconds / SECONDS_PER_MINUTE
-    val seconds = totalSeconds % SECONDS_PER_MINUTE
-    return if (minutes > 0) "${minutes}m ${seconds}s" else "${seconds}s"
-}
-
 @Composable
 private fun Seq3DelaySuggestionBanner(
     suggestion: Seq3DelaySuggestion,
@@ -1523,7 +1516,7 @@ private fun Seq3DelaySuggestionBanner(
     ) {
         val suffix = if (moreCount > 0) " (+$moreCount more)" else ""
         AppText(
-            "${seq3FormatGapDuration(suggestion.gapMillis)} gap detected$suffix — add a delay marker?",
+            "${formatDuration(suggestion.gapMillis)} gap detected$suffix — add a delay marker?",
             color = tc.ac,
             fontSize = 11.sp,
             maxLines = 1,

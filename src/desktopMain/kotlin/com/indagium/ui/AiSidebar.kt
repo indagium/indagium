@@ -104,6 +104,7 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.AiProviderKind
 import com.indagium.model.LogTab
 import com.indagium.model.VoiceRecognitionEngine
+import com.indagium.utils.formatDuration
 import com.indagium.voice.AppleSpeechNative
 import com.indagium.voice.AppleSpeechTranscriber
 import com.indagium.voice.JavaSoundVoiceCapture
@@ -1401,8 +1402,8 @@ private fun AiRunTimingRow(
     val elapsedEnd = run.completedAt ?: liveNow
     val parts = buildList {
         add("Sent ${clockTimeLabel(run.sentAt)}")
-        firstResponseAt?.let { add("first reply after ${durationLabel(it - run.sentAt)}") }
-        val elapsed = durationLabel(elapsedEnd - run.sentAt)
+        firstResponseAt?.let { add("first reply after ${formatDuration(it - run.sentAt)}") }
+        val elapsed = formatDuration(elapsedEnd - run.sentAt)
         add(if (run.completedAt != null) "took $elapsed" else "running $elapsed")
     }
     Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
@@ -1463,12 +1464,6 @@ private fun usageTokenLines(usage: AiRunEvent.Usage): List<String> = buildList {
 
 private fun clockTimeLabel(epochMs: Long): String =
     java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(epochMs))
-
-private fun durationLabel(ms: Long): String = when {
-    ms < MS_PER_SECOND -> "${ms.coerceAtLeast(0)}ms"
-    ms < MS_PER_MINUTE -> String.format(java.util.Locale.US, "%.1fs", ms / MS_PER_SECOND.toDouble())
-    else -> "${ms / MS_PER_MINUTE}m ${(ms % MS_PER_MINUTE) / MS_PER_SECOND}s"
-}
 
 @Composable
 private fun AiEvidenceCard(evidence: AiEvidence, onNavigate: (AiEvidence) -> Unit) {

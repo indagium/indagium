@@ -5,7 +5,9 @@ import com.indagium.model.LogLevel
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
+import com.indagium.utils.elapsedMillisOfDay
 import com.indagium.utils.formatDelta
+import com.indagium.utils.formatDuration
 import com.indagium.utils.formatSignedDelta
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.widestAdjacentGapMagnitudeMs
@@ -87,6 +89,29 @@ class LogTimeTest {
     }
 
     @Test
+    fun elapsedMillisOfDayComputesTheOrdinaryForwardGap() {
+        assertEquals(2_651L, elapsedMillisOfDay(parseMillisOfDay("10:00:00.000"), parseMillisOfDay("10:00:02.651")))
+    }
+
+    @Test
+    fun elapsedMillisOfDayAppliesMidnightRolloverCorrection() {
+        // Same fixture as deltaMillisAppliesMidnightRolloverCorrection, but exercised directly
+        // against the extracted function rather than through the string-parsing deltaMillis
+        // wrapper: 23:59:59.900 -> 00:00:00.100 is a 200ms gap across the rollover, not a ~24h
+        // jump backward.
+        assertEquals(200L, elapsedMillisOfDay(parseMillisOfDay("23:59:59.900"), parseMillisOfDay("00:00:00.100")))
+    }
+
+    @Test
+    fun elapsedMillisOfDayRendersAGenuineSmallNegativeAsIsRatherThanClamping() {
+        // Load-bearing: deltaMillis' own doc says a small negative (out-of-order merged sources)
+        // must survive as real data, not get clamped to zero. The refactor moved that contract
+        // from deltaMillis into this function, so assert it here directly rather than only
+        // through the deltaMillis wrapper.
+        assertEquals(-500L, elapsedMillisOfDay(parseMillisOfDay("10:00:01.000"), parseMillisOfDay("10:00:00.500")))
+    }
+
+    @Test
     fun formatDeltaSubSecond() {
         assertEquals("+0.140", formatDelta(140))
         assertEquals("-0.050", formatDelta(-50))
@@ -119,6 +144,42 @@ class LogTimeTest {
         assertEquals(formatDelta(4_291), formatSignedDelta(4_291))
         assertEquals("-4.291", formatSignedDelta(-4_291))
         assertEquals("+0.001", formatSignedDelta(1))
+    }
+
+    @Test
+    fun formatDurationSubSecondBand() {
+        assertEquals("0ms", formatDuration(0))
+        assertEquals("999ms", formatDuration(999))
+    }
+
+    @Test
+    fun formatDurationSecondsBandBoundary() {
+        // At exactly 1000ms, the sub-second band's `<` comparison no longer holds — falls into
+        // the seconds band rather than reading "1000ms".
+        assertEquals("1.0s", formatDuration(1_000))
+        assertEquals("4.2s", formatDuration(4_200))
+    }
+
+    @Test
+    fun formatDurationMinutesBandBoundary() {
+        // Just below 60s stays in the seconds band; %.1f rounds 59.999 up to "60.0s" rather than
+        // truncating — a slightly odd-looking but correct edge of the seconds band.
+        assertEquals("60.0s", formatDuration(59_999))
+        // At exactly 60_000ms, the seconds band's `<` comparison no longer holds — falls into the
+        // minutes band, zero-padded seconds included.
+        assertEquals("1m 00s", formatDuration(60_000))
+        assertEquals("3m 05s", formatDuration(185_000)) // zero-padded seconds, not "3m 5s"
+    }
+
+    @Test
+    fun formatDurationHoursBandBoundary() {
+        // Just below 1h stays in the minutes band.
+        assertEquals("59m 59s", formatDuration(3_599_000))
+        // At exactly 3_600_000ms, the minutes band's `<` comparison no longer holds — falls into
+        // the hours band, zero-padded minutes included.
+        assertEquals("1h 00m", formatDuration(3_600_000))
+        assertEquals("2h 00m", formatDuration(7_200_000)) // the WP13 motivating case: no "120m 0s"
+        assertEquals("1h 02m", formatDuration(3_723_000))
     }
 
     @Test

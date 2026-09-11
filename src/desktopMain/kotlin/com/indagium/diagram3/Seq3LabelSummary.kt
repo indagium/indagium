@@ -68,10 +68,14 @@ internal fun seq3EmissionRawTimestamp(message: Seq3Message, occurrenceRawTimesta
 /** What a renderer actually shows for one row's timestamp: the real logged text when there is one
  *  (preserves whatever precision/format the source log itself used), else [timestampMillis]
  *  formatted with the same `HH:MM:SS.mmm` convention `utils.parseMillisOfDay` parses (see that
- *  function's own doc — this is its inverse, kept as a tiny local formatter rather than importing
- *  `utils`'s own `DateTimeFormatter`-based one, which is `private` and lives in a file that imports
- *  `com.indagium.model`, off-limits to this package). Null only when neither is available — a
- *  brief/RAW row with no parseable `ts` and no manual override. */
+ *  function's own doc — this is its inverse). Kept as a tiny local formatter rather than reusing
+ *  one from `utils` — NOT because `utils` is off-limits to `diagram3` (it isn't: Seq3Correlation.kt
+ *  already imports `utils.deltaMillis`, and Seq3DelaySuggest.kt imports `utils.elapsedMillisOfDay`,
+ *  despite `utils` depending on `com.indagium.model`); `utils` just doesn't have a public formatter
+ *  with this exact clamped-to-non-negative `HH:MM:SS.mmm` shape — `formatElapsedAsClock` wraps
+ *  modulo 24h instead of clamping, and `LogMerge`'s `TIME_FORMATTER` is a *parser*, private, and
+ *  pattern-based rather than hand-rolled. Null only when neither is available — a brief/RAW row
+ *  with no parseable `ts` and no manual override. */
 internal fun seq3DisplayTimestamp(rawTimestamp: String, timestampMillis: Long?): String? {
     val trimmed = rawTimestamp.trim()
     if (trimmed.isNotEmpty()) return trimmed

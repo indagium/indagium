@@ -59,17 +59,32 @@ fun parseMillisOfDay(ts: String): Long {
     return millis + frac
 }
 
+/** The rollover-corrected gap from [from] to [to], both already-parsed millis-of-day values (see
+ *  [parseMillisOfDay]). This is the one place the [ROLLOVER_THRESHOLD_MS] correction is written —
+ *  [deltaMillis] (string in, string out) funnels through it, and so does any other caller that
+ *  already has two parsed millis-of-day values on hand (e.g. `diagram3`'s delay-gap suggester,
+ *  which measures a gap between two message timestamps with no string parsing involved) — so the
+ *  midnight-wrap heuristic can't quietly drift out of sync between callers. A small negative
+ *  result (e.g. from out-of-order merged sources) is returned as-is rather than clamped to zero —
+ *  it's real, if surprising, data; see [deltaMillis]'s own doc for why that matters to a caller.
+ *  NOT used by [widestAdjacentGapMagnitudeMs] — that function keeps its own inlined copy of this
+ *  correction; see its own comment for why (it parses each entry's `ts` exactly once across a
+ *  full pass, where routing through [deltaMillis] would parse every entry twice). */
+fun elapsedMillisOfDay(from: Long, to: Long): Long {
+    var delta = to - from
+    if (delta < -ROLLOVER_THRESHOLD_MS) delta += HOURS_PER_DAY * MILLIS_PER_HOUR
+    return delta
+}
+
 /** Delta from `prevTs` to `curTs` in milliseconds, or null if either side doesn't parse (blank
  *  ts on brief/RAW rows, or genuinely malformed input). Applies the midnight-rollover correction
- *  documented on [ROLLOVER_THRESHOLD_MS]; a small negative delta (e.g. from out-of-order merged
- *  sources) is returned as-is rather than clamped to zero — it's real, if surprising, data. */
+ *  via [elapsedMillisOfDay]; a small negative delta (e.g. from out-of-order merged sources) is
+ *  returned as-is rather than clamped to zero — it's real, if surprising, data. */
 fun deltaMillis(prevTs: String, curTs: String): Long? {
     val prev = parseMillisOfDay(prevTs)
     val cur = parseMillisOfDay(curTs)
     if (prev == TS_UNKNOWN || cur == TS_UNKNOWN) return null
-    var delta = cur - prev
-    if (delta < -ROLLOVER_THRESHOLD_MS) delta += HOURS_PER_DAY * MILLIS_PER_HOUR
-    return delta
+    return elapsedMillisOfDay(prev, cur)
 }
 
 // Magnitude-only formatting shared by formatDelta/formatSignedDelta below — "0.140" below a
@@ -107,6 +122,38 @@ fun formatDelta(ms: Long): String {
 fun formatSignedDelta(ms: Long): String {
     if (ms == 0L) return formatMagnitude(0L)
     return formatDelta(ms)
+}
+
+/** Formats a bare DURATION (never a delta — no sign, magnitude only; caller owns whether negative
+ *  input can even occur) the way a human would say it out loud: `850ms` below a second, `4.2s`
+ *  below a minute, `3m 05s` below an hour, `1h 02m` beyond that. Deliberately its own scale rather
+ *  than reusing [formatMagnitude]: that one renders sub-minute as unitless `"42.000"` (fine
+ *  *inside* a signed `+42.000` delta, where the sign plus gutter context supplies the unit, but
+ *  read alone — a delay marker's label, a duration standing by itself in a sentence — it's not
+ *  obviously seconds) and keeps `HH:MM:SS`-style zero-padding all the way down to milliseconds.
+ *  Also deliberately NOT [formatDelta]/[formatSignedDelta]: those are always signed, and a
+ *  duration is not a delta — there is no "before/after" side to point a sign at. And deliberately
+ *  never `HH:MM:SS.mmm` at any band: that format implies a precision — down to the millisecond,
+ *  no matter how large the value — that a coarse duration (e.g. a 30s-threshold delay-gap
+ *  suggestion) doesn't actually have; the banded units here communicate roughly how precisely the
+ *  value is known, the same way "about 3 minutes" reads differently from "180.000 seconds" even
+ *  when they're the same duration. */
+fun formatDuration(ms: Long): String {
+    val absMs = kotlin.math.abs(ms)
+    return when {
+        absMs < MILLIS_PER_SECOND -> "${absMs}ms"
+        absMs < MILLIS_PER_MINUTE -> String.format(Locale.US, "%.1fs", absMs / MILLIS_PER_SECOND.toDouble())
+        absMs < MILLIS_PER_HOUR -> {
+            val m = absMs / MILLIS_PER_MINUTE
+            val s = (absMs % MILLIS_PER_MINUTE) / MILLIS_PER_SECOND
+            String.format(Locale.US, "%dm %02ds", m, s)
+        }
+        else -> {
+            val h = absMs / MILLIS_PER_HOUR
+            val m = (absMs % MILLIS_PER_HOUR) / MILLIS_PER_MINUTE
+            String.format(Locale.US, "%dh %02dm", h, m)
+        }
+    }
 }
 
 /** Formats a raw elapsed-timeline value — as produced by AppState's day-unrolled follow index,

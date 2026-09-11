@@ -1,5 +1,7 @@
 package com.indagium.diagram3
 
+import com.indagium.utils.elapsedMillisOfDay
+
 // ── Time-gap markers: auto-SUGGEST (WP11) ───────────────────────────────────────────────────
 //
 // The user's explicit decision (round-2 corrections plan): "manual insert plus auto-suggest,
@@ -57,7 +59,19 @@ fun seq3SuggestedDelays(document: Seq3Document, thresholdMillis: Long = SEQ3_AUT
         val after = ordered[i + 1]
         val beforeTs = before.primaryTimestampMillis ?: continue
         val afterTs = after.primaryTimestampMillis ?: continue
-        val gap = afterTs - beforeTs
+        // Routed through the shared [elapsedMillisOfDay] for contract consistency, NOT because a
+        // rollover can fire here — it cannot, and it would be wrong to imply otherwise. `ordered`
+        // is sorted ascending by `primaryTimestampMillis`, the exact same value read back into
+        // `beforeTs`/`afterTs`, so `afterTs >= beforeTs` always holds for a non-null pair and the
+        // `delta < -ROLLOVER_THRESHOLD_MS` branch is unreachable. Kept anyway so this subtraction
+        // can never drift away from the one place the correction lives.
+        //
+        // The genuine midnight problem for this function is one level up and NOT fixed here: the
+        // ordering itself is date-unaware, so a pair that really does straddle midnight sorts
+        // 00:00:00.100 BEFORE 23:59:59.900 and yields a ~24h gap rather than the true 200ms one.
+        // Fixing that means changing `seq3ChronologicalOrder`, which every drawn row's position
+        // depends on — far past the blast radius of a delay-suggestion threshold.
+        val gap = elapsedMillisOfDay(beforeTs, afterTs)
         if (gap >= thresholdMillis && before.id !in alreadyMarked) {
             suggestions += Seq3DelaySuggestion(before.id, after.id, gap)
         }
