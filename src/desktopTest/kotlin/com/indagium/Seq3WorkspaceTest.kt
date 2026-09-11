@@ -27,6 +27,7 @@ import com.indagium.ui.seq3CopyTargetLabel
 import com.indagium.ui.seq3CopyTargetText
 import com.indagium.ui.seq3DefaultNotePlacement
 import com.indagium.ui.seq3DisownAutoExpand
+import com.indagium.ui.seq3InsertDelayAfter
 import com.indagium.ui.seq3OperandFragmentIdAt
 import com.indagium.ui.seq3PaneSegments
 import com.indagium.ui.seq3PanelVisible
@@ -299,6 +300,29 @@ class Seq3WorkspaceTest {
         val applied = seq3AddNote(state, session, view, document, emptySet(), placement = null)
 
         assertFalse(applied)
+    }
+
+    // ── seq3InsertDelayAfter: WP13's delay-suggestion accept path ────────────────────────────
+
+    @Test
+    fun insertDelayAfterCarriesTheCallerSuppliedLabelRatherThanTheLiteralDefault() {
+        // Mirrors Seq3QueuePanel.kt's suggestion-banner accept path: it passes
+        // `label = formatDuration(suggestion.gapMillis)` so the measured gap reaches the diagram
+        // instead of seq3InsertDelayAfter's own "delay" placeholder default winning silently.
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        val afterMessageId = session.document.messages.first().id
+
+        val applied = seq3InsertDelayAfter(state, session, afterMessageId, label = "50ms")
+
+        assertTrue(applied, "seq3InsertDelayAfter must succeed for a message id that exists in the document")
+        val updated = state.seq3Sessions.sessions.single { it.id == id }.document
+        val delay = updated.delays.singleOrNull()
+        assertNotNull(delay, "a delay marker should have been added")
+        assertEquals("50ms", delay.label, "the accept path's measured-gap label must reach the created Seq3Delay, not the literal \"delay\" default")
+        assertEquals(afterMessageId, delay.afterMessageId)
     }
 
     // ── seq3PaneSegments / seq3TogglePaneSegment: header 1a's Panes multi-select ─────────────
