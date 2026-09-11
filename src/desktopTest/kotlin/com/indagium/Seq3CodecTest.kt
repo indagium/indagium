@@ -444,6 +444,38 @@ class Seq3CodecTest {
         assertFalse(parsed.document.showActivations)
     }
 
+    // ── WP15: elapsed-tag document toggle ───────────────────────────────────────────────────────
+
+    @Test
+    fun showElapsedRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(showElapsed = true)
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertTrue(parsed.document.showElapsed)
+    }
+
+    @Test
+    fun aDocumentMissingTheWp15ElapsedKeyDecodesToFalse() {
+        // A note saved by a build predating WP15 has no "showElapsed" key at all.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertFalse(parsed.document.showElapsed)
+    }
+
     // ── Delay (WP11) ─────────────────────────────────────────────────────────────────────────
 
     @Test

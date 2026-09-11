@@ -2,6 +2,7 @@
 
 package com.indagium.diagram3
 
+import com.indagium.utils.elapsedMillisOfDay
 import kotlin.math.max
 import kotlin.math.min
 
@@ -526,7 +527,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // WP10 (item 7): number/timestamp-prefix each call's label BEFORE measurement — see
     // prefixEmissionLabels' own doc for why doing this after measureRequirement would reintroduce
     // WP9's clipping bug in a worse form (a toggle the user can flip live, not just a one-off typo).
-    val emissions = prefixEmissionLabels(chronologicalEmissions, doc.showSequenceNumbers, doc.showTimestamps)
+    val emissions = prefixEmissionLabels(chronologicalEmissions, doc.showSequenceNumbers, doc.showTimestamps, doc.showElapsed)
     val requirements = emissions.map { measureRequirement(it, tm, opts.maxLabelLines) }
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
@@ -854,17 +855,33 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
     if (message.occurrences.isNotEmpty() && visibleOccurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
         val occ = visibleOccurrences.firstOrNull()
+        // WP15 Part 2: was the bare `message.labelTemplate` — a capture-bearing NOTE drew its
+        // literal `{name}` slots on screen with no value in sight. `collapsedRepeatLabel` already
+        // does exactly the right thing here with zero new logic: it substitutes the one occurrence
+        // when there is exactly one, summarizes a few distinct values as `A|B|C`, falls back to the
+        // honest template above COLLAPSED_SUMMARY_MAX_DISTINCT, and — the case that matters for an
+        // authored NOTE with no occurrences at all — returns the template unchanged when there is
+        // nothing to substitute from (distinctLabels.size == 0 misses its 1..3 range).
         return listOf(
-            Emission.Note(message.id, message.fromLifelineId, message.labelTemplate, occ?.entryId, message.primaryTimestampMillis, message.primaryRawTimestamp),
+            Emission.Note(
+                message.id,
+                message.fromLifelineId,
+                collapsedRepeatLabel(message, visibleOccurrences),
+                occ?.entryId,
+                message.primaryTimestampMillis,
+                message.primaryRawTimestamp,
+            ),
         )
     }
     if (message.toLifelineId == null) {
         val occ = visibleOccurrences.firstOrNull()
+        // WP15 Part 2: same fix as the NOTE branch above, same reasoning — an unresolved/LOST/FOUND
+        // stub used to draw the bare template too.
         return listOf(
             Emission.Stub(
                 message.id,
                 message.fromLifelineId,
-                message.labelTemplate,
+                collapsedRepeatLabel(message, visibleOccurrences),
                 visibleOccurrences.size.coerceAtLeast(1),
                 occ?.entryId,
                 message.primaryTimestampMillis,
@@ -1064,14 +1081,41 @@ private fun buildActivationBars(
 // above threshold is exactly ONE [Emission.Arrow]/[Emission.Self] at this point (see
 // [expandForLayout]'s own COLLAPSE_ABOVE branch), so it takes exactly one number, matching what the
 // design brief asks for.
-private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers: Boolean, showTimestamps: Boolean): List<Emission> {
-    if (!showSequenceNumbers && !showTimestamps) return emissions
+// WP15 Part 1: [showElapsed] adds a fourth tag, `[+0.140]` — the measured gap from the previous
+// DRAWN row's real timestamp to this row's own, per THE FOUR RULES (this function's own call site
+// doc / the work package brief). This is now a fold carrying `lastRealTimestampMillis` alongside
+// the pre-existing `callNumber` var — same "mutate a local while mapping in emission order" shape,
+// just a second piece of running state. The accumulator advances on EVERY emission, numbered or
+// not (rule 4): a [Emission.Note]/[Emission.Elision] row is never itself tagged, but its own
+// [Emission.timestampMillis] still becomes the next row's "previous real timestamp" — this is what
+// makes [Seq3Repeat.FIRST_LAST]'s elision row come out right. That row is seeded with the FIRST
+// occurrence's own timestamp (see [Emission.Elision]'s own doc), so folding it through unchanged
+// means the LAST row's tag measures the true span of the whole elided run, not just its own
+// immediate (and meaningless) predecessor. [elapsedFor] returns null — never a fabricated `+0.000`
+// — the moment either endpoint is unknown (rule 1), and deliberately does NOT fall back to an older
+// non-null accumulator value once a null has been folded through: reaching further back past a null
+// predecessor would silently measure across a gap this function has no evidence for and report it
+// as if it were real. [elapsedMillisOfDay] (not plain subtraction) absorbs the midnight rollover
+// (rule 3) the same way every other elapsed measurement in this codebase does.
+private fun prefixEmissionLabels(
+    emissions: List<Emission>,
+    showSequenceNumbers: Boolean,
+    showTimestamps: Boolean,
+    showElapsed: Boolean,
+): List<Emission> {
+    if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
+    var lastRealTimestampMillis: Long? = null
+    fun elapsedFor(currentTimestampMillis: Long?): Long? {
+        val previous = lastRealTimestampMillis
+        return if (previous != null && currentTimestampMillis != null) elapsedMillisOfDay(previous, currentTimestampMillis) else null
+    }
     return emissions.map { emission ->
         when (emission) {
             is Emission.Arrow -> {
                 callNumber++
-                emission.copy(
+                val elapsed = elapsedFor(emission.timestampMillis)
+                val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
                         callNumber,
@@ -1079,12 +1123,17 @@ private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers:
                         emission.timestampMillis,
                         showSequenceNumbers,
                         showTimestamps,
+                        elapsed,
+                        showElapsed,
                     ),
                 )
+                lastRealTimestampMillis = emission.timestampMillis
+                result
             }
             is Emission.Self -> {
                 callNumber++
-                emission.copy(
+                val elapsed = elapsedFor(emission.timestampMillis)
+                val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
                         callNumber,
@@ -1092,12 +1141,17 @@ private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers:
                         emission.timestampMillis,
                         showSequenceNumbers,
                         showTimestamps,
+                        elapsed,
+                        showElapsed,
                     ),
                 )
+                lastRealTimestampMillis = emission.timestampMillis
+                result
             }
             is Emission.Stub -> {
                 callNumber++
-                emission.copy(
+                val elapsed = elapsedFor(emission.timestampMillis)
+                val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
                         callNumber,
@@ -1105,10 +1159,19 @@ private fun prefixEmissionLabels(emissions: List<Emission>, showSequenceNumbers:
                         emission.timestampMillis,
                         showSequenceNumbers,
                         showTimestamps,
+                        elapsed,
+                        showElapsed,
                     ),
                 )
+                lastRealTimestampMillis = emission.timestampMillis
+                result
             }
-            is Emission.Note, is Emission.Elision -> emission
+            is Emission.Note, is Emission.Elision -> {
+                // Untagged (rule 4's own case), but the accumulator still advances — see this
+                // function's own header.
+                lastRealTimestampMillis = emission.timestampMillis
+                emission
+            }
         }
     }
 }

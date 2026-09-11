@@ -271,7 +271,8 @@ internal fun seq3PanelVisible(view: Seq3ViewState): Boolean =
     view.messagesSectionOpen || view.lifelinesSectionOpen || view.artifactsSectionOpen
 
 /** Design variant 1a's diagram-presentation group — "how does this diagram present itself": the
- *  PlantUML/Mermaid dialect control, the `#n`/`⏱ Time` prefix toggles, then the theme swatch.
+ *  PlantUML/Mermaid dialect control, the `#n`/`⏱ Time`/`▮ Bars`/`Δt` prefix toggles, then the theme
+ *  swatch.
  *  Unchanged in behaviour from before the header rework — only grouped and hairline-bounded now
  *  instead of running directly into the panes toggles on one side and the output actions on the
  *  other. */
@@ -412,18 +413,21 @@ internal fun seq3CopyTargetText(target: Seq3CopyTarget, document: Seq3Document):
  * [SegmentedControl] inside [Seq3DiagramPresentationGroup] — beside the dialect control and
  * [Seq3DocumentThemeDropdown] it visually pairs with ("how does this diagram present itself").
  * Used to be two glyph `#`/`⏱` [ToolbarBtn]s explained only by a tooltip; the segments are now
- * self-describing sample text (`"#n"`/`"⏱ Time"`/`"▮ Bars"`) so the label itself carries the
+ * self-describing sample text (`"#n"`/`"⏱ Time"`/`"▮ Bars"`/`"Δt"`) so the label itself carries the
  * affordance. [SegmentedControl] renders every option in one font, so the design mock's monospace
- * `#n` is out of reach here without forking the control — not worth it for three labels, so all
+ * `#n` is out of reach here without forking the control — not worth it for four labels, so all
  * render in the control's default font. Each segment still dispatches its OWN [Seq3Command]
  * ([Seq3Command.SetShowSequenceNumbers]/[Seq3Command.SetShowTimestamps]/
- * [Seq3Command.SetShowActivations], via [seq3TogglePrefixSegment]) so `⌘Z` still undoes them
- * independently, and all three stay document fields (not view state) for the same reason as
- * before: the canvas, the PNG export, and the exported text must always agree on whether a call's
- * `[#n]`/`[ts]` prefix or an activation bar is showing. Per-segment tooltips are dropped for the
- * same reason as the font: [SegmentedControl] draws its options as one internal Row, so wrapping
- * any sample in its own [TooltipArea] would mean forking the control just for this one call site
- * — the labels are the affordance now.
+ * [Seq3Command.SetShowActivations]/[Seq3Command.SetShowElapsed], via [seq3TogglePrefixSegment]) so
+ * `⌘Z` still undoes them independently, and all four stay document fields (not view state) for the
+ * same reason as before: the canvas, the PNG export, and the exported text must always agree on
+ * whether a call's `[#n]`/`[ts]`/`[+elapsed]` prefix or an activation bar is showing. Per-segment
+ * tooltips are dropped for the same reason as the font: [SegmentedControl] draws its options as one
+ * internal Row, so wrapping any sample in its own [TooltipArea] would mean forking the control just
+ * for this one call site — the labels are the affordance now. `"Δt"` (WP15) deliberately doesn't
+ * spell out "Elapsed" the way `"⏱ Time"` spells out "Time" — the Δt gutter already teaches this
+ * exact glyph elsewhere in the app (see `utils.LogTime.formatDelta`'s own doc), and a fourth
+ * multi-word segment would widen this control past its siblings for no real gain in clarity.
  *
  * WP3: the `▮ Bars` segment (index 2) is a plain [Modifier.clickable] under the hood (see
  * [SegmentedControl]'s own implementation) — CLAUDE.md's documented scar is that ANY clickable
@@ -437,7 +441,7 @@ internal fun seq3CopyTargetText(target: Seq3CopyTarget, document: Seq3Document):
 private fun Seq3InlinePrefixToggles(state: AppState, session: Seq3WorkspaceSession) {
     val focusRequester = LocalSeq3FocusRequester.current
     SegmentedControl(
-        options = listOf("#n", "⏱ Time", "▮ Bars"),
+        options = listOf("#n", "⏱ Time", "▮ Bars", "Δt"),
         selectedIndices = seq3PrefixToggleSegments(session.document),
         onToggle = { index ->
             seq3TogglePrefixSegment(state, session, index)
@@ -451,6 +455,7 @@ internal fun seq3PrefixToggleSegments(document: Seq3Document): Set<Int> = buildS
     if (document.showSequenceNumbers) add(0)
     if (document.showTimestamps) add(1)
     if (document.showActivations) add(2)
+    if (document.showElapsed) add(3)
 }
 
 /** [seq3PrefixToggleSegments]'s toggle half — dispatches the [Seq3Command] the clicked index maps
@@ -463,6 +468,7 @@ internal fun seq3TogglePrefixSegment(state: AppState, session: Seq3WorkspaceSess
         0 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowSequenceNumbers(!document.showSequenceNumbers))
         1 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowTimestamps(!document.showTimestamps))
         2 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowActivations(!document.showActivations))
+        3 -> state.seq3Sessions.applyCommand(session.id, Seq3Command.SetShowElapsed(!document.showElapsed))
     }
 }
 

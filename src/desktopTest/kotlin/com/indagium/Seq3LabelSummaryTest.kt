@@ -9,6 +9,7 @@ import com.indagium.diagram3.seq3ChronologicalFallbacks
 import com.indagium.diagram3.seq3ChronologicalOrder
 import com.indagium.diagram3.seq3DisplayTimestamp
 import com.indagium.diagram3.seq3PrefixedLabel
+import com.indagium.utils.elapsedMillisOfDay
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -97,6 +98,89 @@ class Seq3LabelSummaryTest {
             showTimestamps = true,
         )
         assertEquals("hello", result, "a brief/RAW row with no parseable timestamp must not print an empty '[]' tag")
+    }
+
+    // ── WP15 Part 1: elapsed tag ─────────────────────────────────────────────────────────────
+
+    @Test
+    fun elapsedOnPrefixesTheMeasuredGapAfterTheNumberAndTimestampTags() {
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = 3,
+            rawTimestamp = "10:00:00.140",
+            timestampMillis = 1_140L,
+            showSequenceNumbers = true,
+            showTimestamps = true,
+            elapsedMillis = 140L,
+            showElapsed = true,
+        )
+        assertEquals("[#3] [10:00:00.140] [+0.140] hello", result)
+    }
+
+    @Test
+    fun elapsedOffLeavesTheLabelUnprefixedEvenWhenAMeasuredGapIsAvailable() {
+        // The default-off guarantee (WP15 brief): showElapsed=false must never print a tag, even
+        // when the caller happens to have a real, non-null elapsedMillis on hand.
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            elapsedMillis = 140L,
+            showElapsed = false,
+        )
+        assertEquals("hello", result)
+    }
+
+    @Test
+    fun elapsedOnIsANoOpWhenNoMeasuredGapIsAvailable() {
+        // Rule 1's rendering half: seq3PrefixedLabel itself must never fabricate a tag when the
+        // fold handed it null (either endpoint unknown) — see prefixEmissionLabels/
+        // prefixSeq3EmissionLabels for where that null actually comes from.
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            elapsedMillis = null,
+            showElapsed = true,
+        )
+        assertEquals("hello", result, "elapsedMillis == null must not print an empty/fabricated '[+...]' tag")
+    }
+
+    @Test
+    fun elapsedTagUsesTheRolloverCorrectedDeltaNotPlainSubtraction() {
+        // Rule 3 (WP15 brief): the fold computes elapsedMillis via utils.elapsedMillisOfDay, never
+        // plain subtraction — this pins the exact contract at the point seq3PrefixedLabel actually
+        // renders it. 23:59:59.900 -> 00:00:00.100 the next day is a real ~200ms gap; PLAIN
+        // subtraction (100 - 86_399_900 = -86_399_800) would print as a huge, nonsensical backwards
+        // jump instead. Both prefixEmissionLabels' and prefixSeq3EmissionLabels' own `elapsedFor`
+        // helpers route through this exact function (elapsedMillisOfDay's own doc: "the ONE place
+        // the ROLLOVER_THRESHOLD_MS correction is written"), so pinning its output here pins theirs
+        // too. (In today's pipeline the global chronological sort — seq3ChronologicalOrder — always
+        // hands the fold two ASCENDING real timestamps, so this negative-delta branch can't actually
+        // fire end-to-end yet, the same acknowledged-unreachable situation Seq3DelaySuggest.kt's own
+        // header documents for its gap suggester; using the shared, rollover-aware function anyway
+        // is what keeps this arithmetic from drifting out of sync with the one place the correction
+        // lives, the moment anything upstream changes.)
+        val corrected = elapsedMillisOfDay(86_399_900L, 100L)
+        assertEquals(200L, corrected, "sanity check on the fixture itself")
+
+        val result = seq3PrefixedLabel(
+            "hello",
+            sequenceNumber = null,
+            rawTimestamp = "",
+            timestampMillis = null,
+            showSequenceNumbers = false,
+            showTimestamps = false,
+            elapsedMillis = corrected,
+            showElapsed = true,
+        )
+        assertEquals("[+0.200] hello", result)
     }
 
     // ── seq3DisplayTimestamp ─────────────────────────────────────────────────────────────────

@@ -148,6 +148,10 @@ sealed class Seq3Command {
      *  [Seq3Document.showActivations]'s own doc for why this is document-level rather than a view
      *  flag. No renderer reads this yet (WP2/WP3); this command only flips the stored flag. */
     data class SetShowActivations(val show: Boolean) : Seq3Command()
+
+    /** WP15: toggle inline `[+0.140]` elapsed-gap tags — see [Seq3Document.showElapsed]'s own doc
+     *  for why this is document-level rather than a view flag. Mirrors [SetShowActivations]. */
+    data class SetShowElapsed(val show: Boolean) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -218,6 +222,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetShowSequenceNumbers -> dispatchSetShowSequenceNumbers(document, command)
     is Seq3Command.SetShowTimestamps -> dispatchSetShowTimestamps(document, command)
     is Seq3Command.SetShowActivations -> dispatchSetShowActivations(document, command)
+    is Seq3Command.SetShowElapsed -> dispatchSetShowElapsed(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -574,4 +579,9 @@ private fun dispatchSetShowTimestamps(document: Seq3Document, command: Seq3Comma
 private fun dispatchSetShowActivations(document: Seq3Document, command: Seq3Command.SetShowActivations): Outcome {
     if (document.showActivations == command.show) return unapplied(document, "No change")
     return applied(document.copy(showActivations = command.show), "Toggle activation bars")
+}
+
+private fun dispatchSetShowElapsed(document: Seq3Document, command: Seq3Command.SetShowElapsed): Outcome {
+    if (document.showElapsed == command.show) return unapplied(document, "No change")
+    return applied(document.copy(showElapsed = command.show), "Toggle elapsed tags")
 }

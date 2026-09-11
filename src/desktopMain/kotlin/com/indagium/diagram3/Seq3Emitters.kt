@@ -1,5 +1,7 @@
 package com.indagium.diagram3
 
+import com.indagium.utils.elapsedMillisOfDay
+
 // ── Mermaid / PlantUML text emitters ────────────────────────────────────────────────────────
 //
 // Ported from `diagram/DiagramEmitters.kt` (282 lines): alias sanitization/dedup and per-dialect
@@ -188,11 +190,16 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
+        // WP15 Part 2: was `templatedLabel(message)` — a capture-bearing NOTE emitted its literal
+        // `{name}` slots into the exported text with no value in sight. See Seq3Layout.kt's
+        // matching `expandForLayout` NOTE branch for the full reasoning; `collapsedRepeatLabel`
+        // already handles the "no occurrences to substitute from" authored case correctly on its
+        // own (falls back to the template), so nothing else changes here.
         return listOf(
             Seq3Emission.NoteLine(
                 message.id,
                 fromIdx,
-                templatedLabel(message),
+                collapsedRepeatLabel(message, occurrences),
                 occurrences.firstOrNull()?.entryId,
                 message.primaryTimestampMillis,
             ),
@@ -200,11 +207,13 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     }
     val toIdx = message.toLifelineId?.let(lifelineIndex::get)
     if (toIdx == null) {
+        // WP15 Part 2: same fix as the NOTE branch above — an unresolved/LOST/FOUND stub used to
+        // emit the bare template too.
         return listOf(
             Seq3Emission.NeedsTarget(
                 message.id,
                 fromIdx,
-                templatedLabel(message),
+                collapsedRepeatLabel(message, occurrences),
                 occurrences.firstOrNull()?.entryId,
                 message.primaryRawTimestamp,
                 message.primaryTimestampMillis,
@@ -379,7 +388,7 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
             indexByOccurrence[Seq3OccurrenceRef(emission.messageId, entryId)] = index
         }
     }
-    val prefixed = prefixSeq3EmissionLabels(emissions, document.showSequenceNumbers, document.showTimestamps)
+    val prefixed = prefixSeq3EmissionLabels(emissions, document.showSequenceNumbers, document.showTimestamps, document.showElapsed)
     return Seq3EmissionPlan(lifelineIndex, prefixed, firstIndex, lastIndex, indexByOccurrence)
 }
 
@@ -402,14 +411,33 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
 // "canvas draws in real time order, text follows the durable queue order" split this comment used
 // to document is gone; a manually reordered queue can no longer show two different numbers for the
 // same message.
-private fun prefixSeq3EmissionLabels(emissions: List<Seq3Emission>, showSequenceNumbers: Boolean, showTimestamps: Boolean): List<Seq3Emission> {
-    if (!showSequenceNumbers && !showTimestamps) return emissions
+// WP15 Part 1: mirrors Seq3Layout.kt's own `prefixEmissionLabels` — see that function's own doc for
+// the fold/accumulator reasoning (rule 4 especially: the accumulator advances on an untagged
+// NoteLine/Elided row too, which is what makes a FIRST_LAST elision's true span show up correctly
+// on the LAST row after it). A fourth small copy of this "which emissions are numbered, which
+// advance the accumulator" split, not a shared call — same reason [prefixEmissionLabels] itself
+// isn't shared (this file's own header: Seq3Emitters is phase-1, not restructured around
+// Seq3Layout's shape). What both copies MUST share, and do, is [seq3PrefixedLabel] and
+// [elapsedMillisOfDay] themselves.
+private fun prefixSeq3EmissionLabels(
+    emissions: List<Seq3Emission>,
+    showSequenceNumbers: Boolean,
+    showTimestamps: Boolean,
+    showElapsed: Boolean,
+): List<Seq3Emission> {
+    if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
+    var lastRealTimestampMillis: Long? = null
+    fun elapsedFor(currentTimestampMillis: Long?): Long? {
+        val previous = lastRealTimestampMillis
+        return if (previous != null && currentTimestampMillis != null) elapsedMillisOfDay(previous, currentTimestampMillis) else null
+    }
     return emissions.map { emission ->
         when (emission) {
             is Seq3Emission.Arrow -> {
                 callNumber++
-                emission.copy(
+                val elapsed = elapsedFor(emission.timestampMillis)
+                val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
                         callNumber,
@@ -417,12 +445,17 @@ private fun prefixSeq3EmissionLabels(emissions: List<Seq3Emission>, showSequence
                         emission.timestampMillis,
                         showSequenceNumbers,
                         showTimestamps,
+                        elapsed,
+                        showElapsed,
                     ),
                 )
+                lastRealTimestampMillis = emission.timestampMillis
+                result
             }
             is Seq3Emission.NeedsTarget -> {
                 callNumber++
-                emission.copy(
+                val elapsed = elapsedFor(emission.timestampMillis)
+                val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
                         callNumber,
@@ -430,10 +463,19 @@ private fun prefixSeq3EmissionLabels(emissions: List<Seq3Emission>, showSequence
                         emission.timestampMillis,
                         showSequenceNumbers,
                         showTimestamps,
+                        elapsed,
+                        showElapsed,
                     ),
                 )
+                lastRealTimestampMillis = emission.timestampMillis
+                result
             }
-            is Seq3Emission.NoteLine, is Seq3Emission.Elided -> emission
+            is Seq3Emission.NoteLine, is Seq3Emission.Elided -> {
+                // Untagged, but the accumulator still advances — see this function's own header
+                // and Seq3Layout.prefixEmissionLabels' matching comment (rule 4).
+                lastRealTimestampMillis = emission.timestampMillis
+                emission
+            }
         }
     }
 }
