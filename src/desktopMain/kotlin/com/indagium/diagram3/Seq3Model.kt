@@ -109,6 +109,19 @@ data class Seq3Occurrence(
     val captureValues: Map<String, String> = emptyMap(),
     /** Per-occurrence display flag. Unlike a message hide, this never affects sibling evidence. */
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+    /** Appended LAST (CLAUDE.md's "append-last field versioning" invariant). Day-unrolled,
+     *  monotonic counterpart of [timestampMillis] — `utils.unrollLogTimeline`'s per-entry elapsed
+     *  value, populated in `Seq3Generator.toOccurrence` from whatever range that occurrence's
+     *  message was generated (or added) from. Exists ONLY to fix ORDERING and elapsed-gap
+     *  measurement across a midnight rollover (see [Seq3Message.primaryElapsedMillis] and
+     *  `Seq3LabelSummary.seq3ChronologicalOrder`'s callers) — [timestampMillis] stays the value
+     *  every renderer DISPLAYS (`[HH:MM:SS.mmm]`, a clock reading), because unrolled elapsed time is
+     *  not a wall-clock time and must never be shown as one. Null means "no monotonic data": every
+     *  document written before this field existed (decodes to null, see `Seq3Codec`), or an
+     *  occurrence whose `ts` never parsed in the first place (same condition that already leaves
+     *  [timestampMillis] null) — either way every consumer must keep behaving exactly as it did
+     *  before this field existed. */
+    val elapsedMillis: Long? = null,
 )
 
 /** Stable reference used by occurrence-level commands. */
@@ -215,6 +228,28 @@ data class Seq3Message(
     /** Timeline value shared by queue sorting, canvas layout, and authored-message editing. */
     val primaryTimestampMillis: Long?
         get() = manualTimestampMillis ?: occurrences.firstOrNull()?.timestampMillis
+
+    /** Day-unrolled, monotonic counterpart of [primaryTimestampMillis] — same shape (manual
+     *  override wins, else the first occurrence's own value), reading [Seq3Occurrence.elapsedMillis]
+     *  instead of [Seq3Occurrence.timestampMillis]. This is the value chronological ORDERING now
+     *  prefers (see `Seq3LabelSummary.seq3ChronologicalOrder`'s callers), falling back to
+     *  [primaryTimestampMillis] when this is null — an old document, an unparseable `ts`, or a
+     *  fully-custom message with no manual override and no evidence at all.
+     *
+     *  [manualTimestampMillis] deliberately wins here as-is, UN-unrolled: it is a plain millis-of-day
+     *  value a user typed into a time picker, with no calendar date attached and therefore no
+     *  monotonic equivalent to compute (see that field's own doc) — the same reason
+     *  `utils.LogMerge.mergeLogs` cannot align two sources across a day boundary either. Reusing it
+     *  directly here (rather than returning null and forcing every authored message through
+     *  `seq3ChronologicalFallbacks`' interpolation) keeps an author's explicit "this happens at
+     *  14:32" placement authoritative, exactly like [primaryTimestampMillis] already treats it, and
+     *  orders correctly against any evidence on the SAME day. The one case this does not solve: an
+     *  authored message with an explicit manual override, in a document whose evidence spans a real
+     *  midnight rollover, sitting on the far side of that rollover from where list order would put
+     *  it — that pair can still misorder, same as every message used to before this fix. Left as-is
+     *  rather than guessed at; flagged prominently rather than silently accepted. */
+    val primaryElapsedMillis: Long?
+        get() = manualTimestampMillis ?: occurrences.firstOrNull()?.elapsedMillis
 
     /** Human-readable timestamp with the authored override taking precedence when present. */
     val primaryRawTimestamp: String

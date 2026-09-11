@@ -3,15 +3,22 @@ package com.indagium
 import com.indagium.diagram3.MAX_SEQ3_HEADER_CHARS
 import com.indagium.diagram3.Seq3AddResult
 import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.Seq3FontRole
 import com.indagium.diagram3.Seq3GenerateOptions
+import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3State
+import com.indagium.diagram3.Seq3TextMetrics
+import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
+import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.toMermaid
+import com.indagium.diagram3.toPlantUml
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import kotlin.system.measureTimeMillis
@@ -471,6 +478,67 @@ class Seq3GeneratorTest {
             "generateSeq3 took ${elapsedMs}ms over 1000 delimiterless-tail lines " +
                 "(threshold ${PERF_REGRESSION_THRESHOLD_MS}ms) — NAMED_VALUE's bounding may have regressed",
         )
+    }
+
+    // ── Midnight-rollover fix ────────────────────────────────────────────────────────────────────
+
+    /**
+     * HEADLINE TEST for the midnight-rollover fix. Two single-occurrence messages on one tag, one
+     * just before midnight (ts 23:59:59.900, millis-of-day 86_399_900) and one just after (ts
+     * 00:00:00.100, millis-of-day 100). Before this fix, ordering ran on bare
+     * `Seq3Occurrence.timestampMillis`: the post-midnight message's millis-of-day (100) is SMALLER
+     * than the pre-midnight one's (86_399_900), so it sorted FIRST — the diagram split into two
+     * blocks and swapped them, exactly the bug this deliverable exists to fix. Checked at every
+     * layer the bug report named: `Seq3Document.messages`' own generation-time order (what the queue
+     * panel shows untouched), the canvas layout's drawn row order, and both exported dialects' text
+     * order — a fix that only touched one of the three would still show the swap in the others.
+     */
+    @Test
+    fun aMidnightCrossingRangeOrdersPreMidnightMessagesBeforePostMidnightOnesInDocumentLayoutAndBothDialects() {
+        val entries = listOf(
+            entry(1, "23:59:59.900", "App", "pre-midnight event"),
+            entry(2, "00:00:00.100", "App", "post-midnight event"),
+        )
+        val document = generateSeq3(entries, Seq3Range.VisibleView)
+
+        // 1) Generation-time list order.
+        assertEquals(
+            listOf("pre-midnight event", "post-midnight event"),
+            document.messages.map { it.labelTemplate },
+            "Seq3Document.messages must keep the pre-midnight message first, not swap the two blocks",
+        )
+        val preOcc = document.messages[0].occurrences.single()
+        val postOcc = document.messages[1].occurrences.single()
+        assertNotNull(preOcc.elapsedMillis, "unrollLogTimeline must actually populate elapsedMillis end-to-end from the real LogEntry.ts")
+        assertNotNull(postOcc.elapsedMillis)
+        assertTrue(
+            postOcc.elapsedMillis > preOcc.elapsedMillis,
+            "the post-midnight occurrence's day-unrolled elapsed value must exceed the pre-midnight one's",
+        )
+
+        // 2) Canvas layout draw order (single tag, so both messages are unresolved stubs — target
+        // inference is irrelevant to this test, only draw ORDER is).
+        val metrics = object : Seq3TextMetrics {
+            override fun width(role: Seq3FontRole, text: String) = text.length * 7.0
+            override fun lineHeight(role: Seq3FontRole) = 16.0
+        }
+        val layout = layoutSeq3(document, Seq3LayoutOptions(metrics))
+        val rowLabels = layout.rows.filterIsInstance<Seq3UnresolvedStubRow>().map { it.label }
+        assertEquals(
+            listOf("pre-midnight event", "post-midnight event"),
+            rowLabels,
+            "the canvas must draw the pre-midnight row before the post-midnight one",
+        )
+
+        // 3) Both exported dialects.
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+        for ((label, text) in listOf("Mermaid" to mermaid, "PlantUML" to plantUml)) {
+            val preIndex = text.indexOf("pre-midnight event")
+            val postIndex = text.indexOf("post-midnight event")
+            assertTrue(preIndex >= 0 && postIndex >= 0, "$label text must contain both messages:\n$text")
+            assertTrue(preIndex < postIndex, "$label text must write the pre-midnight message before the post-midnight one:\n$text")
+        }
     }
 
     /** A short "key=value" prefix followed by an unbroken (no spaces, no '='/':' ) run of text —

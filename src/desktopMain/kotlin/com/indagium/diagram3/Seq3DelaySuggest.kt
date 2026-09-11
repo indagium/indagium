@@ -50,27 +50,40 @@ fun seq3SuggestedDelays(document: Seq3Document, thresholdMillis: Long = SEQ3_AUT
         document,
         visible,
         messageIdOf = { it.id },
-        timestampMillisOf = { it.primaryTimestampMillis },
+        timestampMillisOf = { it.primaryElapsedMillis ?: it.primaryTimestampMillis },
         entryIdOf = { it.occurrences.firstOrNull()?.entryId },
     )
     val suggestions = mutableListOf<Seq3DelaySuggestion>()
     for (i in 0 until ordered.size - 1) {
         val before = ordered[i]
         val after = ordered[i + 1]
-        val beforeTs = before.primaryTimestampMillis ?: continue
-        val afterTs = after.primaryTimestampMillis ?: continue
+        val beforeTs = before.primaryElapsedMillis ?: before.primaryTimestampMillis ?: continue
+        val afterTs = after.primaryElapsedMillis ?: after.primaryTimestampMillis ?: continue
         // Routed through the shared [elapsedMillisOfDay] for contract consistency, NOT because a
-        // rollover can fire here — it cannot, and it would be wrong to imply otherwise. `ordered`
-        // is sorted ascending by `primaryTimestampMillis`, the exact same value read back into
-        // `beforeTs`/`afterTs`, so `afterTs >= beforeTs` always holds for a non-null pair and the
+        // rollover can fire here in the general case — see below. `ordered` is sorted ascending by
+        // the SAME value read back into `beforeTs`/`afterTs` (`primaryElapsedMillis`, falling back
+        // to `primaryTimestampMillis` — mirrored exactly in the `timestampMillisOf` lambda above),
+        // so `afterTs >= beforeTs` always holds for a non-null pair and the
         // `delta < -ROLLOVER_THRESHOLD_MS` branch is unreachable. Kept anyway so this subtraction
         // can never drift away from the one place the correction lives.
         //
-        // The genuine midnight problem for this function is one level up and NOT fixed here: the
-        // ordering itself is date-unaware, so a pair that really does straddle midnight sorts
-        // 00:00:00.100 BEFORE 23:59:59.900 and yields a ~24h gap rather than the true 200ms one.
-        // Fixing that means changing `seq3ChronologicalOrder`, which every drawn row's position
-        // depends on — far past the blast radius of a delay-suggestion threshold.
+        // Before the midnight-rollover fix (`Seq3Generator.generateSeq3`'s `unrollLogTimeline`
+        // call), this same "ascending by the same key" argument was ALREADY true, but for the wrong
+        // reason and about the wrong axis: `primaryTimestampMillis` is bare millis-of-day, so a pair
+        // that genuinely straddled midnight still sorted 00:00:00.100 BEFORE 23:59:59.900 — a
+        // perfectly ascending sort, just an ascending sort over a value that resets to zero every
+        // day. The subtraction was therefore never unreachable BECAUSE it was correct; it was
+        // unreachable while quietly reporting a spurious ~24h gap instead of the true ~200ms one,
+        // which is exactly the WRONG kind of "unreachable" for a doc comment to celebrate.
+        // `primaryElapsedMillis` fixes the axis at the source (day-unrolled, monotonic), so the very
+        // same sentence above is now true in the way it always sounded like it was.
+        //
+        // One residual gap this function inherits rather than fixes: an AUTHORED message's
+        // `manualTimestampMillis` (see `Seq3Message.primaryElapsedMillis`'s own doc) has no
+        // monotonic equivalent — a diagram mixing an authored message that carries an explicit
+        // manual timestamp with real evidence on the far side of a genuine midnight rollover can
+        // still misorder that one pair and therefore misreport that one gap. Real log evidence, the
+        // overwhelming case this function exists for, is unaffected.
         val gap = elapsedMillisOfDay(beforeTs, afterTs)
         if (gap >= thresholdMillis && before.id !in alreadyMarked) {
             suggestions += Seq3DelaySuggestion(before.id, after.id, gap)

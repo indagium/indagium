@@ -560,6 +560,8 @@ private fun occurrenceToMap(o: Seq3Occurrence): Map<String, Any?> = mapOf(
     "text" to o.text,
     "captureValues" to o.captureValues,
     "visibility" to o.visibility.name,
+    // Append-last (CLAUDE.md invariant): see Seq3Occurrence.elapsedMillis's own doc.
+    "elapsedMillis" to o.elapsedMillis,
 )
 
 @Suppress("UNCHECKED_CAST")
@@ -579,6 +581,9 @@ private fun occurrenceFromMap(map: Map<String, Any?>): Seq3Occurrence? {
         text = text,
         captureValues = captureValues,
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+        // Missing (every occurrence written before this field existed) or unparsable both decode to
+        // null — "no monotonic data" — matching this field's own pre-existing default.
+        elapsedMillis = (map["elapsedMillis"] as? Number)?.toLong(),
     )
 }
 

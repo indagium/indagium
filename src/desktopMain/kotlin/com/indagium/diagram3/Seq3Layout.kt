@@ -548,17 +548,26 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // a different `[#n]` call number) than this canvas/PNG geometry for the same document. Both
     // files now call through `seq3ChronologicalOrder`/`seq3ChronologicalFallbacks`
     // (Seq3LabelSummary.kt) so the two can never again quietly disagree about order.
+    // Midnight-rollover fix: `elapsedByEntryId` (Seq3LabelSummary.kt) is the day-unrolled,
+    // monotonic value per occurrence — looked up by `entryId` rather than added as a field to
+    // `Emission` itself, since an emission's occurrence identity (`entryId`) is already exactly what
+    // this needs and a new field on every one of `Emission`'s five subtypes would duplicate data
+    // this map already has. A miss (an emission with no occurrence — an authored arrow/stub/note, or
+    // `Emission.Elision`, which never carries one) falls back to `emission.timestampMillis`, its own
+    // pre-existing (and, for those cases, already-correct — see `Seq3Message.primaryElapsedMillis`'s
+    // own doc on manual overrides) value.
+    val elapsedByEntryId = seq3ElapsedByEntryId(doc)
     val chronologicalEmissions = seq3ChronologicalOrder(
         doc,
         visibleMessages.flatMap(::expandForLayout),
         messageIdOf = { emission -> emission.messageId },
-        timestampMillisOf = { emission -> emission.timestampMillis },
+        timestampMillisOf = { emission -> emission.entryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis },
         entryIdOf = { emission -> emission.entryId },
     )
     // WP10 (item 7): number/timestamp-prefix each call's label BEFORE measurement — see
     // prefixEmissionLabels' own doc for why doing this after measureRequirement would reintroduce
     // WP9's clipping bug in a worse form (a toggle the user can flip live, not just a one-off typo).
-    val emissions = prefixEmissionLabels(chronologicalEmissions, doc.showSequenceNumbers, doc.showTimestamps, doc.showElapsed)
+    val emissions = prefixEmissionLabels(chronologicalEmissions, doc.showSequenceNumbers, doc.showTimestamps, doc.showElapsed, elapsedByEntryId)
     val requirements = emissions.map { measureRequirement(it, tm, opts.maxLabelLines) }
     val gapSolve = solveGaps(emissions, requirements, lifelineIndex, headerWidths)
 
@@ -1242,26 +1251,46 @@ private fun buildStateInvariantBoxes(
 // — the moment either endpoint is unknown (rule 1), and deliberately does NOT fall back to an older
 // non-null accumulator value once a null has been folded through: reaching further back past a null
 // predecessor would silently measure across a gap this function has no evidence for and report it
-// as if it were real. [elapsedMillisOfDay] (not plain subtraction) absorbs the midnight rollover
-// (rule 3) the same way every other elapsed measurement in this codebase does.
+// as if it were real. [elapsedMillisOfDay] (not plain subtraction) is still what performs the
+// subtraction (rule 3), but — midnight-rollover fix — what it now reads is [orderingValue]'s
+// day-unrolled, monotonic value (via [elapsedByEntryId], falling back to the emission's own raw
+// [Emission.timestampMillis] where no unrolled value exists), not [Emission.timestampMillis]
+// directly. Before [elapsedByEntryId] existed, this fold measured gaps off bare millis-of-day, so a
+// message range that crossed midnight had ALREADY been drawn in swapped, wrong order by the time
+// this fold ever ran (see `seq3ChronologicalOrder`'s own history) — the row right after the seam
+// then read back a spurious ~24h `[+86399.860]` tag instead of the true short gap, and
+// [elapsedMillisOfDay]'s own rollover correction inside THIS fold could never catch that: both
+// values it ever saw were already millis-of-day and already on the "wrong" side of each other
+// relative to real time, which looks like an ordinary small gap to the correction, not a crossing.
+// Feeding it the unrolled value instead fixes the problem at its source — the fold now walks
+// genuinely ascending elapsed time, and the tag it reports for that same seam is the true short
+// gap. [seq3PrefixedLabel]'s own `timestampMillis` argument below is deliberately left reading
+// [Emission.timestampMillis] (never [orderingValue]) in every call — that argument is what gets
+// DISPLAYED as `[HH:MM:SS.mmm]`, and unrolled elapsed time is not a wall-clock reading.
 private fun prefixEmissionLabels(
     emissions: List<Emission>,
     showSequenceNumbers: Boolean,
     showTimestamps: Boolean,
     showElapsed: Boolean,
+    elapsedByEntryId: Map<Int, Long>,
 ): List<Emission> {
     if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
-    var lastRealTimestampMillis: Long? = null
-    fun elapsedFor(currentTimestampMillis: Long?): Long? {
-        val previous = lastRealTimestampMillis
-        return if (previous != null && currentTimestampMillis != null) elapsedMillisOfDay(previous, currentTimestampMillis) else null
+    var lastRealElapsedMillis: Long? = null
+    // The value this fold's ACCUMULATOR reads and measures gaps on — see this function's own header
+    // for why this must not be [Emission.timestampMillis] itself. A miss (no occurrence, e.g. an
+    // authored arrow/stub/note, or [Emission.Elision]) falls back to that same raw value, exactly
+    // preserving pre-fix behaviour for a message/document with no unrolled data.
+    fun orderingValue(emission: Emission): Long? = emission.entryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis
+    fun elapsedFor(currentElapsedMillis: Long?): Long? {
+        val previous = lastRealElapsedMillis
+        return if (previous != null && currentElapsedMillis != null) elapsedMillisOfDay(previous, currentElapsedMillis) else null
     }
     return emissions.map { emission ->
         when (emission) {
             is Emission.Arrow -> {
                 callNumber++
-                val elapsed = elapsedFor(emission.timestampMillis)
+                val elapsed = elapsedFor(orderingValue(emission))
                 val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
@@ -1275,12 +1304,12 @@ private fun prefixEmissionLabels(
                         emission.spanEndTimestampMillis,
                     ),
                 )
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 result
             }
             is Emission.Self -> {
                 callNumber++
-                val elapsed = elapsedFor(emission.timestampMillis)
+                val elapsed = elapsedFor(orderingValue(emission))
                 val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
@@ -1294,12 +1323,12 @@ private fun prefixEmissionLabels(
                         emission.spanEndTimestampMillis,
                     ),
                 )
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 result
             }
             is Emission.Stub -> {
                 callNumber++
-                val elapsed = elapsedFor(emission.timestampMillis)
+                val elapsed = elapsedFor(orderingValue(emission))
                 val result = emission.copy(
                     label = seq3PrefixedLabel(
                         emission.label,
@@ -1312,13 +1341,13 @@ private fun prefixEmissionLabels(
                         showElapsed,
                     ),
                 )
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 result
             }
             is Emission.Note, is Emission.Elision -> {
                 // Untagged (rule 4's own case), but the accumulator still advances — see this
                 // function's own header.
-                lastRealTimestampMillis = emission.timestampMillis
+                lastRealElapsedMillis = orderingValue(emission)
                 emission
             }
         }

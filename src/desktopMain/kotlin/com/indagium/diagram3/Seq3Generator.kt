@@ -7,6 +7,7 @@ import com.indagium.source.SourceTraceInferenceEngine
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.parseMillisOfDay
+import com.indagium.utils.unrollLogTimeline
 
 // ── Log entries -> Seq3Document ─────────────────────────────────────────────────────────────
 //
@@ -129,6 +130,21 @@ fun generateSeq3(
         return Seq3Document(title = options.title, sourceFile = options.sourceFile, range = range, defaultRepeat = options.defaultRepeat)
     }
 
+    // Midnight-rollover fix: day-unroll THIS diagram's own resolved range so message ORDERING (and
+    // the elapsed-gap math derived from it — Seq3DelaySuggest, WP15's `[+n]` tag) runs on real
+    // elapsed time instead of `LogEntry.ts`'s bare millis-of-day (see `Seq3Occurrence.elapsedMillis`'s
+    // own doc for why a raw millis-of-day sort splits a midnight-crossing range into two swapped
+    // blocks). Deliberately scoped to `resolved` alone, not the whole tab: ordering only needs
+    // RELATIVE correctness within one diagram, and `resolved` is already the exact ascending-by-id
+    // slice every occurrence in this generation is built from — unrolling anything wider would cost
+    // more and prove nothing extra. This does NOT cover `utils.LogMerge.mergeLogs`-interleaved tabs:
+    // a merge across midnight is a genuinely different, harder problem (aligning two sources needs
+    // the calendar date, which parsing already discarded) that `mergeLogs`' own comment already
+    // calls an accepted limitation — a merged tab's `resolved` range unrolls as best as a SINGLE
+    // timeline can (see `unrollLogTimeline`'s own multi-buffer/lone-outlier doc), which is no worse
+    // than today, but two interleaved sources that each cross midnight independently are not this
+    // fix's problem to solve.
+    val elapsedByEntryId = unrollLogTimeline(resolved).byId
     val lifelines = rankLifelines(resolved, options.maxLifelines, cancellationCheck)
     val lifelineIdByTag = lifelines.flatMap { lifeline -> lifeline.tagIds.map { it to lifeline.id } }.toMap()
     if (lifelineIdByTag.isEmpty()) {
@@ -151,6 +167,7 @@ fun generateSeq3(
             cancellationCheck()
             messages += buildMessages(
                 tag, group, lifelineIdByTag, resolved, entryIndexById, options, sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+                elapsedByEntryId,
             )
         }
     }
@@ -159,8 +176,19 @@ fun generateSeq3(
     // by that occurrence's LogEntry.id as the deterministic tiebreak for same-millisecond rows —
     // "No layout concerns here" per this phase's brief; a caller wanting a different VIEW order
     // (by lifeline, by occurrence count, by state) sorts this list itself (Seq3Queue, phase 2).
+    // Midnight-rollover fix: prefer the just-unrolled `elapsedMillis` over bare `timestampMillis` —
+    // this is the SAME list order `Seq3Document.messages` persists and the queue panel shows
+    // untouched (unlike the canvas/exported text, which re-derive their own draw order through
+    // `seq3ChronologicalOrder` later), so getting it right here, at generation time, is what keeps
+    // a freshly generated midnight-crossing diagram's queue panel — not just its canvas — showing
+    // pre-midnight messages first.
     val chronological = messages
-        .sortedWith(compareBy({ it.occurrences.first().timestampMillis ?: Long.MAX_VALUE }, { it.occurrences.first().entryId }))
+        .sortedWith(
+            compareBy(
+                { it.occurrences.first().elapsedMillis ?: it.occurrences.first().timestampMillis ?: Long.MAX_VALUE },
+                { it.occurrences.first().entryId },
+            ),
+        )
         .mapIndexed { index, message -> message.copy(id = "msg-${index + 1}") }
     // P3a: cap message COUNT before the occurrence budget runs — see [applySeq3MessageCountBudget]'s
     // own doc for why the asymmetry this closes (MAX_SEQ3_MESSAGES enforced only on decode) needs a
@@ -467,6 +495,7 @@ private fun buildMessages(
     options: Seq3GenerateOptions,
     sourceTraceCallEntryIds: Set<Int> = emptySet(),
     callbackRegistrarFirstIndexByTag: Map<String, Int> = emptyMap(),
+    elapsedByEntryId: Map<Int, Long> = emptyMap(),
 ): List<Seq3Message> {
     val result = tokenizeSeq3Messages(tag, group.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
     val match = result.match
@@ -474,7 +503,7 @@ private fun buildMessages(
         return listOf(
             toMessage(
                 tag, match, group, result.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options,
-                sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+                sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag, elapsedByEntryId,
             ),
         )
     }
@@ -486,15 +515,19 @@ private fun buildMessages(
         val single = tokenizeSeq3Messages(tag, listOf(Seq3TokenizeInput(entry.id.toString(), entry.msg)))
         toMessage(
             tag, single.match!!, listOf(entry), single.captureValuesByOccurrence, lifelineIdByTag, resolved, entryIndexById, options,
-            sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag,
+            sourceTraceCallEntryIds, callbackRegistrarFirstIndexByTag, elapsedByEntryId,
         )
     }
 }
 
 /** One [Seq3Occurrence] from a raw [LogEntry] plus whatever [captureValues] the tokenizer proved
  *  for it — the exact shape every occurrence in this package is built from, shared by [toMessage]
- *  and [addSeq3MessageFromSelection] so the two never drift on what an occurrence looks like. */
-private fun toOccurrence(entry: LogEntry, captureValues: Map<String, String>): Seq3Occurrence {
+ *  and [addSeq3MessageFromSelection] so the two never drift on what an occurrence looks like.
+ *  [elapsedByEntryId] is `unrollLogTimeline`'s day-unrolled map, keyed the same way this file's own
+ *  `entryIndexById` is; a miss (entry outside whatever range was unrolled, or an unparseable `ts` —
+ *  same condition that already leaves [Seq3Occurrence.timestampMillis] null) simply leaves
+ *  [Seq3Occurrence.elapsedMillis] null, its documented "no monotonic data" default. */
+private fun toOccurrence(entry: LogEntry, captureValues: Map<String, String>, elapsedByEntryId: Map<Int, Long> = emptyMap()): Seq3Occurrence {
     val millis = parseMillisOfDay(entry.ts)
     return Seq3Occurrence(
         entryId = entry.id,
@@ -505,6 +538,7 @@ private fun toOccurrence(entry: LogEntry, captureValues: Map<String, String>): S
         level = entry.level.key,
         text = entry.msg,
         captureValues = captureValues,
+        elapsedMillis = elapsedByEntryId[entry.id],
     )
 }
 
@@ -519,8 +553,9 @@ private fun toMessage(
     options: Seq3GenerateOptions,
     sourceTraceCallEntryIds: Set<Int> = emptySet(),
     callbackRegistrarFirstIndexByTag: Map<String, Int> = emptyMap(),
+    elapsedByEntryId: Map<Int, Long> = emptyMap(),
 ): Seq3Message {
-    val occurrences = group.map { entry -> toOccurrence(entry, captureValuesByOccurrence[entry.id.toString()].orEmpty()) }
+    val occurrences = group.map { entry -> toOccurrence(entry, captureValuesByOccurrence[entry.id.toString()].orEmpty(), elapsedByEntryId) }
     return Seq3Message(
         // reassigned once every tag's messages are merged and sorted into log-clock order
         id = "",
@@ -686,7 +721,13 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
     val sorted = selectedEntries.sortedBy { it.id }
     val tokenized = tokenizeSeq3Messages(tag, sorted.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
     val match = tokenized.match ?: return Seq3AddResult.Rejected(tokenized.error ?: "Selected rows do not share a provable pattern")
-    val occurrences = sorted.map { entry -> toOccurrence(entry, tokenized.captureValuesByOccurrence[entry.id.toString()].orEmpty()) }
+    // Midnight-rollover fix: unlike `generateSeq3`, there is no whole-range `resolved` list in scope
+    // here — a queue-panel "＋ Add" only ever sees the rows the user picked. Unrolling just [sorted]
+    // (already small, already the exact set this message's evidence is built from) is enough to get
+    // this handful of occurrences onto the same monotonic axis as the rest of the diagram; there is
+    // nothing cheaper to unroll and nothing wider worth reaching for.
+    val elapsedByEntryId = unrollLogTimeline(sorted).byId
+    val occurrences = sorted.map { entry -> toOccurrence(entry, tokenized.captureValuesByOccurrence[entry.id.toString()].orEmpty(), elapsedByEntryId) }
 
     val newMessageId = nextSeq3MessageId(withLifeline)
     val message = Seq3Message(

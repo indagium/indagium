@@ -928,6 +928,75 @@ class Seq3CodecTest {
         assertNull(parseSeq3Note(text), "a fragment declaring more than the per-fragment operand cap must be rejected, not silently truncated")
     }
 
+    // ── Midnight-rollover fix: Seq3Occurrence.elapsedMillis (appended last) ─────────────────────
+
+    @Test
+    fun occurrenceElapsedMillisRoundTripsThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            messages = fixedDocument().messages.map { message ->
+                message.copy(occurrences = message.occurrences.map { it.copy(elapsedMillis = 86_412_345L) })
+            },
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals(86_412_345L, parsed.document.messages.single().occurrences.single().elapsedMillis)
+    }
+
+    @Test
+    fun anOccurrenceMissingTheElapsedMillisKeyDecodesToNull() {
+        // An occurrence saved by a build predating the midnight-rollover fix has no "elapsedMillis"
+        // key at all — must fall back to null ("no monotonic data"), the field's own pre-existing
+        // default, rather than throwing. Same "hand-built legacy map" shape as
+        // aDelayMissingTheAfterOccurrenceEntryIdKeyDecodesToNull above.
+        val legacyOccurrenceMap = mapOf(
+            "entryId" to 42,
+            "timestampMillis" to 12_345L,
+            "rawTimestamp" to "10:00:00.000",
+            "pid" to 7,
+            "tid" to 11,
+            "level" to "I",
+            "text" to "push",
+            "captureValues" to emptyMap<String, String>(),
+            "visibility" to "VISIBLE",
+            // no "elapsedMillis" key at all
+        )
+        val legacyMessageMap = mapOf(
+            "id" to "m1",
+            "match" to mapOf("tag" to "A", "template" to "push", "captures" to emptyList<Any?>()),
+            "fromLifelineId" to "A",
+            "toLifelineId" to "B",
+            "labelTemplate" to "push",
+            "kind" to "CALL",
+            "repeat" to "EVERY",
+            "repeatThreshold" to 3,
+            "visibility" to "VISIBLE",
+            "authoring" to "AUTO",
+            "occurrences" to listOf(legacyOccurrenceMap),
+        )
+        val legacyMap = mapOf(
+            "lifelines" to listOf(
+                mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0),
+                mapOf("id" to "B", "name" to "B", "tagIds" to listOf("B"), "ordinal" to 1),
+            ),
+            "messages" to listOf(legacyMessageMap),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        val occurrence = parsed.document.messages.single().occurrences.single()
+        assertNull(occurrence.elapsedMillis, "a pre-existing note with no elapsedMillis key must decode to null, never throw or fabricate a value")
+        assertEquals(12_345L, occurrence.timestampMillis, "the pre-existing timestampMillis key must still decode unaffected")
+    }
+
     @Test
     fun aFreeFloatingNoteWithNoMessageIdsRoundTrips() {
         // WP7 item 3: "Add note here" on empty canvas creates a note with an EMPTY messageIds and
