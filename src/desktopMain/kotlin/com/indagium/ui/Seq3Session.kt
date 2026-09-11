@@ -27,6 +27,7 @@ import com.indagium.diagram3.generateSeq3
 import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
+import com.indagium.diagram3.seq3NoteHasHandEdit
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.utils.computeLogFingerprint
@@ -149,6 +150,23 @@ data class Seq3WorkspaceSession(
      *  [Seq3Session.openLibraryItem]) keeps its notes in the saved document but loses the ability to
      *  re-anchor them to a fresh generate — exactly like any hand-added note today. */
     val noteSeeds: List<Seq3NoteSeed> = emptyList(),
+    /**
+     * WP14: true while at least one of this session's LINKED notes (`Seq3AttachmentMode.LINKED`)
+     * has drifted — hand-edited since it was generated, [com.indagium.diagram3.seq3NoteHasHandEdit]
+     * — and so [Seq3Session.syncLiveLinkedNote] is SKIPPING it rather than overwriting it. A live
+     * link the user hand-edited has stopped being a live link in any meaningful sense; unlike
+     * [Seq3Session.confirm]'s prompt (an explicit action, gated with a real choice), this runs from
+     * [Seq3Session.publishGenerated]/[Seq3Session.markDirty] on every edit, so a prompt per sync is
+     * unusable — this flag is the "tell the user once" alternative: [ui.Seq3CanvasStatusBar] renders
+     * an extra clause while it's true, no popup, no dedupe map of its own needed (unlike
+     * [Seq3Session.reportSaveRejection]'s [Seq3Session.lastReportedRejectionKey], there is exactly
+     * ONE boolean here — the log call beside where this is set only fires on a false->true
+     * transition, checked against the session's own previous value, which is dedupe enough).
+     * Recomputed from scratch on every [Seq3Session.syncLiveLinkedNote] pass, so it also clears
+     * itself automatically once nothing is drifted any more (e.g. the user adopts the hand-edited
+     * source, or reverts it) — no separate "clear" call needed.
+     */
+    val linkedNoteDrifted: Boolean = false,
 )
 
 private const val BASE_UNTITLED_TITLE = "Untitled diagram"
@@ -739,7 +757,14 @@ class Seq3Session(
     /** Keeps the diagram library useful as a real draft library. A workspace gets a record as soon
      * as its first generation lands, and every later document/title edit refreshes that same
      * record. This is deliberately independent from [confirm], which is still the explicit note
-     * action and may or may not be used for a given diagram. */
+     * action and may or may not be used for a given diagram.
+     *
+     * WP14: deliberately UNCHANGED by the hand-edit gate added to [confirm]/[syncLiveLinkedNote].
+     * [saveToLibrary] writes the LIBRARY record — [DiagramLibraryStore]'s own draft snapshot — never
+     * a note block in any tab's annotations, so there is no fence for a user to have hand-edited
+     * here in the first place; `seq3NoteHasHandEdit` has nothing to check against. Do not "fix" this
+     * into calling it anyway for consistency with the other two — that would be checking a property
+     * this function's write can't violate. */
     private fun autoSaveDraftToLibrary(id: String) {
         val current = session(id) ?: return
         val tab = current.sourceTabId?.let(appState::tab) ?: return
@@ -773,16 +798,45 @@ class Seq3Session(
         // chasing this one a moment later, and guarantees the library draft never lags behind an
         // explicit note-writing action.
         flush(id)
+        val existingBlock = current.confirmedBlockId
+            ?.let { blockId -> appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
+        // WP14: confirm() is an explicit user action (the note-strip "confirm" press), so it's the
+        // one write path in this class that can afford to STOP and ask instead of silently
+        // re-deriving the fence from `current.document` — see seq3NoteHasHandEdit's own doc for the
+        // exact "drifted, not merely unparseable" check. Routes through AppState.
+        // pendingNoteOverwrite (PendingNoteOverwrite.handEdit) rather than a second pending field:
+        // that's the existing single-flight "at most one deferred note decision on screen" channel,
+        // and a second field would let a hand-edit prompt and a file-conflict prompt both try to be
+        // on screen at once. syncLiveLinkedNote below is the OTHER write path that can hit this same
+        // drift, but it runs unattended off publishGenerated/markDirty — a prompt per debounced sync
+        // would be unusable there, so it skips instead of asking; see that function's own doc.
+        if (existingBlock != null && seq3NoteHasHandEdit(existingBlock.text)) {
+            appState.pendingNoteOverwrite = PendingNoteOverwrite(
+                tabId = tabId,
+                targetPath = "",
+                targetName = current.document.title.ifBlank { "Untitled diagram" },
+                pendingTab = appState.tab(tabId) ?: return null,
+                handEdit = PendingHandEditOverwrite(sessionId = id, blockId = existingBlock.id),
+            )
+            return null
+        }
+        return writeConfirmedNote(id, current, tabId, existingBlock)
+    }
+
+    /**
+     * The actual note write + bookkeeping — everything [confirm] itself did unconditionally before
+     * WP14 inserted the hand-edit gate above it. Split out so [resolveHandEditOverwrite] (that
+     * gate's own "Overwrite" resolution) can run exactly this without going back through [confirm],
+     * which would immediately re-run the very drift check that raised the prompt, against the text
+     * THIS call is about to replace, and never terminate.
+     */
+    private fun writeConfirmedNote(id: String, current: Seq3WorkspaceSession, tabId: String, existingBlock: AnnBlock.Note?): String? {
         // Sticky per-session: seeded from the global default only the FIRST time (a brand-new
         // session's exportMode starts null); every later confirm on this session — including one
         // reached via beginEdit/openLibraryItem, which seed it from the note/item's own already-
         // written choice — reuses this value rather than re-reading a since-changed setting.
         val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
-        val existingAttachment = current.confirmedBlockId
-            ?.let { blockId ->
-                (appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note)
-                    ?.let { parseSeq3Note(it.text)?.attachment }
-            }
+        val existingAttachment = existingBlock?.let { parseSeq3Note(it.text)?.attachment }
         val text = encodeSeq3Note(
             current.document,
             current.dialect,
@@ -806,6 +860,24 @@ class Seq3Session(
             syncLiveLinkedNote(id)
         }
         return blockId
+    }
+
+    /**
+     * WP14: resolves the hand-edit prompt's "Overwrite" arm — [AppState.confirmSeq3NoteOverwrite]'s
+     * only caller. Re-reads the session and its [Seq3WorkspaceSession.confirmedBlockId] fresh
+     * rather than trusting anything captured when [confirm] first raised the prompt: the session
+     * may have kept generating or being edited in the background while the modal sat on screen.
+     * `internal`, not `private`: [AppState] — not this class — owns [AppState.pendingNoteOverwrite]
+     * and must be the one to null it out before delegating here (never after, or a second call
+     * arriving while this one runs could see the prompt as still "up"). A no-op (returns null) if
+     * the session has since closed.
+     */
+    internal fun resolveHandEditOverwrite(id: String): String? {
+        val current = session(id) ?: return null
+        val tabId = current.sourceTabId ?: return null
+        val existingBlock = current.confirmedBlockId
+            ?.let { blockId -> appState.tab(tabId)?.annotations?.blocks?.firstOrNull { it.id == blockId } as? AnnBlock.Note }
+        return writeConfirmedNote(id, current, tabId, existingBlock)
     }
 
     /**
@@ -1011,37 +1083,65 @@ class Seq3Session(
             }
         }
         if (linkedNotes.isEmpty()) return
-        val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
-        val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
-        // W1c: tryUpdate, not update — this write can hit the same size/library-full rejections as
-        // saveToLibrary (see that function's own doc), and it runs from publishGenerated/markDirty,
-        // exactly the chains W1c requires never to let an IllegalArgumentException escape.
-        val result = libraryStore.tryUpdate(libraryItemId) { item ->
-            item.copy(
-                title = current.document.title.ifBlank { item.title },
-                source = sourceIdentity(tab),
-                snapshot = DiagramLibrarySnapshot(plainText),
-                updatedAt = clock(),
+        // WP14: a linked note whose fence was hand-edited since it was generated has stopped being
+        // a "live" link in any meaningful sense — re-deriving it from `current.document` here (the
+        // pre-WP14 behaviour) would throw the hand edit away on the very next debounced sync, with
+        // no explicit user action in between to blame it on. Unlike confirm() (a real press, gated
+        // with a real prompt), this runs unattended from publishGenerated/markDirty, so the policy
+        // is SKIP + tell once (Seq3WorkspaceSession.linkedNoteDrifted), never ask. `!parsed.
+        // sourceHashMatches` is exactly seq3NoteHasHandEdit's own check, already applied to a
+        // ParsedSeq3 this function parsed a few lines up — routing it back through that function
+        // from the raw text would just reparse the same note for free.
+        val (drifted, syncable) = linkedNotes.partition { (_, parsed, _) -> !parsed.sourceHashMatches }
+        if (drifted.isNotEmpty() && !current.linkedNoteDrifted) {
+            // Logged on the false->true transition only (checked against the session's own PREVIOUS
+            // flag, not a parallel dedupe map) — mirrors reportSaveRejection's "the user was already
+            // told, don't tell them again on every keystroke" reasoning, but there is exactly one
+            // boolean to debounce here, not a handful of rejection categories to distinguish.
+            AppLogger.error(
+                "diagram3",
+                "Live-linked diagram note(s) skipped for session $id: hand-edited since generation, no longer syncing",
             )
         }
-        val updated = resolveLibraryWrite(id, result) ?: return
-        linkedNotes.forEach { (blockId, parsed, attachment) ->
-            val linkedText = encodeSeq3Note(
-                current.document,
-                current.dialect,
-                parsed.caption,
-                exportMode,
-                attachment = attachment.copy(revision = updated.updatedAt),
-            )
-            appState.updateBlock(tabId, blockId, linkedText)
-        }
-        libraryRevision++
-        replace(id) {
-            it.copy(
-                exportMode = exportMode,
-                dirty = false,
-                draftSavedAtMillis = clock(),
-            )
+        replace(id) { it.copy(linkedNoteDrifted = drifted.isNotEmpty()) }
+        // `if (syncable.isNotEmpty()) { ... }` rather than an early `if (syncable.isEmpty()) return`
+        // — detekt's ReturnCount budget for this function is already spent on the tab/session lookups
+        // above; this block simply falls through to the end when there is nothing left to sync
+        // (every linked note drifted), same effective behaviour as the early return it replaces.
+        if (syncable.isNotEmpty()) {
+            val exportMode = current.exportMode ?: appState.settings.diagramDefaultExportMode
+            val plainText = encodeSeq3Note(current.document, current.dialect, exportMode = exportMode)
+            // W1c: tryUpdate, not update — this write can hit the same size/library-full rejections as
+            // saveToLibrary (see that function's own doc), and it runs from publishGenerated/markDirty,
+            // exactly the chains W1c requires never to let an IllegalArgumentException escape.
+            val result = libraryStore.tryUpdate(libraryItemId) { item ->
+                item.copy(
+                    title = current.document.title.ifBlank { item.title },
+                    source = sourceIdentity(tab),
+                    snapshot = DiagramLibrarySnapshot(plainText),
+                    updatedAt = clock(),
+                )
+            }
+            resolveLibraryWrite(id, result)?.let { updated ->
+                syncable.forEach { (blockId, parsed, attachment) ->
+                    val linkedText = encodeSeq3Note(
+                        current.document,
+                        current.dialect,
+                        parsed.caption,
+                        exportMode,
+                        attachment = attachment.copy(revision = updated.updatedAt),
+                    )
+                    appState.updateBlock(tabId, blockId, linkedText)
+                }
+                libraryRevision++
+                replace(id) {
+                    it.copy(
+                        exportMode = exportMode,
+                        dirty = false,
+                        draftSavedAtMillis = clock(),
+                    )
+                }
+            }
         }
     }
 

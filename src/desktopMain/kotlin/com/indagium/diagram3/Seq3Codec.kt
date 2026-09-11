@@ -314,6 +314,20 @@ fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): S
  */
 fun adoptSeq3NoteSource(noteText: String): String? = updateSeq3NoteExportMode(noteText, DiagramExportMode.SOURCE)
 
+/**
+ * WP14: true when [text] is a v3 diagram note whose fence has DEFINITELY drifted from the header's
+ * declared hash — the same condition [ParsedSeq3.sourceHashMatches] already flags, exposed here as
+ * the one predicate every write path (confirm/sync/the MCP route) shares, so they can never
+ * disagree about what counts as a hand edit.
+ *
+ * The shape is deliberate: `parseSeq3Note(text)?.sourceHashMatches == false`, NOT
+ * `parseSeq3Note(text)?.sourceHashMatches != true`. An unparseable [text] is not a diagram note at
+ * all — there is no fence/hash pair to have drifted — so it must NOT read as a hand edit; `!= true`
+ * would make that mistake (`null != true` is `true`), silently gating every ordinary Note write
+ * behind a diagram-only prompt/refusal. Do not "simplify" this to `!= true`.
+ */
+fun seq3NoteHasHandEdit(text: String): Boolean = parseSeq3Note(text)?.sourceHashMatches == false
+
 /** Strips the leading header comment (and the blank line right after it, if any), leaving just the
  *  fenced code block — for Markdown export, where the JSON header would otherwise appear as a stray
  *  HTML comment. Returns [text] unchanged when it isn't a well-formed v3 diagram note, which is

@@ -1,6 +1,8 @@
 package com.indagium.debug
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.diagram3.Seq3Document
+import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.model.AnnBlock
 import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
@@ -412,6 +414,75 @@ class IndagiumToolGatewayTest {
         assertEquals(true, suffix["ok"])
         assertEquals("- Reproduce\n\n- Verify the fix", suffix["content"])
         assertEquals(IndagiumToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("append_annotation_section"))
+    }
+
+    // WP14: update_note_block's own catalogue description ("Update a text note's text or a log
+    // note's caption") never promised diagram notes — see updateAnnotationRoute's own comment for
+    // why refusing (not just warning) is the right default, with `force` as the explicit override.
+
+    @Test
+    fun updateNoteBlockRefusesToOverwriteADiagramNoteWithPlainTextUnlessForced() {
+        val diagramText = encodeSeq3Note(Seq3Document(title = "t"))
+        val added = operations.toolGateway.execute("add_text_note", mapOf("tabId" to "t1", "text" to diagramText)) as Map<*, *>
+        val blockId = added["blockId"] as String
+
+        val refused = operations.toolGateway.execute(
+            "update_note_block", mapOf("tabId" to "t1", "blockId" to blockId, "text" to "just some plain text"),
+        ) as Map<*, *>
+
+        assertNotNull(refused["error"], "must refuse to blow away a diagram note's header/fence without force")
+        assertEquals(
+            diagramText,
+            (state.tab("t1")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text,
+            "the diagram note must survive the refused write byte for byte",
+        )
+
+        val forced = operations.toolGateway.execute(
+            "update_note_block", mapOf("tabId" to "t1", "blockId" to blockId, "text" to "just some plain text", "force" to true),
+        ) as Map<*, *>
+
+        assertEquals(true, forced["ok"], "force=true must let the destructive write through")
+        assertEquals(
+            "just some plain text",
+            (state.tab("t1")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text,
+        )
+    }
+
+    @Test
+    fun updateNoteBlockIsUnaffectedForAnOrdinaryTextNote() {
+        val added = operations.toolGateway.execute("add_text_note", mapOf("tabId" to "t1", "text" to "plain note")) as Map<*, *>
+        val blockId = added["blockId"] as String
+
+        val result = operations.toolGateway.execute(
+            "update_note_block", mapOf("tabId" to "t1", "blockId" to blockId, "text" to "updated plain note"),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"], "an ordinary text note must update without needing force")
+        assertEquals(
+            "updated plain note",
+            (state.tab("t1")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text,
+        )
+    }
+
+    // A diagram note replaced by ANOTHER diagram note (e.g. a scripted metadata round-trip) is not
+    // the destructive case this guard exists for — only "structured diagram note -> non-diagram
+    // text" trips it. See updateAnnotationRoute's own comment for why the check reads this way.
+    @Test
+    fun updateNoteBlockAllowsReplacingADiagramNoteWithAnotherDiagramNoteWithoutForce() {
+        val original = encodeSeq3Note(Seq3Document(title = "before"))
+        val added = operations.toolGateway.execute("add_text_note", mapOf("tabId" to "t1", "text" to original)) as Map<*, *>
+        val blockId = added["blockId"] as String
+        val replacement = encodeSeq3Note(Seq3Document(title = "after"))
+
+        val result = operations.toolGateway.execute(
+            "update_note_block", mapOf("tabId" to "t1", "blockId" to blockId, "text" to replacement),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        assertEquals(
+            replacement,
+            (state.tab("t1")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text,
+        )
     }
 
     @Test

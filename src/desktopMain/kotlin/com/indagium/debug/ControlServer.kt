@@ -963,8 +963,18 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         ),
     ),
     McpTool(
-        "update_note_block", "Update a text note's text or a log note's caption.",
-        schema("tabId" to "string", "blockId" to "string", "text" to "string", required = listOf("tabId", "blockId", "text")),
+        "update_note_block",
+        "Update a text note's text or a log note's caption. Refuses to overwrite a diagram note " +
+            "(one holding a generated sequence diagram) with non-diagram text unless force=true is " +
+            "set — diagram notes are outside this tool's contract; pass force to override anyway.",
+        schema(
+            "tabId" to "string", "blockId" to "string", "text" to "string", "force" to "boolean",
+            required = listOf("tabId", "blockId", "text"),
+            descriptions = mapOf(
+                "force" to "Overwrite a diagram note's text with non-diagram content anyway, " +
+                    "destroying its generated model. Defaults to false (refused).",
+            ),
+        ),
     ),
     McpTool(
         "move_note_block", "Move an annotation block up or down by delta positions.",

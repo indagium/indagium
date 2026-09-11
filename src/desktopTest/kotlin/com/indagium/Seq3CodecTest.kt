@@ -25,6 +25,7 @@ import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.adoptSeq3NoteSource
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.seq3NoteHasHandEdit
 import com.indagium.diagram3.seq3SourceHash
 import com.indagium.diagram3.stripSeq3NoteHeader
 import com.indagium.diagram3.toMermaid
@@ -243,6 +244,36 @@ class Seq3CodecTest {
     @Test
     fun adoptSeq3NoteSourceReturnsNullForAnUnparseableNote() {
         assertNull(adoptSeq3NoteSource("just a plain text note, not a diagram note at all"))
+    }
+
+    // ── WP14: seq3NoteHasHandEdit — the one predicate confirm()/syncLiveLinkedNote/the MCP route
+    // now all share to decide "has this fence drifted". Exercises exactly the three cases its own
+    // KDoc calls out: a genuinely drifted note, an intact one, and something that isn't a diagram
+    // note at all (where the deliberate `?. + == false` shape, not `!= true`, matters).
+
+    @Test
+    fun seq3NoteHasHandEditIsTrueForATamperedFence() {
+        val text = encodeSeq3Note(fixedDocument())
+        val tampered = text.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n    Note over A: tampered\n")
+
+        assertTrue(seq3NoteHasHandEdit(tampered))
+    }
+
+    @Test
+    fun seq3NoteHasHandEditIsFalseForAnUntamperedNote() {
+        val text = encodeSeq3Note(fixedDocument())
+
+        assertFalse(seq3NoteHasHandEdit(text))
+    }
+
+    @Test
+    fun seq3NoteHasHandEditIsFalseForTextThatIsNotADiagramNoteAtAll() {
+        // The deliberate shape this function's own KDoc calls out: an unparseable note has no
+        // fence/hash pair to have drifted, so it must read as "not a hand edit" — `?. + == false`,
+        // not `!= true` (which would make `null != true` evaluate to true here and wrongly flag
+        // every ordinary Note).
+        assertFalse(seq3NoteHasHandEdit("just a plain text note, not a diagram note at all"))
+        assertFalse(seq3NoteHasHandEdit(""))
     }
 
     @Test
