@@ -393,6 +393,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // WP1: append-last, same invariant — see Seq3Model.kt's own doc on showActivations for why
     // defaulting false on decode (below) is load-bearing for every later work package.
     "showActivations" to d.showActivations,
+    // WP15: append-last, same invariant — see Seq3Model.kt's own doc on showElapsed for why
+    // defaulting false on decode (below) is load-bearing.
+    "showElapsed" to d.showElapsed,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -449,6 +452,9 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // WP1: absent on any note written before this field existed, which decodes to false —
         // activation bars off, byte-identical to every pre-WP1 rendering.
         showActivations = map.bool("showActivations") ?: false,
+        // WP15: absent on any note written before this field existed, which decodes to false —
+        // elapsed tags off, byte-identical to every pre-WP15 rendering.
+        showElapsed = map.bool("showElapsed") ?: false,
     )
 }
 

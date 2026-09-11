@@ -18,6 +18,7 @@ import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3LifelineSegment
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
@@ -831,6 +832,233 @@ class Seq3LayoutTest {
         val row = layout.rows.single() as Seq3ArrowRow
         assertEquals(5_000L, row.timestampMillis)
         assertEquals("10:00:00.000", row.rawTimestamp)
+    }
+
+    // ── WP15 Part 1: measured elapsed tag ───────────────────────────────────────────────────────
+    //
+    // The fixture trap (this file's own header via the class doc): occurrence()'s `rawTimestamp` is
+    // hard-coded to "10:00:00.000" regardless of `ts` — fine here, since every test below reads
+    // `label`/`row.timestampMillis`, never `row.rawTimestamp`.
+
+    @Test
+    fun showElapsedFalseLeavesTheDrawnLabelUnprefixed() {
+        // The default-off guarantee: showElapsed defaults false, so a document that never sets it
+        // must draw byte-identical to every pre-WP15 rendering, even across two rows with a real,
+        // measurable gap between them.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L)), template = "first"),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 1_500L)), template = "second"),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals("first", rows[0].label)
+        assertEquals("second", rows[1].label, "no [+...] tag anywhere when showElapsed is off")
+    }
+
+    @Test
+    fun elapsedTagMeasuresTheGapFromThePreviousDrawnRowEveryRepeatCorrectByConstruction() {
+        // EVERY mode: each occurrence draws its own row, so the gap is simply the per-occurrence
+        // delta — "correct by construction" per the WP15 brief's own repeat-mode checklist.
+        val occs = listOf(occurrence(1, ts = 1_000L), occurrence(2, ts = 1_140L), occurrence(3, ts = 3_140L))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = occs, template = "call")),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(3, rows.size)
+        assertEquals("call", rows[0].label, "the very first drawn row in the whole diagram has no predecessor, so no tag")
+        assertTrue(rows[1].label.startsWith("[+0.140] "), "got '${rows[1].label}'")
+        assertTrue(rows[2].label.startsWith("[+2.000] "), "got '${rows[2].label}'")
+    }
+
+    @Test
+    fun nullTimestampNeighbourSuppressesTheElapsedTagAndDoesNotReachFurtherBack() {
+        // Rule 1: a null timestamp on EITHER endpoint emits nothing — and, critically, a null row
+        // must not be silently skipped over so a LATER row reaches back to an older real value
+        // across it (m3 must not report a gap from m1's real 1_000L).
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L)), template = "first"),
+                // A brief/RAW-format row: no parseable ts at all.
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = null)), template = "brief"),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 5_000L)), template = "third"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals("first", rows[0].label, "no predecessor at all")
+        assertEquals("brief", rows[1].label, "this row's OWN timestamp is null: rule 1 says emit nothing")
+        assertEquals(
+            "third",
+            rows[2].label,
+            "must not reach back past the null m2 row to m1's real 1_000L timestamp — that would silently " +
+                "measure across an unknown gap and report it as if it were measured",
+        )
+    }
+
+    @Test
+    fun chronologicalOrderFallbackNeverFeedsTheElapsedTag() {
+        // Rule 2: seq3ChronologicalFallbacks interpolates a stand-in timestamp for an untimestamped
+        // AUTHORED message purely so it draws in the right spot — Seq3DelaySuggest.kt's own doc:
+        // "never for a real elapsed-time measurement." m2 is authored (no occurrences, no
+        // manualTimestampMillis), so its Emission.timestampMillis stays null even though its DRAW
+        // POSITION is the interpolated fallback (proven below by the row order itself).
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L)), template = "first"),
+                message("m2", "A", "B", occurrences = emptyList(), template = "authored"),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 5_000L)), template = "third"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(
+            listOf("m1", "m2", "m3"),
+            rows.map { it.messageId },
+            "the interpolated fallback must still place the untimestamped authored row between its timestamped neighbours",
+        )
+        assertEquals("authored", rows[1].label, "m2 has no REAL timestamp of its own — its fabricated draw position must not leak into a tag")
+        assertEquals("third", rows[2].label, "must not reach back through m2's fabricated position to m1's real timestamp either")
+    }
+
+    @Test
+    fun elapsedAccumulatorAdvancesThroughAnUntaggedNoteRowRatherThanStayingStale() {
+        // Rule 4: Note/Elision rows are never themselves tagged, but the fold's
+        // lastRealTimestampMillis must still update to THEIR OWN timestamp, not stay pinned to
+        // whatever the last NUMBERED row set it to. m2 (a NOTE, ts=4_000L) sits chronologically
+        // between m1 (ts=1_000L) and m3 (ts=9_000L); m3's tag must measure from m2 (5_000ms), not
+        // from m1 (8_000ms) — a wrong implementation that only updates the accumulator inside the
+        // Arrow/Self/Stub branches (skipping Note/Elision) would produce the latter, stale value.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L)), template = "first"),
+                message("m2", "A", "A", kind = Seq3Kind.NOTE, occurrences = listOf(occurrence(2, ts = 4_000L)), template = "a note"),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 9_000L)), template = "third"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val arrows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals("first", arrows[0].label, "no predecessor at all")
+        assertTrue(
+            arrows[1].label.startsWith("[+5.000] "),
+            "the accumulator must have advanced to the NOTE's own 4_000L timestamp, not stayed at m1's 1_000L; got '${arrows[1].label}'",
+        )
+    }
+
+    @Test
+    fun firstLastElisionRowCarriesTheTrueElidedSpanToTheLastRow() {
+        // FIRST_LAST repeat mode (WP15 brief's own checklist): the elision row is untagged and
+        // seeded with the FIRST occurrence's own timestamp (Emission.Elision's own doc) — folding
+        // that through unchanged (rule 4 again) is what makes the LAST row's tag report the TRUE
+        // span of the whole elided run (first -> last), not just its immediate, meaningless
+        // predecessor (the last of the elided middle occurrences).
+        val occs = listOf(
+            occurrence(1, ts = 1_000L),
+            occurrence(2, ts = 2_500L), // elided — never drawn as its own row
+            occurrence(3, ts = 9_000L),
+        )
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", repeat = Seq3Repeat.FIRST_LAST, occurrences = occs, template = "call")),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val arrows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        val elision = layout.rows.filterIsInstance<Seq3ElisionRow>().single()
+        assertEquals(2, arrows.size, "first + last, the elided middle occurrence draws as the elision marker instead")
+        assertEquals("call", arrows[0].label, "the first row has no predecessor")
+        assertEquals(1_000L, elision.timestampMillis, "seeded from the FIRST occurrence, per Emission.Elision's own doc")
+        assertTrue(
+            arrows[1].label.startsWith("[+8.000] "),
+            "the last row must report the TRUE elided span (9_000 - 1_000 = 8_000ms), not the 6_500ms gap from the " +
+                "last elided occurrence alone; got '${arrows[1].label}'",
+        )
+    }
+
+    @Test
+    fun collapseAboveElapsedTagMeasuresGapToTheFirstOfTheCollapsedGroup() {
+        // COLLAPSE_ABOVE above threshold (WP15 brief's own checklist): the whole group draws as ONE
+        // row carrying `occurrences.first().timestampMillis` — its tag is honestly "the gap from the
+        // previous row to the first of these n", never a fabricated internal span (that's WP16, not
+        // this package).
+        val occs = (1..5).map { i -> occurrence(i, ts = 2_000L + i * 10L) }
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(0, ts = 1_000L)), template = "prev"),
+                message("m2", "A", "B", repeat = Seq3Repeat.COLLAPSE_ABOVE, threshold = 3, occurrences = occs, template = "repeated"),
+            ),
+            showElapsed = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rows = layout.rows.filterIsInstance<Seq3ArrowRow>()
+        assertEquals(2, rows.size, "the collapsed group must still draw as ONE row")
+        assertEquals(5, rows[1].repeatCount)
+        assertTrue(
+            rows[1].label.startsWith("[+1.010] "),
+            "gap from 'prev' (1_000L) to the FIRST occurrence of the group (2_010L); got '${rows[1].label}'",
+        )
+    }
+
+    // ── WP15 Part 2: no literal {slot} on a NOTE or unresolved-stub row ─────────────────────────
+
+    @Test
+    fun noteRowWithCapturesNeverShowsALiteralBraceToken() {
+        val match = Seq3Match(tag = "A", template = "state={state}", captures = listOf(Seq3Capture("state", Seq3CaptureSource.NAMED_VALUE)))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            messages = listOf(
+                message(
+                    "m1", "A", null, kind = Seq3Kind.NOTE,
+                    occurrences = listOf(occurrence(1, text = "state=RUNNING", captureValues = mapOf("state" to "RUNNING"))),
+                    template = "state={state}", match = match,
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val note = layout.rows.single() as Seq3MessageNoteRow
+        val text = note.lines.joinToString(" ")
+        assertFalse(text.contains("{"), "a NOTE row with a resolvable capture must never draw the literal template; got '$text'")
+        assertTrue(text.contains("RUNNING"), "expected the substituted value; got '$text'")
+    }
+
+    @Test
+    fun stubRowWithCapturesNeverShowsALiteralBraceToken() {
+        val match = Seq3Match(tag = "A", template = "deviceKey={deviceKey}", captures = listOf(Seq3Capture("deviceKey", Seq3CaptureSource.NAMED_VALUE)))
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0)),
+            messages = listOf(
+                message(
+                    "m1", "A", null,
+                    occurrences = listOf(occurrence(1, text = "deviceKey=abc123", captureValues = mapOf("deviceKey" to "abc123"))),
+                    template = "deviceKey={deviceKey}", match = match,
+                ),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val stub = layout.rows.single() as Seq3UnresolvedStubRow
+        assertFalse(stub.label.contains("{"), "an unresolved stub row with a resolvable capture must never draw the literal template; got '${stub.label}'")
+        assertTrue(stub.label.contains("abc123"), "expected the substituted value; got '${stub.label}'")
     }
 
     // ── Time-gap markers (WP11) ─────────────────────────────────────────────────────────────

@@ -1,5 +1,7 @@
 package com.indagium.diagram3
 
+import com.indagium.utils.formatDelta
+
 // ── Message-label helpers shared by Seq3Layout and Seq3Emitters ────────────────────────────────
 //
 // `occurrenceLabel` and the collapsed-row (`COLLAPSE_ABOVE`, above threshold) summary used to be
@@ -96,13 +98,20 @@ private fun seq3FormatMillisOfDay(millis: Long): String {
 }
 
 /**
- * Composes the displayed label as `[#n] [ts] label` — the ONE place this string is built (see this
- * section's own header). [sequenceNumber] is this row's own already-assigned call number (1-based,
- * counting only numbered rows — Arrow/Self/Stub in Seq3Layout, Arrow/NeedsTarget in Seq3Emitters —
- * in canvas/emission order; never assigned to a Note or an elision marker, which aren't calls); pass
- * null when [showSequenceNumbers] is off or this row isn't numbered. Returns [label] byte-identical
- * when both toggles are off or neither prefix has anything to show, so a caller never needs its own
- * "did anything change" branch.
+ * Composes the displayed label as `[#n] [ts] [+elapsed] label` — the ONE place this string is built
+ * (see this section's own header). [sequenceNumber] is this row's own already-assigned call number
+ * (1-based, counting only numbered rows — Arrow/Self/Stub in Seq3Layout, Arrow/NeedsTarget in
+ * Seq3Emitters — in canvas/emission order; never assigned to a Note or an elision marker, which
+ * aren't calls); pass null when [showSequenceNumbers] is off or this row isn't numbered. [elapsedMillis]
+ * (WP15) is the already rollover-corrected gap from the previous DRAWN row's real timestamp to this
+ * row's own (see each caller's fold — `prefixEmissionLabels`/`prefixSeq3EmissionLabels` — for how it
+ * is accumulated); pass null when either endpoint has no real timestamp, which this function renders
+ * as "nothing", never a fabricated "+0.000". Formatted with [formatDelta] (signed `+`/`-`, never
+ * clamped — a negative gap from out-of-order merged sources is real data, not an error to hide; see
+ * [formatDelta]'s own doc) rather than `formatDuration`, which is magnitude-only and belongs on a
+ * duration, not a directional delta between two specific rows. Returns [label] byte-identical when
+ * every toggle is off or no prefix has anything to show, so a caller never needs its own "did
+ * anything change" branch.
  */
 internal fun seq3PrefixedLabel(
     label: String,
@@ -111,10 +120,13 @@ internal fun seq3PrefixedLabel(
     timestampMillis: Long?,
     showSequenceNumbers: Boolean,
     showTimestamps: Boolean,
+    elapsedMillis: Long? = null,
+    showElapsed: Boolean = false,
 ): String {
     val tags = buildList {
         if (showSequenceNumbers && sequenceNumber != null) add("#$sequenceNumber")
         if (showTimestamps) seq3DisplayTimestamp(rawTimestamp, timestampMillis)?.let(::add)
+        if (showElapsed && elapsedMillis != null) add(formatDelta(elapsedMillis))
     }
     if (tags.isEmpty()) return label
     return tags.joinToString(separator = "") { "[$it] " } + label

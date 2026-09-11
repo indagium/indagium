@@ -1118,6 +1118,121 @@ class Seq3EmitterTest {
         assertTrue(plantUml.contains("[#2] later-thing"), "got:\n$plantUml")
     }
 
+    // ── WP15 Part 1: measured elapsed tag ───────────────────────────────────────────────────────
+
+    @Test
+    fun showElapsedFalseLeavesTheEmittedTextUnprefixedInBothDialects() {
+        val occ1 = Seq3Occurrence(entryId = 1, timestampMillis = 1_000L, rawTimestamp = "10:00:01.000", pid = 0, tid = 0, level = 'I', text = "first")
+        val occ2 = Seq3Occurrence(entryId = 2, timestampMillis = 1_500L, rawTimestamp = "10:00:01.500", pid = 0, tid = 0, level = 'I', text = "second")
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "first"),
+            message("m2", occurrences = listOf(occ2), label = "second"),
+        )
+        // showElapsed defaults false — the default-off guarantee.
+        val document = doc(messages)
+
+        assertTrue(document.toMermaid().contains(": second"), "got:\n${document.toMermaid()}")
+        assertFalse(document.toMermaid().contains("[+"), "got:\n${document.toMermaid()}")
+        assertTrue(document.toPlantUml().contains(": second"), "got:\n${document.toPlantUml()}")
+        assertFalse(document.toPlantUml().contains("[+"), "got:\n${document.toPlantUml()}")
+    }
+
+    @Test
+    fun showElapsedTruePrefixesEachDrawnCallWithTheMeasuredGapInBothDialects() {
+        val occ1 = Seq3Occurrence(entryId = 1, timestampMillis = 1_000L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "first")
+        val occ2 = Seq3Occurrence(entryId = 2, timestampMillis = 1_140L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "second")
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "first"),
+            message("m2", occurrences = listOf(occ2), label = "second"),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        assertTrue(document.toMermaid().contains(": first"), "the first drawn row has no predecessor; got:\n${document.toMermaid()}")
+        assertTrue(document.toMermaid().contains(": [+0.140] second"), "got:\n${document.toMermaid()}")
+        assertTrue(document.toPlantUml().contains(": first"), "got:\n${document.toPlantUml()}")
+        assertTrue(document.toPlantUml().contains(": [+0.140] second"), "got:\n${document.toPlantUml()}")
+    }
+
+    @Test
+    fun nullTimestampNeighbourSuppressesTheElapsedTagInEmittedText() {
+        // Rule 1, exercised through the emitted text rather than layout row geometry — see
+        // Seq3LayoutTest's own test of the identical rule for the full reasoning.
+        val occ1 = Seq3Occurrence(entryId = 1, timestampMillis = 1_000L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "first")
+        val occ2 = Seq3Occurrence(entryId = 2, timestampMillis = null, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "brief")
+        val occ3 = Seq3Occurrence(entryId = 3, timestampMillis = 5_000L, rawTimestamp = "", pid = 0, tid = 0, level = 'I', text = "third")
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "first"),
+            message("m2", occurrences = listOf(occ2), label = "brief"),
+            message("m3", occurrences = listOf(occ3), label = "third"),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        val mermaid = document.toMermaid()
+        assertTrue(mermaid.contains(": brief"), "m2's own timestamp is null: no tag; got:\n$mermaid")
+        assertTrue(
+            mermaid.contains(": third"),
+            "must not reach back past the null m2 row to m1's real 1_000L timestamp; got:\n$mermaid",
+        )
+        assertFalse(mermaid.contains("[+"), "no elapsed tag should have been produced anywhere in this document; got:\n$mermaid")
+    }
+
+    @Test
+    fun elapsedTagIsByteIdenticalAcrossTheLayoutRowLabelAndBothEmittedDialects() {
+        // Same parity shape as theSamePrefixIsProducedByTheLayoutRowLabelAndBothEmittedDialects
+        // above, extended to the elapsed tag — canvas, Mermaid and PlantUML all compose it through
+        // the same shared seq3PrefixedLabel call (Seq3LabelSummary.kt), so they can never quietly
+        // disagree about its content.
+        val occ1 = Seq3Occurrence(entryId = 1, timestampMillis = 1_000L, rawTimestamp = "10:00:01.000", pid = 0, tid = 0, level = 'I', text = "first")
+        val occ2 = Seq3Occurrence(entryId = 2, timestampMillis = 1_140L, rawTimestamp = "10:00:01.140", pid = 0, tid = 0, level = 'I', text = "second")
+        val messages = listOf(
+            message("m1", occurrences = listOf(occ1), label = "first"),
+            message("m2", occurrences = listOf(occ2), label = "second"),
+        )
+        val document = doc(messages).copy(showElapsed = true)
+
+        val layout = layoutSeq3(document, Seq3LayoutOptions(FixedWidthMetrics()))
+        val layoutLabels = layout.rows.filterIsInstance<Seq3ArrowRow>().map { it.label }
+        assertEquals(listOf("first", "[+0.140] second"), layoutLabels, "canvas row labels")
+
+        assertTrue(document.toPlantUml().contains(": [+0.140] second"), "got:\n${document.toPlantUml()}")
+        // Mermaid escapes '#'/':' but never '+' or '.', so the elapsed tag survives unescaped.
+        assertTrue(document.toMermaid().contains(": [+0.140] second"), "got:\n${document.toMermaid()}")
+    }
+
+    // ── WP15 Part 2: no literal {slot} on a NOTE or unresolved-target row ───────────────────────
+
+    @Test
+    fun noteMessageWithCapturesNeverEmitsALiteralBraceTokenInEitherDialect() {
+        val match = Seq3Match(tag = "A", template = "state={state}", captures = listOf(Seq3Capture("state", Seq3CaptureSource.NAMED_VALUE)))
+        val note = message(
+            kind = Seq3Kind.NOTE, to = null, label = "state={state}", match = match,
+            occurrences = listOf(occurrence(1, "state=RUNNING", mapOf("state" to "RUNNING"))),
+        )
+        val mermaid = doc(listOf(note)).toMermaid()
+        val plantUml = doc(listOf(note)).toPlantUml()
+
+        assertFalse(mermaid.contains("{"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("RUNNING"), "got:\n$mermaid")
+        assertFalse(plantUml.contains("{"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("RUNNING"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun unresolvedStubMessageWithCapturesNeverEmitsALiteralBraceTokenInEitherDialect() {
+        val match = Seq3Match(tag = "A", template = "deviceKey={deviceKey}", captures = listOf(Seq3Capture("deviceKey", Seq3CaptureSource.NAMED_VALUE)))
+        val unresolved = message(
+            to = null, label = "deviceKey={deviceKey}", match = match,
+            occurrences = listOf(occurrence(1, "deviceKey=abc123", mapOf("deviceKey" to "abc123"))),
+        )
+        val mermaid = doc(listOf(unresolved)).toMermaid()
+        val plantUml = doc(listOf(unresolved)).toPlantUml()
+
+        assertFalse(mermaid.contains("{"), "got:\n$mermaid")
+        assertTrue(mermaid.contains("abc123"), "got:\n$mermaid")
+        assertFalse(plantUml.contains("{"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("abc123"), "got:\n$plantUml")
+    }
+
     // ── Activation bars (WP3) ───────────────────────────────────────────────────────────────────
 
     @Test

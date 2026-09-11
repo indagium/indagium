@@ -550,6 +550,18 @@ data class Seq3Document(
      *  note and every already-generated document decodes with activation bars off, exactly like
      *  before WP1. */
     val showActivations: Boolean = false,
+    /** WP15: prefix every drawn call's label with its measured elapsed gap from the previous drawn
+     *  row, e.g. `[+0.140]` — the one thing this generator can show that a hand-drawn UML diagram
+     *  cannot, since it comes from the real log clock rather than being authored. Document-level,
+     *  not view-only, for the same export-parity reason as [showSequenceNumbers]/[showTimestamps]/
+     *  [showActivations]: canvas, PNG export, and both text dialects must all agree. Appended LAST
+     *  (see CLAUDE.md's "append-last field versioning" invariant). Defaults false, and that default
+     *  is LOAD-BEARING the same way [showActivations]'s is: every already-written note and every
+     *  already-generated document decodes with elapsed tags off, so no existing test's expected
+     *  output changes the moment this field exists. See `diagram3.Seq3LabelSummary.seq3PrefixedLabel`
+     *  for where the tag is actually composed, and that function's own doc for why it is signed
+     *  (`+`/`-`), never clamped. */
+    val showElapsed: Boolean = false,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
