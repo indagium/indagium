@@ -168,9 +168,15 @@ enum class Seq3Visibility { VISIBLE, HIDDEN }
  *  [Seq3Message.state]'s own doc for why deriving it beats persisting a copy that can drift. */
 enum class Seq3State { AUTO, EDITED, NEEDS_TARGET }
 
-/** Pins one message's order against a same-timestamp neighbour. Only meaningful when two
- *  messages' first occurrence genuinely tie on [Seq3Occurrence.timestampMillis] — the design
- *  spec's §07 "Pin appears only when two messages share a timestamp". */
+/** Pins one message's order against a same-instant neighbour. Only meaningful when two messages'
+ *  first occurrence genuinely tie on the day-unrolled elapsed axis — [Seq3Message.primaryElapsedMillis]
+ *  (falling back to [Seq3Message.primaryTimestampMillis] when a message has no unrolled data) —
+ *  the design spec's §07 "Pin appears only when two messages share a timestamp", now read on the
+ *  axis that survives a midnight rollover instead of the raw wall-clock reading two messages 24h
+ *  apart would otherwise share. [tiedTimestampMillis] records whichever value the tie was
+ *  detected on, but is informational only: it round-trips through `Seq3Codec` and is asserted in
+ *  `Seq3QueueTest`, and nothing else reads it back — see `nudgeSeq3OrderPin`'s own comment in
+ *  Seq3Queue.kt for why that made switching its axis safe. */
 data class Seq3OrderPin(
     val tiedTimestampMillis: Long,
     val tieRank: Int,

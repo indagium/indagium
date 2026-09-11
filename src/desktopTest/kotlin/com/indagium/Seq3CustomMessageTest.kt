@@ -34,6 +34,16 @@ private const val SECOND_LIFELINE_ORDINAL = 1
 private const val FIRST_MESSAGE_TIMESTAMP = 100L
 private const val SECOND_MESSAGE_TIMESTAMP = 200L
 
+// Midnight-rollover fixture for moveOutPlacesAPostMidnightOccurrenceAfterItsPreMidnightSourceUsingElapsedMillis:
+// day-unrolled elapsed millis keep increasing across the rollover even though the raw wall clock
+// (millis-of-day) resets to near-zero.
+private const val MILLIS_PER_DAY = 86_400_000L
+private const val PRE_MIDNIGHT_TS = 86_390_000L // 23:59:50.000 -- still day 0, so elapsed == wall clock
+private const val POST_MIDNIGHT_WALL_TS = 5_000L // 00:00:05.000 wall clock, after the rollover
+private const val POST_MIDNIGHT_ELAPSED_TS = MILLIS_PER_DAY + POST_MIDNIGHT_WALL_TS
+private const val FOLLOWING_ANCHOR_WALL_TS = 10_000L // 00:00:10.000 wall clock, also after the rollover
+private const val FOLLOWING_ANCHOR_ELAPSED_TS = MILLIS_PER_DAY + FOLLOWING_ANCHOR_WALL_TS
+
 class Seq3CustomMessageTest {
     @Test
     fun customMessageUsesExplicitEndpointsPositionTimestampAndExistingFragmentWithoutFakeEvidence() {
@@ -146,6 +156,65 @@ class Seq3CustomMessageTest {
         assertEquals(Seq3Authoring.EDITED, updated.messages[0].authoring)
         assertEquals(Seq3Authoring.EDITED, updated.messages[1].authoring)
         assertEquals(updated.messages.map { it.id }.toSet(), updated.fragments.single().messageIds.toSet())
+    }
+
+    @Test
+    fun moveOutPlacesAPostMidnightOccurrenceAfterItsPreMidnightSourceUsingElapsedMillis() {
+        // m1's second occurrence actually happened just after midnight (day-unrolled elapsed =
+        // POST_MIDNIGHT_ELAPSED_TS), but its raw millis-of-day (POST_MIDNIGHT_WALL_TS) reads
+        // *earlier* than m1's remaining pre-midnight occurrence and m2's anchor. Comparing raw
+        // timestamps would reinsert the extracted message before both; comparing elapsed millis
+        // places it correctly between them.
+        val document = Seq3Document(
+            lifelines = listOf(
+                Seq3Lifeline("A", "Alpha", setOf("A"), FIRST_LIFELINE_ORDINAL),
+                Seq3Lifeline("B", "Beta", setOf("B"), SECOND_LIFELINE_ORDINAL),
+            ),
+            messages = listOf(
+                Seq3Message(
+                    id = "m1",
+                    match = Seq3Match("A", "m1 label"),
+                    fromLifelineId = "A",
+                    toLifelineId = "B",
+                    labelTemplate = "m1 label",
+                    occurrences = listOf(
+                        Seq3Occurrence(
+                            1, PRE_MIDNIGHT_TS, "23:59:50.000", 1, 1, 'I', "before midnight",
+                            elapsedMillis = PRE_MIDNIGHT_TS,
+                        ),
+                        Seq3Occurrence(
+                            2, POST_MIDNIGHT_WALL_TS, "00:00:05.000", 1, 1, 'I', "after midnight",
+                            elapsedMillis = POST_MIDNIGHT_ELAPSED_TS,
+                        ),
+                    ),
+                ),
+                Seq3Message(
+                    id = "m2",
+                    match = Seq3Match("B", "m2 label"),
+                    fromLifelineId = "B",
+                    toLifelineId = "A",
+                    labelTemplate = "m2 label",
+                    occurrences = listOf(
+                        Seq3Occurrence(
+                            3, FOLLOWING_ANCHOR_WALL_TS, "00:00:10.000", 1, 1, 'I', "anchor after midnight",
+                            elapsedMillis = FOLLOWING_ANCHOR_ELAPSED_TS,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val result = moveSeq3OccurrenceOut(document, "m1", 2)
+        val updated = (result as? Seq3MessageEditResult.Updated)?.document ?: error("expected split")
+
+        val extractedId = updated.messages.map { it.id }.single { it !in setOf("m1", "m2") }
+        assertEquals(
+            listOf("m1", extractedId, "m2"),
+            updated.messages.map { it.id },
+            "elapsed order is pre-midnight m1 (23:59:50) < extracted occurrence (day+5s) < m2's " +
+                "anchor (day+10s); comparing raw millis-of-day would instead read the extracted " +
+                "occurrence (00:00:05) and m2 (00:00:10) as both earlier than m1 (23:59:50)",
+        )
     }
 
     @Test
