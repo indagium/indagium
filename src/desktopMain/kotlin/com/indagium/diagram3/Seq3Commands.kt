@@ -262,6 +262,8 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.AddFragmentOperand -> "Add else branch"
     is Seq3BulkAction.SetFragmentOperandGuard -> "Set branch guard"
     is Seq3BulkAction.RemoveFragmentOperand -> "Remove branch"
+    is Seq3BulkAction.AddStateInvariant -> "Promote to state invariant"
+    is Seq3BulkAction.DeleteStateInvariant -> "Remove state invariant"
     Seq3BulkAction.SwapEndpoints -> "Swap direction"
 }
 

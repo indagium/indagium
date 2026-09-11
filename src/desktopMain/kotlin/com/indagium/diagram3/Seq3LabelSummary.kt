@@ -47,6 +47,27 @@ internal fun collapsedRepeatLabel(message: Seq3Message, occurrences: List<Seq3Oc
     }
 }
 
+/**
+ * WP18: the collapsed-row counterpart of [collapsedRepeatLabel] for a promoted [Seq3StateInvariant]
+ * — same shape, deliberately reused rather than a second answer invented for it (the design brief's
+ * own instruction): substitute the one value when [occurrences] agree, a compact `A|B|C` summary
+ * for a FEW distinct values, and an honest `{captureName}` placeholder above
+ * [COLLAPSED_SUMMARY_MAX_DISTINCT] distinct values — a collapsed row genuinely stands for many
+ * different states at that point, and a summary that grew unboundedly long would defeat collapsing
+ * at all, the identical reasoning [collapsedRepeatLabel]'s own doc gives for its label fallback.
+ * Null only when NONE of [occurrences] carry [captureName] at all (a dangling/renamed capture,
+ * `Seq3StateInvariant.captureName`'s own "no longer present" contract) — nothing to summarize, so
+ * the caller draws nothing rather than an empty marker.
+ */
+internal fun collapsedStateInvariantValue(captureName: String, occurrences: List<Seq3Occurrence>): String? {
+    val distinctValues = occurrences.mapNotNull { it.captureValues[captureName] }.distinct()
+    return when {
+        distinctValues.isEmpty() -> null
+        distinctValues.size <= COLLAPSED_SUMMARY_MAX_DISTINCT -> distinctValues.joinToString("|")
+        else -> "{$captureName}"
+    }
+}
+
 // ── WP10: inline timestamp / sequence-number prefix ─────────────────────────────────────────
 //
 // Same drift hazard this file's header describes for occurrenceLabel/collapsedRepeatLabel: a call's

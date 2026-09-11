@@ -26,6 +26,7 @@ import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3RasterTheme
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3SelfLoopRow
+import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3TextMetrics
 import com.indagium.diagram3.Seq3UnresolvedStubRow
@@ -1868,6 +1869,149 @@ class Seq3LayoutTest {
         assertTrue(
             row.toX < targetColumn.centerX,
             "a CREATE arrow drawn left-to-right must stop at the target box's near (left) edge, not the column centre (${targetColumn.centerX})",
+        )
+    }
+
+    // ── WP18: state invariants ──────────────────────────────────────────────────────────────
+
+    private fun stateMatch(from: String, template: String = "state={state}") =
+        Seq3Match(from, template, captures = listOf(Seq3Capture("state", Seq3CaptureSource.NAMED_VALUE)))
+
+    @Test
+    fun promotedCaptureRendersItsPerOccurrenceValueOnTheRightLifeline() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1", "A", "B",
+                    repeat = Seq3Repeat.EVERY,
+                    occurrences = listOf(
+                        occurrence(1, captureValues = mapOf("state" to "CONNECTING")),
+                        occurrence(2, captureValues = mapOf("state" to "CONNECTED")),
+                    ),
+                    match = stateMatch("A"),
+                ),
+            ),
+            stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val rowsByY = layout.rows.filterIsInstance<Seq3ArrowRow>().sortedBy { it.y }
+        assertEquals(2, rowsByY.size, "this fixture must actually draw one arrow per occurrence")
+        val boxesByCenterY = layout.stateInvariants.sortedBy { it.box.y + it.box.height / 2 }
+        assertEquals(2, boxesByCenterY.size, "one marker per drawn row")
+        assertEquals(
+            rowsByY.map { it.y },
+            boxesByCenterY.map { it.box.y + it.box.height / 2 },
+            "each marker must center on its OWN row's y, not a fixed offset",
+        )
+        assertEquals(
+            listOf("CONNECTING", "CONNECTED"),
+            boxesByCenterY.map { it.text },
+            "a message drawing as n rows must show each row's OWN occurrence value, not a repeated constant",
+        )
+        boxesByCenterY.forEach { assertEquals("A", it.lifelineId, "anchored on fromLifelineId — the component that logged the line — never the target") }
+    }
+
+    @Test
+    fun aStateInvariantAddsZeroVerticalPitchToAnyRow() {
+        // Modeled on rowYPositionsAreIdenticalWithActivationsOnAndOff (WP2's own anti-reflow test):
+        // a state invariant marker decorates space an existing row already occupies, so toggling
+        // one on/off must never move a single row or change the diagram's own height.
+        val baseDoc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, captureValues = mapOf("state" to "IDLE"))), match = stateMatch("A")),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+        )
+        val layoutOff = layoutSeq3(baseDoc, opts())
+        val layoutOn = layoutSeq3(baseDoc.copy(stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state"))), opts())
+
+        assertEquals(layoutOff.rows.map { it.y }, layoutOn.rows.map { it.y }, "a state invariant must add ZERO vertical pitch to any row")
+        assertEquals(layoutOff.height, layoutOn.height, "promoting a capture must never reflow the diagram's own height")
+        // Sanity check so the equality above isn't vacuously true because this fixture happens to
+        // produce no marker at all.
+        assertTrue(layoutOn.stateInvariants.isNotEmpty(), "this fixture must actually produce a marker when a capture is promoted")
+    }
+
+    @Test
+    fun aStateInvariantWithADanglingMessageIdDrawsNothingAndNeverThrows() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)), match = stateMatch("A"))),
+            stateInvariants = listOf(Seq3StateInvariant("s1", "no-such-message", "state")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.stateInvariants.isEmpty())
+    }
+
+    @Test
+    fun aStateInvariantWhoseCaptureNameIsNoLongerPresentDrawsNothingAndNeverThrows() {
+        // The pattern was edited after promotion: no occurrence carries a "state" value any more.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.stateInvariants.isEmpty())
+    }
+
+    @Test
+    fun aCollapsedRowSummarizesAFewDistinctValuesTheSameShapeCollapsedRepeatLabelUsesForLabels() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1", "A", "B",
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE,
+                    threshold = 3,
+                    occurrences = listOf(
+                        occurrence(1, captureValues = mapOf("state" to "OPEN")),
+                        occurrence(2, captureValues = mapOf("state" to "OPEN")),
+                        occurrence(3, captureValues = mapOf("state" to "CLOSED")),
+                        occurrence(4, captureValues = mapOf("state" to "CLOSED")),
+                    ),
+                    match = stateMatch("A"),
+                ),
+            ),
+            stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val row = layout.rows.single { it.messageId == "m1" } as Seq3ArrowRow
+        assertTrue(row.badgeBox != null, "this fixture must actually collapse to one badged row above threshold")
+        assertEquals(
+            "OPEN|CLOSED",
+            layout.stateInvariants.single().text,
+            "a collapsed row's few distinct values summarize as A|B, the same shape collapsedRepeatLabel already uses",
+        )
+    }
+
+    @Test
+    fun aCollapsedRowWithTooManyDistinctValuesFallsBackToTheHonestCaptureNamePlaceholder() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message(
+                    "m1", "A", "B",
+                    repeat = Seq3Repeat.COLLAPSE_ABOVE,
+                    threshold = 3,
+                    occurrences = (1..4).map { occurrence(it, captureValues = mapOf("state" to "S$it")) },
+                    match = stateMatch("A"),
+                ),
+            ),
+            stateInvariants = listOf(Seq3StateInvariant("s1", "m1", "state")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(
+            "{state}",
+            layout.stateInvariants.single().text,
+            "above 3 distinct values a collapsed row falls back to the honest {captureName} placeholder, never a truncated summary",
         )
     }
 }

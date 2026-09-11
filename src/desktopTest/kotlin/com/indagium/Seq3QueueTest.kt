@@ -22,6 +22,7 @@ import com.indagium.diagram3.Seq3PinDirection
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
+import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3BulkAction
 import com.indagium.diagram3.applySeq3Command
@@ -62,6 +63,24 @@ class Seq3QueueTest {
         return Seq3Document(
             lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1), Seq3Lifeline("C", "C", setOf("C"), 2)),
             messages = listOf(m1, m3, m2, m4),
+        )
+    }
+
+    // WP18: a one-message document whose match actually declares a capture — [msg] above has no
+    // `match` parameter of its own (every fixture predates captures), so this is its own small
+    // fixture rather than a variant threaded through that helper.
+    private fun captureDocument(): Seq3Document {
+        val message = Seq3Message(
+            id = "m1",
+            match = Seq3Match("A", "state={state}", captures = listOf(Seq3Capture("state", Seq3CaptureSource.NAMED_VALUE))),
+            fromLifelineId = "A",
+            toLifelineId = "B",
+            labelTemplate = "state={state}",
+            occurrences = listOf(occ(1, 100)),
+        )
+        return Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+            messages = listOf(message),
         )
     }
 
@@ -576,6 +595,60 @@ class Seq3QueueTest {
     fun setDelayVisibilityIsASafeNoOpForAnUnknownId() {
         val doc = baseDocument()
         val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetDelayVisibility("no-such-delay", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    // ── State invariants (WP18) — same id-keyed/selection-independent shape as Delay above ──────
+
+    @Test
+    fun addStateInvariantAppendsANewOneIndependentOfSelection() {
+        val doc = captureDocument()
+        val invariant = Seq3StateInvariant("s1", messageId = "m1", captureName = "state")
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddStateInvariant(invariant))
+        assertTrue(result.applied)
+        assertEquals(listOf(invariant), result.document.stateInvariants)
+    }
+
+    @Test
+    fun addStateInvariantIsASafeNoOpForABlankIdACollidingIdAnUnknownMessageOrAnUnknownCapture() {
+        val existing = Seq3StateInvariant("s1", "m1", "state")
+        val doc = captureDocument().copy(stateInvariants = listOf(existing))
+
+        val blankId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddStateInvariant(Seq3StateInvariant("", "m1", "state")))
+        assertFalse(blankId.applied)
+        assertEquals(doc, blankId.document)
+
+        val collidingId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddStateInvariant(Seq3StateInvariant("s1", "m1", "state")))
+        assertFalse(collidingId.applied)
+        assertEquals(doc, collidingId.document)
+
+        val unknownMessage = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddStateInvariant(Seq3StateInvariant("s2", "no-such-message", "state")))
+        assertFalse(unknownMessage.applied)
+        assertEquals(doc, unknownMessage.document)
+
+        // The picker only ever lists real captures (Deliverable 4) — promoting one it never
+        // offered is a caller defect, so this is rejected outright rather than degraded quietly.
+        val unknownCapture = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddStateInvariant(Seq3StateInvariant("s2", "m1", "no-such-capture")))
+        assertFalse(unknownCapture.applied)
+        assertEquals(doc, unknownCapture.document)
+    }
+
+    @Test
+    fun deleteStateInvariantRemovesOnlyTheRequestedOneAndTouchesNoMessage() {
+        val s1 = Seq3StateInvariant("s1", "m1", "state")
+        val s2 = Seq3StateInvariant("s2", "m1", "state")
+        val doc = captureDocument().copy(stateInvariants = listOf(s1, s2))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteStateInvariant("s1"))
+        assertTrue(result.applied)
+        assertEquals(listOf(s2), result.document.stateInvariants)
+        assertEquals(doc.messages, result.document.messages)
+    }
+
+    @Test
+    fun deleteStateInvariantIsASafeNoOpForAnUnknownId() {
+        val doc = captureDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteStateInvariant("no-such-invariant"))
         assertFalse(result.applied)
         assertEquals(doc, result.document)
     }

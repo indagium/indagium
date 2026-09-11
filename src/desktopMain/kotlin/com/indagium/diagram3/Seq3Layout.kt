@@ -286,6 +286,24 @@ data class Seq3NoteBox(val noteId: String, val box: Seq3Box, val text: String)
 data class Seq3DelayBox(val delayId: String, val label: String, val box: Seq3Box)
 
 /**
+ * A promoted [Seq3StateInvariant]'s drawn geometry (WP18) — a small marker anchored ON its
+ * lifeline, at exactly the row that message occurrence drew at. [text] is that row's OWN capture
+ * value (or [collapsedStateInvariantValue]'s summary for a row that stands for more than one
+ * occurrence — see [buildStateInvariantBoxes]' own doc for the exact rule), never an authored
+ * string: the whole point of promoting a capture instead of adding a plain note is that it says
+ * something DIFFERENT at each row a repeated message draws.
+ *
+ * Deliberately NOT a [Seq3RowGeometry] subtype, for the identical reason [Seq3DelayBox]/
+ * [Seq3ActivationBar] aren't: it adds no pitch of its own (drawn in space an existing row already
+ * occupies — see [buildStateInvariantBoxes]' own "zero pitch" doc) and a new sealed subtype would
+ * force nine exhaustive `when` updates across this file/`Seq3Raster.kt`/`ui/Seq3Canvas.kt` for a
+ * shape that needs none of that dispatch. [Seq3StateInvariantBox] shares [Seq3DelayBox]'s own
+ * three-field shape (id-ish label, box, text) on purpose — this deliverable's own instruction to
+ * follow that precedent exactly.
+ */
+data class Seq3StateInvariantBox(val lifelineId: String, val box: Seq3Box, val text: String)
+
+/**
  * A [Seq3ActivationSpan] (WP1's pure call/return pairing, `Seq3Activation.kt`) turned into an
  * actual rectangle — WP2's ONLY geometry contribution for UML activation bars. [box] is already
  * the bar's full drawn extent (x, top y, width, height); a renderer paints exactly this rect and
@@ -375,6 +393,11 @@ data class Seq3Layout(
      *  have an honest name for the value they actually mean, instead of reaching into column 0 and
      *  hoping it was never created. */
     val headerBandBottom: Double = 0.0,
+    /** WP18: promoted-capture StateInvariant markers — see [Seq3StateInvariantBox]'s own doc.
+     *  Empty for a document with no [Seq3Document.stateInvariants], same "absent list, nothing
+     *  drawn" contract as [delays]/[activations]. Appended LAST — this file's own versioning rule
+     *  (see [activations]' own doc for why that rule matters here too). */
+    val stateInvariants: List<Seq3StateInvariantBox> = emptyList(),
 )
 
 // ── Layout constants (all unit-less "1x" values — see this file's header) ──────────────────────
@@ -452,6 +475,14 @@ private const val FRAGMENT_TOP_RESERVE = ROW_H / 2 + FRAGMENT_LABEL_H + 6.0
 private const val ACTIVATION_W = 10.0
 private const val ACTIVATION_NEST_OFFSET = 4.0
 private const val ACTIVATION_MIN_H = ROW_H / 2
+
+// WP18: a StateInvariant marker's own geometry — sized like a small badge (BADGE_H/BADGE_PAD_H's
+// own role) rather than a NOTE box, since it sits directly on the lifeline instead of floating
+// beside it. Deliberately its own constants, not a reuse of BADGE_H/BADGE_PAD_H: a badge counts
+// occurrences (`×3`) and a state marker shows a value, two different things that happen to want a
+// similar-sized chip today but have no reason to be pinned to the same number forever.
+private const val STATE_INVARIANT_H = 16.0
+private const val STATE_INVARIANT_PAD_H = 6.0
 
 private const val ELLIPSIS = "…"
 
@@ -591,6 +622,10 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // real work, just work that reads more clearly, and counts against a fresh budget, as its own
     // named function rather than another inline block bolted onto an already-long orchestrator.
     val activationBars = buildActivationBars(doc, emissions, rowBuild.rowYByIndex, lifelineIndex, centers)
+    // WP18: promoted-capture StateInvariant markers — a pure post-pass over the already-placed rows,
+    // like buildActivationBars just above; see buildStateInvariantBoxes' own doc for why it needs
+    // nothing rowsWithCreateStop itself doesn't already hand back.
+    val stateInvariantBoxes = buildStateInvariantBoxes(doc, rowsWithCreateStop, lifelineIndex, centers, tm)
     // Folded into the existing rightEdge maxOf below with one extra term — a bar on the rightmost
     // column (nested activation stairstepping it further right still via ACTIVATION_NEST_OFFSET)
     // must never get clipped, the identical reasoning gapSolve.rightExtra/rowBuild.rightExtra
@@ -618,6 +653,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     return Seq3Layout(
         width, height, lifelineColumns, rowsWithCreateStop, fragments, notes, crossingCount,
         rowBuild.delayBoxes, activationBars, headerBandBottom = minLifelineTop,
+        stateInvariants = stateInvariantBoxes,
     )
 }
 
@@ -1099,6 +1135,82 @@ private fun buildActivationBars(
         // own doc.
         val height = max(bottom - top, ACTIVATION_MIN_H)
         Seq3ActivationBar(span.lifelineId, Seq3Box(x, top, ACTIVATION_W, height), span.depth, span.unmatched)
+    }
+}
+
+/**
+ * WP18: turns every VISIBLE [Seq3Document.stateInvariants] into [Seq3StateInvariantBox]es, one per
+ * DRAWN ROW of the message it promotes a capture from — see [Seq3StateInvariantBox]'s own doc for
+ * why the text differs per row. A pure post-pass over [rows] (already-placed geometry, like
+ * [buildActivationBars] above), not folded into `buildRows`/`expandForLayout` themselves: those two
+ * only ever see ONE message at a time and have no reason to know `doc.stateInvariants` exists at
+ * all — this needs nothing they don't already hand back (`messageId`/`y`/`occurrenceEntryId`, all on
+ * [Seq3RowGeometry]'s own base class).
+ *
+ * **Zero added vertical pitch, pinned by its own test** (`aStateInvariantAddsZeroVerticalPitch...`,
+ * Seq3LayoutTest.kt): every box is placed at an EXISTING row's own `y` — nothing here advances a
+ * y-cursor or widens a row's own pitch, mirroring [Seq3DelayBox]/[Seq3ActivationBar]'s identical
+ * "decorate space a row already occupies" contract; toggling a promotion on/off can never reflow the
+ * diagram, matching WP2's own activation-bar precedent (`rowYPositionsAreIdenticalWithActivationsOn
+ * AndOff`).
+ *
+ * **The collapsed-row decision** (deliverable's own open question): a message that draws FEWER rows
+ * than it has visible occurrences — a [Seq3Repeat.COLLAPSE_ABOVE] row above threshold (one row, all
+ * occurrences), or a [Seq3Kind.NOTE]/needs-target message (always exactly one row regardless of
+ * `repeat`, see `expandForLayout`'s own NOTE/stub branches) — has no single occurrence for that lone
+ * row to represent. [collapsedStateInvariantValue] (Seq3LabelSummary.kt) already solves this EXACT
+ * problem for [collapsedRepeatLabel]'s own label text, so it is reused here rather than a second
+ * answer invented for a value instead of a label: substitute the one value when every occurrence
+ * agrees, a compact `A|B|C` summary for a few distinct values, and an honest `{captureName}`
+ * placeholder above [COLLAPSED_SUMMARY_MAX_DISTINCT] (Seq3LabelSummary.kt) distinct values — a
+ * collapsed row genuinely stands for many different states at that point, and a marker that tried to
+ * cram them all in would be worse than admitting it can't. `messageRows.size == 1 && visibleOccurrences
+ * .size > 1` is the exact, type-agnostic test for "this one row stands for more than one occurrence":
+ * it is true for a collapsed-above-threshold [Seq3ArrowRow]/[Seq3SelfLoopRow], a NOTE's
+ * [Seq3MessageNoteRow], and a needs-target/LOST/FOUND [Seq3UnresolvedStubRow] alike, and false for
+ * EVERY/FIRST_LAST/below-threshold COLLAPSE_ABOVE (one row genuinely IS one occurrence there) without
+ * this function needing to `when` on the row's own subtype at all.
+ *
+ * **Dangling references never throw**: an [Seq3StateInvariant.messageId] naming no message in the
+ * document, one whose [Seq3Message.fromLifelineId] is hidden/unresolvable, and a [Seq3StateInvariant
+ * .captureName] no longer present on ANY visible occurrence (the pattern was edited after
+ * promotion — [collapsedStateInvariantValue] returns null for that case) all drop out silently via
+ * the `?:`/`mapNotNull` chain below — the same "a dangling reference draws, never crashes" contract
+ * this package documents everywhere else a stored id can go stale.
+ */
+private fun buildStateInvariantBoxes(
+    doc: Seq3Document,
+    rows: List<Seq3RowGeometry>,
+    lifelineIndex: Map<String, Int>,
+    centers: DoubleArray,
+    tm: Seq3TextMetrics,
+): List<Seq3StateInvariantBox> {
+    if (doc.stateInvariants.isEmpty()) return emptyList()
+    val messagesById = doc.messages.associateBy { it.id }
+    val rowsByMessageId = rows.groupBy { it.messageId }
+    return doc.stateInvariants.filter { it.visibility == Seq3Visibility.VISIBLE }.flatMap { invariant ->
+        val message = messagesById[invariant.messageId] ?: return@flatMap emptyList()
+        val lifelineIdx = lifelineIndex[message.fromLifelineId] ?: return@flatMap emptyList()
+        val centerX = centers[lifelineIdx]
+        val messageRows = rowsByMessageId[invariant.messageId].orEmpty()
+        val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
+        // See this function's own "collapsed-row decision" doc above for exactly why this predicate
+        // (not a per-row-type `when`) is the right test.
+        val collapsed = messageRows.size == 1 && visibleOccurrences.size > 1
+        messageRows.mapNotNull { row ->
+            val text = if (collapsed) {
+                collapsedStateInvariantValue(invariant.captureName, visibleOccurrences)
+            } else {
+                val entryId = row.occurrenceEntryId ?: return@mapNotNull null
+                visibleOccurrences.firstOrNull { it.entryId == entryId }?.captureValues?.get(invariant.captureName)
+            } ?: return@mapNotNull null
+            val width = withMeasurementSlack(tm.width(Seq3FontRole.BADGE, text)) + 2 * STATE_INVARIANT_PAD_H
+            Seq3StateInvariantBox(
+                message.fromLifelineId,
+                Seq3Box(centerX - width / 2, row.y - STATE_INVARIANT_H / 2, width, STATE_INVARIANT_H),
+                text,
+            )
+        }
     }
 }
 

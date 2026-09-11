@@ -78,6 +78,7 @@ import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3State
+import com.indagium.diagram3.Seq3StateInvariant
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.addSeq3MessageFromSelection
 import com.indagium.diagram3.nudgeSeq3OrderPin
@@ -2620,6 +2621,68 @@ private fun Seq3MessageInfo(
                 }
             },
         )
+        // WP18: only offered for a message whose match actually captured something — a message with
+        // no captures has nothing a state invariant could show a per-occurrence value for, so the
+        // section (and the picker inside it) is entirely absent rather than shown empty/disabled.
+        if (message.match.captures.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Seq3StateInvariantField(state, session, view, message)
+        }
+    }
+}
+
+/**
+ * WP18: promotes one of [message]'s own [Seq3Match.captures] to a [Seq3StateInvariant], or shows/
+ * un-promotes the one already promoted for this message — at most one per message, matching how
+ * every other field in [Seq3MessageInfo] edits a single value in place rather than accumulating a
+ * list. [Seq3DropdownButton] already reclaims focus on dismiss via its own `LocalSeq3FocusRequester`
+ * (see [Seq3RefDiagramPicker]'s identical doc), so only the plain [ToolbarBtn] remove button below
+ * needs its own `runCatching { view.focusRequester.requestFocus() }` — the documented CLAUDE.md scar
+ * this file's neighbouring remove buttons ([Seq3OperandRow]'s "×", among others) already work around
+ * the same way.
+ */
+@Composable
+private fun Seq3StateInvariantField(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    message: Seq3Message,
+) {
+    val tc = tc()
+    val existing = session.document.stateInvariants.firstOrNull { it.messageId == message.id }
+    Seq3InfoFieldLabel("State invariant")
+    if (existing == null) {
+        Seq3DropdownButton(label = "Promote a capture…", labelColor = tc.ts, fillColor = tc.p2, menuWidth = 160.dp) { close ->
+            message.match.captures.forEach { capture ->
+                Seq3DropdownMenuItem(capture.name) {
+                    state.seq3Sessions.applyCommand(
+                        session.id,
+                        Seq3Command.Bulk(
+                            emptySet(),
+                            Seq3BulkAction.AddStateInvariant(
+                                Seq3StateInvariant(id = "seq3-state-${UUID.randomUUID()}", messageId = message.id, captureName = capture.name),
+                            ),
+                        ),
+                    )
+                    close()
+                }
+            }
+        }
+    } else {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText("{${existing.captureName}}", color = tc.tx, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
+            ToolbarBtn(
+                label = "×",
+                tooltip = "Un-promote this state invariant",
+                contentPadding = PaddingValues(0.dp),
+                modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                shape = CORNER_SM,
+                onClick = {
+                    state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteStateInvariant(existing.id)))
+                    runCatching { view.focusRequester.requestFocus() }
+                },
+            )
+        }
     }
 }
 
