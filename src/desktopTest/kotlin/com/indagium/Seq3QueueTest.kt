@@ -169,6 +169,71 @@ class Seq3QueueTest {
         assertEquals(before, doc.messages, "the canvas must never change when the sort changes (spec §07)")
     }
 
+    // ── Midnight rollover (day-unrolled secondary sort key) ─────────────────────────────────────
+
+    // Same clock-reading shape the midnight-rollover fix targets: 23:59:59.000 on one side, the
+    // next day's 00:00:00.100 on the other. Raw `timestampMillis` (millis-of-day) puts the
+    // post-midnight occurrence FIRST (100 < 86_399_000); `elapsedMillis` (day-unrolled, monotonic)
+    // puts it where it actually happened, second.
+    @Suppress("MagicNumber") // clock-reading fixture data, not tunable constants
+    private fun preMidnightOcc(id: Int) = occ(id, 86_399_000L).copy(elapsedMillis = 86_399_000L)
+
+    @Suppress("MagicNumber") // clock-reading fixture data, not tunable constants
+    private fun postMidnightOcc(id: Int) = occ(id, 100L).copy(elapsedMillis = 86_400_100L)
+
+    // Both AUTO/CALL with a resolved target, both on lifeline A->B, so LIFELINE ties on
+    // fromLifelineId and STATE ties on stateSortRank — either sort must fall through to
+    // firstTimestamp to break the tie.
+    private fun midnightCrossingDocument(): Seq3Document = Seq3Document(
+        lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+        messages = listOf(
+            msg("post", "A", "B", listOf(postMidnightOcc(1))),
+            msg("pre", "A", "B", listOf(preMidnightOcc(2))),
+        ),
+    )
+
+    @Test
+    fun lifelineSortOrdersAMidnightCrossingPairCorrectlyWhenOccurrencesCarryElapsedMillis() {
+        val doc = midnightCrossingDocument()
+        assertEquals(
+            listOf("pre", "post"),
+            seq3QueueRows(doc, Seq3Filter.ALL, sort = Seq3Sort.LIFELINE).map { it.id },
+            "LIFELINE ties on fromLifelineId (both A) then must break the tie on the day-unrolled " +
+                "elapsedMillis axis, the same one the canvas orders on — not raw millis-of-day, which " +
+                "would put the post-midnight message first",
+        )
+    }
+
+    @Test
+    fun stateSortOrdersAMidnightCrossingPairCorrectlyWhenOccurrencesCarryElapsedMillis() {
+        val doc = midnightCrossingDocument()
+        assertEquals(
+            listOf("pre", "post"),
+            seq3QueueRows(doc, Seq3Filter.ALL, sort = Seq3Sort.STATE).map { it.id },
+            "STATE ties on stateSortRank (both AUTO) then must break the tie on the day-unrolled " +
+                "elapsedMillis axis, the same one the canvas orders on — not raw millis-of-day, which " +
+                "would put the post-midnight message first",
+        )
+    }
+
+    @Test
+    fun sortsFallBackToRawTimestampWhenNoOccurrenceCarriesElapsedMillis() {
+        // An old note written before elapsedMillis existed decodes with elapsedMillis=null on every
+        // occurrence (Seq3Codec) — baseDocument's fixtures never set it, so this must sort exactly
+        // as it always did: on primaryTimestampMillis.
+        val doc = baseDocument()
+        assertEquals(
+            listOf("m1", "m3", "m2", "m4"),
+            seq3QueueRows(doc, Seq3Filter.ALL, sort = Seq3Sort.LIFELINE).map { it.id },
+            "no occurrence here carries elapsedMillis, so LIFELINE must fall back to primaryTimestampMillis unchanged",
+        )
+        assertEquals(
+            listOf("m2", "m3", "m1", "m4"),
+            seq3QueueRows(doc, Seq3Filter.ALL, sort = Seq3Sort.STATE).map { it.id },
+            "no occurrence here carries elapsedMillis, so STATE must fall back to primaryTimestampMillis unchanged",
+        )
+    }
+
     // ── Selection ────────────────────────────────────────────────────────────────────────────
 
     @Test

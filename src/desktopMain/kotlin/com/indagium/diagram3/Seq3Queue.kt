@@ -46,7 +46,12 @@ private fun passesTextFilter(message: Seq3Message, text: String): Boolean {
 
 enum class Seq3Sort { LOG_ORDER, LIFELINE, OCCURRENCES, STATE }
 
-private fun firstTimestamp(message: Seq3Message): Long = message.primaryTimestampMillis ?: Long.MAX_VALUE
+/** Same day-unrolled axis [Seq3Layout]/[Seq3Emitters]/`Seq3DelaySuggest` now order on — the queue
+ *  is a second VIEW of the same document (this file's header), so it must not disagree with the
+ *  canvas about which message comes first across a midnight rollover. Falls back to
+ *  [Seq3Message.primaryTimestampMillis] for a message with no unrolled value (an old document, an
+ *  unparseable `ts`, or a fully-custom message with no evidence). */
+private fun firstTimestamp(message: Seq3Message): Long = message.primaryElapsedMillis ?: message.primaryTimestampMillis ?: Long.MAX_VALUE
 
 private fun stateSortRank(state: Seq3State): Int = when (state) {
     Seq3State.NEEDS_TARGET -> 0
@@ -951,6 +956,15 @@ fun nudgeSeq3OrderPin(document: Seq3Document, messageId: String, direction: Seq3
     if (neighborIdx !in document.messages.indices) return Seq3PinResult(document, false, "No neighbouring message in that direction")
     val message = document.messages[idx]
     val neighbor = document.messages[neighborIdx]
+    // Deliberately still `primaryTimestampMillis`, not the day-unrolled `primaryElapsedMillis`
+    // `firstTimestamp` above now uses. Two reasons: this is an EQUALITY check ("do these two share
+    // an exact clock reading"), not an ordering comparison, so the midnight-rollover argument for
+    // switching axes doesn't apply the same way; and `ts` is persisted into `Seq3OrderPin.
+    // tiedTimestampMillis`, which round-trips through Seq3Codec, so changing the axis here is a
+    // format-compatibility question, not a two-line fix. Known narrow flaw left as-is: two messages
+    // exactly 24h apart share the same millis-of-day clock reading and would be treated as a tie
+    // here even though they are not — because the stored/compared value is the wall-clock reading,
+    // not the unrolled one. Not fixed; flagged for whoever changes `Seq3OrderPin`'s persisted shape.
     val ts = message.primaryTimestampMillis
     val neighborTs = neighbor.primaryTimestampMillis
     if (ts == null || ts != neighborTs) {
