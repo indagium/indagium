@@ -581,6 +581,33 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun aRefFragmentWithADanglingRefDiagramIdStillDrawsItsBracketAndLabel() {
+        // WP17: Seq3Layout never reads Seq3Fragment.refDiagramId at all — only the interactive
+        // canvas overlay resolves it against the diagram library, and only to decide what a click
+        // does / whether to show a "missing" affordance (ui/Seq3Canvas.kt). Layout draws the
+        // bracket and label from kind/label/messageIds alone, exactly like any other fragment kind
+        // (Seq3FragmentKind.REF's own doc: "a REF fragment brackets its messages, it does not hide
+        // them"), so an id that names no real library item — never validated at this layer, and
+        // there is no library for this layer to validate it against (diagram3 is UI-free) — can
+        // never fail layout. This is the documented "dangling reference draws, never crashes"
+        // contract Seq3Delay/Seq3Fragment.visibility/operand anchors already share.
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B", occurrences = listOf(occurrence(1)))),
+            fragments = listOf(
+                Seq3Fragment("f1", Seq3FragmentKind.REF, "billing flow", listOf("m1"), refDiagramId = "no-such-diagram-id"),
+            ),
+        )
+
+        val layout = layoutSeq3(doc, opts())
+        val fragment = layout.fragments.single()
+
+        assertEquals(Seq3FragmentKind.REF, fragment.kind)
+        assertEquals("billing flow", fragment.label)
+        assertTrue(fragment.box.width > 0.0 && fragment.box.height > 0.0, "the bracket must have real drawn geometry; got ${fragment.box}")
+    }
+
+    @Test
     fun hiddenFragmentIsOmittedFromTheLayout() {
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),

@@ -337,18 +337,25 @@ class Seq3EmitterTest {
 
     @Test
     fun everyRealUmlFragmentKindEmitsItsNativeKeywordAndABalancedEnd() {
-        // GROUP and the four WP11 kinds (NEG/STRICT/CONSIDER/IGNORE) are deliberately excluded
-        // here. GROUP is not a UML operator at all; NEG/STRICT/CONSIDER/IGNORE ARE real UML
-        // operators but Mermaid's grammar has no keyword for any of them either, so none of these
-        // five emits a bare keyword in Mermaid — see groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml
-        // and negStrictConsiderAndIgnoreDegradeToRectAndNoteOverInMermaidWithTheOperatorWordPreserved
-        // below, the dedicated tests for their very different, per-dialect shape.
+        // GROUP, the four WP11 kinds (NEG/STRICT/CONSIDER/IGNORE), and WP17's REF are deliberately
+        // excluded here. GROUP is not a UML operator at all; NEG/STRICT/CONSIDER/IGNORE ARE real
+        // UML operators but Mermaid's grammar has no keyword for any of them either; REF (WP17) is
+        // ALSO a real UML operator with no Mermaid keyword, so none of these six emits a bare
+        // keyword in Mermaid — see groupEmitsRectAndNoteOverInMermaidButGroupInPlantUml,
+        // negStrictConsiderAndIgnoreDegradeToRectAndNoteOverInMermaidWithTheOperatorWordPreserved,
+        // and refFallsBackToRectAndNoteOverInMermaidAndNeverEmitsABareRefKeyword below, the
+        // dedicated tests for their very different, per-dialect shape. (REF would ALSO fail this
+        // test's PlantUML-shaped assumption even if it emitted a bare Mermaid keyword: its real
+        // PlantUML syntax is `ref over A, B : label`, not `keyword label` closed by a plain `end`
+        // — see refEmitsRealPlantUmlRefOverSyntaxWithNoClosingEnd — so it could never share this
+        // loop's single assertion shape with the true "same shape in both dialects" kinds below.)
         val mermaidFallbackKinds = setOf(
             Seq3FragmentKind.GROUP,
             Seq3FragmentKind.NEG,
             Seq3FragmentKind.STRICT,
             Seq3FragmentKind.CONSIDER,
             Seq3FragmentKind.IGNORE,
+            Seq3FragmentKind.REF,
         )
         (Seq3FragmentKind.entries - mermaidFallbackKinds).forEach { kind ->
             val msg = message()
@@ -458,6 +465,68 @@ class Seq3EmitterTest {
                 "expected the operator word plus label to survive into the Mermaid fallback note:\n$out",
             )
         }
+    }
+
+    // ── ref / InteractionUse (WP17) ─────────────────────────────────────────────────────────
+
+    @Test
+    fun refEmitsRealPlantUmlRefOverSyntaxWithNoClosingEnd() {
+        // PlantUML's REAL `ref` syntax is `ref over A, B : label` — confirmed against
+        // plantuml.com's own sequence-diagram documentation (PlantUML publishes no public formal
+        // grammar file the way mermaid-js does, so its own docs are the best available primary
+        // source for this — see Seq3FragmentKind.REF's own doc, the same rigour WP11 applied to
+        // Mermaid's jison grammar for create/destroy). Unlike every other fragment kind, a real
+        // `ref over` is a STANDALONE statement, never a block — so it takes no closing `end`;
+        // writing one would be an unmatched, unparseable token. Both assertions are the point.
+        val fragment = Seq3Fragment("f1", Seq3FragmentKind.REF, "Retry", listOf("m1"))
+        val out = doc(listOf(message()), fragments = listOf(fragment)).toPlantUml()
+
+        assertTrue(out.contains("ref over A,B : Retry\n"), "expected real PlantUML 'ref over A,B : Retry' syntax; got:\n$out")
+        assertFalse(out.contains("end\n"), "'ref over' is a standalone PlantUML statement, never closed by 'end'; got:\n$out")
+    }
+
+    @Test
+    fun refFallsBackToRectAndNoteOverInMermaidAndNeverEmitsABareRefKeyword() {
+        // Mermaid's sequence-diagram grammar has no `ref` construct at all — a bare `ref Retry`
+        // would be a Mermaid PARSE ERROR, exactly like the bare `group`/`neg` that already forced
+        // GROUP's/WP11's own fallback, so REF joins that SAME `rect` + `Note over` fallback,
+        // keeping the word 'ref' in the note text so the construct survives the degradation
+        // (same reasoning as NEG/STRICT/CONSIDER/IGNORE, unlike GROUP which carries no operator
+        // word at all — see MERMAID_FALLBACK_FRAGMENT_KINDS' own doc). The negative assertions
+        // are the point: they are the exact Mermaid parse error this fallback prevents.
+        val fragment = Seq3Fragment("f1", Seq3FragmentKind.REF, "Retry", listOf("m1"))
+        val out = doc(listOf(message()), fragments = listOf(fragment)).toMermaid()
+
+        assertFalse(out.contains("    ref Retry\n"), "bare 'ref' is a Mermaid parse error; got:\n$out")
+        assertFalse(out.contains("    ref\n"), "bare 'ref' is a Mermaid parse error; got:\n$out")
+        assertTrue(out.contains("    rect rgb("), "expected a 'rect rgb(...)' wrapper in Mermaid:\n$out")
+        assertTrue(out.contains("    end\n"), "expected the rect to close with a balanced 'end' in Mermaid:\n$out")
+        assertTrue(
+            out.contains("    Note over A,B: ref Retry\n"),
+            "expected the word 'ref' plus label to survive into the Mermaid fallback note:\n$out",
+        )
+    }
+
+    @Test
+    fun refWithElseOperandsEmitsNoDividerInEitherDialect() {
+        // REF is not one of ALT/PAR/CRITICAL (SEQ3_OPERAND_FRAGMENT_KINDS/DIVIDER_FRAGMENT_KINDS'
+        // own gate) — mirrors optAndLoopEmitNoDividerEvenWhenOperandsArePresent above for the same
+        // "the kind gate, not an emptiness check, is what suppresses the divider" reason. A stray
+        // elseOperands entry (e.g. left behind by a kind change away from ALT and back through
+        // REF) is preserved on the fragment but must never be RENDERED for a kind UML gives no
+        // 'else' branch to.
+        val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
+        val fragment = Seq3Fragment(
+            "f1", Seq3FragmentKind.REF, "cond0", listOf("m1", "m2"),
+            elseOperands = listOf(Seq3Operand("op1", "cond1", startsAtMessageId = "m2")),
+        )
+        val document = doc(messages, fragments = listOf(fragment))
+
+        val mermaid = document.toMermaid()
+        assertFalse(mermaid.contains("cond1"), "REF must emit no divider even though elseOperands is non-empty; got:\n$mermaid")
+
+        val plantUml = document.toPlantUml()
+        assertFalse(plantUml.contains("cond1"), "REF must emit no divider even though elseOperands is non-empty; got:\n$plantUml")
     }
 
     @Test

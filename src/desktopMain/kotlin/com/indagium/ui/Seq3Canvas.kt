@@ -1576,6 +1576,20 @@ private fun Seq3FragmentLabelOverlay(
     } else {
         "$kindLabel: ${fragment.label}"
     }
+    // WP17: [Seq3FragmentBox] (the layout geometry type) deliberately carries no `refDiagramId` of
+    // its own — layout/raster/the text emitters never read it (see [Seq3Fragment.refDiagramId]'s
+    // own doc), only this interactive overlay needs it, so it's resolved here straight from the
+    // live document instead of growing the layout type for one canvas-only affordance. A dangling
+    // id (the library item was deleted) resolves `libraryItem(...)` to null — a plain nullable
+    // read, never a throw — which is this whole field's documented contract: draw the bracket and
+    // label regardless, here spelled out as a small "missing" suffix rather than a crash.
+    val refDiagramId = if (fragment.kind == Seq3FragmentKind.REF) {
+        session.document.fragments.firstOrNull { it.id == fragment.fragmentId }?.refDiagramId
+    } else {
+        null
+    }
+    val refMissing = refDiagramId != null && state.seq3Sessions.libraryItem(refDiagramId) == null
+    val refLabel = if (refMissing) "$displayedLabel ⚠" else displayedLabel
 
     fun commit() {
         if (text.isNotBlank()) {
@@ -1596,9 +1610,23 @@ private fun Seq3FragmentLabelOverlay(
         Modifier.offset(fragment.box.x.dp, fragment.box.y.dp)
             .width(fragment.box.width.dp)
             .height(headerHeight)
-            .pointerInput(session.id, fragment.fragmentId) {
+            .pointerInput(session.id, fragment.fragmentId, refDiagramId) {
                 detectTapGestures(
-                    onTap = { seq3ClearSelection(view, clearFocus = true) },
+                    // WP17: a REF box's plain tap click-throughs to the diagram it points at
+                    // instead of the ordinary "clear selection" every other fragment kind does —
+                    // the deliverable's own "clicking a ref box opens that diagram" contract. A
+                    // dangling id (refMissing) falls through to the ordinary tap behavior rather
+                    // than a no-op-looking click into nothing; openLibraryItem itself is also a
+                    // safe no-op for an unknown id (`libraryStore.markOpened(id) ?: return false`),
+                    // so this can never throw even if the id is deleted between resolving
+                    // `refMissing` above and this tap landing.
+                    onTap = {
+                        if (refDiagramId != null) {
+                            state.seq3Sessions.openLibraryItem(refDiagramId)
+                        } else {
+                            seq3ClearSelection(view, clearFocus = true)
+                        }
+                    },
                     onDoubleTap = { editing = true },
                 )
             },
@@ -1627,7 +1655,7 @@ private fun Seq3FragmentLabelOverlay(
                 horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 AppText(
-                    displayedLabel,
+                    refLabel,
                     color = docTheme.seq1,
                     fontSize = 10.sp,
                     fontWeight = FontWeight.SemiBold,

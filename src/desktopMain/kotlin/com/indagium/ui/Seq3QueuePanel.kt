@@ -1786,6 +1786,27 @@ private fun Seq3FragmentRenameRow(state: AppState, session: Seq3WorkspaceSession
                 Seq3Command.Bulk(emptySet(), Seq3BulkAction.RemoveFragmentOperand(fragment.id, operandId)),
             )
         },
+        // WP17: only meaningful for a REF fragment — Seq3ArtifactRow itself gates on
+        // `fragmentKind == REF` before rendering anything, so passing these unconditionally for
+        // every kind (like every other param above) costs nothing for a LOOP/ALT/etc. row.
+        refDiagramId = fragment.refDiagramId,
+        refDiagramTitle = fragment.refDiagramId?.let { state.seq3Sessions.libraryItem(it)?.title },
+        onPickRefDiagram = { diagramId ->
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetFragmentRefDiagramId(fragment.id, diagramId)),
+            )
+        },
+        onOpenRefDiagram = fragment.refDiagramId?.let { diagramId ->
+            // No tabId: the referenced diagram may well have been built from a DIFFERENT log than
+            // this workspace's own source, so this session's own sourceTabId would be the wrong tab
+            // to attach it to — `openLibraryItem`'s own doc says a null tabId still opens a fully
+            // viewable, offline-capable session, which is exactly right here. Its Boolean return is
+            // discarded by ordinary `() -> Unit` coercion; nothing else here needs it.
+            { state.seq3Sessions.openLibraryItem(diagramId) }
+        },
+        searchRefDiagrams = { query -> state.seq3Sessions.searchLibrary(query) },
+        recentRefDiagrams = { state.seq3Sessions.recentLibrary() },
     )
 }
 
@@ -1938,6 +1959,18 @@ private fun Seq3ArtifactRow(
     onToggleOperandsExpanded: (() -> Unit)? = null,
     onSetOperandGuard: ((operandId: String, guard: String) -> Unit)? = null,
     onRemoveOperand: ((operandId: String) -> Unit)? = null,
+    // WP17: the `ref` diagram-library link — null/no-op for every row that isn't a
+    // [Seq3FragmentKind.REF] fragment, same "absent for what doesn't apply" default the operand
+    // params above already use. [refDiagramTitle] is resolved by the CALLER (it alone knows how to
+    // ask `Seq3Session.libraryItem`), null meaning either "no target chosen yet" (refDiagramId also
+    // null) or "target no longer exists" (refDiagramId set, title null) — [Seq3RefDiagramBlock]
+    // tells those two apart the same way.
+    refDiagramId: String? = null,
+    refDiagramTitle: String? = null,
+    onPickRefDiagram: ((String) -> Unit)? = null,
+    onOpenRefDiagram: (() -> Unit)? = null,
+    searchRefDiagrams: ((String) -> List<DiagramLibrarySummary>)? = null,
+    recentRefDiagrams: (() -> List<DiagramLibrarySummary>)? = null,
 ) {
     val tc = tc()
     Column(
@@ -2083,6 +2116,122 @@ private fun Seq3ArtifactRow(
                 onRemove = onRemoveOperand ?: {},
                 view = view,
             )
+        }
+        // WP17: appended after the Row (and after the operands block, when both would somehow
+        // apply — they never do today, REF isn't in SEQ3_OPERAND_FRAGMENT_KINDS), same "one
+        // artifact, N possible child blocks" shape as the operands block just above.
+        if (fragmentKind == Seq3FragmentKind.REF && onPickRefDiagram != null && searchRefDiagrams != null && recentRefDiagrams != null) {
+            Seq3RefDiagramBlock(
+                refDiagramId = refDiagramId,
+                refDiagramTitle = refDiagramTitle,
+                onPick = onPickRefDiagram,
+                onOpen = onOpenRefDiagram,
+                search = searchRefDiagrams,
+                recent = recentRefDiagrams,
+            )
+        }
+    }
+}
+
+/** WP17: [Seq3ArtifactRow]'s appended child block for a [Seq3FragmentKind.REF] box — same
+ *  "one artifact, appended child content" recipe [Seq3OperandsBlock] uses just above, gated on
+ *  kind rather than on [SEQ3_OPERAND_FRAGMENT_KINDS] membership. Shows the linked diagram's title,
+ *  an affordance for a dangling [Seq3Fragment.refDiagramId] (that field's own contract: draw
+ *  something and never crash, never silently hide the row), an Open button that click-throughs via
+ *  `Seq3Session.openLibraryItem`, and the picker itself just below. No [Seq3ViewState] param here
+ *  (unlike [Seq3OperandsBlock]'s own `view`) — neither this block's own "Open" button nor
+ *  [Seq3RefDiagramPicker]'s dropdown needs a `runCatching { view.focusRequester.requestFocus() }`
+ *  of its own: [Seq3DropdownButton] already reclaims focus on dismiss via its own
+ *  `LocalSeq3FocusRequester`, and "Open" navigates the whole workspace away rather than leaving
+ *  this row's focus state to matter. */
+@Composable
+private fun Seq3RefDiagramBlock(
+    refDiagramId: String?,
+    refDiagramTitle: String?,
+    onPick: (String) -> Unit,
+    onOpen: (() -> Unit)?,
+    search: (String) -> List<DiagramLibrarySummary>,
+    recent: () -> List<DiagramLibrarySummary>,
+) {
+    val tc = tc()
+    // Dangling: an id is set but the library no longer has it (deleted after the ref was made).
+    val missing = refDiagramId != null && refDiagramTitle == null
+    Column(Modifier.fillMaxWidth().padding(start = 22.dp, top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            AppText(
+                when {
+                    refDiagramId == null -> "No diagram linked yet"
+                    missing -> "⚠ Linked diagram not found (deleted)"
+                    else -> refDiagramTitle.orEmpty().ifBlank { "Untitled diagram" }
+                },
+                color = if (missing) tc.warn else tc.td,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            if (onOpen != null && refDiagramId != null && !missing) {
+                ToolbarBtn(
+                    label = "Open",
+                    icon = Icons.AutoMirrored.Outlined.OpenInNew,
+                    showLabel = false,
+                    tooltip = "Open referenced diagram",
+                    contentPadding = PaddingValues(0.dp),
+                    modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                    shape = CORNER_SM,
+                    onClick = onOpen,
+                )
+            }
+        }
+        Seq3RefDiagramPicker(
+            label = if (refDiagramId == null) "Pick diagram" else "Change diagram",
+            onPick = onPick,
+            search = search,
+            recent = recent,
+        )
+    }
+}
+
+/** The search/recent picker itself — reuses the dead `DiagramLibraryStore.search`/`recent` API
+ *  (WP17: no production call site before this), not `Seq3Session.libraryForTab`, which is scoped
+ *  to the CURRENT log's source identity — a `ref` may legitimately point at a diagram built from a
+ *  different one (`Seq3Session.searchLibrary`/`recentLibrary`'s own doc explains the scoping
+ *  choice). [Seq3DropdownButton] already owns the Popup-dismiss-must-reclaim-focus dance
+ *  (`closeAndReclaimFocus`, `ui/Seq3Workspace.kt`) — this needs no clickable/Popup of its own and
+ *  no separate `runCatching { view.focusRequester.requestFocus() }` call; picking a row below calls
+ *  the menu's own `close`, which already does that. */
+@Composable
+private fun Seq3RefDiagramPicker(
+    label: String,
+    onPick: (String) -> Unit,
+    search: (String) -> List<DiagramLibrarySummary>,
+    recent: () -> List<DiagramLibrarySummary>,
+) {
+    val tc = tc()
+    var query by remember { mutableStateOf("") }
+    Seq3DropdownButton(label = label, labelColor = tc.tx, menuWidth = 220.dp, fixedHeight = 24.dp) { close ->
+        InlineField(
+            value = query,
+            onValue = { query = it },
+            placeholder = "Search diagrams…",
+            fontSize = 11.sp,
+            modifier = Modifier.fillMaxWidth().height(24.dp).padding(bottom = 4.dp),
+        )
+        val results = (if (query.isBlank()) recent() else search(query)).take(8)
+        if (results.isEmpty()) {
+            AppText(
+                if (query.isBlank()) "No recently opened diagrams" else "No matches",
+                color = tc.td,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        } else {
+            results.forEach { item ->
+                Seq3DropdownMenuItem(item.title.ifBlank { "Untitled diagram" }) {
+                    onPick(item.id)
+                    close()
+                }
+            }
         }
     }
 }

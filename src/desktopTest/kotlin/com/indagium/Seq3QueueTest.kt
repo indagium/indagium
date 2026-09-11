@@ -409,6 +409,34 @@ class Seq3QueueTest {
         assertEquals(doc, result.document)
     }
 
+    // ── SetFragmentRefDiagramId (WP17) ──────────────────────────────────────────────────────
+
+    @Test
+    fun setFragmentRefDiagramIdSetsAnExistingFragmentsLinkByIdIndependentOfSelection() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.REF, "billing flow", listOf("m1"))
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentRefDiagramId("frag1", "diagram-1"))
+        assertTrue(result.applied)
+        assertEquals("diagram-1", result.document.fragments.single().refDiagramId)
+    }
+
+    @Test
+    fun setFragmentRefDiagramIdWithANullIdClearsAnExistingLink() {
+        val fragment = Seq3Fragment("frag1", Seq3FragmentKind.REF, "billing flow", listOf("m1"), refDiagramId = "diagram-1")
+        val doc = baseDocument().copy(fragments = listOf(fragment))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetFragmentRefDiagramId("frag1", null))
+        assertTrue(result.applied)
+        assertNull(result.document.fragments.single().refDiagramId)
+    }
+
+    @Test
+    fun setFragmentRefDiagramIdIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, setOf("m1"), Seq3BulkAction.SetFragmentRefDiagramId("no-such-fragment", "diagram-1"))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
     @Test
     fun setNoteTextRenamesAnExistingNoteByIdIndependentOfSelection() {
         val note = Seq3Note("n1", "original text", listOf("m1"))

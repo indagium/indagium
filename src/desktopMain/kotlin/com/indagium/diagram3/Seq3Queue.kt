@@ -245,6 +245,20 @@ sealed class Seq3BulkAction {
         override val targetsById: Boolean get() = true
     }
 
+    /** WP17: sets/clears an EXISTING fragment's [Seq3Fragment.refDiagramId] — the queue panel's
+     *  diagram picker for a [Seq3FragmentKind.REF] box. Mirrors [SetFragmentHideKindLabel] exactly:
+     *  same id-keyed/empty-selection shape, same unknown-id-is-a-safe-no-op contract. Deliberately
+     *  NOT gated on the fragment's own [Seq3Fragment.kind] here — same reasoning
+     *  [AddFragmentOperand]'s own doc gives for not gating on the ALT/PAR/CRITICAL operand kinds:
+     *  the queue panel is what decides when to OFFER this picker (only for a REF fragment), so a
+     *  value set here survives a later `SetFragmentKind` away from and back to REF rather than
+     *  being silently discarded, the same "keep the data, drop the drawing" rule [elseOperands]
+     *  documents for itself. [diagramId] null clears the link (picking "None" or removing a stale
+     *  reference), matching [Seq3Fragment.refDiagramId]'s own "null means no target chosen" case. */
+    data class SetFragmentRefDiagramId(val fragmentId: String, val diagramId: String?) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
     /** Shows/hides an EXISTING note's box without touching any of its messages. */
     data class SetNoteVisibility(val noteId: String, val visibility: Seq3Visibility) : Seq3BulkAction() {
         override val targetsById: Boolean get() = true
@@ -373,6 +387,7 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.SetRepeat -> applySetRepeat(document, selectedIds, action)
         is Seq3BulkAction.SetFragmentVisibility -> applySetFragmentVisibility(document, action)
         is Seq3BulkAction.SetFragmentHideKindLabel -> applySetFragmentHideKindLabel(document, action)
+        is Seq3BulkAction.SetFragmentRefDiagramId -> applySetFragmentRefDiagramId(document, action)
         is Seq3BulkAction.SetNoteVisibility -> applySetNoteVisibility(document, action)
         is Seq3BulkAction.AddDelay -> applyAddDelay(document, action)
         is Seq3BulkAction.SetDelayLabel -> applySetDelayLabel(document, action)
@@ -631,6 +646,20 @@ private fun applySetFragmentHideKindLabel(document: Seq3Document, action: Seq3Bu
     if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
     return Seq3BulkResult(
         document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(hideKindLabel = action.hide) else it }),
+        applied = true,
+    )
+}
+
+/** WP17: sets/clears the diagram-library target a [Seq3FragmentKind.REF] box points at. Same
+ *  unknown-id-is-a-safe-no-op contract as [applySetFragmentHideKindLabel]; the id itself is taken
+ *  as already-validated by the caller (the queue panel's picker only ever offers ids read straight
+ *  back from `DiagramLibraryStore.search`/`recent`) — this layer has no store to validate against
+ *  (`diagram3` is UI-free, see this package's own boundary) and a stale/dangling id is a drawing
+ *  concern the canvas resolves at render time, not a reason to reject the edit itself. */
+private fun applySetFragmentRefDiagramId(document: Seq3Document, action: Seq3BulkAction.SetFragmentRefDiagramId): Seq3BulkResult {
+    if (document.fragments.none { it.id == action.fragmentId }) return unapplied(document, "Unknown fragment")
+    return Seq3BulkResult(
+        document.copy(fragments = document.fragments.map { if (it.id == action.fragmentId) it.copy(refDiagramId = action.diagramId) else it }),
         applied = true,
     )
 }
