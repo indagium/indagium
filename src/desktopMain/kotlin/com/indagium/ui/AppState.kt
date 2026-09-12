@@ -53,6 +53,8 @@ import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MergeSourceFile
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.RetraceOutcome
+import com.indagium.utils.RetraceService
 import com.indagium.utils.RolloverSample
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.SearchComputeResult
@@ -229,6 +231,27 @@ fun emptyWorkspaceTab() = LogTab(
     // not "not yet analyzed," and shouldn't show an "Analyzing…" hint that will never resolve.
     analysis = LogAnalysis(pending = false),
 )
+
+/** Transient state for the non-destructive R8/ProGuard retrace result dialog. */
+sealed interface RetraceDialogState {
+    val tabId: String
+    val groupGid: String
+
+    data class Loading(override val tabId: String, override val groupGid: String) : RetraceDialogState
+
+    data class Success(override val tabId: String, override val groupGid: String, val text: String) : RetraceDialogState
+
+    data class Failure(override val tabId: String, override val groupGid: String, val message: String) : RetraceDialogState
+}
+
+/** Reconstructs the exact ordered message lines represented by one exception group. */
+internal fun retraceInputForGroup(tab: LogTab, group: StackTraceGroup): List<String> = buildList {
+    tab.rmap[group.rid]?.msg?.let(::add)
+    group.memberIds.asSequence()
+        .mapNotNull { tab.rmap[it] }
+        .sortedBy { it.id }
+        .forEach { add(it.msg) }
+}
 
 // AtomicInteger, not a plain var (A-01): openFileInternal/openZipEntry/mergeTabs/addTab/
 // loadSplitPartAsTab each capture one id via getAndIncrement() on whichever thread calls them —
@@ -1610,6 +1633,7 @@ class AppState(
 
     private val ioJob = SupervisorJob()
     private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
+    private val retraceService = RetraceService()
     private val closed = AtomicBoolean(false)
 
     // Keyed by absolute path rather than tab: two tabs can intentionally write to the same pinned
@@ -1814,6 +1838,11 @@ class AppState(
      *  dialog's own "OK" button ([App.kt]) — never auto-dismissed, so a fast-moving user can't miss
      *  it. */
     var pendingDiagramNotice by mutableStateOf<DiagramNotice?>(null)
+
+    // R8/ProGuard retracing is explicitly opt-in and non-destructive: this state is only the
+    // modal's transient loading/result surface, while the selected mapping path belongs to the
+    // individual LogTab and is persisted with the session.
+    var retraceDialogState by mutableStateOf<RetraceDialogState?>(null)
 
     // See PendingNoteOverwrite's doc comment / autoExportAnnotations. Dismissing (Dialog's
     // onDismissRequest, or the explicit "Cancel" button) must only set this back to null — never a
@@ -5944,6 +5973,62 @@ class AppState(
         val selectedEntryPath = effectivePath.substring(bang + 1)
         val candidate = listArchiveLogCandidates(archiveFile).firstOrNull { it.entryPath == selectedEntryPath } ?: return null
         return SplitSource.ArchiveEntry(archiveFile, candidate)
+    }
+
+    // ── R8/ProGuard retrace ──────────────────────────────────────────
+
+    /** Stores a mapping path without checking it; readability is validated only on retrace. */
+    fun setRetraceMappingPath(tabId: String, path: String?) {
+        val normalized = path?.trim()?.takeIf { it.isNotEmpty() }?.let { File(it).absolutePath }
+        upTab(tabId) { it.copy(retraceMappingPath = normalized) }
+        autosaveInBackground()
+    }
+
+    fun clearRetraceMapping(tabId: String) = setRetraceMappingPath(tabId, null)
+
+    /** Opens the native picker used by other single-file flows, then stores the absolute path. */
+    fun chooseRetraceMapping(tabId: String) {
+        val current = tab(tabId)?.retraceMappingPath?.let(::File)
+        val dialog = FileDialog(null as Frame?, "Choose R8 mapping.txt", FileDialog.LOAD).apply {
+            directory = current?.parentFile?.takeIf { it.isDirectory }?.absolutePath
+            file = current?.name ?: "mapping.txt"
+            setFilenameFilter { _, name -> name.equals("mapping.txt", ignoreCase = true) || name.endsWith(".map", ignoreCase = true) }
+            isVisible = true
+        }
+        val chosen = dialog.file?.let { name -> dialog.directory?.let { File(it, name) } } ?: return
+        setRetraceMappingPath(tabId, chosen.absolutePath)
+    }
+
+    /** Starts a background retrace for one Java/Kotlin exception group. */
+    fun retraceIssue(tabId: String, groupGid: String) {
+        val target = tab(tabId)
+        val group = target?.analysis?.stackTraceGroups?.firstOrNull { it.gid == groupGid }
+        if (target == null || group == null) {
+            retraceDialogState = RetraceDialogState.Failure(tabId, groupGid, "The exception group is no longer available.")
+            return
+        }
+        val mappingPath = target.retraceMappingPath
+        if (mappingPath.isNullOrBlank()) {
+            retraceDialogState = RetraceDialogState.Failure(
+                tabId,
+                groupGid,
+                "Choose a readable mapping.txt for this tab before retracing.",
+            )
+            return
+        }
+        val input = retraceInputForGroup(target, group)
+        retraceDialogState = RetraceDialogState.Loading(tabId, groupGid)
+        ioScope.launch {
+            val outcome = retraceService.retrace(mappingPath, input)
+            retraceDialogState = when (outcome) {
+                is RetraceOutcome.Success -> RetraceDialogState.Success(tabId, groupGid, outcome.text)
+                is RetraceOutcome.Failure -> RetraceDialogState.Failure(tabId, groupGid, outcome.message)
+            }
+        }
+    }
+
+    fun dismissRetraceDialog() {
+        retraceDialogState = null
     }
 
     // ── Copy / Save ──────────────────────────────────────────────────

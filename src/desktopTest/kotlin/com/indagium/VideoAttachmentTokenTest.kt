@@ -125,9 +125,9 @@ class VideoAttachmentTokenTest {
     fun tabTokenCarriesAttachedVideoAsFieldIndexEleven() {
         val original = tabFixture(VideoAttachment(path = "/videos/repro.mp4", sourceLabel = "/videos/repro.mp4"))
         val fields = original.tabToken().tokenFields()
-        // 13 fields (0..12) since noteTargetName (LogTab's auto-export-overwrite pin) was appended
-        // as a 13th trailing field after attachedVideo — attachedVideo itself stays at index 11.
-        assertEquals(13, fields.size, "tab token must carry exactly 13 fields (0..12) once attachedVideo is set")
+        // 14 fields (0..13) since noteTargetName and the optional persisted R8 mapping were
+        // appended after attachedVideo — attachedVideo itself stays at index 11.
+        assertEquals(14, fields.size, "tab token must carry exactly 14 fields (0..13) once attachedVideo is set")
     }
 
     @Test

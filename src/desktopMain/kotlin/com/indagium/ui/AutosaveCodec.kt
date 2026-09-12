@@ -1543,7 +1543,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta, attachedVideo, noteTargetName,
+    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1666,6 +1666,9 @@ internal fun LogTab.tabToken(): String {
         // user's "keep existing note" / "save to a new file" decision and the next keystroke's
         // auto-export silently re-resolves to (and overwrites) the default `<base>_analysis.md`.
         noteTargetName.orEmpty(),
+        // Trailing field (position 13): optional absolute R8/ProGuard mapping path. Appended so
+        // every legacy tab token remains readable; retraced output is never persisted.
+        retraceMappingPath.orEmpty(),
     )
 }
 
@@ -1726,6 +1729,8 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             // Field index 12 (see tabToken above); absent on legacy tokens means "not yet decided",
             // same as a brand-new tab — resolveNoteTarget falls through to its fingerprint search.
             noteTargetName = p.getOrNull(12)?.takeIf { it.isNotBlank() },
+            // Field index 13 (append-only); old tokens have no selected mapping and restore null.
+            retraceMappingPath = p.getOrNull(13)?.takeIf { it.isNotBlank() },
         ),
         source,
     )
