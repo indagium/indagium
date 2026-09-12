@@ -217,7 +217,7 @@ class Seq3CodecTest {
     }
 
     @Test
-    fun adoptingPreservesDocumentDialectCaptionAndAttachmentUnchanged() {
+    fun keepingSourceSnapshotsALinkedAttachment() {
         val attachment = Seq3AttachmentMetadata(
             diagramId = "diagram-42",
             mode = Seq3AttachmentMode.LINKED,
@@ -239,7 +239,10 @@ class Seq3CodecTest {
         assertEquals(fixedDocument(), reparsed.document)
         assertEquals(Seq3Dialect.PLANTUML, reparsed.dialect)
         assertEquals("kept caption", reparsed.caption)
-        assertEquals(attachment, reparsed.attachment)
+        assertEquals(
+            Seq3AttachmentMetadata(mode = Seq3AttachmentMode.SNAPSHOT, attachedAtEpochMs = 1234L),
+            reparsed.attachment,
+        )
     }
 
     @Test

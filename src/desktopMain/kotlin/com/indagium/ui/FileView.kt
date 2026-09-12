@@ -315,6 +315,19 @@ internal fun FileView(
                         onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
                         onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
                         onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+                        onImportLinkedDiagram = { blockId, source, dialect, confirm ->
+                            val diagramId = (tab.annotations.blocks.filterIsInstance<com.indagium.model.AnnBlock.Note>()
+                                .firstOrNull { it.id == blockId }?.text?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
+                                ?.attachment?.diagramId)
+                            val session = diagramId?.let { id -> state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id } }
+                                ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
+                            if (session == null) {
+                                state.pendingDiagramNotice = DiagramNotice("Couldn't import diagram edits", "This linked diagram is not open in a workspace.")
+                                com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
+                            } else {
+                                state.seq3Sessions.importSource(session.id, source, dialect, confirm)
+                            }
+                        },
                         diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
                         onCreateDiagram = { state.seq3Sessions.begin(tab.id, tab.selected) },
                         onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },

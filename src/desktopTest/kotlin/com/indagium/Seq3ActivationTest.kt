@@ -18,8 +18,8 @@ class Seq3ActivationTest {
     private fun call(index: Int, from: String, to: String?, messageId: String = "m$index") =
         Seq3ActivationEvent(index, messageId, Seq3Kind.CALL, from, to)
 
-    private fun ret(index: Int, from: String, messageId: String = "m$index") =
-        Seq3ActivationEvent(index, messageId, Seq3Kind.RETURN, from, toLifelineId = null)
+    private fun ret(index: Int, from: String, to: String? = null, messageId: String = "m$index") =
+        Seq3ActivationEvent(index, messageId, Seq3Kind.RETURN, from, toLifelineId = to)
 
     private fun neutral(index: Int, kind: Seq3Kind, from: String, to: String? = null, messageId: String = "m$index") =
         Seq3ActivationEvent(index, messageId, kind, from, to)
@@ -41,10 +41,14 @@ class Seq3ActivationTest {
         // B calls back into itself (or is re-entered) before its first call returns: the outer
         // span opens at depth 0, the inner reentrant one at depth 1, and they close inner-first.
         val events = listOf(
-            call(0, from = "A", to = "B"), // outer open, depth 0
-            call(1, from = "B", to = "B"), // inner open, depth 1
-            ret(2, from = "B"), // closes the inner (depth 1) span
-            ret(3, from = "B"), // closes the outer (depth 0) span
+            // Outer open, depth 0.
+            call(0, from = "A", to = "B"),
+            // Inner open, depth 1.
+            call(1, from = "B", to = "B"),
+            // Closes the inner, depth-1 frame.
+            ret(2, from = "B"),
+            // Closes the outer, depth-0 frame.
+            ret(3, from = "B"),
         )
 
         val spans = seq3ActivationSpans(events, lastIndex = 3)
@@ -60,13 +64,60 @@ class Seq3ActivationTest {
     }
 
     @Test
+    fun targetedReturnsCloseTheMostRecentFrameForTheirExactCallerAndCallee() {
+        // Two callers invoke B before either return. A return explicitly addressed to A must
+        // close A's older frame, rather than blindly popping C's newer frame from B's stack.
+        val events = listOf(
+            call(0, from = "A", to = "B"),
+            call(1, from = "C", to = "B"),
+            ret(2, from = "B", to = "A"),
+            ret(3, from = "B", to = "C"),
+        )
+
+        val spans = seq3ActivationSpans(events, lastIndex = 3)
+
+        assertEquals(
+            listOf(
+                Seq3ActivationSpan("B", startIndex = 0, endIndex = 2, depth = 0, unmatched = false),
+                Seq3ActivationSpan("B", startIndex = 1, endIndex = 3, depth = 1, unmatched = false),
+            ),
+            spans,
+        )
+    }
+
+    @Test
+    fun targetedReturnWithoutAMatchingCallerIsANoOpAndDoesNotCloseAnotherFrame() {
+        val events = listOf(
+            call(0, from = "A", to = "B"),
+            call(1, from = "C", to = "B"),
+            // No B frame was opened by D.
+            ret(2, from = "B", to = "D"),
+            // Compatibility path: closes C's most recent frame.
+            ret(3, from = "B"),
+        )
+
+        val spans = seq3ActivationSpans(events, lastIndex = 3)
+
+        assertEquals(
+            listOf(
+                Seq3ActivationSpan("B", startIndex = 0, endIndex = 3, depth = 0, unmatched = true),
+                Seq3ActivationSpan("B", startIndex = 1, endIndex = 3, depth = 1, unmatched = false),
+            ),
+            spans,
+            "the unmatched targeted return must not steal C's frame; a null target remains legacy LIFO",
+        )
+    }
+
+    @Test
     fun anUnmatchedCallIsFlaggedAndClosedAtItsLifelinesLastTouchingIndex() {
         // B never returns. The lifeline's last touching row is the call itself (index 0) unless
         // something else later touches B — here, an unrelated call FROM B extends that to index 2.
         val events = listOf(
             call(0, from = "A", to = "B"),
-            call(1, from = "X", to = "Y"), // does not touch B at all
-            call(2, from = "B", to = "C"), // touches B as sender — this is now B's last touch
+            // Does not touch B at all.
+            call(1, from = "X", to = "Y"),
+            // Touches B as sender, so this is now B's last touch.
+            call(2, from = "B", to = "C"),
         )
 
         val spans = seq3ActivationSpans(events, lastIndex = 10)

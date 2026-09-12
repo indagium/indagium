@@ -11,6 +11,7 @@ import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3Range
+import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.model.AnnBlock
@@ -779,6 +780,55 @@ class Seq3SessionTest {
         val reopened = state.seq3Sessions.beginEdit("log", blockId)
         assertEquals(id, reopened, "opening a live-linked note must activate the existing session")
         assertEquals(1, state.seq3Sessions.sessions.size)
+    }
+
+    @Test
+    fun sameDocumentLinkedImportCanonicalizesDriftWithoutAddingUndo() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val blockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))
+        val original = (state.tab("log")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text
+        val drifted = original.replaceFirst("sequenceDiagram\n", "sequenceDiagram\n\n")
+        state.updateBlock("log", blockId, drifted)
+        val parsed = requireNotNull(parseSeq3Note(drifted))
+        val undoCount = state.seq3Sessions.sessions.single { it.id == id }.undoStack.size
+
+        val result = state.seq3Sessions.importSource(id, parsed.source, parsed.dialect)
+
+        assertIs<Seq3SourceImportResult.Success>(result)
+        assertEquals(undoCount, state.seq3Sessions.sessions.single { it.id == id }.undoStack.size)
+        val canonical = (state.tab("log")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text
+        assertTrue(requireNotNull(parseSeq3Note(canonical)).sourceHashMatches)
+    }
+
+    @Test
+    fun confirmedMarkerRemovalAppliesEvidenceFreeCandidateAsOneUndoStep() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        awaitGenerated(state, id)
+        val blockId = requireNotNull(state.seq3Sessions.attachLiveLink(id))
+        val original = (state.tab("log")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text
+        val parsed = requireNotNull(parseSeq3Note(original))
+        val lines = parsed.source.lines().toMutableList()
+        val arrow = lines.indexOfFirst { it.contains("Producer->>Consumer: start op") }
+        lines.removeAt(arrow - 1)
+        val markerRemovedSource = lines.joinToString("\n")
+        state.updateBlock("log", blockId, original.replace(parsed.source, markerRemovedSource))
+        val undoCount = state.seq3Sessions.sessions.single { it.id == id }.undoStack.size
+
+        val result = state.seq3Sessions.importSource(id, markerRemovedSource, parsed.dialect, confirmEvidenceLoss = true)
+
+        assertIs<Seq3SourceImportResult.Success>(result)
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        assertEquals(undoCount + 1, session.undoStack.size)
+        assertTrue(
+            session.document.messages.any { message ->
+                message.labelTemplate == "start op" &&
+                    message.authoring == Seq3Authoring.EDITED &&
+                    message.occurrences.isEmpty()
+            },
+        )
     }
 
     // WP14: syncLiveLinkedNote runs unattended (off publishGenerated/markDirty), so unlike confirm()

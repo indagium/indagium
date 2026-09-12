@@ -1284,6 +1284,9 @@ class AppState(
         pickSaveFile(title, suggestedName, initialDirectory)
     },
     private val updateChecker: UpdateChecker = UpdateChecker(),
+    // Reveal the completed update in the platform file manager. This callback is injectable so
+    // download tests can record the requested file without opening Finder/Explorer.
+    private val fileRevealer: (File) -> Unit = ::revealInFileManager,
     // Test seam for video/VideoPlayerController.kt: production wraps a real FFmpegFrameGrabber
     // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
     // so the mapping/persistence tests in this file's video section never touch real FFmpeg.
@@ -2279,7 +2282,7 @@ class AppState(
             }.onSuccess { file ->
                 updateDownload = UpdateDownloadState.Done(file)
                 AppLogger.info("update", "Update download completed")
-                revealInFileManager(file)
+                fileRevealer(file)
             }.onFailure { error ->
                 if (error is CancellationException) throw error
                 updateDownload = UpdateDownloadState.Failed(error.message ?: "Download failed.")

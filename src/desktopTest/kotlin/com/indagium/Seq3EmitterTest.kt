@@ -25,6 +25,9 @@ import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
+import net.sourceforge.plantuml.SourceStringReader
+import net.sourceforge.plantuml.error.PSystemError
+import java.io.ByteArrayOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -64,6 +67,23 @@ class Seq3EmitterTest {
 
     private fun doc(messages: List<Seq3Message>, fragments: List<Seq3Fragment> = emptyList(), notes: List<Seq3Note> = emptyList()) =
         Seq3Document(title = "", lifelines = listOf(a, b), messages = messages, fragments = fragments, notes = notes)
+
+    /** Parse and render the complete source so grammar regressions cannot hide behind textual
+     *  assertions. PlantUML returns a [PSystemError] as the parsed diagram for invalid input rather
+     *  than throwing, so check that type before rendering and require non-empty image output too. */
+    private fun assertPlantUmlRenders(source: String) {
+        val reader = SourceStringReader(source)
+        val blocks = reader.getBlocks()
+        assertEquals(1, blocks.size, "PlantUML source must contain exactly one diagram block:\n$source")
+        val diagram = blocks.single().getDiagram()
+        assertFalse(
+            diagram is PSystemError,
+            "PlantUML parser rejected generated source: ${diagram.getWarningOrError()}\n$source",
+        )
+        val image = ByteArrayOutputStream()
+        val description = reader.outputImage(image)
+        assertTrue(image.size() > 0, "PlantUML renderer returned no image bytes: $description\n$source")
+    }
 
     // ── Escaping ─────────────────────────────────────────────────────────────────────────────
 
@@ -427,17 +447,17 @@ class Seq3EmitterTest {
     }
 
     @Test
-    fun negStrictConsiderAndIgnoreEmitTheirRealOperatorKeywordInPlantUml() {
-        // WP11: PlantUML needs no per-kind special case for any of these four — `kind.name
-        // .lowercase()` already produces PlantUML's own `neg`/`strict`/`consider`/`ignore`
-        // keyword, the exact same shared path LOOP/ALT/OPT/PAR/BREAK already take.
+    fun negStrictConsiderAndIgnoreEmitValidGroupFallbacksInPlantUml() {
+        // PlantUML has no bare sequence keyword for these UML operators. The fallback keeps the
+        // authored operator and label in a valid `group <operator> <label>` block.
         listOf(Seq3FragmentKind.NEG, Seq3FragmentKind.STRICT, Seq3FragmentKind.CONSIDER, Seq3FragmentKind.IGNORE).forEach { kind ->
             val fragment = Seq3Fragment("f1", kind, "Retry", listOf("m1"))
             val out = doc(listOf(message()), fragments = listOf(fragment)).toPlantUml()
 
             val keyword = kind.name.lowercase()
-            assertTrue(out.contains("$keyword Retry\n"), "expected '$keyword Retry' in PlantUML:\n$out")
+            assertTrue(out.contains("group $keyword Retry\n"), "expected a group fallback in PlantUML:\n$out")
             assertTrue(out.contains("end\n"), "expected a balanced 'end' in PlantUML:\n$out")
+            assertPlantUmlRenders(out)
         }
     }
 
@@ -686,7 +706,7 @@ class Seq3EmitterTest {
     }
 
     @Test
-    fun criticalEmitsOptionInMermaidAndNoDividerAtAllInPlantUml() {
+    fun criticalEmitsOptionInMermaidAndElseInPlantUml() {
         val messages = listOf(message(id = "m1", label = "branch0"), message(id = "m2", label = "branch1"))
         val fragment = Seq3Fragment(
             "f1", Seq3FragmentKind.CRITICAL, "cond0", listOf("m1", "m2"),
@@ -699,15 +719,16 @@ class Seq3EmitterTest {
         assertValidFragmentBracketNesting(mermaid)
 
         val plantUml = document.toPlantUml()
-        assertFalse(
-            plantUml.contains("cond1"),
-            "PlantUML has NO divider syntax for CRITICAL at all — the second operand's guard must not appear anywhere; got:\n$plantUml",
+        assertTrue(
+            plantUml.contains("else cond1\n"),
+            "PlantUML preserves additional CRITICAL operands with its generic else divider; got:\n$plantUml",
         )
         assertTrue(
             plantUml.contains("branch0") && plantUml.contains("branch1"),
-            "both messages must still be emitted, only the branch label is lost; got:\n$plantUml",
+            "both messages and their CRITICAL branch must be emitted; got:\n$plantUml",
         )
         assertValidFragmentBracketNesting(plantUml)
+        assertPlantUmlRenders(plantUml)
     }
 
     @Test
@@ -1337,6 +1358,37 @@ class Seq3EmitterTest {
     }
 
     @Test
+    fun firstLastElisionAfterMidnightStaysBetweenItsArrowsInBothDialects() {
+        val pre = Seq3Occurrence(1, 86_399_900L, "23:59:59.900", 0, 0, 'I', "pre", elapsedMillis = 86_399_900L)
+        val repeated = listOf(
+            Seq3Occurrence(2, 100L, "00:00:00.100", 0, 0, 'I', "first", elapsedMillis = 86_400_100L),
+            Seq3Occurrence(3, 500L, "00:00:00.500", 0, 0, 'I', "hidden", elapsedMillis = 86_400_500L),
+            Seq3Occurrence(4, 1_000L, "00:00:01.000", 0, 0, 'I', "last", elapsedMillis = 86_401_000L),
+        )
+        val document = doc(
+            listOf(
+                message("pre", label = "pre", occurrences = listOf(pre), repeat = Seq3Repeat.EVERY),
+                message("repeat", label = "call", occurrences = repeated, repeat = Seq3Repeat.FIRST_LAST),
+            ),
+        ).copy(showElapsed = true)
+
+        for ((dialect, text) in listOf("Mermaid" to document.toMermaid(), "PlantUML" to document.toPlantUml())) {
+            val preIndex = text.indexOf(": pre")
+            val firstIndex = text.indexOf(": [+0.200] call")
+            val elisionIndex = text.indexOf("⋯ ×1 elided")
+            val lastIndex = text.indexOf(": [+0.900] call")
+            assertTrue(
+                preIndex >= 0 && firstIndex >= 0 && elisionIndex >= 0 && lastIndex >= 0,
+                "$dialect must contain the full first/elision/last sequence:\n$text",
+            )
+            assertTrue(
+                preIndex < firstIndex && firstIndex < elisionIndex && elisionIndex < lastIndex,
+                "$dialect must preserve first-elision-last order across midnight:\n$text",
+            )
+        }
+    }
+
+    @Test
     fun nullTimestampNeighbourSuppressesTheElapsedTagInEmittedText() {
         // Rule 1, exercised through the emitted text rather than layout row geometry — see
         // Seq3LayoutTest's own test of the identical rule for the full reasoning.
@@ -1666,4 +1718,3 @@ class Seq3EmitterTest {
         override fun lineHeight(role: Seq3FontRole): Double = 16.0
     }
 }
-

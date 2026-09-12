@@ -226,6 +226,9 @@ kotlin {
         desktopTest.dependencies {
             implementation(kotlin("test"))
             implementation("io.ktor:ktor-client-mock:$ktorVersion")
+            // Parser/render-backed validation for exported PlantUML sequence sources. Keeping this
+            // on desktopTest avoids bundling the sizeable PlantUML runtime into the application.
+            implementation("net.sourceforge.plantuml:plantuml:1.2025.3")
         }
     }
 }

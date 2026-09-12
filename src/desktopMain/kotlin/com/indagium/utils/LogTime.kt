@@ -106,6 +106,19 @@ private const val ROLLOVER_LOOKAHEAD_SCAN_CAP = 200
 data class RolloverSample(val id: Int, val ts: String)
 
 /**
+ * One timestamped position on a log-like timeline.  This deliberately contains only the identity
+ * and the already-parsed time-of-day needed by [unrollLogTimeline]: diagram occurrences can now be
+ * aligned with newly selected [LogEntry] rows without reconstructing synthetic log entries (or
+ * losing the occurrence id that the diagram persists).  [rawTimestamp] is diagnostic-only; an
+ * empty value is appropriate when the source was an occurrence rather than a raw log row.
+ */
+internal data class LogTimelinePoint(
+    val id: Int,
+    val timestampMillis: Long?,
+    val rawTimestamp: String = "",
+)
+
+/**
  * Result of [unrollLogTimeline]: the day-unrolled elapsed timeline for one sequence of log entries,
  * plus the rollover diagnostics a caller needs to explain it. [byId] maps each mappable entry id (a
  * row with a parseable `ts`) to its unrolled elapsed milliseconds, in the same order as the input
@@ -129,11 +142,11 @@ data class UnrolledLogTimeline(
 // (blank ts on brief/RAW rows) — bounded by ROLLOVER_LOOKAHEAD_SCAN_CAP. Returns null when the
 // scan runs off the end of the log or hits the cap first, either of which the caller treats as
 // "no confirmation available."
-private fun nextParseableMillis(data: List<LogEntry>, fromIndex: Int): Long? {
+private fun nextTimelinePointMillis(data: List<LogTimelinePoint>, fromIndex: Int): Long? {
     val limit = minOf(data.size, fromIndex + ROLLOVER_LOOKAHEAD_SCAN_CAP)
     for (i in fromIndex until limit) {
-        val millis = parseMillisOfDay(data[i].ts)
-        if (millis != TS_UNKNOWN) return millis
+        val millis = data[i].timestampMillis
+        if (millis != null) return millis
     }
     return null
 }
@@ -193,7 +206,20 @@ private fun nextParseableMillis(data: List<LogEntry>, fromIndex: Int): Long? {
  * accumulate into a permanent, unbounded corruption of everything after it the way this timeline's
  * running `dayOffset` does, so the failure mode this guards against does not exist there.
  */
-fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
+fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline =
+    unrollLogTimeline(data.map { entry ->
+        LogTimelinePoint(entry.id, parseMillisOfDay(entry.ts).takeUnless { it == TS_UNKNOWN }, entry.ts)
+    })
+
+/**
+ * [unrollLogTimeline]'s generalized form for an ordered sequence of entry-id/time points.  The
+ * caller owns ordering: it is normally ascending raw log id, including when a diagram combines
+ * persisted occurrence evidence with a newly selected set of rows.  Keeping that sequence intact
+ * is essential because midnight is inferred from neighbouring positions, not from a timestamp in
+ * isolation.
+ */
+internal fun unrollLogTimeline(data: Iterable<LogTimelinePoint>): UnrolledLogTimeline {
+    val points = data.toList()
     val byId = LinkedHashMap<Int, Long>()
     var previousMillis: Long? = null
     var dayOffset = 0L
@@ -211,10 +237,9 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
     // later that resumption happens to land.
     var firstCommittedBaseline: Long? = null
     var modelInvalidated = false
-    for (i in data.indices) {
-        val entry = data[i]
-        val millis = parseMillisOfDay(entry.ts)
-        if (millis == TS_UNKNOWN) continue
+    for (i in points.indices) {
+        val point = points[i]
+        val millis = point.timestampMillis ?: continue
         firstCommittedBaseline?.let { fcb -> if (millis > fcb) modelInvalidated = true }
         val baseline = previousMillis
         // Preserve LogTime.deltaMillis's established interpretation: only a backwards jump
@@ -222,7 +247,7 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
         // out-of-order rows/clock corrections, not a fabricated next-day recording, and never
         // reach this branch.
         if (baseline != null && millis - baseline < -(dayMs / 2)) {
-            val next = nextParseableMillis(data, i + 1)
+            val next = nextTimelinePointMillis(points, i + 1)
             val resumesPreJumpBaseline = next != null && kotlin.math.abs(next - baseline) <= dayMs / 2
             val doesNotContinueFromThisRow = next != null && kotlin.math.abs(next - millis) > dayMs / 2
             if (resumesPreJumpBaseline && doesNotContinueFromThisRow) {
@@ -234,13 +259,13 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
                 // routes AppState's floor search to the already-existing linear-scan fallback
                 // instead of silently trusting a corrupted binary search.
                 suppressedCount++
-                if (suppressedSamples.size < ROLLOVER_SAMPLE_CAP) suppressedSamples += RolloverSample(entry.id, entry.ts)
-                byId[entry.id] = dayOffset + millis
+                if (suppressedSamples.size < ROLLOVER_SAMPLE_CAP) suppressedSamples += RolloverSample(point.id, point.rawTimestamp)
+                byId[point.id] = dayOffset + millis
                 continue
             }
             dayOffset += dayMs
             rolloverCount++
-            if (rolloverSamples.size < ROLLOVER_SAMPLE_CAP) rolloverSamples += RolloverSample(entry.id, entry.ts)
+            if (rolloverSamples.size < ROLLOVER_SAMPLE_CAP) rolloverSamples += RolloverSample(point.id, point.rawTimestamp)
             if (firstCommittedBaseline == null) {
                 firstCommittedBaseline = baseline
             } else {
@@ -249,7 +274,7 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
                 modelInvalidated = true
             }
         }
-        byId[entry.id] = dayOffset + millis
+        byId[point.id] = dayOffset + millis
         previousMillis = millis
     }
 
@@ -259,9 +284,8 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline {
         // every row — raw time-of-day, unconditionally. Only paid on this rare path: the common
         // (single-timeline) case above already built the real result in one pass.
         byId.clear()
-        for (entry in data) {
-            val millis = parseMillisOfDay(entry.ts)
-            if (millis != TS_UNKNOWN) byId[entry.id] = millis
+        for (point in points) {
+            point.timestampMillis?.let { millis -> byId[point.id] = millis }
         }
     }
 

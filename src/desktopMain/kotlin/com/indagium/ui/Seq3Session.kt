@@ -18,12 +18,14 @@ import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3NoteSeed
 import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.Seq3RegenReview
+import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.Seq3UndoEntry
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.applySeq3Command
 import com.indagium.diagram3.applySeq3NoteSeeds
 import com.indagium.diagram3.encodeSeq3Note
 import com.indagium.diagram3.generateSeq3
+import com.indagium.diagram3.importSeq3Source
 import com.indagium.diagram3.matchOneMessage
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.reviewSeq3Regeneration
@@ -665,6 +667,51 @@ class Seq3Session(
         replace(id) { it.copy(document = document, undoStack = (it.undoStack + undo).takeLast(MAX_UNDO_DEPTH)) }
         markDirty(id)
         return true
+    }
+
+    /**
+     * Applies a fence import as one ordinary ReplaceDocument undo step.  The pure importer does
+     * all parsing before this method reaches mutable session state; therefore malformed source is
+     * an atomic no-op.  Evidence deletion is intentionally a two-step UI flow: callers inspect a
+     * successful result with [Seq3SourceImportResult.Success.evidenceLoss] and repeat with
+     * [confirmEvidenceLoss] only after the user explicitly agrees.
+     */
+    fun importSource(id: String, source: String, dialect: Seq3Dialect, confirmEvidenceLoss: Boolean = false): Seq3SourceImportResult {
+        val current = session(id) ?: return Seq3SourceImportResult.Failure(emptyList())
+        val result = importSeq3Source(source, dialect, current.document)
+        val success = result as? Seq3SourceImportResult.Success ?: return result
+        if (success.evidenceLoss && !confirmEvidenceLoss) return success
+        if (success.document != current.document) {
+            if (!applyCommand(id, Seq3Command.ReplaceDocument(success.document))) {
+                return Seq3SourceImportResult.Failure(emptyList())
+            }
+        }
+        canonicalizeImportedLinkedNote(id, success)
+        // A same-document import is still an explicit reconciliation: canonicalize all matching
+        // linked notes/library snapshots now, without manufacturing a no-op ReplaceDocument undo.
+        syncLiveLinkedNote(id)
+        return success
+    }
+
+    private fun canonicalizeImportedLinkedNote(id: String, success: Seq3SourceImportResult.Success) {
+        // A linked fence is necessarily drifted at the point it is imported, and the ordinary
+        // live-sync safeguard correctly refuses to overwrite drifted text.  This is the explicit
+        // user-requested import path, so rewrite THIS confirmed block canonically before the
+        // debounced sync runs; the hash now matches and subsequent ordinary syncs remain guarded.
+        val after = session(id)
+        val blockId = after?.confirmedBlockId
+        val tabId = after?.sourceTabId
+        if (blockId != null && tabId != null) {
+            val note = appState.tab(tabId)?.annotations?.blocks?.filterIsInstance<AnnBlock.Note>()?.firstOrNull { it.id == blockId }
+            val parsed = note?.text?.let(::parseSeq3Note)
+            if (parsed?.attachment?.mode == Seq3AttachmentMode.LINKED) {
+                appState.updateBlock(
+                    tabId,
+                    blockId,
+                    encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment),
+                )
+            }
+        }
     }
 
     fun canUndo(id: String): Boolean = session(id)?.undoStack?.isNotEmpty() == true

@@ -283,6 +283,40 @@ class Seq3GeneratorTest {
         assertTrue(result.document.messages.any { it.id == result.newMessageId })
     }
 
+    @Test
+    fun incrementalSelectionAfterMidnightIsAlignedWithPersistedPreMidnightEvidence() {
+        val existing = generateSeq3(
+            listOf(entry(1, "23:59:59.900", "App", "before midnight")),
+            Seq3Range.VisibleView,
+        )
+        val added = addSeq3MessageFromSelection(
+            existing,
+            listOf(entry(2, "00:00:00.100", "App", "after midnight")),
+        ) as? Seq3AddResult.Added ?: error("expected Added")
+
+        val newMessage = added.document.messages.single { it.id == added.newMessageId }
+        assertTrue(
+            newMessage.occurrences.single().elapsedMillis!! > existing.messages.single().occurrences.single().elapsedMillis!!,
+            "the selected post-midnight row must be unrolled with the existing pre-midnight evidence, not as a new day-zero timeline",
+        )
+
+        val layout = layoutSeq3(
+            added.document,
+            Seq3LayoutOptions(object : Seq3TextMetrics {
+                override fun width(role: Seq3FontRole, text: String) = text.length * 7.0
+
+                override fun lineHeight(role: Seq3FontRole) = 16.0
+            }),
+        )
+        assertEquals(
+            listOf("before midnight", "after midnight"),
+            layout.rows.filterIsInstance<Seq3UnresolvedStubRow>().map { it.label },
+        )
+        for (text in listOf(added.document.toMermaid(), added.document.toPlantUml())) {
+            assertTrue(text.indexOf("before midnight") < text.indexOf("after midnight"), "midnight order must match in emitted text:\n$text")
+        }
+    }
+
     private fun emptyDocument() = Seq3Document()
 
     // ── Section 3 (post-ship plan): shape-key grouping must survive short mixed-alnum ids ────────
@@ -520,6 +554,7 @@ class Seq3GeneratorTest {
         // inference is irrelevant to this test, only draw ORDER is).
         val metrics = object : Seq3TextMetrics {
             override fun width(role: Seq3FontRole, text: String) = text.length * 7.0
+
             override fun lineHeight(role: Seq3FontRole) = 16.0
         }
         val layout = layoutSeq3(document, Seq3LayoutOptions(metrics))
