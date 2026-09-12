@@ -12,6 +12,8 @@ import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import java.io.File
+import java.io.IOException
+import java.util.Collections
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -75,10 +77,12 @@ class FolderPickerAppStateTest {
         val client = HttpClient(MockEngine {
             respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
         }) { expectSuccess = false }
+        val revealedFiles = Collections.synchronizedList(mutableListOf<File>())
         val state = AppState(
             autosaveFile = File(root, "state.cache"),
             updateSavePicker = picker::pick,
             updateChecker = UpdateChecker(client),
+            fileRevealer = revealedFiles::add,
         )
 
         try {
@@ -86,7 +90,7 @@ class FolderPickerAppStateTest {
             state.availableUpdate = releaseWithAssets()
 
             state.downloadUpdate()
-            waitUntil { state.updateDownload is UpdateDownloadState.Done }
+            waitUntil { state.updateDownload is UpdateDownloadState.Done && revealedFiles.size == 1 }
 
             // The picker returns a FILE (the user can rename it), but what's persisted for next
             // time is its parent DIRECTORY, not the file path itself.
@@ -97,6 +101,7 @@ class FolderPickerAppStateTest {
             // parent, not the raw settings value, so the dialog seeds with a real folder.
             assertEquals(legacyFile.parentFile, picker.initialDirectories.single())
             assertIs<UpdateDownloadState.Done>(state.updateDownload)
+            assertEquals(listOf(File(selectedDir, expectedAssetName)), revealedFiles)
         } finally {
             state.close()
             client.close()
@@ -108,9 +113,11 @@ class FolderPickerAppStateTest {
         val root = createTempDirectory("openlog-update-picker-cancel").toFile()
         val originalDir = File(root, "original-downloads").apply { mkdir() }
         val picker = FakeSavePicker(null)
+        val revealedFiles = Collections.synchronizedList(mutableListOf<File>())
         val state = AppState(
             autosaveFile = File(root, "state.cache"),
             updateSavePicker = picker::pick,
+            fileRevealer = revealedFiles::add,
         )
 
         try {
@@ -122,6 +129,7 @@ class FolderPickerAppStateTest {
             assertEquals(originalDir.absolutePath, state.settings.updateDownloadDir)
             assertEquals(listOf("Save Update"), picker.titles)
             assertEquals(UpdateDownloadState.Idle, state.updateDownload)
+            assertTrue(revealedFiles.isEmpty())
         } finally {
             state.close()
         }
@@ -136,23 +144,56 @@ class FolderPickerAppStateTest {
         val client = HttpClient(MockEngine {
             respond("package", HttpStatusCode.OK, headersOf("Content-Length", "7"))
         }) { expectSuccess = false }
+        val revealedFiles = Collections.synchronizedList(mutableListOf<File>())
         val state = AppState(
             autosaveFile = File(root, "state.cache"),
             updateSavePicker = picker::pick,
             updateChecker = UpdateChecker(client),
+            fileRevealer = revealedFiles::add,
         )
 
         try {
             state.availableUpdate = releaseWithAssets()
 
             state.downloadUpdate()
-            waitUntil { state.updateDownload is UpdateDownloadState.Done }
+            waitUntil { state.updateDownload is UpdateDownloadState.Done && revealedFiles.size == 1 }
 
             val done = assertIs<UpdateDownloadState.Done>(state.updateDownload)
             assertEquals(renamed, done.file)
             assertEquals("package", renamed.readText())
             val originalAssetName = requireNotNull(assetForCurrentOs(releaseWithAssets().assets)).name
             assertTrue(!File(selectedDir, originalAssetName).exists())
+            assertEquals(listOf(renamed), revealedFiles)
+        } finally {
+            state.close()
+            client.close()
+        }
+    }
+
+    @Test
+    fun failedUpdateDownloadDoesNotRevealAFile() {
+        val root = createTempDirectory("openlog-update-picker-failure").toFile()
+        val selectedDir = File(root, "downloads").apply { mkdir() }
+        val picker = FakeSavePicker(File(selectedDir, "update.deb"))
+        val client = HttpClient(MockEngine {
+            throw IOException("simulated download failure")
+        }) { expectSuccess = false }
+        val revealedFiles = Collections.synchronizedList(mutableListOf<File>())
+        val state = AppState(
+            autosaveFile = File(root, "state.cache"),
+            updateSavePicker = picker::pick,
+            updateChecker = UpdateChecker(client),
+            fileRevealer = revealedFiles::add,
+        )
+
+        try {
+            state.availableUpdate = releaseWithAssets()
+
+            state.downloadUpdate()
+            waitUntil { state.updateDownload is UpdateDownloadState.Failed }
+
+            assertIs<UpdateDownloadState.Failed>(state.updateDownload)
+            assertTrue(revealedFiles.isEmpty())
         } finally {
             state.close()
             client.close()

@@ -60,7 +60,12 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.diagram3.ParsedSeq3
+import com.indagium.diagram3.Seq3AttachmentMode
+import com.indagium.diagram3.Seq3Dialect
+import com.indagium.diagram3.Seq3SourceImportResult
 import com.indagium.diagram3.adoptSeq3NoteSource
+import com.indagium.diagram3.encodeSeq3Note
+import com.indagium.diagram3.importSeq3Source
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode
@@ -434,6 +439,12 @@ fun AnnotationPanel(
     // diagram, never a broken one.
     onEditDiagram: (blockId: String) -> Unit = {},
     onNavigateDiagramLine: (entryId: Int) -> Unit = {},
+    onImportLinkedDiagram: (
+        blockId: String,
+        source: String,
+        dialect: Seq3Dialect,
+        confirmEvidenceLoss: Boolean,
+    ) -> Seq3SourceImportResult? = { _, _, _, _ -> null },
     // The panel deliberately receives library data/actions rather than reaching into AppState:
     // it stays a UI leaf and the caller owns source-identity scoping and workspace transitions.
     diagramLibraryItems: List<DiagramLibraryItem> = emptyList(),
@@ -1027,6 +1038,7 @@ fun AnnotationPanel(
                             },
                             onEditDiagram = { onEditDiagram(block.id) },
                             onNavigateDiagramLine = onNavigateDiagramLine,
+                            onImportLinkedDiagram = { source, dialect, confirm -> onImportLinkedDiagram(block.id, source, dialect, confirm) },
                             onCopyDiagramImage = onCopyDiagramImage,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
@@ -1990,6 +2002,7 @@ private fun NoteBlock(
     onBeforeToggleDiagram: () -> Unit = {},
     onEditDiagram: () -> Unit = {},
     onNavigateDiagramLine: (Int) -> Unit = {},
+    onImportLinkedDiagram: (String, Seq3Dialect, Boolean) -> Seq3SourceImportResult? = { _, _, _ -> null },
     onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
 ) {
     // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
@@ -2045,6 +2058,7 @@ private fun NoteBlock(
                 onFieldFocusChanged = onFieldFocusChanged,
                 onUpdateDiagramText = onUpdate,
                 onNavigateLine = onNavigateDiagramLine,
+                onImportLinkedDiagram = onImportLinkedDiagram,
                 expanded = diagramExpanded,
                 onToggleExpanded = {
                     onBeforeToggleDiagram()
@@ -2177,9 +2191,12 @@ private fun DiagramNoteView(
     onFieldFocusChanged: (Boolean) -> Unit,
     onUpdateDiagramText: (String) -> Unit,
     onNavigateLine: (Int) -> Unit,
+    onImportLinkedDiagram: (String, Seq3Dialect, Boolean) -> Seq3SourceImportResult?,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
 ) {
+    var pendingEvidenceImport by remember(noteText) { mutableStateOf<Seq3SourceImportResult.Success?>(null) }
+    var importFailure by remember(noteText) { mutableStateOf<String?>(null) }
     BasicTextField(
         value = summary.caption,
         onValueChange = { caption ->
@@ -2240,6 +2257,35 @@ private fun DiagramNoteView(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+                Box(
+                    Modifier.clickable {
+                        val parsed = expandedDiagram.parsed
+                        val linked = parsed.attachment?.mode == Seq3AttachmentMode.LINKED
+                        val imported = if (linked) onImportLinkedDiagram(parsed.source, parsed.dialect, false)
+                        else importSeq3Source(parsed.source, parsed.dialect, parsed.document)
+                        when (imported) {
+                            is Seq3SourceImportResult.Success -> {
+                                if (imported.evidenceLoss) {
+                                    pendingEvidenceImport = imported
+                                } else if (!linked) {
+                                    encodeSeq3Note(
+                                        imported.document,
+                                        parsed.dialect,
+                                        parsed.caption,
+                                        parsed.exportMode,
+                                        attachment = parsed.attachment,
+                                        sourceOverride = imported.canonicalSource,
+                                    ).let(onUpdateDiagramText)
+                                }
+                            }
+                            is Seq3SourceImportResult.Failure -> {
+                                importFailure = imported.diagnostics.joinToString(" ") { it.message }
+                                    .ifBlank { "No matching open diagram session." }
+                            }
+                            null -> importFailure = "No matching open diagram session."
+                        }
+                    }.padding(horizontal = 4.dp, vertical = 2.dp),
+                ) { AppText("Import edits", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
                 TooltipArea(
                     tooltip = {
                         ToolbarTooltip(
@@ -2254,7 +2300,7 @@ private fun DiagramNoteView(
                         }.padding(horizontal = 4.dp, vertical = 2.dp),
                     ) {
                         AppText(
-                            "Adopt as source",
+                            "Keep source only",
                             color = tc.ac,
                             fontSize = 10.sp,
                             fontWeight = FontWeight.Medium,
@@ -2262,6 +2308,27 @@ private fun DiagramNoteView(
                     }
                 }
             }
+            pendingEvidenceImport?.let {
+                AppText("Import removes marked log evidence. Confirm to continue.", color = tc.td, fontSize = 10.sp)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.clickable { pendingEvidenceImport = null }.padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
+                    Box(Modifier.clickable {
+                        val parsed = expandedDiagram.parsed
+                        if (parsed.attachment?.mode == Seq3AttachmentMode.LINKED) {
+                            when (val result = onImportLinkedDiagram(parsed.source, parsed.dialect, true)) {
+                                is Seq3SourceImportResult.Failure -> importFailure = result.diagnostics.joinToString(" ") { it.message }
+                                else -> pendingEvidenceImport = null
+                            }
+                        } else {
+                            val success = pendingEvidenceImport ?: return@clickable
+                            encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment,
+                                sourceOverride = success.canonicalSource).let(onUpdateDiagramText)
+                            pendingEvidenceImport = null
+                        }
+                    }.padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                }
+            }
+            importFailure?.let { AppText(it, color = tc.td, fontSize = 10.sp) }
             Spacer(Modifier.height(6.dp))
         }
         when {

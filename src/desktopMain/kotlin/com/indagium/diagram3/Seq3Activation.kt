@@ -78,16 +78,18 @@ private const val SEQ3_MAX_ACTIVATION_DEPTH = 8
 
 /**
  * Pairs [events] — one per drawn/emitted row, in row order — into activation spans via a stack
- * machine: one `ArrayDeque<Int>` of open start-[Seq3ActivationEvent.index] values per lifeline id,
+ * machine: one stack of open frames per callee lifeline id,
  * walked once over [events] in order.
  *
  * | `kind` | action |
  * |---|---|
- * | `CALL` | push `index` on [toLifelineId]'s stack (the callee is what starts executing); `depth`
- * |         | is that stack's size BEFORE the push. A null `toLifelineId` (an unresolved-target
+ * | `CALL` | push a frame containing caller, callee, `index`, and depth on [toLifelineId]'s stack
+ * |         | (the callee is what starts executing). A null `toLifelineId` (an unresolved-target
  * |         | message) is a no-op — there is no lifeline to open a bar on. |
- * | `RETURN` | pop the top open index on [fromLifelineId]'s stack (the sender of a return is what
- * |           | stops executing) and close that span at this `index`. |
+ * | `RETURN` | with a null [Seq3ActivationEvent.toLifelineId], pop the top frame on
+ * |           | [fromLifelineId]'s stack (the legacy per-callee LIFO behavior). With a target,
+ * |           | close the most recently opened frame whose caller is that target and whose callee
+ * |           | is [fromLifelineId]. A target that has no matching frame is a no-op. |
  * | `ASYNC`/`SELF`/`NOTE` | neutral — no push, no pop. |
  *
  * Rule 1 — **unmatched calls close at the last row index that touches their lifeline**
@@ -103,9 +105,10 @@ private const val SEQ3_MAX_ACTIVATION_DEPTH = 8
  * every activation bar on a fresh document (defeating the whole feature) or hand Mermaid invalid
  * syntax.
  *
- * Rule 2 — **unmatched returns are silently dropped.** A `RETURN` whose `fromLifelineId` stack is
- * empty opens and closes nothing; this package's posture everywhere is never to throw on degenerate
- * input (see `utils/TextMatch.kt`'s own doc for the same idea one layer down).
+ * Rule 2 — **unmatched returns are silently dropped.** A `RETURN` whose sender stack is empty, or
+ * whose explicit target has no matching caller/callee frame, opens and closes nothing; this
+ * package's posture everywhere is never to throw on degenerate input (see `utils/TextMatch.kt`'s
+ * own doc for the same idea one layer down).
  *
  * Rule 3 — the [SEQ3_MAX_ACTIVATION_DEPTH] cap: see that constant's own doc.
  *
@@ -123,8 +126,17 @@ private const val SEQ3_MAX_ACTIVATION_DEPTH = 8
  * Returned spans are sorted by [Seq3ActivationSpan.startIndex] then [Seq3ActivationSpan.lifelineId]
  * so callers (and tests) never depend on `HashMap`/`ArrayDeque` iteration order.
  */
+private data class Seq3OpenActivationFrame(
+    val callerLifelineId: String,
+    val calleeLifelineId: String,
+    val startIndex: Int,
+    val depth: Int,
+)
+
 fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List<Seq3ActivationSpan> {
-    val openStacks = mutableMapOf<String, ArrayDeque<Int>>()
+    // A list is deliberately used instead of a plain stack: explicitly addressed RETURN events
+    // must remove the newest frame for a particular caller while preserving unrelated frames.
+    val openStacks = mutableMapOf<String, MutableList<Seq3OpenActivationFrame>>()
     val closedSpans = mutableListOf<Seq3ActivationSpan>()
 
     // Rule 1's fallback target: the last row index touching each lifeline, either as sender or
@@ -145,22 +157,39 @@ fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List
             // already-correct behavior for any CALL that never got an explicit RETURN.
             Seq3Kind.CALL, Seq3Kind.CREATE -> {
                 val calleeId = event.toLifelineId ?: continue
-                val stack = openStacks.getOrPut(calleeId) { ArrayDeque() }
-                if (stack.size < SEQ3_MAX_ACTIVATION_DEPTH) stack.addLast(event.index)
+                val stack = openStacks.getOrPut(calleeId) { mutableListOf() }
+                if (stack.size < SEQ3_MAX_ACTIVATION_DEPTH) {
+                    stack += Seq3OpenActivationFrame(
+                        callerLifelineId = event.fromLifelineId,
+                        calleeLifelineId = calleeId,
+                        startIndex = event.index,
+                        depth = stack.size,
+                    )
+                }
                 // Rule 3: past the cap, the push is dropped — no span opens for it, and no
                 // corresponding pop will find it, which is fine (rule 2 drops that pop too).
             }
             Seq3Kind.RETURN -> {
                 val stack = openStacks[event.fromLifelineId]
-                if (stack != null && stack.isNotEmpty()) {
-                    // The popped entry is always the current top, so its depth (the stack's size
-                    // at the moment IT was pushed) equals the stack's size right now, minus one —
-                    // see this file's own reasoning: nothing can sit above it in a LIFO stack while
-                    // it is still open, so its distance from the bottom never changes while open.
-                    val depth = stack.size - 1
-                    val startIndex = stack.removeLast()
-                    closedSpans += Seq3ActivationSpan(event.fromLifelineId, startIndex, event.index, depth, unmatched = false)
-                } // Rule 2: an empty stack means an unmatched return — dropped, opens/closes nothing.
+                val frame = when {
+                    stack.isNullOrEmpty() -> null
+                    // Keep historic documents and synthetic callers that omit a return target
+                    // compatible: they retain the old per-callee LIFO pairing.
+                    event.toLifelineId == null -> stack.removeAt(stack.lastIndex)
+                    else -> stack.indexOfLast {
+                        it.callerLifelineId == event.toLifelineId &&
+                            it.calleeLifelineId == event.fromLifelineId
+                    }.takeIf { it >= 0 }?.let(stack::removeAt)
+                }
+                if (frame != null) {
+                    closedSpans += Seq3ActivationSpan(
+                        lifelineId = frame.calleeLifelineId,
+                        startIndex = frame.startIndex,
+                        endIndex = event.index,
+                        depth = frame.depth,
+                        unmatched = false,
+                    )
+                } // Rule 2: no frame means an unmatched return — dropped, opens/closes nothing.
             }
             // WP9 enum append forces a decision here (this file is otherwise off limits per that
             // package's brief) — LOST/FOUND join the existing neutral bucket, not a new one: both
@@ -183,12 +212,12 @@ fun seq3ActivationSpans(events: List<Seq3ActivationEvent>, lastIndex: Int): List
     }
 
     // Whatever is left open never saw a RETURN — rule 1 closes each at its lifeline's last
-    // touching row. Depth is the entry's position from the bottom of its own stack (0-indexed),
-    // which `ArrayDeque` preserves in push order.
+    // touching row. Frames retain their opening depth so targeted returns can safely close a
+    // non-top frame without changing the nesting identity of unrelated frames.
     for ((lifelineId, stack) in openStacks) {
-        stack.forEachIndexed { depth, startIndex ->
+        stack.forEach { frame ->
             val endIndex = lastTouchIndex[lifelineId] ?: lastIndex
-            closedSpans += Seq3ActivationSpan(lifelineId, startIndex, endIndex, depth, unmatched = true)
+            closedSpans += Seq3ActivationSpan(lifelineId, frame.startIndex, endIndex, frame.depth, unmatched = true)
         }
     }
 

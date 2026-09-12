@@ -70,6 +70,7 @@ import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3GuidedPassState
+import com.indagium.diagram3.Seq3MessageLabelStyle
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Operand
@@ -271,8 +272,8 @@ internal fun seq3PanelVisible(view: Seq3ViewState): Boolean =
     view.messagesSectionOpen || view.lifelinesSectionOpen || view.artifactsSectionOpen
 
 /** Design variant 1a's diagram-presentation group — "how does this diagram present itself": the
- *  PlantUML/Mermaid dialect control, the `#n`/`⏱ Time`/`▮ Bars`/`Δt` prefix toggles, then the theme
- *  swatch.
+ *  PlantUML/Mermaid dialect control, the `#n`/`⏱ Time`/`▮ Bars`/`Δt` prefix toggles, the compact
+ *  message-label style toggle, then the theme swatch.
  *  Unchanged in behaviour from before the header rework — only grouped and hairline-bounded now
  *  instead of running directly into the panes toggles on one side and the output actions on the
  *  other. */
@@ -293,8 +294,44 @@ private fun Seq3DiagramPresentationGroup(state: AppState, session: Seq3Workspace
             },
         )
         Seq3InlinePrefixToggles(state, session)
+        Seq3MessageLabelStyleToggle(state, session)
         Seq3DocumentThemeDropdown(state, session)
     }
+}
+
+/** Compact document-level toggle for A9's conservative operation-signature presentation. The
+ *  `ƒ()` label is intentionally terse for the header; the tooltip carries the explicit action and
+ *  the selected accent state makes the current mode visible without widening the toolbar. */
+@Composable
+private fun Seq3MessageLabelStyleToggle(state: AppState, session: Seq3WorkspaceSession) {
+    val style = session.document.messageLabelStyle
+    val focusRequester = LocalSeq3FocusRequester.current
+    ToolbarBtn(
+        label = "ƒ()",
+        tooltip = seq3MessageLabelStyleTooltip(style),
+        active = style == Seq3MessageLabelStyle.UML_SIGNATURE,
+        modifier = Modifier.height(28.dp),
+        onClick = {
+            seq3ToggleMessageLabelStyle(state, session)
+            focusRequester?.let { runCatching { it.requestFocus() } }
+        },
+    )
+}
+
+/** Human-readable tooltip for the compact A9 toolbar control. */
+internal fun seq3MessageLabelStyleTooltip(style: Seq3MessageLabelStyle): String = when (style) {
+    Seq3MessageLabelStyle.FREE_TEXT -> "Use UML signature labels"
+    Seq3MessageLabelStyle.UML_SIGNATURE -> "Use free-text labels"
+}
+
+/** The pure mapping behind [Seq3MessageLabelStyleToggle], kept outside composition for focused UI
+ *  mapping tests and to make the toggle's one-command/one-undo contract explicit. */
+internal fun seq3ToggleMessageLabelStyle(state: AppState, session: Seq3WorkspaceSession) {
+    val next = when (session.document.messageLabelStyle) {
+        Seq3MessageLabelStyle.FREE_TEXT -> Seq3MessageLabelStyle.UML_SIGNATURE
+        Seq3MessageLabelStyle.UML_SIGNATURE -> Seq3MessageLabelStyle.FREE_TEXT
+    }
+    state.seq3Sessions.applyCommand(session.id, Seq3Command.SetMessageLabelStyle(next))
 }
 
 /** Design variant 1a's output group — the header's two actions on the PRODUCED diagram, as

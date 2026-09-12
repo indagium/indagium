@@ -315,7 +315,24 @@ fun updateSeq3NoteExportMode(noteText: String, exportMode: DiagramExportMode): S
  *
  * Returns null for an unparseable note, matching its neighbours' contract.
  */
-fun adoptSeq3NoteSource(noteText: String): String? = updateSeq3NoteExportMode(noteText, DiagramExportMode.SOURCE)
+fun adoptSeq3NoteSource(noteText: String): String? {
+    val parsed = parseSeq3Note(noteText) ?: return null
+    // A hand-authored source cannot remain a live link: the session's next ordinary edit would
+    // overwrite text the user explicitly chose to keep.  Preserve the note's caption/export
+    // representation while dropping only the live-library pointer.
+    val attachment = parsed.attachment?.let { current ->
+        if (current.mode == Seq3AttachmentMode.LINKED) current.copy(diagramId = null, mode = Seq3AttachmentMode.SNAPSHOT, revision = null)
+        else current
+    }
+    return encodeSeq3Note(
+        parsed.document,
+        parsed.dialect,
+        parsed.caption,
+        DiagramExportMode.SOURCE,
+        attachment = attachment,
+        sourceOverride = parsed.source,
+    )
+}
 
 /**
  * WP14: true when [text] is a v3 diagram note whose fence has DEFINITELY drifted from the header's
@@ -402,6 +419,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // WP18: append-last, same invariant — see Seq3Model.kt's own doc on stateInvariants for why an
     // absent key decoding to emptyList() (below) is load-bearing.
     "stateInvariants" to d.stateInvariants.map(::stateInvariantToMap),
+    // A9: append-last, so every note written before message-label presentation existed decodes
+    // with the original FREE_TEXT rendering.
+    "messageLabelStyle" to d.messageLabelStyle.name,
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -418,6 +438,111 @@ private fun withinSeq3DocumentBounds(
     lifelineMaps.size <= MAX_SEQ3_LIFELINES && messageMaps.size <= MAX_SEQ3_MESSAGES &&
         fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES &&
         delayMaps.size <= MAX_SEQ3_DELAYS && stateInvariantMaps.size <= MAX_SEQ3_STATE_INVARIANTS
+
+/**
+ * Validates an in-memory candidate before import/session mutation using the same caps as decode.
+ * Unlike decoding, this reports the first user-actionable reason so source import can attach a
+ * line diagnostic without serializing and reparsing the candidate.
+ */
+internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when {
+    document.lifelines.size > MAX_SEQ3_LIFELINES -> "Document has too many lifelines."
+    document.messages.size > MAX_SEQ3_MESSAGES -> "Document has too many messages."
+    document.fragments.size > MAX_SEQ3_FRAGMENTS -> "Document has too many fragments."
+    document.notes.size > MAX_SEQ3_NOTES -> "Document has too many notes."
+    document.delays.size > MAX_SEQ3_DELAYS -> "Document has too many delays."
+    document.stateInvariants.size > MAX_SEQ3_STATE_INVARIANTS -> "Document has too many state invariants."
+    document.messages.any { it.occurrences.size > MAX_SEQ3_OCCURRENCES_PER_MESSAGE } ->
+        "A message has too many occurrences."
+    document.messages.any { it.match.captures.size > MAX_SEQ3_CAPTURES_PER_MATCH } ->
+        "A message has too many captures."
+    document.fragments.any {
+        it.messageIds.size > MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT ||
+            it.occurrenceRefs.size > MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT
+    } -> "A fragment has too many message references."
+    document.fragments.any { it.elseOperands.size > MAX_SEQ3_OPERANDS_PER_FRAGMENT } ->
+        "A fragment has too many operands."
+    seq3DocumentStrings(document).any { it.length > MAX_SEQ3_STRING_CHARS } ->
+        "Document contains a string exceeding the supported size."
+    Json.encode(documentToMap(document)).length > MAX_SEQ3_HEADER_CHARS ->
+        "Document metadata exceeds the supported header size."
+    else -> null
+}
+
+private fun seq3DocumentStrings(document: Seq3Document): Sequence<String> = sequence {
+    yieldSeq3DocumentMetadata(document)
+    yieldSeq3MessageStrings(document.messages)
+    yieldSeq3StructureStrings(document)
+}
+
+private suspend fun SequenceScope<String>.yieldSeq3DocumentMetadata(document: Seq3Document) {
+    yield(document.title)
+    document.sourceFile?.let { yield(it) }
+    document.themePresetName?.let { yield(it) }
+    when (val range = document.range) {
+        is Seq3Range.Time -> {
+            yield(range.fromTs)
+            yield(range.toTs)
+        }
+        else -> Unit
+    }
+    document.lifelines.forEach { lifeline ->
+        yield(lifeline.id)
+        yield(lifeline.name)
+        lifeline.tagIds.forEach { yield(it) }
+    }
+}
+
+private suspend fun SequenceScope<String>.yieldSeq3MessageStrings(messages: List<Seq3Message>) {
+    messages.forEach { message ->
+        yield(message.id)
+        yield(message.match.tag)
+        yield(message.match.template)
+        message.match.captures.forEach { yield(it.name) }
+        yield(message.fromLifelineId)
+        message.toLifelineId?.let { yield(it) }
+        yield(message.labelTemplate)
+        message.movedOutFromMessageId?.let { yield(it) }
+        yield(message.manualRawTimestamp)
+        message.occurrences.forEach { occurrence ->
+            yield(occurrence.rawTimestamp)
+            yield(occurrence.text)
+            occurrence.captureValues.forEach { (name, value) ->
+                yield(name)
+                yield(value)
+            }
+        }
+    }
+}
+
+private suspend fun SequenceScope<String>.yieldSeq3StructureStrings(document: Seq3Document) {
+    document.fragments.forEach { fragment ->
+        yield(fragment.id)
+        yield(fragment.label)
+        fragment.messageIds.forEach { yield(it) }
+        fragment.occurrenceRefs.forEach { yield(it.messageId) }
+        fragment.elseOperands.forEach { operand ->
+            yield(operand.id)
+            yield(operand.guard)
+            yield(operand.startsAtMessageId)
+        }
+        fragment.refDiagramId?.let { yield(it) }
+    }
+    document.notes.forEach { note ->
+        yield(note.id)
+        yield(note.text)
+        note.messageIds.forEach { yield(it) }
+    }
+    document.delays.forEach { delay ->
+        yield(delay.id)
+        yield(delay.afterMessageId)
+        yield(delay.label)
+    }
+    document.stateInvariants.forEach { invariant ->
+        yield(invariant.id)
+        yield(invariant.messageId)
+        yield(invariant.captureName)
+    }
+}
 
 private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     val lifelineMaps = map.mapList("lifelines").orEmpty()
@@ -470,6 +595,8 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         // "delays" just above. A malformed individual element drops out via mapNotNull rather than
         // failing the whole document (stateInvariantFromMap's own "occurrenceRefFromMap posture").
         stateInvariants = stateInvariantMaps.mapNotNull(::stateInvariantFromMap),
+        // A9: old codecs have no label-style key and therefore retain the pre-A9 free-text output.
+        messageLabelStyle = enumFromName(map.str("messageLabelStyle"), Seq3MessageLabelStyle.FREE_TEXT),
     )
 }
 

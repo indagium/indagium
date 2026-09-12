@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.utils.LogTimelinePoint
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
@@ -10,6 +11,7 @@ import com.indagium.utils.formatDelta
 import com.indagium.utils.formatDuration
 import com.indagium.utils.formatSignedDelta
 import com.indagium.utils.parseMillisOfDay
+import com.indagium.utils.unrollLogTimeline
 import com.indagium.utils.widestAdjacentGapMagnitudeMs
 import com.indagium.utils.widestAnchorDeltaMagnitudeMs
 import kotlin.test.Test
@@ -109,6 +111,19 @@ class LogTimeTest {
         // from deltaMillis into this function, so assert it here directly rather than only
         // through the deltaMillis wrapper.
         assertEquals(-500L, elapsedMillisOfDay(parseMillisOfDay("10:00:01.000"), parseMillisOfDay("10:00:00.500")))
+    }
+
+    @Test
+    fun unrollLogTimelineAcceptsPersistedEntryIdAndTimePoints() {
+        val timeline = unrollLogTimeline(
+            listOf(
+                LogTimelinePoint(17, parseMillisOfDay("23:59:59.900")),
+                LogTimelinePoint(42, parseMillisOfDay("00:00:00.100")),
+            ),
+        )
+
+        assertEquals(86_399_900L, timeline.byId[17])
+        assertEquals(86_400_100L, timeline.byId[42])
     }
 
     @Test

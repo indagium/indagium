@@ -331,6 +331,28 @@ internal fun CompareView(
                                     onNavigateVideoFrame = { state.navigateToVideoFrame(leftTab.id, it) },
                                     onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(leftTab.id, blockId) },
                                     onNavigateDiagramLine = { entryId -> state.navigateToLogLine(leftTab.id, entryId) },
+                                    onImportLinkedDiagram = { blockId, source, dialect, confirm ->
+                                        val diagramId = leftTab.annotations.blocks
+                                            .filterIsInstance<com.indagium.model.AnnBlock.Note>()
+                                            .firstOrNull { it.id == blockId }
+                                            ?.text
+                                            ?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
+                                            ?.attachment
+                                            ?.diagramId
+                                        val session = diagramId?.let { id ->
+                                            state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id }
+                                        }
+                                            ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
+                                        if (session == null) {
+                                            state.pendingDiagramNotice = DiagramNotice(
+                                                "Couldn't import diagram edits",
+                                                "This linked diagram is not open in a workspace.",
+                                            )
+                                            com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
+                                        } else {
+                                            state.seq3Sessions.importSource(session.id, source, dialect, confirm)
+                                        }
+                                    },
                                     diagramLibraryItems = state.seq3Sessions.libraryForTab(leftTab),
                                     onCreateDiagram = { state.seq3Sessions.begin(leftTab.id, leftTab.selected) },
                                     onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(leftTab.id) },

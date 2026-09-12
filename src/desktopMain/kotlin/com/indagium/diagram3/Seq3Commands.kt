@@ -152,6 +152,11 @@ sealed class Seq3Command {
     /** WP15: toggle inline `[+0.140]` elapsed-gap tags — see [Seq3Document.showElapsed]'s own doc
      *  for why this is document-level rather than a view flag. Mirrors [SetShowActivations]. */
     data class SetShowElapsed(val show: Boolean) : Seq3Command()
+
+    /** A9: switch the document-wide message-label presentation. The snapshot undo mechanism makes
+     *  this one compact toolbar action exactly one undoable edit, while every renderer reads the
+     *  resulting document style on its next pass. */
+    data class SetMessageLabelStyle(val style: Seq3MessageLabelStyle) : Seq3Command()
 }
 
 /** Snapshot-based undo record — see this file's header for why a whole-document snapshot, not a
@@ -172,7 +177,17 @@ fun applySeq3Command(document: Seq3Document, command: Seq3Command): Seq3CommandR
     return if (!outcome.applied) {
         Seq3CommandResult(document, applied = false, reason = outcome.reason)
     } else {
-        Seq3CommandResult(outcome.document, applied = true, undo = Seq3UndoEntry(outcome.label, document))
+        // All mutation paths meet here: endpoint/kind edits, timestamp/order/visibility changes,
+        // custom insertion, replacement, and reviewed regeneration.  Compare lifecycle
+        // violations against the prior document so a legacy malformed diagram can still receive
+        // unrelated edits, while any newly introduced defect rejects this entire command before it
+        // reaches undo history.
+        val lifecycleViolation = seq3NewLifecycleViolation(document, outcome.document)
+        if (lifecycleViolation != null) {
+            Seq3CommandResult(document, applied = false, reason = lifecycleViolation.rejectionReason())
+        } else {
+            Seq3CommandResult(outcome.document, applied = true, undo = Seq3UndoEntry(outcome.label, document))
+        }
     }
 }
 
@@ -223,6 +238,7 @@ private fun dispatch(document: Seq3Document, command: Seq3Command): Outcome = wh
     is Seq3Command.SetShowTimestamps -> dispatchSetShowTimestamps(document, command)
     is Seq3Command.SetShowActivations -> dispatchSetShowActivations(document, command)
     is Seq3Command.SetShowElapsed -> dispatchSetShowElapsed(document, command)
+    is Seq3Command.SetMessageLabelStyle -> dispatchSetMessageLabelStyle(document, command)
 }
 
 private fun dispatchBulk(document: Seq3Document, command: Seq3Command.Bulk): Outcome {
@@ -587,4 +603,14 @@ private fun dispatchSetShowActivations(document: Seq3Document, command: Seq3Comm
 private fun dispatchSetShowElapsed(document: Seq3Document, command: Seq3Command.SetShowElapsed): Outcome {
     if (document.showElapsed == command.show) return unapplied(document, "No change")
     return applied(document.copy(showElapsed = command.show), "Toggle elapsed tags")
+}
+
+private fun dispatchSetMessageLabelStyle(document: Seq3Document, command: Seq3Command.SetMessageLabelStyle): Outcome {
+    if (document.messageLabelStyle == command.style) return unapplied(document, "No change")
+    val label = if (command.style == Seq3MessageLabelStyle.UML_SIGNATURE) {
+        "Use UML signatures"
+    } else {
+        "Use free-text labels"
+    }
+    return applied(document.copy(messageLabelStyle = command.style), label)
 }

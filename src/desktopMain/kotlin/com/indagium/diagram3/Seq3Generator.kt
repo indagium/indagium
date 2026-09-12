@@ -5,6 +5,7 @@ import com.indagium.model.LogLevel
 import com.indagium.source.SourceIndex
 import com.indagium.source.SourceTraceInferenceEngine
 import com.indagium.utils.CancellationCheck
+import com.indagium.utils.LogTimelinePoint
 import com.indagium.utils.TS_UNKNOWN
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.unrollLogTimeline
@@ -721,12 +722,25 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
     val sorted = selectedEntries.sortedBy { it.id }
     val tokenized = tokenizeSeq3Messages(tag, sorted.map { Seq3TokenizeInput(it.id.toString(), it.msg) })
     val match = tokenized.match ?: return Seq3AddResult.Rejected(tokenized.error ?: "Selected rows do not share a provable pattern")
-    // Midnight-rollover fix: unlike `generateSeq3`, there is no whole-range `resolved` list in scope
-    // here — a queue-panel "＋ Add" only ever sees the rows the user picked. Unrolling just [sorted]
-    // (already small, already the exact set this message's evidence is built from) is enough to get
-    // this handful of occurrences onto the same monotonic axis as the rest of the diagram; there is
-    // nothing cheaper to unroll and nothing wider worth reaching for.
-    val elapsedByEntryId = unrollLogTimeline(sorted).byId
+    // A selection can cross midnight even when every *selected* timestamp is after midnight.  Its
+    // persisted neighbours are the evidence that tells the unroller which day that 00:00 reading
+    // belongs to, so align the selected rows with every existing occurrence before assigning their
+    // elapsed values.  Do not rewrite prior occurrences: old documents may intentionally retain
+    // their saved elapsed axis, and this command owns only the message it is adding.
+    val timelinePoints = linkedMapOf<Int, LogTimelinePoint>()
+    document.messages.asSequence()
+        .flatMap { it.occurrences.asSequence() }
+        .forEach { occurrence ->
+            timelinePoints.putIfAbsent(
+                occurrence.entryId,
+                LogTimelinePoint(occurrence.entryId, occurrence.timestampMillis, occurrence.rawTimestamp),
+            )
+        }
+    sorted.forEach { entry ->
+        val millis = parseMillisOfDay(entry.ts).takeUnless { it == TS_UNKNOWN }
+        timelinePoints[entry.id] = LogTimelinePoint(entry.id, millis, entry.ts)
+    }
+    val elapsedByEntryId = unrollLogTimeline(timelinePoints.values.sortedBy { it.id }).byId
     val occurrences = sorted.map { entry -> toOccurrence(entry, tokenized.captureValuesByOccurrence[entry.id.toString()].orEmpty(), elapsedByEntryId) }
 
     val newMessageId = nextSeq3MessageId(withLifeline)
@@ -752,12 +766,12 @@ fun addSeq3MessageFromSelection(document: Seq3Document, selectedEntries: List<Lo
  * semantic fragment. This supports inserting an authored message into an existing OPT/ALT/LOOP/PAR
  * section without manufacturing a second, overlapping fragment.
  */
-/** [addSeq3CustomMessage]'s own per-kind target validation, pulled out into its own function
- *  (WP9) once the LOST/FOUND branch pushed the caller over detekt's CyclomaticComplexMethod
- *  threshold — the logic itself is unchanged from before that branch existed, just no longer
- *  inline. Returns the resolved `toLifelineId` (nullable) on the right, or a rejection reason on
- *  the left, so the caller's own early-return shape stays a single `when`. */
+
 private fun resolveSeq3CustomMessageTarget(spec: Seq3CustomMessageSpec, from: Seq3Lifeline, document: Seq3Document): Seq3CustomMessageResult.Rejected? =
+    // [addSeq3CustomMessage]'s own per-kind target validation was pulled out into this function
+    // (WP9) once the LOST/FOUND branch pushed the caller over detekt's CyclomaticComplexMethod
+    // threshold. The logic is unchanged; the resolved nullable target or rejection reason keeps
+    // the caller's early-return shape as a single `when`.
     // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here instead of
     // silently inheriting the CALL/RETURN/ASYNC "ordinary target lifeline" rule.
     when (spec.kind) {

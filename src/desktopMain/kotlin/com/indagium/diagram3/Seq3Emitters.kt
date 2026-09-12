@@ -1,6 +1,8 @@
 package com.indagium.diagram3
 
+import com.indagium.debug.Json
 import com.indagium.utils.elapsedMillisOfDay
+import java.util.Base64
 
 // ── Mermaid / PlantUML text emitters ────────────────────────────────────────────────────────
 //
@@ -24,6 +26,35 @@ import com.indagium.utils.elapsedMillisOfDay
 
 private val NON_IDENTIFIER_CHAR = Regex("[^A-Za-z0-9_]")
 private const val ALIAS_SUFFIX_START = 2
+
+/*
+ * These comments are intentionally part of the source, rather than the note header.  The header
+ * tells us which document produced a fence; a line marker tells the importer which *piece* of the
+ * document a hand edit belongs to.  Mermaid ignores %% comments and PlantUML ignores apostrophe
+ * comments.  Keep the payload small and versioned: it is an identity hint, never an alternative
+ * serialization of the document (the note codec remains that serialization).
+ */
+private fun seq3SourceMarker(type: String, id: String, entryId: Int? = null, role: String? = null): String {
+    val payload = buildMap<String, Any?> {
+        put("t", type)
+        put("id", id)
+        entryId?.let { put("entry", it) }
+        role?.let { put("role", it) }
+    }
+    return Base64.getUrlEncoder().withoutPadding().encodeToString(Json.encode(payload).toByteArray(Charsets.UTF_8))
+}
+
+private fun StringBuilder.appendSeq3SourceMarker(
+    dialect: Seq3Dialect,
+    type: String,
+    id: String,
+    entryId: Int? = null,
+    role: String? = null,
+    indent: String = "",
+) {
+    append(indent).append(if (dialect == Seq3Dialect.MERMAID) "%%" else "'")
+        .append(" indagium-seq3:v1 ").append(seq3SourceMarker(type, id, entryId, role)).append('\n')
+}
 
 // Sanitizes every lifeline's id into a valid `[A-Za-z0-9_]` alias (both dialects accept the same
 // charset) and dedupes with a numeric suffix — done once over the whole list so two lifelines that
@@ -168,30 +199,45 @@ private sealed class Seq3Emission {
         override val timestampMillis: Long? = null,
     ) : Seq3Emission()
 
-    /** [timestampMillis] seeded from the FIRST elided occurrence's own timestamp, exactly like
-     *  Seq3Layout.kt's `Emission.Elision` — see that type's own doc: "a reasonable, defensible
-     *  placement, not required to be exact", now load-bearing here too since this row must sort
-     *  immediately after the arrow it was elided from. */
+    /** [timestampMillis] remains the FIRST elided occurrence's wall-clock time for display,
+     *  while [orderingMillis] carries the corresponding day-unrolled position.  An elision has no
+     *  occurrence id, so it cannot otherwise join the same monotonic ordering axis as its arrows. */
     data class Elided(
         override val messageId: String,
         val participantIdx: Int,
         val count: Int,
         override val timestampMillis: Long? = null,
+        val orderingMillis: Long? = null,
     ) : Seq3Emission() {
         override val occurrenceEntryId: Int? get() = null
     }
 }
 
+/** Ordering/gap value shared by the text dialects.  The elision's displayed timestamp remains a
+ * wall-clock value, but its separate elapsed position keeps it on the same side of midnight as the
+ * first arrow it represents. */
+private fun seq3EmissionOrderingMillis(emission: Seq3Emission, elapsedByEntryId: Map<Int, Long>): Long? =
+    (emission as? Seq3Emission.Elided)?.orderingMillis
+        ?: emission.occurrenceEntryId?.let(elapsedByEntryId::get)
+        ?: emission.timestampMillis
+
 // The collapsed/multi-occurrence label keeps `{name}` slots visible (the templated form); a
 // single rendered arrow substitutes that occurrence's real captured values back in — the same
 // distinction the design spec draws between a queue row's pattern and an individual occurrence.
-private fun templatedLabel(message: Seq3Message): String = message.labelTemplate
+private fun templatedLabel(
+    message: Seq3Message,
+    style: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): String = seq3MessageLabelTemplate(message, style)
 
 // occurrenceLabel/collapsedRepeatLabel now live in Seq3LabelSummary.kt, shared with Seq3Layout —
 // see that file's header on why (WP9: the two copies of occurrenceLabel had drifted apart once
 // already, the same class of bug round 1 hit with arrow styles).
 
-private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>): List<Seq3Emission> {
+private fun expandMessage(
+    message: Seq3Message,
+    lifelineIndex: Map<String, Int>,
+    labelStyle: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): List<Seq3Emission> {
     val fromIdx = lifelineIndex[message.fromLifelineId] ?: return emptyList()
     val occurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && occurrences.isEmpty()) return emptyList()
@@ -205,7 +251,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
             Seq3Emission.NoteLine(
                 message.id,
                 fromIdx,
-                collapsedRepeatLabel(message, occurrences),
+                collapsedRepeatLabel(message, occurrences, labelStyle),
                 occurrences.firstOrNull()?.entryId,
                 message.primaryTimestampMillis,
             ),
@@ -219,7 +265,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
             Seq3Emission.NeedsTarget(
                 message.id,
                 fromIdx,
-                collapsedRepeatLabel(message, occurrences),
+                collapsedRepeatLabel(message, occurrences, labelStyle),
                 occurrences.firstOrNull()?.entryId,
                 message.primaryRawTimestamp,
                 message.primaryTimestampMillis,
@@ -235,7 +281,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                 message.id,
                 fromIdx,
                 toIdx,
-                templatedLabel(message),
+                templatedLabel(message, labelStyle),
                 message.kind,
                 1,
                 rawTimestamp = message.primaryRawTimestamp,
@@ -249,7 +295,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                 message.id,
                 fromIdx,
                 toIdx,
-                occurrenceLabel(message, occ),
+                occurrenceLabel(message, occ, labelStyle),
                 message.kind,
                 1,
                 occ.entryId,
@@ -257,14 +303,14 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                 seq3EmissionTimestamp(message, occ.timestampMillis),
             )
         }
-        Seq3Repeat.FIRST_LAST -> firstAndLastEmissions(message, fromIdx, toIdx, occurrences)
+        Seq3Repeat.FIRST_LAST -> firstAndLastEmissions(message, fromIdx, toIdx, occurrences, labelStyle)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
             listOf(
                 Seq3Emission.Arrow(
                     message.id,
                     fromIdx,
                     toIdx,
-                    collapsedRepeatLabel(message, occurrences),
+                    collapsedRepeatLabel(message, occurrences, labelStyle),
                     message.kind,
                     // COUNT, not "how many rows do I draw" — see Seq3Layout.expandForLayout's
                     // identical COLLAPSE_ABOVE branch for why this reads totalOccurrenceCount.
@@ -284,7 +330,7 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
                     message.id,
                     fromIdx,
                     toIdx,
-                    occurrenceLabel(message, occ),
+                    occurrenceLabel(message, occ, labelStyle),
                     message.kind,
                     1,
                     occ.entryId,
@@ -296,7 +342,13 @@ private fun expandMessage(message: Seq3Message, lifelineIndex: Map<String, Int>)
     }
 }
 
-private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int, occurrences: List<Seq3Occurrence>): List<Seq3Emission> {
+private fun firstAndLastEmissions(
+    message: Seq3Message,
+    fromIdx: Int,
+    toIdx: Int,
+    occurrences: List<Seq3Occurrence>,
+    labelStyle: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): List<Seq3Emission> {
     if (occurrences.size <= 1) {
         val only = occurrences.first()
         return listOf(
@@ -304,7 +356,7 @@ private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int
                 message.id,
                 fromIdx,
                 toIdx,
-                occurrenceLabel(message, only),
+                occurrenceLabel(message, only, labelStyle),
                 message.kind,
                 1,
                 only.entryId,
@@ -322,7 +374,7 @@ private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int
                 message.id,
                 fromIdx,
                 toIdx,
-                occurrenceLabel(message, first),
+                occurrenceLabel(message, first, labelStyle),
                 message.kind,
                 1,
                 first.entryId,
@@ -331,7 +383,15 @@ private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int
             ),
         )
         if (elided > 0) {
-            add(Seq3Emission.Elided(message.id, fromIdx, elided, seq3EmissionTimestamp(message, first.timestampMillis)))
+            add(
+                Seq3Emission.Elided(
+                    message.id,
+                    fromIdx,
+                    elided,
+                    seq3EmissionTimestamp(message, first.timestampMillis),
+                    seq3EmissionElapsed(message, first.elapsedMillis),
+                ),
+            )
         }
         val last = occurrences.last()
         add(
@@ -339,7 +399,7 @@ private fun firstAndLastEmissions(message: Seq3Message, fromIdx: Int, toIdx: Int
                 message.id,
                 fromIdx,
                 toIdx,
-                occurrenceLabel(message, last),
+                occurrenceLabel(message, last, labelStyle),
                 message.kind,
                 1,
                 last.entryId,
@@ -372,7 +432,7 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
     val unordered = mutableListOf<Seq3Emission>()
     document.messages.forEach { message ->
         if (message.visibility == Seq3Visibility.HIDDEN) return@forEach
-        unordered += expandMessage(message, lifelineIndex)
+        unordered += expandMessage(message, lifelineIndex, document.messageLabelStyle)
     }
     // Task 0 (round-2 corrections plan, WP11 prerequisite): this used to skip straight from
     // `unordered` to `firstIndex`/`lastIndex`/`indexByOccurrence` below, in plain
@@ -389,7 +449,7 @@ private fun planEmissions(document: Seq3Document): Seq3EmissionPlan {
         document,
         unordered,
         messageIdOf = { emission -> emission.messageId },
-        timestampMillisOf = { emission -> emission.occurrenceEntryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis },
+        timestampMillisOf = { emission -> seq3EmissionOrderingMillis(emission, elapsedByEntryId) },
         entryIdOf = { emission -> emission.occurrenceEntryId },
     )
     val firstIndex = HashMap<String, Int>()
@@ -455,7 +515,9 @@ private fun prefixSeq3EmissionLabels(
     if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
     var lastRealElapsedMillis: Long? = null
-    fun orderingValue(emission: Seq3Emission): Long? = emission.occurrenceEntryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis
+
+    fun orderingValue(emission: Seq3Emission): Long? = seq3EmissionOrderingMillis(emission, elapsedByEntryId)
+
     fun elapsedFor(currentElapsedMillis: Long?): Long? {
         val previous = lastRealElapsedMillis
         return if (previous != null && currentElapsedMillis != null) elapsedMillisOfDay(previous, currentElapsedMillis) else null
@@ -573,13 +635,10 @@ private fun fragmentKeywordLine(kind: Seq3FragmentKind, label: String, escape: (
 // Every [Seq3FragmentKind] except the members of [MERMAID_FALLBACK_FRAGMENT_KINDS] is a real UML
 // 2.x combined-fragment operator that BOTH dialects accept the same bare way: `kind.name.lowercase()`
 // plus the label, closed by a plain `end`. The dialects diverge on that fallback set:
-//   - PlantUML needs no special case for GROUP or NEG/STRICT/CONSIDER/IGNORE. GROUP is not a UML
-//     operator at all — see that enum constant's own doc — but PlantUML invented `group <label>`
-//     for exactly this, which happens to have the exact same shape as every real operator
-//     (`kind.name.lowercase()` + label). NEG/STRICT/CONSIDER/IGNORE (WP11) ARE real UML operators,
-//     so PlantUML's own `neg`/`strict`/`consider`/`ignore` keyword falls straight out of that same
-//     shared `kind.name.lowercase()` call — nothing PlantUML-side to add for them either. REF
-//     (WP17) is the ONE member of this set that DOES need a PlantUML-side special case —
+//   - PlantUML needs no special case for GROUP: it invented `group <label>` for exactly this.
+//     NEG/STRICT/CONSIDER/IGNORE (WP11) are represented as `group <operator> <label>` fallback
+//     blocks because PlantUML does not accept those UML operator names as bare sequence keywords.
+//     REF (WP17) is the member of this set that needs a different PlantUML-side special case —
 //     `plantUmlFragmentOpenLines`'s own doc covers the real `ref over A, B : label` syntax and why
 //     its bracket also skips the generic `end` line below.
 //   - Mermaid has no equivalent for any of the six, and the bare word is a MERMAID PARSE ERROR for
@@ -655,24 +714,36 @@ private fun mermaidFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPla
     }
 }
 
-/** PlantUML's open line for one fragment bracket. GROUP needs no special case here: PlantUML's own
- *  invented `group <label>` already has the exact `kind.name.lowercase()` + label shape every real
- *  UML operator has. Kept as its own function (rather than inlined at the one call site) so the
- *  per-dialect branch structure is symmetric with [mermaidFragmentOpenLines] and the next kind that
- *  needs a real PlantUML-side special case has an obvious place to add it — [REF] (WP17) is that
- *  next kind: unlike every other member, its real PlantUML syntax is `ref over A, B : label`, NOT
- *  `kind.name.lowercase()` + label (confirmed against plantuml.com's own sequence-diagram
- *  documentation — see [Seq3FragmentKind.REF]'s own doc for why that page, not a public grammar
- *  file, is the best available source for this dialect). [plan]/[aliases] are only needed for this
- *  one branch, to compute the `over A, B` participant span via [bracketSpan] — every other kind
- *  ignores them, same as [mermaidFragmentOpenLines] already threads both through for its own
- *  fallback branch's `Note over`. */
+/** PlantUML's open line for one fragment bracket.
+ *
+ * PlantUML has a native `group <label>` block, but its sequence grammar does not accept the UML
+ * interaction operators NEG/STRICT/CONSIDER/IGNORE as bare block keywords. Keep those operators
+ * visible by degrading them to labelled group blocks (`group neg <label>`, etc.). This is a valid
+ * PlantUML construct and, unlike silently dropping the operator, preserves the semantic intent in
+ * exported source. GROUP itself already has the same `group <label>` shape. REF is the one special
+ * case: its real PlantUML syntax is `ref over A, B : label`, a standalone statement rather than a
+ * block (confirmed against PlantUML's sequence-diagram documentation), so it must not receive a
+ * closing `end`. [plan]/[aliases] are only needed for REF's participant span. */
 private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPlan, aliases: List<String>): List<String> {
     val fragment = bracket.fragment
-    return if (fragment.kind == Seq3FragmentKind.REF) {
-        listOf("ref over ${bracketSpan(bracket, plan, aliases)} : ${plantUmlEscape(fragmentLabel(fragment))}")
+    return when (fragment.kind) {
+        Seq3FragmentKind.REF -> listOf("ref over ${bracketSpan(bracket, plan, aliases)} : ${plantUmlEscape(fragmentLabel(fragment))}")
+        Seq3FragmentKind.NEG,
+        Seq3FragmentKind.STRICT,
+        Seq3FragmentKind.CONSIDER,
+        Seq3FragmentKind.IGNORE,
+        -> listOf(plantUmlGroupFallbackLine(fragment))
+        else -> listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
+    }
+}
+
+/** Fallback for UML interaction operators that PlantUML does not expose as sequence keywords. */
+private fun plantUmlGroupFallbackLine(fragment: Seq3Fragment): String {
+    val operator = fragment.kind.name.lowercase()
+    return if (fragment.label.isBlank()) {
+        "group $operator"
     } else {
-        listOf(fragmentKeywordLine(fragment.kind, fragment.label, ::plantUmlEscape))
+        "group $operator ${plantUmlEscape(fragment.label)}"
     }
 }
 
@@ -689,11 +760,9 @@ private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPl
 //   PAR       -> `and <guard>` in Mermaid (its own keyword for a parallel branch) but
 //                `else <guard>` in PlantUML (PlantUML has no `and`; every divided operator reuses
 //                `else`).
-//   CRITICAL  -> `option <guard>` in Mermaid; PlantUML has NO divider syntax for `critical` AT
-//                ALL — there is nothing to fall back to, so a `critical` operand's own messages
-//                silently fold into the preceding branch in PlantUML text. The messages
-//                themselves are still emitted in order; only the branch label is lost, which is
-//                exactly what this deliverable calls for, not a bug to paper over.
+//   CRITICAL  -> `option <guard>` in Mermaid; `else <guard>` in PlantUML, which has no dedicated
+//                CRITICAL divider keyword but can preserve the operand boundary with its generic
+//                alternative syntax.
 //   everything else (OPT/LOOP/BREAK/GROUP) -> no divider in EITHER dialect: UML gives OPT/LOOP/
 //                BREAK exactly one operand, and GROUP isn't a UML combined-fragment operator at
 //                all (see [Seq3FragmentKind]'s own doc) — so a stray `elseOperands` entry left
@@ -703,7 +772,7 @@ private fun plantUmlFragmentOpenLines(bracket: Seq3Bracket, plan: Seq3EmissionPl
 // DO NOT fold these two into one `when (dialect)` helper — same reasoning as
 // [mermaidFragmentOpenLines]'s own header: PAR and CRITICAL genuinely disagree between dialects,
 // so a "unified" version would just relocate the per-dialect branch one level down instead of
-// removing it, while making it easy to miss that CRITICAL has no PlantUML case at all.
+// removing it, while making it easy to miss the dialect-specific CRITICAL spelling.
 
 /** Shared keyword+guard formatting only — NOT a dialect branch (see the header above for why the
  *  two functions below stay separate). Mirrors [fragmentKeywordLine]'s "a blank label leaves the
@@ -723,11 +792,12 @@ private fun mermaidFragmentDividerLine(kind: Seq3FragmentKind, guard: String): S
 }
 
 /** PlantUML's divider line for one [Seq3Operand] belonging to a fragment of [kind], or null when
- *  [kind] has no PlantUML divider — every kind but ALT/PAR, AND (this section's own header table)
- *  CRITICAL itself: PlantUML has no `critical` divider syntax to fall back to. */
+ *  [kind] has no PlantUML divider. CRITICAL uses the generic `else` divider because PlantUML has
+ *  no dedicated `critical` divider keyword. */
 private fun plantUmlFragmentDividerLine(kind: Seq3FragmentKind, guard: String): String? = when (kind) {
     Seq3FragmentKind.ALT -> operandDividerLine("else", guard, ::plantUmlEscape)
     Seq3FragmentKind.PAR -> operandDividerLine("else", guard, ::plantUmlEscape)
+    Seq3FragmentKind.CRITICAL -> operandDividerLine("else", guard, ::plantUmlEscape)
     else -> null
 }
 
@@ -799,10 +869,19 @@ private fun StringBuilder.appendDividerLines(
     dividersByAnchor: Map<Int, List<Seq3OperandDivider>>,
     i: Int,
     indent: String,
+    dialect: Seq3Dialect,
     dividerLineFor: (Seq3FragmentKind, String) -> String?,
 ) {
     dividersByAnchor[i]?.forEach { divider ->
         val line = dividerLineFor(divider.bracket.fragment.kind, divider.operand.guard) ?: return@forEach
+        appendSeq3SourceMarker(
+            dialect,
+            "operand",
+            divider.operand.id,
+            divider.operand.startsAtOccurrenceEntryId,
+            role = divider.bracket.fragment.id,
+            indent = indent,
+        )
         append(indent).append(line).append('\n')
     }
 }
@@ -885,7 +964,7 @@ private fun delaySpan(aliases: List<String>): String {
 // row's PER-OCCURRENCE value is the whole point, the identical rule [Seq3StateInvariantBox]
 // (Seq3Layout.kt) already applies to the canvas/PNG counterpart of this same marker.
 
-private data class Seq3StateInvariantLine(val lifelineIdx: Int, val text: String)
+private data class Seq3StateInvariantLine(val invariantId: String, val lifelineIdx: Int, val text: String)
 
 /**
  * Resolves ONE [Seq3StateInvariant] to the `(emission index, line)` pairs it draws — see this
@@ -923,7 +1002,7 @@ private fun stateInvariantLinesForOne(
             val entryId = plan.emissions[index].occurrenceEntryId ?: return@mapNotNull null
             visibleOccurrences.firstOrNull { it.entryId == entryId }?.captureValues?.get(invariant.captureName)
         } ?: return@mapNotNull null
-        index to Seq3StateInvariantLine(lifelineIdx, "${invariant.captureName}=$text")
+        index to Seq3StateInvariantLine(invariant.id, lifelineIdx, "${invariant.captureName}=$text")
     }
 }
 
@@ -951,8 +1030,9 @@ private fun StringBuilder.appendStateInvariantLines(
     linesByAnchor: Map<Int, List<Seq3StateInvariantLine>>,
     i: Int,
     lineFor: (Seq3StateInvariantLine) -> String,
+    markerFor: ((Seq3StateInvariantLine) -> Unit)? = null,
 ) {
-    linesByAnchor[i]?.forEach { line -> append(lineFor(line)).append('\n') }
+    linesByAnchor[i]?.forEach { line -> markerFor?.invoke(line); append(lineFor(line)).append('\n') }
 }
 
 // ── Activation bars (WP3) ────────────────────────────────────────────────────────────────────
@@ -1072,6 +1152,7 @@ private fun activationKeywordLine(activate: Boolean, alias: String): String = "$
  */
 private fun StringBuilder.appendActivationLines(maps: Seq3ActivationMaps, i: Int, plan: Seq3EmissionPlan, aliases: List<String>, indent: String) {
     fun aliasOfLifeline(lifelineId: String): String? = plan.lifelineIndex[lifelineId]?.let { aliases.getOrNull(it) }
+
     fun emit(activate: Boolean, span: Seq3ActivationSpan) {
         val alias = aliasOfLifeline(span.lifelineId) ?: return
         append(indent).append(activationKeywordLine(activate = activate, alias = alias)).append('\n')
@@ -1155,6 +1236,87 @@ private fun StringBuilder.appendMermaidLifecycleDirectives(
     }
 }
 
+private fun mermaidArrowToken(kind: Seq3Kind): String = when (kind) {
+    Seq3Kind.RETURN, Seq3Kind.CREATE -> "-->>"
+    Seq3Kind.ASYNC -> "-)"
+    Seq3Kind.CALL,
+    Seq3Kind.SELF,
+    Seq3Kind.NOTE,
+    Seq3Kind.LOST,
+    Seq3Kind.FOUND,
+    Seq3Kind.DESTROY,
+    -> "->>"
+}
+
+private fun StringBuilder.appendMermaidEmission(
+    emission: Seq3Emission,
+    lifecycle: Seq3LifecycleMaps,
+    i: Int,
+    visibleLifelines: List<Seq3Lifeline>,
+    lifelineDisplaySegments: Int,
+    aliasOf: (Int) -> String,
+) {
+    when (emission) {
+        is Seq3Emission.Arrow -> {
+            appendMermaidLifecycleDirectives(
+                lifecycle,
+                i,
+                emission.toIdx,
+                visibleLifelines,
+                lifelineDisplaySegments,
+                aliasOf,
+            )
+            appendSeq3SourceMarker(
+                Seq3Dialect.MERMAID,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+                indent = "    ",
+            )
+            val label = mermaidEscape(emission.label) + repeatSuffix(emission.repeatCount)
+            append("    ").append(aliasOf(emission.fromIdx)).append(mermaidArrowToken(emission.kind))
+                .append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
+        }
+        is Seq3Emission.NeedsTarget -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.MERMAID,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+                indent = "    ",
+            )
+            append("    Note right of ").append(aliasOf(emission.fromIdx)).append(": ")
+                .append(mermaidEscape(emission.label))
+                .append(mermaidNeedsTargetSuffix(emission.kind)).append('\n')
+        }
+        is Seq3Emission.NoteLine -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.MERMAID,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+                indent = "    ",
+            )
+            append("    Note over ").append(aliasOf(emission.participantIdx)).append(": ")
+                .append(mermaidEscape(emission.text)).append('\n')
+        }
+        is Seq3Emission.Elided -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.MERMAID,
+                "message",
+                emission.messageId,
+                role = "elision",
+                indent = "    ",
+            )
+            append("    Note right of ").append(aliasOf(emission.participantIdx))
+                .append(": ⋯ ×").append(emission.count).append(" elided\n")
+        }
+    }
+}
+
 // ── Mermaid ──────────────────────────────────────────────────────────────────────────────────
 
 fun Seq3Document.toMermaid(): String {
@@ -1175,6 +1337,9 @@ fun Seq3Document.toMermaid(): String {
     // operandDividersByAnchor's own "THE TRAP" doc for why that distinction is load-bearing.
     val dividersByAnchor = operandDividersByAnchor(brackets, plan)
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
+    val noteStartsByAnchor = visibleNotes.mapNotNull { note ->
+        note.messageIds.mapNotNull { plan.firstIndexByMessage[it] }.minOrNull()?.let { it to note }
+    }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
     // WP18: see this file's own "State invariants" header for the degraded-note shape.
@@ -1189,77 +1354,60 @@ fun Seq3Document.toMermaid(): String {
         append("sequenceDiagram\n")
         if (title.isNotBlank()) append("    title ").append(mermaidEscape(title)).append('\n')
         visibleLifelines.forEachIndexed { i, l ->
+            // A CREATEd participant has no header declaration; emitting its marker here would
+            // leave it dangling before the later create directive.
+            if (!lifecycle.createAt.containsKey(i)) appendSeq3SourceMarker(Seq3Dialect.MERMAID, "lifeline", l.id, indent = "    ")
             appendMermaidParticipantDeclaration(i, l, lifecycle, aliases, lifelineDisplaySegments)
         }
         plan.emissions.forEachIndexed { i, emission ->
+            noteStartsByAnchor[i]?.forEach { note -> appendSeq3SourceMarker(Seq3Dialect.MERMAID, "note", note.id, role = "span-start", indent = "    ") }
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
+                appendSeq3SourceMarker(Seq3Dialect.MERMAID, "fragment", b.fragment.id, role = "start", indent = "    ")
                 mermaidFragmentOpenLines(b, plan, aliases).forEach { line -> append("    ").append(line).append('\n') }
             }
             // WP5: an operand's divider begins AT the message it anchors to, so it is written
             // after any fragment that opens at this same index (the divider's own fragment
             // included, when its own operand zero starts here) and before the emission's own line.
-            appendDividerLines(dividersByAnchor, i, indent = "    ", dividerLineFor = ::mermaidFragmentDividerLine)
-            when (emission) {
-                is Seq3Emission.Arrow -> {
-                    // WP10: Mermaid's own grammar requires BOTH `create ...` and `destroy ...` to
-                    // appear on the line immediately BEFORE the message that creates/destroys the
-                    // participant (confirmed against mermaid-js's sequenceDiagram.jison: `destroy`
-                    // is `'destroy' actor 'NEWLINE'` with no trailing message clause of its own —
-                    // it is always its own statement ahead of the next one) — never after, unlike
-                    // PlantUML below. Extracted into its own function (like appendMermaidParticipant
-                    // Declaration above) purely to keep toMermaid's own Cyclomatic Complexity under
-                    // this file's detekt threshold.
-                    appendMermaidLifecycleDirectives(lifecycle, i, emission.toIdx, visibleLifelines, lifelineDisplaySegments, ::aliasOf)
-                    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
-                    // instead of silently inheriting the plain "->>" arrow token meant for CALL.
-                    val arrow = when (emission.kind) {
-                        Seq3Kind.RETURN -> "-->>"
-                        Seq3Kind.ASYNC -> "-)"
-                        // LOST/FOUND never actually reach an Arrow emission — expandMessage routes
-                        // any message whose `toLifelineId` is null (which LOST/FOUND always are,
-                        // by construction) to NeedsTarget instead, and that's where their real
-                        // "· lost"/"· found" text lives, just below. This branch only exists
-                        // because Seq3Emission.Arrow.kind's type can't statically rule out a
-                        // document where a LOST/FOUND message was somehow left with a resolved
-                        // `toLifelineId` (Seq3Message never enforces that as an invariant) — a
-                        // defensive fallback for that inconsistent state, not the intended path,
-                        // so it reads as a plain solid call rather than a crash.
-                        //
-                        // WP10: CREATE reuses RETURN's dashed-open-arrowhead token because
-                        // `seq3ArrowStyle` already decided CREATE has that exact shape (see that
-                        // file's own WP10 comment) — the text dialects and the picture must draw
-                        // the same arrow, not two independently-chosen ones. DESTROY reuses CALL's
-                        // plain filled-arrowhead token for the identical reason: `seq3ArrowStyle`
-                        // gave DESTROY the ordinary CALL shape, since the "this is a destroy" signal
-                        // is the X drawn on the lifeline (and the `destroy` directive here), not a
-                        // distinct arrowhead.
-                        Seq3Kind.CREATE -> "-->>"
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND, Seq3Kind.DESTROY -> "->>"
-                    }
-                    val label = mermaidEscape(emission.label) + repeatSuffix(emission.repeatCount)
-                    append("    ").append(aliasOf(emission.fromIdx)).append(arrow).append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
-                }
-                is Seq3Emission.NeedsTarget ->
-                    append("    Note right of ").append(aliasOf(emission.fromIdx)).append(": ")
-                        .append(mermaidEscape(emission.label)).append(mermaidNeedsTargetSuffix(emission.kind)).append('\n')
-                is Seq3Emission.NoteLine ->
-                    append("    Note over ").append(aliasOf(emission.participantIdx)).append(": ").append(mermaidEscape(emission.text)).append('\n')
-                is Seq3Emission.Elided ->
-                    append("    Note right of ").append(aliasOf(emission.participantIdx)).append(": ⋯ ×").append(emission.count).append(" elided\n")
-            }
+            appendDividerLines(dividersByAnchor, i, indent = "    ", dialect = Seq3Dialect.MERMAID, dividerLineFor = ::mermaidFragmentDividerLine)
+            appendMermaidEmission(
+                emission,
+                lifecycle,
+                i,
+                visibleLifelines,
+                lifelineDisplaySegments,
+                ::aliasOf,
+            )
             // Activation open/close ordering (not a flat deactivate-before-activate rule — see
             // appendActivationLines' own doc) — must run right after the emission's own line and
             // before any note anchored to the same index.
             appendActivationLines(activations, i, plan, aliases, indent = "    ")
             notesByAnchor[i]?.forEach { note ->
+                appendSeq3SourceMarker(Seq3Dialect.MERMAID, "note", note.id, role = "span-end", indent = "    ")
+                appendSeq3SourceMarker(Seq3Dialect.MERMAID, "note", note.id, role = "statement", indent = "    ")
                 append("    Note over ").append(noteSpan(note, plan, aliases)).append(": ").append(mermaidEscape(note.text)).append('\n')
             }
             // WP18: degraded StateInvariant marker — see this file's own "State invariants" header.
-            appendStateInvariantLines(stateInvariantsByAnchor, i) { line -> "    Note over ${aliasOf(line.lifelineIdx)}: {${mermaidEscape(line.text)}}" }
-            closes[i]?.sortedByDescending { it.depth }?.forEach { append("    end\n") }
+            appendStateInvariantLines(
+                stateInvariantsByAnchor,
+                i,
+                { line -> "    Note over ${aliasOf(line.lifelineIdx)}: {${mermaidEscape(line.text)}}" },
+            ) { line ->
+                appendSeq3SourceMarker(
+                    Seq3Dialect.MERMAID,
+                    "state",
+                    line.invariantId,
+                    role = "value",
+                    indent = "    ",
+                )
+            }
+            closes[i]?.sortedByDescending { it.depth }?.forEach { b ->
+                appendSeq3SourceMarker(Seq3Dialect.MERMAID, "fragment", b.fragment.id, role = "end", indent = "    ")
+                append("    end\n")
+            }
             // WP11: Mermaid has no delay/spacer construct — see this file's own "Time-gap markers"
             // header for why this stays a `Note over`, never "unified" with PlantUML's `...` below.
             delaysByAnchor[i]?.forEach { d ->
+                appendSeq3SourceMarker(Seq3Dialect.MERMAID, "delay", d.id, indent = "    ")
                 append("    Note over ").append(delaySpan(aliases)).append(": ").append(mermaidEscape(d.label)).append('\n')
             }
         }
@@ -1299,6 +1447,73 @@ private fun StringBuilder.appendPlantUmlDestroyDirective(lifecycle: Seq3Lifecycl
     if (lifecycle.destroyAt[toIdx] == i) append("destroy ").append(aliasOf(toIdx)).append('\n')
 }
 
+private fun plantUmlArrowToken(kind: Seq3Kind): String = when (kind) {
+    Seq3Kind.RETURN, Seq3Kind.CREATE -> "-->"
+    Seq3Kind.ASYNC -> "->>"
+    Seq3Kind.CALL,
+    Seq3Kind.SELF,
+    Seq3Kind.NOTE,
+    Seq3Kind.LOST,
+    Seq3Kind.FOUND,
+    Seq3Kind.DESTROY,
+    -> "->"
+}
+
+private fun StringBuilder.appendPlantUmlEmission(
+    emission: Seq3Emission,
+    lifecycle: Seq3LifecycleMaps,
+    i: Int,
+    aliasOf: (Int) -> String,
+) {
+    when (emission) {
+        is Seq3Emission.Arrow -> {
+            appendPlantUmlCreateDirective(lifecycle, i, emission.toIdx, aliasOf)
+            appendSeq3SourceMarker(
+                Seq3Dialect.PLANTUML,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+            )
+            val label = plantUmlEscape(emission.label) + repeatSuffix(emission.repeatCount)
+            append(aliasOf(emission.fromIdx)).append(' ').append(plantUmlArrowToken(emission.kind))
+                .append(' ').append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
+            appendPlantUmlDestroyDirective(lifecycle, i, emission.toIdx, aliasOf)
+        }
+        is Seq3Emission.NeedsTarget -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.PLANTUML,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+            )
+            appendPlantUmlNeedsTargetLine(emission, aliasOf)
+        }
+        is Seq3Emission.NoteLine -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.PLANTUML,
+                "message",
+                emission.messageId,
+                emission.occurrenceEntryId,
+                role = if (emission.occurrenceEntryId == null) "template" else "occurrence",
+            )
+            append("note right of ").append(aliasOf(emission.participantIdx)).append(": ")
+                .append(plantUmlEscape(emission.text)).append('\n')
+        }
+        is Seq3Emission.Elided -> {
+            appendSeq3SourceMarker(
+                Seq3Dialect.PLANTUML,
+                "message",
+                emission.messageId,
+                role = "elision",
+            )
+            append("note right of ").append(aliasOf(emission.participantIdx))
+                .append(": ⋯ ×").append(emission.count).append(" elided\n")
+        }
+    }
+}
+
 // ── PlantUML ─────────────────────────────────────────────────────────────────────────────────
 
 fun Seq3Document.toPlantUml(): String {
@@ -1316,6 +1531,9 @@ fun Seq3Document.toPlantUml(): String {
     // operandDividersByAnchor's own "THE TRAP" doc for why that distinction is load-bearing.
     val dividersByAnchor = operandDividersByAnchor(brackets, plan)
     val notesByAnchor = visibleNotes.mapNotNull { note -> noteAnchorIndex(note, plan)?.let { it to note } }.groupBy({ it.first }, { it.second })
+    val noteStartsByAnchor = visibleNotes.mapNotNull { note ->
+        note.messageIds.mapNotNull { plan.firstIndexByMessage[it] }.minOrNull()?.let { it to note }
+    }.groupBy({ it.first }, { it.second })
     val visibleDelays = delays.filter { it.visibility == Seq3Visibility.VISIBLE }
     val delaysByAnchor = visibleDelays.mapNotNull { d -> delayAnchorIndex(d, plan)?.let { it to d } }.groupBy({ it.first }, { it.second })
     // WP18: see this file's own "State invariants" header for the degraded-note shape — same map,
@@ -1333,59 +1551,26 @@ fun Seq3Document.toPlantUml(): String {
         append("@startuml\n")
         if (title.isNotBlank()) append("title ").append(plantUmlEscape(title)).append('\n')
         visibleLifelines.forEachIndexed { i, l ->
+            if (!lifecycle.createAt.containsKey(i)) appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "lifeline", l.id)
             appendPlantUmlParticipantDeclaration(i, l, lifecycle, aliases, lifelineDisplaySegments)
         }
         plan.emissions.forEachIndexed { i, emission ->
+            noteStartsByAnchor[i]?.forEach { note -> appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "note", note.id, role = "span-start") }
             opens[i]?.sortedBy { it.depth }?.forEach { b ->
+                appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "fragment", b.fragment.id, role = "start")
                 plantUmlFragmentOpenLines(b, plan, aliases).forEach { line -> append(line).append('\n') }
             }
             // WP5: an operand's divider begins AT the message it anchors to — see toMermaid's
             // identical comment just above its own dividersByAnchor block.
-            appendDividerLines(dividersByAnchor, i, indent = "", dividerLineFor = ::plantUmlFragmentDividerLine)
-            when (emission) {
-                is Seq3Emission.Arrow -> {
-                    // WP10: PlantUML's own convention (confirmed against plantuml.com's own
-                    // "Participant creation"/"Lifeline Activation and Destruction" sections) places
-                    // `create <alias>` on the line BEFORE the message that creates it, and
-                    // `destroy <alias>` on the line AFTER the message that destroys it — the
-                    // opposite ordering from Mermaid's `destroy` (which is always pre-message), so
-                    // this is deliberately not a shared helper with toMermaid's version — split into
-                    // two tiny one-line functions (below the arrow line too) purely to keep
-                    // toPlantUml's own Cyclomatic Complexity under this file's detekt threshold.
-                    appendPlantUmlCreateDirective(lifecycle, i, emission.toIdx, ::aliasOf)
-                    // No `else`: exhaustive on purpose (WP8) so a new Seq3Kind forces a decision here
-                    // instead of silently inheriting the plain "->" arrow token meant for CALL.
-                    val arrow = when (emission.kind) {
-                        Seq3Kind.RETURN -> "-->"
-                        Seq3Kind.ASYNC -> "->>"
-                        // See toMermaid's identical branch: structurally unreachable (LOST/FOUND
-                        // always take the NeedsTarget path just below, which is where their real
-                        // `->o]`/`[o->` gate syntax is emitted) — a defensive fallback only, kept
-                        // here because Seq3Emission.Arrow.kind's type doesn't itself rule it out.
-                        //
-                        // WP10: same reasoning as toMermaid's identical branch — CREATE reuses
-                        // RETURN's dashed token (`seq3ArrowStyle` gave it that exact shape), DESTROY
-                        // reuses CALL's plain token (the `destroy` directive/X carries the meaning,
-                        // not the arrowhead).
-                        Seq3Kind.CREATE -> "-->"
-                        Seq3Kind.CALL, Seq3Kind.SELF, Seq3Kind.NOTE, Seq3Kind.LOST, Seq3Kind.FOUND, Seq3Kind.DESTROY -> "->"
-                    }
-                    val label = plantUmlEscape(emission.label) + repeatSuffix(emission.repeatCount)
-                    append(aliasOf(emission.fromIdx)).append(' ').append(arrow).append(' ')
-                        .append(aliasOf(emission.toIdx)).append(": ").append(label).append('\n')
-                    appendPlantUmlDestroyDirective(lifecycle, i, emission.toIdx, ::aliasOf)
-                }
-                is Seq3Emission.NeedsTarget -> appendPlantUmlNeedsTargetLine(emission, ::aliasOf)
-                is Seq3Emission.NoteLine ->
-                    append("note right of ").append(aliasOf(emission.participantIdx)).append(": ").append(plantUmlEscape(emission.text)).append('\n')
-                is Seq3Emission.Elided ->
-                    append("note right of ").append(aliasOf(emission.participantIdx)).append(": ⋯ ×").append(emission.count).append(" elided\n")
-            }
+            appendDividerLines(dividersByAnchor, i, indent = "", dialect = Seq3Dialect.PLANTUML, dividerLineFor = ::plantUmlFragmentDividerLine)
+            appendPlantUmlEmission(emission, lifecycle, i, ::aliasOf)
             // Activation open/close ordering (not a flat deactivate-before-activate rule — see
             // appendActivationLines' own doc) — must run right after the emission's own line and
             // before any note anchored to the same index.
             appendActivationLines(activations, i, plan, aliases, indent = "")
             notesByAnchor[i]?.forEach { note ->
+                appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "note", note.id, role = "span-end")
+                appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "note", note.id, role = "statement")
                 append("note over ").append(noteSpan(note, plan, aliases)).append(": ").append(plantUmlEscape(note.text)).append('\n')
             }
             // WP18: degraded StateInvariant marker — see this file's own "State invariants" header.
@@ -1393,7 +1578,18 @@ fun Seq3Document.toPlantUml(): String {
             // same "note right of ONE lifeline" fallback shape [Seq3Emission.NoteLine]'s own
             // PlantUML branch already uses just above, not `note over` — a state invariant decorates
             // exactly one participant, never a span.
-            appendStateInvariantLines(stateInvariantsByAnchor, i) { line -> "note right of ${aliasOf(line.lifelineIdx)}: {${plantUmlEscape(line.text)}}" }
+            appendStateInvariantLines(
+                stateInvariantsByAnchor,
+                i,
+                { line -> "note right of ${aliasOf(line.lifelineIdx)}: {${plantUmlEscape(line.text)}}" },
+            ) { line ->
+                appendSeq3SourceMarker(
+                    Seq3Dialect.PLANTUML,
+                    "state",
+                    line.invariantId,
+                    role = "value",
+                )
+            }
             // WP17: REF is skipped here, never PlantUML's own generic `end\n` — real PlantUML's
             // `ref over A, B : label` (plantUmlFragmentOpenLines) is a standalone statement, not a
             // block that encloses other statements the way alt/loop/opt/par/critical/group/neg/
@@ -1403,12 +1599,16 @@ fun Seq3Document.toPlantUml(): String {
             // bracketed messages themselves are still emitted normally just below, in order — only
             // the (nonexistent) closing keyword is what's skipped.
             closes[i]?.sortedByDescending { it.depth }?.forEach { b ->
+                appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "fragment", b.fragment.id, role = "end")
                 if (b.fragment.kind != Seq3FragmentKind.REF) append("end\n")
             }
             // WP11: PlantUML's REAL delay syntax — `...label...`, no participant reference at all
             // (it draws as a full-width divider natively) — see this file's own "Time-gap markers"
             // header for why this must NOT be folded into the same branch as toMermaid's Note over.
-            delaysByAnchor[i]?.forEach { d -> append("...").append(plantUmlEscape(d.label)).append("...\n") }
+            delaysByAnchor[i]?.forEach { d ->
+                appendSeq3SourceMarker(Seq3Dialect.PLANTUML, "delay", d.id)
+                append("...").append(plantUmlEscape(d.label)).append("...\n")
+            }
         }
         append("@enduml\n")
     }

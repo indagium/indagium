@@ -559,9 +559,9 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     val elapsedByEntryId = seq3ElapsedByEntryId(doc)
     val chronologicalEmissions = seq3ChronologicalOrder(
         doc,
-        visibleMessages.flatMap(::expandForLayout),
+        visibleMessages.flatMap { message -> expandForLayout(message, doc.messageLabelStyle) },
         messageIdOf = { emission -> emission.messageId },
-        timestampMillisOf = { emission -> emission.entryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis },
+        timestampMillisOf = { emission -> emissionOrderingMillis(emission, elapsedByEntryId) },
         entryIdOf = { emission -> emission.entryId },
     )
     // WP10 (item 7): number/timestamp-prefix each call's label BEFORE measurement — see
@@ -887,26 +887,38 @@ private sealed class Emission {
 
     /** The "N more" marker between a [Seq3Repeat.FIRST_LAST] message's first and last drawn rows —
      *  represents the elided middle, so it has no occurrence (hence [entryId] is `null`) of its own.
-     *  [timestampMillis] is seeded from the FIRST occurrence's own timestamp (see
-     *  [firstLastEmissions]) so it sorts immediately after that row — a reasonable, defensible
-     *  placement, not required to be exact. */
+     *  [timestampMillis] remains the FIRST occurrence's wall-clock time for display and gap folding;
+     *  [orderingMillis] is its separate day-unrolled position, needed because the marker cannot
+     *  look up elapsed time by an entry id of its own. */
     data class Elision(
         override val messageId: String,
         override val fromLifelineId: String,
         val count: Int,
         override val timestampMillis: Long?,
         val rawTimestamp: String,
+        val orderingMillis: Long? = null,
     ) : Emission() {
         override val entryId: Int? get() = null
     }
 }
+
+/** The elapsed axis used for ordering and measured gaps; [Emission.Elision] supplies its own
+ * position because it deliberately has no occurrence id, while retaining its raw timestamp for
+ * display. */
+private fun emissionOrderingMillis(emission: Emission, elapsedByEntryId: Map<Int, Long>): Long? =
+    (emission as? Emission.Elision)?.orderingMillis
+        ?: emission.entryId?.let(elapsedByEntryId::get)
+        ?: emission.timestampMillis
 
 // occurrenceLabel/collapsedRepeatLabel/seq3EmissionTimestamp/seq3EmissionRawTimestamp now live in
 // Seq3LabelSummary.kt, shared with Seq3Emitters — see that file's header on why (WP9: the two
 // copies of occurrenceLabel had drifted apart once already, the same class of bug round 1 hit with
 // arrow styles).
 
-private fun expandForLayout(message: Seq3Message): List<Emission> {
+private fun expandForLayout(
+    message: Seq3Message,
+    labelStyle: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): List<Emission> {
     val visibleOccurrences = message.occurrences.filter { it.visibility == Seq3Visibility.VISIBLE }
     if (message.occurrences.isNotEmpty() && visibleOccurrences.isEmpty()) return emptyList()
     if (message.kind == Seq3Kind.NOTE) {
@@ -922,7 +934,7 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
             Emission.Note(
                 message.id,
                 message.fromLifelineId,
-                collapsedRepeatLabel(message, visibleOccurrences),
+                collapsedRepeatLabel(message, visibleOccurrences, labelStyle),
                 occ?.entryId,
                 message.primaryTimestampMillis,
                 message.primaryRawTimestamp,
@@ -937,7 +949,7 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
             Emission.Stub(
                 message.id,
                 message.fromLifelineId,
-                collapsedRepeatLabel(message, visibleOccurrences),
+                collapsedRepeatLabel(message, visibleOccurrences, labelStyle),
                 visibleOccurrences.size.coerceAtLeast(1),
                 occ?.entryId,
                 message.primaryTimestampMillis,
@@ -970,23 +982,23 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
         )
     }
     if (occurrences.isEmpty()) {
-        return listOf(arrow(message.labelTemplate, 1, null, message.primaryTimestampMillis, message.primaryRawTimestamp))
+        return listOf(arrow(seq3MessageLabelTemplate(message, labelStyle), 1, null, message.primaryTimestampMillis, message.primaryRawTimestamp))
     }
     return when (message.repeat) {
         Seq3Repeat.EVERY -> occurrences.map { occ ->
             arrow(
-                occurrenceLabel(message, occ),
+                occurrenceLabel(message, occ, labelStyle),
                 1,
                 occ.entryId,
                 seq3EmissionTimestamp(message, occ.timestampMillis),
                 seq3EmissionRawTimestamp(message, occ.rawTimestamp),
             )
         }
-        Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, ::arrow)
+        Seq3Repeat.FIRST_LAST -> firstLastEmissions(message, occurrences, labelStyle, ::arrow)
         Seq3Repeat.COLLAPSE_ABOVE -> if (occurrences.size > message.repeatThreshold) {
             listOf(
                 arrow(
-                    collapsedRepeatLabel(message, occurrences),
+                    collapsedRepeatLabel(message, occurrences, labelStyle),
                     // COUNT, not "how many rows do I draw" (this branch always draws exactly one) —
                     // read the true pre-trim total (W1a) when generation elided evidence, so the
                     // badge never under-reports how many times this call actually happened.
@@ -1008,7 +1020,7 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
         } else {
             occurrences.map { occ ->
                 arrow(
-                    occurrenceLabel(message, occ),
+                    occurrenceLabel(message, occ, labelStyle),
                     1,
                     occ.entryId,
                     seq3EmissionTimestamp(message, occ.timestampMillis),
@@ -1022,13 +1034,14 @@ private fun expandForLayout(message: Seq3Message): List<Emission> {
 private fun firstLastEmissions(
     message: Seq3Message,
     occurrences: List<Seq3Occurrence>,
+    labelStyle: Seq3MessageLabelStyle,
     arrow: (String, Int, Int?, Long?, String) -> Emission,
 ): List<Emission> {
     if (occurrences.size <= 1) {
         val only = occurrences.firstOrNull()
         return listOf(
             arrow(
-                occurrenceLabel(message, occurrences.first()),
+                occurrenceLabel(message, occurrences.first(), labelStyle),
                 1,
                 only?.entryId,
                 seq3EmissionTimestamp(message, only?.timestampMillis),
@@ -1043,7 +1056,7 @@ private fun firstLastEmissions(
     return buildList {
         add(
             arrow(
-                occurrenceLabel(message, occurrences.first()),
+                occurrenceLabel(message, occurrences.first(), labelStyle),
                 1,
                 occurrences.first().entryId,
                 seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
@@ -1058,12 +1071,13 @@ private fun firstLastEmissions(
                     elided,
                     seq3EmissionTimestamp(message, occurrences.first().timestampMillis),
                     seq3EmissionRawTimestamp(message, occurrences.first().rawTimestamp),
+                    seq3EmissionElapsed(message, occurrences.first().elapsedMillis),
                 ),
             )
         }
         add(
             arrow(
-                occurrenceLabel(message, occurrences.last()),
+                occurrenceLabel(message, occurrences.last(), labelStyle),
                 1,
                 occurrences.last().entryId,
                 seq3EmissionTimestamp(message, occurrences.last().timestampMillis),
@@ -1277,11 +1291,13 @@ private fun prefixEmissionLabels(
     if (!showSequenceNumbers && !showTimestamps && !showElapsed) return emissions
     var callNumber = 0
     var lastRealElapsedMillis: Long? = null
+
     // The value this fold's ACCUMULATOR reads and measures gaps on — see this function's own header
     // for why this must not be [Emission.timestampMillis] itself. A miss (no occurrence, e.g. an
     // authored arrow/stub/note, or [Emission.Elision]) falls back to that same raw value, exactly
     // preserving pre-fix behaviour for a message/document with no unrolled data.
-    fun orderingValue(emission: Emission): Long? = emission.entryId?.let(elapsedByEntryId::get) ?: emission.timestampMillis
+    fun orderingValue(emission: Emission): Long? = emissionOrderingMillis(emission, elapsedByEntryId)
+
     fun elapsedFor(currentElapsedMillis: Long?): Long? {
         val previous = lastRealElapsedMillis
         return if (previous != null && currentElapsedMillis != null) elapsedMillisOfDay(previous, currentElapsedMillis) else null

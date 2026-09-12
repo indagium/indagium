@@ -385,6 +385,31 @@ class Seq3LayoutTest {
     }
 
     @Test
+    fun firstLastElisionKeepsItsWallClockButOrdersOnThePostMidnightElapsedAxis() {
+        val pre = occurrence(1, ts = 86_399_900L, text = "pre").copy(elapsedMillis = 86_399_900L)
+        val repeated = listOf(
+            occurrence(2, ts = 100L, text = "first").copy(elapsedMillis = 86_400_100L),
+            occurrence(3, ts = 500L, text = "hidden").copy(elapsedMillis = 86_400_500L),
+            occurrence(4, ts = 1_000L, text = "last").copy(elapsedMillis = 86_401_000L),
+        )
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("pre", "A", "B", occurrences = listOf(pre), template = "pre"),
+                message("repeat", "A", "B", repeat = Seq3Repeat.FIRST_LAST, occurrences = repeated, template = "call"),
+            ),
+            showElapsed = true,
+        )
+
+        val rows = layoutSeq3(doc, opts()).rows
+        assertEquals(listOf("pre", "repeat", "repeat", "repeat"), rows.map { it.messageId })
+        val elision = rows[2] as Seq3ElisionRow
+        assertEquals(100L, elision.timestampMillis, "the marker still displays the first row's 00:00:00.100 wall-clock timestamp")
+        assertTrue((rows[1] as Seq3ArrowRow).label.startsWith("[+0.200] "))
+        assertTrue((rows[3] as Seq3ArrowRow).label.startsWith("[+0.900] "), "the last row must measure from the first/elision point")
+    }
+
+    @Test
     fun hiddenMessageContributesNoGeometryAtAll() {
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
@@ -998,7 +1023,8 @@ class Seq3LayoutTest {
         // predecessor (the last of the elided middle occurrences).
         val occs = listOf(
             occurrence(1, ts = 1_000L),
-            occurrence(2, ts = 2_500L), // elided — never drawn as its own row
+            // Elided — never drawn as its own row.
+            occurrence(2, ts = 2_500L),
             occurrence(3, ts = 9_000L),
         )
         val doc = Seq3Document(

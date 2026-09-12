@@ -11,13 +11,133 @@ import com.indagium.utils.formatDuration
 // geometry), one in Seq3Emitters (Mermaid/PlantUML text). Round 1 had exactly this class of bug
 // with arrow styles (two copies quietly drifting apart), so this round keeps both in one place.
 
+// ── A9: conservative UML operation signatures ───────────────────────────────────────────────
+
+/**
+ * Formats one message template for the selected [style].  The UML signature form is deliberately
+ * narrow: it recognizes only a leading identifier followed by a comma-separated list of named
+ * capture arguments (`operation key={value}`), or the one common colon form
+ * (`operation: {value}`).  This lets useful log calls become `operation(key={value})` without
+ * guessing at arbitrary prose or assigning meaning to values returned/assigned by an operation.
+ *
+ * A template that already has parentheses, has no capture token, has no usable operation name, or
+ * contains anything outside those argument forms is returned unchanged.  In particular,
+ * `connect to {device} on port {port}` is intentionally free text: the words between the
+ * operation-looking prefix and captures are not a named-argument list.
+ */
+internal fun formatSeq3MessageLabel(labelTemplate: String, style: Seq3MessageLabelStyle): String {
+    if (style == Seq3MessageLabelStyle.FREE_TEXT || labelTemplate.isBlank()) return labelTemplate
+    if (labelTemplate != labelTemplate.trim() || !labelTemplate.contains('{')) return labelTemplate
+
+    return formatSeq3UmlSignatureCandidate(labelTemplate) ?: labelTemplate
+}
+
+/** Tries the narrowly supported forms in their precedence order. A null result means that the
+ *  input is not a conservative signature candidate and must be preserved byte-for-byte. */
+private fun formatSeq3UmlSignatureCandidate(labelTemplate: String): String? =
+    formatSeq3ColonLabel(labelTemplate)
+        ?: formatSeq3ColonArguments(labelTemplate)
+        ?: formatSeq3SpacedArguments(labelTemplate)
+
+/** Formats the compact `operation: {capture}` form. */
+private fun formatSeq3ColonLabel(labelTemplate: String): String? {
+    val match = SIGNATURE_COLON_LABEL.matchEntire(labelTemplate) ?: return null
+    val operation = match.groupValues[1]
+    if (operation.lowercase() in NON_OPERATION_WORDS) return null
+    val capture = match.groupValues[2]
+    return "$operation($capture={$capture})"
+}
+
+/** Formats the named-argument colon form (`operation: key={value}, ...`). */
+private fun formatSeq3ColonArguments(labelTemplate: String): String? {
+    val match = SIGNATURE_COLON_ARGUMENTS.matchEntire(labelTemplate) ?: return null
+    val operation = match.groupValues[1]
+    if (operation.lowercase() in NON_OPERATION_WORDS) return null
+    return formatSeq3NamedArguments(operation, match.groupValues[2])
+}
+
+/** Formats the whitespace-separated named-argument form (`operation key={value}, ...`). */
+private fun formatSeq3SpacedArguments(labelTemplate: String): String? {
+    val match = SIGNATURE_HEAD.matchEntire(labelTemplate) ?: return null
+    val operation = match.groupValues[1]
+    val body = match.groupValues[2].trim()
+    if (operation.lowercase() in NON_OPERATION_WORDS || body.isEmpty()) return null
+
+    // `foo(...)` is already a signature, and preserving it byte-for-byte avoids reformatting a
+    // user's spacing or punctuation. The no-whitespace form (`foo(...)`) never reaches this
+    // function's head regex, but this covers `foo (...)` as well.
+    if (body.startsWith('(') && body.endsWith(')')) return labelTemplate
+
+    return formatSeq3SpacedBody(operation, body)
+}
+
+private fun formatSeq3SpacedBody(operation: String, body: String): String? {
+    val capture = SIGNATURE_COLON_CAPTURE.matchEntire(body)?.groupValues?.getOrNull(1)
+    return if (capture != null) {
+        "$operation($capture={$capture})"
+    } else {
+        formatSeq3NamedArguments(operation, body)
+    }
+}
+
+/** Renders a fully validated comma-separated named-capture list, or null when prose/punctuation
+ *  appears between the operation and captures. */
+private fun formatSeq3NamedArguments(operation: String, body: String): String? {
+    val arguments = SIGNATURE_ARGUMENTS.matchEntire(body)?.groupValues?.getOrNull(1) ?: return null
+    val renderedArguments = SIGNATURE_ARGUMENT.findAll(arguments).map { match ->
+        "${match.groupValues[1]}={${match.groupValues[2]}}"
+    }.toList()
+    return renderedArguments.takeIf { it.isNotEmpty() }?.let { rendered ->
+        "$operation(${rendered.joinToString(", ")})"
+    }
+}
+
+private val SIGNATURE_HEAD = Regex("^([A-Za-z_][A-Za-z0-9_.]*)\\s+(.+)$")
+private val SIGNATURE_COLON_LABEL = Regex("^([A-Za-z_][A-Za-z0-9_.]*)\\s*:\\s*\\{([A-Za-z_][A-Za-z0-9_]*)}\\s*$")
+private val SIGNATURE_COLON_ARGUMENTS = Regex("^([A-Za-z_][A-Za-z0-9_.]*)\\s*:\\s*(.+)$")
+private val SIGNATURE_COLON_CAPTURE = Regex("^:\\s*\\{([A-Za-z_][A-Za-z0-9_]*)}\\s*$")
+private val SIGNATURE_ARGUMENTS = Regex(
+    "^((?:[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\{[A-Za-z_][A-Za-z0-9_]*}\\s*)" +
+        "(?:,\\s*[A-Za-z_][A-Za-z0-9_]*\\s*=\\s*\\{[A-Za-z_][A-Za-z0-9_]*}\\s*)*)$",
+)
+private val SIGNATURE_ARGUMENT = Regex("([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*\\{([A-Za-z_][A-Za-z0-9_]*)}")
+
+// Assignment/return words are not operations. Keeping this tiny denylist is preferable to
+// inventing a broader natural-language parser and accidentally converting `return value={value}`
+// into a call signature.
+private val NON_OPERATION_WORDS = setOf("return", "returns", "result", "output")
+
+/** The selected style's template, kept in one helper so every substitution path uses the same
+ *  formatting before replacing capture values. */
+internal fun seq3MessageLabelTemplate(
+    message: Seq3Message,
+    style: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): String = if (message.match.captures.isEmpty()) {
+    // Braces are legal free-text characters. The document's capture declaration, not a brace
+    // scan alone, is what authorizes A9 to reinterpret a label as a signature candidate.
+    message.labelTemplate
+} else if (
+    seq3CaptureTokenNames(message.labelTemplate).toSet() != message.match.captures.map { it.name }.toSet()
+) {
+    // A hand-edited label can intentionally stop mentioning one of the original captures (or
+    // contain an undeclared token). Do not reinterpret that partial template as a new signature;
+    // preserving it is safer than formatting a value the row no longer proves.
+    message.labelTemplate
+} else {
+    formatSeq3MessageLabel(message.labelTemplate, style)
+}
+
 /** Substitutes one [occurrence]'s captured values into [message]'s `{name}` template — the label
  *  drawn for a SINGLE occurrence's arrow. Never used for a collapsed/multi-occurrence row, which
- *  keeps the raw template or uses [collapsedRepeatLabel]'s summary instead — a collapsed row has
- *  no one occurrence to substitute from. */
-internal fun occurrenceLabel(message: Seq3Message, occurrence: Seq3Occurrence): String {
+ *  keeps the formatted template or uses [collapsedRepeatLabel]'s summary instead — a collapsed
+ *  row has no one occurrence to substitute from. */
+internal fun occurrenceLabel(
+    message: Seq3Message,
+    occurrence: Seq3Occurrence,
+    style: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): String {
     if (message.match.captures.isEmpty()) return message.labelTemplate
-    var label = message.labelTemplate
+    var label = seq3MessageLabelTemplate(message, style)
     message.match.captures.forEach { capture ->
         val value = occurrence.captureValues[capture.name] ?: return@forEach
         label = label.replace("{${capture.name}}", value)
@@ -38,14 +158,25 @@ private const val COLLAPSED_SUMMARY_MAX_DISTINCT = 3
  * [COLLAPSED_SUMMARY_MAX_DISTINCT] or fewer distinct substituted labels, show a compact `A|B|C`
  * summary instead; above that, keep the honest "this stands for many different values" `{name}`.
  */
-internal fun collapsedRepeatLabel(message: Seq3Message, occurrences: List<Seq3Occurrence>): String {
-    val distinctLabels = occurrences.map { occurrenceLabel(message, it) }.distinct()
+internal fun collapsedRepeatLabel(
+    message: Seq3Message,
+    occurrences: List<Seq3Occurrence>,
+    style: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): String {
+    val distinctLabels = occurrences.map { occurrenceLabel(message, it, style) }.distinct()
     return if (distinctLabels.size in 1..COLLAPSED_SUMMARY_MAX_DISTINCT) {
         distinctLabels.joinToString("|")
     } else {
-        message.labelTemplate
+        seq3MessageLabelTemplate(message, style)
     }
 }
+
+/** Message-aware overload for callers that need the no-captures guarantee as well as formatting. */
+internal fun formatSeq3MessageLabel(
+    message: Seq3Message,
+    style: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+): String =
+    seq3MessageLabelTemplate(message, style)
 
 /**
  * WP18: the collapsed-row counterpart of [collapsedRepeatLabel] for a promoted [Seq3StateInvariant]

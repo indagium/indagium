@@ -159,6 +159,12 @@ enum class Seq3Repeat { COLLAPSE_ABOVE, EVERY, FIRST_LAST }
  *  display flag, not a third authoring state. */
 enum class Seq3Authoring { AUTO, EDITED }
 
+/** How message labels are presented by every Seq3 renderer.  [FREE_TEXT] preserves the
+ * generated/log wording; [UML_SIGNATURE] applies the conservative operation-signature rewrite
+ * shared by canvas, PNG, Mermaid, and PlantUML.  This is a document setting (rather than a
+ * per-message copy) so switching presentation cannot leave one output path with a stale label. */
+enum class Seq3MessageLabelStyle { FREE_TEXT, UML_SIGNATURE }
+
 /** [HIDDEN] drops the arrow but keeps the evidence and the struck-through queue row — a separate
  *  flag from [Seq3Authoring], never a state of its own (see the design spec's §03 table: "Hidden
  *  is a separate visibility flag, not a state"). */
@@ -694,6 +700,9 @@ data class Seq3Document(
      *  a [Seq3Kind]. Appended LAST (CLAUDE.md's "append-last field versioning" invariant). Defaults
      *  empty so an old note decodes to its original, marker-free rendering, exactly like [delays]. */
     val stateInvariants: List<Seq3StateInvariant> = emptyList(),
+    /** A9: document-wide message-label presentation. Appended LAST so notes written before A9
+     *  decode as [Seq3MessageLabelStyle.FREE_TEXT] and retain their previous rendering exactly. */
+    val messageLabelStyle: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────
