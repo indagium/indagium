@@ -735,6 +735,9 @@ data class LogTab(
     // persisted, so it is NOT written to AutosaveCodec in any form (no tabToken/tabShellFromToken/
     // persistedSnapshot entry) — see AnnBlock.LogRef.resolveRows for the precedence this feeds.
     val recoveredNoteRows: Map<String, List<LogEntry>> = emptyMap(),
+    // Optional absolute R8/ProGuard mapping selected for this tab. Persisted as the final
+    // append-only tab-token field; retraced output is deliberately transient and never stored.
+    val retraceMappingPath: String? = null,
 )
 
 /**

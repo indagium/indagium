@@ -168,6 +168,10 @@ kotlin {
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
                 implementation("org.tukaani:xz:1.10")
+                // Official R8 Retrace API. Keep this pinned: mapping metadata and the in-process
+                // retrace contract are versioned together, so a moving dependency can silently
+                // change deobfuscation behavior between desktop releases.
+                implementation("com.android.tools:r8:9.4.17")
                 // Native MCP server (ControlServer.kt): the app speaks MCP over Streamable HTTP
                 // so clients connect by URL with no Node bridge. The SDK's mcpStreamableHttp {}
                 // helper runs on Ktor (CIO engine); CORS lets browser-based MCP inspectors reach it.

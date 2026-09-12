@@ -2031,16 +2031,16 @@ class AppStateBehaviorTest {
 
         // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
         // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
-        // Four drops, not one: showTimeDelta, attachedVideo, and noteTargetName were all appended
-        // AFTER archiveCandidate (positions 10/11/12), so a single strip would now remove only
-        // noteTargetName and leave showTimeDelta/attachedVideo/archiveCandidate in place — dropping
-        // all four trailing fields is what actually reproduces a token from before any of them
-        // existed, which is the scenario this test means to exercise.
+        // Five drops, not one: showTimeDelta, attachedVideo, noteTargetName, and retraceMappingPath
+        // were all appended AFTER archiveCandidate (positions 10-13), so a single strip would now
+        // remove only retraceMappingPath and leave archiveCandidate in place — dropping all five
+        // trailing fields is what actually reproduces a token from before any of them existed.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
                 line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
+                    .substringBeforeLast('|')
             } else {
                 line
             }

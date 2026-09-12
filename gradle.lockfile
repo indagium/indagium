@@ -30,6 +30,7 @@ androidx.savedstate:savedstate-compose-desktop:1.4.0=desktopCompileClasspath,des
 androidx.savedstate:savedstate-compose:1.4.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 androidx.savedstate:savedstate-desktop:1.4.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 androidx.savedstate:savedstate:1.4.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
+com.android.tools:r8:9.4.17=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.google.errorprone:error_prone_annotations:2.50.0=desktopTestRuntimeClasspath
 com.google.guava:failureaccess:1.0.3=desktopTestRuntimeClasspath
 com.google.guava:guava:33.7.1-jre=desktopTestRuntimeClasspath

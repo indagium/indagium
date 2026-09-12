@@ -2123,6 +2123,10 @@ fun App(
                 }
             }
 
+            state.retraceDialogState?.let { result ->
+                RetraceDialog(state, result)
+            }
+
             state.openError?.let { error ->
                 Dialog(onDismissRequest = { state.dismissOpenError() }) {
                     val tc2 = tc()

@@ -609,6 +609,9 @@ internal fun FilterPanel(
     onUnhandledFileDrop: (List<File>) -> Unit,
     onClearFilter: () -> Unit,
     onNavigateCrash: (IssueSite) -> Unit,
+    onChooseRetraceMapping: () -> Unit,
+    onClearRetraceMapping: () -> Unit,
+    onRetraceIssue: (String) -> Unit,
     logCompositionActions: LogCompositionActions,
     onUiStateChanged: () -> Unit = {},
     mostUsedTagLimit: Int,
@@ -2394,6 +2397,36 @@ internal fun FilterPanel(
                     },
                 )
             }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText("Mapping:", color = tc.td, fontSize = 10.sp)
+                AppText(
+                    tab.retraceMappingPath?.let { File(it).name } ?: "none selected",
+                    color = if (tab.retraceMappingPath == null) tc.ts else tc.tx,
+                    fontSize = 10.sp,
+                    fontFamily = MONO,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                AppButton(
+                    if (tab.retraceMappingPath == null) "Choose…" else "Replace…",
+                    onClick = onChooseRetraceMapping,
+                    variant = ButtonVariant.Ghost,
+                    horizontalPadding = 6.dp,
+                )
+                if (tab.retraceMappingPath != null) {
+                    AppButton(
+                        "Clear",
+                        onClick = onClearRetraceMapping,
+                        variant = ButtonVariant.Ghost,
+                        horizontalPadding = 6.dp,
+                    )
+                }
+            }
             // Forty identical retries collapse to one row here; the flat crashSites list underneath
             // (and the minimap/MCP consumers reading it) still sees every occurrence — see
             // groupIssueSites' doc comment.
@@ -2441,6 +2474,7 @@ internal fun FilterPanel(
                                 }
                             },
                             onNavigate = onNavigateCrash,
+                            onRetrace = onRetraceIssue,
                         )
                     }
                 }
@@ -3369,6 +3403,12 @@ private fun IssueSite.kindLabel(): String = when (this) {
     }
 }
 
+// Kept as a pure eligibility function so the Issues UI and its tests cannot drift on which
+// issue kinds have a complete Java/Kotlin stack trace that official R8 Retrace can consume.
+// Native crashes and ANRs deliberately remain outside B4.1's scope.
+internal fun retraceGroupGidFor(site: IssueSite): String? =
+    (site as? CrashSite)?.takeIf { it.kind == CrashKind.EXCEPTION }?.groupGid
+
 private fun CrashCategory.label(): String = when (this) {
     CrashCategory.ALL -> "All"
     CrashCategory.CRASHES -> "Crashes"
@@ -3505,10 +3545,12 @@ private fun IssueSiteRow(
     expanded: Boolean,
     onToggleExpand: () -> Unit,
     onNavigate: (IssueSite) -> Unit,
+    onRetrace: (String) -> Unit,
 ) {
     val site = group.representative
     val accent = site.accentColor()
     val count = group.occurrences.size
+    val retraceGroupGid = retraceGroupGidFor(site)
     Column(Modifier.fillMaxWidth()) {
         HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { onNavigate(site) }) {
             Column(
@@ -3532,6 +3574,14 @@ private fun IssueSiteRow(
                                 color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold,
                             )
                         }
+                    }
+                    if (retraceGroupGid != null) {
+                        AppButton(
+                            "Retrace",
+                            onClick = { onRetrace(retraceGroupGid) },
+                            variant = ButtonVariant.Ghost,
+                            horizontalPadding = 5.dp,
+                        )
                     }
                     AppText(site.entry.ts, color = tc.td, fontSize = 9.sp, fontFamily = MONO)
                     AppText(site.entry.tag, color = tc.td, fontSize = 9.sp, fontFamily = MONO,
