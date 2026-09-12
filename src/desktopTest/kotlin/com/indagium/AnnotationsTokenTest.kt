@@ -48,6 +48,18 @@ class AnnotationsTokenTest {
     }
 
     @Test
+    fun roundTripsRichMarkdownInNotesAndLogAnnotations() {
+        val original = Annotations(
+            blocks = listOf(
+                AnnBlock.Note("n1", "# Investigation\n\n**Root cause:** a race."),
+                AnnBlock.LogRef("r1", listOf(42), "> Reproduces on cold start\n\n`Startup.kt:42`"),
+            ),
+        )
+
+        assertEquals(original, original.annotationsToken().annotationsFromToken())
+    }
+
+    @Test
     fun roundTripsThroughTheNoSourcePathAutosavePath() {
         // Mirrors tabToken(): annotationsToken() is called with NO sourcePath argument there —
         // field 4 (sourcePath) must come back empty while fields 5/6 still round-trip.

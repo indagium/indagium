@@ -26,6 +26,25 @@ class AnnotationExportTest {
     private fun imageBlock(id: String, caption: String = "", bytes: ByteArray = byteArrayOf(1, 2, 3)): AnnBlock.Image =
         AnnBlock.Image(id = id, caption = caption, provenance = "from repro.mp4", format = "jpeg", bytes = bytes)
 
+    @Test
+    fun buildMdPreservesRichMarkdownInNotesAndLogAnnotations() {
+        val tab = mkTab("t1", "app.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.E, "App", "Boom"))).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note("n1", "# Investigation\n\n**Root cause:** a race."),
+                    AnnBlock.LogRef("r1", listOf(1), "> Reproduces on cold start\n\n`Startup.kt:42`"),
+                ),
+            ),
+        )
+
+        val markdown = buildMd(tab, AppSettings())
+
+        assertTrue(markdown.contains("# Investigation"))
+        assertTrue(markdown.contains("**Root cause:** a race."))
+        assertTrue(markdown.contains("> Reproduces on cold start"))
+        assertTrue(markdown.contains("`Startup.kt:42`"))
+    }
+
     // ── annotationImageFileName (C1) ─────────────────────────────────────
 
     @Test
