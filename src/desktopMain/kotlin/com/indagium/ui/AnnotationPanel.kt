@@ -44,6 +44,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -472,6 +473,7 @@ fun AnnotationPanel(
 ) {
     val tc = tc()
     val mono = monoFont()
+    val mainWindowSize = LocalWindowInfo.current.containerSize
     val ann = tab.annotations
     val hasAnnotationBlocks = ann.blocks.isNotEmpty()
     val hasRecentNotes = recentNotes.isNotEmpty()
@@ -494,6 +496,9 @@ fun AnnotationPanel(
     var blockFieldFocused by remember { mutableStateOf(false) }
     var activeBlockFieldId by remember(tab.id) { mutableStateOf<String?>(null) }
     var navIndex by remember(tab.id) { mutableStateOf(0) }
+    // The rich editor deliberately keeps an independent draft.  The panel's existing inline
+    // field stays available, but Update is the only action that writes this dialog's draft.
+    var editingBlockId by remember(tab.id) { mutableStateOf<String?>(null) }
     val prefixFr = remember { FocusRequester() }
     val suffixFr = remember { FocusRequester() }
     val blockFieldRequesters = remember(ann.blocks.map { it.id }) {
@@ -708,6 +713,40 @@ fun AnnotationPanel(
             ev.isMetaPressed && ev.key == Key.Enter -> { onAddNoteAfter(blockId); true }
             ev.key == Key.Delete || ev.key == Key.Backspace -> { onRemoveBlock(blockId); true }
             else -> false
+        }
+    }
+
+    val editingBlock = editingBlockId?.let { blockId -> ann.blocks.firstOrNull { it.id == blockId } }
+    editingBlock?.let { block ->
+        val text = when (block) {
+            is AnnBlock.Note -> block.text
+            is AnnBlock.LogRef -> block.caption
+            is AnnBlock.Image -> null
+        }
+        // Diagram notes have a dedicated editor that keeps their model/source contract intact;
+        // Image captions are intentionally outside this prose-editor scope.
+        if (text != null) {
+            Dialog(
+                onDismissRequest = { editingBlockId = null },
+                properties = DialogProperties(
+                    usePlatformDefaultWidth = false,
+                    dismissOnClickOutside = false,
+                ),
+            ) {
+                AnnotationMarkdownEditorDialog(
+                    title = if (block is AnnBlock.Note) "Edit note" else "Edit annotation",
+                    initialText = text,
+                    confirmLabel = "Update",
+                    windowSize = mainWindowSize,
+                    rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
+                    sourceFilename = (block as? AnnBlock.LogRef)?.sourceFilename,
+                    onConfirm = { updated ->
+                        onUpdateBlock(block.id, updated)
+                        editingBlockId = null
+                    },
+                    onDismiss = { editingBlockId = null },
+                )
+            }
         }
     }
 
@@ -1022,6 +1061,7 @@ fun AnnotationPanel(
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
                             onUpdate = { onUpdateBlock(block.id, it) },
+                            onEdit = { editingBlockId = block.id },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
@@ -1052,6 +1092,7 @@ fun AnnotationPanel(
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
+                            onEdit = { editingBlockId = block.id },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
@@ -1995,6 +2036,7 @@ private fun NoteBlock(
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
     onUpdate: (String) -> Unit,
+    onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
@@ -2018,6 +2060,7 @@ private fun NoteBlock(
         BlockControls(
             if (diagram != null) "diagram" else "text",
             tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+            onEdit = if (diagram == null) onEdit else null,
             onNavigate = if (diagram != null) onEditDiagram else null,
             onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
             onCopyImage = diagram?.let { summary ->
@@ -2402,6 +2445,7 @@ private fun LogRefBlock(
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
     onUpdateCaption: (String) -> Unit,
+    onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
@@ -2420,6 +2464,7 @@ private fun LogRefBlock(
     ) {
         BlockControls(
             "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
+            onEdit = onEdit,
             dragHandleModifier = dragHandleModifier,
         )
         if (block.sourceFilename != null) {
@@ -2576,6 +2621,7 @@ private fun BlockControls(
     onNavigate: (() -> Unit)? = null,
     onNavigateTooltip: String? = null,
     onCopyImage: (() -> Unit)? = null,
+    onEdit: (() -> Unit)? = null,
     afterBadgeContent: (@Composable () -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
 ) {
@@ -2645,6 +2691,7 @@ private fun BlockControls(
         if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
         if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
         LabelIconButton("+ note", fontSize = 10.sp, onClick = onAddBelow)
+        onEdit?.let { SquareIconButton("✎", fontSize = 13.sp, onClick = it) }
         SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
     }
 }

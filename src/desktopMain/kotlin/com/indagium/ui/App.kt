@@ -37,6 +37,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
@@ -139,6 +140,7 @@ fun App(
 ) {
     val theme = themeColors(state.settings.theme)
     val platformDensity = LocalDensity.current
+    val mainWindowSize = LocalWindowInfo.current.containerSize
     val interfaceScale = state.settings.interfaceScalePercent / 100f
     val scaledDensity = remember(platformDensity, interfaceScale) {
         Density(
@@ -1059,9 +1061,16 @@ fun App(
             // ── Add annotation dialog ─────────────────────────────────
             state.addAnnRequest?.let { req ->
                 val rows = req.logIds.mapNotNull { state.tab(req.sourceTabId)?.rmap?.get(it) }
-                Dialog(onDismissRequest = { state.addAnnRequest = null }) {
+                Dialog(
+                    onDismissRequest = { state.addAnnRequest = null },
+                    properties = DialogProperties(
+                        usePlatformDefaultWidth = false,
+                        dismissOnClickOutside = false,
+                    ),
+                ) {
                     AddAnnDialog(
                         rows = rows,
+                        windowSize = mainWindowSize,
                         sourceFilename = req.sourceFilename,
                         onConfirm = { caption ->
                             state.confirmAddAnn(

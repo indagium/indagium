@@ -10,11 +10,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -22,84 +26,305 @@ import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
 import java.io.File
 
+internal enum class MarkdownFormatAction {
+    Bold,
+    Italic,
+    Strikethrough,
+    Heading1,
+    Heading2,
+    Heading3,
+    BulletList,
+    NumberedList,
+    Quote,
+    InlineCode,
+    CodeBlock,
+    Link,
+}
+
+/**
+ * Applies a Markdown formatting action without losing the editor's selection. Inline actions wrap
+ * the selected text (or select a useful placeholder), while line actions affect the current line
+ * or every selected line. Keeping this pure makes the editor behaviour independently testable.
+ */
+internal fun applyMarkdownFormat(value: TextFieldValue, action: MarkdownFormatAction): TextFieldValue = when (action) {
+    MarkdownFormatAction.Bold -> wrapMarkdown(value, "**", "**", "bold text")
+    MarkdownFormatAction.Italic -> wrapMarkdown(value, "*", "*", "italic text")
+    MarkdownFormatAction.Strikethrough -> wrapMarkdown(value, "~~", "~~", "struck text")
+    MarkdownFormatAction.InlineCode -> wrapMarkdown(value, "`", "`", "code")
+    MarkdownFormatAction.CodeBlock -> wrapMarkdown(value, "```\n", "\n```", "code")
+    MarkdownFormatAction.Link -> wrapMarkdown(value, "[", "](url)", "link text")
+    MarkdownFormatAction.Heading1 -> prefixMarkdownLines(value, "# ")
+    MarkdownFormatAction.Heading2 -> prefixMarkdownLines(value, "## ")
+    MarkdownFormatAction.Heading3 -> prefixMarkdownLines(value, "### ")
+    MarkdownFormatAction.BulletList -> prefixMarkdownLines(value, "- ")
+    MarkdownFormatAction.NumberedList -> prefixMarkdownLines(value, "1. ")
+    MarkdownFormatAction.Quote -> prefixMarkdownLines(value, "> ")
+}
+
+/** Restores a just-lost text-field selection before a toolbar action consumes it. */
+internal fun restoreMarkdownSelection(value: TextFieldValue, retainedSelection: TextRange?): TextFieldValue =
+    if (
+        value.selection.start == value.selection.end &&
+        retainedSelection != null &&
+        retainedSelection.start >= 0 &&
+        retainedSelection.end <= value.text.length
+    ) {
+        value.copy(selection = retainedSelection)
+    } else {
+        value
+    }
+
+private fun wrapMarkdown(value: TextFieldValue, prefix: String, suffix: String, placeholder: String): TextFieldValue {
+    val start = minOf(value.selection.start, value.selection.end)
+    val end = maxOf(value.selection.start, value.selection.end)
+    val content = value.text.substring(start, end).ifEmpty { placeholder }
+    val replacement = "$prefix$content$suffix"
+    val text = value.text.replaceRange(start, end, replacement)
+    val selectedStart = start + prefix.length
+    return TextFieldValue(text, TextRange(selectedStart, selectedStart + content.length))
+}
+
+private fun prefixMarkdownLines(value: TextFieldValue, prefix: String): TextFieldValue {
+    val start = minOf(value.selection.start, value.selection.end)
+    val end = maxOf(value.selection.start, value.selection.end)
+    val lineStart = value.text.lastIndexOf('\n', start - 1).let { it + 1 }
+    val effectiveEnd = if (end > start && end <= value.text.length && value.text[end - 1] == '\n') end - 1 else end
+    val lineEnd = value.text.indexOf('\n', effectiveEnd).takeIf { it >= 0 } ?: value.text.length
+    val replacement = value.text.substring(lineStart, lineEnd)
+        .split('\n')
+        .joinToString("\n") { "$prefix$it" }
+    val text = value.text.replaceRange(lineStart, lineEnd, replacement)
+    return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
+}
+
 // ── Add annotation dialog ─────────────────────────────────────────────
 @Composable
 internal fun AddAnnDialog(
     rows: List<LogEntry>,
+    windowSize: IntSize,
+    sourceFilename: String? = null,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AnnotationMarkdownEditorDialog(
+        title = "Add annotation",
+        initialText = "",
+        confirmLabel = "Add annotation",
+        rows = rows,
+        windowSize = windowSize,
+        sourceFilename = sourceFilename,
+        onConfirm = onConfirm,
+        onDismiss = onDismiss,
+    )
+}
+
+/** Shared large Markdown editor for a new log annotation and an existing annotation edit. */
+@Composable
+internal fun AnnotationMarkdownEditorDialog(
+    title: String,
+    initialText: String,
+    confirmLabel: String,
+    windowSize: IntSize,
+    rows: List<LogEntry> = emptyList(),
     sourceFilename: String? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val tc = tc()
     val mono = monoFont()
-    var caption by remember { mutableStateOf("") }
+    val density = LocalDensity.current
+    val dialogWidth = with(density) { (windowSize.width * 0.72f).toDp() }
+    val dialogHeight = with(density) { (windowSize.height * 0.72f).toDp() }
+    var editorValue by remember(initialText) { mutableStateOf(TextFieldValue(initialText)) }
 
-    Column(
-        Modifier.width(440.dp).background(tc.p, RoundedCornerShape(8.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+    Box(
+        // Make the actual dialog window, not merely its content, a same-axis fraction of the
+        // main window. This keeps its aspect ratio stable while the user resizes the app.
+        Modifier.width(dialogWidth).height(dialogHeight)
+            .background(tc.p, RoundedCornerShape(8.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(8.dp)),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppText("Add annotation", color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            if (sourceFilename != null) {
-                Box(
-                    Modifier.background(tc.ac.copy(.15f), CORNER_SM)
-                        .border(1.dp, tc.ac.copy(.3f), CORNER_SM)
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                ) { AppText("from $sourceFilename", color = tc.ac, fontSize = 10.sp, fontFamily = MONO) }
-            }
-        }
-
-        // Show referenced log lines
-        Column(
-            Modifier.fillMaxWidth().background(tc.bg, CORNER_MD)
-                .border(1.dp, tc.br, CORNER_MD).padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            rows.take(5).forEach { r ->
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    LevelBadge(r.level)
-                    AppText(
-                        r.tag, color = tc.td, fontSize = 10.sp, fontFamily = mono,
-                        modifier = Modifier.width(80.dp), overflow = TextOverflow.Ellipsis
-                    )
-                    AppText(
-                        r.msg, color = tc.ts, fontSize = 10.sp, fontFamily = mono,
-                        modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis
-                    )
+        Column(Modifier.fillMaxSize().padding(20.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                if (sourceFilename != null) {
+                    Box(
+                        Modifier.background(tc.ac.copy(.15f), CORNER_SM)
+                            .border(1.dp, tc.ac.copy(.3f), CORNER_SM)
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) { AppText("from $sourceFilename", color = tc.ac, fontSize = 10.sp, fontFamily = MONO) }
                 }
             }
-            if (rows.size > 5) AppText("… and ${rows.size - 5} more lines", color = tc.td, fontSize = 10.sp)
-        }
 
-        // Note / caption input
-        BasicTextField(
-            value = caption,
-            onValueChange = { caption = it },
-            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-            cursorBrush = SolidColor(tc.ac),
-            modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, CORNER_MD)
-                .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
-                .padding(10.dp).defaultMinSize(minHeight = 72.dp),
-            decorationBox = { inner ->
-                if (caption.isEmpty()) AppText("Add your analysis note here…", color = tc.td, fontSize = 12.sp)
-                inner()
-            },
-        )
+            Spacer(Modifier.height(12.dp))
+            if (rows.isNotEmpty()) {
+                // Both new and existing log annotations deliberately use the exact same
+                // bounded evidence viewport.  It has its own scrollbar, so evidence never
+                // changes the dialog's layout or competes with the editor's scrollbar.
+                AnnotationEvidenceList(rows, mono)
+                Spacer(Modifier.height(12.dp))
+            }
 
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            DialogActionButton("Add annotation", active = true) { onConfirm(caption) }
-            DialogActionButton("Cancel", active = false, onClick = onDismiss)
+            MarkdownAnnotationEditor(
+                value = editorValue,
+                onValueChange = { editorValue = it },
+                placeholder = "Add your analysis note here…",
+                modifier = Modifier.weight(1f),
+            )
+
+            Spacer(Modifier.height(12.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                DialogActionButton(confirmLabel, active = true) { onConfirm(editorValue.text) }
+                DialogActionButton("Cancel", active = false, onClick = onDismiss)
+            }
         }
     }
+}
+
+/** A shared, bounded evidence viewport for adding and editing log annotations. */
+@Composable
+private fun AnnotationEvidenceList(rows: List<LogEntry>, mono: FontFamily) {
+    val tc = tc()
+    val evidenceScroll = rememberScrollState()
+    Box(
+        Modifier.fillMaxWidth().height(170.dp)
+            .background(tc.bg, CORNER_MD)
+            .border(1.dp, tc.br, CORNER_MD),
+    ) {
+        Column(
+            Modifier.fillMaxSize().verticalScroll(evidenceScroll).padding(8.dp, end = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            rows.forEach { row -> AnnotationEvidenceRow(row, mono) }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(evidenceScroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+            style = appScrollbarStyle(tc),
+        )
+    }
+}
+
+@Composable
+private fun AnnotationEvidenceRow(row: LogEntry, mono: FontFamily) {
+    val tc = tc()
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LevelBadge(row.level)
+        AppText(
+            row.tag,
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = mono,
+            modifier = Modifier.width(80.dp),
+            overflow = TextOverflow.Ellipsis,
+        )
+        AppText(
+            row.msg,
+            color = tc.ts,
+            fontSize = 10.sp,
+            fontFamily = mono,
+            modifier = Modifier.weight(1f),
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun MarkdownAnnotationEditor(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val editorScroll = rememberScrollState()
+    val toolbarScroll = rememberScrollState()
+    // A toolbar click can cause the text field to report a collapsed selection before its click
+    // callback runs. Retain the last real selection so formatting still wraps what the user saw
+    // highlighted instead of appending a placeholder after it.
+    var retainedSelection by remember { mutableStateOf<TextRange?>(null) }
+
+    fun updateEditor(updated: TextFieldValue) {
+        val isSelection = updated.selection.start != updated.selection.end
+        if (isSelection) {
+            retainedSelection = updated.selection
+        } else if (updated.text != value.text) {
+            retainedSelection = null
+        }
+        onValueChange(updated)
+    }
+
+    fun applyFormat(action: MarkdownFormatAction) {
+        val valueForAction = restoreMarkdownSelection(value, retainedSelection)
+        retainedSelection = null
+        onValueChange(applyMarkdownFormat(valueForAction, action))
+    }
+
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Formatting", color = tc.td, fontSize = 10.sp)
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(toolbarScroll),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            MarkdownFormatAction.entries.forEach { action ->
+                AppButton(
+                    label = markdownActionLabel(action),
+                    onClick = { applyFormat(action) },
+                    modifier = Modifier.height(28.dp),
+                    horizontalPadding = 7.dp,
+                )
+            }
+        }
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            BasicTextField(
+                value = value,
+                onValueChange = ::updateEditor,
+                textStyle = TextStyle(
+                    color = tc.tx,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Default,
+                    lineHeight = 20.sp,
+                ),
+                cursorBrush = SolidColor(tc.ac),
+                modifier = Modifier.fillMaxSize()
+                    .background(tc.bg, CORNER_MD)
+                    .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
+                    .padding(10.dp)
+                    .verticalScroll(editorScroll),
+                decorationBox = { inner ->
+                    if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
+                    inner()
+                },
+            )
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(editorScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                style = appScrollbarStyle(tc),
+            )
+        }
+    }
+}
+
+private fun markdownActionLabel(action: MarkdownFormatAction): String = when (action) {
+    MarkdownFormatAction.Bold -> "B"
+    MarkdownFormatAction.Italic -> "I"
+    MarkdownFormatAction.Strikethrough -> "S̶"
+    MarkdownFormatAction.Heading1 -> "H1"
+    MarkdownFormatAction.Heading2 -> "H2"
+    MarkdownFormatAction.Heading3 -> "H3"
+    MarkdownFormatAction.BulletList -> "• list"
+    MarkdownFormatAction.NumberedList -> "1. list"
+    MarkdownFormatAction.Quote -> "quote"
+    MarkdownFormatAction.InlineCode -> "code"
+    MarkdownFormatAction.CodeBlock -> "block"
+    MarkdownFormatAction.Link -> "link"
 }
 
 // ── Custom AI command editor ──────────────────────────────────────────
