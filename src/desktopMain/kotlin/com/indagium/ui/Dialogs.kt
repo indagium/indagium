@@ -144,6 +144,10 @@ internal fun evidenceSummary(rows: List<LogEntry>): EvidenceSummary {
     )
 }
 
+/** "N lines · firstTs → lastTs", the summary row shared by the dialog and the report panel's log excerpts. */
+internal fun EvidenceSummary.rangeLabel(): String =
+    "$count ${if (count == 1) "line" else "lines"} · $firstTs → $lastTs"
+
 /** Word count for the editor footer strip ("N words"). Splits on whitespace runs so Markdown
  *  punctuation (`**`, backticks, …) doesn't inflate the count. */
 internal fun markdownWordCount(text: String): Int =
@@ -487,7 +491,7 @@ private fun NoteEvidencePanel(
             ) {
                 AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 9.sp, modifier = Modifier.width(8.dp))
                 AppText(
-                    "${summary.count} lines · ${summary.firstTs} → ${summary.lastTs}",
+                    summary.rangeLabel(),
                     color = tc.ts,
                     fontSize = 11.sp,
                     fontFamily = mono,

@@ -3,7 +3,9 @@ package com.indagium
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.ui.evidenceSummary
+import com.indagium.ui.logExcerptVisibleRowCount
 import com.indagium.ui.markdownWordCount
+import com.indagium.ui.rangeLabel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -73,5 +75,39 @@ class NoteEditorRedesignTest {
     fun markdownWordCountDoesNotTreatMarkdownPunctuationAsExtraWords() {
         assertEquals(2, markdownWordCount("**bold** text"))
         assertEquals(2, markdownWordCount("`durationMs=761` right"))
+    }
+
+    @Test
+    fun logExcerptVisibleRowCountShowsAllRowsWhenAtOrUnderTheCap() {
+        assertEquals(0, logExcerptVisibleRowCount(total = 0, expanded = false))
+        assertEquals(1, logExcerptVisibleRowCount(total = 1, expanded = false))
+        assertEquals(3, logExcerptVisibleRowCount(total = 3, expanded = false))
+    }
+
+    @Test
+    fun logExcerptVisibleRowCountCollapsesToCapWhenOverItAndNotExpanded() {
+        assertEquals(3, logExcerptVisibleRowCount(total = 4, expanded = false))
+        assertEquals(3, logExcerptVisibleRowCount(total = 10, expanded = false))
+    }
+
+    @Test
+    fun logExcerptVisibleRowCountShowsEveryRowWhenExpandedRegardlessOfTotal() {
+        assertEquals(4, logExcerptVisibleRowCount(total = 4, expanded = true))
+        assertEquals(10, logExcerptVisibleRowCount(total = 10, expanded = true))
+        assertEquals(0, logExcerptVisibleRowCount(total = 0, expanded = true))
+    }
+
+    @Test
+    fun logExcerptVisibleRowCountHonorsACustomCap() {
+        assertEquals(5, logExcerptVisibleRowCount(total = 8, expanded = false, cap = 5))
+        assertEquals(8, logExcerptVisibleRowCount(total = 8, expanded = false, cap = 10))
+    }
+
+    @Test
+    fun rangeLabelSingularisesOneLine() {
+        val one = listOf(LogEntry(1, "09:15:00.010", LogLevel.I, "Tag", "msg"))
+        assertEquals("1 line · 09:15:00.010 → 09:15:00.010", evidenceSummary(one).rangeLabel())
+        val two = one + LogEntry(2, "09:15:00.552", LogLevel.W, "Tag", "msg")
+        assertEquals("2 lines · 09:15:00.010 → 09:15:00.552", evidenceSummary(two).rangeLabel())
     }
 }

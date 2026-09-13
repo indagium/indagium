@@ -22,12 +22,18 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.input.key.Key
@@ -38,7 +44,9 @@ import androidx.compose.ui.input.key.isMetaPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -51,6 +59,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,6 +81,8 @@ import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode
 import com.indagium.model.AnnBlock
 import com.indagium.model.AppSettings
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.resolveRows
@@ -384,6 +395,14 @@ internal fun manualGroupKeyAtY(
     return null
 }
 
+/** How many of a LogRef block's excerpt [rows][total] to render right now ("Note popup redesign"
+ *  1b): collapsed shows the first [cap] rows plus a "show N more" link, expanded shows every row.
+ *  With [total] at or under [cap] there is nothing to hide, so the full count is returned either
+ *  way and the caller shows no toggle at all. Pure so the row-count math is unit-testable without
+ *  composing the block. */
+internal fun logExcerptVisibleRowCount(total: Int, expanded: Boolean, cap: Int = 3): Int =
+    if (expanded || total <= cap) total else cap
+
 @Composable
 fun AnnotationPanel(
     tab: LogTab,
@@ -499,6 +518,11 @@ fun AnnotationPanel(
     // The rich editor deliberately keeps an independent draft.  The panel's existing inline
     // field stays available, but Update is the only action that writes this dialog's draft.
     var editingBlockId by remember(tab.id) { mutableStateOf<String?>(null) }
+    // Log excerpt expand/collapse per LogRef block ("Note popup redesign" 1b) — panel-level so a
+    // reader's choice survives recomposition, keyed by block id rather than tab.id: block ids are
+    // unique across the whole session (same reasoning as blockHeights above), so this can just
+    // accumulate for the session instead of needing to be re-keyed/cleared per tab.
+    val logExcerptExpanded = remember { mutableStateMapOf<String, Boolean>() }
     val prefixFr = remember { FocusRequester() }
     val suffixFr = remember { FocusRequester() }
     val blockFieldRequesters = remember(ann.blocks.map { it.id }) {
@@ -548,35 +572,57 @@ fun AnnotationPanel(
         val chromeDp = 56f
         val charsPerLine = ((width - chromeDp) / avgCharWidthDp).coerceAtLeast(10f)
 
-        fun textFieldDp(text: String, lineHeightDp: Float, minHeightDp: Float): Float {
-            val lines = if (text.isEmpty()) 1f else kotlin.math.ceil(text.length / charsPerLine).coerceAtLeast(1f)
-            return maxOf(minHeightDp, lines * lineHeightDp + 16f)
+        // "Note popup redesign" 1b: an empty field is now one line at rest (~28dp: 5+5dp vertical
+        // padding around an ~18dp line/cursor) instead of the old fixed 40-60dp minimum — see
+        // BlockTextField. Content still grows the same way as before.
+        fun textFieldDp(text: String, lineHeightDp: Float, emptyDp: Float = 28f): Float {
+            if (text.isEmpty()) return emptyDp
+            val lines = kotlin.math.ceil(text.length / charsPerLine).coerceAtLeast(1f)
+            return maxOf(emptyDp, lines * lineHeightDp + 10f)
         }
-        val controlsDp = 23f
-        val outerChromeDp = 20f
+        // BlockCard's header row (an 18dp control row plus 7dp top/bottom padding), its 1-1.5dp
+        // top+bottom border, the body's own 9dp bottom padding, the 7dp spacing between body
+        // children, and the 8dp gap BlockCard now carries as its own bottom padding in place of
+        // the old edge-to-edge coloured border (see BlockCard's doc comment).
+        val headerDp = 18f + 14f
+        val cardChromeDp = 3f
+        val bodyBottomDp = 9f
+        val spacingDp = 7f
+        val gapDp = BLOCK_GAP_DP.toFloat()
         val dp = when (block) {
             is AnnBlock.Note -> {
                 // Folded diagram cards do not decode or draw their carried model.  The shallow
                 // summary gives us a stable header-height estimate without making a long Notes
                 // document pay an O(messages) parse during layout.
                 val summary = Seq3NoteSummaryCache.summary(block.text)
-                val collapsedDiagramDp = if (summary != null) 38f else 0f
-                val caption = summary?.caption.orEmpty()
-                controlsDp + collapsedDiagramDp + textFieldDp(caption, 20.7f, 40f) + outerChromeDp
+                if (summary != null) {
+                    // Collapsed diagram row: a recessed summary row (~42dp for its two lines of
+                    // text plus padding) — never parses/renders itself, matching DiagramSummaryRow.
+                    val captionDp = textFieldDp(summary.caption, 20.7f)
+                    headerDp + cardChromeDp + captionDp + spacingDp + 42f + bodyBottomDp + gapDp
+                } else {
+                    headerDp + cardChromeDp + textFieldDp(block.text, 20.7f) + bodyBottomDp + gapDp
+                }
             }
             is AnnBlock.LogRef -> {
-                val captionDp = textFieldDp(block.caption, 20.7f, 52f)
+                val captionDp = textFieldDp(block.caption, 20.7f)
                 val rowCount = block.resolveRows(tab).size
-                val rowsDp = rowCount * 15f + 12f
-                val filenameBadgeDp = if (block.sourceFilename != null) 21f else 0f
-                controlsDp + filenameBadgeDp + captionDp + 6f + rowsDp + outerChromeDp
+                // Collapsed excerpt (the common case): a 26dp summary row plus up to 3 single-line
+                // rows at 16dp each, plus a 16dp "show N more" link when there's more to hide.
+                val visibleRows = logExcerptVisibleRowCount(rowCount, expanded = false)
+                val excerptDp = if (rowCount == 0) 0f else {
+                    26f + visibleRows * 16f + (if (rowCount > 3) 16f else 0f)
+                }
+                val filenameBadgeDp = if (block.sourceFilename != null) 21f + spacingDp else 0f
+                headerDp + cardChromeDp + filenameBadgeDp + captionDp +
+                    (if (rowCount > 0) spacingDp + excerptDp else 0f) + bodyBottomDp + gapDp
             }
             is AnnBlock.Image -> {
-                // Label plus its trailing Spacer, and only when the block actually renders one —
-                // a pasted/dropped image draws neither (see displayProvenance at the render site).
-                val provenanceDp = if (block.displayProvenance != null) 16f + 5f else 0f
-                val captionDp = textFieldDp(block.caption, 20.7f, 40f)
-                controlsDp + IMAGE_BLOCK_THUMBNAIL_DP + 5f + provenanceDp + captionDp + outerChromeDp
+                // Label plus its own spacing, and only when the block actually renders one — a
+                // pasted/dropped image draws neither (see displayProvenance at the render site).
+                val provenanceDp = if (block.displayProvenance != null) 16f + spacingDp else 0f
+                val captionDp = textFieldDp(block.caption, 20.7f)
+                headerDp + cardChromeDp + IMAGE_BLOCK_THUMBNAIL_DP + spacingDp + provenanceDp + captionDp + bodyBottomDp + gapDp
             }
         }
         return dp * blockDensity
@@ -1034,12 +1080,7 @@ fun AnnotationPanel(
 
                 if (ann.blocks.isEmpty()) {
                     // Add note button + empty state
-                    Box(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                            .border(1.dp, tc.br, CORNER_MD)
-                            .clickable { onAddNoteAfter(null) }.padding(vertical = 5.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
+                    AddNoteButton(tc = tc, onClick = { onAddNoteAfter(null) })
                     Column(
                         Modifier.fillMaxWidth().padding(40.dp),
                         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1099,6 +1140,8 @@ fun AnnotationPanel(
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
+                            excerptExpanded = logExcerptExpanded[block.id] ?: false,
+                            onToggleExcerpt = { logExcerptExpanded[block.id] = !(logExcerptExpanded[block.id] ?: false) },
                             dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.Image -> ImageBlockView(
@@ -1130,7 +1173,8 @@ fun AnnotationPanel(
                 // its declaration) specifically so a revisited tab's blocks — already measured
                 // once — get accurate positions immediately, with no re-measure flicker and no
                 // window where this whole layout would need to fall back to something else.
-                Box(Modifier.fillMaxWidth().heightIn(min = (totalBlockHeightPx / blockDensity).dp)) {
+                // Top gap before the first block card, matching the BLOCK_GAP_DP between cards.
+                Box(Modifier.fillMaxWidth().padding(top = BLOCK_GAP_DP.dp).heightIn(min = (totalBlockHeightPx / blockDensity).dp)) {
                     ann.blocks.forEach { block ->
                         key(block.id) {
                             val idx = blockIds.indexOf(block.id)
@@ -1246,16 +1290,11 @@ fun AnnotationPanel(
 
                 if (ann.blocks.isNotEmpty()) {
                     // Global + text block button
-                    Box(
-                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
-                            .border(1.dp, tc.br, CORNER_MD)
-                            .clickable { onAddNoteAfter(ann.blocks.last().id) }.padding(vertical = 5.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { AppText("+ Add text block", color = tc.td, fontSize = 11.sp) }
+                    AddNoteButton(tc = tc, onClick = { onAddNoteAfter(ann.blocks.last().id) })
 
                     // Suffix
                     AnnSection(tc) {
-                        AppText("Next steps", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                        AppText("Next steps", color = tc.td, fontSize = 11.sp, fontFamily = UI)
                         Spacer(Modifier.height(3.dp))
                         ScrollableTextArea(
                             value = ann.suffix,
@@ -2026,6 +2065,133 @@ internal fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypograp
     )
 }
 
+// ── Shared block chrome ("Note popup redesign" 1b) ─────────────────────
+
+// Card shape for every report-panel block — a bit rounder than the shared CORNER_MD (buttons) so
+// note/log/image/diagram cards read as a distinct container.
+private val BLOCK_CORNER = RoundedCornerShape(6.dp)
+
+// Text fields and recessed rows (log excerpt summary, diagram collapsed row) share this slightly
+// tighter radius, matching the "Note popup redesign" 1b handoff's field radius — distinct from the
+// card's own BLOCK_CORNER above and from the shared CORNER_SM/CORNER_MD tokens used elsewhere.
+private val FIELD_CORNER = RoundedCornerShape(5.dp)
+
+// The gap between consecutive blocks, replacing the old edge-to-edge 2dp coloured border. Lives as
+// BlockCard's own bottom padding rather than a separate Spacer between blocks — see BlockCard's doc.
+private const val BLOCK_GAP_DP = 8
+
+// A dashed rounded-rect outline, drawn rather than borrowed from Modifier.border (which has no
+// dashed variant) — used only by AddNoteButton below.
+private fun Modifier.dashedOutline(color: Color, corner: Dp, strokeWidth: Dp = 1.dp): Modifier = this.drawBehind {
+    val stroke = strokeWidth.toPx()
+    drawRoundRect(
+        color = color,
+        style = Stroke(width = stroke, pathEffect = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 3.dp.toPx()))),
+        cornerRadius = CornerRadius(corner.toPx(), corner.toPx()),
+        topLeft = Offset(stroke / 2f, stroke / 2f),
+        size = Size(size.width - stroke, size.height - stroke),
+    )
+}
+
+/**
+ * Shared chrome for every report-panel block card ("Note popup redesign" 1b): a 1dp `tc.br` border
+ * (1.5dp `tc.ac` when [focused] — keyboard nav or the AI `highlightedBlockId`, same signal as
+ * before, just thinner) around a 6dp-rounded `tc.p` card, with a 3dp left edge in [edgeColor]
+ * identifying the block's type/level (replacing the old edge-to-edge 2dp coloured border). The
+ * gap between consecutive blocks lives HERE, as this composable's own bottom padding — not as a
+ * separate Spacer between blocks — so it stays inside the Box [AnnotationPanel] measures via
+ * `onSizeChanged` for drag-reorder offsets; a gap living outside that Box would desync
+ * `blockHeights` from the actual on-screen block spacing and break the drag math.
+ */
+@Composable
+private fun BlockCard(
+    tc: ThemeColors,
+    edgeColor: Color,
+    focused: Boolean,
+    header: @Composable () -> Unit,
+    body: @Composable ColumnScope.() -> Unit,
+) {
+    Column(Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = BLOCK_GAP_DP.dp)) {
+        Column(
+            Modifier.fillMaxWidth()
+                .clip(BLOCK_CORNER)
+                .background(tc.p, BLOCK_CORNER)
+                .border(if (focused) 1.5.dp else 1.dp, if (focused) tc.ac else tc.br, BLOCK_CORNER)
+                // Drawn last (after the border above) so the edge overpaints the border's own left
+                // segment, the same visual as a CSS border-left override in the design handoff.
+                .drawBehind { drawRect(edgeColor, size = Size(3.dp.toPx(), size.height)) },
+        ) {
+            Box(Modifier.fillMaxWidth().padding(horizontal = 9.dp, vertical = 7.dp)) { header() }
+            Column(
+                Modifier.fillMaxWidth().padding(start = 9.dp, end = 9.dp, bottom = 9.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+                content = body,
+            )
+        }
+    }
+}
+
+/**
+ * Shared "empty fields collapse to one line" text field for a block's caption/note text: no fixed
+ * minimum height, so an empty-and-unfocused field sits at its natural one-line height instead of
+ * the old fixed 40-60dp box that was the main source of empty space between blocks. Focusing an
+ * empty field grows it to a comfortable 52dp so there's room to start typing; a field with content
+ * already sizes to that content regardless of focus, exactly as before.
+ */
+@Composable
+private fun BlockTextField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    placeholder: String,
+    tc: ThemeColors,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+        cursorBrush = SolidColor(tc.ac),
+        modifier = Modifier.fillMaxWidth()
+            .background(tc.bg, FIELD_CORNER)
+            .border(1.dp, tc.br, FIELD_CORNER)
+            .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+            .onFocusChanged { isFocused = it.isFocused; onFieldFocusChanged(it.isFocused) }
+            .then(if (value.isEmpty() && isFocused) Modifier.heightIn(min = 52.dp) else Modifier)
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+        decorationBox = { inner ->
+            if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 12.sp)
+            inner()
+        },
+    )
+}
+
+/** Renamed from "+ Add text block" per the note popup redesign's user-decision override: the
+ *  button stays (no "Add block ▾" menu) since this panel still only creates text-note blocks
+ *  directly — images/diagrams/log refs come from the log viewer, paste/drop, or the diagram
+ *  library. Dashed outline so it reads as an affordance to add something, not another block. */
+@Composable
+private fun AddNoteButton(tc: ThemeColors, onClick: () -> Unit) {
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+            .clip(BLOCK_CORNER)
+            .background(if (hovered) tc.hv else Color.Transparent, BLOCK_CORNER)
+            .dashedOutline(if (hovered) tc.td else tc.br, 6.dp)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(vertical = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("+", color = tc.td, fontSize = 11.sp)
+            AppText("Add note", color = tc.ts, fontSize = 11.sp)
+        }
+    }
+}
+
 // ── Note block ─────────────────────────────────────────────────────────
 @Composable
 private fun NoteBlock(
@@ -2053,45 +2219,46 @@ private fun NoteBlock(
     // in sync. A malformed/non-diagram note remains the ordinary editable text control below.
     val diagram = remember(block.text) { Seq3NoteSummaryCache.summary(block.text) }
     var diagramExpanded by remember(block.id, block.text) { mutableStateOf(false) }
-    Column(
-        Modifier.fillMaxWidth()
-            .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) {
-        BlockControls(
-            if (diagram != null) "diagram" else "text",
-            tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
-            onEdit = if (diagram == null) onEdit else null,
-            onNavigate = if (diagram != null) onEditDiagram else null,
-            onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
-            onCopyImage = diagram?.let { summary ->
-                {
-                    // Copy is an explicit action, so it is the right point to pay for parsing
-                    // and rasterizing. A folded card itself stays document-free. WP4: this
-                    // document is fully in hand here, so it resolves ITS OWN theme rather than
-                    // the ambient app theme.
-                    Seq3NoteParseCache.parse(block.text)?.document?.let { document ->
-                        onCopyDiagramImage(
-                            Seq3RenderCache.brandedPngBytes(
-                                Seq3RenderCache.layout(document),
-                                resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
-                            ),
-                            "Sequence diagram: ${summary.title.ifBlank { "Sequence diagram" }}",
+    BlockCard(
+        tc = tc,
+        edgeColor = if (diagram != null) tc.ac else tc.br,
+        focused = focused,
+        header = {
+            BlockControls(
+                if (diagram != null) "diagram" else "text",
+                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+                onEdit = if (diagram == null) onEdit else null,
+                onNavigate = if (diagram != null) onEditDiagram else null,
+                onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
+                onCopyImage = diagram?.let { summary ->
+                    {
+                        // Copy is an explicit action, so it is the right point to pay for parsing
+                        // and rasterizing. A folded card itself stays document-free. WP4: this
+                        // document is fully in hand here, so it resolves ITS OWN theme rather than
+                        // the ambient app theme.
+                        Seq3NoteParseCache.parse(block.text)?.document?.let { document ->
+                            onCopyDiagramImage(
+                                Seq3RenderCache.brandedPngBytes(
+                                    Seq3RenderCache.layout(document),
+                                    resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
+                                ),
+                                "Sequence diagram: ${summary.title.ifBlank { "Sequence diagram" }}",
+                            )
+                        }
+                    }
+                },
+                afterBadgeContent = diagram?.let { summary ->
+                    {
+                        DiagramExportModeSwitcher(
+                            noteText = block.text,
+                            exportMode = summary.exportMode,
+                            onUpdateDiagramText = onUpdate,
                         )
                     }
-                }
-            },
-            afterBadgeContent = diagram?.let { summary ->
-                {
-                    DiagramExportModeSwitcher(
-                        noteText = block.text,
-                        exportMode = summary.exportMode,
-                        onUpdateDiagramText = onUpdate,
-                    )
-                }
-            },
-        )
-        Spacer(Modifier.height(5.dp))
+                },
+            )
+        },
+    ) {
         if (diagram != null) {
             DiagramNoteView(
                 noteText = block.text,
@@ -2110,45 +2277,15 @@ private fun NoteBlock(
                 },
             )
         } else {
-            BasicTextField(
+            BlockTextField(
                 value = block.text,
                 onValueChange = onUpdate,
-                textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-                cursorBrush = SolidColor(tc.ac),
-                modifier = Modifier.fillMaxWidth()
-                    .background(tc.bg, CORNER_SM)
-                    .border(1.dp, tc.br, CORNER_SM)
-                    .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-                    .onFocusChanged { onFieldFocusChanged(it.isFocused) }
-                    .padding(8.dp).defaultMinSize(minHeight = 60.dp),
-                decorationBox = { inner ->
-                    if (block.text.isEmpty()) AppText("Write your note here…", color = tc.td, fontSize = 12.sp)
-                    inner()
-                },
+                placeholder = "Write your note…",
+                tc = tc,
+                fieldFocusRequester = fieldFocusRequester,
+                onFieldFocusChanged = onFieldFocusChanged,
             )
         }
-    }
-}
-
-@Composable
-private fun DiagramHeaderSummary(summary: Seq3NoteSummary) {
-    val metrics = summary.messageCount?.let { "$it arrows" }
-    Column(Modifier.widthIn(max = 180.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
-        AppText(
-            summary.title.ifBlank { "Sequence diagram" },
-            color = tc().tx,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        AppText(
-            listOfNotNull(summary.scope, metrics).joinToString(" · "),
-            color = tc().td,
-            fontSize = 9.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
     }
 }
 
@@ -2241,195 +2378,218 @@ private fun DiagramNoteView(
 ) {
     var pendingEvidenceImport by remember(noteText) { mutableStateOf<Seq3SourceImportResult.Success?>(null) }
     var importFailure by remember(noteText) { mutableStateOf<String?>(null) }
-    BasicTextField(
-        value = summary.caption,
-        onValueChange = { caption ->
-            updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText)
-        },
-        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-        cursorBrush = SolidColor(tc.ac),
-        modifier = Modifier.fillMaxWidth()
-            .background(tc.bg, CORNER_SM)
-            .border(1.dp, tc.br, CORNER_SM)
-            .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-            .onFocusChanged { onFieldFocusChanged(it.isFocused) }
-            .padding(8.dp).defaultMinSize(minHeight = 40.dp),
-        decorationBox = { inner ->
-            if (summary.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
-            inner()
-        },
-    )
-    Spacer(Modifier.height(6.dp))
-    Row(
-        modifier = Modifier.fillMaxWidth()
-            .clickable(onClick = onToggleExpanded)
-            .padding(horizontal = 4.dp, vertical = 3.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Box(
-            Modifier.size(18.dp).background(tc.br.copy(.5f), CORNER_SM),
-            contentAlignment = Alignment.Center,
-        ) { AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 14.sp) }
-        DiagramHeaderSummary(summary)
-    }
-    // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
-    // expansion starts the full parse/render pipeline on Dispatchers.Default and publishes its
-    // finished display artifact back to Compose. WP4: the resolved theme comes from the parsed
-    // document itself (inside rememberExpandedDiagram), not the ambient app theme — see that
-    // function's own doc.
-    val expandedDiagram = rememberExpandedDiagram(noteText, settings, expanded)
-    if (expanded) {
-        Spacer(Modifier.height(6.dp))
-        // WP12: the Notes-panel card is the ordinary place a user looks — before this, the drift
-        // warning only ever showed in the Preview dialog (~line 1784, same copy reused verbatim
-        // below), so a hand-edited fence (e.g. via the MCP update_note_block tool) could go
-        // unnoticed here indefinitely. adoptSeq3NoteSource is the way out: see its own KDoc for why
-        // adopting also forces Src export mode rather than leaving IMAGE pointing at a picture that
-        // now disagrees with the text.
-        if (expandedDiagram != null && !expandedDiagram.parsed.sourceHashMatches) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                AppText(
-                    "Diagram source has drifted from its model",
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Box(
-                    Modifier.clickable {
-                        val parsed = expandedDiagram.parsed
-                        val linked = parsed.attachment?.mode == Seq3AttachmentMode.LINKED
-                        val imported = if (linked) onImportLinkedDiagram(parsed.source, parsed.dialect, false)
-                        else importSeq3Source(parsed.source, parsed.dialect, parsed.document)
-                        when (imported) {
-                            is Seq3SourceImportResult.Success -> {
-                                if (imported.evidenceLoss) {
-                                    pendingEvidenceImport = imported
-                                } else if (!linked) {
-                                    encodeSeq3Note(
-                                        imported.document,
-                                        parsed.dialect,
-                                        parsed.caption,
-                                        parsed.exportMode,
-                                        attachment = parsed.attachment,
-                                        sourceOverride = imported.canonicalSource,
-                                    ).let(onUpdateDiagramText)
-                                }
-                            }
-                            is Seq3SourceImportResult.Failure -> {
-                                importFailure = imported.diagnostics.joinToString(" ") { it.message }
-                                    .ifBlank { "No matching open diagram session." }
-                            }
-                            null -> importFailure = "No matching open diagram session."
-                        }
-                    }.padding(horizontal = 4.dp, vertical = 2.dp),
-                ) { AppText("Import edits", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
-                TooltipArea(
-                    tooltip = {
-                        ToolbarTooltip(
-                            "Keeps the hand-edited text exactly as written and switches this " +
-                                "note to Src export. It will not regenerate the picture.",
-                        )
-                    },
+    // Wrapped in a single Column (its own 7dp rhythm, same as BlockCard's body) so this whole
+    // function contributes exactly one child to the block card's body — the caller relies on that
+    // to keep the outer 7dp block-body spacing from doubling up with spacing in here.
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        BlockTextField(
+            value = summary.caption,
+            onValueChange = { caption -> updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText) },
+            placeholder = "Add a caption…",
+            tc = tc,
+            fieldFocusRequester = fieldFocusRequester,
+            onFieldFocusChanged = onFieldFocusChanged,
+        )
+        DiagramSummaryRow(summary = summary, tc = tc, expanded = expanded, onToggleExpanded = onToggleExpanded)
+        // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
+        // expansion starts the full parse/render pipeline on Dispatchers.Default and publishes its
+        // finished display artifact back to Compose. WP4: the resolved theme comes from the parsed
+        // document itself (inside rememberExpandedDiagram), not the ambient app theme — see that
+        // function's own doc.
+        val expandedDiagram = rememberExpandedDiagram(noteText, settings, expanded)
+        if (expanded) {
+            // WP12: the Notes-panel card is the ordinary place a user looks — before this, the drift
+            // warning only ever showed in the Preview dialog (~line 1784, same copy reused verbatim
+            // below), so a hand-edited fence (e.g. via the MCP update_note_block tool) could go
+            // unnoticed here indefinitely. adoptSeq3NoteSource is the way out: see its own KDoc for why
+            // adopting also forces Src export mode rather than leaving IMAGE pointing at a picture that
+            // now disagrees with the text.
+            if (expandedDiagram != null && !expandedDiagram.parsed.sourceHashMatches) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    AppText(
+                        "Diagram source has drifted from its model",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Box(
                         Modifier.clickable {
-                            adoptSeq3NoteSource(noteText)?.let(onUpdateDiagramText)
-                        }.padding(horizontal = 4.dp, vertical = 2.dp),
-                    ) {
-                        AppText(
-                            "Keep source only",
-                            color = tc.ac,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
-                    }
-                }
-            }
-            pendingEvidenceImport?.let {
-                AppText("Import removes marked log evidence. Confirm to continue.", color = tc.td, fontSize = 10.sp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.clickable { pendingEvidenceImport = null }.padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
-                    Box(Modifier.clickable {
-                        val parsed = expandedDiagram.parsed
-                        if (parsed.attachment?.mode == Seq3AttachmentMode.LINKED) {
-                            when (val result = onImportLinkedDiagram(parsed.source, parsed.dialect, true)) {
-                                is Seq3SourceImportResult.Failure -> importFailure = result.diagnostics.joinToString(" ") { it.message }
-                                else -> pendingEvidenceImport = null
-                            }
-                        } else {
-                            val success = pendingEvidenceImport ?: return@clickable
-                            encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment,
-                                sourceOverride = success.canonicalSource).let(onUpdateDiagramText)
-                            pendingEvidenceImport = null
-                        }
-                    }.padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
-                }
-            }
-            importFailure?.let { AppText(it, color = tc.td, fontSize = 10.sp) }
-            Spacer(Modifier.height(6.dp))
-        }
-        when {
-            expandedDiagram == null -> {
-                AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
-            }
-            expandedDiagram.display == null -> {
-                // A diagram note written by an older build, or hand-authored: the fence still exports
-                // wherever Mermaid is supported, but there is no model to draw or click here.
-                AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
-            }
-            else -> {
-                val display = expandedDiagram.display
-                val rendered = display.rendered
-                val bitmap = display.bitmap
-                // The renderer uses a generously sized editor canvas. A note card must not inherit
-                // that raw canvas size, so fit the visible preview within the available width and a
-                // fixed height while retaining the exact aspect ratio for hit testing.
-                BoxWithConstraints(Modifier.fillMaxWidth()) {
-                    val maxPreviewHeight = 300.dp
-                    val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
-                    val previewWidth = minOf(maxWidth, maxPreviewHeight * aspectRatio)
-                    val previewHeight = previewWidth / aspectRatio
-                    val density = LocalDensity.current.density
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        Image(
-                            bitmap = bitmap,
-                            contentDescription = "Sequence diagram",
-                            modifier = Modifier
-                                .width(previewWidth)
-                                .height(previewHeight)
-                                .pointerInput(rendered, previewWidth, previewHeight) {
-                                    detectTapGestures { offset ->
-                                        // RenderedSeq3 carries no per-arrow hit list (unlike v1/v2's
-                                        // RenderedDiagram.hits) — Seq3Layout.kt's own header names
-                                        // it as the ONE shared geometry source for both this static
-                                        // preview and the live Compose canvas (Seq3Canvas.kt), so
-                                        // hit-testing here maps the tap back into that same unit-
-                                        // less layout space and finds the nearest row by y, rather
-                                        // than duplicating a second hit-region format.
-                                        val displayWidthPx = previewWidth.value * density
-                                        val displayHeightPx = previewHeight.value * density
-                                        val unitX = (offset.x / displayWidthPx * rendered.widthPx) / rendered.scale
-                                        val unitY = (offset.y / displayHeightPx * rendered.heightPx) / rendered.scale
-                                        val layout = Seq3RenderCache.layout(expandedDiagram.parsed.document)
-                                        layout.rows.minByOrNull { kotlin.math.abs(it.y - unitY) }
-                                            ?.takeIf { kotlin.math.abs(it.y - unitY) <= DIAGRAM_ROW_HIT_TOLERANCE && unitX >= 0.0 }
-                                            ?.occurrenceEntryId
-                                            ?.let(onNavigateLine)
+                            val parsed = expandedDiagram.parsed
+                            val linked = parsed.attachment?.mode == Seq3AttachmentMode.LINKED
+                            val imported = if (linked) onImportLinkedDiagram(parsed.source, parsed.dialect, false)
+                            else importSeq3Source(parsed.source, parsed.dialect, parsed.document)
+                            when (imported) {
+                                is Seq3SourceImportResult.Success -> {
+                                    if (imported.evidenceLoss) {
+                                        pendingEvidenceImport = imported
+                                    } else if (!linked) {
+                                        encodeSeq3Note(
+                                            imported.document,
+                                            parsed.dialect,
+                                            parsed.caption,
+                                            parsed.exportMode,
+                                            attachment = parsed.attachment,
+                                            sourceOverride = imported.canonicalSource,
+                                        ).let(onUpdateDiagramText)
                                     }
-                                },
-                        )
+                                }
+                                is Seq3SourceImportResult.Failure -> {
+                                    importFailure = imported.diagnostics.joinToString(" ") { it.message }
+                                        .ifBlank { "No matching open diagram session." }
+                                }
+                                null -> importFailure = "No matching open diagram session."
+                            }
+                        }.padding(horizontal = 4.dp, vertical = 2.dp),
+                    ) { AppText("Import edits", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                    TooltipArea(
+                        tooltip = {
+                            ToolbarTooltip(
+                                "Keeps the hand-edited text exactly as written and switches this " +
+                                    "note to Src export. It will not regenerate the picture.",
+                            )
+                        },
+                    ) {
+                        Box(
+                            Modifier.clickable {
+                                adoptSeq3NoteSource(noteText)?.let(onUpdateDiagramText)
+                            }.padding(horizontal = 4.dp, vertical = 2.dp),
+                        ) {
+                            AppText(
+                                "Keep source only",
+                                color = tc.ac,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
+                    }
+                }
+                pendingEvidenceImport?.let {
+                    AppText("Import removes marked log evidence. Confirm to continue.", color = tc.td, fontSize = 10.sp)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Box(Modifier.clickable { pendingEvidenceImport = null }.padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
+                        Box(Modifier.clickable {
+                            val parsed = expandedDiagram.parsed
+                            if (parsed.attachment?.mode == Seq3AttachmentMode.LINKED) {
+                                when (val result = onImportLinkedDiagram(parsed.source, parsed.dialect, true)) {
+                                    is Seq3SourceImportResult.Failure -> importFailure = result.diagnostics.joinToString(" ") { it.message }
+                                    else -> pendingEvidenceImport = null
+                                }
+                            } else {
+                                val success = pendingEvidenceImport ?: return@clickable
+                                encodeSeq3Note(success.document, parsed.dialect, parsed.caption, parsed.exportMode, attachment = parsed.attachment,
+                                    sourceOverride = success.canonicalSource).let(onUpdateDiagramText)
+                                pendingEvidenceImport = null
+                            }
+                        }.padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                    }
+                }
+                importFailure?.let { AppText(it, color = tc.td, fontSize = 10.sp) }
+            }
+            when {
+                expandedDiagram == null -> {
+                    AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
+                }
+                expandedDiagram.display == null -> {
+                    // A diagram note written by an older build, or hand-authored: the fence still exports
+                    // wherever Mermaid is supported, but there is no model to draw or click here.
+                    AppText("Diagram source only — regenerate to see and click the picture.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+                }
+                else -> {
+                    val display = expandedDiagram.display
+                    val rendered = display.rendered
+                    val bitmap = display.bitmap
+                    // The renderer uses a generously sized editor canvas. A note card must not inherit
+                    // that raw canvas size, so fit the visible preview within the available width and a
+                    // fixed height while retaining the exact aspect ratio for hit testing.
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val maxPreviewHeight = 300.dp
+                        val aspectRatio = rendered.widthPx.toFloat() / rendered.heightPx.coerceAtLeast(1)
+                        val previewWidth = minOf(maxWidth, maxPreviewHeight * aspectRatio)
+                        val previewHeight = previewWidth / aspectRatio
+                        val density = LocalDensity.current.density
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "Sequence diagram",
+                                modifier = Modifier
+                                    .width(previewWidth)
+                                    .height(previewHeight)
+                                    .pointerInput(rendered, previewWidth, previewHeight) {
+                                        detectTapGestures { offset ->
+                                            // RenderedSeq3 carries no per-arrow hit list (unlike v1/v2's
+                                            // RenderedDiagram.hits) — Seq3Layout.kt's own header names
+                                            // it as the ONE shared geometry source for both this static
+                                            // preview and the live Compose canvas (Seq3Canvas.kt), so
+                                            // hit-testing here maps the tap back into that same unit-
+                                            // less layout space and finds the nearest row by y, rather
+                                            // than duplicating a second hit-region format.
+                                            val displayWidthPx = previewWidth.value * density
+                                            val displayHeightPx = previewHeight.value * density
+                                            val unitX = (offset.x / displayWidthPx * rendered.widthPx) / rendered.scale
+                                            val unitY = (offset.y / displayHeightPx * rendered.heightPx) / rendered.scale
+                                            val layout = Seq3RenderCache.layout(expandedDiagram.parsed.document)
+                                            layout.rows.minByOrNull { kotlin.math.abs(it.y - unitY) }
+                                                ?.takeIf { kotlin.math.abs(it.y - unitY) <= DIAGRAM_ROW_HIT_TOLERANCE && unitX >= 0.0 }
+                                                ?.occurrenceEntryId
+                                                ?.let(onNavigateLine)
+                                        }
+                                    },
+                            )
+                        }
                     }
                 }
             }
         }
-        Spacer(Modifier.height(6.dp))
+    }
+}
+
+/** Collapsed/expanded toggle row for a diagram note ("Note popup redesign" 1b): a recessed row
+ *  with an accent caret, the diagram's title and scope/metrics line, and a "show"/"hide" link —
+ *  replaces the old plain caret + [Seq3NoteSummary]-only header so the row itself reads as a
+ *  clickable invitation rather than a bare disclosure triangle. */
+@Composable
+private fun DiagramSummaryRow(
+    summary: Seq3NoteSummary,
+    tc: ThemeColors,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+) {
+    val metrics = summary.messageCount?.let { "$it arrows" }
+    Row(
+        Modifier.fillMaxWidth()
+            .background(tc.bg, FIELD_CORNER)
+            .border(1.dp, tc.br, FIELD_CORNER)
+            .clip(FIELD_CORNER)
+            .clickable(onClick = onToggleExpanded)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        AppText(if (expanded) "▾" else "▸", color = tc.ac, fontSize = 9.sp, modifier = Modifier.width(8.dp))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            AppText(
+                summary.title.ifBlank { "Sequence diagram" },
+                color = tc.tx,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            AppText(
+                listOfNotNull(summary.scope, metrics).joinToString(" · "),
+                color = tc.td,
+                fontSize = 10.sp,
+                fontFamily = MONO,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        AppText(if (expanded) "hide" else "show", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -2451,6 +2611,8 @@ private fun LogRefBlock(
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
     onNavigate: () -> Unit,
+    excerptExpanded: Boolean,
+    onToggleExcerpt: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
 ) {
     val rows = block.resolveRows(tab)
@@ -2458,63 +2620,149 @@ private fun LogRefBlock(
     val context = rememberAnnotationLogLineContext(tab, settings, localSource)
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
-    Column(
-        Modifier.fillMaxWidth()
-            .border(BorderStroke(2.dp, if (focused) tc.ac else borderColor))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+    BlockCard(
+        tc = tc,
+        edgeColor = borderColor,
+        focused = focused,
+        header = {
+            BlockControls(
+                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
+                onNavigateTooltip = "Show in log",
+                onEdit = onEdit,
+                dragHandleModifier = dragHandleModifier,
+            )
+        },
     ) {
-        BlockControls(
-            "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
-            onEdit = onEdit,
-            dragHandleModifier = dragHandleModifier,
-        )
         if (block.sourceFilename != null) {
-            Spacer(Modifier.height(3.dp))
             Box(
                 Modifier.background(tc.ac.copy(.12f), CORNER_SM)
                     .border(1.dp, tc.ac.copy(.25f), CORNER_SM)
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
         }
-        Spacer(Modifier.height(5.dp))
-        BasicTextField(
+        BlockTextField(
             value = block.caption,
             onValueChange = onUpdateCaption,
-            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-            cursorBrush = SolidColor(tc.ac),
-            modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM)
-                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
-                .padding(8.dp).defaultMinSize(minHeight = 52.dp),
-            decorationBox = { inner ->
-                if (block.caption.isEmpty()) AppText("Add a note or analysis…", color = tc.td, fontSize = 12.sp)
-                inner()
-            },
+            placeholder = "Add a note…",
+            tc = tc,
+            fieldFocusRequester = fieldFocusRequester,
+            onFieldFocusChanged = onFieldFocusChanged,
         )
-        Spacer(Modifier.height(6.dp))
+        LogExcerpt(
+            rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
+            mono = mono, tc = tc, expanded = excerptExpanded, onToggleExpanded = onToggleExcerpt,
+        )
+    }
+}
 
-        // Referenced log lines shown BELOW the text
-        Column(
+/**
+ * The referenced log lines below a [LogRefBlock]'s caption ("Note popup redesign" 1b): a recessed
+ * box with a clickable "N lines · firstTs → lastTs" summary (reusing [evidenceSummary], same as
+ * the full editor dialog) plus the worst level present. With more than 3 rows this collapses to
+ * the first 3 as single-line ellipsis rows with a "show N more" link; with 3 or fewer there is
+ * nothing to hide, so every row renders exactly as before and the toggle is dropped (the summary
+ * row still shows, for consistency, but isn't clickable).
+ */
+@Composable
+private fun LogExcerpt(
+    rows: List<LogEntry>,
+    tab: LogTab,
+    settings: AppSettings,
+    context: LogLinePresentationContext?,
+    localSource: Boolean,
+    mono: FontFamily,
+    tc: ThemeColors,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
+) {
+    if (rows.isEmpty()) return
+    val summary = remember(rows) { evidenceSummary(rows) }
+    val canToggle = rows.size > 3
+    val worst = summary.levelCounts.firstOrNull()
+    Column(
+        Modifier.fillMaxWidth()
+            .background(tc.bg, FIELD_CORNER)
+            .border(1.dp, tc.br, FIELD_CORNER)
+            .clip(FIELD_CORNER),
+    ) {
+        Row(
             Modifier.fillMaxWidth()
-                .background(tc.bg.copy(.7f), CORNER_SM)
-                .border(1.dp, tc.br.copy(.6f), CORNER_SM)
-                .padding(6.dp),
+                .then(if (canToggle) Modifier.clickable(onClick = onToggleExpanded) else Modifier)
+                .padding(horizontal = 8.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(
+                if (!canToggle) "" else if (expanded) "▾" else "▸",
+                color = tc.ts, fontSize = 9.sp, modifier = Modifier.width(8.dp),
+            )
+            AppText(
+                summary.rangeLabel(),
+                color = tc.ts, fontSize = 10.sp, fontFamily = mono,
+            )
+            Spacer(Modifier.weight(1f))
+            worst?.let { (level, count) -> LogExcerptLevelChip(level, count, mono) }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            rows.forEach { r ->
+            if (expanded || !canToggle) {
+                // Expanded (or nothing to collapse): every row exactly as before — presentLogLine,
+                // wrapped, no truncation. Nothing is lost by collapsing first.
+                rows.forEach { r ->
+                    AppText(
+                        presentLogLine(tab, r, settings, context, allowProcessName = localSource),
+                        color = tc.ts,
+                        fontSize = 9.sp,
+                        fontFamily = mono,
+                        maxLines = Int.MAX_VALUE,
+                        overflow = TextOverflow.Clip,
+                    )
+                }
+                if (canToggle) {
+                    AppText(
+                        "show less",
+                        color = tc.ac, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clickable(onClick = onToggleExpanded).padding(top = 2.dp),
+                    )
+                }
+            } else {
+                val visibleCount = logExcerptVisibleRowCount(rows.size, expanded = false)
+                rows.take(visibleCount).forEach { r ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) { LevelBadge(r.level) }
+                        AppText(
+                            "${r.tag}  ${r.msg}",
+                            color = tc.tx, fontSize = 10.sp, fontFamily = mono,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
                 AppText(
-                    presentLogLine(tab, r, settings, context, allowProcessName = localSource),
-                    color = tc.ts,
-                    fontSize = 9.sp,
-                    fontFamily = mono,
-                    maxLines = Int.MAX_VALUE,
-                    overflow = TextOverflow.Clip,
+                    "show ${rows.size - visibleCount} more",
+                    color = tc.ac, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clickable(onClick = onToggleExpanded).padding(top = 2.dp),
                 )
             }
         }
     }
+}
+
+@Composable
+private fun LogExcerptLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
+    val color = level.defaultColor
+    Box(
+        Modifier.background(color.copy(alpha = .13f), CORNER_SM)
+            .border(1.dp, color.copy(alpha = .27f), CORNER_SM)
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    ) { AppText("$count ${level.key}", color = color, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold) }
 }
 
 // ── Image block ──────────────────────────────────────────────────────
@@ -2538,38 +2786,30 @@ private fun ImageBlockView(
     // edit — updateBlock's b.copy(caption = ...) reuses the same bytes reference), so decoding
     // only happens once per distinct image, not on every recomposition.
     val bitmap = remember(block.bytes) { decodeImageBlockBitmap(block.bytes) }
-    Column(
-        Modifier.fillMaxWidth()
-            .border(BorderStroke(2.dp, if (focused) tc.ac else tc.ac.copy(.35f)))
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+    BlockCard(
+        tc = tc,
+        edgeColor = tc.br,
+        focused = focused,
+        header = {
+            BlockControls(
+                "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
+                onNavigate = onNavigateVideoFrame,
+                onCopyImage = onCopyImage,
+                dragHandleModifier = dragHandleModifier,
+            )
+        },
     ) {
-        BlockControls(
-            "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
-            onNavigate = onNavigateVideoFrame,
-            onCopyImage = onCopyImage,
-            dragHandleModifier = dragHandleModifier,
-        )
-        Spacer(Modifier.height(5.dp))
-        BasicTextField(
+        BlockTextField(
             value = block.caption,
             onValueChange = onUpdateCaption,
-            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
-            cursorBrush = SolidColor(tc.ac),
-            modifier = Modifier.fillMaxWidth()
-                .background(tc.bg, CORNER_SM)
-                .border(1.dp, tc.br, CORNER_SM)
-                .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-                .onFocusChanged { onFieldFocusChanged(it.isFocused) }
-                .padding(8.dp).defaultMinSize(minHeight = 40.dp),
-            decorationBox = { inner ->
-                if (block.caption.isEmpty()) AppText("Add a caption…", color = tc.td, fontSize = 12.sp)
-                inner()
-            },
+            placeholder = "Add a caption…",
+            tc = tc,
+            fieldFocusRequester = fieldFocusRequester,
+            onFieldFocusChanged = onFieldFocusChanged,
         )
-        Spacer(Modifier.height(5.dp))
-        // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — the label
-        // and its surrounding spacing disappear entirely for a pasted or dropped image, which is
-        // why this is one nullable read rather than an empty-string AppText.
+        // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — it
+        // disappears entirely for a pasted or dropped image, which is why this is one nullable
+        // read rather than an empty-string AppText.
         block.displayProvenance?.let { provenance ->
             val provenanceModifier = if (onNavigateVideoFrame != null) {
                 Modifier
@@ -2585,7 +2825,6 @@ private fun ImageBlockView(
                 fontFamily = MONO,
                 modifier = provenanceModifier,
             )
-            Spacer(Modifier.height(5.dp))
         }
         if (bitmap != null) {
             Image(
@@ -2688,11 +2927,17 @@ private fun BlockControls(
         }
         Spacer(Modifier.weight(1f))
 
-        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
-        if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+        // Fixed-width ↑/↓ slots: an invisible, disabled placeholder of the same footprint on the
+        // first/last block, so the action row is the same width on every block instead of
+        // shifting as ↑/↓ appear and disappear while scrolling through the list.
+        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp) else Spacer(Modifier.size(18.dp))
+        if (!isLast) SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown) else Spacer(Modifier.size(18.dp))
         if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
-        LabelIconButton("+ note", fontSize = 10.sp, onClick = onAddBelow)
-        onEdit?.let { SquareIconButton("✎", fontSize = 13.sp, onClick = it) }
+        // Renamed from the bare "✎" glyph, which at this size read as a paperclip rather than the
+        // button that opens the full editor dialog.
+        onEdit?.let { LabelIconButton("Edit", fontSize = 10.sp, onClick = it) }
+        LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
+        Box(Modifier.width(1.dp).height(14.dp).background(tc().br))
         SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
     }
 }
