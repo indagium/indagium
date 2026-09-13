@@ -92,7 +92,7 @@ class SequentialArchiveTest {
         val dir = createTempDirectory("sequential-archive").toFile()
         val binary = byteArrayOf(0, 1, 2, 3, 0x89.toByte(), 'H'.code.toByte(), 'E'.code.toByte(), 'A'.code.toByte())
         // Deliberately ordered so a stray `.use {}` on the shared tar stream while classifying
-        // "a.log" (which DOES read from its stream, via candidateKind's isText() check) or
+        // "a.log" (which DOES read from its stream, via candidateKindFromContent's content sniff) or
         // "bad.log" (same — read, then rejected for containing NUL bytes) would truncate the scan
         // before ever reaching "c.log". Finding "c.log" is the regression guard.
         val tar = buildTar(

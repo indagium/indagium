@@ -54,7 +54,7 @@ private class ScanState(
 
 /**
  * Scans [root] for log/ANR-text and video candidates, shaped exactly like [scanArchiveCandidates]
- * (BugReportZip.kt) does for an archive — reusing [candidateKind] and [isVideoEntryName] verbatim
+ * (BugReportZip.kt) does for an archive — reusing [candidateKindFromContent] and [isVideoEntryName] verbatim
  * so a folder of unpacked logs and an archive containing the same logs classify identically and
  * can never quietly drift apart from each other.
  *
@@ -161,7 +161,7 @@ private fun visitFile(state: ScanState, child: File): Boolean {
     // Each file gets its own stream here (unlike a sequential archive's one shared stream) —
     // `.use {}` is correct and required to release the file handle promptly rather than leaving
     // thousands of them open until GC gets around to it.
-    val kind = candidateKindFromContent(relativePath) { child.inputStream().use(::sniffCandidateContent) }
+    val kind = candidateKindFromContent(relativePath) { child.inputStream().use { sniffLogContentKind(it, child.name) } }
     if (kind != null) {
         state.logs += ZipLogCandidate(relativePath, child.name, child.length(), kind)
         state.candidatesAccepted++

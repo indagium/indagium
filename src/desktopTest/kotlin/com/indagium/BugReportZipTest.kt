@@ -2,7 +2,9 @@ package com.indagium
 
 import com.indagium.model.LogLevel
 import com.indagium.utils.ArchiveBudgetExceededException
+import com.indagium.utils.LogContentKind
 import com.indagium.utils.ZipLogCandidateKind
+import com.indagium.utils.candidateKindFromContent
 import com.indagium.utils.extractArchiveVideoToCache
 import com.indagium.utils.extractCandidate
 import com.indagium.utils.isSupportedArchiveFile
@@ -183,6 +185,41 @@ class BugReportZipTest {
             setOf("v1.bin", "v2.bin"),
             listArchiveLogCandidates(zip).filter { it.kind == ZipLogCandidateKind.DLT }.map { it.entryPath }.toSet(),
         )
+    }
+
+    @Test
+    fun ordinaryBinaryEntriesNeverMisclassifyAsDltCandidates() {
+        val dir = createTempDirectory("openlog-ordinary-binaries").toFile()
+        // Real magic bytes for each format, deliberately including ones whose leading byte's
+        // top 3 bits happen to look like DLT's v1/v2 version field — the point of the regression
+        // is that name-gating (not a content coincidence) is what keeps these out.
+        val innerZipBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04) + ByteArray(16)
+        val sqliteBytes = "SQLite format 3 ".toByteArray() + ByteArray(16)
+        val protoBytes = byteArrayOf(0x22, 0x10) + ByteArray(16)
+        val randomTextLikeBytes = ByteArray(64) { ('A' + (it % 26)).code.toByte() }
+        val zip = buildZip(
+            dir, "bugreport.zip",
+            mapOf(
+                "inner.zip" to innerZipBytes,
+                "app.db" to sqliteBytes,
+                "activity.proto" to protoBytes,
+                "data.bin" to randomTextLikeBytes,
+            ),
+        )
+
+        assertTrue(listArchiveLogCandidates(zip).isEmpty())
+    }
+
+    @Test
+    fun sniffIsNeverInvokedForEntriesWhoseNameDoesNotAlreadySuggestALogOrDlt() {
+        var calls = 0
+        val sniff = { calls++; LogContentKind.OTHER }
+
+        assertEquals(null, candidateKindFromContent("photos/image.png", sniff))
+        assertEquals(null, candidateKindFromContent("libs/x.so", sniff))
+        assertEquals(null, candidateKindFromContent("proto/a.proto", sniff))
+
+        assertEquals(0, calls, "the sniff lambda must not run for names that are name-gated out")
     }
 
     @Test
