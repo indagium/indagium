@@ -1,30 +1,51 @@
+@file:OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
 import java.io.File
+import kotlin.math.roundToInt
 
 internal enum class MarkdownFormatAction {
     Bold,
@@ -97,28 +118,69 @@ private fun prefixMarkdownLines(value: TextFieldValue, prefix: String): TextFiel
     return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
 }
 
+/** Read-only rollup of a note's attached log lines, feeding the evidence panel's collapsed summary
+ *  row ("N lines · firstTs → lastTs") and its level-count chips. Kept pure so the summary text and
+ *  chip ordering are unit-testable without composing the dialog. */
+internal data class EvidenceSummary(
+    val count: Int,
+    val firstTs: String,
+    val lastTs: String,
+    val levelCounts: List<Pair<LogLevel, Int>>,
+)
+
+// Chips read worst-first (Error, Warn, Info, Debug, Verbose) per the design handoff; Assert is
+// folded in after Verbose rather than given its own slot ahead of the others — LogParser never
+// emits one, but a caller that somehow has one still sees a count instead of it silently vanishing.
+private val EVIDENCE_LEVEL_ORDER =
+    listOf(LogLevel.E, LogLevel.W, LogLevel.I, LogLevel.D, LogLevel.V, LogLevel.A)
+
+internal fun evidenceSummary(rows: List<LogEntry>): EvidenceSummary {
+    val counts = rows.groupingBy { it.level }.eachCount()
+    return EvidenceSummary(
+        count = rows.size,
+        firstTs = rows.firstOrNull()?.ts.orEmpty(),
+        lastTs = rows.lastOrNull()?.ts.orEmpty(),
+        levelCounts = EVIDENCE_LEVEL_ORDER.mapNotNull { level -> counts[level]?.let { level to it } },
+    )
+}
+
+/** Word count for the editor footer strip ("N words"). Splits on whitespace runs so Markdown
+ *  punctuation (`**`, backticks, …) doesn't inflate the count. */
+internal fun markdownWordCount(text: String): Int =
+    text.trim().let { if (it.isEmpty()) 0 else it.split(Regex("\\s+")).size }
+
 // ── Add annotation dialog ─────────────────────────────────────────────
 @Composable
 internal fun AddAnnDialog(
     rows: List<LogEntry>,
     windowSize: IntSize,
-    sourceFilename: String? = null,
+    fileLabel: String? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     AnnotationMarkdownEditorDialog(
-        title = "Add annotation",
+        title = "New note",
         initialText = "",
-        confirmLabel = "Add annotation",
+        confirmLabel = "Save note",
         rows = rows,
         windowSize = windowSize,
-        sourceFilename = sourceFilename,
+        fileLabel = fileLabel,
         onConfirm = onConfirm,
         onDismiss = onDismiss,
     )
 }
 
-/** Shared large Markdown editor for a new log annotation and an existing annotation edit. */
+// Top-left corner stays square so the editor box visually joins the selected "Write" tab above it.
+private val EDITOR_BOX_SHAPE = RoundedCornerShape(topStart = 0.dp, topEnd = 6.dp, bottomEnd = 6.dp, bottomStart = 6.dp)
+
+/**
+ * Shared large Markdown editor for a new log annotation and an existing annotation edit
+ * ("Note editor redesign" 1a). Layout, top to bottom: header (title, file chip, ✕) → a
+ * collapsed-by-default evidence summary (only when [rows] is non-empty) → Write/Preview tabs
+ * joined to an editor box (borderless hover toolbar, text field or rendered preview, a footer
+ * strip with word count / unsaved-changes / the save-shortcut hint) → an action bar with an
+ * optional Delete, Cancel and a solid-accent Save.
+ */
 @Composable
 internal fun AnnotationMarkdownEditorDialog(
     title: String,
@@ -126,83 +188,521 @@ internal fun AnnotationMarkdownEditorDialog(
     confirmLabel: String,
     windowSize: IntSize,
     rows: List<LogEntry> = emptyList(),
-    sourceFilename: String? = null,
+    fileLabel: String? = null,
+    onDelete: (() -> Unit)? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val tc = tc()
     val mono = monoFont()
     val density = LocalDensity.current
-    val dialogWidth = with(density) { (windowSize.width * 0.72f).toDp() }
-    val dialogHeight = with(density) { (windowSize.height * 0.72f).toDp() }
-    var editorValue by remember(initialText) { mutableStateOf(TextFieldValue(initialText)) }
+    val dialogWidth = minOf(780.dp, with(density) { (windowSize.width * 0.92f).toDp() })
+    // Sized to 88% of the window height, same fixed-fraction approach the previous 72% used — the
+    // editor area below fills whatever that leaves via weight(1f) and scrolls its own overflow.
+    // Capped at 760dp so a large monitor doesn't turn this into an oversized modal.
+    val dialogHeight = with(density) { (windowSize.height * 0.88f).toDp() }.coerceAtMost(760.dp)
 
+    var editorValue by remember(initialText) { mutableStateOf(TextFieldValue(initialText)) }
+    var previewMode by remember { mutableStateOf(false) }
+    var evidenceExpanded by remember { mutableStateOf(false) }
+    var headingMenuOpen by remember { mutableStateOf(false) }
+    // A toolbar click can cause the text field to report a collapsed selection before its click
+    // callback runs. Retain the last real selection so formatting still wraps what the user saw
+    // highlighted instead of appending a placeholder after it.
+    var retainedSelection by remember { mutableStateOf<TextRange?>(null) }
+    val editorFocusRequester = remember { FocusRequester() }
+
+    val summary = remember(rows) { evidenceSummary(rows) }
+    val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
+    val hasUnsavedChanges = editorValue.text != initialText
+    val shortcutHint = if (isMacOs) "⌘↵ save · esc cancel" else "Ctrl↵ save · esc cancel"
+    val displayTitle = if (rows.isNotEmpty()) {
+        "Note on ${rows.size} log line${if (rows.size == 1) "" else "s"}"
+    } else {
+        title
+    }
+
+    // Runs once on open (previewMode starts false) and again every time the user switches back
+    // from Preview to Write. The FocusRequester is only attached to the BasicTextField in Write
+    // mode — Preview has no text field to attach it to — so without this, switching back leaves
+    // the dialog with nothing focused at all: typing and the root Esc/save shortcuts go nowhere
+    // until the user clicks the field themselves.
+    LaunchedEffect(previewMode) {
+        if (!previewMode) runCatching { editorFocusRequester.requestFocus() }
+    }
+
+    // The CLAUDE.md-documented scar: Modifier.clickable is focusable, so clicking it moves keyboard
+    // focus onto it and never gives it back. Every click handler that isn't itself the text field
+    // (toolbar buttons, the Heading popup) routes through one of these two reclaims so the user can
+    // keep typing right after, and so this dialog's own root Esc/save shortcuts keep working.
+    fun closeHeadingMenu() {
+        headingMenuOpen = false
+        runCatching { editorFocusRequester.requestFocus() }
+    }
+
+    fun updateEditor(updated: TextFieldValue) {
+        val isSelection = updated.selection.start != updated.selection.end
+        if (isSelection) {
+            retainedSelection = updated.selection
+        } else if (updated.text != editorValue.text) {
+            retainedSelection = null
+        }
+        editorValue = updated
+    }
+
+    fun applyFormat(action: MarkdownFormatAction) {
+        val valueForAction = restoreMarkdownSelection(editorValue, retainedSelection)
+        retainedSelection = null
+        editorValue = applyMarkdownFormat(valueForAction, action)
+        runCatching { editorFocusRequester.requestFocus() }
+    }
+
+    val dialogShape = RoundedCornerShape(10.dp)
     Box(
         // Make the actual dialog window, not merely its content, a same-axis fraction of the
         // main window. This keeps its aspect ratio stable while the user resizes the app.
         Modifier.width(dialogWidth).height(dialogHeight)
-            .background(tc.p, RoundedCornerShape(8.dp))
-            .border(1.dp, tc.br, RoundedCornerShape(8.dp)),
+            .background(tc.p, dialogShape)
+            .border(1.dp, tc.br, dialogShape)
+            .onPreviewKeyEvent { ev ->
+                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when {
+                    // Esc closes the Heading popup first, same as the header's own ✕/dismiss.
+                    headingMenuOpen && ev.key == Key.Escape -> { closeHeadingMenu(); true }
+                    ev.key == Key.Escape -> { onDismiss(); true }
+                    ev.isActionKey && (ev.key == Key.Enter || ev.key == Key.NumPadEnter) -> {
+                        onConfirm(editorValue.text)
+                        true
+                    }
+                    else -> false
+                }
+            },
     ) {
-        Column(Modifier.fillMaxSize().padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                if (sourceFilename != null) {
+        Column(Modifier.fillMaxSize()) {
+            // ── Header ──────────────────────────────────────────────────
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                AppText(displayTitle, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                if (fileLabel != null) {
                     Box(
-                        Modifier.background(tc.ac.copy(.15f), CORNER_SM)
-                            .border(1.dp, tc.ac.copy(.3f), CORNER_SM)
+                        Modifier.background(tc.ac.copy(alpha = .12f), CORNER_SM)
+                            .border(1.dp, tc.ac.copy(alpha = .28f), CORNER_SM)
                             .padding(horizontal = 6.dp, vertical = 2.dp),
-                    ) { AppText("from $sourceFilename", color = tc.ac, fontSize = 10.sp, fontFamily = MONO) }
+                    ) { AppText(fileLabel, color = tc.ac, fontSize = 10.sp, fontFamily = mono) }
+                }
+                Spacer(Modifier.weight(1f))
+                CloseButton(onClick = onDismiss)
+            }
+            NoteDialogDivider()
+
+            // ── Evidence panel (collapsed by default) ────────────────────
+            if (rows.isNotEmpty()) {
+                Box(Modifier.padding(start = 16.dp, end = 16.dp, top = 12.dp)) {
+                    NoteEvidencePanel(
+                        rows = rows,
+                        summary = summary,
+                        expanded = evidenceExpanded,
+                        onToggle = { evidenceExpanded = !evidenceExpanded },
+                        mono = mono,
+                    )
                 }
             }
 
-            Spacer(Modifier.height(12.dp))
-            if (rows.isNotEmpty()) {
-                // Both new and existing log annotations deliberately use the exact same
-                // bounded evidence viewport.  It has its own scrollbar, so evidence never
-                // changes the dialog's layout or competes with the editor's scrollbar.
-                AnnotationEvidenceList(rows, mono)
-                Spacer(Modifier.height(12.dp))
+            // ── Write / Preview tabs + editor box ────────────────────────
+            Column(Modifier.weight(1f).padding(start = 16.dp, end = 16.dp, top = 14.dp)) {
+                Row(
+                    // Overlaps the editor box's own top border by exactly its own 1dp (design:
+                    // "position:relative; top:1px") and draws above it (zIndex), so the selected
+                    // tab's tc.p background paints over that seam instead of leaving the editor
+                    // box's border line crossing behind the tab.
+                    Modifier.offset(y = 1.dp).zIndex(1f),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    NoteEditorTab("Write", selected = !previewMode, onClick = { previewMode = false })
+                    Spacer(Modifier.width(2.dp))
+                    NoteEditorTab("Preview", selected = previewMode, onClick = { previewMode = true })
+                    Spacer(Modifier.weight(1f))
+                    AppText(
+                        "Markdown",
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        fontFamily = mono,
+                        modifier = Modifier.padding(bottom = 7.dp),
+                    )
+                }
+                Column(
+                    Modifier.weight(1f).fillMaxWidth()
+                        .border(1.dp, tc.br, EDITOR_BOX_SHAPE)
+                        .background(tc.p, EDITOR_BOX_SHAPE)
+                        .clip(EDITOR_BOX_SHAPE),
+                ) {
+                    if (!previewMode) {
+                        // No weighted children here, so a horizontal scroll is safe: on a narrow
+                        // window the row just scrolls instead of clipping the trailing buttons.
+                        Row(
+                            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                                .padding(horizontal = 6.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box {
+                                MarkdownToolbarButton(onClick = { headingMenuOpen = true }) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        AppText("Heading", color = tc.ts, fontSize = 11.sp)
+                                        AppText("▾", color = tc.td, fontSize = 8.sp)
+                                    }
+                                }
+                                if (headingMenuOpen) {
+                                    HeadingFormatMenu(
+                                        onSelect = { action -> applyFormat(action); closeHeadingMenu() },
+                                        onDismiss = { closeHeadingMenu() },
+                                    )
+                                }
+                            }
+                            MarkdownToolbarSeparator()
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Bold) }) {
+                                AppText("B", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Italic) }) {
+                                // AppText has no italic param; this is the one glyph that needs it. Serif,
+                                // because a sans-serif italic capital I renders as a bare slash.
+                                Text("I", color = tc.ts, fontSize = 13.sp, fontStyle = FontStyle.Italic, fontFamily = FontFamily.Serif)
+                            }
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Strikethrough) }) {
+                                AppText("S", color = tc.ts, fontSize = 12.sp, textDecoration = TextDecoration.LineThrough)
+                            }
+                            MarkdownToolbarSeparator()
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.InlineCode) }) {
+                                AppText("Code", color = tc.ts, fontSize = 11.sp)
+                            }
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.CodeBlock) }) {
+                                AppText("Code block", color = tc.ts, fontSize = 11.sp)
+                            }
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Quote) }) {
+                                AppText("Quote", color = tc.ts, fontSize = 11.sp)
+                            }
+                            MarkdownToolbarSeparator()
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.BulletList) }) {
+                                AppText("• List", color = tc.ts, fontSize = 11.sp)
+                            }
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.NumberedList) }) {
+                                AppText("1. List", color = tc.ts, fontSize = 11.sp)
+                            }
+                            MarkdownToolbarSeparator()
+                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Link) }) {
+                                AppText("Link", color = tc.ts, fontSize = 11.sp)
+                            }
+                        }
+                        NoteDialogDivider()
+                    }
+
+                    // A 260dp floor (this area's natural resting height) would outgrow a short
+                    // window's weight(1f) share and push the action bar off the bottom of the
+                    // dialog; 120dp is just enough to keep the editor usable while still yielding
+                    // to the header/evidence/toolbar/footer/action-bar chrome around it.
+                    Box(Modifier.weight(1f).fillMaxWidth().heightIn(min = 120.dp)) {
+                        if (previewMode) {
+                            MarkdownPreviewArea(editorValue.text, tc)
+                        } else {
+                            MarkdownWriteArea(
+                                value = editorValue,
+                                onValueChange = ::updateEditor,
+                                placeholder = "Write your note…",
+                                focusRequester = editorFocusRequester,
+                            )
+                        }
+                    }
+
+                    NoteDialogDivider()
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AppText("$wordCount words", color = tc.td, fontSize = 10.sp, fontFamily = mono)
+                        if (hasUnsavedChanges) {
+                            AppText("·", color = tc.td, fontSize = 10.sp, fontFamily = mono)
+                            AppText("unsaved changes", color = tc.td, fontSize = 10.sp, fontFamily = mono)
+                        }
+                        Spacer(Modifier.weight(1f))
+                        AppText(shortcutHint, color = tc.td, fontSize = 11.sp)
+                    }
+                }
             }
 
-            MarkdownAnnotationEditor(
-                value = editorValue,
-                onValueChange = { editorValue = it },
-                placeholder = "Add your analysis note here…",
-                modifier = Modifier.weight(1f),
-            )
-
-            Spacer(Modifier.height(12.dp))
+            // ── Action bar ────────────────────────────────────────────────
+            Spacer(Modifier.height(16.dp))
+            NoteDialogDivider()
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                Modifier.fillMaxWidth().padding(16.dp),
                 verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                DialogActionButton(confirmLabel, active = true) { onConfirm(editorValue.text) }
-                DialogActionButton("Cancel", active = false, onClick = onDismiss)
+                if (onDelete != null) DeleteNoteButton(onClick = onDelete)
+                Spacer(Modifier.weight(1f))
+                AppButton("Cancel", onClick = onDismiss, variant = ButtonVariant.Secondary)
+                SaveNoteButton(confirmLabel, onClick = { onConfirm(editorValue.text) })
             }
         }
     }
 }
 
-/** A shared, bounded evidence viewport for adding and editing log annotations. */
+// A lighter line than the shared Divider()'s tc.br — the design's separate "hover / divider" token
+// (tc.p2) for internal seams (header underline, toolbar underline, footer overline), distinct from
+// tc.br's stronger structural borders (dialog outline, evidence box, editor box).
 @Composable
-private fun AnnotationEvidenceList(rows: List<LogEntry>, mono: FontFamily) {
+private fun NoteDialogDivider() {
     val tc = tc()
-    val evidenceScroll = rememberScrollState()
-    Box(
-        Modifier.fillMaxWidth().height(170.dp)
-            .background(tc.bg, CORNER_MD)
-            .border(1.dp, tc.br, CORNER_MD),
+    Box(Modifier.fillMaxWidth().height(1.dp).background(tc.p2))
+}
+
+/** Collapsible evidence summary: a clickable "N lines · firstTs → lastTs" row with level-count
+ *  chips, collapsed by default, expanding to the bounded/scrollable row list. */
+@Composable
+private fun NoteEvidencePanel(
+    rows: List<LogEntry>,
+    summary: EvidenceSummary,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    mono: FontFamily,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(6.dp)
+    Column(
+        Modifier.fillMaxWidth()
+            .background(tc.bg, shape)
+            .border(1.dp, tc.br, shape)
+            .clip(shape),
     ) {
-        Column(
-            Modifier.fillMaxSize().verticalScroll(evidenceScroll).padding(8.dp, end = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            rows.forEach { row -> AnnotationEvidenceRow(row, mono) }
+        HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onToggle) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText(if (expanded) "▾" else "▸", color = tc.td, fontSize = 9.sp, modifier = Modifier.width(8.dp))
+                AppText(
+                    "${summary.count} lines · ${summary.firstTs} → ${summary.lastTs}",
+                    color = tc.ts,
+                    fontSize = 11.sp,
+                    fontFamily = mono,
+                )
+                Spacer(Modifier.weight(1f))
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    summary.levelCounts.forEach { (level, count) -> EvidenceLevelChip(level, count, mono) }
+                }
+            }
         }
+        if (expanded) {
+            Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
+            val scroll = rememberScrollState()
+            Box(Modifier.fillMaxWidth().heightIn(max = 118.dp)) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(scroll)
+                        .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                ) {
+                    rows.forEach { row -> NoteEvidenceRow(row, mono) }
+                }
+                VerticalScrollbar(
+                    adapter = rememberScrollbarAdapter(scroll),
+                    modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                    style = appScrollbarStyle(tc),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NoteEvidenceRow(row: LogEntry, mono: FontFamily) {
+    val tc = tc()
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        AppText(row.ts, color = tc.td, fontSize = 10.sp, fontFamily = mono, modifier = Modifier.width(78.dp))
+        Box(Modifier.width(18.dp), contentAlignment = Alignment.Center) { LevelBadge(row.level) }
+        AppText(
+            row.tag,
+            color = tc.ts,
+            fontSize = 10.sp,
+            fontFamily = mono,
+            modifier = Modifier.width(132.dp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        AppText(
+            row.msg,
+            color = tc.tx,
+            fontSize = 10.sp,
+            fontFamily = mono,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun EvidenceLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
+    val color = level.defaultColor
+    Box(
+        Modifier.background(color.copy(alpha = .13f), CORNER_SM)
+            .border(1.dp, color.copy(alpha = .27f), CORNER_SM)
+            .padding(horizontal = 5.dp, vertical = 1.dp),
+    ) {
+        AppText("$count ${level.key}", color = color, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** A "Write"/"Preview" tab. The selected tab draws its own top/left/right border and paints its
+ *  background the same colour as the editor box below it, so the shared seam between them reads
+ *  as one continuous outline instead of two stacked boxes (no bottom border on the selected tab). */
+@Composable
+private fun NoteEditorTab(label: String, selected: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
+    Box(
+        Modifier
+            // background must draw BEFORE the border lines below, or the fill paints over them —
+            // a plain Modifier chain draws top-to-bottom, so background has to come first here.
+            .background(if (selected) tc.p else if (hovered) tc.hv else Color.Transparent, shape)
+            // clip before drawBehind so the straight corner-crossing stroke segments below get cut
+            // to the same rounded corners as the fill, instead of poking past the curve.
+            .clip(shape)
+            .then(
+                if (selected) {
+                    Modifier.drawBehind {
+                        val stroke = 1.dp.toPx()
+                        val half = stroke / 2
+                        drawLine(tc.br, Offset(half, 0f), Offset(half, size.height), stroke)
+                        drawLine(tc.br, Offset(size.width - half, 0f), Offset(size.width - half, size.height), stroke)
+                        drawLine(tc.br, Offset(0f, half), Offset(size.width, half), stroke)
+                    }
+                } else {
+                    Modifier
+                },
+            )
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        AppText(
+            label,
+            color = if (selected) tc.tx else tc.td,
+            fontSize = 12.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
+}
+
+/** One borderless, hover-only toolbar button (26dp min). Shared shell for both the plain-label
+ *  buttons and the bespoke B/I/S glyphs, which need styling AppText's fixed param set can't express. */
+@Composable
+private fun MarkdownToolbarButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(5.dp)
+    Box(
+        Modifier
+            .heightIn(min = 26.dp)
+            .widthIn(min = 26.dp)
+            .background(if (hovered) tc.hv else Color.Transparent, shape)
+            .clip(shape)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+@Composable
+private fun MarkdownToolbarSeparator() {
+    val tc = tc()
+    Box(Modifier.padding(horizontal = 5.dp).width(1.dp).height(16.dp).background(tc.br))
+}
+
+/** The Heading ▾ dropdown's H1/H2/H3 menu. Non-focusable (no arrow-key roving needed for three
+ *  rows) — the dialog's own root onPreviewKeyEvent handles Esc, and every path that closes this
+ *  (a row click or the click-outside dismiss) reclaims the editor's focus via [onDismiss]/
+ *  [onSelect] per the CLAUDE.md Popup-focus gotcha. */
+@Composable
+private fun HeadingFormatMenu(onSelect: (MarkdownFormatAction) -> Unit, onDismiss: () -> Unit) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    Popup(
+        alignment = Alignment.TopStart,
+        offset = IntOffset(0, (30 * density).roundToInt()),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = false),
+    ) {
+        val shape = RoundedCornerShape(6.dp)
+        Column(
+            Modifier.width(90.dp)
+                .background(tc.p, shape)
+                .border(1.dp, tc.br, shape)
+                .clip(shape)
+                .padding(vertical = 4.dp),
+        ) {
+            listOf(
+                "H1" to MarkdownFormatAction.Heading1,
+                "H2" to MarkdownFormatAction.Heading2,
+                "H3" to MarkdownFormatAction.Heading3,
+            ).forEach { (label, action) ->
+                HoverBox(modifier = Modifier.fillMaxWidth(), onClick = { onSelect(action) }) {
+                    AppText(
+                        label,
+                        color = tc.tx,
+                        fontSize = 11.sp,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 5.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MarkdownWriteArea(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    placeholder: String,
+    focusRequester: FocusRequester,
+) {
+    val tc = tc()
+    val editorScroll = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            textStyle = TextStyle(
+                color = tc.tx,
+                fontSize = 13.sp,
+                fontFamily = FontFamily.Default,
+                lineHeight = 21.sp,
+            ),
+            cursorBrush = SolidColor(tc.ac),
+            modifier = Modifier.fillMaxSize()
+                .focusRequester(focusRequester)
+                .padding(horizontal = 14.dp, vertical = 12.dp)
+                .verticalScroll(editorScroll),
+            decorationBox = { inner ->
+                if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
+                inner()
+            },
+        )
         VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(evidenceScroll),
+            adapter = rememberScrollbarAdapter(editorScroll),
             modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
             style = appScrollbarStyle(tc),
         )
@@ -210,121 +710,57 @@ private fun AnnotationEvidenceList(rows: List<LogEntry>, mono: FontFamily) {
 }
 
 @Composable
-private fun AnnotationEvidenceRow(row: LogEntry, mono: FontFamily) {
-    val tc = tc()
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        LevelBadge(row.level)
-        AppText(
-            row.tag,
-            color = tc.td,
-            fontSize = 10.sp,
-            fontFamily = mono,
-            modifier = Modifier.width(80.dp),
-            overflow = TextOverflow.Ellipsis,
-        )
-        AppText(
-            row.msg,
-            color = tc.ts,
-            fontSize = 10.sp,
-            fontFamily = mono,
-            modifier = Modifier.weight(1f),
-            overflow = TextOverflow.Ellipsis,
+private fun MarkdownPreviewArea(text: String, tc: ThemeColors) {
+    val scroll = rememberScrollState()
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 14.dp, vertical = 12.dp)) {
+            if (text.isBlank()) {
+                AppText("Nothing to preview", color = tc.td, fontSize = 13.sp)
+            } else {
+                AnnotationMarkdownText(text, tc)
+            }
+        }
+        VerticalScrollbar(
+            adapter = rememberScrollbarAdapter(scroll),
+            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+            style = appScrollbarStyle(tc),
         )
     }
 }
 
 @Composable
-private fun MarkdownAnnotationEditor(
-    value: TextFieldValue,
-    onValueChange: (TextFieldValue) -> Unit,
-    placeholder: String,
-    modifier: Modifier = Modifier,
-) {
-    val tc = tc()
-    val editorScroll = rememberScrollState()
-    val toolbarScroll = rememberScrollState()
-    // A toolbar click can cause the text field to report a collapsed selection before its click
-    // callback runs. Retain the last real selection so formatting still wraps what the user saw
-    // highlighted instead of appending a placeholder after it.
-    var retainedSelection by remember { mutableStateOf<TextRange?>(null) }
-
-    fun updateEditor(updated: TextFieldValue) {
-        val isSelection = updated.selection.start != updated.selection.end
-        if (isSelection) {
-            retainedSelection = updated.selection
-        } else if (updated.text != value.text) {
-            retainedSelection = null
-        }
-        onValueChange(updated)
-    }
-
-    fun applyFormat(action: MarkdownFormatAction) {
-        val valueForAction = restoreMarkdownSelection(value, retainedSelection)
-        retainedSelection = null
-        onValueChange(applyMarkdownFormat(valueForAction, action))
-    }
-
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText("Formatting", color = tc.td, fontSize = 10.sp)
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(toolbarScroll),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            MarkdownFormatAction.entries.forEach { action ->
-                AppButton(
-                    label = markdownActionLabel(action),
-                    onClick = { applyFormat(action) },
-                    modifier = Modifier.height(28.dp),
-                    horizontalPadding = 7.dp,
-                )
-            }
-        }
-        Box(Modifier.fillMaxWidth().weight(1f)) {
-            BasicTextField(
-                value = value,
-                onValueChange = ::updateEditor,
-                textStyle = TextStyle(
-                    color = tc.tx,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Default,
-                    lineHeight = 20.sp,
-                ),
-                cursorBrush = SolidColor(tc.ac),
-                modifier = Modifier.fillMaxSize()
-                    .background(tc.bg, CORNER_MD)
-                    .border(1.dp, tc.ac.copy(.5f), CORNER_MD)
-                    .padding(10.dp)
-                    .verticalScroll(editorScroll),
-                decorationBox = { inner ->
-                    if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
-                    inner()
-                },
-            )
-            VerticalScrollbar(
-                adapter = rememberScrollbarAdapter(editorScroll),
-                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                style = appScrollbarStyle(tc),
-            )
-        }
-    }
+private fun DeleteNoteButton(onClick: () -> Unit) {
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(6.dp)
+    Box(
+        Modifier
+            .background(if (hovered) DANGER_RED.copy(alpha = .1f) else Color.Transparent, shape)
+            .clip(shape)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+    ) { AppText("Delete note", color = DANGER_RED, fontSize = 12.sp) }
 }
 
-private fun markdownActionLabel(action: MarkdownFormatAction): String = when (action) {
-    MarkdownFormatAction.Bold -> "B"
-    MarkdownFormatAction.Italic -> "I"
-    MarkdownFormatAction.Strikethrough -> "S̶"
-    MarkdownFormatAction.Heading1 -> "H1"
-    MarkdownFormatAction.Heading2 -> "H2"
-    MarkdownFormatAction.Heading3 -> "H3"
-    MarkdownFormatAction.BulletList -> "• list"
-    MarkdownFormatAction.NumberedList -> "1. list"
-    MarkdownFormatAction.Quote -> "quote"
-    MarkdownFormatAction.InlineCode -> "code"
-    MarkdownFormatAction.CodeBlock -> "block"
-    MarkdownFormatAction.Link -> "link"
+/** The dialog's one solid-fill button. Unlike [AppButton]'s Primary variant (a fixed fill that
+ *  doesn't react to hover), this one darkens toward black on hover, matching the design handoff. */
+@Composable
+private fun SaveNoteButton(label: String, onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(6.dp)
+    val fill = if (hovered) lerp(tc.ac, Color.Black, 0.15f) else tc.ac
+    Box(
+        Modifier
+            .background(fill, shape)
+            .clip(shape)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 18.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) { AppText(label, color = tc.p, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
 }
 
 // ── Custom AI command editor ──────────────────────────────────────────

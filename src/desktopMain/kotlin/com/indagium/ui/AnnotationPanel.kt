@@ -734,12 +734,13 @@ fun AnnotationPanel(
                 ),
             ) {
                 AnnotationMarkdownEditorDialog(
-                    title = if (block is AnnBlock.Note) "Edit note" else "Edit annotation",
+                    title = "Edit note",
                     initialText = text,
-                    confirmLabel = "Update",
+                    confirmLabel = "Save note",
                     windowSize = mainWindowSize,
                     rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
-                    sourceFilename = (block as? AnnBlock.LogRef)?.sourceFilename,
+                    fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
+                    onDelete = { onRemoveBlock(block.id); editingBlockId = null },
                     onConfirm = { updated ->
                         onUpdateBlock(block.id, updated)
                         editingBlockId = null
@@ -1971,7 +1972,7 @@ private fun rememberAnnotationLogLineContext(
 }
 
 @Composable
-private fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
+internal fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
     if (text.isBlank() && numberPrefix == null) return
     val content: @Composable () -> Unit = {
         val markdownState = rememberMarkdownState(content = text.ifBlank { " " })
@@ -1993,7 +1994,7 @@ private fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: 
 }
 
 @Composable
-private fun annotationMarkdownColors(colors: ThemeColors) = markdownColor(
+internal fun annotationMarkdownColors(colors: ThemeColors) = markdownColor(
     text = colors.tx,
     codeBackground = colors.bg,
     inlineCodeBackground = colors.bg,
@@ -2002,7 +2003,7 @@ private fun annotationMarkdownColors(colors: ThemeColors) = markdownColor(
 )
 
 @Composable
-private fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypography {
+internal fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypography {
     val body = TextStyle(color = colors.tx, fontSize = 13.sp, fontFamily = UI)
     val code = TextStyle(color = colors.ts, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     val heading = body.copy(fontWeight = FontWeight.SemiBold)
