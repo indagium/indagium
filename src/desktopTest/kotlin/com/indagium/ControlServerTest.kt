@@ -13,6 +13,7 @@ import com.indagium.model.LogLevel
 import com.indagium.source.SourceIndexStore
 import com.indagium.source.SourceIndexer
 import com.indagium.ui.AppState
+import com.indagium.ui.OpenFileError
 import com.indagium.ui.mkTab
 import com.indagium.utils.ParsedLog
 import com.indagium.utils.SPLIT_PROMPT_BYTES
@@ -698,6 +699,52 @@ class ControlServerTest {
     fun mergeTabsErrorsForUnknownTabId() {
         state.tabs = listOf(mkTab("t1", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
         assertTrue(post("/merge", """{"tabIds":["t1","nope"]}""").contains("\"error\""))
+    }
+
+    @Test
+    fun openingProtocolV2DltFileSurfacesTheSpecificOpenErrorAndCreatesNoTab() {
+        val file = File.createTempFile("openlog-control-server-dlt-v2", ".dlt")
+        file.writeBytes(byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 2) + ByteArray(12))
+
+        val body = post("/open", """{"path":"${file.absolutePath.replace("\\", "\\\\")}"}""")
+
+        assertTrue(body.contains("\"error\""), body)
+        assertTrue(body.contains("file did not load"), body)
+        assertTrue(body.contains("DLT protocol v2 is not supported"), body)
+        assertTrue(state.tabs.isEmpty(), body)
+
+        file.delete()
+    }
+
+    @Test
+    fun mergingMixedLogFormatsSurfacesTheSpecificOpenErrorAndCreatesNoNewTab() {
+        state.tabs = listOf(
+            mkTab("dlt", "capture.bin", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))).copy(logFormat = LogFormat.DLT),
+            mkTab("logcat", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))).copy(logFormat = LogFormat.LOGCAT),
+        )
+
+        val body = post("/merge", """{"tabIds":["dlt","logcat"],"newTabName":"Combined"}""")
+
+        assertTrue(body.contains("\"error\""), body)
+        assertTrue(body.contains("merge did not produce a new tab"), body)
+        assertTrue(body.contains("Cannot merge mixed log formats"), body)
+        assertEquals(2, state.tabs.size)
+    }
+
+    @Test
+    fun aStaleOpenErrorIsReplacedByTheReasonRaisedByThisCall() {
+        // An earlier, still-displayed UI error must never be reported as this call's reason.
+        state.openError = OpenFileError("Stale earlier title", null, "stale earlier message")
+        state.tabs = listOf(
+            mkTab("dlt", "capture.bin", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))).copy(logFormat = LogFormat.DLT),
+            mkTab("logcat", "main.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))),
+        )
+
+        val body = post("/merge", """{"tabIds":["dlt","logcat"]}""")
+
+        assertTrue(body.contains("Cannot merge mixed log formats"), body)
+        assertTrue(!body.contains("stale earlier"), body)
+        assertTrue(!body.contains("Stale earlier title"), body)
     }
 
     @Test

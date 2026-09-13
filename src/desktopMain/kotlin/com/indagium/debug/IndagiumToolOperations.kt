@@ -35,6 +35,7 @@ import com.indagium.source.SourceStructureParser
 import com.indagium.ui.AppState
 import com.indagium.ui.FollowDiagnostics
 import com.indagium.ui.HL_COLORS
+import com.indagium.ui.OpenFileError
 import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SplitSource
 import com.indagium.ui.imageBytesFromFile
@@ -301,6 +302,18 @@ internal class IndagiumToolOperations(
 
     // ── Routes ──────────────────────────────────────────────────────────
 
+    // AppState already computes a specific refusal reason for most open/merge failures — it just
+    // stores it in the UI-only appState.openError instead of returning it. Routes below snapshot
+    // openError immediately before invoking the AppState action (errorBefore), then use this to
+    // append it to their generic fallback message — but ONLY when appState.openError changed
+    // identity (===) during that call, so a stale error left over from an earlier, unrelated UI
+    // action is never misattributed to this response. The fallback text is kept as the message's
+    // prefix so existing clients/tests matching the old exact string keep working.
+    private fun withOpenErrorDetail(fallback: String, errorBefore: OpenFileError?): String {
+        val err = appState.openError?.takeIf { it !== errorBefore } ?: return fallback
+        return "$fallback: ${err.title} — ${err.message}"
+    }
+
     private fun listTabs(): List<Map<String, Any?>> = appState.tabs.map { t ->
         mapOf(
             "id" to t.id,
@@ -331,6 +344,7 @@ internal class IndagiumToolOperations(
             return splitLogRoute(path, entryPath = null, destinationDir = destinationDir, postfix = postfix, partCount = partCount)
         }
         val absPath = file.absolutePath
+        val errorBefore = appState.openError
         val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) appState.openFileAsIs(file) else appState.openFile(file)
         appState.pendingSplitPrompt?.sources?.firstOrNull { source ->
             source is SplitSource.RealFile && source.file.absolutePath == absPath
@@ -341,9 +355,10 @@ internal class IndagiumToolOperations(
         // reused, via the "already open" dedup fast path) — scope the wait to that tab instead of
         // the global isLoading flag, so a concurrent unrelated open on another tab can't make this
         // call wait on, or misreport completion for, a load it didn't start.
-        if (tabId == null) return mapOf("error" to "file did not load: $path")
+        if (tabId == null) return mapOf("error" to withOpenErrorDetail("file did not load: $path", errorBefore))
         awaitLoad(tabId)
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "file did not load: $path")
+        val tab = appState.tab(tabId)
+            ?: return mapOf("error" to withOpenErrorDetail("file did not load: $path", errorBefore))
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
     }
 
@@ -371,6 +386,7 @@ internal class IndagiumToolOperations(
         if (splitMode.equals("split", ignoreCase = true)) {
             return splitLogRoute(file.absolutePath, target.entryPath, destinationDir, postfix, partCount)
         }
+        val errorBefore = appState.openError
         val tabId = if (splitMode.equals("open_as_is", ignoreCase = true)) {
             appState.openZipEntryAsIs(file, target)
         } else {
@@ -385,9 +401,12 @@ internal class IndagiumToolOperations(
         }
         // (ARCH-3) See openLogFile's matching comment above — scope to the specific tabId
         // openZipEntryAsIs/openZipEntries already hand back, instead of the global isLoading flag.
-        if (tabId == null) return mapOf("error" to "entry did not load: ${target.entryPath}")
+        if (tabId == null) {
+            return mapOf("error" to withOpenErrorDetail("entry did not load: ${target.entryPath}", errorBefore))
+        }
         awaitLoad(tabId)
-        val tab = appState.tab(tabId) ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
+        val tab = appState.tab(tabId)
+            ?: return mapOf("error" to withOpenErrorDetail("entry did not load: ${target.entryPath}", errorBefore))
         return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
     }
 
@@ -457,11 +476,19 @@ internal class IndagiumToolOperations(
         val missing = tabIds.filter { appState.tab(it) == null }
         if (missing.isNotEmpty()) return mapOf("error" to "no such tab(s): ${missing.joinToString(", ")}")
         val beforeCount = appState.tabs.size
+        val errorBefore = appState.openError
         appState.mergeTabs(tabIds, newTabName)
         awaitLoad()
-        if (appState.tabs.size <= beforeCount) return mapOf("error" to "merge did not produce a new tab")
+        if (appState.tabs.size <= beforeCount) {
+            return mapOf("error" to withOpenErrorDetail("merge did not produce a new tab", errorBefore))
+        }
         val tab = appState.tabs.last()
-        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+        return mapOf(
+            "tabId" to tab.id,
+            "filename" to tab.filename,
+            "entryCount" to tab.logData.size,
+            "logFormat" to tab.logFormat.name,
+        )
     }
 
     // Starting/stopping tailing is a synchronous state update (unlike open/merge, there's no
