@@ -194,7 +194,7 @@ class BugReportZipTest {
         // top 3 bits happen to look like DLT's v1/v2 version field — the point of the regression
         // is that name-gating (not a content coincidence) is what keeps these out.
         val innerZipBytes = byteArrayOf(0x50, 0x4B, 0x03, 0x04) + ByteArray(16)
-        val sqliteBytes = "SQLite format 3 ".toByteArray() + ByteArray(16)
+        val sqliteBytes = "SQLite format 3\u0000".toByteArray() + ByteArray(16)
         val protoBytes = byteArrayOf(0x22, 0x10) + ByteArray(16)
         val randomTextLikeBytes = ByteArray(64) { ('A' + (it % 26)).code.toByte() }
         val zip = buildZip(
