@@ -941,9 +941,29 @@ class ControlServerTest {
     }
 
     @Test
-    fun explicitDltSplitRequestIsRejectedWithoutWritingOutputs() {
+    fun explicitDltSplitRequestSplitsTheCaptureFrameAwareAndOpensPartsAsDltTabs() {
         val dir = kotlin.io.path.createTempDirectory("openlog-control-dlt-split").toFile()
-        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("do not split")) }
+        val frames = (1..6).map { i -> dltStorageHeader(ecu = "ECU1") + dltTestFrame("frame $i") }
+        val capture = File(dir, "capture.bin").apply { writeBytes(frames.reduce { acc, f -> acc + f }) }
+        val out = File(dir, "parts")
+
+        val body = post(
+            "/split",
+            """{"path":"${capture.absolutePath.replace("\\", "\\\\")}","destinationDir":"${out.absolutePath.replace("\\", "\\\\")}","partCount":2}""",
+        )
+
+        assertTrue(body.contains("\"ok\":true"), body)
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertTrue(state.tabs.all { it.logFormat == LogFormat.DLT })
+        assertTrue(out.isDirectory)
+    }
+
+    @Test
+    fun explicitSplitRequestForProtocolV2DltIsRejectedWithoutWritingOutputs() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-dlt-v2-split").toFile()
+        val capture = File(dir, "capture.dlt").apply {
+            writeBytes(byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 2) + ByteArray(12))
+        }
         val out = File(dir, "parts")
 
         val body = post(

@@ -116,19 +116,44 @@ class FolderOpenBehaviorTest {
     }
 
     @Test
-    fun rawDltFolderChildBypassesSplitPromptAndCannotBeTailed() {
-        val dir = createTempDirectory("openlog-folder-dlt").toFile()
+    fun rawDltFolderChildGetsSplitPromptWhenOversizedLikeAnyOtherFormat() {
+        val dir = createTempDirectory("openlog-folder-dlt-oversized").toFile()
         val folder = File(dir, "unpacked").apply { mkdir() }
         val capture = File(folder, "capture.bin").apply { writeBytes(dltTestFrame("folder DLT")) }
         val state = AppState(File(dir, "state.cache"))
-        val candidate = com.indagium.utils.ZipLogCandidate(
+        val candidate = ZipLogCandidate(
             entryPath = "capture.bin",
             displayName = "capture.bin",
             sizeBytes = SPLIT_PROMPT_BYTES,
             kind = ZipLogCandidateKind.DLT,
         )
 
+        // Frame-aware DLT splitting (Phase 4) removed the old DLT exclusion from this gate — a
+        // large DLT child now defers into the split prompt exactly like any other format.
         val tabIds = state.openFolderEntries(folder, listOf(candidate), splitPromptThresholdBytes = 1L)
+
+        assertTrue(tabIds.isEmpty())
+        assertTrue(state.tabs.isEmpty())
+        val pending = state.pendingSplitPrompt
+        assertTrue(pending != null, "expected the oversized DLT folder child to trigger the split prompt")
+        val source = assertIs<SplitSource.RealFile>(pending!!.sources.single())
+        assertEquals(capture.absolutePath, source.file.absolutePath)
+    }
+
+    @Test
+    fun rawDltFolderChildOpensNormallyAndCannotBeTailed() {
+        val dir = createTempDirectory("openlog-folder-dlt").toFile()
+        val folder = File(dir, "unpacked").apply { mkdir() }
+        val capture = File(folder, "capture.bin").apply { writeBytes(dltTestFrame("folder DLT")) }
+        val state = AppState(File(dir, "state.cache"))
+        val candidate = ZipLogCandidate(
+            entryPath = "capture.bin",
+            displayName = "capture.bin",
+            sizeBytes = capture.length(),
+            kind = ZipLogCandidateKind.DLT,
+        )
+
+        val tabIds = state.openFolderEntries(folder, listOf(candidate))
 
         assertEquals(1, tabIds.size)
         assertNull(state.pendingSplitPrompt)

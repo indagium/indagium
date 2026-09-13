@@ -57,6 +57,22 @@ fun splitStreamToFiles(
     input: InputStream,
     outputFiles: List<File>,
     sourceSizeBytes: Long,
+): List<File> = splitStreamToFiles(input, outputFiles, sourceSizeBytes, partPreamble = null)
+
+// DLT Viewer CSV overload: [partPreamble] is the header line's raw bytes (including its trailing
+// newline), rewritten at the start of parts 2..n so every part parses standalone as its own CSV —
+// part 1 already has the header naturally, as the stream's own first line. The preamble is written
+// directly to the newly opened part and is NOT counted against `written`/targetBytes, so it never
+// perturbs the rotation math that already ran on the un-prefixed byte stream — a part's *content*
+// still lands within about one line of its byte target, same as the no-preamble contract below; the
+// header repeat is purely additive. A `null` preamble (every other caller) is byte-identical to the
+// original 3-arg overload — this is the only shared code path, so that identity is structural, not
+// just tested.
+internal fun splitStreamToFiles(
+    input: InputStream,
+    outputFiles: List<File>,
+    sourceSizeBytes: Long,
+    partPreamble: ByteArray?,
 ): List<File> {
     require(outputFiles.isNotEmpty()) { "At least one output file is required" }
     outputFiles.forEach { file ->
@@ -64,7 +80,7 @@ fun splitStreamToFiles(
         file.writeBytes(ByteArray(0))
     }
     val targetBytes = max(1L, (sourceSizeBytes + outputFiles.size - 1) / outputFiles.size)
-    SplitWriter(outputFiles, targetBytes).use { writer ->
+    SplitWriter(outputFiles, targetBytes, partPreamble).use { writer ->
         input.use { stream ->
             val buf = ByteArray(SPLIT_BUFFER_BYTES)
             while (true) {
@@ -81,6 +97,7 @@ fun splitStreamToFiles(
 private class SplitWriter(
     private val outputFiles: List<File>,
     private val targetBytes: Long,
+    private val partPreamble: ByteArray? = null,
 ) : AutoCloseable {
     private var outputIndex = 0
     private var out = outputFiles[0].outputStream().buffered(SPLIT_BUFFER_BYTES)
@@ -148,6 +165,7 @@ private class SplitWriter(
             outputIndex += 1
             out = outputFiles[outputIndex].outputStream().buffered(SPLIT_BUFFER_BYTES)
             written = 0L
+            partPreamble?.let { out.write(it) } // not counted in `written` — see the overload's KDoc
         }
     }
 

@@ -55,8 +55,10 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 
 Indagium also opens Diagnostic Log and Trace (DLT) captures (`.dlt`), raw DLT streams, and
 DLT Viewer text/CSV exports. Binary captures are decoded as framed records; non-verbose payloads
-are retained as safe text/hex and are not interpreted through FIBEX/ARXML definitions. DLT tabs
-do not support live UTF-8 tailing or line-based splitting.
+are retained as safe text/hex and are not interpreted through FIBEX/ARXML definitions. An oversized
+DLT capture can be split like any other log — binary captures are split frame-aware (every part is
+a valid standalone DLT stream), and DLT Viewer CSV parts repeat the header row. DLT protocol v2
+streams are not supported and cannot be split. DLT tabs do not support live UTF-8 tailing.
 
 `threadtime`, `time`, `brief`, `bare` — unrecognised lines are shown with tag `RAW`.
 
