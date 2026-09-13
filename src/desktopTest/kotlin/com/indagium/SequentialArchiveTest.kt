@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.utils.ArchiveBudgetExceededException
+import com.indagium.utils.ZipLogCandidateKind
 import com.indagium.utils.extractCandidate
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.listArchiveVideoCandidates
@@ -75,6 +76,17 @@ class SequentialArchiveTest {
         return file
     }
 
+    private fun buildBinaryTarNestedInSevenZ(dir: File, name: String, innerEntryName: String, tarEntries: Map<String, ByteArray>): File {
+        val file = File(dir, name)
+        val tarPayload = tarBytes(tarEntries)
+        SevenZOutputFile(file).use { sevenZ ->
+            sevenZ.putArchiveEntry(SevenZArchiveEntry().apply { this.name = innerEntryName; this.size = tarPayload.size.toLong() })
+            sevenZ.write(tarPayload)
+            sevenZ.closeArchiveEntry()
+        }
+        return file
+    }
+
     @Test
     fun listArchiveLogCandidatesFindsLogEntriesInATarAndRejectsBinaryOnesWithoutTruncatingTheScan() {
         val dir = createTempDirectory("sequential-archive").toFile()
@@ -127,6 +139,17 @@ class SequentialArchiveTest {
     }
 
     @Test
+    fun rawDltCandidateIsDetectedAndExtractedFromTar() {
+        val dir = createTempDirectory("sequential-dlt-archive").toFile()
+        val tar = buildTar(dir, "capture.tar", mapOf("capture.bin" to dltTestFrame("from tar")))
+
+        val candidate = listArchiveLogCandidates(tar).single()
+
+        assertEquals(ZipLogCandidateKind.DLT, candidate.kind)
+        assertEquals("from tar", extractCandidate(tar, candidate).single().msg)
+    }
+
+    @Test
     fun extractCandidateRejectsAnArEntryOverTheByteBudget() {
         val dir = createTempDirectory("sequential-archive").toFile()
         val ar = buildTextAr(dir, "diag.ar", mapOf("main.log" to "x".repeat(200)))
@@ -175,6 +198,23 @@ class SequentialArchiveTest {
         assertEquals(listOf("payload.tar!logs/main.log"), scan.logCandidates.map { it.entryPath })
         val entries = extractCandidate(archive, scan.logCandidates.single())
         assertEquals("nested", entries.single().msg)
+    }
+
+    @Test
+    fun nestedTarDltCandidateRetainsItsDltKindAndMetadata() {
+        val dir = createTempDirectory("sequential-dlt-nested").toFile()
+        val archive = buildBinaryTarNestedInSevenZ(
+            dir,
+            "capture.7z",
+            "payload.tar",
+            mapOf("logs/capture.bin" to dltTestFrame("nested DLT")),
+        )
+
+        val candidate = scanArchiveCandidates(archive).logCandidates.single()
+
+        assertEquals("payload.tar!logs/capture.bin", candidate.entryPath)
+        assertEquals(ZipLogCandidateKind.DLT, candidate.kind)
+        assertEquals("nested DLT", extractCandidate(archive, candidate).single().msg)
     }
 
     @Test

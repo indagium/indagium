@@ -57,6 +57,22 @@ class BugReportZipTest {
         return file
     }
 
+    private fun buildSevenZBytes(dir: File, name: String, entries: Map<String, ByteArray>): File {
+        val file = File(dir, name)
+        SevenZOutputFile(file).use { sevenZ ->
+            entries.forEach { (path, bytes) ->
+                val entry = SevenZArchiveEntry().apply {
+                    this.name = path
+                    this.size = bytes.size.toLong()
+                }
+                sevenZ.putArchiveEntry(entry)
+                sevenZ.write(bytes)
+                sevenZ.closeArchiveEntry()
+            }
+        }
+        return file
+    }
+
     @Test
     fun isZipFileDetectsByContentNotExtension() {
         val dir = createTempDirectory("openlog-zip").toFile()
@@ -123,6 +139,60 @@ class BugReportZipTest {
         val zip = buildTextZip(dir, "archive(1).zip", mapOf("documents/session.txt" to "plain readable diagnostic text"))
 
         assertEquals(listOf("documents/session.txt"), listLogcatCandidates(zip).map { it.entryPath })
+    }
+
+    @Test
+    fun binaryDltCandidateIsDetectedByContentWithoutExtensionAndPreservesMetadataOnExtraction() {
+        val dir = createTempDirectory("openlog-dlt-zip").toFile()
+        val zip = buildZip(dir, "bugreport.zip", mapOf("capture.bin" to dltTestFrame("from zip", ecu = "ECU1")))
+
+        val candidate = listArchiveLogCandidates(zip).single()
+        assertEquals("capture.bin", candidate.entryPath)
+        assertEquals(ZipLogCandidateKind.DLT, candidate.kind)
+        val entry = extractCandidate(zip, candidate).single()
+        assertEquals("from zip", entry.msg)
+        assertEquals("ECU1", entry.dltEcuId)
+    }
+
+    @Test
+    fun identifiableV2DltCandidateIsRoutedToTheClearUnsupportedVersionError() {
+        val dir = createTempDirectory("openlog-dlt-v2-zip").toFile()
+        // HTYP version bits identify protocol v2; this is deliberately a minimal frame because
+        // v2 is routed only far enough to produce the explicit unsupported-version error.
+        val zip = buildZip(dir, "capture.zip", mapOf("capture.dlt" to byteArrayOf(0x41, 0, 0, 4)))
+
+        val candidate = listArchiveLogCandidates(zip).single()
+        assertEquals(ZipLogCandidateKind.DLT, candidate.kind)
+        val error = assertFailsWith<IllegalArgumentException> { extractCandidate(zip, candidate) }
+        assertEquals("DLT protocol v2 is not supported", error.message)
+    }
+
+    @Test
+    fun storageDltPrefixesAreClassifiedBeforeTextHeuristicsForV1AndV2() {
+        val dir = createTempDirectory("openlog-dlt-storage-prefix").toFile()
+        // These samples deliberately contain no NUL bytes, which makes them text-like to the
+        // generic bounded sniff. The explicit storage signature must nevertheless win.
+        val printableStorage = { version: Byte -> byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), version) + ByteArray(12) { 0x20 } }
+        val zip = buildZip(
+            dir,
+            "capture.zip",
+            mapOf("v1.bin" to printableStorage(1), "v2.bin" to printableStorage(2)),
+        )
+
+        assertEquals(
+            setOf("v1.bin", "v2.bin"),
+            listArchiveLogCandidates(zip).filter { it.kind == ZipLogCandidateKind.DLT }.map { it.entryPath }.toSet(),
+        )
+    }
+
+    @Test
+    fun sevenZDltCandidateUsesTheSameContentSniffingPath() {
+        val dir = createTempDirectory("openlog-dlt-7z").toFile()
+        val archive = buildSevenZBytes(dir, "capture.7z", mapOf("capture.raw" to dltTestFrame("from 7z")))
+
+        val candidate = listArchiveLogCandidates(archive).single()
+        assertEquals(ZipLogCandidateKind.DLT, candidate.kind)
+        assertEquals("from 7z", extractCandidate(archive, candidate).single().msg)
     }
 
     @Test

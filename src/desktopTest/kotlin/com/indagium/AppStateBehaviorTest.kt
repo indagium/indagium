@@ -21,6 +21,7 @@ import com.indagium.model.Highlighter
 import com.indagium.model.IssueCategorySelection
 import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.MAX_INTERFACE_SCALE_PERCENT
@@ -66,6 +67,7 @@ import com.indagium.ui.shouldSyncSequenceVisualOrder
 import com.indagium.ui.summarizeItems
 import com.indagium.ui.tabDisplayLabel
 import com.indagium.ui.themeColors
+import com.indagium.utils.ParsedLog
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
@@ -2031,16 +2033,16 @@ class AppStateBehaviorTest {
 
         // Simulate a pre-PERF-3b cache: strip the trailing candidate field from every tab line by
         // dropping the last '|'-separated token. Tab lines are the ones after the "tabs" marker.
-        // Five drops, not one: showTimeDelta, attachedVideo, noteTargetName, and retraceMappingPath
-        // were all appended AFTER archiveCandidate (positions 10-13), so a single strip would now
-        // remove only retraceMappingPath and leave archiveCandidate in place — dropping all five
+        // Six drops, not one: showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath,
+        // and logFormat were appended AFTER archiveCandidate (positions 10-14), so a single strip
+        // would now remove only logFormat and leave archiveCandidate in place — dropping all six
         // trailing fields is what actually reproduces a token from before any of them existed.
         val lines = cacheFile.readLines()
         val tabsIdx = lines.indexOf("tabs")
         val rewritten = lines.mapIndexed { i, line ->
             if (i > tabsIdx && line.startsWith("tab\t")) {
                 line.substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|').substringBeforeLast('|')
-                    .substringBeforeLast('|')
+                    .substringBeforeLast('|').substringBeforeLast('|')
             } else {
                 line
             }
@@ -3835,7 +3837,7 @@ class AppStateBehaviorTest {
             parser = { file ->
                 started.countDown()
                 release.await(2, TimeUnit.SECONDS)
-                listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name)))
             },
         )
 
@@ -3867,7 +3869,7 @@ class AppStateBehaviorTest {
                     started.countDown()
                     release.await(2, TimeUnit.SECONDS)
                 }
-                listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "", LogLevel.I, file.nameWithoutExtension, file.name)))
             },
         )
 
@@ -3899,7 +3901,7 @@ class AppStateBehaviorTest {
             parser = {
                 started.countDown()
                 release.await(2, TimeUnit.SECONDS)
-                listOf(LogEntry(1, "", LogLevel.I, "Slow", "done"))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "", LogLevel.I, "Slow", "done")))
             },
         )
 
@@ -3923,7 +3925,7 @@ class AppStateBehaviorTest {
             parser = {
                 started.countDown()
                 release.await(2, TimeUnit.SECONDS)
-                listOf(LogEntry(1, "", LogLevel.I, "Slow", "done"))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "", LogLevel.I, "Slow", "done")))
             },
         )
 
@@ -3945,7 +3947,7 @@ class AppStateBehaviorTest {
             autosaveFile = File(dir, "state.cache"),
             parser = {
                 parseCalls += 1
-                emptyList()
+                ParsedLog(LogFormat.LOGCAT, emptyList())
             },
         )
 
@@ -3967,7 +3969,7 @@ class AppStateBehaviorTest {
         RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
         val state = AppState(
             autosaveFile = File(dir, "state.cache"),
-            parser = { listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded")) },
+            parser = { ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded"))) },
         )
         state.settings = state.settings.copy(openNewFilesWithUnfiltered = true)
         state.openFile(file)
@@ -4097,6 +4099,53 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun rawDltWithoutExtensionKeepsItsFormatThroughOpenAndAutosaveRestore() {
+        val dir = createTempDirectory("openlog-dlt-restore").toFile()
+        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("raw DLT", ecu = null)) }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.openFile(capture)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        assertEquals(LogFormat.DLT, state.tabs.single().logFormat)
+        assertEquals("raw DLT", state.tabs.single().logData.single().msg)
+        assertTrue(state.tabs.single().analysis.crashSites.isEmpty())
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals(LogFormat.DLT, restored.tabs.single().logFormat)
+        assertEquals("raw DLT", restored.tabs.single().logData.single().msg)
+    }
+
+    @Test
+    fun legacyAutosaveWithoutFormatFieldIsReclassifiedFromRawDltContent() {
+        val dir = createTempDirectory("openlog-dlt-legacy-autosave").toFile()
+        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("legacy DLT")) }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.tabs = listOf(
+            mkTab("dlt", capture.name, listOf(LogEntry(1, "", LogLevel.I, "DLT", "legacy DLT")))
+                .copy(sourcePath = capture.absolutePath, logFormat = LogFormat.DLT),
+        )
+        state.activeTabId = "dlt"
+        state.autosaveNow()
+
+        val legacyCache = cacheFile.readLines().map { line ->
+            if (line.startsWith("tab\t")) line.substringBeforeLast('|') else line
+        }
+        cacheFile.writeText(legacyCache.joinToString("\n") + "\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        assertEquals(LogFormat.LOGCAT, restored.tabs.single().logFormat, "legacy shell defaults before content load")
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals(LogFormat.DLT, restored.tabs.single().logFormat)
+        assertEquals("legacy DLT", restored.tabs.single().logData.single().msg)
+    }
+
+    @Test
     fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
         val dir = createTempDirectory("openlog-merge").toFile()
         val state = AppState(autosaveFile = File(dir, "state.cache"))
@@ -4120,6 +4169,90 @@ class AppStateBehaviorTest {
         assertEquals(listOf(1, 2, 3), merged.logData.map { it.id })
         assertEquals(listOf("main.log", "system.log", "main.log"), merged.logData.map { it.sourceTag })
         assertEquals(state.activeTabId, merged.id)
+    }
+
+    @Test
+    fun mergeTabsPreservesDltFormatAndDisablesAndroidCrashAnalysis() {
+        val dir = createTempDirectory("openlog-merge-dlt").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        val row = LogEntry(1, "10:00:00.000", LogLevel.E, "ECU1/APP1/CTX1", "FATAL EXCEPTION: main", dltEcuId = "ECU1")
+        state.tabs = listOf(
+            mkTab("d1", "first.bin", listOf(row)).copy(logFormat = LogFormat.DLT),
+            mkTab("d2", "second.bin", listOf(row.copy(id = 1))).copy(logFormat = LogFormat.DLT),
+        )
+
+        state.mergeTabs(listOf("d1", "d2"), "Merged DLT")
+
+        waitUntil { state.tabs.size == 3 && !state.isLoading }
+        val merged = state.tabs.last()
+        assertEquals(LogFormat.DLT, merged.logFormat)
+        assertTrue(merged.analysis.crashSites.isEmpty())
+        assertTrue(merged.analysis.stackTraceGroups.isEmpty())
+    }
+
+    @Test
+    fun mergeTabsRejectsMixedFormatsWithoutCreatingATabOrStartingLoading() {
+        val dir = createTempDirectory("openlog-merge-mixed").toFile()
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(
+            mkTab("logcat", "first.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))),
+            mkTab("dlt", "second.bin", listOf(LogEntry(1, "", LogLevel.I, "DLT", "hello"))).copy(logFormat = LogFormat.DLT),
+        )
+        val beforeIds = state.tabs.map { it.id }
+
+        state.mergeTabs(listOf("logcat", "dlt"), "Invalid merge")
+
+        assertEquals(beforeIds, state.tabs.map { it.id })
+        assertFalse(state.isLoading)
+        assertEquals("Cannot merge mixed log formats", state.openError?.title)
+    }
+
+    @Test
+    fun dltSplitRequestsFailWithoutCreatingPromptOrOutputFiles() {
+        val dir = createTempDirectory("openlog-dlt-split").toFile()
+        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("do not split")) }
+        val output = File(dir, "parts")
+        val state = AppState(File(dir, "state.cache"))
+
+        state.requestSplitForFile(capture)
+        assertNull(state.pendingSplitPrompt)
+        assertEquals("DLT splitting unavailable", state.openError?.title)
+
+        val source = requireNotNull(state.splitSourceForPath(capture.absolutePath))
+        assertTrue(state.splitSourceAndOpen(source, output, "part", 2).isEmpty())
+        assertFalse(output.exists())
+    }
+
+    @Test
+    fun oversizedDltArchiveCandidateBypassesSplitPrompt() {
+        val dir = createTempDirectory("openlog-dlt-archive-split").toFile()
+        val archive = buildZipBytesFixture(dir, "capture.zip", mapOf("capture.bin" to dltTestFrame("archive DLT")))
+        val candidate = requireNotNull(com.indagium.utils.listArchiveLogCandidates(archive).singleOrNull()).copy(
+            sizeBytes = SPLIT_PROMPT_BYTES,
+            kind = ZipLogCandidateKind.DLT,
+        )
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openZipEntries(archive, listOf(candidate))
+
+        assertNull(state.pendingSplitPrompt)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        assertEquals(LogFormat.DLT, state.tabs.single().logFormat)
+    }
+
+    @Test
+    fun archiveV2DltShowsUnsupportedVersionErrorWithoutOpeningAnEmptyTab() {
+        val dir = createTempDirectory("openlog-dlt-v2-archive").toFile()
+        val archive = buildZipBytesFixture(dir, "capture.zip", mapOf("capture.dlt" to byteArrayOf(0x41, 0, 0, 4)))
+        val candidate = com.indagium.utils.listArchiveLogCandidates(archive).single()
+        val state = AppState(File(dir, "state.cache"))
+
+        state.openZipEntries(archive, listOf(candidate))
+
+        waitUntil { !state.isLoading }
+        assertTrue(state.tabs.isEmpty())
+        assertEquals("Could not open DLT", state.openError?.title)
+        assertEquals("DLT protocol v2 is not supported", state.openError?.message)
     }
 
     @Test
@@ -4273,6 +4406,20 @@ class AppStateBehaviorTest {
         state.startTailing("t1")
 
         assertFalse(state.tab("t1")!!.tailing)
+    }
+
+    @Test
+    fun startTailingIsANoOpForDltEvenWhenItHasAPlainFileSource() {
+        val dir = createTempDirectory("openlog-tail-dlt").toFile()
+        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("do not tail")) }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.tabs = listOf(
+            mkTab("dlt", capture.name, emptyList()).copy(sourcePath = capture.absolutePath, logFormat = LogFormat.DLT),
+        )
+
+        state.startTailing("dlt")
+
+        assertFalse(state.tab("dlt")!!.tailing)
     }
 
     @Test
@@ -6810,7 +6957,7 @@ class AppStateBehaviorTest {
             parser = {
                 parserStarted.countDown()
                 releaseParser.await(2, TimeUnit.SECONDS)
-                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
             },
         )
 
@@ -6834,7 +6981,7 @@ class AppStateBehaviorTest {
             parser = {
                 parserStarted.countDown()
                 releaseParser.await(2, TimeUnit.SECONDS)
-                listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
             },
         )
 
@@ -8200,6 +8347,18 @@ class AppStateBehaviorTest {
             entries.forEach { (path, content) ->
                 zos.putNextEntry(java.util.zip.ZipEntry(path))
                 zos.write(content.toByteArray())
+                zos.closeEntry()
+            }
+        }
+        return file
+    }
+
+    private fun buildZipBytesFixture(dir: File, name: String, entries: Map<String, ByteArray>): File {
+        val file = File(dir, name)
+        java.util.zip.ZipOutputStream(file.outputStream()).use { zos ->
+            entries.forEach { (path, content) ->
+                zos.putNextEntry(java.util.zip.ZipEntry(path))
+                zos.write(content)
                 zos.closeEntry()
             }
         }

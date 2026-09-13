@@ -278,6 +278,7 @@ compose.desktop {
             fileAssociation("text/plain", "logcat", "Android logcat file")
             fileAssociation("text/plain", "trace", "Trace log file")
             fileAssociation("text/plain", "out", "Output log file")
+            fileAssociation("application/vnd.dlt", "dlt", "Diagnostic Log and Trace file")
             // shared-mime-info (the freedesktop.org MIME database Linux distros ship) types
             // *.log as text/x-log, not text/plain — without this, .log (the app's primary
             // format) never matches on Linux even after the Exec %F / MimeType .deb fixes.

@@ -52,6 +52,7 @@ import com.indagium.utils.EntryIdMap
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MergeSourceFile
+import com.indagium.utils.ParsedLog
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.RetraceOutcome
 import com.indagium.utils.RetraceService
@@ -79,10 +80,11 @@ import com.indagium.utils.enforceArchiveVideoCacheBudget
 import com.indagium.utils.exportFilteredToFile
 import com.indagium.utils.extractAppVersionHeuristic
 import com.indagium.utils.extractArchiveVideoToCache
-import com.indagium.utils.extractCandidate
+import com.indagium.utils.extractCandidateResult
 import com.indagium.utils.formatElapsedAsClock
 import com.indagium.utils.indexOfEntryId
 import com.indagium.utils.invalidateComputeCache
+import com.indagium.utils.isLikelyDltSourceFile
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.listArchiveLogCandidates
@@ -92,7 +94,7 @@ import com.indagium.utils.mergeLogs
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.newId
 import com.indagium.utils.openArchiveCandidateStream
-import com.indagium.utils.parseLogFile
+import com.indagium.utils.parseLogFileResult
 import com.indagium.utils.passesFilter
 import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.presentLogLine
@@ -180,12 +182,19 @@ private class NoteExportWriter {
 // LogTab.messageComposition instead of this LogAnalysis — TailCoordinator replaces a tab's whole
 // `analysis` wholesale on its debounce, so a histogram stored here would be silently discarded by
 // the next tail flush.
-internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<CustomIssueRule> = emptyList()): LogAnalysis {
-    val stackGroups = computeStackTraceGroups(data)
+internal fun buildLogAnalysis(
+    data: List<LogEntry>,
+    customIssueRules: List<CustomIssueRule> = emptyList(),
+    logFormat: LogFormat = LogFormat.LOGCAT,
+): LogAnalysis {
+    // Crash/ANR recognizers are Android logcat heuristics. DLT payloads can contain arbitrary
+    // application text that looks like an exception, so running those heuristics on DLT creates
+    // misleading Issues anchors and expensive work for no user value.
+    val stackGroups = if (logFormat == LogFormat.DLT) emptyList() else computeStackTraceGroups(data)
     return LogAnalysis(
         tagCounts = data.groupingBy { it.tag }.eachCount(),
         stackTraceGroups = stackGroups,
-        crashSites = computeCrashSites(data, stackGroups),
+        crashSites = if (logFormat == LogFormat.DLT) emptyList() else computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
         processNames = computeProcessNames(data),
         pending = false,
@@ -198,8 +207,12 @@ internal fun buildLogAnalysis(data: List<LogEntry>, customIssueRules: List<Custo
 // (utils/ProcessNames.kt) costs about what tagCounts does, nowhere near computeStackTraceGroups,
 // so deferring it to the background tier would leave the PID column showing bare numbers for
 // several seconds on a large file and then reflowing once the full analysis lands.
-private fun pendingAnalysis(data: List<LogEntry>): LogAnalysis =
-    LogAnalysis(tagCounts = data.groupingBy { it.tag }.eachCount(), processNames = computeProcessNames(data), pending = true)
+private fun pendingAnalysis(data: List<LogEntry>, logFormat: LogFormat = LogFormat.LOGCAT): LogAnalysis =
+    LogAnalysis(
+        tagCounts = data.groupingBy { it.tag }.eachCount(),
+        processNames = computeProcessNames(data),
+        stackTraceGroups = emptyList(), crashSites = emptyList(), pending = logFormat != LogFormat.DLT,
+    )
 
 internal fun logEntryMarkdownLine(entry: LogEntry): String =
     "**[${entry.ts}] `${entry.level.key}/${entry.tag}`:** ${entry.msg}"
@@ -213,11 +226,13 @@ fun mkTab(
     // no AppState in scope (and every test builds tabs through it). Production callers pass
     // AppState.newTabProcessNameMode(); see AppSettings.showProcessNamesInNewTabs.
     processNameMode: ProcessNameMode = ProcessNameMode.OFF,
+    logFormat: LogFormat = LogFormat.LOGCAT,
 ) = LogTab(
     id = id, filename = filename, logData = logData, rmap = mkRmap(logData),
     annotations = Annotations(prefix = "From $filename"),
     analysis = analysis,
     processNameMode = processNameMode,
+    logFormat = logFormat,
 )
 
 fun emptyWorkspaceTab() = LogTab(
@@ -1248,7 +1263,7 @@ class AppState(
     // logcat lines on every relaunch of a restored .log.gz tab. parseLogFile falls through to
     // parseLogcat unchanged for every file that isn't a bare compressed log, so this is a no-op
     // for the overwhelming majority of callers/tests.
-    private val parser: (File) -> List<LogEntry> = ::parseLogFile,
+    private val parser: (File) -> ParsedLog = ::parseLogFileResult,
     private val notesDir: File = DesktopStorage.notesDir(),
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val customCommandsDir: File = DesktopStorage.customCommandsDir(),
@@ -5208,7 +5223,18 @@ class AppState(
     // Runs on ioScope for consistency with the rest of the codebase's bias toward backgrounding
     // anything touching logData, even though mergeLogs() itself is a pure in-memory sort.
     fun mergeTabs(tabIds: List<String>, newTabName: String = "Merged") {
-        val sources = tabIds.mapNotNull { id -> tab(id)?.let { MergeSourceFile(it.filename, it.logData) } }
+        val tabsToMerge = tabIds.mapNotNull { id -> tab(id) }
+        val formats = tabsToMerge.map { it.logFormat }.toSet()
+        if (formats.size > 1) {
+            showOpenError(
+                title = "Cannot merge mixed log formats",
+                path = null,
+                message = "Select tabs with the same log format before merging.",
+            )
+            return
+        }
+        val format = formats.singleOrNull() ?: return
+        val sources = tabsToMerge.map { MergeSourceFile(it.filename, it.logData) }
         if (sources.size < 2) return
         val n = tabCounter.getAndIncrement()
         beginLoading("Merging logs...")
@@ -5217,7 +5243,12 @@ class AppState(
             try {
                 val merged = mergeLogs(sources)
                 ensureActive()
-                val t = mkTab("t$n", newTabName, merged, analysis = pendingAnalysis(merged), processNameMode = newTabProcessNameMode())
+                val t = mkTab(
+                    "t$n", newTabName, merged,
+                    analysis = pendingAnalysis(merged, format),
+                    processNameMode = newTabProcessNameMode(),
+                    logFormat = format,
+                )
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + t
@@ -5226,7 +5257,7 @@ class AppState(
                 finishLoading()
                 published = true
                 val issueRules = settings.customIssueRules
-                val full = buildLogAnalysis(merged, issueRules)
+                val full = buildLogAnalysis(merged, issueRules, format)
                 ensureActive()
                 upTab("t$n") { current ->
                     if (settings.customIssueRules == issueRules && current.logData == merged) current.copy(analysis = full) else current
@@ -5266,7 +5297,8 @@ class AppState(
             // compressed file to route into anyway. It's bounded by BoundedInputStream/
             // MAX_ARCHIVE_ENTRY_BYTES during parsing instead, the same deal an archive entry
             // already has (see extractCandidate's KDoc) — never split-prompted, just capped.
-            detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+            detectArchiveFormat(file) is ArchiveFormat.None && !isLikelyDltSourceFile(file) &&
+                requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
         if (oversizedFiles.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
@@ -5354,7 +5386,7 @@ class AppState(
     }
 
     private fun isLikelyLogPath(file: File): Boolean =
-        file.isFile && file.extension.lowercase() in setOf("log", "txt")
+        file.isFile && (file.extension.lowercase() in setOf("log", "txt", "dlt") || isLikelyDltSourceFile(file))
 
     // Same "will this actually open" check drag-and-drop uses (openPaths above), reused by the
     // Open toolbar button in App.kt. Needed there because java.awt.FileDialog.setFilenameFilter
@@ -5412,7 +5444,7 @@ class AppState(
                 title = "Unsupported archive format",
                 path = file.absolutePath,
                 message = "${format.label} isn't supported. Supported archives: .zip, .7z, the .tar family " +
-                    "(.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.lzma), .ar, and bare compressed logs like .log.gz.",
+                    "(.tar, .tar.gz, .tar.bz2, .tar.xz, .tar.lzma), .ar, DLT captures (.dlt), and bare compressed logs like .log.gz.",
             )
             return
         }
@@ -5421,7 +5453,7 @@ class AppState(
                 title = "Could not open file",
                 path = file.absolutePath,
                 message = "This doesn't look like a log/text file or a supported archive " +
-                    "(.zip, .7z, the .tar family, .ar, or a compressed log like .log.gz).",
+                    "(.zip, .7z, the .tar family, .ar, DLT captures (.dlt), or a compressed log like .log.gz).",
             )
             return
         }
@@ -5451,7 +5483,7 @@ class AppState(
         // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
         // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
-        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length())) {
+        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && !isLikelyDltSourceFile(file) && requiresSplitPrompt(file.length())) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
             return null
         }
@@ -5472,7 +5504,7 @@ class AppState(
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
             try {
-                val logData = runCatching { parser(file) }.getOrElse { error ->
+                val parsed = runCatching { parser(file) }.getOrElse { error ->
                     removeRecentFile(file)
                     showOpenError(
                         title = "Could not open file",
@@ -5482,11 +5514,18 @@ class AppState(
                     return@launch
                 }
                 ensureActive()
+                val logData = parsed.entries
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 // Publish the tab as soon as parsing finishes — the stack/crash analysis costs
                 // as much as the parse on multi-GB files and fills in below, in the same job so
                 // closing the tab cancels it.
-                val t = mkTab(tabId, file.name, logData, analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
+                val logFormat = parsed.format
+                val t = mkTab(
+                    tabId, file.name, logData,
+                    analysis = pendingAnalysis(logData, logFormat),
+                    processNameMode = newTabProcessNameMode(),
+                    logFormat = logFormat,
+                )
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -5503,7 +5542,7 @@ class AppState(
                 published = true
                 autoLoadOwnNotesIfAny(tabId)
                 val issueRules = settings.customIssueRules
-                val full = buildLogAnalysis(logData, issueRules)
+                val full = buildLogAnalysis(logData, issueRules, logFormat)
                 ensureActive()
                 upTab(tabId) { current ->
                     if (settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
@@ -5615,7 +5654,7 @@ class AppState(
                 showOpenError(
                     title = "No log files found",
                     path = path,
-                    message = "This archive does not contain readable .log, .txt, or ANR trace entries.",
+                    message = "This archive does not contain readable .log, .txt, .dlt, or ANR trace entries.",
                 )
             }
         }
@@ -5657,7 +5696,9 @@ class AppState(
         selected: List<ZipLogCandidate>,
         videoToAttach: ZipLogCandidate? = null,
     ): List<String> {
-        val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
+        val (oversized, normal) = selected.partition {
+            it.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(it.sizeBytes)
+        }
         if (oversized.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
                 sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
@@ -5717,7 +5758,7 @@ class AppState(
                 else -> showOpenError(
                     title = "No log files found",
                     path = path,
-                    message = "This folder does not contain readable .log, .txt, or ANR trace entries.",
+                    message = "This folder does not contain readable .log, .txt, .dlt, or ANR trace entries.",
                 )
             }
         }
@@ -5743,14 +5784,16 @@ class AppState(
         splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES,
     ): List<String> {
         val files = selected.map { File(folder, it.entryPath) }
-        val (oversized, normal) = files.partition { requiresSplitPrompt(it.length(), splitPromptThresholdBytes) }
+        val (oversized, normal) = selected.zip(files).partition { (candidate, file) ->
+            candidate.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+        }
         if (oversized.isNotEmpty()) {
             // Same "defer everything selected, not just the oversized ones" shape as
             // openZipEntries' identical branch — confirmSplitPrompt already knows how to open a
             // plain File deferred this way (its `deferredFiles.forEach { openPath(it) }`).
             pendingSplitPrompt = PendingSplitPrompt(
-                sources = oversized.map { SplitSource.RealFile(it) },
-                deferredFiles = normal,
+                sources = oversized.map { (_, file) -> SplitSource.RealFile(file) },
+                deferredFiles = normal.map { (_, file) -> file },
             )
             pendingFolderPicker = null
             return emptyList()
@@ -5780,7 +5823,7 @@ class AppState(
         if (existing != null) {
             activateTab(existing.id); return existing.id
         }
-        if (!bypassSplitPrompt && requiresSplitPrompt(candidate.sizeBytes)) {
+        if (!bypassSplitPrompt && candidate.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(candidate.sizeBytes)) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
             return null
         }
@@ -5791,7 +5834,7 @@ class AppState(
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
             try {
-                val logData = runCatching { extractCandidate(zipFile, candidate, archiveEntryByteBudget) }.getOrElse { error ->
+                val parsed = runCatching { extractCandidateResult(zipFile, candidate, archiveEntryByteBudget) }.getOrElse { error ->
                     AppLogger.error("archive", "Archive entry extraction failed", error)
                     // A budget breach (S-03: bounded archive extraction) is a real, actionable
                     // failure — surface it instead of silently opening an empty tab, which used to
@@ -5805,14 +5848,29 @@ class AppState(
                         )
                         return@launch
                     }
-                    emptyList()
+                    if (candidate.kind == ZipLogCandidateKind.DLT) {
+                        showOpenError(
+                            title = "Could not open DLT",
+                            path = path,
+                            message = error.message ?: "The DLT entry could not be parsed.",
+                        )
+                        return@launch
+                    }
+                    ParsedLog(LogFormat.LOGCAT, emptyList())
                 }
                 ensureActive()
+                val logData = parsed.entries
                 val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
                 // Archive-sourced tabs always get an archive-qualified prefix ("archive.zip/entry/
                 // path.log") — the bare display name alone doesn't say which archive it came from.
                 val prefixName = archiveQualifiedLabel(path) ?: candidate.displayName
-                val t = mkTab(tabId, candidate.displayName, logData, analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
+                val logFormat = parsed.format
+                val t = mkTab(
+                    tabId, candidate.displayName, logData,
+                    analysis = pendingAnalysis(logData, logFormat),
+                    processNameMode = newTabProcessNameMode(),
+                    logFormat = logFormat,
+                )
                     .copy(
                         sourcePath = path,
                         annotations = Annotations(prefix = "$prefixLabel $prefixName"),
@@ -5830,7 +5888,7 @@ class AppState(
                 published = true
                 autoLoadOwnNotesIfAny(tabId)
                 val issueRules = settings.customIssueRules
-                val full = buildLogAnalysis(logData, issueRules)
+                val full = buildLogAnalysis(logData, issueRules, logFormat)
                 ensureActive()
                 upTab(tabId) { current ->
                     if (settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
@@ -5847,11 +5905,20 @@ class AppState(
 
     fun requestSplitForFile(file: File) {
         if (!file.isFile) return
+        if (isLikelyDltSourceFile(file)) {
+            showDltSplittingUnavailable(file.absolutePath)
+            return
+        }
         pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
     }
 
     fun requestSplitForTab(tabId: String): Boolean {
-        val sourcePath = tab(tabId)?.sourcePath ?: return false
+        val current = tab(tabId) ?: return false
+        if (current.logFormat == LogFormat.DLT) {
+            showDltSplittingUnavailable(current.sourcePath)
+            return false
+        }
+        val sourcePath = current.sourcePath ?: return false
         val source = splitSourceFromPath(sourcePath, entryPath = null) ?: return false
         pendingSplitPrompt = PendingSplitPrompt(listOf(source))
         return true
@@ -5859,6 +5926,17 @@ class AppState(
 
     fun splitSourceForPath(path: String, entryPath: String? = null): SplitSource? =
         splitSourceFromPath(path, entryPath)
+
+    /** Shared preflight for UI and MCP split routes; DLT frames cannot be byte-split safely. */
+    fun isDltSplitSource(source: SplitSource): Boolean = source.isDlt()
+
+    private fun showDltSplittingUnavailable(path: String?) {
+        showOpenError(
+            "DLT splitting unavailable",
+            path,
+            "DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+        )
+    }
 
     fun defaultSplitDestination(source: SplitSource): File =
         settings.defaultSaveDir?.let(::File) ?: source.sourceFile.parentFile ?: File(".")
@@ -5909,6 +5987,14 @@ class AppState(
         splitSourceAndOpenParts(source, destinationDir, postfix, partCount)
 
     private fun splitSourceAndOpenParts(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> {
+        if (isDltSplitSource(source)) {
+            showOpenError(
+                title = "DLT splitting unavailable",
+                path = source.sourceFile.absolutePath,
+                message = "DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+            )
+            return emptyList()
+        }
         val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
         val written = when (source) {
             is SplitSource.RealFile -> splitFileToFiles(source.file, outputs)
@@ -5919,6 +6005,11 @@ class AppState(
         }
         written.forEach { part -> loadSplitPartAsTab(part) }
         return written
+    }
+
+    private fun SplitSource.isDlt(): Boolean = when (this) {
+        is SplitSource.RealFile -> isLikelyDltSourceFile(file)
+        is SplitSource.ArchiveEntry -> candidate.kind == ZipLogCandidateKind.DLT
     }
 
     private fun loadSplitPartAsTab(file: File) {
@@ -5932,7 +6023,7 @@ class AppState(
         rememberAutoExportedNoteFor(file.name, path)
         val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
-        val logData = runCatching { parser(file) }.getOrElse { error ->
+        val parsed = runCatching { parser(file) }.getOrElse { error ->
             showOpenError(
                 title = "Could not open split file",
                 path = path,
@@ -5940,8 +6031,15 @@ class AppState(
             )
             return
         }
+        val logData = parsed.entries
         val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
-        val t = mkTab(tabId, file.name, logData, analysis = buildLogAnalysis(logData, settings.customIssueRules), processNameMode = newTabProcessNameMode())
+        val logFormat = parsed.format
+        val t = mkTab(
+            tabId, file.name, logData,
+            analysis = buildLogAnalysis(logData, settings.customIssueRules, logFormat),
+            processNameMode = newTabProcessNameMode(),
+            logFormat = logFormat,
+        )
             .copy(
                 sourcePath = path,
                 annotations = Annotations(prefix = "$prefixLabel ${file.name}"),
@@ -8495,6 +8593,7 @@ class AppState(
                 result as RestoredTabLoadResult.Loaded
                 ensureActive()
                 val rmap = mkRmap(result.logData)
+                val logFormat = result.logFormat
                 // Rows and the metadata that controls their Compose computation become visible in
                 // one snapshot update; a regenerated archive cannot expose new large content under
                 // the persisted small-file classification.
@@ -8502,7 +8601,8 @@ class AppState(
                     it.copy(
                         logData = result.logData,
                         rmap = rmap,
-                        analysis = pendingAnalysis(result.logData),
+                        analysis = pendingAnalysis(result.logData, logFormat),
+                        logFormat = logFormat,
                         archiveCandidate = result.archiveCandidate,
                         largeFileMode = result.largeFileMode,
                     )
@@ -8510,7 +8610,7 @@ class AppState(
                 markActiveLoadFinished(tabId)
                 published = true
                 val issueRules = settings.customIssueRules
-                val full = buildLogAnalysis(result.logData, issueRules)
+                val full = buildLogAnalysis(result.logData, issueRules, logFormat)
                 ensureActive()
                 upTab(tabId) { current ->
                     if (settings.customIssueRules == issueRules && current.logData == result.logData) current.copy(analysis = full) else current
@@ -8527,23 +8627,26 @@ class AppState(
     private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult {
         return when (source) {
             is RestoredTabSource.FileSource -> {
-                val logData = runCatching { parser(source.file) }.getOrElse { emptyList() }
+                val parsed = runCatching { parser(source.file) }
+                    .getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
                 RestoredTabLoadResult.Loaded(
-                    logData = logData,
+                    logData = parsed.entries,
                     archiveCandidate = null,
                     largeFileMode = source.file.length() >= LARGE_FILE_MODE_BYTES,
+                    logFormat = parsed.format,
                 )
             }
             is RestoredTabSource.ArchiveSource -> {
                 val currentCandidate = restoredArchiveCandidateResolver(source.archiveFile, source.entryPath)
                     ?: return RestoredTabLoadResult.MissingArchiveEntry(source.archiveFile, source.entryPath)
-                val logData = runCatching {
-                    extractCandidate(source.archiveFile, currentCandidate, archiveEntryByteBudget)
-                }.getOrElse { emptyList() }
+                val parsed = runCatching {
+                    extractCandidateResult(source.archiveFile, currentCandidate, archiveEntryByteBudget)
+                }.getOrElse { ParsedLog(LogFormat.LOGCAT, emptyList()) }
                 RestoredTabLoadResult.Loaded(
-                    logData = logData,
+                    logData = parsed.entries,
                     archiveCandidate = currentCandidate,
                     largeFileMode = currentCandidate.sizeBytes >= restoredArchiveLargeFileModeBytes,
+                    logFormat = parsed.format,
                 )
             }
         }

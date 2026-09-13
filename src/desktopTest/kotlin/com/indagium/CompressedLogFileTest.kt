@@ -1,9 +1,11 @@
 package com.indagium
 
+import com.indagium.model.LogFormat
 import com.indagium.ui.AppState
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.parseCompressedLog
+import com.indagium.utils.parseCompressedLogResult
 import com.indagium.utils.parseLogFile
 import com.indagium.utils.parseLogcat
 import org.apache.commons.compress.compressors.bzip2.BZip2CompressorOutputStream
@@ -73,6 +75,20 @@ class CompressedLogFileTest {
         assertEquals(1, entries.size)
         assertEquals("App", entries.single().tag)
         assertEquals("starting up", entries.single().msg)
+    }
+
+    @Test
+    fun compressedRawDltKeepsAuthoritativeFormatWithoutExtension() {
+        val dir = createTempDirectory("compressed-dlt-file").toFile()
+        val compressed = File(dir, "capture.bin")
+        // The filename intentionally has no .dlt suffix so content detection, not extension
+        // inference, is under test.
+        GzipCompressorOutputStream(compressed.outputStream()).use { it.write(dltTestFrame("compressed DLT")) }
+
+        val parsed = parseCompressedLogResult(compressed, "gz")
+
+        assertEquals(LogFormat.DLT, parsed.format)
+        assertEquals("compressed DLT", parsed.entries.single().msg)
     }
 
     @Test

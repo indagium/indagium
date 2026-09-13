@@ -6,6 +6,7 @@ import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
 import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.model.ProcessNameMode
 import com.indagium.ui.AppState
@@ -150,5 +151,31 @@ class CopyMetadataPresentationTest {
         assertTrue(csv.lineSequence().first().startsWith("ts,pid,tid,pid_name"))
         // The first log line has no PID/TID; CSV keeps its optional schema aligned using blanks.
         assertTrue(csv.contains("10:00:00.000,,,,I,App,start"))
+    }
+
+    @Test
+    fun dltCsvAddsProtocolColumnsOnlyForAuthoritativeDltTabs() {
+        val dltEntry = LogEntry(
+            1,
+            "10:00:00.000",
+            LogLevel.W,
+            "ECU1/APP1/CTX1",
+            "temperature high",
+            dltEcuId = "ECU1",
+            dltAppId = "APP1",
+            dltContextId = "CTX1",
+            dltMessageType = "log",
+            dltTimestamp = 1234L,
+            dltTimestampSource = "relative",
+        )
+        val dlt = mkTab("dlt", "capture.bin", listOf(dltEntry)).copy(logFormat = LogFormat.DLT)
+
+        val csv = buildFilteredCsv(dlt, AppSettings())
+
+        assertEquals(
+            "ts,level,tag,dlt_ecu_id,dlt_app_id,dlt_context_id,dlt_message_type,dlt_timestamp,dlt_timestamp_source,msg",
+            csv.lineSequence().first(),
+        )
+        assertTrue(csv.contains("10:00:00.000,W,ECU1/APP1/CTX1,ECU1,APP1,CTX1,log,1234,relative,temperature high"))
     }
 }

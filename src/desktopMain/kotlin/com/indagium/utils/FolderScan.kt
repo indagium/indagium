@@ -161,7 +161,7 @@ private fun visitFile(state: ScanState, child: File): Boolean {
     // Each file gets its own stream here (unlike a sequential archive's one shared stream) —
     // `.use {}` is correct and required to release the file handle promptly rather than leaving
     // thousands of them open until GC gets around to it.
-    val kind = candidateKind(relativePath) { child.inputStream().use(::isLikelyTextStream) }
+    val kind = candidateKindFromContent(relativePath) { child.inputStream().use(::sniffCandidateContent) }
     if (kind != null) {
         state.logs += ZipLogCandidate(relativePath, child.name, child.length(), kind)
         state.candidatesAccepted++

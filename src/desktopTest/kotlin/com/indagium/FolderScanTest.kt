@@ -36,6 +36,17 @@ class FolderScanTest {
     }
 
     @Test
+    fun rawDltCaptureIsASeparateCandidateEvenWithoutDltExtension() {
+        val root = createTempDirectory("openlog-folder-scan-dlt").toFile()
+        File(root, "capture.bin").writeBytes(dltTestFrame("folder DLT"))
+
+        val scan = scanFolderForLogs(root)
+
+        assertEquals(listOf("capture.bin"), scan.logCandidates.map { it.entryPath })
+        assertEquals(ZipLogCandidateKind.DLT, scan.logCandidates.single().kind)
+    }
+
+    @Test
     fun videosAreSeparatedFromLogCandidates() {
         val root = createTempDirectory("openlog-folder-scan-video").toFile()
         File(root, "main.log").writeText("06-26 10:00:00.000  1  1 I Tag: main\n")

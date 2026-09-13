@@ -8,11 +8,13 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.FilterMode
 import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.source.SourceIndexStore
 import com.indagium.source.SourceIndexer
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.utils.ParsedLog
 import com.indagium.utils.SPLIT_PROMPT_BYTES
 import java.io.File
 import java.io.RandomAccessFile
@@ -149,6 +151,52 @@ class ControlServerTest {
         assertTrue(body.contains("\"id\":\"t1\""))
         assertTrue(body.contains("\"filename\":\"test.log\""))
         assertTrue(body.contains("\"entryCount\":1"))
+    }
+
+    @Test
+    fun mcpAndVisibleRowsExposeAuthoritativeDltFormatAndMetadata() {
+        val entry = LogEntry(
+            1,
+            "10:00:00.000",
+            LogLevel.I,
+            "ECU1/APP1/CTX1",
+            "hello",
+            dltEcuId = "ECU1",
+            dltAppId = "APP1",
+            dltContextId = "CTX1",
+            dltMessageType = "log",
+            dltTimestamp = 77L,
+            dltTimestampSource = "relative",
+        )
+        state.tabs = listOf(
+            mkTab("dlt", "capture.bin", listOf(entry)).copy(logFormat = LogFormat.DLT),
+        )
+
+        val tabs = get("/tabs")
+        val visible = get("/visible?tabId=dlt")
+
+        assertTrue(tabs.contains("\"logFormat\":\"DLT\""), tabs)
+        assertTrue(visible.contains("\"dltEcuId\":\"ECU1\""), visible)
+        assertTrue(visible.contains("\"dltAppId\":\"APP1\""), visible)
+        assertTrue(visible.contains("\"dltContextId\":\"CTX1\""), visible)
+        assertTrue(visible.contains("\"dltTimestampSource\":\"relative\""), visible)
+    }
+
+    @Test
+    fun visibleAndContextRowsOmitDltMetadataForLogcatTabs() {
+        // Metadata-shaped entries can be constructed by callers, but the tab's authoritative
+        // format controls the MCP schema exposed to clients.
+        val entry = LogEntry(
+            1, "10:00:00.000", LogLevel.I, "App", "hello",
+            dltEcuId = "ECU1", dltAppId = "APP1", dltContextId = "CTX1",
+        )
+        state.tabs = listOf(mkTab("logcat", "capture.log", listOf(entry)))
+
+        val visible = get("/visible?tabId=logcat")
+        val context = get("/context?tabId=logcat&lineId=1")
+
+        assertTrue(!visible.contains("dltEcuId"), visible)
+        assertTrue(!context.contains("dltEcuId"), context)
     }
 
     @Test
@@ -893,6 +941,23 @@ class ControlServerTest {
     }
 
     @Test
+    fun explicitDltSplitRequestIsRejectedWithoutWritingOutputs() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-control-dlt-split").toFile()
+        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("do not split")) }
+        val out = File(dir, "parts")
+
+        val body = post(
+            "/split",
+            """{"path":"${capture.absolutePath.replace("\\", "\\\\")}","destinationDir":"${out.absolutePath.replace("\\", "\\\\")}","partCount":2}""",
+        )
+
+        assertTrue(body.contains("\"ok\":false"), body)
+        assertTrue(body.contains("DLT splitting unavailable"), body)
+        assertTrue(!out.exists())
+        assertTrue(state.tabs.isEmpty())
+    }
+
+    @Test
     fun openLogFileCanSplitOversizedPlainFileWhenRequested() {
         val dir = kotlin.io.path.createTempDirectory("openlog-control-open-split-mode").toFile()
         val source = File(dir, "large.log").apply { writeText("one\ntwo\nthree\nfour\n") }
@@ -923,7 +988,7 @@ class ControlServerTest {
         restartServerWith(
             AppState(
                 autosaveFile = File(dir, "state.cache"),
-                parser = { listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded")) },
+                parser = { ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "loaded"))) },
             ),
         )
 

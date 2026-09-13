@@ -1543,7 +1543,7 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
-    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath,
+    showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat,
 )
 
 private fun ZipLogCandidate.archiveCandidateToken(): String = tokenFields(
@@ -1669,6 +1669,9 @@ internal fun LogTab.tabToken(): String {
         // Trailing field (position 13): optional absolute R8/ProGuard mapping path. Appended so
         // every legacy tab token remains readable; retraced output is never persisted.
         retraceMappingPath.orEmpty(),
+        // Trailing field (position 14): authoritative parsed source format. Old autosaves omit
+        // this field and restore with LOGCAT until the content parser provides the real format.
+        logFormat.name,
     )
 }
 
@@ -1682,6 +1685,7 @@ internal sealed interface RestoredTabLoadResult {
         val logData: List<LogEntry>,
         val archiveCandidate: ZipLogCandidate?,
         val largeFileMode: Boolean,
+        val logFormat: LogFormat = LogFormat.LOGCAT,
     ) : RestoredTabLoadResult
 
     data class MissingArchiveEntry(val archiveFile: File, val entryPath: String) : RestoredTabLoadResult
@@ -1731,6 +1735,9 @@ internal fun String.tabShellFromToken(): RestoredTabShell? = runCatching {
             noteTargetName = p.getOrNull(12)?.takeIf { it.isNotBlank() },
             // Field index 13 (append-only); old tokens have no selected mapping and restore null.
             retraceMappingPath = p.getOrNull(13)?.takeIf { it.isNotBlank() },
+            // Field index 14 (append-only); old autosaves are reclassified after parsing.
+            logFormat = p.getOrNull(14)?.let { runCatching { LogFormat.valueOf(it) }.getOrNull() }
+                ?: LogFormat.LOGCAT,
         ),
         source,
     )

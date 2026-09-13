@@ -824,7 +824,8 @@ class Seq3CodecTest {
                 Seq3Fragment(
                     "f1",
                     Seq3FragmentKind.ALT,
-                    "x > 0", // operand zero's guard — see Seq3Fragment.elseOperands' own doc
+                    // Operand zero's guard — see Seq3Fragment.elseOperands' own doc.
+                    "x > 0",
                     listOf("m1"),
                     elseOperands = listOf(
                         Seq3Operand("op1", "x == 0", startsAtMessageId = "m1", startsAtOccurrenceEntryId = 42),
@@ -890,8 +891,10 @@ class Seq3CodecTest {
                     "label" to "x > 0",
                     "messageIds" to listOf<String>(),
                     "elseOperands" to listOf(
-                        mapOf("id" to "op-missing-anchor", "guard" to "x == 0"), // no startsAtMessageId
-                        mapOf("guard" to "x < 0", "startsAtMessageId" to "m1"), // no id
+                        // No startsAtMessageId.
+                        mapOf("id" to "op-missing-anchor", "guard" to "x == 0"),
+                        // No id.
+                        mapOf("guard" to "x < 0", "startsAtMessageId" to "m1"),
                         mapOf("id" to "op-valid", "guard" to "x < 0", "startsAtMessageId" to "m1"),
                     ),
                 ),

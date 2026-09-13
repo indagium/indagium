@@ -1,10 +1,12 @@
 package com.indagium
 
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.utils.ParsedLog
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.ZipLogCandidateKind
 import com.indagium.utils.archiveVideoCacheFileName
@@ -59,7 +61,7 @@ class VideoDropBehaviorTest {
             parser = {
                 parserStarted.countDown()
                 check(releaseParser.await(2, TimeUnit.SECONDS)) { "test parser was not released" }
-                listOf(LogEntry(2, "10:00:00.000", LogLevel.I, "New", "loaded"))
+                ParsedLog(LogFormat.LOGCAT, listOf(LogEntry(2, "10:00:00.000", LogLevel.I, "New", "loaded")))
             },
         ).also { state ->
             state.tabs = listOf(

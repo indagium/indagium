@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.model.LogFormat
 import com.indagium.ui.AppState
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream
 import java.io.File
@@ -101,6 +102,28 @@ class CompressedLogOpenBehaviorTest {
         // relaunch of a restored .log.gz tab instead of decompressing first.
         assertEquals(original.logData, restored.tabs.single().logData)
         assertEquals(gz.absolutePath, restored.tabs.single().sourcePath)
+    }
+
+    @Test
+    fun compressedRawDltOpensAndRestoresAsDltWithoutSplitPrompt() {
+        val dir = createTempDirectory("compressed-dlt-open").toFile()
+        val gz = File(dir, "capture.bin").also { file ->
+            GzipCompressorOutputStream(file.outputStream()).use { it.write(dltTestFrame("compressed DLT")) }
+        }
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+
+        state.openPath(gz)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        assertNull(state.pendingSplitPrompt)
+        assertEquals(LogFormat.DLT, state.tabs.single().logFormat)
+        state.autosaveNow()
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+        restored.startPendingRestoredTabLoads()
+        waitUntil { restored.tabs.size == 1 && !restored.isLoading }
+        assertEquals(LogFormat.DLT, restored.tabs.single().logFormat)
+        assertEquals("compressed DLT", restored.tabs.single().logData.single().msg)
     }
 
     @Test
