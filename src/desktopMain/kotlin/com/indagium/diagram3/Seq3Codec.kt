@@ -56,10 +56,12 @@ private const val MAX_SEQ3_CAPTURES_PER_MATCH = 32
 private const val MAX_SEQ3_FRAGMENTS = 128
 private const val MAX_SEQ3_NOTES = 400
 private const val MAX_SEQ3_DELAYS = 400
+
 // WP18: same posture/bound as MAX_SEQ3_DELAYS just above — a state invariant is the same lightweight
 // "one document-level artifact per promotion" shape, folded into the same document bounds check.
 private const val MAX_SEQ3_STATE_INVARIANTS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
+
 // WP4: guards are short strings against a 512 KB header cap, so this bound exists to match the
 // existing per-fragment caps' posture (reject a pathological document rather than truncate it
 // silently), not because 32 branches is remotely expected in practice.

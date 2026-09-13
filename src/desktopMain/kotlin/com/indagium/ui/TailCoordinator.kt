@@ -50,9 +50,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
     // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
     // by a real, currently-existing file path can be tailed (not a zip-extracted or merged tab).
+    @Suppress("ReturnCount") // Each early return is a separate, side-effect-free tailing precondition.
     fun startTailing(tabId: String) {
         if (activeTails.containsKey(tabId)) return
         val t = appState.tab(tabId) ?: return
+        // DLT is a framed binary stream; FileTailer intentionally emits UTF-8 lines and cannot
+        // preserve partial frames across polls. Until a framed incremental tailer exists, refuse
+        // the action rather than appending corrupted RAW rows.
+        if (t.logFormat == com.indagium.model.LogFormat.DLT) return
         val path = t.sourcePath ?: return
         val file = File(path)
         if (!file.isFile) return

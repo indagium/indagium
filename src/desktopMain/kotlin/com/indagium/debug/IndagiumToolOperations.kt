@@ -16,6 +16,7 @@ import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
+import com.indagium.model.LogFormat
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
@@ -309,6 +310,7 @@ internal class IndagiumToolOperations(
             "activeTags" to t.filter.activeTags.toList(),
             "levels" to t.filter.levels.map { it.key.toString() },
             "tailing" to t.tailing,
+            "logFormat" to t.logFormat.name,
         )
     }
 
@@ -342,7 +344,7 @@ internal class IndagiumToolOperations(
         if (tabId == null) return mapOf("error" to "file did not load: $path")
         awaitLoad(tabId)
         val tab = appState.tab(tabId) ?: return mapOf("error" to "file did not load: $path")
-        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
     }
 
     // Mirrors the UI's single/multi-candidate split (AppState.openZipFile): a lone candidate
@@ -386,7 +388,7 @@ internal class IndagiumToolOperations(
         if (tabId == null) return mapOf("error" to "entry did not load: ${target.entryPath}")
         awaitLoad(tabId)
         val tab = appState.tab(tabId) ?: return mapOf("error" to "entry did not load: ${target.entryPath}")
-        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size)
+        return mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "logFormat" to tab.logFormat.name)
     }
 
     private fun splitLogRoute(
@@ -398,6 +400,12 @@ internal class IndagiumToolOperations(
     ): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
+        if (appState.isDltSplitSource(source)) {
+            return mapOf(
+                "ok" to false,
+                "error" to "DLT splitting unavailable: DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+            )
+        }
         val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)
         val count = (partCount ?: appState.defaultSplitPartCount(source)).coerceAtLeast(1)
         if (appState.pendingSplitPrompt?.sources?.any { it.id == source.id } == true) {
@@ -1282,7 +1290,9 @@ internal class IndagiumToolOperations(
         return mapOf(
             "tabId" to tabId,
             "totalCount" to items.size,
-            "items" to items.drop(offset).take(limit).map { projectItem(logItemToMap(it), fields, compact) },
+            "items" to items.drop(offset).take(limit).map {
+                projectItem(logItemToMap(it, tab.logFormat == LogFormat.DLT), fields, compact)
+            },
         )
     }
 
@@ -1296,7 +1306,7 @@ internal class IndagiumToolOperations(
         val to = (idx + after.coerceAtLeast(0)).coerceAtMost(tab.logData.lastIndex)
         return mapOf(
             "tabId" to tabId, "lineId" to lineId,
-            "lines" to (from..to).map { rowMap(tab.logData[it], fields, compact) },
+            "lines" to (from..to).map { rowMap(tab.logData[it], tab.logFormat == LogFormat.DLT, fields, compact) },
         )
     }
 
@@ -1819,32 +1829,41 @@ internal class IndagiumToolOperations(
 
     // Deliberately no `else` branch, so adding a new LogItem variant is a compile error here,
     // not a silently-missing DTO field.
-    private fun logItemToMap(item: LogItem): Map<String, Any?> = when (item) {
+    private fun logItemToMap(item: LogItem, includeDltMetadata: Boolean): Map<String, Any?> = when (item) {
         is LogItem.Row -> mapOf(
             "type" to "Row", "id" to item.entry.id, "ts" to item.entry.ts,
             "level" to item.entry.level.key.toString(), "tag" to item.entry.tag,
             "msg" to item.entry.msg, "pid" to item.entry.pid, "tid" to item.entry.tid,
             "indent" to item.indent,
-        )
+        ) + dltEntryToMap(item.entry, includeDltMetadata)
         is LogItem.SeqHeader -> mapOf(
             "type" to "SeqHeader", "id" to item.entry.id, "gid" to item.gid,
             "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
-        )
+        ) + dltEntryToMap(item.entry, includeDltMetadata)
         is LogItem.ManualHeader -> mapOf(
             "type" to "ManualHeader", "id" to item.entry.id, "gid" to item.gid,
             "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "expanded" to item.expanded, "count" to item.count,
-        )
+        ) + dltEntryToMap(item.entry, includeDltMetadata)
         is LogItem.StackTraceHeader -> mapOf(
             "type" to "StackTraceHeader", "id" to item.entry.id, "gid" to item.gid,
             "ts" to item.entry.ts, "level" to item.entry.level.key.toString(),
             "tag" to item.entry.tag, "msg" to item.entry.msg,
             "indent" to item.indent, "expanded" to item.expanded, "count" to item.count,
-        )
+        ) + dltEntryToMap(item.entry, includeDltMetadata)
     }
+
+    private fun dltEntryToMap(entry: LogEntry, includeDltMetadata: Boolean): Map<String, Any?> = if (includeDltMetadata) mapOf(
+        "dltEcuId" to entry.dltEcuId,
+        "dltAppId" to entry.dltAppId,
+        "dltContextId" to entry.dltContextId,
+        "dltMessageType" to entry.dltMessageType,
+        "dltTimestamp" to entry.dltTimestamp,
+        "dltTimestampSource" to entry.dltTimestampSource,
+    ) else emptyMap()
 
     private fun crashSiteToMap(site: CrashSite): Map<String, Any?> = mapOf(
         "id" to site.id, "kind" to site.kind.name, "groupGid" to site.groupGid, "isFatal" to site.isFatal,
@@ -1910,8 +1929,8 @@ internal class IndagiumToolOperations(
         }
     }
 
-    private fun rowMap(entry: LogEntry, fields: Set<String>?, compact: Boolean): Map<String, Any?> =
-        projectItem(logItemToMap(LogItem.Row(entry, 0)), fields, compact)
+    private fun rowMap(entry: LogEntry, includeDltMetadata: Boolean, fields: Set<String>?, compact: Boolean): Map<String, Any?> =
+        projectItem(logItemToMap(LogItem.Row(entry, 0), includeDltMetadata), fields, compact)
 
     private fun zipCandidateToMap(candidate: ZipLogCandidate): Map<String, Any?> = mapOf(
         "entryPath" to candidate.entryPath,

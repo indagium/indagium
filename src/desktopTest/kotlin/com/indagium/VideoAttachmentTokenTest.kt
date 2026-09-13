@@ -125,9 +125,9 @@ class VideoAttachmentTokenTest {
     fun tabTokenCarriesAttachedVideoAsFieldIndexEleven() {
         val original = tabFixture(VideoAttachment(path = "/videos/repro.mp4", sourceLabel = "/videos/repro.mp4"))
         val fields = original.tabToken().tokenFields()
-        // 14 fields (0..13) since noteTargetName and the optional persisted R8 mapping were
-        // appended after attachedVideo — attachedVideo itself stays at index 11.
-        assertEquals(14, fields.size, "tab token must carry exactly 14 fields (0..13) once attachedVideo is set")
+        // 15 fields (0..14) since noteTargetName, the optional persisted R8 mapping, and the
+        // authoritative log-format field were appended after attachedVideo — attachedVideo itself stays at index 11.
+        assertEquals(15, fields.size, "tab token must carry exactly 15 fields (0..14) once attachedVideo is set")
     }
 
     @Test

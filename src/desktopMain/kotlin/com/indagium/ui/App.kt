@@ -947,10 +947,12 @@ fun App(
                         // compressed log (sourcePath is real, but TailCoordinator.startTailing
                         // refuses it too — see its doc comment for why appending raw gzip bytes
                         // makes no sense). Mirrors that same guard so the menu item doesn't even
-                        // offer an action startTailing would silently no-op on.
-                        val canTail = remember(ttab.sourcePath) {
+                        // offer an action startTailing would silently no-op on. DLT additionally
+                        // uses framed binary records, so its authoritative format must disable
+                        // the menu action even when the source itself is a real plain file.
+                        val canTail = remember(ttab.sourcePath, ttab.logFormat) {
                             val p = ttab.sourcePath
-                            p != null && '!' !in p && File(p).isFile &&
+                            ttab.logFormat != LogFormat.DLT && p != null && '!' !in p && File(p).isFile &&
                                 detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
                         }
                         val canSplit = remember(ttab.sourcePath) {

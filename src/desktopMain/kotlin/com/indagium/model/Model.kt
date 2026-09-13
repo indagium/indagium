@@ -21,6 +21,10 @@ enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
     }
 }
 
+/** Source syntax used to produce a tab's rows. Kept deliberately small: DLT text exports and
+ * binary captures share the same row model and are both represented by [DLT]. */
+enum class LogFormat { LOGCAT, DLT }
+
 data class LogEntry(
     val id: Int,
     val ts: String,
@@ -34,6 +38,15 @@ data class LogEntry(
     // last (not inserted earlier) so every existing positional LogEntry(...) construction across
     // the test suite keeps compiling unchanged.
     val sourceTag: String? = null,
+    // Optional DLT metadata. These fields are appended after sourceTag so all existing positional
+    // constructors remain source compatible. A non-null ECU/APID/CTID is also the format marker
+    // used when a parser result is handed through an older List<LogEntry> seam.
+    val dltEcuId: String? = null,
+    val dltAppId: String? = null,
+    val dltContextId: String? = null,
+    val dltMessageType: String? = null,
+    val dltTimestamp: Long? = null,
+    val dltTimestampSource: String? = null,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────
@@ -704,6 +717,9 @@ data class LogTab(
     // A transport/UI preference for this process only. Keeping it out of AutosaveCodec means a
     // restored session never unexpectedly scrolls the log while a recording starts playing.
     val videoFollowLog: Boolean = false,
+    // Source format is session/persistence metadata rather than a property of an individual row.
+    // Appended here to preserve every existing LogTab(...) call site and old autosave tokens.
+    val logFormat: LogFormat = LogFormat.LOGCAT,
     // The auto-export note-file decision for this tab, once made: a bare filename (no directory)
     // inside activeNotesDir(). null means "not yet decided" — AppState.resolveNoteTarget falls
     // through to its fingerprint-based name search, and the first annotation edit prompts before

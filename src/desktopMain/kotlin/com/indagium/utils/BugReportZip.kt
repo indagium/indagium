@@ -7,6 +7,7 @@ import org.apache.commons.compress.archivers.ArchiveInputStream
 import org.apache.commons.compress.archivers.sevenz.SevenZFile
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FilterInputStream
 import java.io.IOException
@@ -64,7 +65,7 @@ internal class BoundedInputStream(private val delegate: InputStream, private val
     override fun close() = delegate.close()
 }
 
-enum class ZipLogCandidateKind { LOGCAT, ANR_TEXT, VIDEO }
+enum class ZipLogCandidateKind { LOGCAT, DLT, ANR_TEXT, VIDEO }
 
 data class ZipLogCandidate(
     val entryPath: String,
@@ -78,6 +79,65 @@ data class ArchiveScan(val logCandidates: List<ZipLogCandidate>, val videoCandid
 
 private val LOG_EXTENSIONS = setOf("txt", "log")
 private val ANR_EXTENSIONS = setOf("", "txt", "trace", "traces")
+private const val CANDIDATE_SNIFF_BYTES = 8 * 1024
+private const val DLT_FRAME_HEADER_SIZE = 4
+private const val DLT_VERSION_SHIFT = 5
+private const val DLT_PROTOCOL_V1 = 1
+private const val DLT_PROTOCOL_V2 = 2
+private const val DLT_MAX_FRAME_SIZE = 0xffff
+private const val BYTE_MASK = 0xff
+
+internal enum class CandidateContent { DLT, TEXT, OTHER }
+
+/** One bounded read used by archive/folder classification. It recognizes both binary DLT and
+ * DLT Viewer text exports before applying the filename/ANR rules. */
+internal fun sniffCandidateContent(stream: InputStream): CandidateContent {
+    val sample = runCatching { stream.readNBytes(CANDIDATE_SNIFF_BYTES) }
+        .getOrElse { return CandidateContent.OTHER }
+    // Storage framing has an unambiguous four-byte signature. Check it before the generic text
+    // heuristic because a valid header can otherwise be entirely non-NUL bytes (and v2 must still
+    // reach the parser's explicit unsupported-version error).
+    if (hasDltStoragePrefix(sample)) return CandidateContent.DLT
+    // A v1 HTYP is deliberately compact, so common printable bytes can have its version bits and
+    // two following text bytes can look like a legal big-endian LEN. Prefer a text classification
+    // whenever the bounded sample is text-like; DLT Viewer is the one text exception and has its
+    // own explicit column signature. This mirrors parseLogContent's text-first raw-frame routing.
+    if (isLikelyTextSample(sample)) {
+        return if (looksLikeDltViewerHeader(sample)) CandidateContent.DLT else CandidateContent.TEXT
+    }
+    return if (looksLikeDltBinary(sample)) CandidateContent.DLT else CandidateContent.OTHER
+}
+
+private fun looksLikeDltViewerHeader(sample: ByteArray): Boolean {
+    val first = runCatching {
+        openLogTextReader(ByteArrayInputStream(sample)).use { it.lineSequence().firstOrNull { line -> line.isNotBlank() } }
+    }.getOrNull()?.trim()?.lowercase() ?: return false
+    val fields = first.split(',', ';').map { it.trim().replace("_", " ") }
+
+    fun hasAny(vararg names: String) = fields.any { field -> names.any { name -> field == name || field.contains(name) } }
+    return hasAny("ecu") && hasAny("apid", "app", "application") && hasAny("ctid", "context")
+}
+
+/** Bounded content sniff for direct-file routing (binary DLT and DLT Viewer exports). */
+fun isLikelyDltSourceFile(file: File): Boolean = file.isFile && runCatching {
+    file.inputStream().use { sniffCandidateContent(it) == CandidateContent.DLT }
+}.getOrDefault(false)
+
+private fun looksLikeDltBinary(sample: ByteArray): Boolean {
+    if (sample.size < DLT_FRAME_HEADER_SIZE) return false
+    if (hasDltStoragePrefix(sample)) return true
+    val htyp = sample[0].toInt() and BYTE_MASK
+    // Keep an identifiable v2 frame on the DLT route so the parser can report its explicit
+    // unsupported-version error. v2 is intentionally not parsed or otherwise accepted.
+    if ((htyp ushr DLT_VERSION_SHIFT) !in DLT_PROTOCOL_V1..DLT_PROTOCOL_V2) return false
+    val length = ((sample[2].toInt() and BYTE_MASK) shl 8) or (sample[3].toInt() and BYTE_MASK)
+    return length in DLT_FRAME_HEADER_SIZE..DLT_MAX_FRAME_SIZE
+}
+
+private fun hasDltStoragePrefix(sample: ByteArray): Boolean =
+    sample.size >= DLT_FRAME_HEADER_SIZE && sample[0] == 'D'.code.toByte() &&
+        sample[1] == 'L'.code.toByte() && sample[2] == 'T'.code.toByte() &&
+        sample[3].toInt() in DLT_PROTOCOL_V1..DLT_PROTOCOL_V2
 
 // Content-sniffed, not extension-gated — same "open by content" philosophy as isLikelyTextFile.
 // Delegates to detectArchiveFormat's magic-byte-detect-then-validate pipeline (ArchiveFormat.kt)
@@ -142,7 +202,7 @@ private fun scanZip(zipFile: File, budget: ScanBudget, logs: MutableList<ZipLogC
                 } else {
                     // Fresh per-entry stream: close it here (see classifyEntry's doc).
                     classifyEntry(entry.name, entry.size, logs, videos) {
-                        zf.getInputStream(entry).use(::isLikelyTextStream)
+                        zf.getInputStream(entry).use { sniffCandidateContent(it) }
                     }
                 }
             }
@@ -162,7 +222,7 @@ private fun scanSevenZ(archiveFile: File, budget: ScanBudget, logs: MutableList<
                 } else {
                     // Fresh per-entry stream: close it here (see classifyEntry's doc).
                     classifyEntry(entry.name, entry.size, logs, videos) {
-                        sevenZ.getInputStream(entry).use(::isLikelyTextStream)
+                        sevenZ.getInputStream(entry).use { sniffCandidateContent(it) }
                     }
                 }
             }
@@ -182,7 +242,7 @@ private fun scanSequential(
     // sniff at most once per entry, and getNextEntry() skips whatever of the entry that sniff
     // left unread. The visit return value isn't needed; logs/videos are filled by side effect.
     forEachSequentialEntry(file, format, maxEntries) { name, size, isDirectory, stream ->
-        if (!isDirectory) classifyEntry(name, size, logs, videos) { isLikelyTextStream(stream) }
+        if (!isDirectory) classifyEntry(name, size, logs, videos) { sniffCandidateContent(stream) }
         null
     }
 }
@@ -213,7 +273,7 @@ private fun scanNestedTar(
         val nestedPath = "$outerEntryPath!${entry.name}"
         // Borrowed, exactly like scanSequential — `tar` is the single stream for this nested
         // archive and closing it would end the walk at its first entry.
-        classifyEntry(nestedPath, entry.size, logs, videos) { isLikelyTextStream(tar) }
+        classifyEntry(nestedPath, entry.size, logs, videos) { sniffCandidateContent(tar) }
     }
 }
 
@@ -240,14 +300,14 @@ private fun classifyEntry(
     size: Long,
     logs: MutableList<ZipLogCandidate>,
     videos: MutableList<ZipLogCandidate>,
-    sniffText: () -> Boolean,
+    sniffContent: () -> CandidateContent,
 ) {
     val name = entryPath.substringAfterLast('/')
     if (isVideoEntryName(name)) {
         videos += ZipLogCandidate(entryPath, name, size, ZipLogCandidateKind.VIDEO)
         return
     }
-    val kind = candidateKind(entryPath, sniffText) ?: return
+    val kind = candidateKindFromContent(entryPath, sniffContent) ?: return
     logs += ZipLogCandidate(entryPath, name, size, kind)
 }
 
@@ -255,7 +315,40 @@ private fun sevenZFile(file: File): SevenZFile = SevenZFile.builder().setFile(fi
 
 // internal (not private): reused by FolderScan.kt so folder and archive candidate classification
 // can't drift apart from each other.
+@Suppress("CyclomaticComplexMethod") // Compatibility wrapper retains its explicit legacy filename rules.
 internal fun candidateKind(entryPath: String, isText: () -> Boolean): ZipLogCandidateKind? {
+    val name = entryPath.substringAfterLast('/')
+    val lowerPath = entryPath.lowercase()
+    val lowerName = name.lowercase()
+    val ext = name.substringAfterLast('.', missingDelimiterValue = "")
+    val isTextFile = ext.equals("txt", ignoreCase = true)
+    val isDltFile = ext.equals("dlt", ignoreCase = true)
+    val looksLikeLog = name.contains("log", ignoreCase = true) && (ext.isEmpty() || ext.lowercase() in LOG_EXTENSIONS)
+    val inAnrDir = lowerPath.contains("/anr/") || lowerPath.startsWith("anr/")
+    val looksLikeAnrTrace = lowerName.startsWith("anr_") ||
+        lowerName.startsWith("traces") ||
+        lowerName.contains("anr") && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
+    val looksLikeAnr = (inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
+    if (!looksLikeLog && !looksLikeAnr && !isTextFile && !isDltFile) return null
+    if (!runCatching { isText() }.getOrDefault(false)) return null
+
+    if (isDltFile) return ZipLogCandidateKind.DLT
+    if (looksLikeLog || isTextFile) {
+        return ZipLogCandidateKind.LOGCAT
+    }
+
+    return if (looksLikeAnr) {
+        ZipLogCandidateKind.ANR_TEXT
+    } else {
+        null
+    }
+}
+
+internal fun candidateKindFromContent(entryPath: String, sniff: () -> CandidateContent): ZipLogCandidateKind? {
+    val content = runCatching(sniff).getOrDefault(CandidateContent.OTHER)
+    if (content == CandidateContent.DLT) return ZipLogCandidateKind.DLT
+    if (content != CandidateContent.TEXT) return null
+
     val name = entryPath.substringAfterLast('/')
     val lowerPath = entryPath.lowercase()
     val lowerName = name.lowercase()
@@ -267,18 +360,8 @@ internal fun candidateKind(entryPath: String, isText: () -> Boolean): ZipLogCand
         lowerName.startsWith("traces") ||
         lowerName.contains("anr") && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
     val looksLikeAnr = (inAnrDir || looksLikeAnrTrace) && (ext.isEmpty() || ext.lowercase() in ANR_EXTENSIONS)
-    if (!looksLikeLog && !looksLikeAnr && !isTextFile) return null
-    if (!runCatching { isText() }.getOrDefault(false)) return null
-
-    if (looksLikeLog || isTextFile) {
-        return ZipLogCandidateKind.LOGCAT
-    }
-
-    return if (looksLikeAnr) {
-        ZipLogCandidateKind.ANR_TEXT
-    } else {
-        null
-    }
+    if (looksLikeLog || isTextFile) return ZipLogCandidateKind.LOGCAT
+    return if (looksLikeAnr) ZipLogCandidateKind.ANR_TEXT else null
 }
 
 // internal (not private): reused by FolderScan.kt, same rationale as candidateKind above.
@@ -364,11 +447,19 @@ fun extractArchiveVideoToCache(
 // exceeds it throws ArchiveBudgetExceededException instead of silently swallowing to an empty list
 // the way other extraction failures (corrupt entry, IO error) still do below.
 fun extractCandidate(zipFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): List<LogEntry> =
+    extractCandidateResult(zipFile, candidate, maxEntryBytes).entries
+
+/** Content-aware archive extraction used by AppState; [extractCandidate] remains source-compatible. */
+fun extractCandidateResult(
+    zipFile: File,
+    candidate: ZipLogCandidate,
+    maxEntryBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+): ParsedLog =
     when (val format = detectArchiveFormat(zipFile)) {
         ArchiveFormat.Zip -> extractZipCandidate(zipFile, candidate, maxEntryBytes)
         ArchiveFormat.SevenZ -> extractSevenZCandidate(zipFile, candidate, maxEntryBytes)
         is ArchiveFormat.Sequential -> extractSequentialCandidate(zipFile, format, candidate, maxEntryBytes)
-        else -> emptyList()
+        else -> ParsedLog(com.indagium.model.LogFormat.LOGCAT, emptyList())
     }
 
 fun openArchiveCandidateStream(archiveFile: File, candidate: ZipLogCandidate): InputStream? =
@@ -379,46 +470,51 @@ fun openArchiveCandidateStream(archiveFile: File, candidate: ZipLogCandidate): I
         else -> null
     }
 
-private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): List<LogEntry> {
+private fun extractZipCandidate(zipFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): ParsedLog {
     val nested = splitNestedEntryPath(candidate.entryPath)
     val result = runCatching {
         ZipFile(zipFile).use { zf ->
             if (nested != null) {
                 val (outerPath, innerPath) = nested
-                val outerEntry = zf.getEntry(outerPath) ?: return@use emptyList()
+                val outerEntry = zf.getEntry(outerPath) ?: return@use emptyParsedLog()
                 extractNestedTarEntry(zf.getInputStream(outerEntry), innerPath, maxEntryBytes)
             } else {
-                val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyList()
+                val entry = zf.getEntry(candidate.entryPath) ?: return@use emptyParsedLog()
                 BoundedInputStream(zf.getInputStream(entry), maxEntryBytes).use { stream ->
-                    openLogTextReader(stream).useLines { lines -> parseLogcatLines(lines) }
+                    parseLogContent(stream)
                 }
             }
         }
     }
-    // Budget breaches propagate (callers must surface a clear error); every other failure mode
-    // (corrupt entry, IO error) keeps the pre-existing silent-empty-list behavior.
-    result.exceptionOrNull()?.let { if (it is ArchiveBudgetExceededException) throw it }
-    return result.getOrDefault(emptyList())
+    // Budget breaches and DLT parse failures propagate. A DLT candidate that reaches extraction
+    // has already passed the bounded content sniff; silently converting an identifiable v2 frame
+    // into an empty LOGCAT tab would hide the parser's actionable unsupported-version error.
+    result.exceptionOrNull()?.let { error ->
+        if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT && error is IllegalArgumentException) throw error
+    }
+    return result.getOrDefault(emptyParsedLog())
 }
 
-private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): List<LogEntry> {
+private fun extractSevenZCandidate(archiveFile: File, candidate: ZipLogCandidate, maxEntryBytes: Long): ParsedLog {
     val nested = splitNestedEntryPath(candidate.entryPath)
     val result = runCatching {
         sevenZFile(archiveFile).use { sevenZ ->
             if (nested != null) {
                 val (outerPath, innerPath) = nested
-                val outerEntry = sevenZ.entries.firstOrNull { it.name == outerPath } ?: return@use emptyList()
+                val outerEntry = sevenZ.entries.firstOrNull { it.name == outerPath } ?: return@use emptyParsedLog()
                 extractNestedTarEntry(sevenZ.getInputStream(outerEntry), innerPath, maxEntryBytes)
             } else {
-                val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: return@use emptyList()
+                val entry = sevenZ.entries.firstOrNull { it.name == candidate.entryPath } ?: return@use emptyParsedLog()
                 BoundedInputStream(sevenZ.getInputStream(entry), maxEntryBytes).use { stream ->
-                    openLogTextReader(stream).useLines { lines -> parseLogcatLines(lines) }
+                    parseLogContent(stream)
                 }
             }
         }
     }
-    result.exceptionOrNull()?.let { if (it is ArchiveBudgetExceededException) throw it }
-    return result.getOrDefault(emptyList())
+    result.exceptionOrNull()?.let { error ->
+        if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT && error is IllegalArgumentException) throw error
+    }
+    return result.getOrDefault(emptyParsedLog())
 }
 
 private fun extractSequentialCandidate(
@@ -426,12 +522,12 @@ private fun extractSequentialCandidate(
     format: ArchiveFormat.Sequential,
     candidate: ZipLogCandidate,
     maxEntryBytes: Long,
-): List<LogEntry> {
+): ParsedLog {
     val result = runCatching {
         openSequentialArchive(file, format).use { archive ->
             val found = findSequentialEntry(archive, candidate.entryPath)
             if (found == null) {
-                emptyList()
+                emptyParsedLog()
             } else {
                 // Bounded-wrapping `archive` itself (not a fresh per-entry stream — sequential
                 // formats don't have those) is safe here specifically because this is the
@@ -439,29 +535,33 @@ private fun extractSequentialCandidate(
                 // premature close could truncate away. Not `.use {}`'d separately — the outer
                 // openSequentialArchive(...).use{} below already closes `archive` (and therefore
                 // this wrapper's delegate) once the lambda returns.
-                openLogTextReader(BoundedInputStream(archive, maxEntryBytes)).useLines { lines -> parseLogcatLines(lines) }
+                parseLogContent(BoundedInputStream(archive, maxEntryBytes))
             }
         }
     }
-    result.exceptionOrNull()?.let { if (it is ArchiveBudgetExceededException) throw it }
-    return result.getOrDefault(emptyList())
+    result.exceptionOrNull()?.let { error ->
+        if (error is ArchiveBudgetExceededException || candidate.kind == ZipLogCandidateKind.DLT && error is IllegalArgumentException) throw error
+    }
+    return result.getOrDefault(emptyParsedLog())
 }
 
 // Reads forward until [innerPath] is found inside the tar wrapped around [outerStream] (an already
 // -open entry stream from the enclosing zip/7z), then parses just that entry — the same "terminal
 // read, safe to close the shared stream now" reasoning as extractSequentialCandidate above.
-private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, maxEntryBytes: Long): List<LogEntry> =
+private fun extractNestedTarEntry(outerStream: InputStream, innerPath: String, maxEntryBytes: Long): ParsedLog =
     TarArchiveInputStream(outerStream).use { tar ->
         val found = findTarEntry(tar, innerPath)
         if (found == null) {
-            emptyList()
+            emptyParsedLog()
         } else {
             // Not `.use {}`'d separately — see extractSequentialCandidate's identical note on why
             // wrapping `tar` itself (rather than a fresh per-entry stream) is safe for this,
             // the terminal read, and why the outer `.use {}` above is enough cleanup on its own.
-            openLogTextReader(BoundedInputStream(tar, maxEntryBytes)).useLines { lines -> parseLogcatLines(lines) }
+            parseLogContent(BoundedInputStream(tar, maxEntryBytes))
         }
     }
+
+private fun emptyParsedLog(): ParsedLog = ParsedLog(com.indagium.model.LogFormat.LOGCAT, emptyList())
 
 private fun openZipCandidateStream(zipFile: File, candidate: ZipLogCandidate): InputStream? = runCatching {
     val zf = ZipFile(zipFile)

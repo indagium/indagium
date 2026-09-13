@@ -11,7 +11,11 @@ import java.io.InputStream
 // stream, without ever materializing the uncompressed content to disk. [uncompressedBytes] is the
 // real decompressed size actually read (not the file's on-disk compressed size, which under-reports
 // by roughly the compression ratio); see its use in AppState.kt for why openFileInternal wants it.
-data class CompressedLogParse(val entries: List<LogEntry>, val uncompressedBytes: Long)
+data class CompressedLogParse(
+    val entries: List<LogEntry>,
+    val uncompressedBytes: Long,
+    val format: com.indagium.model.LogFormat = com.indagium.model.LogFormat.LOGCAT,
+)
 
 // Counts bytes as they pass through, purely for CompressedLogParse.uncompressedBytes — unlike
 // BoundedInputStream (which this wraps), a byte count alone never fails closed; the budget
@@ -47,8 +51,21 @@ fun openCompressedLogStream(file: File, compressorName: String): InputStream =
 fun parseCompressedLog(file: File, compressorName: String, maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): CompressedLogParse {
     val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
     val counting = CountingInputStream(bounded)
-    val entries = openLogTextReader(counting).useLines { lines -> parseLogcatLines(lines) }
-    return CompressedLogParse(entries, counting.count)
+    val parsed = parseLogContent(counting)
+    return CompressedLogParse(parsed.entries, counting.count, parsed.format)
+}
+
+/** Parsed compressed-file result used by AppState so content detection is never inferred from a name. */
+fun parseCompressedLogResult(
+    file: File,
+    compressorName: String,
+    maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES,
+): ParsedLog = parseCompressedLog(file, compressorName, maxBytes).let { ParsedLog(it.format, it.entries) }
+
+/** Content-aware file parser. The List-returning [parseLogFile] remains the compatibility seam. */
+fun parseLogFileResult(file: File): ParsedLog = when (val format = detectArchiveFormat(file)) {
+    is ArchiveFormat.CompressedFile -> parseCompressedLogResult(file, format.compressorName)
+    else -> file.inputStream().use { parseLogContent(it) }
 }
 
 // The one hook that makes bare compressed logs "just work" everywhere a plain file already did:
@@ -57,5 +74,5 @@ fun parseCompressedLog(file: File, compressorName: String, maxBytes: Long = MAX_
 // re-parse gzip bytes as raw (garbage) logcat lines on every relaunch of a restored .log.gz tab.
 fun parseLogFile(file: File): List<LogEntry> = when (val format = detectArchiveFormat(file)) {
     is ArchiveFormat.CompressedFile -> parseCompressedLog(file, format.compressorName).entries
-    else -> parseLogcat(file)
+    else -> file.inputStream().use { parseLogContent(it).entries }
 }

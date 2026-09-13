@@ -1,8 +1,12 @@
 package com.indagium
 
+import com.indagium.model.LogFormat
 import com.indagium.model.VideoSource
 import com.indagium.ui.AppState
 import com.indagium.ui.SplitSource
+import com.indagium.utils.SPLIT_PROMPT_BYTES
+import com.indagium.utils.ZipLogCandidate
+import com.indagium.utils.ZipLogCandidateKind
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -109,6 +113,31 @@ class FolderOpenBehaviorTest {
         assertTrue(pending != null, "expected the oversized folder child to trigger the split prompt")
         val source = assertIs<SplitSource.RealFile>(pending!!.sources.single())
         assertEquals(bigLog.absolutePath, source.file.absolutePath)
+    }
+
+    @Test
+    fun rawDltFolderChildBypassesSplitPromptAndCannotBeTailed() {
+        val dir = createTempDirectory("openlog-folder-dlt").toFile()
+        val folder = File(dir, "unpacked").apply { mkdir() }
+        val capture = File(folder, "capture.bin").apply { writeBytes(dltTestFrame("folder DLT")) }
+        val state = AppState(File(dir, "state.cache"))
+        val candidate = com.indagium.utils.ZipLogCandidate(
+            entryPath = "capture.bin",
+            displayName = "capture.bin",
+            sizeBytes = SPLIT_PROMPT_BYTES,
+            kind = ZipLogCandidateKind.DLT,
+        )
+
+        val tabIds = state.openFolderEntries(folder, listOf(candidate), splitPromptThresholdBytes = 1L)
+
+        assertEquals(1, tabIds.size)
+        assertNull(state.pendingSplitPrompt)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tab = state.tabs.single()
+        assertEquals(capture.absolutePath, tab.sourcePath)
+        assertEquals(LogFormat.DLT, tab.logFormat)
+        state.startTailing(tab.id)
+        assertFalse(state.tab(tab.id)!!.tailing)
     }
 
     @Test

@@ -103,6 +103,14 @@ fun filteredCsvHeader(tab: LogTab, settings: AppSettings): List<String> = buildL
     }
     add("level")
     add("tag")
+    if (tab.logFormat == com.indagium.model.LogFormat.DLT) {
+        add("dlt_ecu_id")
+        add("dlt_app_id")
+        add("dlt_context_id")
+        add("dlt_message_type")
+        add("dlt_timestamp")
+        add("dlt_timestamp_source")
+    }
     add("msg")
 }
 
@@ -130,5 +138,13 @@ fun filteredCsvValues(
     }
     add(entry.level.key.toString())
     add(entry.tag)
+    if (tab.logFormat == com.indagium.model.LogFormat.DLT) {
+        add(entry.dltEcuId.orEmpty())
+        add(entry.dltAppId.orEmpty())
+        add(entry.dltContextId.orEmpty())
+        add(entry.dltMessageType.orEmpty())
+        add(entry.dltTimestamp?.toString().orEmpty())
+        add(entry.dltTimestampSource.orEmpty())
+    }
     add(entry.msg)
 }

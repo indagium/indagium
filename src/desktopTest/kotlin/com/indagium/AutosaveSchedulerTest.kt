@@ -305,7 +305,7 @@ class AutosaveSchedulerTest {
             base.copy(retraceMappingPath = "/tmp/mapping.txt"),
         )
 
-        assertEquals(14, base.persistedSnapshot().size)
+        assertEquals(15, base.persistedSnapshot().size)
         variants.forEach { variant ->
             assertNotEquals(base.persistedSnapshot(), variant.persistedSnapshot())
             assertNotEquals(base.tabToken(), variant.tabToken())
