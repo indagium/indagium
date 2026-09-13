@@ -2850,6 +2850,15 @@ private fun ImageBlockView(
 private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
     runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
 
+/** A move arrow that can't be used here (↑ on the first block, ↓ on the last): same 18dp
+ *  footprint as the live SquareIconButton, dimmed and not clickable. */
+@Composable
+private fun DisabledMoveArrow(text: String) {
+    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
+        AppText(text, color = tc().td.copy(alpha = .35f), fontSize = 12.sp)
+    }
+}
+
 // ── Block controls (move / delete / add note) ──────────────────────────
 @Composable
 private fun BlockControls(
@@ -2927,11 +2936,11 @@ private fun BlockControls(
         }
         Spacer(Modifier.weight(1f))
 
-        // Fixed-width ↑/↓ slots: an invisible, disabled placeholder of the same footprint on the
-        // first/last block, so the action row is the same width on every block instead of
-        // shifting as ↑/↓ appear and disappear while scrolling through the list.
-        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp) else Spacer(Modifier.size(18.dp))
-        if (!isLast) SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown) else Spacer(Modifier.size(18.dp))
+        // Fixed-width ↑/↓ slots: the first/last block shows its unavailable arrow dimmed rather than
+        // hiding it, so the action row keeps the same layout on every block instead of shifting as
+        // arrows appear and disappear — and without the blank gap an invisible placeholder leaves.
+        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp) else DisabledMoveArrow("↑")
+        if (!isLast) SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown) else DisabledMoveArrow("↓")
         if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
         // Renamed from the bare "✎" glyph, which at this size read as a paperclip rather than the
         // button that opens the full editor dialog.
