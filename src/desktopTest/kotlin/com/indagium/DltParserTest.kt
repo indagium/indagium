@@ -132,8 +132,15 @@ class DltParserTest {
         assertFailsWith<IllegalArgumentException> {
             parseDltContent(ByteArrayInputStream(storageHeader("ECU1") + frame(payload = verboseString("ok", true)) + ByteArray(16)))
         }
+        // A headerless (no "DLT" storage magic) v2-looking frame is deliberately name-gated to
+        // ".dlt" by the shared classifier (DltDetection.kt) — otherwise ordinary archive binaries
+        // whose first byte happens to carry v2's version bits would misclassify as DLT. Pass a
+        // ".dlt" filename here to exercise that gated path; see DltDetectionTest for the ungated
+        // (no filename) case, which now falls through to the text fallback instead of throwing.
         val v2 = byteArrayOf(0x41, 0, 0, 4)
-        val error = assertFailsWith<IllegalArgumentException> { parseLogContent(ByteArrayInputStream(v2)) }
+        val error = assertFailsWith<IllegalArgumentException> {
+            parseLogContent(ByteArrayInputStream(v2), fileName = "capture.dlt")
+        }
         assertTrue(error.message.orEmpty().contains("v2 is not supported"))
         val storageV2 = byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 2) + "text header".toByteArray()
         val storageError = assertFailsWith<IllegalArgumentException> { parseLogContent(ByteArrayInputStream(storageV2)) }

@@ -4,7 +4,6 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
 import com.indagium.model.LogLevel
 import java.io.BufferedInputStream
-import java.io.File
 import java.io.InputStream
 import java.time.Instant
 import java.time.ZoneId
@@ -14,20 +13,10 @@ import java.util.Locale
 /** Result of syntax detection and parsing. The old List<LogEntry> parser API remains available. */
 data class ParsedLog(val format: LogFormat, val entries: List<LogEntry>)
 
-/** Infers format when a legacy parser seam returns only rows (for example archive extraction). */
-fun inferLogFormat(filename: String, entries: List<LogEntry>, fallback: LogFormat = LogFormat.LOGCAT): LogFormat =
-    if (fallback == LogFormat.DLT || filename.isDltFilename() || entries.any(::hasDltMetadata)) LogFormat.DLT else LogFormat.LOGCAT
-
-private fun String.isDltFilename(): Boolean = substringAfterLast('.', "").equals("dlt", ignoreCase = true)
-
-private fun hasDltMetadata(entry: LogEntry): Boolean =
-    entry.dltEcuId != null || entry.dltAppId != null || entry.dltContextId != null || entry.dltTimestampSource != null
-
 private const val DLT_STORAGE_HEADER_SIZE = 16
 private const val DLT_MAX_FRAME_SIZE = 0xffff
 private const val DLT_V1 = 1
 private const val DLT_V2 = 2
-private const val TEXT_LOOKAHEAD_LINES = 32
 private const val DLT_STANDARD_HEADER_SIZE = 4
 private const val DLT_EXTENDED_HEADER_SIZE = 10
 private const val DLT_ID_SIZE = 4
@@ -53,60 +42,28 @@ private val DLT_STORAGE_MAGIC = byteArrayOf('D'.code.toByte(), 'L'.code.toByte()
 private val DLT_STORAGE_MAGIC_V2 = byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 2)
 private val TIME_OUTPUT = DateTimeFormatter.ofPattern("HH:mm:ss.SSS")
 
-/** True when the beginning of a stream is a standard DLT storage header or a plausible raw DLT frame. */
-fun isLikelyDltStream(stream: InputStream): Boolean {
-    return runCatching {
-        // Do not wrap a non-markable archive-entry stream in BufferedInputStream here: the
-        // wrapper may prefetch bytes from the *next* tar entry before being discarded. Sequential
-        // archive callers intentionally own and advance one shared stream.
-        val input = if (stream.markSupported()) stream else stream
-        if (input.markSupported()) input.mark(32)
-        val sample = input.readNBytes(16)
-        if (input.markSupported()) input.reset()
-        sample.size >= DLT_STANDARD_HEADER_SIZE &&
-            (sample.copyOfRange(0, DLT_STANDARD_HEADER_SIZE).contentEquals(DLT_STORAGE_MAGIC) || plausibleFrame(sample))
-    }.getOrDefault(false)
-}
+private const val PARSE_LOG_CONTENT_BUFFER_BYTES = 64 * 1024
 
-/** Keeps DLT and text sniffing on one buffer for non-markable archive streams. */
-fun isLikelyDltOrTextStream(stream: InputStream): Boolean {
-    val input = if (stream.markSupported()) stream else BufferedInputStream(stream)
-    return isLikelyDltStream(input) || isLikelyTextStream(input)
-}
-
-fun isLikelyDltFile(file: File): Boolean = file.isFile && runCatching {
-    file.inputStream().use(::isLikelyDltStream)
-}.getOrDefault(false)
-
-/** Parse a file by content. DLT detection is content-first, with text/CSV fallback. */
-fun parseLogContent(stream: InputStream, startId: Int = 1): ParsedLog {
-    val input = if (stream.markSupported()) stream else BufferedInputStream(stream)
-    input.mark(32)
-    val prefix = input.readNBytes(16)
+/**
+ * Parse a stream by content. Routes through the shared [classifyLogContent] classifier so this
+ * can never disagree with [sniffCandidateContent]/[isLikelyDltSourceFile] about what a given
+ * prefix of bytes means. [fileName], when known, is used only to gate an ambiguous headerless v2
+ * frame (see [classifyLogContent]'s doc) — pass it whenever the caller has one.
+ */
+fun parseLogContent(stream: InputStream, startId: Int = 1, fileName: String? = null): ParsedLog {
+    val input = if (stream.markSupported()) stream else BufferedInputStream(stream, PARSE_LOG_CONTENT_BUFFER_BYTES)
+    input.mark(CONTENT_SNIFF_BYTES + 1)
+    val sample = input.readNBytes(CONTENT_SNIFF_BYTES)
     input.reset()
-    if (prefix.size >= DLT_STANDARD_HEADER_SIZE && prefix.copyOfRange(0, DLT_STANDARD_HEADER_SIZE).contentEquals(DLT_STORAGE_MAGIC)) {
-        return ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = true, startId = startId))
+    val atEof = sample.size < CONTENT_SNIFF_BYTES
+    return when (classifyLogContent(sample, atEof, fileName)) {
+        LogContentKind.DLT_STORAGE -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = true, startId = startId))
+        LogContentKind.DLT_RAW -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = false, startId = startId))
+        LogContentKind.DLT_UNSUPPORTED_V2 -> throw IllegalArgumentException("DLT protocol v2 is not supported")
+        LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT -> parseViewerTextLog(input, startId)
+        LogContentKind.TEXT, LogContentKind.OTHER -> parseTextLog(input, startId)
     }
-    require(!(prefix.size >= DLT_STANDARD_HEADER_SIZE &&
-        prefix.copyOfRange(0, DLT_STANDARD_HEADER_SIZE).contentEquals(DLT_STORAGE_MAGIC_V2))) {
-        "DLT protocol v2 is not supported"
-    }
-    // Text must win before raw-frame probing. In particular, BOM-less UTF-16LE logcat can begin
-    // with a byte that looks like a v1 HTYP and a plausible big-endian LEN. Reuse the established
-    // UTF-16-aware text classifier instead of a printable-ASCII check so it remains streaming and
-    // gives UTF-16 the same content-based routing as normal file/archive imports.
-    if (isLikelyTextSample(prefix)) {
-        return parseTextLog(input, startId)
-    }
-    require(!isDltV2Header(prefix)) { "DLT protocol v2 is not supported" }
-    if (plausibleFrame(prefix)) {
-        return ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = false, startId = startId))
-    }
-
-    return parseTextLog(input, startId)
 }
-
-fun parseDlt(file: File): List<LogEntry> = file.inputStream().use { parseDltContent(it).entries }
 
 fun parseDltContent(stream: InputStream, startId: Int = 1): ParsedLog {
     val input = if (stream.markSupported()) stream else BufferedInputStream(stream)
@@ -145,19 +102,13 @@ private fun isDltV2Header(sample: ByteArray): Boolean =
     sample.size >= DLT_STANDARD_HEADER_SIZE &&
         ((sample[DLT_HEADER_TYPE_OFFSET].toInt() and BYTE_MASK) ushr DLT_VERSION_SHIFT) == DLT_V2
 
+// The DLT-viewer-vs-logcat decision is made once, by classifyLogContent, before either of these
+// runs — parseLogContent dispatches to the right one directly instead of re-detecting here.
 private fun parseTextLog(input: InputStream, startId: Int): ParsedLog =
-    openLogTextReader(input).use { reader ->
-        val iterator = reader.lineSequence().iterator()
-        val lookahead = ArrayList<String>(TEXT_LOOKAHEAD_LINES)
-        while (iterator.hasNext() && lookahead.size < TEXT_LOOKAHEAD_LINES) lookahead += iterator.next()
-        val viewerStart = lookahead.indexOfFirst { it.isNotBlank() && isDltViewerStart(it) }
-        val lines = sequence {
-            yieldAll(if (viewerStart >= 0) lookahead.drop(viewerStart) else lookahead)
-            while (iterator.hasNext()) yield(iterator.next())
-        }
-        if (viewerStart >= 0) ParsedLog(LogFormat.DLT, parseDltViewerLines(lines, startId))
-        else ParsedLog(LogFormat.LOGCAT, parseLogcatLines(lines, startId))
-    }
+    openLogTextReader(input).use { reader -> ParsedLog(LogFormat.LOGCAT, parseLogcatLines(reader.lineSequence(), startId)) }
+
+private fun parseViewerTextLog(input: InputStream, startId: Int): ParsedLog =
+    openLogTextReader(input).use { reader -> ParsedLog(LogFormat.DLT, parseDltViewerLines(reader.lineSequence(), startId)) }
 
 private fun readFully(input: InputStream, target: ByteArray): Boolean {
     var offset = 0
@@ -483,18 +434,6 @@ private fun formatEpoch(seconds: Long, micros: Long): String = runCatching {
         .atZone(ZoneId.systemDefault()).toLocalTime().format(TIME_OUTPUT)
 }.getOrDefault("")
 
-private fun isDltViewerStart(line: String): Boolean {
-    val clean = line.trim()
-    if (clean.contains(',') || clean.contains(';')) {
-        val delimiter = if (clean.count { it == ';' } > clean.count { it == ',' }) ';' else ','
-        val headers = splitCsv(clean, delimiter).map { it.trim().lowercase(Locale.ROOT) }
-        return headers.any { it in setOf("ecu", "ecu id", "ecuid", "ecu_id") } &&
-            headers.any { it in setOf("apid", "appid", "app", "application") } &&
-            headers.any { it in setOf("ctid", "context", "contextid", "context_id") }
-    }
-    return parseViewerLine(clean, 0) != null
-}
-
 private fun parseDltViewerLines(lines: Sequence<String>, startId: Int): List<LogEntry> {
     val iterator = lines.iterator()
     var first: String? = null
@@ -550,7 +489,9 @@ private fun parseCsvDlt(header: String, rows: Sequence<String>, delimiter: Char,
     }.toList()
 }
 
-private fun splitCsv(line: String, delimiter: Char): List<String> {
+// internal (not private): reused by DltDetection.kt's CSV header sniff, so header parsing during
+// detection can never drift from header parsing during the actual parse below.
+internal fun splitCsv(line: String, delimiter: Char): List<String> {
     val out = mutableListOf<String>(); val current = StringBuilder(); var quoted = false
     line.forEach { c ->
         when {

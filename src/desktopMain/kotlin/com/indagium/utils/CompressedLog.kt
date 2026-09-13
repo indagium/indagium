@@ -51,7 +51,9 @@ fun openCompressedLogStream(file: File, compressorName: String): InputStream =
 fun parseCompressedLog(file: File, compressorName: String, maxBytes: Long = MAX_ARCHIVE_ENTRY_BYTES): CompressedLogParse {
     val bounded = BoundedInputStream(openCompressedLogStream(file, compressorName), maxBytes)
     val counting = CountingInputStream(bounded)
-    val parsed = parseLogContent(counting)
+    // file.nameWithoutExtension strips only the compressor suffix ("capture.dlt.gz" -> "capture.dlt"),
+    // recovering the logical filename the classifier's DLT-v2 name gate cares about.
+    val parsed = parseLogContent(counting, fileName = file.nameWithoutExtension)
     return CompressedLogParse(parsed.entries, counting.count, parsed.format)
 }
 
@@ -65,7 +67,7 @@ fun parseCompressedLogResult(
 /** Content-aware file parser. The List-returning [parseLogFile] remains the compatibility seam. */
 fun parseLogFileResult(file: File): ParsedLog = when (val format = detectArchiveFormat(file)) {
     is ArchiveFormat.CompressedFile -> parseCompressedLogResult(file, format.compressorName)
-    else -> file.inputStream().use { parseLogContent(it) }
+    else -> file.inputStream().use { parseLogContent(it, fileName = file.name) }
 }
 
 // The one hook that makes bare compressed logs "just work" everywhere a plain file already did:
@@ -74,5 +76,5 @@ fun parseLogFileResult(file: File): ParsedLog = when (val format = detectArchive
 // re-parse gzip bytes as raw (garbage) logcat lines on every relaunch of a restored .log.gz tab.
 fun parseLogFile(file: File): List<LogEntry> = when (val format = detectArchiveFormat(file)) {
     is ArchiveFormat.CompressedFile -> parseCompressedLog(file, format.compressorName).entries
-    else -> file.inputStream().use { parseLogContent(it).entries }
+    else -> file.inputStream().use { parseLogContent(it, fileName = file.name).entries }
 }
