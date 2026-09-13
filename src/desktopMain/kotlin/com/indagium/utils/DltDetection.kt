@@ -79,33 +79,40 @@ private val ASCII_MODES = setOf("verbose", "non-verbose")
  *
  * Rules, in order:
  * 1. `DLT\x01` storage magic -> [LogContentKind.DLT_STORAGE]; `DLT\x02` -> [LogContentKind.DLT_UNSUPPORTED_V2].
- * 2. Text-like content -> a DLT Viewer CSV/ASCII export, or plain [LogContentKind.TEXT].
- * 3. A chain of >= [MIN_CHAINED_FRAMES] structurally valid v1 frames from offset 0 (or a shorter
- *    chain that exactly consumes the whole sample when [atEof]) -> [LogContentKind.DLT_RAW].
- * 4. A lone byte with v2's version bits, name-gated to files ending in `.dlt` -> [LogContentKind.DLT_UNSUPPORTED_V2].
- * 5. Otherwise -> [LogContentKind.OTHER].
+ * 2. A NUL-free sample -> a DLT Viewer CSV/ASCII export, or plain [LogContentKind.TEXT].
+ * 3. A chain of >= [MIN_CHAINED_FRAMES] structurally valid v1 frames from offset 0 (or, when
+ *    [atEof], >= 1 frame that consumes the sample or ends in a truncated frame) -> [LogContentKind.DLT_RAW].
+ * 4. Remaining text-like (UTF-16) content -> as rule 2.
+ * 5. A lone byte with v2's version bits, name-gated to files ending in `.dlt` -> [LogContentKind.DLT_UNSUPPORTED_V2].
+ * 6. Otherwise -> [LogContentKind.OTHER].
  */
 internal fun classifyLogContent(sample: ByteArray, atEof: Boolean, fileName: String? = null): LogContentKind {
     if (hasStorageMagic(sample, version = 1)) return LogContentKind.DLT_STORAGE
     if (hasStorageMagic(sample, version = 2)) return LogContentKind.DLT_UNSUPPORTED_V2
 
-    if (isLikelyTextSample(sample)) {
-        val firstLine = firstNonBlankLines(sample, 1).firstOrNull()
-        if (firstLine != null && looksLikeDltCsvHeaderLine(firstLine)) return LogContentKind.DLT_VIEWER_CSV
-        val lookahead = firstNonBlankLines(sample, ASCII_VIEWER_LOOKAHEAD_LINES)
-        val matches = lookahead.count(::isDltViewerAsciiLine)
-        val isAsciiViewer = if (lookahead.size <= 1) matches == 1 else matches >= ASCII_VIEWER_MIN_MATCHES
-        return if (isAsciiViewer) LogContentKind.DLT_VIEWER_TEXT else LogContentKind.TEXT
-    }
+    // A NUL-free sample is ASCII/UTF-8 text or non-DLT binary: every real frame header carries NULs
+    // (LEN's high byte, padded ids), and NUL-free bytes 2..3 make LEN too large to chain in the
+    // sample. Only a sample that contains NULs can be DLT — and it must be tested for frames before
+    // the UTF-16 heuristic, which otherwise claims small NUL-dense frames as UTF-16 text.
+    if (sample.none { it == 0.toByte() }) return classifyText(sample)
 
     val chain = walkRawV1Frames(sample)
-    if (chain.completeFrames >= MIN_CHAINED_FRAMES ||
-        (atEof && chain.endOffset == sample.size && chain.completeFrames >= 1)
-    ) {
+    val completeOrTruncatedTail = chain.endOffset == sample.size || chain.stoppedAtTruncatedFrame
+    if (chain.completeFrames >= MIN_CHAINED_FRAMES || (atEof && chain.completeFrames >= 1 && completeOrTruncatedTail)) {
         return LogContentKind.DLT_RAW
     }
+    if (isLikelyTextSample(sample)) return classifyText(sample)
     if (isVersion2Header(sample) && fileName.hasDltExtension()) return LogContentKind.DLT_UNSUPPORTED_V2
     return LogContentKind.OTHER
+}
+
+private fun classifyText(sample: ByteArray): LogContentKind {
+    val firstLine = firstNonBlankLines(sample, 1).firstOrNull()
+    if (firstLine != null && looksLikeDltCsvHeaderLine(firstLine)) return LogContentKind.DLT_VIEWER_CSV
+    val lookahead = firstNonBlankLines(sample, ASCII_VIEWER_LOOKAHEAD_LINES)
+    val matches = lookahead.count(::isDltViewerAsciiLine)
+    val isAsciiViewer = if (lookahead.size <= 1) matches == 1 else matches >= ASCII_VIEWER_MIN_MATCHES
+    return if (isAsciiViewer) LogContentKind.DLT_VIEWER_TEXT else LogContentKind.TEXT
 }
 
 private fun String?.hasDltExtension(): Boolean =
@@ -118,7 +125,7 @@ private fun hasStorageMagic(sample: ByteArray, version: Int): Boolean =
 private fun isVersion2Header(sample: ByteArray): Boolean =
     sample.isNotEmpty() && ((sample[0].toInt() and BYTE_MASK) ushr HTYP_VERSION_SHIFT) == 2
 
-private data class RawFrameWalk(val completeFrames: Int, val endOffset: Int)
+private data class RawFrameWalk(val completeFrames: Int, val endOffset: Int, val stoppedAtTruncatedFrame: Boolean)
 
 /**
  * Walks chained v1 frames from offset 0 of a headerless raw stream, validating structure only —
@@ -128,6 +135,7 @@ private data class RawFrameWalk(val completeFrames: Int, val endOffset: Int)
 private fun walkRawV1Frames(sample: ByteArray): RawFrameWalk {
     var offset = 0
     var frames = 0
+    var truncated = false
     while (offset + STD_HEADER_SIZE <= sample.size) {
         val htyp = sample[offset].toInt() and BYTE_MASK
         if ((htyp ushr HTYP_VERSION_SHIFT) != 1) break
@@ -145,11 +153,14 @@ private fun walkRawV1Frames(sample: ByteArray): RawFrameWalk {
             if (mstp > MSTP_MAX) break
             if (!printableIdsAt(sample, extOffset + 2)) break
         }
-        if (offset + len > sample.size) break
+        if (offset + len > sample.size) {
+            truncated = true
+            break
+        }
         frames++
         offset += len
     }
-    return RawFrameWalk(frames, offset)
+    return RawFrameWalk(frames, offset, truncated)
 }
 
 /** APID (4 bytes) followed by CTID (4 bytes) — each byte must be printable ASCII or NUL. */

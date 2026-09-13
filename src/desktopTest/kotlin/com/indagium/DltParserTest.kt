@@ -70,24 +70,25 @@ class DltParserTest {
         assertEquals("hello true -2 42 65530 1.5 2.25 -3 18446744073709551615 rpm=9 [1/min] 0xABCD 0x0102", entry.msg)
     }
 
-    @Test fun rendersFinalUnsupportedArraysAndStructuresAsDeterministicHex() {
+    @Test fun rendersUnsupportedArraysAndStructuresAsDeterministicHexAndStopsAtTheFirstOne() {
         // A V1 array has U16 dimensions followed by one U16 entry count per dimension, then
         // its values. The parser intentionally leaves its type-specific representation opaque.
         val array = typed(0x141, u16(1, true) + u16(2, true) + byteArrayOf(0xAA.toByte(), 0xBB.toByte()))
         val finalArray = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = array))).entries.single()
         assertEquals("0x00010002AABB", finalArray.msg)
 
+        // A non-final ARAY/STRU can't self-delimit its length, so the parser renders the rest of
+        // the payload (including whatever followed it) as one opaque hex blob and stops — it never
+        // throws, and any argument count claimed beyond this one is simply left undecoded.
         val following = typed(0x41, u8(7))
-        assertFailsWith<IllegalArgumentException> {
-            parseDltContent(ByteArrayInputStream(frame(noar = 2, payload = array + following)))
-        }
+        val nonFinalArray = parseDltContent(ByteArrayInputStream(frame(noar = 2, payload = array + following))).entries.single()
+        assertEquals("0x00010002AABB0000004107", nonFinalArray.msg)
 
         val structure = typed(0x4001, byteArrayOf(0x00, 0x02, 0xAA.toByte(), 0xBB.toByte()))
         val structureEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = structure))).entries.single()
         assertEquals("0x0002AABB", structureEntry.msg)
-        assertFailsWith<IllegalArgumentException> {
-            parseDltContent(ByteArrayInputStream(frame(noar = 2, payload = structure + following)))
-        }
+        val nonFinalStructure = parseDltContent(ByteArrayInputStream(frame(noar = 2, payload = structure + following))).entries.single()
+        assertEquals("0x0002AABB0000004107", nonFinalStructure.msg)
     }
 
     @Test fun mapsMstpAndMtinIndependently() {
@@ -120,18 +121,15 @@ class DltParserTest {
         assertEquals(listOf("first", "second"), result.entries.map { it.msg })
     }
 
-    @Test fun rejectsTruncationInvalidLengthsMalformedArgumentsStorageAndV2() {
+    @Test fun rejectsZeroFrameStreamsAndV2WhileTruncationElsewhereIsTolerant() {
+        // These all fail to produce even one complete frame, so the "zero frames decoded" rule
+        // still throws (a non-DLT/all-garbage stream must remain an error, not a silent empty tab).
         assertFailsWith<IllegalArgumentException> { parseDltContent(ByteArrayInputStream(frame(payload = verboseString("x", true)).copyOf(8))) }
         assertFailsWith<IllegalArgumentException> { parseDltContent(ByteArrayInputStream(byteArrayOf(0x21, 0, 0, 3))) }
         val truncatedStorage = byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 1, 0, 0)
         assertFailsWith<IllegalArgumentException> { parseLogContent(ByteArrayInputStream(truncatedStorage)) }
         assertFailsWith<IllegalArgumentException> { parseDltContent(ByteArrayInputStream(byteArrayOf(0x41, 0, 0, 4))) }
-        assertFailsWith<IllegalArgumentException> {
-            parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = typed(0x200, u16(5, true) + byteArrayOf('x'.code.toByte())))))
-        }
-        assertFailsWith<IllegalArgumentException> {
-            parseDltContent(ByteArrayInputStream(storageHeader("ECU1") + frame(payload = verboseString("ok", true)) + ByteArray(16)))
-        }
+
         // A headerless (no "DLT" storage magic) v2-looking frame is deliberately name-gated to
         // ".dlt" by the shared classifier (DltDetection.kt) — otherwise ordinary archive binaries
         // whose first byte happens to carry v2's version bits would misclassify as DLT. Pass a
@@ -147,6 +145,95 @@ class DltParserTest {
         assertTrue(storageError.message.orEmpty().contains("v2 is not supported"))
         val directStorageError = assertFailsWith<IllegalArgumentException> { parseDltContent(ByteArrayInputStream(storageV2)) }
         assertTrue(directStorageError.message.orEmpty().contains("v2 is not supported"))
+    }
+
+    @Test fun rendersUndecodablePayloadTailInsteadOfThrowingOnAMalformedArgument() {
+        // A STRG argument claims 5 bytes of string data but only 1 is actually present — payload
+        // decode must never throw; it renders whatever was decoded so far (nothing, here) plus the
+        // remaining raw bytes (type info + length + the 1 stray byte) as an undecodable hex tail.
+        val malformed = typed(0x200, u16(5, true) + byteArrayOf('x'.code.toByte()))
+        val entry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = malformed))).entries.single()
+        assertTrue(entry.msg.startsWith("[undecodable payload 0x"), entry.msg)
+    }
+
+    @Test fun tolerantlyResyncsPastTrailingGarbageAfterTheLastValidStorageRecord() {
+        val bytes = storageHeader("ECU1") + frame(payload = verboseString("ok", true)) + ByteArray(16)
+        val result = parseLogContent(ByteArrayInputStream(bytes))
+        assertEquals(2, result.entries.size)
+        assertEquals("ok", result.entries[0].msg)
+        assertEquals(LogLevel.W, result.entries[1].level)
+        assertEquals("RAW", result.entries[1].tag)
+        assertTrue(result.entries[1].msg.contains("skipped 16 bytes"), result.entries[1].msg)
+    }
+
+    @Test fun tolerantlyMarksATruncatedFinalRawFrameWithoutDroppingEarlierRows() {
+        val good = frame(payload = verboseString("first", true))
+        val bad = frame(payload = verboseString("second-will-be-cut", true))
+        val bytes = good + bad.copyOf(bad.size - 3)
+        val result = parseDltContent(ByteArrayInputStream(bytes))
+        assertEquals(2, result.entries.size)
+        assertEquals("first", result.entries[0].msg)
+        assertEquals(LogLevel.W, result.entries[1].level)
+        assertEquals("RAW", result.entries[1].tag)
+        assertTrue(result.entries[1].msg.contains("truncated frame"), result.entries[1].msg)
+    }
+
+    @Test fun tolerantlyResyncsPastGarbageBetweenTwoStorageRecordsAndReportsTheSkipCount() {
+        val garbage = "GARBAGE!".toByteArray() // 8 bytes, no accidental "DLT" prefix inside
+        val bytes = storageHeader("ECU1") + frame(payload = verboseString("rec1", true)) +
+            garbage + storageHeader("ECU1") + frame(payload = verboseString("rec2", true))
+        // parseDltContent on purpose: its old prefix check misread the storage magic's 'D' as v2.
+        val result = parseDltContent(ByteArrayInputStream(bytes))
+        assertEquals(3, result.entries.size)
+        assertEquals("rec1", result.entries[0].msg)
+        assertEquals(LogLevel.W, result.entries[1].level)
+        assertEquals("RAW", result.entries[1].tag)
+        assertTrue(result.entries[1].msg.contains("skipped 8 bytes"), result.entries[1].msg)
+        assertEquals("rec2", result.entries[2].msg)
+    }
+
+    @Test fun mapsSessionIdToPid() {
+        val entry = parseDltContent(ByteArrayInputStream(frame(session = 55, payload = verboseString("session", true)))).entries.single()
+        assertEquals(55, entry.pid)
+        assertEquals(0, entry.tid)
+    }
+
+    @Test fun formatsRelativeTimestampFromTmspAsWallClockTimeOfDayWrappingAt24Hours() {
+        // TMSP is 0.1ms units. 37_230_040 units => 3_723_004ms => 01:02:03.004.
+        val entry = parseDltContent(ByteArrayInputStream(frame(timestamp = 37_230_040L, payload = verboseString("rel", true)))).entries.single()
+        assertEquals("01:02:03.004", entry.ts)
+        assertEquals("relative", entry.dltTimestampSource)
+
+        // 900_000_000 units => 90_000_000ms => 25h == 01:00:00.000 after wrapping mod 24.
+        val wrapped = parseDltContent(ByteArrayInputStream(frame(timestamp = 900_000_000L, payload = verboseString("rel", true)))).entries.single()
+        assertEquals("01:00:00.000", wrapped.ts)
+    }
+
+    @Test fun rendersVariAttributesForBoolStringRawAndFixedPointNumbers() {
+        val boolPayload = typed(0x810, attrName("flag", true) + u8(1))
+        val boolEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = boolPayload))).entries.single()
+        assertEquals("flag=true", boolEntry.msg)
+
+        val stringData = ("hello" + '\u0000').toByteArray()
+        val stringPayload = typed(0xA00, u16(stringData.size, true) + u16("path".toByteArray().size, true) + "path".toByteArray() + stringData)
+        val stringEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = stringPayload))).entries.single()
+        assertEquals("path=hello", stringEntry.msg)
+
+        val rawBytes = byteArrayOf(0xDE.toByte(), 0xAD.toByte())
+        val rawPayload = typed(0xC00, u16(rawBytes.size, true) + u16("blob".toByteArray().size, true) + "blob".toByteArray() + rawBytes)
+        val rawEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = rawPayload))).entries.single()
+        assertEquals("blob=0xDEAD", rawEntry.msg)
+
+        // UINT with VARI, no FIXP — exercises the real nameLen/unitLen/name/unit ordering.
+        val uintPayload = typed(0x841, attr("rpm", "1/min", true) + u8(9))
+        val uintEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = uintPayload))).entries.single()
+        assertEquals("rpm=9 [1/min]", uintEntry.msg)
+
+        // UINT with FIXP (no VARI): quantization=0.5 (exact in binary), offset=5, raw=20 ->
+        // physical = 20*0.5+5 = 15.0 exactly (avoids float-precision drift in the assertion).
+        val fixpPayload = typed(0x1042, f32(0.5f, true) + i32(5, true) + u16(20, true))
+        val fixpEntry = parseDltContent(ByteArrayInputStream(frame(noar = 1, payload = fixpPayload))).entries.single()
+        assertEquals("15.0", fixpEntry.msg)
     }
 
     @Test fun parsesViewerCsvAndStreamingLogcatWithoutMaterializingText() {
@@ -223,8 +310,18 @@ class DltParserTest {
 
     private fun typed(type: Int, value: ByteArray, msbf: Boolean = true): ByteArray = u32(type.toLong(), msbf) + value
 
-    private fun attr(name: String, unit: String, msbf: Boolean): ByteArray =
-        lengthPrefixed(name.toByteArray(), msbf) + lengthPrefixed(unit.toByteArray(), msbf)
+    // dlt-daemon's numeric-with-VARI layout writes both lengths before either string:
+    // nameLen, unitLen, name, unit — not name-then-unit interleaved with their own lengths.
+    private fun attr(name: String, unit: String, msbf: Boolean): ByteArray {
+        val nameBytes = name.toByteArray(); val unitBytes = unit.toByteArray()
+        return u16(nameBytes.size, msbf) + u16(unitBytes.size, msbf) + nameBytes + unitBytes
+    }
+
+    private fun attrName(name: String, msbf: Boolean): ByteArray = u16(name.toByteArray().size, msbf) + name.toByteArray()
+
+    private fun f32(value: Float, bigEndian: Boolean): ByteArray = u32(value.toRawBits().toLong(), bigEndian)
+
+    private fun i32(value: Int, bigEndian: Boolean): ByteArray = u32(value.toLong(), bigEndian)
 
     private fun lengthPrefixed(value: ByteArray, msbf: Boolean): ByteArray = u16(value.size, msbf) + value
 

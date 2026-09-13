@@ -19,8 +19,9 @@ data class CompressedLogParse(
 
 // Counts bytes as they pass through, purely for CompressedLogParse.uncompressedBytes — unlike
 // BoundedInputStream (which this wraps), a byte count alone never fails closed; the budget
-// enforcement is BoundedInputStream's job, this is just bookkeeping on top of it.
-private class CountingInputStream(private val delegate: InputStream) : InputStream() {
+// enforcement is BoundedInputStream's job, this is just bookkeeping on top of it. internal (not
+// private): DltParser.kt reuses it to compute byte offsets for its tolerant-framing marker rows.
+internal class CountingInputStream(private val delegate: InputStream) : InputStream() {
     var count = 0L
         private set
 
