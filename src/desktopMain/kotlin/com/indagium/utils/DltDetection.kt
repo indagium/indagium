@@ -45,22 +45,73 @@ private const val PRINTABLE_ASCII_HIGH = 0x7e
 
 private val STORAGE_MAGIC = byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte())
 
-// DLT Viewer CSV header aliases. Phase 3 replaces this simple presence check with the real
-// resolveDltCsvColumns column-index resolver, shared verbatim with parsing — kept as one function
-// here so that swap touches a single spot instead of every call site.
+// DLT Viewer CSV column resolution — the SINGLE resolver shared by classification (below) and the
+// actual CSV parser (DltParser.kt's parseDltViewerCsv), so the two can never disagree about which
+// column is which. Aliases verified against qdlt/fieldnames.cpp's default DLT Viewer export headers
+// ("Ecuid","Apid"/"Apid Desc","Ctid"/"Ctid Desc","SessionId"/"SessionName", ...), plus a few common
+// human-edited variants.
+internal data class DltCsvColumns(
+    val time: Int,
+    val uptime: Int,
+    val counter: Int,
+    val ecu: Int,
+    val app: Int,
+    val ctx: Int,
+    val session: Int,
+    val type: Int,
+    val subtype: Int,
+    val payload: Int,
+)
+
+private val CSV_TIME_ALIASES = setOf("time", "date", "datetime")
+private val CSV_UPTIME_ALIASES = setOf("timestamp")
+private val CSV_COUNTER_ALIASES = setOf("count")
 private val CSV_ECU_ALIASES = setOf("ecuid", "ecu", "ecu id", "ecu_id")
 private val CSV_APP_ALIASES = setOf("apid", "apid desc", "appid", "app", "app_id", "application")
 private val CSV_CTX_ALIASES = setOf("ctid", "ctid desc", "contextid", "context", "context_id")
+private val CSV_SESSION_ALIASES = setOf("sessionid", "sessionname")
+private val CSV_TYPE_ALIASES = setOf("type")
+private val CSV_SUBTYPE_ALIASES = setOf("subtype", "level", "severity")
+private val CSV_PAYLOAD_ALIASES = setOf("payload", "message", "msg", "text")
 
-// DLT Viewer ASCII export: single-space separated, an optional leading numeric index, then
-// <date> <time> <uptime> <count> <ecu> <apid> <ctid> <sessionId> <type> <subtype> <mode> <#args>
-// <payload...>. Only the anchor fields (date/time/uptime/type/mode) are validated strictly; the
-// short id/count/subtype fields are legitimately empty for some message types.
-private val ASCII_DATE = Regex("""\d{4}/\d{2}/\d{2}""")
-private val ASCII_TIME = Regex("""\d{2}:\d{2}:\d{2}\.\d{6}""")
-private val ASCII_UPTIME = Regex("""\d+\.\d{4}""")
-private val ASCII_TYPES = setOf("log", "app_trace", "nw_trace", "control")
-private val ASCII_MODES = setOf("verbose", "non-verbose")
+/** Delimiters tried, in order, when a CSV file's own delimiter isn't otherwise known. */
+internal val DLT_CSV_DELIMITERS = listOf(',', ';', '\t')
+
+/**
+ * Resolves a header row's columns to the fields this app cares about, or null when the row isn't a
+ * DLT Viewer CSV header. ecu+app+ctx must ALL be present (the same "must have all three ID columns"
+ * bar the old presence-only check used) — every other column is optional and reads back -1 when
+ * absent from the header.
+ */
+internal fun resolveDltCsvColumns(headers: List<String>): DltCsvColumns? {
+    val norm = headers.map { it.trim().lowercase(Locale.ROOT) }
+    fun idx(aliases: Set<String>) = norm.indexOfFirst { it in aliases }
+    val ecu = idx(CSV_ECU_ALIASES)
+    val app = idx(CSV_APP_ALIASES)
+    val ctx = idx(CSV_CTX_ALIASES)
+    if (ecu < 0 || app < 0 || ctx < 0) return null
+    return DltCsvColumns(
+        time = idx(CSV_TIME_ALIASES), uptime = idx(CSV_UPTIME_ALIASES), counter = idx(CSV_COUNTER_ALIASES),
+        ecu = ecu, app = app, ctx = ctx, session = idx(CSV_SESSION_ALIASES),
+        type = idx(CSV_TYPE_ALIASES), subtype = idx(CSV_SUBTYPE_ALIASES), payload = idx(CSV_PAYLOAD_ALIASES),
+    )
+}
+
+/**
+ * Tries each of [DLT_CSV_DELIMITERS] against [headerLine] (RFC-4180 aware, via [splitCsv]) and
+ * returns the first one whose fields [resolveDltCsvColumns] accepts, paired with the resolved
+ * columns. Used by both the classifier (to decide [LogContentKind.DLT_VIEWER_CSV]) and the CSV
+ * parser (to know which delimiter the rest of the file uses) — one decision, shared.
+ */
+internal fun resolveDltCsvHeader(headerLine: String): Pair<Char, DltCsvColumns>? {
+    for (delimiter in DLT_CSV_DELIMITERS) {
+        val headers = splitCsv(headerLine, delimiter)
+        if (headers.size < 2) continue
+        val columns = resolveDltCsvColumns(headers) ?: continue
+        return delimiter to columns
+    }
+    return null
+}
 
 /**
  * The single source of truth for what a bounded prefix of a log source's bytes is. Every DLT
@@ -108,7 +159,7 @@ internal fun classifyLogContent(sample: ByteArray, atEof: Boolean, fileName: Str
 
 private fun classifyText(sample: ByteArray): LogContentKind {
     val firstLine = firstNonBlankLines(sample, 1).firstOrNull()
-    if (firstLine != null && looksLikeDltCsvHeaderLine(firstLine)) return LogContentKind.DLT_VIEWER_CSV
+    if (firstLine != null && resolveDltCsvHeader(firstLine) != null) return LogContentKind.DLT_VIEWER_CSV
     val lookahead = firstNonBlankLines(sample, ASCII_VIEWER_LOOKAHEAD_LINES)
     val matches = lookahead.count(::isDltViewerAsciiLine)
     val isAsciiViewer = if (lookahead.size <= 1) matches == 1 else matches >= ASCII_VIEWER_MIN_MATCHES
@@ -179,34 +230,14 @@ private fun firstNonBlankLines(sample: ByteArray, max: Int): List<String> = runC
 }.getOrDefault(emptyList())
 
 /**
- * Phase 1 DLT Viewer CSV header check: exact case-insensitive column aliases. Kept as one function
- * so Phase 3 can replace it with the real resolveDltCsvColumns resolver (shared with parsing)
- * without touching [classifyLogContent].
+ * Thin wrapper kept for direct unit tests (DltDetectionTest) — the real logic is
+ * [resolveDltCsvHeader], the single CSV-header resolver shared with parsing.
  */
-internal fun looksLikeDltCsvHeaderLine(line: String): Boolean {
-    val trimmed = line.trim()
-    if (',' !in trimmed && ';' !in trimmed) return false
-    val delimiter = if (trimmed.count { it == ';' } > trimmed.count { it == ',' }) ';' else ','
-    val headers = splitCsv(trimmed, delimiter).map { it.trim().lowercase(Locale.ROOT) }
-    fun has(aliases: Set<String>) = headers.any { it in aliases }
-    return has(CSV_ECU_ALIASES) && has(CSV_APP_ALIASES) && has(CSV_CTX_ALIASES)
-}
+internal fun looksLikeDltCsvHeaderLine(line: String): Boolean = resolveDltCsvHeader(line) != null
 
 /**
- * Strict DLT Viewer ASCII-export line matcher (single-space separated, optional leading index).
- * Phase 3 reuses this for the real line parser instead of the speculative bracketed/plain forms
- * it replaces.
+ * Thin wrapper kept for direct unit tests (DltDetectionTest) — the real logic, and the only ASCII
+ * export line parser in the app, is [parseDltViewerAsciiLine] (DltParser.kt). Detection and parsing
+ * share it so they can never disagree about what counts as a DLT Viewer ASCII-export line.
  */
-internal fun isDltViewerAsciiLine(line: String): Boolean {
-    val tokens = line.split(' ')
-    val idx = when {
-        tokens.isNotEmpty() && ASCII_DATE.matches(tokens[0]) -> 0
-        tokens.size > 1 && tokens[0].toIntOrNull() != null && ASCII_DATE.matches(tokens[1]) -> 1
-        else -> return false
-    }
-    if (tokens.size < idx + 13) return false
-    return ASCII_TIME.matches(tokens[idx + 1]) &&
-        ASCII_UPTIME.matches(tokens[idx + 2]) &&
-        tokens[idx + 8] in ASCII_TYPES &&
-        tokens[idx + 10] in ASCII_MODES
-}
+internal fun isDltViewerAsciiLine(line: String): Boolean = parseDltViewerAsciiLine(line, 0) != null

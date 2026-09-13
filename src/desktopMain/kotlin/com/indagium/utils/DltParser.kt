@@ -58,11 +58,11 @@ fun parseLogContent(stream: InputStream, startId: Int = 1, fileName: String? = n
     val sample = input.readNBytes(CONTENT_SNIFF_BYTES)
     input.reset()
     val atEof = sample.size < CONTENT_SNIFF_BYTES
-    return when (classifyLogContent(sample, atEof, fileName)) {
+    return when (val kind = classifyLogContent(sample, atEof, fileName)) {
         LogContentKind.DLT_STORAGE -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = true, startId = startId))
         LogContentKind.DLT_RAW -> ParsedLog(LogFormat.DLT, parseDltBinary(input, storage = false, startId = startId))
         LogContentKind.DLT_UNSUPPORTED_V2 -> throw IllegalArgumentException("DLT protocol v2 is not supported")
-        LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT -> parseViewerTextLog(input, startId)
+        LogContentKind.DLT_VIEWER_CSV, LogContentKind.DLT_VIEWER_TEXT -> parseViewerTextLog(input, startId, kind)
         LogContentKind.TEXT, LogContentKind.OTHER -> parseTextLog(input, startId)
     }
 }
@@ -91,8 +91,16 @@ fun parseDltContent(stream: InputStream, startId: Int = 1): ParsedLog {
 private fun parseTextLog(input: InputStream, startId: Int): ParsedLog =
     openLogTextReader(input).use { reader -> ParsedLog(LogFormat.LOGCAT, parseLogcatLines(reader.lineSequence(), startId)) }
 
-private fun parseViewerTextLog(input: InputStream, startId: Int): ParsedLog =
-    openLogTextReader(input).use { reader -> ParsedLog(LogFormat.DLT, parseDltViewerLines(reader.lineSequence(), startId)) }
+private fun parseViewerTextLog(input: InputStream, startId: Int, kind: LogContentKind): ParsedLog =
+    openLogTextReader(input).use { reader ->
+        val lines = reader.lineSequence()
+        val entries = if (kind == LogContentKind.DLT_VIEWER_CSV) {
+            parseDltViewerCsv(lines, startId)
+        } else {
+            parseDltViewerAsciiLines(lines, startId)
+        }
+        ParsedLog(LogFormat.DLT, entries)
+    }
 
 // Reads until `target` is full or the stream ends; returns how many bytes actually landed (may be
 // less than target.size on EOF — callers decide whether that's a clean end or a truncation).
@@ -662,122 +670,247 @@ private fun formatEpoch(seconds: Long, micros: Long): String = runCatching {
         .atZone(ZoneId.systemDefault()).toLocalTime().format(TIME_OUTPUT)
 }.getOrDefault("")
 
-private fun parseDltViewerLines(lines: Sequence<String>, startId: Int): List<LogEntry> {
-    val iterator = lines.iterator()
-    var first: String? = null
-    while (iterator.hasNext() && first == null) first = iterator.next().trim().takeIf(String::isNotEmpty)
-    require(first != null) { "The DLT Viewer export contains no rows" }
-    val header = first
-    if (header.contains(',') || header.contains(';')) {
-        val delimiter = if (header.count { it == ';' } > header.count { it == ',' }) ';' else ','
-        return parseCsvDlt(header, iterator.asSequence(), delimiter, startId)
+// ── DLT Viewer text/CSV export parsing ────────────────────────────────────────────────────────
+//
+// Both forms share one column resolver (DltDetection.kt's resolveDltCsvColumns/resolveDltCsvHeader)
+// and, for the ASCII form, one line parser (parseDltViewerAsciiLine below) with the classifier
+// (isDltViewerAsciiLine) — so detection and parsing can never disagree about what a line means.
+// Neither path ever drops a line: anything that isn't a recognised header/row/line becomes a RAW
+// row instead, matching parseLogcatLines' convention (LogEntry(id, "", LogLevel.I, "RAW", line)).
+
+// DLT Viewer ASCII export: single-space separated, an optional leading numeric index, then
+// <date> <time> <uptime> <count> <ecu> <apid> <ctid> <sessionId> <type> <subtype> <mode> <#args>
+// <payload...>. Only the anchor fields (date/time/uptime/type/mode) are validated strictly; the
+// short id/count/subtype/payload fields are legitimately empty for some message types.
+private val ASCII_DATE = Regex("""\d{4}/\d{2}/\d{2}""")
+private val ASCII_TIME = Regex("""\d{2}:\d{2}:\d{2}\.\d{6}""")
+private val ASCII_UPTIME = Regex("""\d+\.\d{4}""")
+private val ASCII_TYPES = setOf("log", "app_trace", "nw_trace", "control")
+private val ASCII_MODES = setOf("verbose", "non-verbose")
+
+// date + time + uptime + count + ecu + apid + ctid + sessionId + type + subtype + mode + #args —
+// the 12 fixed-position fields before the free-form payload (which may be entirely absent).
+private const val ASCII_FIXED_FIELD_COUNT = 12
+
+/**
+ * Parses one DLT Viewer ASCII-export line, or returns null when [line] isn't one — the single
+ * source of truth reused both here (real parsing, via [parseDltViewerAsciiLines]) and by
+ * [isDltViewerAsciiLine] (the classifier's strict per-line check), so the two can never disagree.
+ * [intern] lets the real parse path share one tag cache; detection passes the identity function
+ * since it only cares whether the result is non-null.
+ */
+internal fun parseDltViewerAsciiLine(line: String, id: Int, intern: (String) -> String = { it }): LogEntry? {
+    val tokens = line.split(' ')
+    val idx = when {
+        tokens.isNotEmpty() && ASCII_DATE.matches(tokens[0]) -> 0
+        tokens.size > 1 && tokens[0].isNotEmpty() && tokens[0].all(Char::isDigit) && ASCII_DATE.matches(tokens[1]) -> 1
+        else -> return null
     }
-    var id = startId
-    return sequence {
-        yield(header)
-        while (iterator.hasNext()) yield(iterator.next())
-    }.mapNotNull { parseViewerLine(it.trim(), 0) }
-        .map { it.copy(id = id++) }
-        .toList()
+    if (tokens.size < idx + ASCII_FIXED_FIELD_COUNT) return null
+    val time = tokens[idx + 1]
+    val uptime = tokens[idx + 2]
+    if (!ASCII_TIME.matches(time) || !ASCII_UPTIME.matches(uptime)) return null
+    val ecu = tokens[idx + 4]
+    val apid = tokens[idx + 5]
+    val ctid = tokens[idx + 6]
+    val session = tokens[idx + 7]
+    val type = tokens[idx + 8]
+    val subtype = tokens[idx + 9]
+    val mode = tokens[idx + 10]
+    if (type !in ASCII_TYPES || mode !in ASCII_MODES) return null
+    val payloadStart = idx + ASCII_FIXED_FIELD_COUNT
+    val payload = if (tokens.size > payloadStart) tokens.subList(payloadStart, tokens.size).joinToString(" ") else ""
+    return buildDltViewerEntry(
+        id = id, ts = normalizeViewerTimestamp(time), dltTimestamp = parseViewerUptime(uptime),
+        ecu = ecu, app = apid, ctx = ctid, sessionId = session, type = type,
+        level = resolveViewerLevel(hasSubtypeColumn = true, type = type, subtype = subtype),
+        payload = payload, intern = intern,
+    )
 }
 
-private fun parseCsvDlt(header: String, rows: Sequence<String>, delimiter: Char, startId: Int): List<LogEntry> {
-    val headers = splitCsv(header, delimiter).map { it.trim().lowercase(Locale.ROOT) }
-    val hasDltColumns = headers.any { it in setOf("ecu", "ecu id", "ecuid") } &&
-        headers.any { it.contains("app") || it == "apid" } && headers.any { it.contains("context") || it == "ctid" }
-    require(hasDltColumns) { "Not a DLT Viewer CSV export" }
-    // Header matching is alias-aware but boundary-sensitive. Broad substring matching makes the
-    // `text` message alias match `contextid`, so a canonical DLT Viewer row could silently expose
-    // its context as the payload. Exact aliases win; the fallback only accepts aliases as complete
-    // underscore/space-delimited words.
-    val idx = { names: Set<String> ->
-        headers.indexOfFirst { it in names }.takeIf { it >= 0 } ?: headers.indexOfFirst { h ->
-            val words = h.split(Regex("[^a-z0-9]+"), limit = Int.MAX_VALUE).filter(String::isNotBlank)
-            names.any { it in words }
-        }
-    }
-    val time = idx(setOf("time", "timestamp", "date", "datetime"))
-    val ecu = idx(setOf("ecu", "ecuid", "ecu_id"))
-    val app = idx(setOf("apid", "appid", "app", "application"))
-    val ctx = idx(setOf("ctid", "ctid", "context", "contextid", "context_id"))
-    val type = idx(setOf("type", "level", "severity"))
-    val msg = idx(setOf("payload", "message", "msg", "text"))
+private fun parseDltViewerAsciiLines(lines: Sequence<String>, startId: Int): List<LogEntry> {
+    val tagCache = HashMap<String, String>()
+    fun intern(value: String) = tagCache.getOrPut(value) { value }
     var id = startId
-    return rows.mapNotNull { line ->
-        val fields = splitCsv(line, delimiter)
-        if (fields.size < headers.size) return@mapNotNull null
-        val level = fields.getOrNull(type)?.let(::viewerLevel) ?: LogLevel.I
-        val ecuId = fields.getOrNull(ecu).orEmpty().ifBlank { null }
-        val appId = fields.getOrNull(app).orEmpty().ifBlank { null }
-        val contextId = fields.getOrNull(ctx).orEmpty().ifBlank { null }
-        LogEntry(id++, normalizeViewerTimestamp(fields.getOrNull(time).orEmpty()), level,
-            listOfNotNull(ecuId, appId, contextId).joinToString("/").ifBlank { "DLT" },
-            fields.getOrNull(msg).orEmpty(), dltEcuId = ecuId, dltAppId = appId, dltContextId = contextId,
-            dltMessageType = fields.getOrNull(type).orEmpty().ifBlank { null }, dltTimestampSource = "viewer")
+    return lines.mapNotNull { raw ->
+        if (raw.isBlank()) return@mapNotNull null
+        val entry = parseDltViewerAsciiLine(raw.trim(), id, ::intern) ?: LogEntry(id, "", LogLevel.I, "RAW", raw.trimEnd())
+        id++
+        entry
     }.toList()
 }
 
-// internal (not private): reused by DltDetection.kt's CSV header sniff, so header parsing during
-// detection can never drift from header parsing during the actual parse below.
-internal fun splitCsv(line: String, delimiter: Char): List<String> {
-    val out = mutableListOf<String>(); val current = StringBuilder(); var quoted = false
-    line.forEach { c ->
-        when {
-            c == '"' -> quoted = !quoted
-            c == delimiter && !quoted -> { out += current.toString().trim(); current.clear() }
-            else -> current.append(c)
+// Joins physical lines back into one logical CSV row whenever a quoted field's newline was split by
+// the line reader — RFC-4180 quoted fields may embed literal newlines, and quote parity (doubled ""
+// escapes contribute an even count) tells us whether we're still inside one. A stray unbalanced
+// quote in a non-conforming export would otherwise glue the rest of the file into one row, so the
+// join is capped: past the cap the buffered lines are emitted unjoined (each becomes a row or RAW).
+private const val MAX_CSV_CONTINUATION_LINES = 64
+
+private fun joinQuotedCsvLines(lines: Iterator<String>): Sequence<String> = sequence {
+    val pending = ArrayDeque<String>()
+    while (pending.isNotEmpty() || lines.hasNext()) {
+        val physical = ArrayList<String>()
+        physical += pending.removeFirstOrNull() ?: lines.next()
+        var quotes = physical[0].count { it == '"' }
+        while (quotes % 2 != 0 && physical.size <= MAX_CSV_CONTINUATION_LINES) {
+            val next = pending.removeFirstOrNull() ?: (if (lines.hasNext()) lines.next() else break)
+            physical += next
+            quotes += next.count { it == '"' }
+        }
+        if (quotes % 2 != 0 && physical.size > MAX_CSV_CONTINUATION_LINES) {
+            yield(physical[0])
+            for (i in physical.lastIndex downTo 1) pending.addFirst(physical[i])
+        } else {
+            yield(physical.joinToString("\n"))
         }
     }
-    out += current.toString().trim()
+}
+
+private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int): List<LogEntry> {
+    val logical = joinQuotedCsvLines(lines.iterator())
+    val tagCache = HashMap<String, String>()
+    fun intern(value: String) = tagCache.getOrPut(value) { value }
+    var id = startId
+    val entries = ArrayList<LogEntry>()
+
+    val iterator = logical.iterator()
+    var delimiter = ','
+    var columns: DltCsvColumns? = null
+    var headerFieldCount = 0
+    while (iterator.hasNext() && columns == null) {
+        val line = iterator.next()
+        if (line.isBlank()) continue
+        val resolved = resolveDltCsvHeader(line)
+        if (resolved == null) {
+            entries += LogEntry(id++, "", LogLevel.I, "RAW", line)
+            continue
+        }
+        delimiter = resolved.first
+        columns = resolved.second
+        headerFieldCount = splitCsv(line, delimiter).size
+    }
+    val cols = columns ?: return entries // no header found anywhere in the file: keep whatever RAW rows we saw
+
+    while (iterator.hasNext()) {
+        val line = iterator.next()
+        if (line.isBlank()) continue
+        val fields = splitCsv(line, delimiter)
+        if (fields.size < headerFieldCount) {
+            entries += LogEntry(id++, "", LogLevel.I, "RAW", line)
+            continue
+        }
+        val type = fields.getOrNull(cols.type)
+        val subtype = fields.getOrNull(cols.subtype)
+        val uptime = fields.getOrNull(cols.uptime)
+        entries += buildDltViewerEntry(
+            id = id++,
+            ts = fields.getOrNull(cols.time)?.let(::normalizeViewerTimestamp).orEmpty(),
+            dltTimestamp = uptime?.let(::parseViewerUptime),
+            ecu = fields.getOrNull(cols.ecu), app = fields.getOrNull(cols.app), ctx = fields.getOrNull(cols.ctx),
+            sessionId = fields.getOrNull(cols.session), type = type,
+            level = resolveViewerLevel(hasSubtypeColumn = cols.subtype >= 0, type = type, subtype = subtype),
+            payload = fields.getOrNull(cols.payload).orEmpty(), intern = ::intern,
+        )
+    }
+    return entries
+}
+
+/**
+ * Shared row -> [LogEntry] mapping for both viewer export forms. `dltMessageType` normalizes
+ * `nw_trace` to `network_trace` to match the binary parser's [dltMessageTypeName]; `pid` is the
+ * session id when it parses as a number; the tag joins ECU/APID/CTID like the binary parser does,
+ * falling back to "DLT" when all three are blank.
+ */
+private fun buildDltViewerEntry(
+    id: Int,
+    ts: String,
+    dltTimestamp: Long?,
+    ecu: String?,
+    app: String?,
+    ctx: String?,
+    sessionId: String?,
+    type: String?,
+    level: LogLevel,
+    payload: String,
+    intern: (String) -> String,
+): LogEntry {
+    val ecuId = ecu?.trim()?.takeIf(String::isNotEmpty)
+    val appId = app?.trim()?.takeIf(String::isNotEmpty)
+    val ctxId = ctx?.trim()?.takeIf(String::isNotEmpty)
+    val typeNorm = type?.trim()?.lowercase(Locale.ROOT)?.takeIf(String::isNotEmpty)
+    val dltType = typeNorm?.let { if (it == "nw_trace") "network_trace" else it }
+    val tag = intern(listOfNotNull(ecuId, appId, ctxId).joinToString("/").ifBlank { "DLT" })
+    val pid = sessionId?.trim()?.toIntOrNull() ?: 0
+    return LogEntry(
+        id = id, ts = ts, level = level, tag = tag, msg = payload, pid = pid,
+        dltEcuId = ecuId, dltAppId = appId, dltContextId = ctxId, dltMessageType = dltType,
+        dltTimestamp = dltTimestamp, dltTimestampSource = "viewer",
+    )
+}
+
+/**
+ * Level per the plan: when a subtype column/field exists and the type is "log", map the subtype
+ * word (fatal/error/warn/info/debug/verbose); otherwise, when the type value is itself a level
+ * word (e.g. a custom "Type=ERROR" column), use that; otherwise I.
+ */
+private fun resolveViewerLevel(hasSubtypeColumn: Boolean, type: String?, subtype: String?): LogLevel {
+    val typeNorm = type?.trim()?.lowercase(Locale.ROOT)
+    if (hasSubtypeColumn && typeNorm == "log") {
+        return subtype?.let(::viewerLevelOrNull) ?: LogLevel.I
+    }
+    return typeNorm?.let(::viewerLevelOrNull) ?: LogLevel.I
+}
+
+// DLT Viewer's CSV "Timestamp" / ASCII export's uptime field: seconds with exactly 4 fractional
+// digits (0.1ms units — the same unit TMSP uses in the binary decoder, see formatRelativeTimestamp).
+private const val UPTIME_UNITS_PER_SECOND = 10_000L
+private const val UPTIME_FRACTION_DIGITS = 4
+
+private fun parseViewerUptime(value: String): Long? {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty()) return null
+    val dot = trimmed.indexOf('.')
+    if (dot < 0) return trimmed.toLongOrNull()?.let { it * UPTIME_UNITS_PER_SECOND }
+    val whole = trimmed.substring(0, dot).toLongOrNull() ?: return null
+    val fracDigits = trimmed.substring(dot + 1).filter(Char::isDigit)
+    if (fracDigits.isEmpty()) return whole * UPTIME_UNITS_PER_SECOND
+    val frac = fracDigits.padEnd(UPTIME_FRACTION_DIGITS, '0').take(UPTIME_FRACTION_DIGITS).toLongOrNull() ?: return null
+    return whole * UPTIME_UNITS_PER_SECOND + frac
+}
+
+// internal (not private): reused by DltDetection.kt's CSV header/column resolver, so header
+// parsing during detection can never drift from header/row parsing during the actual parse above.
+// RFC-4180: quotes delimit a field (only when they open at the field's very start), "" inside a
+// quoted field is a literal '"', and the delimiter/newlines inside quotes are literal too (embedded
+// newlines are rejoined into one logical line by joinQuotedCsvLines before this ever sees them).
+internal fun splitCsv(line: String, delimiter: Char): List<String> {
+    val out = mutableListOf<String>()
+    val current = StringBuilder()
+    var quoted = false
+    var wasQuoted = false
+    var i = 0
+    while (i < line.length) {
+        val c = line[i]
+        when {
+            quoted -> if (c == '"') {
+                if (i + 1 < line.length && line[i + 1] == '"') {
+                    current.append('"'); i++
+                } else {
+                    quoted = false
+                }
+            } else {
+                current.append(c)
+            }
+            c == '"' && current.isEmpty() && !wasQuoted -> { quoted = true; wasQuoted = true }
+            c == delimiter -> { out += if (wasQuoted) current.toString() else current.toString().trim(); current.clear(); wasQuoted = false }
+            else -> current.append(c)
+        }
+        i++
+    }
+    out += if (wasQuoted) current.toString() else current.toString().trim()
     return out
 }
-
-private val VIEWER_LINE = Regex(
-    """^\[?([^\s\]]+(?:[ T][^\s\]]+)?)\]?\s+(?:\[([^\]]*)\]\s*)?(?:\[([^\]]*)\]\s*)?(?:\[([^\]]*)\]\s*)?(?:\[([^\]]*)\]\s*)?(.+)$""",
-)
-
-private fun parseViewerLine(line: String, id: Int): LogEntry? {
-    val match = VIEWER_LINE.matchEntire(line)
-    if (match == null) return parsePlainViewerLine(line, id)
-    val timestamp = match.groupValues[1]
-    if (!timestamp.any(Char::isDigit) || !timestamp.contains(':')) return null
-    val fields = match.groupValues.drop(2).filter(String::isNotBlank)
-    if (fields.size < 2) return null
-    val typeIndex = fields.indexOfFirst { viewerLevelOrNull(it) != null }
-    if (typeIndex < 0) return null
-    val type = fields[typeIndex]; val message = fields.drop(typeIndex + 1).joinToString(" ").ifBlank { return null }
-    val pre = fields.take(typeIndex)
-    val ecu = pre.getOrNull(0); val app = pre.getOrNull(1); val ctx = pre.getOrNull(2)
-    return LogEntry(id, normalizeViewerTimestamp(timestamp), viewerLevel(type), listOfNotNull(ecu, app, ctx).joinToString("/").ifBlank { "DLT" }, message,
-        dltEcuId = ecu, dltAppId = app, dltContextId = ctx, dltMessageType = type, dltTimestampSource = "viewer")
-}
-
-// DLT Viewer's text export has appeared in both bracketed and whitespace-column forms over its
-// releases. The column form keeps the timestamp as either one ISO/time token or two date+time
-// tokens, followed by ECU/APID/CTID/severity and the free-form payload.
-private fun parsePlainViewerLine(line: String, id: Int): LogEntry? {
-    val tokens = line.trim().split(Regex("\\s+"), limit = 7)
-    val timestamp: String
-    val offset: Int
-    if (tokens.firstOrNull()?.contains(':') == true) {
-        timestamp = tokens[0]; offset = 1
-    } else if (tokens.getOrNull(1)?.contains(':') == true) {
-        timestamp = "${tokens[0]} ${tokens[1]}"; offset = 2
-    } else {
-        return null
-    }
-    if (tokens.size - offset < 5) return null
-    val ecu = tokens[offset].takeIf { it.isNotBlank() }
-    val app = tokens[offset + 1].takeIf { it.isNotBlank() }
-    val ctx = tokens[offset + 2].takeIf { it.isNotBlank() }
-    val type = tokens[offset + 3]
-    val message = tokens.drop(offset + 4).joinToString(" ").ifBlank { return null }
-    if (viewerLevelOrNull(type) == null) return null
-    return LogEntry(id, normalizeViewerTimestamp(timestamp), viewerLevel(type), listOfNotNull(ecu, app, ctx).joinToString("/").ifBlank { "DLT" }, message,
-        dltEcuId = ecu, dltAppId = app, dltContextId = ctx, dltMessageType = type, dltTimestampSource = "viewer")
-}
-
-private fun viewerLevel(value: String): LogLevel = viewerLevelOrNull(value) ?: LogLevel.I
 
 private fun viewerLevelOrNull(value: String): LogLevel? = when (value.trim().lowercase(Locale.ROOT)) {
     "v", "verbose" -> LogLevel.V

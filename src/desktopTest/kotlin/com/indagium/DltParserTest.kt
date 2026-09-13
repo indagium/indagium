@@ -249,6 +249,118 @@ class DltParserTest {
         assertEquals("row1999", parsed.entries.last().msg)
     }
 
+    @Test fun parsesDltViewerCsvWithSemicolonDelimiterQuotedFieldsDoubledQuotesAndAnEmbeddedNewline() {
+        val header = "\"Index\";\"Time\";\"Timestamp\";\"Count\";\"Ecuid\";\"Apid\";\"Ctid\";\"SessionId\";" +
+            "\"Type\";\"Subtype\";\"Mode\";\"#Args\";\"Payload\""
+        // The payload field's closing quote (and the rest of its text) lands on the next physical
+        // line — an RFC-4180 quoted field spanning a literal newline — so this row is two raw lines.
+        val rowLine1 = "\"1\";\"2026/01/02 03:04:05.123456\";\"12.3456\";\"7\";\"ECU1\";\"APP1\";\"CTX1\";\"42\";" +
+            "\"log\";\"error\";\"verbose\";\"1\";\"line one, \"\"quoted\"\" "
+        val rowLine2 = "line two\""
+        val csv = listOf(header, rowLine1, rowLine2).joinToString("\n")
+        val parsed = parseLogContent(ByteArrayInputStream(csv.toByteArray()))
+        assertEquals(LogFormat.DLT, parsed.format)
+        val entry = parsed.entries.single()
+        assertEquals(LogLevel.E, entry.level)
+        assertEquals("03:04:05.123", entry.ts)
+        assertEquals(123_456L, entry.dltTimestamp)
+        assertEquals(42, entry.pid)
+        assertEquals("ECU1/APP1/CTX1", entry.tag)
+        assertEquals("log", entry.dltMessageType)
+        assertEquals("line one, \"quoted\" \nline two", entry.msg)
+    }
+
+    @Test fun parsesDltViewerCsvWithCommaDelimiterApidCtidDescHeadersAndAQuotedPayloadContainingTheDelimiter() {
+        val header = "Index,Time,Timestamp,Count,Ecuid,\"Apid Desc\",\"Ctid Desc\",SessionId,Type,Subtype,Mode,#Args,Payload"
+        val row = "1,2026/01/02 03:04:05.123456,12.3456,7,ECU1,APP1,CTX1,42,log,warn,verbose,0,\"hello, there\""
+        val parsed = parseLogContent(ByteArrayInputStream("$header\n$row\n".toByteArray()))
+        assertEquals(LogFormat.DLT, parsed.format)
+        val entry = parsed.entries.single()
+        assertEquals(LogLevel.W, entry.level)
+        assertEquals("log", entry.dltMessageType)
+        assertEquals("hello, there", entry.msg)
+    }
+
+    @Test fun csvControlMessageWithEmptySubtypeFieldDefaultsToInfoLevel() {
+        val header = "\"Index\",\"Time\",\"Timestamp\",\"Count\",\"Ecuid\",\"Apid\",\"Ctid\",\"SessionId\"," +
+            "\"Type\",\"Subtype\",\"Mode\",\"#Args\",\"Payload\""
+        val row = "2,2026/01/02 03:04:06.000000,13.0000,8,ECU1,APP1,CTX1,42,control,,non-verbose,0,"
+        val parsed = parseLogContent(ByteArrayInputStream("$header\n$row\n".toByteArray()))
+        val entry = parsed.entries.single()
+        assertEquals(LogLevel.I, entry.level)
+        assertEquals("control", entry.dltMessageType)
+        assertEquals("", entry.msg)
+    }
+
+    @Test fun csvRowsShorterThanTheHeaderBecomeRawRowsInsteadOfBeingDropped() {
+        val csv = "Time,ECU,AppId,ContextId,Type,Payload\n" +
+            "2026-01-02 03:04:05.123,ECU1,APP1,CTX1,ERROR,ok\n" +
+            "short,row\n"
+        val parsed = parseLogContent(ByteArrayInputStream(csv.toByteArray()))
+        assertEquals(2, parsed.entries.size)
+        assertEquals("ok", parsed.entries[0].msg)
+        assertEquals("RAW", parsed.entries[1].tag)
+        assertEquals(LogLevel.I, parsed.entries[1].level)
+        assertEquals("short,row", parsed.entries[1].msg)
+    }
+
+    @Test fun aStrayUnbalancedCsvQuoteDoesNotSwallowTheRestOfTheFile() {
+        val header = "Time,ECU,AppId,ContextId,Type,Payload\n"
+        val stray = "2026-01-02 03:04:05.000,ECU1,APP1,CTX1,INFO,\"unterminated\n"
+        val rows = (1..200).joinToString("") { "2026-01-02 03:04:05.123,ECU1,APP1,CTX1,INFO,row$it\n" }
+        val parsed = parseLogContent(ByteArrayInputStream((header + stray + rows).toByteArray()))
+        assertEquals(201, parsed.entries.size)
+        assertEquals("row200", parsed.entries.last().msg)
+    }
+
+    @Test fun parsesAsciiViewerLinesWithAndWithoutIndexEmptySubtypeAndEmptyPayload() {
+        // Empty ECU/subtype fields and an absent trailing payload each produce a shorter token run;
+        // both must still parse instead of being rejected.
+        val withIndexEmptySubtypeNoPayload = "9 2026/01/02 03:04:05.123456 12.3456 7 ECU1 APP1 CTX1 42 control  non-verbose 0"
+        val withoutIndexWithPayload = "2026/01/02 03:04:07.000000 14.0001 9 ECU2 APP2 CTX2 43 log fatal verbose 2 boom now"
+        val ascii = "$withIndexEmptySubtypeNoPayload\n$withoutIndexWithPayload\n"
+        val parsed = parseLogContent(ByteArrayInputStream(ascii.toByteArray()))
+        assertEquals(LogFormat.DLT, parsed.format)
+        assertEquals(2, parsed.entries.size)
+        val first = parsed.entries[0]
+        assertEquals(LogLevel.I, first.level) // control type, empty subtype -> default I
+        assertEquals("", first.msg)
+        assertEquals(42, first.pid)
+        assertEquals("ECU1/APP1/CTX1", first.tag)
+        assertEquals(123_456L, first.dltTimestamp)
+        val second = parsed.entries[1]
+        assertEquals(LogLevel.A, second.level) // log type, fatal subtype
+        assertEquals("boom now", second.msg)
+        assertEquals(43, second.pid)
+        assertEquals(140_001L, second.dltTimestamp)
+    }
+
+    @Test fun preservesUnrecognizedLinesInAnAsciiViewerExportAsRawRowsInsteadOfDroppingThem() {
+        val line1 = "2026/01/02 03:04:05.123456 12.3456 7 ECU1 APP1 CTX1 42 log error verbose 1 boom"
+        val line2 = "2026/01/02 03:04:05.223456 12.3556 8 ECU1 APP1 CTX1 42 log error verbose 1 crash"
+        val stack1 = "    at com.example.Foo.bar(Foo.java:10)"
+        val stack2 = "    at com.example.Foo.baz(Foo.java:20)"
+        val ascii = listOf(line1, stack1, stack2, line2).joinToString("\n") + "\n"
+        val parsed = parseLogContent(ByteArrayInputStream(ascii.toByteArray()))
+        assertEquals(LogFormat.DLT, parsed.format)
+        assertEquals(4, parsed.entries.size)
+        assertEquals("boom", parsed.entries[0].msg)
+        assertEquals("RAW", parsed.entries[1].tag)
+        assertEquals(LogLevel.I, parsed.entries[1].level)
+        assertEquals(stack1, parsed.entries[1].msg)
+        assertEquals("RAW", parsed.entries[2].tag)
+        assertEquals(stack2, parsed.entries[2].msg)
+        assertEquals("crash", parsed.entries[3].msg)
+        assertEquals(listOf(1, 2, 3, 4), parsed.entries.map { it.id })
+    }
+
+    @Test fun bracketedThreadStyleLogFileStaysLogcatNotDltViewer() {
+        val text = "[12:00:00.123] [main] [INFO] started\n[12:00:00.456] [main] [INFO] running\n"
+        val parsed = parseLogContent(ByteArrayInputStream(text.toByteArray()))
+        assertEquals(LogFormat.LOGCAT, parsed.format)
+        assertEquals(2, parsed.entries.size)
+    }
+
     @Test fun routesBomlessUtf16LogcatAheadOfPlausibleRawDlt() {
         val source = "01-02 03:04:05.123  1  2 I Tag: unicode\n"
         listOf(Charsets.UTF_16LE, Charsets.UTF_16BE).forEach { charset ->

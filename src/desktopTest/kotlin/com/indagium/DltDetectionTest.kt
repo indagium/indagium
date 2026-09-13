@@ -51,6 +51,22 @@ class DltDetectionTest {
     }
 
     @Test
+    fun csvHeaderWithApidDescAndCtidDescAliasesIsRecognized() {
+        val header = "Index,Time,Timestamp,Count,Ecuid,\"Apid Desc\",\"Ctid Desc\",SessionId,Type,Subtype,Mode,#Args,Payload"
+        assertTrue(looksLikeDltCsvHeaderLine(header))
+        val sample = (header + "\n1,2026/01/02 03:04:05.123456,12.3456,7,ECU1,APP1,CTX1,42,log,info,verbose,0,hi\n").toByteArray()
+        assertEquals(LogContentKind.DLT_VIEWER_CSV, classify(sample))
+    }
+
+    @Test
+    fun csvHeaderWithTabDelimiterIsRecognized() {
+        val header = "Time\tEcuid\tApid\tCtid\tType\tPayload"
+        assertTrue(looksLikeDltCsvHeaderLine(header))
+        val sample = (header + "\n2026/01/02 03:04:05.123456\tECU1\tAPP1\tCTX1\tlog\thi\n").toByteArray()
+        assertEquals(LogContentKind.DLT_VIEWER_CSV, classify(sample))
+    }
+
+    @Test
     fun csvLikeFirstLineThatIsNotADltHeaderStaysText() {
         // Regression for the "Executing application in context" style false positive: the word
         // "context" alone must not resolve the context-id column.
