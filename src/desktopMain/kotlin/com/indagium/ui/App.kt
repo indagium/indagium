@@ -1073,7 +1073,7 @@ fun App(
                     AddAnnDialog(
                         rows = rows,
                         windowSize = mainWindowSize,
-                        sourceFilename = req.sourceFilename,
+                        fileLabel = req.sourceFilename ?: state.tab(req.sourceTabId)?.filename,
                         onConfirm = { caption ->
                             state.confirmAddAnn(
                                 req.targetTabId,
