@@ -400,10 +400,10 @@ internal class IndagiumToolOperations(
     ): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
         val source = appState.splitSourceForPath(path, entryPath) ?: return mapOf("error" to "source not found: $path")
-        if (appState.isDltSplitSource(source)) {
+        if (appState.isUnsplittableSource(source)) {
             return mapOf(
                 "ok" to false,
-                "error" to "DLT splitting unavailable: DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+                "error" to "DLT splitting unavailable: DLT protocol v2 is not supported, so this capture can't be split.",
             )
         }
         val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)

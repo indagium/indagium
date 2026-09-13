@@ -4208,9 +4208,35 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun dltSplitRequestsFailWithoutCreatingPromptOrOutputFiles() {
+    fun dltSplitRequestSplitsTheCaptureFrameAwareAndOpensPartsAsDltTabs() {
         val dir = createTempDirectory("openlog-dlt-split").toFile()
-        val capture = File(dir, "capture.bin").apply { writeBytes(dltTestFrame("do not split")) }
+        val frames = (1..6).map { i -> dltStorageHeader(ecu = "ECU1") + dltTestFrame("frame $i") }
+        val capture = File(dir, "capture.bin").apply { writeBytes(frames.reduce { acc, f -> acc + f }) }
+        val output = File(dir, "parts")
+        val state = AppState(File(dir, "state.cache"))
+
+        state.requestSplitForFile(capture)
+        assertNotNull(state.pendingSplitPrompt)
+        assertNull(state.openError)
+        val source = state.pendingSplitPrompt!!.sources.single()
+
+        val written = state.splitSourceAndOpen(source, output, "part", 2)
+
+        assertEquals(2, written.size)
+        assertEquals(
+            capture.readBytes().toList(),
+            written.flatMap { it.readBytes().toList() },
+        )
+        assertEquals(2, state.tabs.size)
+        assertTrue(state.tabs.all { it.logFormat == LogFormat.DLT })
+    }
+
+    @Test
+    fun requestSplitForV2DltFileIsRefusedWithoutCreatingAPrompt() {
+        val dir = createTempDirectory("openlog-dlt-v2-split").toFile()
+        val capture = File(dir, "capture.dlt").apply {
+            writeBytes(byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 2) + ByteArray(12))
+        }
         val output = File(dir, "parts")
         val state = AppState(File(dir, "state.cache"))
 
@@ -4224,9 +4250,12 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun oversizedDltArchiveCandidateBypassesSplitPrompt() {
+    fun oversizedDltArchiveCandidateGetsTheSameSplitPromptAsAnyOtherFormat() {
         val dir = createTempDirectory("openlog-dlt-archive-split").toFile()
-        val archive = buildZipBytesFixture(dir, "capture.zip", mapOf("capture.bin" to dltTestFrame("archive DLT")))
+        val archive = buildZipBytesFixture(
+            dir, "capture.zip",
+            mapOf("capture.bin" to (dltStorageHeader(ecu = "ECU1") + dltTestFrame("archive DLT"))),
+        )
         val candidate = requireNotNull(com.indagium.utils.listArchiveLogCandidates(archive).singleOrNull()).copy(
             sizeBytes = SPLIT_PROMPT_BYTES,
             kind = ZipLogCandidateKind.DLT,
@@ -4235,9 +4264,8 @@ class AppStateBehaviorTest {
 
         state.openZipEntries(archive, listOf(candidate))
 
-        assertNull(state.pendingSplitPrompt)
-        waitUntil { state.tabs.size == 1 && !state.isLoading }
-        assertEquals(LogFormat.DLT, state.tabs.single().logFormat)
+        assertTrue(state.tabs.isEmpty())
+        assertEquals(listOf("capture.bin"), state.pendingSplitPrompt?.sources?.map { it.displayName })
     }
 
     @Test

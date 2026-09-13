@@ -47,8 +47,10 @@ import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.ArchiveFormat
+import com.indagium.utils.CONTENT_SNIFF_BYTES
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.LogContentKind
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.MergeSourceFile
@@ -66,6 +68,7 @@ import com.indagium.utils.annotationImageFileName
 import com.indagium.utils.archiveVideoCacheFileName
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
+import com.indagium.utils.classifyLogContent
 import com.indagium.utils.computeCrashSites
 import com.indagium.utils.computeCustomIssueSites
 import com.indagium.utils.computeItems
@@ -105,7 +108,7 @@ import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
 import com.indagium.utils.scanFolderForLogs
-import com.indagium.utils.splitFileToFiles
+import com.indagium.utils.splitDltStreamToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
 import com.indagium.utils.tagMatchesPrefix
@@ -124,7 +127,9 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -1192,6 +1197,10 @@ data class PendingFolderPicker(
 )
 
 enum class SplitMode { SPLIT, OPEN_AS_IS }
+
+// Buffer size for the stream AppState.classifySplitSourceAndStream hands to the actual splitter —
+// matches LogSplitter.kt's own internal copy buffer.
+private const val SPLIT_SNIFF_STREAM_BUFFER_BYTES = 1 shl 20
 
 sealed class SplitSource {
     abstract val id: String
@@ -5297,7 +5306,9 @@ class AppState(
             // compressed file to route into anyway. It's bounded by BoundedInputStream/
             // MAX_ARCHIVE_ENTRY_BYTES during parsing instead, the same deal an archive entry
             // already has (see extractCandidate's KDoc) — never split-prompted, just capped.
-            detectArchiveFormat(file) is ArchiveFormat.None && !isLikelyDltSourceFile(file) &&
+            // DLT is not exempt here (frame-aware splitting handles it — see DltSplitter.kt); only
+            // an unsplittable v2 stream is refused, and only once the user actually chooses Split.
+            detectArchiveFormat(file) is ArchiveFormat.None &&
                 requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
         if (oversizedFiles.isNotEmpty()) {
@@ -5483,7 +5494,7 @@ class AppState(
         // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
         // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
-        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && !isLikelyDltSourceFile(file) && requiresSplitPrompt(file.length())) {
+        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length())) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
             return null
         }
@@ -5696,9 +5707,7 @@ class AppState(
         selected: List<ZipLogCandidate>,
         videoToAttach: ZipLogCandidate? = null,
     ): List<String> {
-        val (oversized, normal) = selected.partition {
-            it.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(it.sizeBytes)
-        }
+        val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
         if (oversized.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
                 sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
@@ -5784,8 +5793,8 @@ class AppState(
         splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES,
     ): List<String> {
         val files = selected.map { File(folder, it.entryPath) }
-        val (oversized, normal) = selected.zip(files).partition { (candidate, file) ->
-            candidate.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+        val (oversized, normal) = selected.zip(files).partition { (_, file) ->
+            requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
         if (oversized.isNotEmpty()) {
             // Same "defer everything selected, not just the oversized ones" shape as
@@ -5823,7 +5832,7 @@ class AppState(
         if (existing != null) {
             activateTab(existing.id); return existing.id
         }
-        if (!bypassSplitPrompt && candidate.kind != ZipLogCandidateKind.DLT && requiresSplitPrompt(candidate.sizeBytes)) {
+        if (!bypassSplitPrompt && requiresSplitPrompt(candidate.sizeBytes)) {
             pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
             return null
         }
@@ -5905,21 +5914,22 @@ class AppState(
 
     fun requestSplitForFile(file: File) {
         if (!file.isFile) return
-        if (isLikelyDltSourceFile(file)) {
+        val source = SplitSource.RealFile(file)
+        if (isUnsplittableSource(source)) {
             showDltSplittingUnavailable(file.absolutePath)
             return
         }
-        pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
+        pendingSplitPrompt = PendingSplitPrompt(listOf(source))
     }
 
     fun requestSplitForTab(tabId: String): Boolean {
         val current = tab(tabId) ?: return false
-        if (current.logFormat == LogFormat.DLT) {
-            showDltSplittingUnavailable(current.sourcePath)
-            return false
-        }
         val sourcePath = current.sourcePath ?: return false
         val source = splitSourceFromPath(sourcePath, entryPath = null) ?: return false
+        if (isUnsplittableSource(source)) {
+            showDltSplittingUnavailable(sourcePath)
+            return false
+        }
         pendingSplitPrompt = PendingSplitPrompt(listOf(source))
         return true
     }
@@ -5927,14 +5937,24 @@ class AppState(
     fun splitSourceForPath(path: String, entryPath: String? = null): SplitSource? =
         splitSourceFromPath(path, entryPath)
 
-    /** Shared preflight for UI and MCP split routes; DLT frames cannot be byte-split safely. */
-    fun isDltSplitSource(source: SplitSource): Boolean = source.isDlt()
+    /**
+     * Shared preflight for UI and MCP split routes. DLT v1 (storage-framed or raw) splits fine —
+     * see [splitDltStreamToFiles] — the only source that truly can't be byte-split is an
+     * identifiable DLT protocol v2 stream, which parsing also refuses outright. This sniffs the
+     * same bounded content sample [classifySplitSourceAndStream] uses for the real split, so the
+     * two can never disagree about which sources are refused.
+     */
+    fun isUnsplittableSource(source: SplitSource): Boolean {
+        val classification = classifySplitSourceAndStream(source) ?: return false
+        classification.stream.close()
+        return classification.kind == LogContentKind.DLT_UNSUPPORTED_V2
+    }
 
     private fun showDltSplittingUnavailable(path: String?) {
         showOpenError(
             "DLT splitting unavailable",
             path,
-            "DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+            "DLT protocol v2 is not supported, so this capture can't be split.",
         )
     }
 
@@ -5987,29 +6007,90 @@ class AppState(
         splitSourceAndOpenParts(source, destinationDir, postfix, partCount)
 
     private fun splitSourceAndOpenParts(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> {
-        if (isDltSplitSource(source)) {
+        val classification = classifySplitSourceAndStream(source) ?: run {
+            showOpenError(
+                title = "Could not open source to split",
+                path = source.sourceFile.absolutePath,
+                message = "The source could not be read.",
+            )
+            return emptyList()
+        }
+        val (kind, sample, stream) = classification
+        if (kind == LogContentKind.DLT_UNSUPPORTED_V2) {
+            stream.close()
             showOpenError(
                 title = "DLT splitting unavailable",
                 path = source.sourceFile.absolutePath,
-                message = "DLT is a framed binary format; split the capture with a DLT-aware tool before opening it.",
+                message = "DLT protocol v2 is not supported, so this capture can't be split.",
             )
             return emptyList()
         }
         val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
-        val written = when (source) {
-            is SplitSource.RealFile -> splitFileToFiles(source.file, outputs)
-            is SplitSource.ArchiveEntry -> {
-                val stream = openArchiveCandidateStream(source.archiveFile, source.candidate) ?: return emptyList()
-                splitStreamToFiles(stream, outputs, source.sizeBytes)
-            }
+        val written = when (kind) {
+            LogContentKind.DLT_STORAGE, LogContentKind.DLT_RAW ->
+                splitDltStreamToFiles(stream, outputs, source.sizeBytes, kind)
+            LogContentKind.DLT_VIEWER_CSV ->
+                splitStreamToFiles(stream, outputs, source.sizeBytes, partPreamble = leadingLineBytes(sample))
+            else -> splitStreamToFiles(stream, outputs, source.sizeBytes)
         }
         written.forEach { part -> loadSplitPartAsTab(part) }
         return written
     }
 
-    private fun SplitSource.isDlt(): Boolean = when (this) {
-        is SplitSource.RealFile -> isLikelyDltSourceFile(file)
-        is SplitSource.ArchiveEntry -> candidate.kind == ZipLogCandidateKind.DLT
+    /**
+     * Bounded content classification + a stream ready to read from the top, shared by
+     * [isUnsplittableSource] (which just sniffs and closes) and [splitSourceAndOpenParts] (which
+     * keeps reading the same stream for the real split). A [SplitSource.RealFile] is sampled by
+     * opening the file once to read up to [CONTENT_SNIFF_BYTES] (closed immediately after — the
+     * `File` is cheap to reopen for the real copy), matching [classifyLogContent]'s general
+     * contract. A [SplitSource.ArchiveEntry] can only be streamed once (there's no filesystem
+     * backing to cheaply reopen), so it's wrapped in a [BufferedInputStream], sampled via
+     * mark/reset, and that same rewound stream is handed back for the caller to keep reading —
+     * exactly the trick [parseLogContent] plays on a non-markable stream. Returns null only when
+     * the archive stream can't be opened at all.
+     */
+    private data class SplitSourceClassification(val kind: LogContentKind, val sample: ByteArray, val stream: InputStream)
+
+    private fun classifySplitSourceAndStream(source: SplitSource): SplitSourceClassification? = when (source) {
+        is SplitSource.RealFile -> {
+            val sample = runCatching { source.file.inputStream().use { it.readNBytes(CONTENT_SNIFF_BYTES) } }
+                .getOrElse { return null }
+            val atEof = sample.size < CONTENT_SNIFF_BYTES
+            val kind = classifyLogContent(sample, atEof, source.file.name)
+            val stream = runCatching { source.file.inputStream().buffered(SPLIT_SNIFF_STREAM_BUFFER_BYTES) }
+                .getOrElse { return null }
+            SplitSourceClassification(kind, sample, stream)
+        }
+        is SplitSource.ArchiveEntry -> {
+            val raw = openArchiveCandidateStream(source.archiveFile, source.candidate) ?: return null
+            val stream = BufferedInputStream(raw, SPLIT_SNIFF_STREAM_BUFFER_BYTES)
+            stream.mark(CONTENT_SNIFF_BYTES + 1)
+            val sample = runCatching { stream.readNBytes(CONTENT_SNIFF_BYTES) }.getOrDefault(ByteArray(0))
+            stream.reset()
+            val atEof = sample.size < CONTENT_SNIFF_BYTES
+            val kind = classifyLogContent(sample, atEof, source.candidate.displayName)
+            SplitSourceClassification(kind, sample, stream)
+        }
+    }
+
+    /** First non-blank line of [sample] (the line the classifier resolved as the DLT Viewer CSV
+     *  header), including its trailing `\n` — repeated at the top of parts 2..n. Falls back to the
+     *  rest of the sample when no newline follows it (a header-only file shorter than one sniff buffer). */
+    private fun leadingLineBytes(sample: ByteArray): ByteArray {
+        var start = 0
+        while (true) {
+            val nl = sample.indexOf('\n'.code.toByte(), start)
+            val end = if (nl >= 0) nl + 1 else sample.size
+            val isBlank = (start until end).all { sample[it] == ' '.code.toByte() || sample[it] == '\t'.code.toByte() ||
+                sample[it] == '\r'.code.toByte() || sample[it] == '\n'.code.toByte() }
+            if (!isBlank || nl < 0) return sample.copyOfRange(start, end)
+            start = end
+        }
+    }
+
+    private fun ByteArray.indexOf(byte: Byte, from: Int): Int {
+        for (i in from until size) if (this[i] == byte) return i
+        return -1
     }
 
     private fun loadSplitPartAsTab(file: File) {
