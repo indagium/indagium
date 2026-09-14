@@ -18,6 +18,7 @@ import com.indagium.model.LogTab
 import com.indagium.ui.AppState
 import com.indagium.ui.DiagramLibraryStore
 import com.indagium.ui.Seq3CopyTarget
+import com.indagium.ui.Seq3ManualActivationDragPreview
 import com.indagium.ui.Seq3RenderCache
 import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.applySeq3Escape
@@ -199,6 +200,26 @@ class Seq3WorkspaceTest {
         val view = state.seq3Sessions.viewState(id)!!
 
         assertFalse(applySeq3Escape(state, session, view))
+    }
+
+    @Test
+    fun escapeCancelsAnActiveManualActivationDragAndDoesNotClearSelection() {
+        val state = state()
+        val id = state.seq3Sessions.begin("log", setOf(1, 2))!!
+        val session = state.seq3Sessions.sessions.single { it.id == id }
+        val view = state.seq3Sessions.viewState(id)!!
+        view.activeManualActivationDragId = "m1"
+        view.manualActivationDragPreview = Seq3ManualActivationDragPreview("m1", 42.0)
+        // A bar is normally selected before its handle is dragged; Esc should cancel only the
+        // drag and leave that selection alone (it isn't one of the "clear selection" branches).
+        view.selectedManualActivationId = "m1"
+
+        assertTrue(applySeq3Escape(state, session, view))
+
+        assertNull(view.activeManualActivationDragId)
+        assertTrue(view.manualActivationDragCancelled)
+        assertNull(view.manualActivationDragPreview)
+        assertEquals("m1", view.selectedManualActivationId)
     }
 
     // ── seq3ClearSelection: clicking empty canvas background also clears a panel selection ───

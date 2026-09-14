@@ -1156,6 +1156,21 @@ internal class Seq3ViewState {
     /** The manual-activation-bar counterpart of [hoveredFragmentId] above — same contract. */
     var hoveredManualActivationId by mutableStateOf<String?>(null)
 
+    /** Live snapped preview while [Seq3ManualActivationOverlay]'s bottom resize handle is being
+     *  dragged. Hoisted here (rather than a local `remember` in `Seq3CanvasContent`) so [applySeq3Escape]
+     *  can clear it directly — the "preview disappears immediately" half of cancelling a drag. */
+    var manualActivationDragPreview by mutableStateOf<Seq3ManualActivationDragPreview?>(null)
+
+    /** Non-null while a manual activation bar's bottom resize handle is mid-drag — the
+     *  [com.indagium.diagram3.Seq3ManualActivation.id] being resized. Lets Esc (see
+     *  [applySeq3Escape]) cancel an in-progress drag before the handle's own `onDragEnd` runs. */
+    var activeManualActivationDragId by mutableStateOf<String?>(null)
+
+    /** Set by Esc while [activeManualActivationDragId] is non-null. The handle's `onDragEnd` reads
+     *  this to skip applying [Seq3BulkAction.SetManualActivationEnd] for a drag Esc already
+     *  cancelled, then clears it back to false. */
+    var manualActivationDragCancelled by mutableStateOf(false)
+
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
      *  session — exiting it must never touch the document. */
@@ -1912,6 +1927,17 @@ private fun applySeq3KeyAction(
 // seq3ClearSelection/seq3AddNote/seq3BeginLabelRename above are already internal rather than
 // private.
 internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, view: Seq3ViewState): Boolean = when {
+    // Manual-activation-bar drag cancel: checked first because it's the most transient state of
+    // all (a live pointer gesture) and must win over every other Esc branch below, including
+    // textFieldFocused. Clearing the preview here (not just marking cancelled) is what makes it
+    // disappear immediately instead of lingering until the mouse is released; the handle's own
+    // onDragEnd/onDragCancel see manualActivationDragCancelled and skip committing the resize.
+    view.activeManualActivationDragId != null -> {
+        view.manualActivationDragCancelled = true
+        view.activeManualActivationDragId = null
+        view.manualActivationDragPreview = null
+        true
+    }
     // WP7 item 6: this root handler sits ABOVE every canvas/panel inline editor in the focus tree,
     // and Compose dispatches onPreviewKeyEvent top-down (root first) — so if this branch claimed
     // (returned true for) the event the way it used to, an editor's own InlineField.onCancel would
