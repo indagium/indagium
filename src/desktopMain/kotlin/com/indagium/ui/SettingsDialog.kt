@@ -1122,6 +1122,16 @@ private fun IssuesSettingsSection(state: AppState) {
 private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
+    CompactSettingWithTooltip(
+        label = "Inline Markdown",
+        tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
+        )
+    }
     CopyMetadataSettingsRow(state)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(

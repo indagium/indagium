@@ -101,7 +101,10 @@ import com.indagium.utils.visibleEntries
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownColor
 import com.mikepenz.markdown.m3.markdownTypography
+import com.mikepenz.markdown.model.MarkdownAnnotator
 import com.mikepenz.markdown.model.MarkdownTypography
+import com.mikepenz.markdown.model.markdownAnnotator
+import com.mikepenz.markdown.model.markdownAnnotatorConfig
 import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -125,6 +128,93 @@ private const val BLOCK_RESIZE_ANCHOR_LIFETIME_MS = 3_000L
 // How long the "can't verify this log" notice (Change 2c's unverifiable-relink case) stays up
 // before auto-dismissing — long enough to read, short enough not to linger as stale chrome.
 private const val UNVERIFIED_RELINK_NOTICE_MS = 8_000L
+
+// Notes use Markdown's soft line breaks as visible line breaks. Keep this renderer configuration
+// in one shared instance so the panel, editor preview, and every inline card all agree without
+// rebuilding an annotator on each recomposition.
+private val ANNOTATION_MARKDOWN_ANNOTATOR: MarkdownAnnotator = markdownAnnotator(
+    config = markdownAnnotatorConfig(eolAsNewLine = true),
+)
+private val ANNOTATION_MARKDOWN_FENCE_MARKER = Regex("^(?:`{3,}|~{3,})")
+
+/** Testable contract for every Notes Markdown surface: a single source line is rendered as a line
+ * break instead of being collapsed into the surrounding paragraph. */
+internal fun annotationMarkdownSoftLineBreaksEnabled(): Boolean =
+    ANNOTATION_MARKDOWN_ANNOTATOR.config.eolAsNewLine
+
+/**
+ * The Markdown parser normally requires an inline delimiter's closing marker to share a line
+ * with the text it closes. Notes are edited as a line-oriented field, however, and users commonly
+ * put a closing `**`/`~~` on its own final line after a multiline span. Relocate only such a
+ * standalone closing marker for rendering; the stored source remains byte-for-byte unchanged.
+ *
+ * Fenced code is deliberately tracked separately, so literal delimiter lines in code blocks are
+ * never changed. The conservative candidate set also avoids touching ordinary prose that merely
+ * contains punctuation on a line of its own.
+ */
+internal fun annotationMarkdownRenderSource(text: String): String {
+    if (text.isEmpty()) return text
+    val lineSeparator = if (text.contains("\r\n")) "\r\n" else "\n"
+    val lines = text.split(lineSeparator).toMutableList()
+    val trackedDelimiters = listOf("**", "__", "~~")
+    val openDelimiters = trackedDelimiters.associateWith { false }.toMutableMap()
+    var fence: String? = null
+    var index = 0
+    while (index < lines.size) {
+        val line = lines[index]
+        val trimmed = line.trim()
+        val fenceMarker = ANNOTATION_MARKDOWN_FENCE_MARKER.find(trimmed)?.value
+        val activeFence = fence
+        if (activeFence != null) {
+            if (fenceMarker != null && fenceMarker.first() == activeFence.first()) fence = null
+            index++
+            continue
+        }
+        if (fenceMarker != null) {
+            fence = fenceMarker
+            // Inline emphasis cannot validly span a fenced block. Reset this render-only state so
+            // a later standalone delimiter cannot be appended to the fence's closing line.
+            trackedDelimiters.forEach { delimiter -> openDelimiters[delimiter] = false }
+            index++
+            continue
+        }
+
+        val candidate = trackedDelimiters.firstOrNull { delimiter ->
+            trimmed == delimiter && openDelimiters[delimiter] == true
+        }
+        if (candidate != null && index > 0) {
+            // Keep any intentional blank line before the delimiter. Appending to the nearest
+            // non-blank content line is enough for the inline parser to see a closing marker while
+            // retaining the source's visible paragraph separation.
+            val previous = (index - 1 downTo 0).firstOrNull { lines[it].trim().isNotEmpty() }
+            if (previous != null) {
+                lines[previous] += candidate
+                lines.removeAt(index)
+                openDelimiters[candidate] = false
+                continue
+            }
+        }
+
+        trackedDelimiters.forEach { delimiter ->
+            val occurrences = countUnescapedOccurrences(line, delimiter)
+            if (occurrences % 2 == 1) openDelimiters[delimiter] = !openDelimiters.getValue(delimiter)
+        }
+        index++
+    }
+    return lines.joinToString(lineSeparator)
+}
+
+private fun countUnescapedOccurrences(line: String, token: String): Int {
+    var count = 0
+    var from = 0
+    while (from <= line.length - token.length) {
+        val found = line.indexOf(token, from)
+        if (found < 0) break
+        if (found == 0 || line[found - 1] != '\\') count++
+        from = found + token.length
+    }
+    return count
+}
 
 // Fixed thumbnail height for an AnnBlock.Image — shared between estimateBlockHeightPx (drag-
 // reorder offset math) and the actual ImageBlockView render, so the estimate never drifts from
@@ -812,10 +902,10 @@ fun AnnotationPanel(
     }
 
     // One Dialog call site for every rich-editor target ("Note popup redesign" fixes): a plain
-    // Note/LogRef block, a diagram Note's caption (never its encoded header — see EditDialogTarget's
-    // KDoc), or the panel-level Prefix/Next steps fields. editingDialogContent is null exactly when
-    // there is nothing to show (target cleared, block since removed, or an Image block's onEdit,
-    // which is never wired) so no blank Dialog ever flashes up.
+    // Note/LogRef/Image block, a diagram Note's caption (never its encoded header — see
+    // EditDialogTarget's KDoc), or the panel-level Prefix/Next steps fields. editingDialogContent is
+    // null exactly when there is nothing to show (target cleared or block since removed), so no
+    // blank Dialog ever flashes up.
     val editingDialogContent: (@Composable () -> Unit)? = when (val target = editingTarget) {
         null -> null
         EditDialogTarget.Prefix -> {
@@ -872,26 +962,24 @@ fun AnnotationPanel(
                     val text = when (block) {
                         is AnnBlock.Note -> block.text
                         is AnnBlock.LogRef -> block.caption
-                        // Image captions are intentionally outside this prose-editor scope.
-                        is AnnBlock.Image -> null
+                        is AnnBlock.Image -> block.caption
                     }
-                    if (text == null) null else {
-                        {
-                            AnnotationMarkdownEditorDialog(
-                                title = "Edit note",
-                                initialText = text,
-                                confirmLabel = "Save note",
-                                windowSize = mainWindowSize,
-                                rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
-                                fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
-                                onDelete = { onRemoveBlock(block.id); editingTarget = null },
-                                onConfirm = { updated ->
-                                    onUpdateBlock(block.id, updated)
-                                    editingTarget = null
-                                },
-                                onDismiss = { editingTarget = null },
-                            )
-                        }
+                    val isCaption = block is AnnBlock.LogRef || block is AnnBlock.Image
+                    {
+                        AnnotationMarkdownEditorDialog(
+                            title = if (isCaption) "Edit caption" else "Edit note",
+                            initialText = text,
+                            confirmLabel = if (isCaption) "Save caption" else "Save note",
+                            windowSize = mainWindowSize,
+                            rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
+                            fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
+                            onDelete = { onRemoveBlock(block.id); editingTarget = null },
+                            onConfirm = { updated ->
+                                onUpdateBlock(block.id, updated)
+                                editingTarget = null
+                            },
+                            onDismiss = { editingTarget = null },
+                        )
                     }
                 }
             }
@@ -1319,7 +1407,7 @@ fun AnnotationPanel(
                             dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.Image -> ImageBlockView(
-                            block = block, tc = tc, isFirst = isFirst, isLast = isLast,
+                            block = block, tc = tc, settings = settings, isFirst = isFirst, isLast = isLast,
                             focused = noteTargets.getOrNull(navIndex)?.id == "block:${block.id}" || highlightedBlockId == block.id,
                             fieldFocusRequester = blockFieldRequesters[block.id],
                             onFieldFocusChanged = { focused ->
@@ -1328,6 +1416,7 @@ fun AnnotationPanel(
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
+                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
@@ -2021,6 +2110,15 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                     } else {
                         null
                     }
+                    // A diagram occupies one annotation slot, just like a text/image/log block.
+                    // Number its caption once here so the caption gets the block's number and the
+                    // diagram body does not increment the following block a second time.
+                    val numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null
+                    if (summary != null && (summary.caption.isNotBlank() || numberPrefix != null)) {
+                        // Keep the caption immediately before the dedicated diagram rendering,
+                        // exactly where an ordinary note's Markdown appears in the export preview.
+                        AnnotationMarkdownText(summary.caption, tc, numberPrefix)
+                    }
                     val parsed = expandedDiagram?.parsed
                     val display = expandedDiagram?.display
                     if (parsed != null && display != null) {
@@ -2090,19 +2188,17 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
                                 }
                             }
                         }
-                        if (settings.numberAnnotationBlocks) blockNumber++
                     } else if (summary != null && expandedDiagram == null) {
                         // The dialog starts its diagram work asynchronously too.  Keep the rest of
                         // the Markdown preview responsive while large attachments rasterize.
                         AppText("Rendering ${summary.title.ifBlank { "sequence diagram" }}…", color = tc.td, fontSize = 11.sp)
-                        if (settings.numberAnnotationBlocks) blockNumber++
                     } else {
                         AnnotationMarkdownText(
                             // A diagram note with no drawable model still shouldn't leak its header
                             // into the preview; stripping is a no-op for an ordinary note.
                             text = if (summary != null) stripDiagramHeaderFast(block.text) else block.text,
                             tc = tc,
-                            numberPrefix = if (settings.numberAnnotationBlocks) "${blockNumber++}. " else null,
+                            numberPrefix = numberPrefix,
                         )
                     }
                 }
@@ -2196,11 +2292,12 @@ private fun rememberAnnotationLogLineContext(
 internal fun AnnotationMarkdownText(text: String, tc: ThemeColors, numberPrefix: String? = null) {
     if (text.isBlank() && numberPrefix == null) return
     val content: @Composable () -> Unit = {
-        val markdownState = rememberMarkdownState(content = text.ifBlank { " " })
+        val markdownState = rememberMarkdownState(content = annotationMarkdownRenderSource(text).ifBlank { " " })
         Markdown(
             markdownState,
             colors = annotationMarkdownColors(tc),
             typography = annotationMarkdownTypography(tc),
+            annotator = ANNOTATION_MARKDOWN_ANNOTATOR,
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -2327,6 +2424,7 @@ private fun BlockTextField(
     placeholder: String,
     tc: ThemeColors,
     fieldFocusRequester: FocusRequester?,
+    secondaryFocusRequester: FocusRequester? = null,
     onFieldFocusChanged: (Boolean) -> Unit,
 ) {
     var isFocused by remember { mutableStateOf(false) }
@@ -2339,6 +2437,7 @@ private fun BlockTextField(
             .background(tc.bg, FIELD_CORNER)
             .border(1.dp, tc.br, FIELD_CORNER)
             .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
+            .then(if (secondaryFocusRequester != null) Modifier.focusRequester(secondaryFocusRequester) else Modifier)
             .onFocusChanged { isFocused = it.isFocused; onFieldFocusChanged(it.isFocused) }
             .then(if (value.isEmpty() && isFocused) Modifier.heightIn(min = 52.dp) else Modifier)
             .padding(horizontal = 8.dp, vertical = 5.dp),
@@ -2347,6 +2446,74 @@ private fun BlockTextField(
             inner()
         },
     )
+}
+
+/**
+ * Shared inline Markdown/read-write field used by ordinary note, log-caption, and image-caption
+ * cards. Empty values deliberately remain a real editor even when inline
+ * rendering is enabled, so a newly-created card is immediately writable. A non-empty rendered
+ * value switches to the card's raw field and focuses it when clicked; losing focus returns to the
+ * rendered view while the card's pencil action remains the full dialog editor.
+ */
+@Composable
+private fun MarkdownInlineOrTextField(
+    value: String,
+    placeholder: String,
+    tc: ThemeColors,
+    renderInlineMarkdown: Boolean,
+    fieldFocusRequester: FocusRequester?,
+    onFieldFocusChanged: (Boolean) -> Unit,
+    onValueChange: (String) -> Unit,
+) {
+    var inlineEditing by remember { mutableStateOf(false) }
+    var hasFocusedInlineEditor by remember { mutableStateOf(false) }
+    val inlineEditRequester = remember { FocusRequester() }
+
+    LaunchedEffect(inlineEditing) {
+        if (inlineEditing) {
+            // The raw field is introduced by the state change above. Wait for that composition to
+            // attach its requester before asking it to take focus.
+            withFrameNanos { }
+            runCatching { inlineEditRequester.requestFocus() }
+        } else {
+            hasFocusedInlineEditor = false
+        }
+    }
+
+    if (renderInlineMarkdown && value.isNotBlank() && !inlineEditing) {
+        var hovered by remember(value) { mutableStateOf(false) }
+        Box(
+            Modifier.fillMaxWidth()
+                .background(if (hovered) tc.hv else Color.Transparent, FIELD_CORNER)
+                .clip(FIELD_CORNER)
+                .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.TEXT_CURSOR)))
+                .clickable { inlineEditing = true }
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+        ) {
+            AnnotationMarkdownText(value, tc)
+        }
+    } else {
+        BlockTextField(
+            value = value,
+            onValueChange = onValueChange,
+            placeholder = placeholder,
+            tc = tc,
+            fieldFocusRequester = fieldFocusRequester,
+            secondaryFocusRequester = inlineEditRequester,
+            onFieldFocusChanged = { focused ->
+                if (focused) {
+                    hasFocusedInlineEditor = true
+                } else if (inlineEditing && hasFocusedInlineEditor) {
+                    // Losing focus is the return-to-rendered gesture. The callback from the
+                    // parent still runs so panel-level keyboard state remains accurate.
+                    inlineEditing = false
+                }
+                onFieldFocusChanged(focused)
+            },
+        )
+    }
 }
 
 /** Renamed from "+ Add text block" per the note popup redesign's user-decision override: the
@@ -2462,13 +2629,14 @@ private fun NoteBlock(
                 },
             )
         } else {
-            BlockTextField(
+            MarkdownInlineOrTextField(
                 value = block.text,
-                onValueChange = onUpdate,
                 placeholder = "Write your note…",
                 tc = tc,
+                renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
                 fieldFocusRequester = fieldFocusRequester,
                 onFieldFocusChanged = onFieldFocusChanged,
+                onValueChange = onUpdate,
             )
         }
     }
@@ -2567,12 +2735,16 @@ private fun DiagramNoteView(
     // function contributes exactly one child to the block card's body — the caller relies on that
     // to keep the outer 7dp block-body spacing from doubling up with spacing in here.
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        BlockTextField(
+        // Diagram captions are ordinary Markdown notes too. Keep the diagram's encoded model
+        // source separate, but give its caption the same setting-dependent rendered/read-write
+        // field as text, log, and image captions.
+        MarkdownInlineOrTextField(
             value = summary.caption,
-            onValueChange = { caption -> updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText) },
             placeholder = "Add a caption…",
             tc = tc,
+            renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
             fieldFocusRequester = fieldFocusRequester,
+            onValueChange = { caption -> updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText) },
             onFieldFocusChanged = onFieldFocusChanged,
         )
         DiagramSummaryRow(summary = summary, tc = tc, expanded = expanded, onToggleExpanded = onToggleExpanded)
@@ -2841,13 +3013,14 @@ private fun LogRefBlock(
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             ) { AppText("from ${block.sourceFilename}", color = tc.ac, fontSize = 9.sp, fontFamily = MONO) }
         }
-        BlockTextField(
+        MarkdownInlineOrTextField(
             value = block.caption,
-            onValueChange = onUpdateCaption,
             placeholder = "Add a note…",
             tc = tc,
+            renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
             fieldFocusRequester = fieldFocusRequester,
             onFieldFocusChanged = onFieldFocusChanged,
+            onValueChange = onUpdateCaption,
         )
         LogExcerpt(
             rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
@@ -2976,11 +3149,13 @@ private fun LogExcerptLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
 private fun ImageBlockView(
     block: AnnBlock.Image,
     tc: ThemeColors,
+    settings: AppSettings,
     isFirst: Boolean, isLast: Boolean,
     focused: Boolean,
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
     onUpdateCaption: (String) -> Unit,
+    onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onAddBelow: () -> Unit,
@@ -3001,17 +3176,19 @@ private fun ImageBlockView(
                 "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
                 onNavigate = onNavigateVideoFrame,
                 onCopyImage = onCopyImage,
+                onEdit = onEdit,
                 dragHandleModifier = dragHandleModifier,
             )
         },
     ) {
-        BlockTextField(
+        MarkdownInlineOrTextField(
             value = block.caption,
-            onValueChange = onUpdateCaption,
             placeholder = "Add a caption…",
             tc = tc,
+            renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
             fieldFocusRequester = fieldFocusRequester,
             onFieldFocusChanged = onFieldFocusChanged,
+            onValueChange = onUpdateCaption,
         )
         // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — it
         // disappears entirely for a pasted or dropped image, which is why this is one nullable

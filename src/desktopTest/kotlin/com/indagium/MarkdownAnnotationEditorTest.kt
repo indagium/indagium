@@ -2,12 +2,24 @@ package com.indagium
 
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
+import com.indagium.model.AppSettings
 import com.indagium.ui.MarkdownFormatAction
 import com.indagium.ui.applyMarkdownFormat
+import com.indagium.ui.annotationMarkdownRenderSource
+import com.indagium.ui.annotationMarkdownSoftLineBreaksEnabled
 import com.indagium.ui.continueMarkdownListOnEnter
+import com.indagium.ui.retainedMarkdownSelectionAfterEditorUpdate
 import com.indagium.ui.restoreMarkdownSelection
+import com.indagium.ui.settingsFromJson
+import com.indagium.ui.settingsJson
+import org.intellij.markdown.MarkdownElementTypes
+import org.intellij.markdown.ast.ASTNode
+import org.intellij.markdown.flavours.commonmark.CommonMarkFlavourDescriptor
+import org.intellij.markdown.parser.MarkdownParser
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -86,6 +98,141 @@ class MarkdownAnnotationEditorTest {
         val restored = restoreMarkdownSelection(collapsed, TextRange(0, 5))
 
         assertEquals("**crash**", applyMarkdownFormat(restored, MarkdownFormatAction.Bold).text)
+    }
+
+    @Test
+    fun toolbarFocusCollapseRetainsTheNewlyFormattedSelectionForSecondClick() {
+        val initial = TextFieldValue("crash", TextRange(0, 5))
+        val first = applyMarkdownFormat(initial, MarkdownFormatAction.Bold)
+        // This is the value BasicTextField can report when clicking the toolbar: the text is
+        // unchanged but the selected range collapses at the former selection's end.
+        val focusCollapse = first.copy(selection = TextRange(first.selection.end))
+        val retained = retainedMarkdownSelectionAfterEditorUpdate(first, focusCollapse, null)
+        val second = applyMarkdownFormat(
+            restoreMarkdownSelection(focusCollapse, retained),
+            MarkdownFormatAction.Bold,
+        )
+
+        assertEquals("crash", second.text)
+        assertEquals(TextRange(0, 5), second.selection)
+    }
+
+    @Test
+    fun inlineActionsToggleExistingFormattingOff() {
+        val expected = mapOf(
+            MarkdownFormatAction.Bold to "**crash**",
+            MarkdownFormatAction.Italic to "*crash*",
+            MarkdownFormatAction.Strikethrough to "~~crash~~",
+            MarkdownFormatAction.InlineCode to "`crash`",
+            MarkdownFormatAction.CodeBlock to "```\ncrash\n```",
+            MarkdownFormatAction.Link to "[crash](url)",
+        )
+        expected.forEach { (action, formatted) ->
+            val first = applyMarkdownFormat(TextFieldValue("crash", TextRange(0, 5)), action)
+            val second = applyMarkdownFormat(first, action)
+
+            assertEquals(formatted, first.text, action.name)
+            assertEquals("crash", second.text, action.name)
+            assertEquals(TextRange(0, 5), second.selection, action.name)
+        }
+    }
+
+    @Test
+    fun lineActionsToggleExistingMarkersOff() {
+        val text = "first\nsecond"
+        val selected = TextFieldValue(text, TextRange(0, text.length))
+
+        val bullets = applyMarkdownFormat(selected, MarkdownFormatAction.BulletList)
+        val unbulleted = applyMarkdownFormat(bullets, MarkdownFormatAction.BulletList)
+        val headings = applyMarkdownFormat(selected, MarkdownFormatAction.Heading2)
+        val unheaded = applyMarkdownFormat(headings, MarkdownFormatAction.Heading2)
+
+        assertEquals("- first\n- second", bullets.text)
+        assertEquals(text, unbulleted.text)
+        assertEquals("## first\n## second", headings.text)
+        assertEquals(text, unheaded.text)
+    }
+
+    @Test
+    fun quoteAndNumberedListActionsToggleExistingMarkersOff() {
+        val text = "first\nsecond"
+        val selected = TextFieldValue(text, TextRange(0, text.length))
+
+        val quotes = applyMarkdownFormat(selected, MarkdownFormatAction.Quote)
+        val unquoted = applyMarkdownFormat(quotes, MarkdownFormatAction.Quote)
+        val numbered = applyMarkdownFormat(selected, MarkdownFormatAction.NumberedList)
+        val unnumbered = applyMarkdownFormat(numbered, MarkdownFormatAction.NumberedList)
+
+        assertEquals("> first\n> second", quotes.text)
+        assertEquals(text, unquoted.text)
+        assertEquals("1. first\n2. second", numbered.text)
+        assertEquals(text, unnumbered.text)
+    }
+
+    @Test
+    fun mixedListSelectionNormalizesExistingMarkersWithoutNesting() {
+        val bulletText = "- first\nsecond\n* third"
+        val bullets = applyMarkdownFormat(
+            TextFieldValue(bulletText, TextRange(0, bulletText.length)),
+            MarkdownFormatAction.BulletList,
+        )
+        val quoteText = "> first\nsecond\n> third"
+        val quotes = applyMarkdownFormat(
+            TextFieldValue(quoteText, TextRange(0, quoteText.length)),
+            MarkdownFormatAction.Quote,
+        )
+        val numberText = "1. first\nsecond\n3. third"
+        val numbered = applyMarkdownFormat(
+            TextFieldValue(numberText, TextRange(0, numberText.length)),
+            MarkdownFormatAction.NumberedList,
+        )
+
+        assertEquals("- first\n- second\n- third", bullets.text)
+        assertEquals("> first\n> second\n> third", quotes.text)
+        assertEquals("1. first\n2. second\n3. third", numbered.text)
+    }
+
+    @Test
+    fun inlineMarkdownSettingDefaultsOnAndRoundTripsThroughKeyedSettings() {
+        assertTrue(AppSettings().renderAnnotationMarkdownInline)
+        assertFalse(settingsFromJson(AppSettings(renderAnnotationMarkdownInline = false).settingsJson())!!
+            .renderAnnotationMarkdownInline)
+        assertTrue(settingsFromJson("{}")!!.renderAnnotationMarkdownInline)
+    }
+
+    @Test
+    fun annotationRendererKeepsSoftLineBreaksVisible() {
+        assertTrue(annotationMarkdownSoftLineBreaksEnabled())
+    }
+
+    @Test
+    fun standaloneClosingBoldDelimiterRendersAsOneMultilineStrongSpan() {
+        val source = "**first\nsecond\nthird\n**"
+        val renderSource = annotationMarkdownRenderSource(source)
+
+        assertEquals("**first\nsecond\nthird**", renderSource)
+        val tree = MarkdownParser(CommonMarkFlavourDescriptor()).buildMarkdownTreeFromString(renderSource)
+        val strong = assertNotNull(findNode(tree, MarkdownElementTypes.STRONG), "the normalized source must parse as a strong span")
+        assertEquals("first\nsecond\nthird", renderSource.substring(strong.startOffset + 2, strong.endOffset - 2))
+    }
+
+    @Test
+    fun standaloneDelimitersInsideCodeFencesRemainLiteral() {
+        val source = "```\n**\nnot bold\n**\n```"
+
+        assertEquals(source, annotationMarkdownRenderSource(source))
+    }
+
+    @Test
+    fun fencedCodeBreaksRenderOnlyDelimiterTrackingWithoutTouchingFenceLines() {
+        val source = "**before\n```\n**\n```\nafter\n**"
+
+        assertEquals(source, annotationMarkdownRenderSource(source))
+    }
+
+    private fun findNode(node: ASTNode, type: org.intellij.markdown.IElementType): ASTNode? {
+        if (node.type == type) return node
+        return node.children.asSequence().mapNotNull { findNode(it, type) }.firstOrNull()
     }
 
     // ── continueMarkdownListOnEnter: Enter continues a list/quote item ──────────────────────

@@ -63,6 +63,8 @@ internal enum class MarkdownFormatAction {
     Link,
 }
 
+private data class MarkdownCaretBounds(val offset: Int, val top: Float, val bottom: Float)
+
 /**
  * Applies a Markdown formatting action without losing the editor's selection. Inline actions wrap
  * the selected text (or select a useful placeholder), while line actions affect the current line
@@ -96,10 +98,51 @@ internal fun restoreMarkdownSelection(value: TextFieldValue, retainedSelection: 
         value
     }
 
+/**
+ * Tracks the selection that the editor had immediately before a toolbar click moved focus away
+ * from it. Compose can report that focus transition as a new [TextFieldValue] with a collapsed
+ * caret, even though the user never collapsed the selection. Keep the previous range in that
+ * specific same-text case so a second toolbar click still toggles the text just formatted.
+ */
+internal fun retainedMarkdownSelectionAfterEditorUpdate(
+    previous: TextFieldValue,
+    updated: TextFieldValue,
+    retainedSelection: TextRange?,
+): TextRange? = when {
+    updated.selection.start != updated.selection.end -> updated.selection
+    updated.text != previous.text -> null
+    retainedSelection != null -> retainedSelection
+    previous.selection.start != previous.selection.end -> previous.selection
+    else -> null
+}
+
 private fun wrapMarkdown(value: TextFieldValue, prefix: String, suffix: String, placeholder: String): TextFieldValue {
     val start = minOf(value.selection.start, value.selection.end)
     val end = maxOf(value.selection.start, value.selection.end)
-    val content = value.text.substring(start, end).ifEmpty { placeholder }
+
+    // Clicking a toolbar button a second time should undo the same formatting. The common case
+    // is the selection left inside the markers by the first click (e.g. `**|text|**`), but also
+    // handle a user selecting the complete formatted fragment (`|**text**|`) so the action feels
+    // like a real toggle whichever selection gesture was used.
+    val hasSurroundingMarkers = start >= prefix.length && end + suffix.length <= value.text.length &&
+        value.text.startsWith(prefix, start - prefix.length) && value.text.startsWith(suffix, end)
+    if (hasSurroundingMarkers) {
+        val text = value.text.removeRange(end, end + suffix.length)
+            .removeRange(start - prefix.length, start)
+        val unwrappedStart = start - prefix.length
+        return TextFieldValue(text, TextRange(unwrappedStart, unwrappedStart + (end - start)))
+    }
+
+    val selectedText = value.text.substring(start, end)
+    if (selectedText.length >= prefix.length + suffix.length &&
+        selectedText.startsWith(prefix) && selectedText.endsWith(suffix)
+    ) {
+        val inner = selectedText.substring(prefix.length, selectedText.length - suffix.length)
+        val text = value.text.replaceRange(start, end, inner)
+        return TextFieldValue(text, TextRange(start, start + inner.length))
+    }
+
+    val content = selectedText.ifEmpty { placeholder }
     val replacement = "$prefix$content$suffix"
     val text = value.text.replaceRange(start, end, replacement)
     val selectedStart = start + prefix.length
@@ -112,16 +155,62 @@ private fun prefixMarkdownLines(value: TextFieldValue, prefix: String): TextFiel
     val lineStart = value.text.lastIndexOf('\n', start - 1).let { it + 1 }
     val effectiveEnd = if (end > start && end <= value.text.length && value.text[end - 1] == '\n') end - 1 else end
     val lineEnd = value.text.indexOf('\n', effectiveEnd).takeIf { it >= 0 } ?: value.text.length
-    val replacement = value.text.substring(lineStart, lineEnd)
-        .split('\n')
-        .joinToString("\n") { "$prefix$it" }
+    val lines = value.text.substring(lineStart, lineEnd).split('\n')
+    val replacement = when {
+        // Heading actions set the requested level when switching levels, and toggle that level
+        // off when it is already active. This avoids producing invalid `# ## title` chains.
+        prefix.startsWith("#") -> {
+            val heading = Regex("^(\\s*)#{1,6}\\s")
+            if (lines.all { it.startsWith(prefix) }) {
+                lines.joinToString("\n") { it.removePrefix(prefix) }
+            } else {
+                lines.joinToString("\n") { line ->
+                    val match = heading.find(line)
+                    val indent = match?.groupValues?.get(1).orEmpty()
+                    val content = match?.let { line.removeRange(it.range) } ?: line
+                    "$indent$prefix$content"
+                }
+            }
+        }
+        // Bullets and quotes also toggle off when every selected line already has a marker. Any
+        // other selected line is prefixed, preserving the existing behaviour for mixed blocks.
+        prefix == "- " -> {
+            val bullet = Regex("^(\\s*)[-*+]\\s")
+            if (lines.all { bullet.containsMatchIn(it) }) {
+                lines.joinToString("\n") { line ->
+                    bullet.find(line)?.let { line.removeRange(it.range) } ?: line
+                }
+            } else {
+                lines.joinToString("\n") { line ->
+                    val match = bullet.find(line)
+                    val indent = match?.groupValues?.get(1).orEmpty()
+                    val content = match?.let { line.removeRange(it.range) } ?: line
+                    "$indent$prefix$content"
+                }
+            }
+        }
+        prefix == "> " -> {
+            val quote = Regex("^(\\s*)>\\s")
+            if (lines.all { quote.containsMatchIn(it) }) {
+                lines.joinToString("\n") { line -> quote.find(line)?.let { line.removeRange(it.range) } ?: line }
+            } else {
+                lines.joinToString("\n") { line ->
+                    val match = quote.find(line)
+                    val indent = match?.groupValues?.get(1).orEmpty()
+                    val content = match?.let { line.removeRange(it.range) } ?: line
+                    "$indent$prefix$content"
+                }
+            }
+        }
+        else -> lines.joinToString("\n") { "$prefix$it" }
+    }
     val text = value.text.replaceRange(lineStart, lineEnd, replacement)
     return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
 }
 
 // Matches a numbered-list line's leading "N. " marker, used only to detect the number to continue
 // from — the line directly above a numbered-list toolbar selection.
-private val NUMBERED_LINE_MARKER = Regex("""^(\d+)\.\s""")
+private val NUMBERED_LINE_MARKER = Regex("""^(\s*)(\d+)[.)]\s""")
 
 /** Like [prefixMarkdownLines] but for [MarkdownFormatAction.NumberedList]: each selected line gets
  *  an incrementing "1. ", "2. ", "3. ", … instead of the same literal prefix repeated on every
@@ -139,15 +228,22 @@ private fun numberMarkdownLines(value: TextFieldValue): TextFieldValue {
         val prevLineEnd = lineStart - 1 // index of the '\n' right before lineStart
         val prevLineStart = value.text.lastIndexOf('\n', prevLineEnd - 1).let { it + 1 }
         val prevLine = value.text.substring(prevLineStart, prevLineEnd)
-        NUMBERED_LINE_MARKER.find(prevLine)?.groupValues?.get(1)?.toIntOrNull()?.plus(1) ?: 1
+        NUMBERED_LINE_MARKER.find(prevLine)?.groupValues?.get(2)?.toIntOrNull()?.plus(1) ?: 1
     } else {
         1
     }
 
-    val replacement = value.text.substring(lineStart, lineEnd)
-        .split('\n')
-        .mapIndexed { index, line -> "${startNumber + index}. $line" }
-        .joinToString("\n")
+    val lines = value.text.substring(lineStart, lineEnd).split('\n')
+    val replacement = if (lines.all { NUMBERED_LINE_MARKER.containsMatchIn(it) }) {
+        lines.joinToString("\n") { line ->
+            NUMBERED_LINE_MARKER.find(line)?.let { line.removeRange(it.range) } ?: line
+        }
+    } else {
+        lines.mapIndexed { index, line ->
+            val content = NUMBERED_LINE_MARKER.find(line)?.let { line.removeRange(it.range) } ?: line
+            "${startNumber + index}. $content"
+        }.joinToString("\n")
+    }
     val text = value.text.replaceRange(lineStart, lineEnd, replacement)
     return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
 }
@@ -332,19 +428,16 @@ internal fun AnnotationMarkdownEditorDialog(
     }
 
     fun updateEditor(updated: TextFieldValue) {
-        val isSelection = updated.selection.start != updated.selection.end
-        if (isSelection) {
-            retainedSelection = updated.selection
-        } else if (updated.text != editorValue.text) {
-            retainedSelection = null
-        }
+        retainedSelection = retainedMarkdownSelectionAfterEditorUpdate(editorValue, updated, retainedSelection)
         editorValue = updated
     }
 
     fun applyFormat(action: MarkdownFormatAction) {
         val valueForAction = restoreMarkdownSelection(editorValue, retainedSelection)
-        retainedSelection = null
         editorValue = applyMarkdownFormat(valueForAction, action)
+        // Keep the newly selected formatted content available if the toolbar click causes a
+        // second focus-collapse callback before the next action is dispatched.
+        retainedSelection = editorValue.selection.takeIf { it.start != it.end }
         runCatching { editorFocusRequester.requestFocus() }
     }
 
@@ -725,6 +818,33 @@ private fun MarkdownWriteArea(
 ) {
     val tc = tc()
     val editorScroll = rememberScrollState()
+    val density = LocalDensity.current
+    var caretBounds by remember { mutableStateOf<MarkdownCaretBounds?>(null) }
+
+    // BasicTextField owns the scrollable viewport, so BringIntoViewRequester cannot target the
+    // caret (the field itself is the viewport). Use the layout's exact caret rectangle instead,
+    // keeping the cursor visible as text grows past the bottom or when the user moves it with the
+    // arrow keys. The effect is keyed only by editor content/selection and therefore never fights
+    // an intentional mouse-wheel scroll while the user is merely reading the draft.
+    LaunchedEffect(value.text, value.selection, caretBounds, editorScroll.viewportSize, editorScroll.maxValue) {
+        val caret = caretBounds?.takeIf { it.offset == value.selection.end } ?: return@LaunchedEffect
+        if (value.selection.start != value.selection.end) return@LaunchedEffect
+        // Let the text field publish its new scroll range after a line was added before deciding
+        // how far to move. Without this frame boundary a fast append can observe maxValue == 0,
+        // clamp the desired target to zero, and never get another key change to correct it.
+        withFrameNanos { }
+        val margin = with(density) { 8.dp.toPx() }
+        val viewport = editorScroll.viewportSize.toFloat()
+        if (viewport <= 0f) return@LaunchedEffect
+        val current = editorScroll.value.toFloat()
+        val target = when {
+            caret.top < current + margin -> (caret.top - margin).coerceAtLeast(0f)
+            caret.bottom > current + viewport - margin -> caret.bottom - viewport + margin
+            else -> return@LaunchedEffect
+        }
+        editorScroll.animateScrollTo(target.roundToInt().coerceIn(0, editorScroll.maxValue))
+    }
+
     Box(Modifier.fillMaxSize()) {
         BasicTextField(
             value = value,
@@ -757,6 +877,12 @@ private fun MarkdownWriteArea(
                 }
                 .padding(horizontal = 14.dp, vertical = 12.dp)
                 .verticalScroll(editorScroll),
+            onTextLayout = { result ->
+                val offset = value.selection.end.coerceIn(0, value.text.length)
+                val rect = result.getCursorRect(offset)
+                val next = MarkdownCaretBounds(offset, rect.top, rect.bottom)
+                if (caretBounds != next) caretBounds = next
+            },
             decorationBox = { inner ->
                 if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
                 inner()
