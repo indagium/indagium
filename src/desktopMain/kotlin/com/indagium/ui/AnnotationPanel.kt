@@ -12,10 +12,13 @@ import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
@@ -99,6 +102,7 @@ import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
@@ -114,6 +118,7 @@ private const val DIAGRAM_ROW_HIT_TOLERANCE = 21.0
 private const val BLOCK_DRAG_SNAP_BIAS = 0.25f
 private const val AUTO_SCROLL_SPEED_FACTOR = 0.6f
 private const val STICK_TO_BOTTOM_THRESHOLD_DP = 24f
+private const val BLOCK_RESIZE_ANCHOR_LIFETIME_MS = 3_000L
 
 // How long the "can't verify this log" notice (Change 2c's unverifiable-relink case) stays up
 // before auto-dismissing — long enough to read, short enough not to linger as stale chrome.
@@ -1052,6 +1057,10 @@ fun AnnotationPanel(
             mutableStateOf(scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx)
         }
         var blockResizeScrollAnchor by remember(tab.id) { mutableStateOf<BlockResizeScrollAnchor?>(null) }
+        // Set around the anchor's own scroll.scrollTo(...) below. scroll.isScrollInProgress flips
+        // true for that programmatic scroll exactly as it would for a real drag/wheel scroll, so
+        // the user-scroll detector a little further down needs this flag to tell the two apart.
+        var applyingAnchorScroll by remember(tab.id) { mutableStateOf(false) }
         // Captures the block's current on-screen viewport position before an expand/collapse
         // toggle changes its height, so the effect below can keep that position once the new
         // height settles — shared by the diagram note's expand/collapse and every LogRef excerpt
@@ -1071,17 +1080,40 @@ fun AnnotationPanel(
             snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
                 .collect { if (blockResizeScrollAnchor == null) stickToBottom = it }
         }
+        // Clears the anchor the instant the user takes over scrolling by hand. Not keyed on
+        // blockResizeScrollAnchor — it needs to keep watching across an anchor's whole lifetime
+        // (which now spans several height changes, see below), not resubscribe on every one.
+        LaunchedEffect(scroll, tab.id) {
+            snapshotFlow { scroll.isScrollInProgress }
+                .collect { inProgress -> if (inProgress && !applyingAnchorScroll) blockResizeScrollAnchor = null }
+        }
         LaunchedEffect(totalBlockHeightPx, scroll, blockResizeScrollAnchor) {
             val anchor = blockResizeScrollAnchor
             if (anchor != null) {
+                if (blockStartOffsets[anchor.blockId] == null) {
+                    // Anchored block is gone (removed/reordered away mid-toggle) — nothing left to
+                    // track.
+                    blockResizeScrollAnchor = null
+                    return@LaunchedEffect
+                }
                 val currentHeight = blockHeightOf(anchor.blockId)
                 if (kotlin.math.abs(currentHeight - anchor.blockHeightPx) > 0.5f) {
                     withFrameNanos { }
                     val blockTop = blockStartOffsets[anchor.blockId] ?: 0f
                     val targetScroll = (blockTop - anchor.viewportTopPx).roundToInt()
+                    applyingAnchorScroll = true
                     scroll.scrollTo(targetScroll.coerceIn(0, scroll.maxValue))
-                    blockResizeScrollAnchor = null
-                    stickToBottom = false
+                    applyingAnchorScroll = false
+                    // Re-baseline to the height we just applied instead of clearing the anchor: a
+                    // cold-cache diagram expand can still grow this same block a second time (the
+                    // "Rendering diagram…" placeholder swapping for the tall image after this
+                    // effect already reacted once), and without this the anchor would be gone by
+                    // then, stickToBottom would already have snapped back to true in between (the
+                    // panel is at the bottom), and the second growth would jump the scroll instead
+                    // of following it. The anchor now stays live until the user scrolls, a drag
+                    // starts, the block disappears, Next steps gains focus, the highlightedBlockId
+                    // effect scrolls, or a new anchorBeforeBlockResize call replaces it outright.
+                    blockResizeScrollAnchor = anchor.copy(blockHeightPx = currentHeight)
                 }
             } else if (stickToBottom) {
                 scroll.scrollTo(scroll.maxValue)
@@ -1097,9 +1129,32 @@ fun AnnotationPanel(
             withFrameNanos { }
             scroll.scrollTo(scroll.maxValue)
         }
+        // A still-live anchor would make the effect above bail out forever once the field is
+        // focused (it never clears itself), so drop it here instead — the growth-follow above then
+        // takes over on the next run.
+        LaunchedEffect(suffixFocused) {
+            if (suffixFocused) blockResizeScrollAnchor = null
+        }
+        // Bound the anchor's lifetime so it can't silently disable stick-to-bottom for the rest of
+        // the session: a cold diagram render lands well within this window, after which ordinary
+        // behaviour (including stickToBottom re-evaluation) resumes. Any block list change (add,
+        // remove, reorder) also ends it, since the anchored layout no longer applies.
+        LaunchedEffect(blockResizeScrollAnchor?.blockId, blockResizeScrollAnchor?.viewportTopPx) {
+            if (blockResizeScrollAnchor != null) {
+                delay(BLOCK_RESIZE_ANCHOR_LIFETIME_MS)
+                blockResizeScrollAnchor = null
+            }
+        }
+        LaunchedEffect(blockIds) {
+            blockResizeScrollAnchor = null
+        }
         LaunchedEffect(highlightedBlockId, tab.id, blockStartOffsets[highlightedBlockId]) {
             val target = highlightedBlockId ?: return@LaunchedEffect
             if (ann.blocks.none { it.id == target }) return@LaunchedEffect
+            // An AI-driven jump to a specific block is a stronger, more direct signal than whatever
+            // resize anchor might still be live — let it win outright rather than racing the anchor
+            // effect for the next scrollTo.
+            blockResizeScrollAnchor = null
             scroll.scrollTo((blockStartOffsets[target] ?: 0f).roundToInt())
         }
         Box(Modifier.fillMaxSize()) {
@@ -1300,6 +1355,10 @@ fun AnnotationPanel(
                                         dragOffsetY = 0f
                                         justReleasedBlockId = null
                                         liveVisualBlockIds = currentBlockIds.value
+                                        // A reorder drag is the user taking manual control of the
+                                        // panel's layout — any resize anchor still tracking an
+                                        // earlier expand/collapse no longer applies.
+                                        blockResizeScrollAnchor = null
                                     },
                                     onDrag = { change, delta ->
                                         change.consume()
@@ -2587,7 +2646,23 @@ private fun DiagramNoteView(
             }
             when {
                 expandedDiagram == null -> {
-                    AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
+                    // Rendering (parse + rasterize on Dispatchers.Default, see rememberExpandedDiagram)
+                    // is usually fast enough on a warm cache that showing this hint immediately would
+                    // just add a second height change to the block — first this short line appears,
+                    // then it's replaced by the tall image, jumping the panel's scroll anchor twice.
+                    // Waiting ~350ms before showing anything means a quick render grows the block once,
+                    // straight to the image, same as a warm open; only a genuinely slow render (cold
+                    // cache) shows the placeholder at all.
+                    var showRenderingHint by remember(expanded) { mutableStateOf(false) }
+                    LaunchedEffect(expanded) {
+                        if (expanded) {
+                            delay(350)
+                            showRenderingHint = true
+                        }
+                    }
+                    if (showRenderingHint) {
+                        AppText("Rendering diagram…", color = tc.td, fontSize = 11.sp)
+                    }
                 }
                 expandedDiagram.display == null -> {
                     // A diagram note written by an older build, or hand-authored: the fence still exports
@@ -3063,7 +3138,7 @@ private fun BlockControls(
             ) {
                 // Leads the actions group, before the arrows — see BlockHeaderLayout's doc for
                 // why this can never be the thing that gets clipped.
-                if (onCopyImage != null) CopyImageBadge(onClick = onCopyImage)
+                if (onCopyImage != null) CopyImageIconButton(onClick = onCopyImage)
                 if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
                 if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
                 // Icon button (not a text label) that opens the full editor dialog — placed right
@@ -3075,28 +3150,44 @@ private fun BlockControls(
     )
 }
 
-// "copy image" rendered as a bordered badge in the same visual family as
-// DiagramExportModeSwitcher's Img|Src pills, rather than the plain LabelIconButton it used to be —
-// it now leads the actions group (before ↑/↓) so it reads as a distinct, always-visible affordance
-// instead of one more text button jostling for space next to ×.
+// Same 18dp footprint/hover convention as EditIconButton/SquareIconButton, rendering an icon-only
+// glyph instead of the old "copy image" text badge — a copy glyph with a small picture badge
+// pinned at its bottom-end so it reads as "copy this image" rather than a generic copy action.
 @Composable
-private fun CopyImageBadge(onClick: () -> Unit) {
+private fun CopyImageIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(6.dp)
-    TooltipArea(tooltip = { ToolbarTooltip("Copy as PNG to the clipboard") }) {
+    TooltipArea(tooltip = { ToolbarTooltip("Copy image to clipboard") }) {
         Box(
-            Modifier.height(18.dp)
-                .background(if (hovered) tc.hv else Color.Transparent, shape)
-                .border(0.5.dp, tc.br, shape)
-                .clip(shape)
+            modifier
+                .size(18.dp)
+                .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
                 .clickable(onClick = onClick)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
-                .onPointerEvent(PointerEventType.Exit) { hovered = false }
-                .padding(horizontal = 7.dp),
+                .onPointerEvent(PointerEventType.Exit) { hovered = false },
             contentAlignment = Alignment.Center,
         ) {
-            AppText("copy image", color = tc.ts, fontSize = 10.sp)
+            Box(Modifier.size(14.dp)) {
+                Icon(
+                    Icons.Outlined.ContentCopy,
+                    contentDescription = "Copy image to clipboard",
+                    tint = tc.td,
+                    modifier = Modifier.size(13.dp).align(Alignment.TopStart),
+                )
+                Box(
+                    Modifier.align(Alignment.BottomEnd)
+                        .background(tc.p, CircleShape)
+                        .padding(1.dp),
+                ) {
+                    Icon(
+                        Icons.Filled.Image,
+                        contentDescription = null,
+                        tint = tc.td,
+                        modifier = Modifier.size(8.dp),
+                    )
+                }
+            }
         }
     }
 }
