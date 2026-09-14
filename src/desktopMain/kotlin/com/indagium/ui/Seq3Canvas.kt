@@ -39,7 +39,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Login
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Height
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.OpenWith
 import androidx.compose.material.icons.outlined.Schedule
@@ -80,6 +82,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.diagram3.Seq3ActivationBar
+import com.indagium.diagram3.Seq3ActivationEvent
 import com.indagium.diagram3.Seq3ArrowRow
 import com.indagium.diagram3.Seq3Box
 import com.indagium.diagram3.Seq3BulkAction
@@ -98,6 +102,7 @@ import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageNoteRow
 import com.indagium.diagram3.Seq3NoteBox
+import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.Seq3Repeat
 import com.indagium.diagram3.Seq3RowGeometry
 import com.indagium.diagram3.Seq3Selection
@@ -106,9 +111,14 @@ import com.indagium.diagram3.Seq3StateInvariantBox
 import com.indagium.diagram3.Seq3StubTerminal
 import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.seq3ActivationSpans
 import com.indagium.diagram3.seq3ArrowStyle
+import com.indagium.diagram3.seq3IsValidManualActivationEnd
 import com.indagium.diagram3.seq3LifelineSegments
+import com.indagium.diagram3.seq3ManualActivationEndLimit
+import com.indagium.diagram3.seq3ResolveManualActivations
 import com.indagium.diagram3.seq3Select
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -381,6 +391,9 @@ private fun Seq3CanvasContent(
     // returns. `remember(session.id)` so switching to a different open v3 workspace never carries a
     // stale preview over.
     var dragPreview by remember(session.id) { mutableStateOf<Seq3EndpointDragPreview?>(null) }
+    // Phase 2: live preview while dragging a manual activation bar's bottom resize handle — same
+    // "hoisted here so the draw pass can read it every frame" shape as [dragPreview] just above.
+    var manualActivationDragPreview by remember(session.id) { mutableStateOf<Seq3ManualActivationDragPreview?>(null) }
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val viewportWidth = maxWidth.value.toDouble()
         val viewportHeight = maxHeight.value.toDouble()
@@ -429,12 +442,18 @@ private fun Seq3CanvasContent(
                                 view.hoveredFragmentId,
                                 view.selectedNoteId,
                                 view.hoveredNoteId,
+                                view.selectedManualActivationId,
+                                view.hoveredManualActivationId,
+                                manualActivationDragPreview,
                             )
                         }
                         layout.fragments.forEach { fragment -> Seq3FragmentLabelOverlay(state, session, view, fragment, docTheme) }
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row, docTheme) }
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
                         layout.delays.forEach { delay -> Seq3DelayLabelOverlay(state, session, view, delay, docTheme) }
+                        Seq3ManualActivationOverlays(state, session, view, layout, document, docTheme) { preview ->
+                            manualActivationDragPreview = preview
+                        }
                         // WP18: shape painted in drawSeq3Diagram below (the shapes-vs-text split
                         // WP6 already established for fragment dividers); the text itself is a
                         // plain, non-interactive overlay — see Seq3StateInvariantTextOverlay's own
@@ -1012,6 +1031,11 @@ private fun DrawScope.drawSeq3Diagram(
     hoveredFragmentId: String? = null,
     selectedNoteId: String? = null,
     hoveredNoteId: String? = null,
+    // Phase 2: manual activation bar select/hover/drag-preview — mirrors the fragment/note pairs
+    // just above, same "thicker accent stroke" language extended to a manually-placed bar.
+    selectedManualActivationId: String? = null,
+    hoveredManualActivationId: String? = null,
+    manualActivationDragPreview: Seq3ManualActivationDragPreview? = null,
 ) {
     val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
     layout.fragments.forEach { fragment ->
@@ -1065,7 +1089,7 @@ private fun DrawScope.drawSeq3Diagram(
     // WP2: UML activation bars — pulled into its own DrawScope function (drawSeq3ActivationBars,
     // just below) purely to keep drawSeq3Diagram itself under this file's detekt LongMethod
     // threshold; ordering/rationale live on that function's own doc.
-    drawSeq3ActivationBars(layout, tc)
+    drawSeq3ActivationBars(layout, tc, selectedManualActivationId, hoveredManualActivationId, manualActivationDragPreview)
     layout.rows.forEach { row ->
         val draggingMessage = dragPreview?.messageId == row.messageId
         val draggingOccurrenceEntryId = dragPreview?.occurrenceEntryId
@@ -1187,23 +1211,353 @@ private fun DrawScope.drawSeq3Diagram(
  * meaning instead of adding a distinct one; see `Seq3Raster.kt`'s `paintActivationBar` for the
  * renderer this is required to stay pixel-structurally in step with.
  */
-private fun DrawScope.drawSeq3ActivationBars(layout: Seq3Layout, tc: ThemeColors) {
+// Phase 2: a selected/hovered MANUAL bar (never an auto one — [Seq3ActivationBar.manualId] is
+// null for those) draws with an accent border, same "thicker accent stroke" language every other
+// emphasized shape in this file already uses. While the bottom handle is being dragged, the bar
+// being resized additionally dims its own committed fill and grows an accent-outlined preview
+// rectangle down to the live snapped candidate — so the user always sees both "what it is right
+// now" (dimmed) and "what it will become on release" (the outline) at once, rather than one
+// replacing the other mid-drag.
+private const val SEQ3_ACTIVATION_DRAG_DIM_ALPHA = 0.35f
+private const val SEQ3_ACTIVATION_PREVIEW_FILL_ALPHA = 0.18f
+
+private fun DrawScope.drawSeq3ActivationBars(
+    layout: Seq3Layout,
+    tc: ThemeColors,
+    selectedManualActivationId: String? = null,
+    hoveredManualActivationId: String? = null,
+    manualActivationDragPreview: Seq3ManualActivationDragPreview? = null,
+) {
     layout.activations.forEach { bar ->
+        val isPreviewing = bar.manualId != null && bar.manualId == manualActivationDragPreview?.manualId
+        val isEmphasized = bar.manualId != null &&
+            (bar.manualId == selectedManualActivationId || bar.manualId == hoveredManualActivationId)
         val topLeft = Offset(bar.box.x.dp.toPx(), bar.box.y.dp.toPx())
         val size = Size(bar.box.width.dp.toPx(), bar.box.height.dp.toPx())
-        drawRect(color = tc.p2, topLeft = topLeft, size = size)
+        val fillColor = if (isPreviewing) tc.p2.copy(alpha = SEQ3_ACTIVATION_DRAG_DIM_ALPHA) else tc.p2
+        drawRect(color = fillColor, topLeft = topLeft, size = size)
         val left = topLeft.x
         val top = topLeft.y
         val right = topLeft.x + size.width
         val bottom = topLeft.y + size.height
-        val strokeWidth = 1.dp.toPx()
-        drawLine(color = tc.br, start = Offset(left, top), end = Offset(right, top), strokeWidth = strokeWidth) // top edge
-        drawLine(color = tc.br, start = Offset(left, top), end = Offset(left, bottom), strokeWidth = strokeWidth) // left edge
-        drawLine(color = tc.br, start = Offset(right, top), end = Offset(right, bottom), strokeWidth = strokeWidth) // right edge
+        val strokeColor = if (isEmphasized) tc.ac else tc.br
+        val strokeWidth = (if (isEmphasized) 2 else 1).dp.toPx()
+        drawLine(color = strokeColor, start = Offset(left, top), end = Offset(right, top), strokeWidth = strokeWidth) // top edge
+        drawLine(color = strokeColor, start = Offset(left, top), end = Offset(left, bottom), strokeWidth = strokeWidth) // left edge
+        drawLine(color = strokeColor, start = Offset(right, top), end = Offset(right, bottom), strokeWidth = strokeWidth) // right edge
         if (!bar.unmatched) {
             // bottom edge — omitted when unmatched, mirroring Seq3Raster.paintActivationBar
-            drawLine(color = tc.br, start = Offset(left, bottom), end = Offset(right, bottom), strokeWidth = strokeWidth)
+            drawLine(color = strokeColor, start = Offset(left, bottom), end = Offset(right, bottom), strokeWidth = strokeWidth)
         }
+        if (isPreviewing) {
+            val previewBottom = manualActivationDragPreview.bottomY.dp.toPx()
+            val previewSize = Size(size.width, (previewBottom - top).coerceAtLeast(0f))
+            drawRect(color = tc.ac.copy(alpha = SEQ3_ACTIVATION_PREVIEW_FILL_ALPHA), topLeft = Offset(left, top), size = previewSize)
+            drawRect(color = tc.ac, topLeft = Offset(left, top), size = previewSize, style = Stroke(width = 2.dp.toPx()))
+        }
+    }
+}
+
+// ── Phase 2: manual activation bars — end candidates, snapping, and the interactive overlay ────
+//
+// Rebuilds its own emission-index space from [Seq3Layout.rows] (`seq3ActivationEventFromRow`
+// below) rather than reaching into `Seq3Layout.kt`'s own PRIVATE one (`buildActivationBars`'
+// `rowYByIndex`, `expandForLayout`) — this file already walks `layout.rows` for hit testing, so a
+// second, ui-local mirror of "row -> activation event" keeps every consumer here in one place, and
+// stays consistent BY CONSTRUCTION with [Seq3Layout.activations]' own geometry: every candidate's
+// [Seq3ActivationEndCandidate.bottomY] is read directly off a row the SAME [layout] already placed.
+
+/** One candidate bottom position phase 2's drag-to-resize (and the pure builder,
+ *  `Seq3Workspace.kt`'s `seq3BuildManualActivation`) can snap a manual activation bar's end to. A
+ *  null [messageId] is the "until the end of the diagram" candidate — [com.indagium.diagram3
+ *  .Seq3ManualActivation.endMessageId]'s own null contract. */
+internal data class Seq3ActivationEndCandidate(
+    val messageId: String?,
+    val occurrenceEntryId: Int?,
+    val bottomY: Double,
+)
+
+/** Live drag state for a manual activation bar's bottom handle — [manualId] identifies which bar
+ *  in [Seq3Layout.activations] to dim/outline, [bottomY] is the CURRENT snapped candidate's own
+ *  [Seq3ActivationEndCandidate.bottomY]. Hoisted in [Seq3CanvasContent], mirroring
+ *  [Seq3EndpointDragPreview]'s identical "read every frame by the draw pass" shape. */
+internal data class Seq3ManualActivationDragPreview(val manualId: String, val bottomY: Double)
+
+private fun seq3ActivationEventFromRow(index: Int, row: Seq3RowGeometry): Seq3ActivationEvent = when (row) {
+    is Seq3ArrowRow -> Seq3ActivationEvent(index, row.messageId, row.kind, row.fromLifelineId, row.toLifelineId)
+    is Seq3SelfLoopRow -> Seq3ActivationEvent(index, row.messageId, Seq3Kind.SELF, row.lifelineId, row.lifelineId)
+    is Seq3UnresolvedStubRow -> Seq3ActivationEvent(index, row.messageId, Seq3Kind.NOTE, row.fromLifelineId, null)
+    is Seq3MessageNoteRow -> Seq3ActivationEvent(index, row.messageId, Seq3Kind.NOTE, row.lifelineId, null)
+    is Seq3ElisionRow -> Seq3ActivationEvent(index, row.messageId, Seq3Kind.NOTE, row.lifelineId, null)
+}
+
+/** The same "bottom of what this row draws" rule `Seq3Layout.kt`'s own (private) `rowVerticalExtent`
+ *  uses: every row's own `y` except a self-loop, whose bar-ending bottom is its `loopBottomY`. */
+private fun seq3RowBottomY(row: Seq3RowGeometry): Double = when (row) {
+    is Seq3SelfLoopRow -> row.loopBottomY
+    else -> row.y
+}
+
+/**
+ * Every valid bottom-end position the manual activation bar [manualId] (a
+ * [com.indagium.diagram3.Seq3ManualActivation.id] in [document]'s own
+ * [com.indagium.diagram3.Seq3Document.manualActivations]) can currently resolve to, in row order —
+ * phase 2's drag-to-resize snaps to the nearest of these via [seq3SnapActivationEnd] rather than
+ * free-placing the bar's bottom anywhere the cursor happens to be, so the committed bar always
+ * matches exactly what [com.indagium.diagram3.layoutSeq3] itself would draw for that end. Also the
+ * building block `Seq3Workspace.kt`'s `seq3BuildManualActivation` reuses to validate/fall back a
+ * freshly-created bar's own default end.
+ *
+ * Empty when [manualId] doesn't currently resolve to a bar at all (hidden, deleted, or its
+ * [com.indagium.diagram3.Seq3ManualActivation.lifelineId] no longer visible) — nothing to offer a
+ * drag against.
+ */
+internal fun seq3ManualActivationEndCandidates(
+    layout: Seq3Layout,
+    document: Seq3Document,
+    manualId: String,
+): List<Seq3ActivationEndCandidate> {
+    val rows = layout.rows
+    if (rows.isEmpty()) return emptyList()
+    val lifelineIds = layout.lifelines.map { it.lifelineId }.toSet()
+    val firstIndexByMessage = HashMap<String, Int>()
+    val lastIndexByMessage = HashMap<String, Int>()
+    val indexByOccurrence = HashMap<Seq3OccurrenceRef, Int>()
+    rows.forEachIndexed { index, row ->
+        firstIndexByMessage.putIfAbsent(row.messageId, index)
+        lastIndexByMessage[row.messageId] = index
+        row.occurrenceEntryId?.let { entryId -> indexByOccurrence[Seq3OccurrenceRef(row.messageId, entryId)] = index }
+    }
+    val lastIndex = rows.lastIndex
+    val resolvedManual = seq3ResolveManualActivations(
+        document.manualActivations, lifelineIds, firstIndexByMessage, lastIndexByMessage, indexByOccurrence, lastIndex,
+    )
+    val current = resolvedManual.firstOrNull { it.id == manualId } ?: return emptyList()
+    val autoSpans = if (document.showActivations) {
+        seq3ActivationSpans(rows.mapIndexed(::seq3ActivationEventFromRow), lastIndex)
+    } else {
+        emptyList()
+    }
+    val endLimit = seq3ManualActivationEndLimit(
+        autoSpans, resolvedManual, current.lifelineId, current.startIndex, lastIndex, excludeManualId = manualId,
+    )
+    val candidates = mutableListOf<Seq3ActivationEndCandidate>()
+    for (index in current.startIndex..minOf(endLimit, lastIndex)) {
+        val valid = seq3IsValidManualActivationEnd(
+            autoSpans, resolvedManual, current.lifelineId, current.startIndex, index, lastIndex, excludeManualId = manualId,
+        )
+        if (!valid) continue
+        val row = rows[index]
+        candidates += Seq3ActivationEndCandidate(row.messageId, row.occurrenceEntryId, seq3RowBottomY(row))
+    }
+    // "End of diagram" (endMessageId == null) always resolves to [lastIndex] IN INDEX SPACE — see
+    // Seq3ManualActivation's own doc — so it's offered exactly when a bar reaching all the way to
+    // the last row is itself valid (same probe, just with a null messageId/occurrenceEntryId). Its
+    // own bottomY, though (user-observed correction), is the owning lifeline's own bottom — the
+    // SAME [Seq3LifelineColumn.lifelineBottom] `Seq3Layout.kt`'s `buildActivationBars` now draws a
+    // `toDiagramEnd` bar down to — NOT the last row's own y: those two coincide only when a
+    // lifeline's dashed guide line happens to end exactly at its final row, which is not the usual
+    // case (a lifeline keeps a little margin below its last row). Using the last row's own y here
+    // made this candidate's bottomY collide with the last real row's own candidate, and
+    // seq3SnapActivationEnd's own tie-break (first in list order) then made "end of diagram"
+    // unreachable by dragging — a null end must stay strictly BELOW every real row's candidate so a
+    // drag past the last row can actually land on it.
+    val diagramEndValid = seq3IsValidManualActivationEnd(
+        autoSpans, resolvedManual, current.lifelineId, current.startIndex, lastIndex, lastIndex, excludeManualId = manualId,
+    )
+    if (diagramEndValid) {
+        val lifelineBottom = layout.lifelines.firstOrNull { it.lifelineId == current.lifelineId }?.lifelineBottom
+            ?: seq3RowBottomY(rows[lastIndex])
+        candidates += Seq3ActivationEndCandidate(null, null, lifelineBottom)
+    }
+    return candidates
+}
+
+/** Nearest [candidates] entry to [pointerBottomY] — a tie keeps the FIRST one in [candidates]' own
+ *  row order, so dragging past the last real row and landing exactly on the "end of diagram"
+ *  candidate (same Y as the last row's own — see [seq3ManualActivationEndCandidates]'s own doc)
+ *  deterministically prefers the real row over the diagram-end sentinel. `null` only when
+ *  [candidates] itself is empty. */
+internal fun seq3SnapActivationEnd(candidates: List<Seq3ActivationEndCandidate>, pointerBottomY: Double): Seq3ActivationEndCandidate? =
+    candidates.minByOrNull { abs(it.bottomY - pointerBottomY) }
+
+// Extra hit width beyond the bar's own [ACTIVATION_W] (10dp — Seq3Layout.kt), split evenly on
+// each side, so a narrow bar is still comfortably clickable — the task's own ">= 8dp total" floor.
+private val SEQ3_ACTIVATION_HIT_EXTRA_W = 8.dp
+private val SEQ3_ACTIVATION_HANDLE_H = 8.dp
+private val SEQ3_ACTIVATION_CTX_MENU_WIDTH = 220.dp
+
+/** One [Seq3ManualActivationOverlay] per manually-placed bar in [layout] — the interactive
+ *  hit-box/resize-handle/context-menu affordance phase 2 adds on top of [drawSeq3ActivationBars]'
+ *  shape-only paint. An auto bar ([Seq3ActivationBar.manualId] null) gets no overlay at all: it is
+ *  not interactive, exactly like every other WP2 activation bar before this phase. */
+@Composable
+private fun Seq3ManualActivationOverlays(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    layout: Seq3Layout,
+    document: Seq3Document,
+    docTheme: ThemeColors,
+    onDragPreview: (Seq3ManualActivationDragPreview?) -> Unit,
+) {
+    layout.activations.forEach { bar ->
+        val manualId = bar.manualId ?: return@forEach
+        Seq3ManualActivationOverlay(state, session, view, layout, document, bar, manualId, docTheme, onDragPreview)
+    }
+}
+
+@Composable
+private fun Seq3ManualActivationOverlay(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    layout: Seq3Layout,
+    document: Seq3Document,
+    bar: Seq3ActivationBar,
+    manualId: String,
+    docTheme: ThemeColors,
+    onDragPreview: (Seq3ManualActivationDragPreview?) -> Unit,
+) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    val focusRequester = LocalSeq3FocusRequester.current
+    val handleCursor = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
+    var menuOpen by remember(session.id, manualId) { mutableStateOf(false) }
+    var dragDeltaY by remember(session.id, manualId, bar.box) { mutableStateOf(0f) }
+    val latestDeltaY = rememberUpdatedState(dragDeltaY)
+    // Stable for the gesture's own lifetime: the document/layout can't change mid-drag (no command
+    // applies until release), and re-keying on `layout` picks up a genuine geometry change (a new
+    // `Seq3Layout` — a data class — compares unequal) without recomputing on every delta tick.
+    val candidates = remember(session.id, manualId, layout) { seq3ManualActivationEndCandidates(layout, document, manualId) }
+
+    fun reclaimFocus() {
+        focusRequester?.let { runCatching { it.requestFocus() } }
+    }
+
+    fun closeMenu() {
+        menuOpen = false
+        reclaimFocus()
+    }
+
+    fun selectBar() {
+        seq3ClearSelection(view, clearFocus = true)
+        view.selectedManualActivationId = manualId
+    }
+
+    val hitExtraW = SEQ3_ACTIVATION_HIT_EXTRA_W.value.toDouble()
+    val hitBox = bar.box.copy(x = bar.box.x - hitExtraW / 2, width = bar.box.width + hitExtraW)
+
+    Box(
+        Modifier
+            .offset(hitBox.x.dp, hitBox.y.dp)
+            .size(hitBox.width.dp, hitBox.height.dp)
+            .onPointerEvent(PointerEventType.Enter) { view.hoveredManualActivationId = manualId }
+            .onPointerEvent(PointerEventType.Exit) { if (view.hoveredManualActivationId == manualId) view.hoveredManualActivationId = null }
+            .pointerInput(session.id, manualId) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Main)
+                        if (event.type != PointerEventType.Press) continue
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (change.isConsumed) continue
+                        when {
+                            event.buttons.isSecondaryPressed -> {
+                                change.consume()
+                                selectBar()
+                                menuOpen = true
+                            }
+                            event.buttons.isPrimaryPressed -> {
+                                change.consume()
+                                selectBar()
+                                reclaimFocus()
+                            }
+                        }
+                    }
+                }
+            },
+    ) {
+        if (menuOpen) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(LocalDensity.current) { hitBox.height.dp.roundToPx() }),
+                onDismissRequest = ::closeMenu,
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(SEQ3_ACTIVATION_CTX_MENU_WIDTH)
+                        .shadow(8.dp, RoundedCornerShape(7.dp))
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    CtxItem(Icons.Outlined.Delete, "Remove activation block") {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteManualActivation(manualId)),
+                        )
+                        if (view.selectedManualActivationId == manualId) view.selectedManualActivationId = null
+                        if (view.hoveredManualActivationId == manualId) view.hoveredManualActivationId = null
+                        closeMenu()
+                    }
+                    CtxItem(Icons.Outlined.VisibilityOff, "Hide activation block") {
+                        state.seq3Sessions.applyCommand(
+                            session.id,
+                            Seq3Command.Bulk(emptySet(), Seq3BulkAction.SetManualActivationVisibility(manualId, Seq3Visibility.HIDDEN)),
+                        )
+                        closeMenu()
+                    }
+                }
+            }
+        }
+        // Bottom resize handle — a thin strip centered on the bar's own bottom edge, matching
+        // `VDivider`'s (Components.kt) S_RESIZE_CURSOR + `dragCursorOverride` recipe exactly, so the
+        // cursor stays a resize arrow for the whole drag even if the pointer briefly outruns this
+        // 8dp-tall strip.
+        Box(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .width(hitBox.width.dp)
+                .height(SEQ3_ACTIVATION_HANDLE_H)
+                .pointerHoverIcon(PointerIcon(handleCursor))
+                .pointerInput(session.id, manualId, bar.box) {
+                    detectDragGestures(
+                        onDragStart = { dragCursorOverride.value = handleCursor },
+                        onDrag = { change, amount ->
+                            change.consume()
+                            dragDeltaY += amount.y
+                            val candidateBottomY = bar.box.y + bar.box.height + latestDeltaY.value / density
+                            val snapped = seq3SnapActivationEnd(candidates, candidateBottomY)
+                            onDragPreview(snapped?.let { Seq3ManualActivationDragPreview(manualId, it.bottomY) })
+                        },
+                        onDragEnd = {
+                            val candidateBottomY = bar.box.y + bar.box.height + latestDeltaY.value / density
+                            val snapped = seq3SnapActivationEnd(candidates, candidateBottomY)
+                            dragDeltaY = 0f
+                            dragCursorOverride.value = null
+                            onDragPreview(null)
+                            val currentActivation = document.manualActivations.firstOrNull { it.id == manualId }
+                            if (snapped != null && currentActivation != null &&
+                                (snapped.messageId != currentActivation.endMessageId || snapped.occurrenceEntryId != currentActivation.endOccurrenceEntryId)
+                            ) {
+                                state.seq3Sessions.applyCommand(
+                                    session.id,
+                                    Seq3Command.Bulk(
+                                        emptySet(),
+                                        Seq3BulkAction.SetManualActivationEnd(manualId, snapped.messageId, snapped.occurrenceEntryId),
+                                    ),
+                                )
+                            }
+                            reclaimFocus()
+                        },
+                        onDragCancel = {
+                            dragDeltaY = 0f
+                            dragCursorOverride.value = null
+                            onDragPreview(null)
+                        },
+                    )
+                },
+        )
     }
 }
 
@@ -1995,6 +2349,24 @@ private fun Seq3CanvasContextMenu(
                 seq3InsertDelayAfter(state, session, messageId, afterOccurrenceEntryId = occurrenceEntryId)
                 view.canvasContextMenuMessageId = null
                 view.canvasContextMenuOccurrenceEntryId = null
+            }
+            // Phase 2 (manual-UML-activation-bars): "Add activation block" targets the message's
+            // own RECEIVER, "Add activation on sender" its SENDER — see
+            // seq3ManualActivationReceiverLifelineId/seq3ManualActivationSenderLifelineId's own
+            // gating doc (Seq3Workspace.kt) for exactly which kinds/self-messages hide each item.
+            // Same exact-occurrence-over-message-default anchoring as "Insert delay after this"
+            // just above; seq3AddManualActivation closes the menu and selects the new bar itself.
+            message?.let { msg ->
+                seq3ManualActivationReceiverLifelineId(msg)?.let { receiverLifelineId ->
+                    CtxItem(Icons.Outlined.Height, "Add activation block") {
+                        seq3AddManualActivation(state, session, view, document, messageId, occurrenceEntryId, receiverLifelineId)
+                    }
+                }
+                seq3ManualActivationSenderLifelineId(msg)?.let { senderLifelineId ->
+                    CtxItem(Icons.Outlined.Height, "Add activation on sender") {
+                        seq3AddManualActivation(state, session, view, document, messageId, occurrenceEntryId, senderLifelineId)
+                    }
+                }
             }
             // WP7 item 1 (canvas half): only offered inside an ALT/PAR/CRITICAL fragment — see
             // seq3OperandFragmentIdAt's own doc for the "innermost fragment wins" tie-break and why

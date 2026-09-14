@@ -70,6 +70,9 @@ import com.indagium.diagram3.Seq3Filter
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3GuidedPassState
+import com.indagium.diagram3.Seq3Kind
+import com.indagium.diagram3.Seq3ManualActivation
+import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageLabelStyle
 import com.indagium.diagram3.Seq3Note
 import com.indagium.diagram3.Seq3OccurrenceRef
@@ -77,6 +80,7 @@ import com.indagium.diagram3.Seq3Operand
 import com.indagium.diagram3.Seq3Selection
 import com.indagium.diagram3.Seq3Sort
 import com.indagium.diagram3.Seq3Visibility
+import com.indagium.diagram3.seq3DefaultManualActivationEnd
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
 import com.indagium.model.ThemePreset
@@ -1144,6 +1148,14 @@ internal class Seq3ViewState {
     /** The delay counterpart of [hoveredFragmentId] above — same contract. */
     var hoveredDelayId by mutableStateOf<String?>(null)
 
+    /** The manual-activation-bar counterpart of [selectedFragmentId] above — same contract, backing
+     *  both the canvas overlay (phase 2 of the manual-activation-bars feature) and the Artifacts
+     *  panel's own activation-block row. */
+    var selectedManualActivationId by mutableStateOf<String?>(null)
+
+    /** The manual-activation-bar counterpart of [hoveredFragmentId] above — same contract. */
+    var hoveredManualActivationId by mutableStateOf<String?>(null)
+
     /** Non-null while the guided pass MODE is on screen (spec §05). A mode, not a dialog, so it
      *  lives here beside the other view state rather than in a dialog-visibility flag on the
      *  session — exiting it must never touch the document. */
@@ -1276,6 +1288,7 @@ internal fun seq3ClearSelection(view: Seq3ViewState, clearFocus: Boolean = false
         view.selectedFragmentId = null
         view.selectedNoteId = null
         view.selectedDelayId = null
+        view.selectedManualActivationId = null
         view.selectedLifelineId = null
     }
 }
@@ -1296,6 +1309,13 @@ internal fun seq3ToggleNoteSelection(view: Seq3ViewState, noteId: String) {
 /** The delay counterpart of [seq3ToggleFragmentSelection] above — same contract. */
 internal fun seq3ToggleDelaySelection(view: Seq3ViewState, delayId: String) {
     view.selectedDelayId = if (view.selectedDelayId == delayId) null else delayId
+}
+
+/** The manual-activation-bar counterpart of [seq3ToggleFragmentSelection] above — same contract,
+ *  backing the Artifacts panel's own activation-block row (phase 2 of the manual-activation-bars
+ *  feature). */
+internal fun seq3ToggleManualActivationSelection(view: Seq3ViewState, manualActivationId: String) {
+    view.selectedManualActivationId = if (view.selectedManualActivationId == manualActivationId) null else manualActivationId
 }
 
 /** The lifeline counterpart of [seq3ToggleFragmentSelection] above — same contract. This is the
@@ -1397,6 +1417,101 @@ internal fun seq3InsertDelayAfter(
         afterOccurrenceEntryId = afterOccurrenceEntryId,
     )
     return state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddDelay(delay)))
+}
+
+// ── Phase 2 (manual-UML-activation-bars): canvas "Add activation block"/"Add activation on
+// sender" ────────────────────────────────────────────────────────────────────────────────────
+
+/** True when [message] has a drawable RECEIVER a manual activation bar can be placed on — the
+ *  canvas context menu's "Add activation block" gate. A NOTE/LOST/FOUND message's `toLifelineId`
+ *  is meaningless even when non-null (see [Seq3Kind.NOTE]'s own doc), so those three kinds are
+ *  excluded explicitly rather than relying on nullness alone. */
+internal fun seq3ManualActivationReceiverLifelineId(message: Seq3Message): String? {
+    if (message.kind == Seq3Kind.NOTE || message.kind == Seq3Kind.LOST || message.kind == Seq3Kind.FOUND) return null
+    return message.toLifelineId
+}
+
+/** The sender counterpart of [seq3ManualActivationReceiverLifelineId] above — the canvas context
+ *  menu's "Add activation on sender" gate. Hidden for a [Seq3Kind.FOUND] message: that kind's own
+ *  doc reads `fromLifelineId` as the RECEIVER (there is no observable sender to place a bar on) —
+ *  and for a self message (`fromLifelineId == toLifelineId`), where the receiver item above
+ *  already targets the one lifeline involved, so a second, identically-targeted item would only
+ *  duplicate it under a different label. */
+internal fun seq3ManualActivationSenderLifelineId(message: Seq3Message): String? {
+    if (message.kind == Seq3Kind.FOUND) return null
+    if (message.fromLifelineId == message.toLifelineId) return null
+    return message.fromLifelineId
+}
+
+/**
+ * Builds the [Seq3ManualActivation] "Add activation block"/"Add activation on sender" should add —
+ * pure given [document] and the caller-minted [id], so this is what [Seq3WorkspaceTest] exercises
+ * directly without a live `AppState`/session. Starts at ([startMessageId], [startOccurrenceEntryId])
+ * on [lifelineId] and defaults its end via [seq3DefaultManualActivationEnd]; when that default
+ * isn't itself a valid end (an already-placed manual or auto bar on the same lifeline would clamp
+ * it — see `seq3IsValidManualActivationEnd`'s own doc, Seq3Activation.kt), falls back to the
+ * FARTHEST reachable valid end and, failing even that (nothing valid past the start row at all),
+ * to a zero-length bar right at the start.
+ *
+ * Reuses [seq3ManualActivationEndCandidates] (Seq3Canvas.kt) against a throwaway PROBE document
+ * (this activation added under [id]) rather than re-deriving the same validity/limit logic by
+ * hand — the one guarantee this needs, agreeing with what phase 2's own drag-to-resize would offer
+ * for the identical bar, falls out for free from calling the same function. Building a probe
+ * [Seq3Document] costs nothing extra to lay out: a manual activation adds no drawn row of its own,
+ * so `Seq3RenderCache.layout` recomputes only the (cheap) activation-bar pass, not the message
+ * rows/columns pass.
+ */
+internal fun seq3BuildManualActivation(
+    document: Seq3Document,
+    id: String,
+    lifelineId: String,
+    startMessageId: String,
+    startOccurrenceEntryId: Int?,
+): Seq3ManualActivation {
+    val default = seq3DefaultManualActivationEnd(document, lifelineId, startMessageId, startOccurrenceEntryId)
+    val provisional = Seq3ManualActivation(
+        id = id,
+        lifelineId = lifelineId,
+        startMessageId = startMessageId,
+        startOccurrenceEntryId = startOccurrenceEntryId,
+        endMessageId = default?.first,
+        endOccurrenceEntryId = default?.second,
+    )
+    val probeDocument = document.copy(manualActivations = document.manualActivations + provisional)
+    val layout = Seq3RenderCache.layout(probeDocument)
+    val candidates = seq3ManualActivationEndCandidates(layout, probeDocument, id)
+    val matchesDefault = candidates.any { it.messageId == provisional.endMessageId && it.occurrenceEntryId == provisional.endOccurrenceEntryId }
+    if (matchesDefault) return provisional
+    val fallback = candidates.lastOrNull()
+    return provisional.copy(
+        endMessageId = fallback?.messageId ?: startMessageId,
+        endOccurrenceEntryId = fallback?.occurrenceEntryId ?: startOccurrenceEntryId,
+    )
+}
+
+/** Fires "Add activation block"/"Add activation on sender": mints the id, builds the activation via
+ *  [seq3BuildManualActivation], applies it, selects the new bar, and closes the canvas context menu
+ *  — mirrors [seq3AddNote]'s own "caller mints the id, this fires the bulk action AND closes the
+ *  menu itself" shape (rather than [seq3InsertDelayAfter]'s, whose call sites close the menu
+ *  themselves), since minting the id here is also what [selectedManualActivationId] needs. */
+internal fun seq3AddManualActivation(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    messageId: String,
+    occurrenceEntryId: Int?,
+    lifelineId: String,
+): Boolean {
+    val id = "seq3-activation-${UUID.randomUUID()}"
+    val activation = seq3BuildManualActivation(document, id, lifelineId, messageId, occurrenceEntryId)
+    val applied = state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddManualActivation(activation)))
+    if (applied) {
+        view.selectedManualActivationId = id
+        view.canvasContextMenuMessageId = null
+        view.canvasContextMenuOccurrenceEntryId = null
+    }
+    return applied
 }
 
 // ── Fragment operands (WP7): canvas "Begin `else` branch here" ─────────────────────────────────
@@ -1821,10 +1936,12 @@ internal fun applySeq3Escape(state: AppState, session: Seq3WorkspaceSession, vie
     // This branch sits ahead of the message-selection branch below: a panel row is the more
     // "local"/recent selection layer, so Esc peels it off first, same as it already peels off a
     // context menu or a marquee rect before falling through to the broader message selection.
-    view.selectedFragmentId != null || view.selectedNoteId != null || view.selectedDelayId != null || view.selectedLifelineId != null -> {
+    view.selectedFragmentId != null || view.selectedNoteId != null || view.selectedDelayId != null ||
+        view.selectedManualActivationId != null || view.selectedLifelineId != null -> {
         view.selectedFragmentId = null
         view.selectedNoteId = null
         view.selectedDelayId = null
+        view.selectedManualActivationId = null
         view.selectedLifelineId = null
         true
     }

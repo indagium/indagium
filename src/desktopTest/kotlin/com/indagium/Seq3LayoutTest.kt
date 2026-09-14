@@ -1725,7 +1725,14 @@ class Seq3LayoutTest {
     }
 
     @Test
-    fun manualActivationWithANullEndReachesTheLastDrawnRow() {
+    fun manualActivationWithANullEndReachesTheLifelinesOwnBottomNotJustItsLastRow() {
+        // User-observed correction: this used to reach only the last drawn row's own y — but a
+        // manual bar with a null end means "keep reaching the bottom even if more messages are
+        // added later" (Seq3ManualActivation's own doc), and a lifeline's dashed guide line ends
+        // BELOW its last row (see resolveSeq3LifelineColumn), not exactly at it. Stopping at the
+        // last row's y also made "end of diagram" collide, pixel-for-pixel, with that row's own
+        // candidate — seq3SnapActivationEnd's own tie-break then made the null end unreachable by
+        // dragging (Seq3CanvasTest's own regression coverage for that half of the fix).
         val doc = Seq3Document(
             lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
             messages = listOf(
@@ -1739,7 +1746,18 @@ class Seq3LayoutTest {
 
         val bar = layout.activations.single()
         val lastRow = layout.rows.last { it.messageId == "m3" }
-        assertEquals(lastRow.y, bar.box.y + bar.box.height, "a null end must reach the diagram's own last drawn row")
+        val lifelineBottom = layout.lifelines.single { it.lifelineId == "B" }.lifelineBottom
+
+        assertEquals(
+            lifelineBottom,
+            bar.box.y + bar.box.height,
+            "a null end must reach the SAME bottom the lifeline's own dashed guide line ends at",
+        )
+        assertTrue(
+            bar.box.y + bar.box.height > lastRow.y,
+            "the lifeline's own bottom sits strictly below its last drawn row's own y",
+        )
+        assertTrue(layout.height >= bar.box.y + bar.box.height, "the bar must still fit within the diagram's own overall height")
     }
 
     @Test

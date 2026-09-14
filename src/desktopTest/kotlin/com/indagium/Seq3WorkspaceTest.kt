@@ -3,9 +3,12 @@ package com.indagium
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
+import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
+import com.indagium.diagram3.Seq3Occurrence
 import com.indagium.diagram3.Seq3OccurrenceRef
 import com.indagium.diagram3.toMermaid
 import com.indagium.diagram3.toPlantUml
@@ -22,12 +25,15 @@ import com.indagium.ui.mkTab
 import com.indagium.ui.seq3AddNote
 import com.indagium.ui.seq3ArtifactsSectionVisible
 import com.indagium.ui.seq3AutoExpandOccurrences
+import com.indagium.ui.seq3BuildManualActivation
 import com.indagium.ui.seq3ClearSelection
 import com.indagium.ui.seq3CopyTargetLabel
 import com.indagium.ui.seq3CopyTargetText
 import com.indagium.ui.seq3DefaultNotePlacement
 import com.indagium.ui.seq3DisownAutoExpand
 import com.indagium.ui.seq3InsertDelayAfter
+import com.indagium.ui.seq3ManualActivationReceiverLifelineId
+import com.indagium.ui.seq3ManualActivationSenderLifelineId
 import com.indagium.ui.seq3OperandFragmentIdAt
 import com.indagium.ui.seq3PaneSegments
 import com.indagium.ui.seq3PanelVisible
@@ -642,5 +648,130 @@ class Seq3WorkspaceTest {
         val inner = Seq3Fragment("inner", Seq3FragmentKind.PAR, "inner branch", listOf("m1"))
         val doc = operandFixtureDocument(listOf(outer, inner))
         assertEquals("inner", seq3OperandFragmentIdAt(doc, "m1", null), "the more specific (smaller) bracket must win")
+    }
+
+    // ── Phase 2 (manual-UML-activation-bars): seq3BuildManualActivation + the receiver/sender
+    // context-menu gates ─────────────────────────────────────────────────────────────────────
+    //
+    // Pure over a plain Seq3Document — same "no AppState/session fixture needed" shape as
+    // seq3OperandFragmentIdAt's own coverage just above. seq3BuildManualActivation itself stays
+    // pure too: it only ever computes a throwaway Seq3RenderCache.layout(...) probe, never touches
+    // a live session or its undo stack.
+
+    private fun seq3ManualActivationOccurrence(entryId: Int, ts: Long) =
+        Seq3Occurrence(entryId, ts, "10:00:00.000", 1, 1, 'I', "line $entryId")
+
+    private fun seq3ManualActivationMessage(
+        id: String,
+        from: String,
+        to: String?,
+        entryId: Int,
+        ts: Long,
+        kind: Seq3Kind = Seq3Kind.CALL,
+    ) = Seq3Message(
+        id = id,
+        match = Seq3Match(from, "$id-label"),
+        fromLifelineId = from,
+        toLifelineId = to,
+        labelTemplate = "$id-label",
+        kind = kind,
+        occurrences = listOf(seq3ManualActivationOccurrence(entryId, ts)),
+    )
+
+    private fun seq3ManualActivationDocument(messages: List<Seq3Message>, manualActivations: List<Seq3ManualActivation> = emptyList()) =
+        Seq3Document(
+            lifelines = listOf(Seq3Lifeline("A", "A", setOf("A"), 0), Seq3Lifeline("B", "B", setOf("B"), 1)),
+            messages = messages,
+            manualActivations = manualActivations,
+        )
+
+    @Test
+    fun buildManualActivationDefaultsToTheNextRowTouchingTheReceiverLifeline() {
+        val doc = seq3ManualActivationDocument(
+            listOf(
+                seq3ManualActivationMessage("m1", "A", "B", entryId = 1, ts = 1_000L),
+                seq3ManualActivationMessage("m2", "A", "B", entryId = 2, ts = 2_000L),
+            ),
+        )
+
+        val activation = seq3BuildManualActivation(doc, id = "new", lifelineId = "B", startMessageId = "m1", startOccurrenceEntryId = null)
+
+        assertEquals("new", activation.id)
+        assertEquals("B", activation.lifelineId)
+        assertEquals("m1", activation.startMessageId)
+        assertEquals("m2", activation.endMessageId, "m2 is the next drawn row touching the receiver lifeline B")
+    }
+
+    @Test
+    fun buildManualActivationOnTheSenderLifelineDefaultsTheSameWay() {
+        val doc = seq3ManualActivationDocument(
+            listOf(
+                seq3ManualActivationMessage("m1", "A", "B", entryId = 1, ts = 1_000L),
+                seq3ManualActivationMessage("m2", "A", "B", entryId = 2, ts = 2_000L),
+            ),
+        )
+
+        val activation = seq3BuildManualActivation(doc, id = "new", lifelineId = "A", startMessageId = "m1", startOccurrenceEntryId = null)
+
+        assertEquals("A", activation.lifelineId)
+        assertEquals("m2", activation.endMessageId, "m2 also touches A, as its own sender")
+    }
+
+    @Test
+    fun buildManualActivationFallsBackToEndOfDiagramWhenNothingLaterTouchesTheLifeline() {
+        val doc = seq3ManualActivationDocument(listOf(seq3ManualActivationMessage("m1", "A", "B", entryId = 1, ts = 1_000L)))
+
+        val activation = seq3BuildManualActivation(doc, id = "new", lifelineId = "B", startMessageId = "m1", startOccurrenceEntryId = null)
+
+        assertNull(activation.endMessageId, "null means until the end of the diagram")
+    }
+
+    @Test
+    fun buildManualActivationFallsBackWhenTheDefaultEndWouldCrossAnExistingManualBar() {
+        val messages = listOf(
+            seq3ManualActivationMessage("m1", "A", "B", entryId = 1, ts = 1_000L),
+            seq3ManualActivationMessage("m2", "A", "B", entryId = 2, ts = 2_000L),
+            seq3ManualActivationMessage("m3", "A", "B", entryId = 3, ts = 3_000L),
+        )
+        val outer = Seq3ManualActivation(id = "outer", lifelineId = "B", startMessageId = "m1", endMessageId = "m2")
+        val doc = seq3ManualActivationDocument(messages, manualActivations = listOf(outer))
+
+        val activation = seq3BuildManualActivation(doc, id = "new", lifelineId = "B", startMessageId = "m2", startOccurrenceEntryId = null)
+
+        // The naive default (the next row touching B after m2, i.e. m3) would cross "outer"'s own
+        // end at m2 once merged — the builder must fall back to the farthest reachable valid end
+        // instead, which is m2 itself: a zero-length bar clamped right where "outer" already ends.
+        assertEquals("m2", activation.endMessageId)
+    }
+
+    @Test
+    fun manualActivationReceiverAndSenderTargetOppositeEndsOfAnOrdinaryCall() {
+        val message = seq3ManualActivationMessage("m1", "A", "B", entryId = 1, ts = 1_000L)
+        assertEquals("B", seq3ManualActivationReceiverLifelineId(message))
+        assertEquals("A", seq3ManualActivationSenderLifelineId(message))
+    }
+
+    @Test
+    fun manualActivationReceiverIsHiddenForANoteButItsSenderIsNot() {
+        val note = seq3ManualActivationMessage("m1", "A", null, entryId = 1, ts = 1_000L, kind = Seq3Kind.NOTE)
+        assertNull(seq3ManualActivationReceiverLifelineId(note), "a NOTE's toLifelineId is meaningless even when set")
+        assertEquals("A", seq3ManualActivationSenderLifelineId(note), "a NOTE still anchors on (and can bar) its own fromLifelineId")
+    }
+
+    @Test
+    fun manualActivationReceiverAndSenderAreBothHiddenForAFoundMessage() {
+        val found = seq3ManualActivationMessage("m1", "A", null, entryId = 1, ts = 1_000L, kind = Seq3Kind.FOUND)
+        assertNull(seq3ManualActivationReceiverLifelineId(found), "FOUND's toLifelineId is meaningless")
+        assertNull(seq3ManualActivationSenderLifelineId(found), "FOUND's fromLifelineId is really the receiver, not a sender to bar")
+    }
+
+    @Test
+    fun manualActivationSenderIsHiddenForASelfMessageToAvoidDuplicatingTheReceiverItem() {
+        val self = seq3ManualActivationMessage("m1", "A", "A", entryId = 1, ts = 1_000L, kind = Seq3Kind.SELF)
+        assertEquals("A", seq3ManualActivationReceiverLifelineId(self))
+        assertNull(
+            seq3ManualActivationSenderLifelineId(self),
+            "the sender item would target the exact same lifeline the receiver item already does",
+        )
     }
 }

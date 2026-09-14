@@ -74,6 +74,21 @@ data class Seq3ActivationSpan(
      *  unchanged because this has a default). Always null for a span [seq3ActivationSpans] itself
      *  produces; only `seq3MergedActivationSpans` (below) ever sets it. */
     val manualId: String? = null,
+    /** Phase 2: true exactly when this MANUAL span's [endIndex] is [Seq3ManualActivation
+     *  .endMessageId] `== null` ("until the end of the diagram") AND that end survived
+     *  [seq3ResolveActivationCrossings] unclamped — i.e. [endIndex] genuinely reflects the last
+     *  emission, not a row a crossing bar clamped it to. `Seq3Layout.kt`'s `buildActivationBars`
+     *  reads this to draw the bar down to the LIFELINE's own bottom (where its dashed guide line
+     *  ends) instead of the last emission's row y — the two can differ once a manual bar with a
+     *  null end is the LAST thing drawn on a lifeline that keeps a little vertical margin below its
+     *  final row (see that function's own doc). [seq3ResolveActivationCrossings] resets this to
+     *  `false` the moment it clamps a manual span's [endIndex] down to an earlier row: at that
+     *  point the span's true bottom IS that row, not the diagram's, and drawing it at the lifeline's
+     *  bottom would overshoot the very clamp that was just computed. Appended LAST, same convention
+     *  as [manualId]; always `false` for an AUTO span (auto spans have no such "until the end"
+     *  concept — [seq3ActivationSpans]' own rule 1 always closes an unmatched call at a concrete
+     *  row). */
+    val toDiagramEnd: Boolean = false,
 )
 
 /** A push past this depth is dropped rather than nested further — same defensive posture as
@@ -250,6 +265,10 @@ data class Seq3ResolvedManualActivation(
     val lifelineId: String,
     val startIndex: Int,
     val endIndex: Int,
+    /** True exactly when [Seq3ManualActivation.endMessageId] was `null` — see
+     *  [Seq3ActivationSpan.toDiagramEnd]'s own doc for what this drives downstream. Appended LAST,
+     *  same field-versioning convention as that one. */
+    val toDiagramEnd: Boolean = false,
 )
 
 /**
@@ -295,7 +314,7 @@ fun seq3ResolveManualActivations(
             ?: startIndex
     }
     val endIndex = if (resolvedEnd < startIndex) startIndex else resolvedEnd
-    Seq3ResolvedManualActivation(activation.id, activation.lifelineId, startIndex, endIndex)
+    Seq3ResolvedManualActivation(activation.id, activation.lifelineId, startIndex, endIndex, toDiagramEnd = activation.endMessageId == null)
 }
 
 /**
@@ -353,10 +372,12 @@ private fun seq3ResolveActivationCrossings(spans: List<Seq3ActivationSpan>): Lis
                 if (inner.endIndex <= outer.endIndex) continue // properly nested, not a crossing
                 // inner.endIndex > outer.endIndex here: a genuine crossing.
                 if (inner.manualId != null) {
-                    working[innerIdx] = inner.copy(endIndex = outer.endIndex)
+                    // toDiagramEnd = false: the clamp just replaced "until the end of the diagram"
+                    // with a concrete earlier row (outer's own end) — see that field's own doc.
+                    working[innerIdx] = inner.copy(endIndex = outer.endIndex, toDiagramEnd = false)
                     changed = true
                 } else if (outer.manualId != null) {
-                    working[outerIdx] = outer.copy(endIndex = (inner.startIndex - 1).coerceAtLeast(outer.startIndex))
+                    working[outerIdx] = outer.copy(endIndex = (inner.startIndex - 1).coerceAtLeast(outer.startIndex), toDiagramEnd = false)
                     changed = true
                 }
                 // else: both auto — left untouched, see this function's own doc.
@@ -407,7 +428,7 @@ fun seq3MergedActivationSpans(
     autoSpans.forEach { span -> byLifeline.getOrPut(span.lifelineId) { mutableListOf() } += span }
     manual.forEach { m ->
         byLifeline.getOrPut(m.lifelineId) { mutableListOf() } +=
-            Seq3ActivationSpan(m.lifelineId, m.startIndex, m.endIndex, depth = 0, unmatched = false, manualId = m.id)
+            Seq3ActivationSpan(m.lifelineId, m.startIndex, m.endIndex, depth = 0, unmatched = false, manualId = m.id, toDiagramEnd = m.toDiagramEnd)
     }
 
     val result = mutableListOf<Seq3ActivationSpan>()

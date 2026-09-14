@@ -264,6 +264,24 @@ class Seq3ActivationTest {
     }
 
     @Test
+    fun aManualSpanWithANullEndLosesToDiagramEndOnceCrossingClampsItToAnEarlierRow() {
+        // Phase 2 fix: `toDiagramEnd` means "draw down to the lifeline's own bottom", which is only
+        // true once this span's endIndex genuinely reflects the diagram's own last emission. Once a
+        // crossing clamps that endIndex down to an enclosing span's own end (3, here — well short of
+        // the diagram's real lastIndex of 10), the clamped span's bottom IS that row, not the
+        // lifeline's bottom — so the clamp must also turn `toDiagramEnd` off, or Seq3Layout.kt would
+        // draw the (now-shorter) bar all the way to the lifeline's bottom anyway.
+        val auto = listOf(Seq3ActivationSpan("B", 0, 3, depth = 0, unmatched = false))
+        val nullEnded = Seq3ResolvedManualActivation("bar1", "B", 1, 10, toDiagramEnd = true)
+
+        val merged = seq3MergedActivationSpans(auto, listOf(nullEnded), lastIndex = 10)
+
+        val inner = merged.single { it.manualId == "bar1" }
+        assertEquals(3, inner.endIndex, "clamped to the enclosing span's own end")
+        assertFalse(inner.toDiagramEnd, "a clamped span's bottom is the row it was clamped to, not the diagram's own end")
+    }
+
+    @Test
     fun anAutoSpanIsNeverClampedEvenWhenItWouldCrossAnEnclosingManualSpan() {
         // A manual bar opens first (0..3) on B; an auto CALL/RETURN pair nests inside it (starts at
         // 1) but its own RETURN lands at 8, past the manual bar's own end — per this function's own

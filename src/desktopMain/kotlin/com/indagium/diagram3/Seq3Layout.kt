@@ -619,6 +619,12 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // under this file's detekt threshold, the identical reason buildActivationBars below is its
     // own function rather than inlined here.
     val lifecycle = resolveSeq3Lifecycle(emissions, lifelineIndex, rowBuild.rowYByIndex)
+    // Hoisted here (rather than immediately before the lifelineColumns build below, its only other
+    // reader) so buildActivationBars can also use it: a manual activation bar with a null end
+    // (`toDiagramEnd`) needs the SAME per-lifeline bottom `resolveSeq3LifelineColumn` computes for
+    // that lifeline's own dashed guide line, or the two would disagree about where "the end of the
+    // diagram" actually is. See buildActivationBars' own doc for why.
+    val minLifelineTop = MARGIN + headerHeight
 
     // WP10: a CREATE arrow's target box is drawn LOWER than `centers[toIdx]`'s usual full-height
     // position (see the lifelineColumns build below) — see applyCreateArrowStops' own doc. Also
@@ -636,7 +642,9 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // this needs (the showActivations gate, plus one mapNotNull per dangling-reference check) is
     // real work, just work that reads more clearly, and counts against a fresh budget, as its own
     // named function rather than another inline block bolted onto an already-long orchestrator.
-    val activationBars = buildActivationBars(doc, emissions, rowBuild.rowYByIndex, lifelineIndex, centers)
+    val activationBars = buildActivationBars(
+        doc, emissions, rowBuild.rowYByIndex, lifelineIndex, centers, lifecycle, minLifelineTop, rowBuild.bottomY,
+    )
     // WP18: promoted-capture StateInvariant markers — a pure post-pass over the already-placed rows,
     // like buildActivationBars just above; see buildStateInvariantBoxes' own doc for why it needs
     // nothing rowsWithCreateStop itself doesn't already hand back.
@@ -658,7 +666,7 @@ fun layoutSeq3(doc: Seq3Document, opts: Seq3LayoutOptions): Seq3Layout {
     // to `maxLabelLineCount` and the shared band stays tall enough) and `buildRows`' own
     // `y = MARGIN + headerHeight + topGap` origin never moves. Only a created column's OWN header
     // box relocates, below, from that shared band down to its creation row — NO ROW MOVES.
-    val minLifelineTop = MARGIN + headerHeight
+    // (minLifelineTop itself is hoisted above, before buildActivationBars, which needs it too.)
     val lifelineColumns = lifelinesSorted.mapIndexed { i, l ->
         resolveSeq3LifelineColumn(
             i, l, lifecycle, minLifelineTop, rowBuild.bottomY, nameBoxHeight,
@@ -1152,10 +1160,16 @@ private fun activationEventOf(index: Int, emission: Emission): Seq3ActivationEve
  * their own dangling references.
  *
  * "End of diagram" (a manual bar with `endMessageId == null`) resolves to [Emission]s' own
- * `lastIndex` — the same fallback index [seq3ActivationSpans]' own rule 1 already uses for an
- * unmatched AUTO call — so its drawn bottom is the LAST drawn row's own extent, not the lifeline
- * column's full height. Consistent by construction: both cases flow through the identical
- * `rowYByIndex[lastIndex]` lookup below.
+ * `lastIndex` in INDEX space — the same fallback index [seq3ActivationSpans]' own rule 1 already
+ * uses for an unmatched AUTO call, and what [Seq3ActivationSpan.toDiagramEnd] being true actually
+ * signals. Its drawn BOTTOM, though (user-observed correction), is the owning lifeline's own
+ * bottom — [lifecycle]/[minLifelineTop]/[naturalBottomY], the SAME values
+ * `resolveSeq3LifelineColumn` uses for that lifeline's dashed guide line — not the last drawn row's
+ * own y: a null end means "keeps reaching the bottom even if more messages are added later", and a
+ * bar that stopped exactly at the last row's y would visibly fall short of the guide line below it
+ * whenever a lifeline keeps margin under its final row. An index-space "end of diagram" and a
+ * pixel-space "last row's own y" are NOT the same thing, and only the former is what `toDiagramEnd`
+ * means — see that field's own doc.
  */
 private fun buildActivationBars(
     doc: Seq3Document,
@@ -1163,6 +1177,14 @@ private fun buildActivationBars(
     rowYByIndex: Map<Int, Pair<Double, Double>>,
     lifelineIndex: Map<String, Int>,
     centers: DoubleArray,
+    // Phase 2 fix: a manual bar with a null end (`Seq3ActivationSpan.toDiagramEnd`) draws to the
+    // owning lifeline's own bottom — [lifecycle]/[minLifelineTop]/[naturalBottomY] are exactly what
+    // `resolveSeq3LifelineColumn` uses to compute THAT SAME bottom for the lifeline's dashed guide
+    // line, so the two can never disagree about where "the end of the diagram" is for a given
+    // lifeline (a destroyed one ends earlier than an ordinary one — see that function's own doc).
+    lifecycle: Seq3Lifecycle,
+    minLifelineTop: Double,
+    naturalBottomY: Double,
 ): List<Seq3ActivationBar> {
     if (!doc.showActivations && doc.manualActivations.isEmpty()) return emptyList()
     val autoSpans = if (doc.showActivations) {
@@ -1183,8 +1205,17 @@ private fun buildActivationBars(
     )
     return seq3MergedActivationSpans(autoSpans, resolvedManual, emissions.lastIndex).mapNotNull { span ->
         val (top, _) = rowYByIndex[span.startIndex] ?: return@mapNotNull null
-        val (_, bottom) = rowYByIndex[span.endIndex] ?: return@mapNotNull null
         val lifelineIdx = lifelineIndex[span.lifelineId] ?: return@mapNotNull null
+        // toDiagramEnd (only ever true for a MANUAL span, and only when it survived
+        // seq3ResolveActivationCrossings unclamped — see that field's own doc): the lifeline's own
+        // bottom, exactly like resolveSeq3LifelineColumn computes it for the dashed guide line,
+        // rather than the last emission's row y — the two differ once a null-ended manual bar is
+        // the last thing drawn on a lifeline that keeps margin below its final row.
+        val bottom = if (span.toDiagramEnd) {
+            lifecycle.destroyRowYByLifeline[lifelineIdx]?.coerceIn(minLifelineTop, naturalBottomY) ?: naturalBottomY
+        } else {
+            rowYByIndex[span.endIndex]?.second ?: return@mapNotNull null
+        }
         val x = centers[lifelineIdx] - ACTIVATION_W / 2 + span.depth * ACTIVATION_NEST_OFFSET
         // max(..., ACTIVATION_MIN_H): a CALL immediately followed by its own RETURN on the very
         // next drawn row would otherwise compute a near-zero-height span — see ACTIVATION_MIN_H's
