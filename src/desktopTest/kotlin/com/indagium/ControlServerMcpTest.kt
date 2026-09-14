@@ -217,7 +217,7 @@ class ControlServerMcpTest {
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
-            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block", "delete_note_block",
+            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "update_note_caption", "move_note_block", "delete_note_block",
             "clear_all_notes",
             "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing",
@@ -225,7 +225,7 @@ class ControlServerMcpTest {
             "set_highlighters", "register_source_folder", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
             "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
         )
-        assertEquals(55, expected.size)
+        assertEquals(56, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
     }
 

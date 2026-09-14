@@ -121,6 +121,18 @@ class DltParserTest {
         assertEquals(listOf("first", "second"), result.entries.map { it.msg })
     }
 
+    @Test
+    fun parsesNulFreeRawFramesAfterTheStructuralClassifierRecognizesThem() {
+        val source = dltNulFreeRawFrame() + dltNulFreeRawFrame()
+        assertTrue(source.none { it == 0.toByte() })
+
+        val result = parseLogContent(ByteArrayInputStream(source))
+
+        assertEquals(LogFormat.DLT, result.format)
+        assertEquals(2, result.entries.size)
+        assertTrue(result.entries.all { it.msg.isNotBlank() })
+    }
+
     @Test fun rejectsZeroFrameStreamsAndV2WhileTruncationElsewhereIsTolerant() {
         // These all fail to produce even one complete frame, so the "zero frames decoded" rule
         // still throws (a non-DLT/all-garbage stream must remain an error, not a silent empty tab).

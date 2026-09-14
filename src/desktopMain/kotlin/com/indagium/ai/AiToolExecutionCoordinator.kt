@@ -168,7 +168,7 @@ internal class AiToolExecutionCoordinator(
             "select_lines", "get_selection", "toggle_group", "expand_all", "collapse_all",
             "get_tags", "get_packages", "get_log_composition", "get_crash_sites", "get_issue_description",
             "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
-            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
+            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "update_note_caption", "move_note_block",
             "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations",
             "load_annotations", "apply_filter_preset", "start_tailing", "stop_tailing",
             // search_similar_cases/get_case are deliberately NOT pinned — search_similar_cases is

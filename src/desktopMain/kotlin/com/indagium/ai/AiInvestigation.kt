@@ -133,6 +133,11 @@ internal enum class AiQuickAction(val label: String, val prompt: String, val req
 
             In the chat reply, give a short summary and link it to the note/evidence you created. Cite only
             tool-returned facts; never invent log lines, source mappings, or actions.
+
+            Notes fields and captions are Markdown (headings, bold/italic/strikethrough, lists, quotes,
+            links, inline code, and fenced code). `update_note_block` full-replaces an ordinary note's
+            Markdown, so read the block first when preserving existing content. Use `update_note_caption`
+            for LogRef, Image, or structured diagram captions; it preserves a diagram's model/source/hash.
         """.trimIndent(),
         requiresLine = false,
         slashName = "investigate_issue",
@@ -217,7 +222,7 @@ internal object AiEvidenceExtractor {
             "get_crash_sites" -> crashRows(map)
             "select_lines" -> selectedRows(map)
             "resolve_log_source" -> sourceMatches(map)
-            "add_text_note", "add_log_note", "update_note_block", "move_note_block" -> note(map)
+            "add_text_note", "add_log_note", "update_note_block", "update_note_caption", "move_note_block" -> note(map)
             else -> emptyList()
         }
     }

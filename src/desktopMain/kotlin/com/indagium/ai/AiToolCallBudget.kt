@@ -73,7 +73,7 @@ internal class AiToolCallBudget(totalCalls: Int) {
         val RESULT_FOOTER_REMAINING = setOf(5, 3, 1)
         val NOTES_WRITE_TOOLS = setOf(
             "append_annotation_section", "set_annotation_section", "add_text_note", "add_log_note",
-            "add_image_note", "update_note_block", "move_note_block", "delete_note_block",
+            "add_image_note", "update_note_block", "update_note_caption", "move_note_block", "delete_note_block",
             "clear_all_notes", "save_annotations", "load_annotations", "set_case_metadata",
         )
 

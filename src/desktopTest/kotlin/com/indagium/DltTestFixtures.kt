@@ -44,6 +44,17 @@ internal fun dltStorageHeader(
         dltU32(seconds, false) + dltU32(micros, false) + ecu.padEnd(4, '\u0000').take(4).toByteArray()
 }
 
+/** A valid raw-v1 frame whose header, ids, and non-verbose payload deliberately contain no NUL. */
+internal fun dltNulFreeRawFrame(payloadSize: Int = 260): ByteArray {
+    require(payloadSize >= 256)
+    // One argument keeps the standard extended header entirely NUL-free; the payload is
+    // intentionally opaque and parser-tolerant, so it need not be a verbose string.
+    val body = byteArrayOf(0x40, 0x01) + "APP1".toByteArray() + "CTX1".toByteArray() +
+        ByteArray(payloadSize) { 'A'.code.toByte() }
+    val length = 4 + body.size
+    return byteArrayOf(0x23, 0x01, (length ushr 8).toByte(), length.toByte()) + body
+}
+
 private fun dltU16(value: Int, bigEndian: Boolean): ByteArray =
     if (bigEndian) byteArrayOf((value ushr 8).toByte(), value.toByte())
     else byteArrayOf(value.toByte(), (value ushr 8).toByte())

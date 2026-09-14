@@ -74,14 +74,19 @@ A few worth calling out:
   `get_source_file` only for broader context and page with `nextStartLine`. These reads are limited
   to Kotlin/Java files under registered source folders, even when the source index is unavailable.
 - `get_annotation_sections` reads the Notes panel's From (`prefix`) and Next steps (`suffix`)
-  sections. `append_annotation_section` adds non-blank text to either section without replacing
+  Markdown. Notes sections, text notes, and log/image/diagram captions support headings,
+  bold/italic/strikethrough, lists, quotes, links, inline code, and fenced code.
+  `append_annotation_section` adds non-blank Markdown to either section without replacing
   existing notes. `set_annotation_section` replaces a section outright — omitting or blanking
   `text` clears it — so prefer `append_annotation_section` unless the existing content is wrong.
 - `get_annotation_blocks` lists every existing Notes block by id with safe details for targeting
   it: text or log caption/line ids, or image caption/format/size/video metadata (never image
   bytes). `get_annotation_sections` intentionally does not list blocks. `clear_all_notes` clears
   both sections and every block only after confirmation; it preserves `issueDescription`,
-  `appVersion`, and `decisiveTags`.
+  `appVersion`, and `decisiveTags`. `update_note_block` full-replaces an ordinary text-note's
+  Markdown, so read the block first when preserving content. `update_note_caption` updates only a
+  LogRef, Image, or structured diagram's Markdown caption and preserves a diagram's model, source
+  fence, and hash; ordinary text Notes are rejected with guidance to use `update_note_block`.
 
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.

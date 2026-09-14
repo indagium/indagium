@@ -3,6 +3,8 @@ package com.indagium.debug
 import androidx.compose.ui.graphics.Color
 import com.indagium.diagram3.Seq3Document
 import com.indagium.diagram3.encodeSeq3Note
+import com.indagium.diagram3.parseSeq3Note
+import com.indagium.diagram3.seq3SourceHash
 import com.indagium.model.AnnBlock
 import com.indagium.model.FilterMode
 import com.indagium.model.LogEntry
@@ -64,7 +66,7 @@ class IndagiumToolGatewayTest {
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
-            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "move_note_block",
+            "add_text_note", "add_log_note", "add_image_note", "update_note_block", "update_note_caption", "move_note_block",
             "delete_note_block", "clear_all_notes", "export_analysis", "export_filtered_log", "save_annotations", "load_annotations",
             "list_filter_presets", "apply_filter_preset", "merge_tabs", "start_tailing", "stop_tailing", "resolve_log_source",
             "get_source_file", "list_source_declarations", "get_source_declarations",
@@ -184,6 +186,17 @@ class IndagiumToolGatewayTest {
             assertEquals(mcpSchema, function.parameters, tool.name)
             assertEquals("object", function.parameters["type"]?.toString()?.trim('"'), tool.name)
         }
+    }
+
+    @Test
+    fun updateNoteCaptionSchemaRequiresItsScopedMarkdownFields() {
+        val tool = operations.toolGateway.tools.single { it.name == "update_note_caption" }
+        val schema = Json.encodeToJsonElement(io.modelcontextprotocol.kotlin.sdk.types.ToolSchema.serializer(), tool.schema).jsonObject.toString()
+        assertTrue(schema.contains("tabId"))
+        assertTrue(schema.contains("blockId"))
+        assertTrue(schema.contains("caption"))
+        assertTrue(tool.description.contains("full-replaces"))
+        assertTrue(tool.description.contains("source hash"))
     }
 
     @Test
@@ -483,6 +496,69 @@ class IndagiumToolGatewayTest {
             replacement,
             (state.tab("t1")!!.annotations.blocks.single { it.id == blockId } as AnnBlock.Note).text,
         )
+    }
+
+    @Test
+    fun updateNoteCaptionSupportsLogImageAndDiagramWhileRejectingOrdinaryNotes() {
+        val ordinary = operations.toolGateway.execute(
+            "add_text_note", mapOf("tabId" to "t1", "text" to "**ordinary** note"),
+        ) as Map<*, *>
+        val ordinaryId = ordinary["blockId"] as String
+        val rejected = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "t1", "blockId" to ordinaryId, "caption" to "ignored"),
+        ) as Map<*, *>
+        assertTrue((rejected["error"] as String).contains("update_note_block"))
+
+        val log = operations.toolGateway.execute(
+            "add_log_note", mapOf("tabId" to "t1", "lineIds" to listOf(1), "caption" to "old"),
+        ) as Map<*, *>
+        val logId = log["blockId"] as String
+        val updatedLog = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "t1", "blockId" to logId, "caption" to "# failure"),
+        ) as Map<*, *>
+        assertEquals(true, updatedLog["ok"])
+        assertEquals("# failure", (state.tab("t1")!!.annotations.blocks.first { it.id == logId } as AnnBlock.LogRef).caption)
+
+        val imageId = "image-caption"
+        state.upAnn("t1") { tab ->
+            tab.copy(annotations = tab.annotations.copy(
+                blocks = tab.annotations.blocks + AnnBlock.Image(imageId, "old", "pasted", "png", byteArrayOf(1, 2, 3)),
+            ))
+        }
+        val updatedImage = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "t1", "blockId" to imageId, "caption" to "*screenshot*"),
+        ) as Map<*, *>
+        assertEquals(true, updatedImage["ok"])
+        assertEquals("*screenshot*", (state.tab("t1")!!.annotations.blocks.first { it.id == imageId } as AnnBlock.Image).caption)
+
+        val diagramText = encodeSeq3Note(Seq3Document(title = "diagram"), caption = "before")
+        val diagram = operations.toolGateway.execute(
+            "add_text_note", mapOf("tabId" to "t1", "text" to diagramText),
+        ) as Map<*, *>
+        val diagramId = diagram["blockId"] as String
+        val beforeParsed = parseSeq3Note(diagramText)!!
+        val updatedDiagram = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "t1", "blockId" to diagramId, "caption" to "**after**"),
+        ) as Map<*, *>
+        assertEquals("diagram", updatedDiagram["type"])
+        val stored = (state.tab("t1")!!.annotations.blocks.first { it.id == diagramId } as AnnBlock.Note).text
+        val afterParsed = parseSeq3Note(stored)!!
+        assertEquals("**after**", afterParsed.caption)
+        assertEquals(beforeParsed.source, afterParsed.source)
+        assertEquals(beforeParsed.document, afterParsed.document)
+        assertEquals(seq3SourceHash(afterParsed.source), afterParsed.sourceHash)
+
+        val malformed = operations.toolGateway.execute(
+            "add_text_note", mapOf("tabId" to "t1", "text" to "<!-- indagium:diagram3 3 {bad} -->"),
+        ) as Map<*, *>
+        val malformedResult = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "t1", "blockId" to malformed["blockId"], "caption" to "ignored"),
+        ) as Map<*, *>
+        assertTrue((malformedResult["error"] as String).contains("ordinary text note"))
+        val missingTab = operations.toolGateway.execute(
+            "update_note_caption", mapOf("tabId" to "missing", "blockId" to ordinaryId, "caption" to "ignored"),
+        ) as Map<*, *>
+        assertTrue((missingTab["error"] as String).contains("no such tab"))
     }
 
     @Test

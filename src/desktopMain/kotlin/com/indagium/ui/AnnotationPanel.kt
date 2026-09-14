@@ -630,6 +630,10 @@ fun AnnotationPanel(
     modifier: Modifier = Modifier.fillMaxHeight(),
 ) {
     val tc = tc()
+    val notesLocked = LocalNotesEditLocked.current
+    fun mutate(action: () -> Unit) {
+        if (notesMutationAllowed(notesLocked)) action()
+    }
     val mono = monoFont()
     val mainWindowSize = LocalWindowInfo.current.containerSize
     val ann = tab.annotations
@@ -830,6 +834,13 @@ fun AnnotationPanel(
     fun imageInsertionAfterId(): String? = activeBlockFieldId ?: focusedBlockId()
 
     fun addDroppedImageFiles(files: List<File>): Boolean {
+        if (notesLocked) {
+            // Consume image drops so the locked Notes target does not insert them, but preserve
+            // the existing app-wide routing for logs, videos, and other non-image files.
+            val forwarded = forwardedDropFilesWhenNotesLocked(files) { imageBytesFromFile(it) != null }
+            if (forwarded.isNotEmpty()) onUnhandledFileDrop(forwarded)
+            return files.isNotEmpty()
+        }
         var afterId = imageInsertionAfterId()
         var addedAny = false
         files.forEach { file ->
@@ -843,7 +854,7 @@ fun AnnotationPanel(
         return addedAny
     }
 
-    val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage, onUnhandledFileDrop) {
+    val imageDropTarget = remember(tab.id, activeBlockFieldId, navIndex, ann.blocks, onAddImage, onUnhandledFileDrop, notesLocked) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 val files = runCatching { localFilesFromDropData(event.dragData()) }.getOrDefault(emptyList())
@@ -864,14 +875,14 @@ fun AnnotationPanel(
         when (target.kind) {
             KeyboardTargetKind.NotePreview -> if (hasAnnotationBlocks) onToggleMd()
             KeyboardTargetKind.NoteCopy -> onCopy()
-            KeyboardTargetKind.NoteSave -> onSave()
-            KeyboardTargetKind.NoteOpen -> openNotePicker()
+            KeyboardTargetKind.NoteSave -> mutate(onSave)
+            KeyboardTargetKind.NoteOpen -> mutate(::openNotePicker)
             KeyboardTargetKind.NoteRecentNotes -> if (hasRecentNotes) onToggleRecentNotes()
             KeyboardTargetKind.NotePrefix -> runCatching { prefixFr.requestFocus() }
             KeyboardTargetKind.NoteSuffix -> runCatching { suffixFr.requestFocus() }
             KeyboardTargetKind.NoteAddTextBlock -> {
                 val after = if (target.id == "add-at-start") null else ann.blocks.lastOrNull()?.id
-                onAddNoteAfter(after)
+                mutate { onAddNoteAfter(after) }
             }
             KeyboardTargetKind.NoteBlock -> {
                 val blockId = target.id.removePrefix("block:")
@@ -892,11 +903,11 @@ fun AnnotationPanel(
         val idx = ann.blocks.indexOfFirst { it.id == blockId }
         if (idx < 0) return false
         return when {
-            ev.isAltPressed && ev.key == Key.DirectionUp -> { onMoveBlock(blockId, -1); true }
-            ev.isAltPressed && ev.key == Key.DirectionDown -> { onMoveBlock(blockId, +1); true }
-            ev.isCtrlPressed && ev.key == Key.Enter -> { onAddNoteAfter(blockId); true }
-            ev.isMetaPressed && ev.key == Key.Enter -> { onAddNoteAfter(blockId); true }
-            ev.key == Key.Delete || ev.key == Key.Backspace -> { onRemoveBlock(blockId); true }
+            ev.isAltPressed && ev.key == Key.DirectionUp -> { mutate { onMoveBlock(blockId, -1) }; true }
+            ev.isAltPressed && ev.key == Key.DirectionDown -> { mutate { onMoveBlock(blockId, 1) }; true }
+            ev.isCtrlPressed && ev.key == Key.Enter -> { mutate { onAddNoteAfter(blockId) }; true }
+            ev.isMetaPressed && ev.key == Key.Enter -> { mutate { onAddNoteAfter(blockId) }; true }
+            ev.key == Key.Delete || ev.key == Key.Backspace -> { mutate { onRemoveBlock(blockId) }; true }
             else -> false
         }
     }
@@ -916,7 +927,9 @@ fun AnnotationPanel(
                     confirmLabel = "Save",
                     windowSize = mainWindowSize,
                     fileLabel = tab.filename,
-                    onConfirm = { onUpdatePrefix(it); editingTarget = null },
+                    locked = notesLocked,
+                    sessionKey = "${tab.id}:prefix",
+                    onConfirm = { updated -> mutate { onUpdatePrefix(updated) }; editingTarget = null },
                     onDismiss = { editingTarget = null },
                 )
             }
@@ -929,7 +942,9 @@ fun AnnotationPanel(
                     confirmLabel = "Save",
                     windowSize = mainWindowSize,
                     fileLabel = tab.filename,
-                    onConfirm = { onUpdateSuffix(it); editingTarget = null },
+                    locked = notesLocked,
+                    sessionKey = "${tab.id}:suffix",
+                    onConfirm = { updated -> mutate { onUpdateSuffix(updated) }; editingTarget = null },
                     onDismiss = { editingTarget = null },
                 )
             }
@@ -950,8 +965,10 @@ fun AnnotationPanel(
                             confirmLabel = "Save caption",
                             windowSize = mainWindowSize,
                             fileLabel = tab.filename,
+                            locked = notesLocked,
+                            sessionKey = "${tab.id}:${block.id}:caption",
                             onConfirm = { newCaption ->
-                                updateSeq3NoteCaption(block.text, newCaption)?.let { onUpdateBlock(block.id, it) }
+                                mutate { updateSeq3NoteCaption(block.text, newCaption)?.let { onUpdateBlock(block.id, it) } }
                                 editingTarget = null
                             },
                             onDismiss = { editingTarget = null },
@@ -973,9 +990,11 @@ fun AnnotationPanel(
                             windowSize = mainWindowSize,
                             rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
                             fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
-                            onDelete = { onRemoveBlock(block.id); editingTarget = null },
+                            locked = notesLocked,
+                            sessionKey = "${tab.id}:${block.id}",
+                            onDelete = { mutate { onRemoveBlock(block.id) }; editingTarget = null },
                             onConfirm = { updated ->
-                                onUpdateBlock(block.id, updated)
+                                mutate { onUpdateBlock(block.id, updated) }
                                 editingTarget = null
                             },
                             onDismiss = { editingTarget = null },
@@ -1013,20 +1032,20 @@ fun AnnotationPanel(
                 val actionPressed = if (isMacOs) ev.isMetaPressed else ev.isCtrlPressed
                 val textFieldFocused = prefixFocused || suffixFocused || blockFieldFocused || issueDescFocused
                 when {
-                    actionPressed && ev.key == Key.S -> { onSave(); true }
+                    actionPressed && ev.key == Key.S -> { mutate(onSave); true }
                     actionPressed && ev.key == Key.V -> {
                         val bytes = runCatching { Toolkit.getDefaultToolkit().systemClipboard.getContents(null) }
                             .getOrNull()
                             ?.let(::imageBytesFromTransferable)
                         if (bytes != null) {
-                            onAddImage(bytes, "pasted from clipboard", imageInsertionAfterId())
+                            mutate { onAddImage(bytes, "pasted from clipboard", imageInsertionAfterId()) }
                             true
                         } else {
                             false
                         }
                     }
                     annotationPreviewCopyShortcutHandled(actionPressed, ev.key, textFieldFocused) -> { onCopy(); true }
-                    actionPressed && ev.key == Key.O -> { openNotePicker(); true }
+                    actionPressed && ev.key == Key.O -> { mutate(::openNotePicker); true }
                     textFieldFocused -> {
                         if (ev.key == Key.Escape) {
                             runCatching { focusRequester?.requestFocus() }
@@ -1059,6 +1078,14 @@ fun AnnotationPanel(
         // Five controls at the common width — Preview/Copy/Save/New fit on one line with the
         // Open+▾ split button trailing them, mirroring TabBar's log-file Open/▾ pair so opening a
         // note and opening a log read as the same gesture.
+        if (notesLocked) {
+            AppText(
+                NOTES_EDIT_LOCK_MESSAGE,
+                color = tc.td,
+                fontSize = 10.sp,
+                modifier = Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 12.dp, vertical = 5.dp),
+            )
+        }
         Box(
             Modifier.fillMaxWidth().heightIn(min = 36.dp).background(tc.p2)
                 .border(BorderStroke(1.dp, tc.br)).padding(horizontal = 12.dp, vertical = 4.dp),
@@ -1070,8 +1097,8 @@ fun AnnotationPanel(
             ) {
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
-                AppButton("Save", onClick = onSave, modifier = headerButtonModifier)
-                AppButton("New", onClick = onNewAnalysis, modifier = headerButtonModifier)
+                AppButton("Save", onClick = { mutate(onSave) }, enabled = !notesLocked, modifier = headerButtonModifier)
+                AppButton("New", onClick = { mutate(onNewAnalysis) }, enabled = !notesLocked, modifier = headerButtonModifier)
                 // Only when this tab has no log at all (opened via Case Library's "Open notes
                 // only," a blank new tab, or its own log going missing) — the guided reconnect
                 // path for Change 2's "note opened without its log" hazard. See
@@ -1079,7 +1106,7 @@ fun AnnotationPanel(
                 // relative in purpose) rather than earlier in the row; it's a rare state and, per
                 // the FlowRow comment above, is allowed to be the thing that wraps to its own line.
                 if (tab.logData.isEmpty()) {
-                    AppButton("Locate log…", onClick = { openLocateLogPicker() }, modifier = headerButtonModifier)
+                    AppButton("Locate log…", onClick = { mutate(::openLocateLogPicker) }, enabled = !notesLocked, modifier = headerButtonModifier)
                 }
                 // Wrapped in its own zero-spacing Row so FlowRow's 4.dp horizontalArrangement gap
                 // treats Open+▾ as one atomic child instead of prying them apart — same reason
@@ -1087,7 +1114,8 @@ fun AnnotationPanel(
                 Row {
                     AppButton(
                         "Open",
-                        onClick = { openNotePicker() },
+                        onClick = { mutate(::openNotePicker) },
+                        enabled = !notesLocked,
                         modifier = headerButtonModifier,
                         shape = if (hasRecentNotes) openJoinedShape else CORNER_MD,
                     )
@@ -1108,7 +1136,7 @@ fun AnnotationPanel(
                                 RecentNotesPopup(
                                     recentNotes = recentNotes,
                                     activeNotePath = activeNotePath,
-                                    onOpenNote = onOpenNote,
+                                    onOpenNote = { file -> mutate { onOpenNote(file) } },
                                     onDismiss = onToggleRecentNotes,
                                     tc = tc,
                                 )
@@ -1284,6 +1312,7 @@ fun AnnotationPanel(
                     onToggle = { diagramLibraryExpanded = !diagramLibraryExpanded },
                     onCreate = onCreateDiagram,
                     onCreateFromNotes = onCreateDiagramFromNotes,
+                    editingEnabled = !notesLocked,
                     selectedLineCount = tab.selected.size,
                     notesDiagramSummary = notesDiagramSummary,
                     onOpen = onOpenDiagramLibraryItem,
@@ -1305,7 +1334,7 @@ fun AnnotationPanel(
                         // stays inside the field and the clear action remains available.
                         ScrollableTextArea(
                             value = ann.issueDescription,
-                            onValue = onUpdateIssueDescription,
+                            onValue = { mutate { onUpdateIssueDescription(it) } },
                             placeholder = "Not included in previews or exports…",
                             modifier = Modifier.fillMaxWidth()
                                 // ScrollableTextArea groups focus around the scrolling field, so
@@ -1316,7 +1345,8 @@ fun AnnotationPanel(
                             minHeight = 60.dp,
                             maxHeight = 160.dp,
                             resetKey = tab.id,
-                            onClear = { onUpdateIssueDescription("") },
+                            enabled = !notesLocked,
+                            onClear = { mutate { onUpdateIssueDescription("") } },
                         )
                     }
                 }
@@ -1327,12 +1357,12 @@ fun AnnotationPanel(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                         Spacer(Modifier.weight(1f))
-                        EditIconButton(onClick = { editingTarget = EditDialogTarget.Prefix })
+                        EditIconButton(enabled = !notesLocked, onClick = { editingTarget = EditDialogTarget.Prefix })
                     }
                     Spacer(Modifier.height(3.dp))
                     ScrollableTextArea(
                         value = ann.prefix,
-                        onValue = onUpdatePrefix,
+                        onValue = { mutate { onUpdatePrefix(it) } },
                         placeholder = "Heading, context…",
                         modifier = Modifier.fillMaxWidth()
                             .focusRequester(prefixFr)
@@ -1341,13 +1371,14 @@ fun AnnotationPanel(
                         fontSize = 12.sp,
                         maxHeight = 160.dp,
                         resetKey = tab.id,
-                        onClear = { onUpdatePrefix("") },
+                        enabled = !notesLocked,
+                        onClear = { mutate { onUpdatePrefix("") } },
                     )
                 }
 
                 if (ann.blocks.isEmpty()) {
                     // Add note button + empty state
-                    AddNoteButton(tc = tc, onClick = { onAddNoteAfter(null) })
+                    AddNoteButton(tc = tc, enabled = !notesLocked, onClick = { mutate { onAddNoteAfter(null) } })
                     Column(
                         Modifier.fillMaxWidth().padding(40.dp),
                         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -1369,17 +1400,20 @@ fun AnnotationPanel(
                                 if (focused) activeBlockFieldId = block.id
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
-                            onUpdate = { onUpdateBlock(block.id, it) },
-                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
-                            onRemove = { onRemoveBlock(block.id) },
-                            onMoveUp = { onMoveBlock(block.id, -1) },
-                            onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
+                            editingEnabled = !notesLocked,
+                            onUpdate = { mutate { onUpdateBlock(block.id, it) } },
+                            onEdit = { mutate { editingTarget = EditDialogTarget.Block(block.id) } },
+                            onRemove = { mutate { onRemoveBlock(block.id) } },
+                            onMoveUp = { mutate { onMoveBlock(block.id, -1) } },
+                            onMoveDown = { mutate { onMoveBlock(block.id, 1) } },
+                            onAddBelow = { mutate { onAddNoteAfter(block.id) } },
                             dragHandleModifier = dragHandleModifier,
                             onBeforeToggleDiagram = { anchorBeforeBlockResize(block.id) },
                             onEditDiagram = { onEditDiagram(block.id) },
                             onNavigateDiagramLine = onNavigateDiagramLine,
-                            onImportLinkedDiagram = { source, dialect, confirm -> onImportLinkedDiagram(block.id, source, dialect, confirm) },
+                            onImportLinkedDiagram = { source, dialect, confirm ->
+                                if (!notesLocked) onImportLinkedDiagram(block.id, source, dialect, confirm) else null
+                            },
                             onCopyDiagramImage = onCopyDiagramImage,
                         )
                         is AnnBlock.LogRef -> LogRefBlock(
@@ -1392,12 +1426,13 @@ fun AnnotationPanel(
                                 if (focused) activeBlockFieldId = block.id
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
-                            onUpdateCaption = { onUpdateBlock(block.id, it) },
-                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
-                            onRemove = { onRemoveBlock(block.id) },
-                            onMoveUp = { onMoveBlock(block.id, -1) },
-                            onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
+                            editingEnabled = !notesLocked,
+                            onUpdateCaption = { mutate { onUpdateBlock(block.id, it) } },
+                            onEdit = { mutate { editingTarget = EditDialogTarget.Block(block.id) } },
+                            onRemove = { mutate { onRemoveBlock(block.id) } },
+                            onMoveUp = { mutate { onMoveBlock(block.id, -1) } },
+                            onMoveDown = { mutate { onMoveBlock(block.id, 1) } },
+                            onAddBelow = { mutate { onAddNoteAfter(block.id) } },
                             onNavigate = { onNavigateLogRef(block) },
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
                             onToggleExcerpt = {
@@ -1415,12 +1450,13 @@ fun AnnotationPanel(
                                 if (focused) activeBlockFieldId = block.id
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
-                            onUpdateCaption = { onUpdateBlock(block.id, it) },
-                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
-                            onRemove = { onRemoveBlock(block.id) },
-                            onMoveUp = { onMoveBlock(block.id, -1) },
-                            onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
+                            editingEnabled = !notesLocked,
+                            onUpdateCaption = { mutate { onUpdateBlock(block.id, it) } },
+                            onEdit = { mutate { editingTarget = EditDialogTarget.Block(block.id) } },
+                            onRemove = { mutate { onRemoveBlock(block.id) } },
+                            onMoveUp = { mutate { onMoveBlock(block.id, -1) } },
+                            onMoveDown = { mutate { onMoveBlock(block.id, 1) } },
+                            onAddBelow = { mutate { onAddNoteAfter(block.id) } },
                             onCopyImage = { onCopyImage(block) },
                             onNavigateVideoFrame = block.videoFrame?.let { frame -> { onNavigateVideoFrame(frame) } },
                             dragHandleModifier = dragHandleModifier,
@@ -1524,7 +1560,10 @@ fun AnnotationPanel(
                                         val targetIdx = releasedOrder.indexOf(releasedId)
                                         if (targetIdx >= 0 && targetIdx != currentBlockIds.value.indexOf(releasedId)) {
                                             liveVisualBlockIds = releasedOrder
-                                            onReorderBlock(releasedId, targetIdx)
+                                            // A run can acquire the Notes lock while a drag that
+                                            // began earlier is still in flight; never commit that
+                                            // stale manual reorder after the lock becomes active.
+                                            mutate { onReorderBlock(releasedId, targetIdx) }
                                         }
                                         justReleasedBlockId = releasedId
                                         dragBlockId = null
@@ -1557,19 +1596,19 @@ fun AnnotationPanel(
 
                 if (ann.blocks.isNotEmpty()) {
                     // Global + text block button
-                    AddNoteButton(tc = tc, onClick = { onAddNoteAfter(ann.blocks.last().id) })
+                    AddNoteButton(tc = tc, enabled = !notesLocked, onClick = { mutate { onAddNoteAfter(ann.blocks.last().id) } })
 
                     // Suffix
                     AnnSection(tc) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             AppText("Next steps", color = tc.td, fontSize = 11.sp, fontFamily = UI)
                             Spacer(Modifier.weight(1f))
-                            EditIconButton(onClick = { editingTarget = EditDialogTarget.Suffix })
+                            EditIconButton(enabled = !notesLocked, onClick = { editingTarget = EditDialogTarget.Suffix })
                         }
                         Spacer(Modifier.height(3.dp))
                         ScrollableTextArea(
                             value = ann.suffix,
-                            onValue = onUpdateSuffix,
+                            onValue = { mutate { onUpdateSuffix(it) } },
                             placeholder = "Add follow-up notes…",
                             modifier = Modifier.fillMaxWidth()
                                 .focusRequester(suffixFr)
@@ -1578,7 +1617,8 @@ fun AnnotationPanel(
                             fontSize = 12.sp,
                             maxHeight = 160.dp,
                             resetKey = tab.id,
-                            onClear = { onUpdateSuffix("") },
+                            enabled = !notesLocked,
+                            onClear = { mutate { onUpdateSuffix("") } },
                         )
                     }
                 }
@@ -1600,7 +1640,7 @@ fun AnnotationPanel(
                     onConfirm = {
                         // Deletion is intentionally confined to this explicit confirmation
                         // action; a row's Delete button only opens this dialog.
-                        onDeleteDiagramLibraryItem(id)
+                        mutate { onDeleteDiagramLibraryItem(id) }
                         pendingDiagramLibraryDeleteId = null
                     },
                     onDismiss = { pendingDiagramLibraryDeleteId = null },
@@ -1626,6 +1666,7 @@ private fun DiagramLibrarySection(
     notesDiagramSummary: Seq3NotesSelection?,
     onOpen: (String) -> Unit,
     onRequestDelete: (String) -> Unit,
+    editingEnabled: Boolean = true,
 ) {
     val tc = tc()
     // Local, not lifted to AppState like RecentNotesPopup's own open flag: nothing outside this
@@ -1639,13 +1680,13 @@ private fun DiagramLibrarySection(
             AppText(items.size.toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO)
             Spacer(Modifier.width(8.dp))
             Box {
-                LabelIconButton("+ diagram", fontSize = 10.sp, onClick = { createMenuOpen = true })
+                LabelIconButton("+ diagram", fontSize = 10.sp, enabled = editingEnabled, onClick = { createMenuOpen = true })
                 if (createMenuOpen) {
                     CreateDiagramPopup(
                         selectedLineCount = selectedLineCount,
                         notesDiagramSummary = notesDiagramSummary,
-                        onCreateFromSelection = { createMenuOpen = false; onCreate() },
-                        onCreateFromNotes = { createMenuOpen = false; onCreateFromNotes() },
+                        onCreateFromSelection = { createMenuOpen = false; if (editingEnabled) onCreate() },
+                        onCreateFromNotes = { createMenuOpen = false; if (editingEnabled) onCreateFromNotes() },
                         onDismiss = { createMenuOpen = false },
                         tc = tc,
                     )
@@ -1714,7 +1755,7 @@ private fun DiagramLibrarySection(
                                     maxLines = 1,
                                 )
                             }
-                            AppButton("Delete", { onRequestDelete(item.id) }, variant = ButtonVariant.Ghost)
+                            AppButton("Delete", { if (editingEnabled) onRequestDelete(item.id) }, enabled = editingEnabled, variant = ButtonVariant.Ghost)
                         }
                     }
                     if (index != items.lastIndex) Divider()
@@ -2426,11 +2467,13 @@ private fun BlockTextField(
     fieldFocusRequester: FocusRequester?,
     secondaryFocusRequester: FocusRequester? = null,
     onFieldFocusChanged: (Boolean) -> Unit,
+    enabled: Boolean = true,
 ) {
     var isFocused by remember { mutableStateOf(false) }
     BasicTextField(
         value = value,
-        onValueChange = onValueChange,
+        onValueChange = { if (enabled) onValueChange(it) },
+        readOnly = !enabled,
         textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
         cursorBrush = SolidColor(tc.ac),
         modifier = Modifier.fillMaxWidth()
@@ -2464,6 +2507,7 @@ private fun MarkdownInlineOrTextField(
     fieldFocusRequester: FocusRequester?,
     onFieldFocusChanged: (Boolean) -> Unit,
     onValueChange: (String) -> Unit,
+    enabled: Boolean = true,
 ) {
     var inlineEditing by remember { mutableStateOf(false) }
     var hasFocusedInlineEditor by remember { mutableStateOf(false) }
@@ -2487,7 +2531,7 @@ private fun MarkdownInlineOrTextField(
                 .background(if (hovered) tc.hv else Color.Transparent, FIELD_CORNER)
                 .clip(FIELD_CORNER)
                 .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.TEXT_CURSOR)))
-                .clickable { inlineEditing = true }
+                .then(if (enabled) Modifier.clickable { inlineEditing = true } else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false }
                 .padding(horizontal = 8.dp, vertical = 5.dp),
@@ -2502,6 +2546,7 @@ private fun MarkdownInlineOrTextField(
             tc = tc,
             fieldFocusRequester = fieldFocusRequester,
             secondaryFocusRequester = inlineEditRequester,
+            enabled = enabled,
             onFieldFocusChanged = { focused ->
                 if (focused) {
                     hasFocusedInlineEditor = true
@@ -2521,14 +2566,14 @@ private fun MarkdownInlineOrTextField(
  *  directly — images/diagrams/log refs come from the log viewer, paste/drop, or the diagram
  *  library. Dashed outline so it reads as an affordance to add something, not another block. */
 @Composable
-private fun AddNoteButton(tc: ThemeColors, onClick: () -> Unit) {
+private fun AddNoteButton(tc: ThemeColors, enabled: Boolean = true, onClick: () -> Unit) {
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
             .clip(BLOCK_CORNER)
             .background(if (hovered) tc.hv else Color.Transparent, BLOCK_CORNER)
             .dashedOutline(if (hovered) tc.td else tc.br, 6.dp)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(vertical = 5.dp),
@@ -2562,6 +2607,7 @@ private fun NoteBlock(
     onNavigateDiagramLine: (Int) -> Unit = {},
     onImportLinkedDiagram: (String, Seq3Dialect, Boolean) -> Seq3SourceImportResult? = { _, _, _ -> null },
     onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
+    editingEnabled: Boolean = true,
 ) {
     // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
     // workspace is the normal route for editing the model itself, which keeps the rendered model
@@ -2578,7 +2624,10 @@ private fun NoteBlock(
         header = {
             BlockControls(
                 if (diagram != null) "diagram" else "text",
-                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
+                mutationEnabled = editingEnabled,
+                navigationEnabled = editingEnabled,
+                dragHandleModifier = dragHandleModifier,
                 onEdit = onEdit,
                 onNavigate = if (diagram != null) onEditDiagram else null,
                 onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
@@ -2604,7 +2653,8 @@ private fun NoteBlock(
                         DiagramExportModeSwitcher(
                             noteText = block.text,
                             exportMode = summary.exportMode,
-                            onUpdateDiagramText = onUpdate,
+                        onUpdateDiagramText = onUpdate,
+                        enabled = editingEnabled,
                         )
                     }
                 },
@@ -2619,6 +2669,7 @@ private fun NoteBlock(
                 settings = settings,
                 fieldFocusRequester = fieldFocusRequester,
                 onFieldFocusChanged = onFieldFocusChanged,
+                editingEnabled = editingEnabled,
                 onUpdateDiagramText = onUpdate,
                 onNavigateLine = onNavigateDiagramLine,
                 onImportLinkedDiagram = onImportLinkedDiagram,
@@ -2636,6 +2687,7 @@ private fun NoteBlock(
                 renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
                 fieldFocusRequester = fieldFocusRequester,
                 onFieldFocusChanged = onFieldFocusChanged,
+                enabled = editingEnabled,
                 onValueChange = onUpdate,
             )
         }
@@ -2647,6 +2699,7 @@ private fun DiagramExportModeSwitcher(
     noteText: String,
     exportMode: DiagramExportMode,
     onUpdateDiagramText: (String) -> Unit,
+    enabled: Boolean = true,
 ) {
     val tc = tc()
     val shape = RoundedCornerShape(6.dp)
@@ -2661,11 +2714,11 @@ private fun DiagramExportModeSwitcher(
                 Modifier.defaultMinSize(minWidth = 30.dp)
                     .fillMaxHeight()
                     .background(if (exportMode == DiagramExportMode.IMAGE) tc.ac.copy(.2f) else Color.Transparent)
-                    .clickable {
+                    .then(if (enabled) Modifier.clickable {
                         if (exportMode != DiagramExportMode.IMAGE) {
                             updateSeq3NoteExportMode(noteText, DiagramExportMode.IMAGE)?.let(onUpdateDiagramText)
                         }
-                    }
+                    } else Modifier)
                     .padding(horizontal = 7.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -2685,11 +2738,11 @@ private fun DiagramExportModeSwitcher(
                 Modifier.defaultMinSize(minWidth = 30.dp)
                     .fillMaxHeight()
                     .background(if (exportMode == DiagramExportMode.SOURCE) tc.ac.copy(.2f) else Color.Transparent)
-                    .clickable {
+                    .then(if (enabled) Modifier.clickable {
                         if (exportMode != DiagramExportMode.SOURCE) {
                             updateSeq3NoteExportMode(noteText, DiagramExportMode.SOURCE)?.let(onUpdateDiagramText)
                         }
-                    }
+                    } else Modifier)
                     .padding(horizontal = 7.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -2728,6 +2781,7 @@ private fun DiagramNoteView(
     onImportLinkedDiagram: (String, Seq3Dialect, Boolean) -> Seq3SourceImportResult?,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
+    editingEnabled: Boolean = true,
 ) {
     var pendingEvidenceImport by remember(noteText) { mutableStateOf<Seq3SourceImportResult.Success?>(null) }
     var importFailure by remember(noteText) { mutableStateOf<String?>(null) }
@@ -2746,6 +2800,7 @@ private fun DiagramNoteView(
             fieldFocusRequester = fieldFocusRequester,
             onValueChange = { caption -> updateSeq3NoteCaption(noteText, caption)?.let(onUpdateDiagramText) },
             onFieldFocusChanged = onFieldFocusChanged,
+            enabled = editingEnabled,
         )
         DiagramSummaryRow(summary = summary, tc = tc, expanded = expanded, onToggleExpanded = onToggleExpanded)
         // Folded cards intentionally do no model decode, rasterization, or bitmap conversion.  An
@@ -2776,7 +2831,7 @@ private fun DiagramNoteView(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Box(
-                        Modifier.clickable {
+                        (if (editingEnabled) Modifier.clickable {
                             val parsed = expandedDiagram.parsed
                             val linked = parsed.attachment?.mode == Seq3AttachmentMode.LINKED
                             val imported = if (linked) onImportLinkedDiagram(parsed.source, parsed.dialect, false)
@@ -2802,7 +2857,7 @@ private fun DiagramNoteView(
                                 }
                                 null -> importFailure = "No matching open diagram session."
                             }
-                        }.padding(horizontal = 4.dp, vertical = 2.dp),
+                        } else Modifier).padding(horizontal = 4.dp, vertical = 2.dp),
                     ) { AppText("Import edits", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
                     TooltipArea(
                         tooltip = {
@@ -2813,9 +2868,9 @@ private fun DiagramNoteView(
                         },
                     ) {
                         Box(
-                            Modifier.clickable {
+                            (if (editingEnabled) Modifier.clickable {
                                 adoptSeq3NoteSource(noteText)?.let(onUpdateDiagramText)
-                            }.padding(horizontal = 4.dp, vertical = 2.dp),
+                            } else Modifier).padding(horizontal = 4.dp, vertical = 2.dp),
                         ) {
                             AppText(
                                 "Keep source only",
@@ -2829,8 +2884,8 @@ private fun DiagramNoteView(
                 pendingEvidenceImport?.let {
                     AppText("Import removes marked log evidence. Confirm to continue.", color = tc.td, fontSize = 10.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box(Modifier.clickable { pendingEvidenceImport = null }.padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
-                        Box(Modifier.clickable {
+                        Box((if (editingEnabled) Modifier.clickable { pendingEvidenceImport = null } else Modifier).padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
+                        Box((if (editingEnabled) Modifier.clickable {
                             val parsed = expandedDiagram.parsed
                             if (parsed.attachment?.mode == Seq3AttachmentMode.LINKED) {
                                 when (val result = onImportLinkedDiagram(parsed.source, parsed.dialect, true)) {
@@ -2843,7 +2898,7 @@ private fun DiagramNoteView(
                                     sourceOverride = success.canonicalSource).let(onUpdateDiagramText)
                                 pendingEvidenceImport = null
                             }
-                        }.padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
+                        } else Modifier).padding(3.dp)) { AppText("Import anyway", color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.Medium) }
                     }
                 }
                 importFailure?.let { AppText(it, color = tc.td, fontSize = 10.sp) }
@@ -2987,6 +3042,7 @@ private fun LogRefBlock(
     excerptExpanded: Boolean,
     onToggleExcerpt: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
+    editingEnabled: Boolean = true,
 ) {
     val rows = block.resolveRows(tab)
     val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
@@ -3002,6 +3058,7 @@ private fun LogRefBlock(
                 "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
                 onNavigateTooltip = "Show in log",
                 onEdit = onEdit,
+                mutationEnabled = editingEnabled,
                 dragHandleModifier = dragHandleModifier,
             )
         },
@@ -3021,6 +3078,7 @@ private fun LogRefBlock(
             fieldFocusRequester = fieldFocusRequester,
             onFieldFocusChanged = onFieldFocusChanged,
             onValueChange = onUpdateCaption,
+            enabled = editingEnabled,
         )
         LogExcerpt(
             rows = rows, tab = tab, settings = settings, context = context, localSource = localSource,
@@ -3162,6 +3220,7 @@ private fun ImageBlockView(
     onCopyImage: () -> Unit,
     onNavigateVideoFrame: (() -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
+    editingEnabled: Boolean = true,
 ) {
     // Keyed on the byte array's own identity (stable across recompositions and across a caption
     // edit — updateBlock's b.copy(caption = ...) reuses the same bytes reference), so decoding
@@ -3177,6 +3236,7 @@ private fun ImageBlockView(
                 onNavigate = onNavigateVideoFrame,
                 onCopyImage = onCopyImage,
                 onEdit = onEdit,
+                mutationEnabled = editingEnabled,
                 dragHandleModifier = dragHandleModifier,
             )
         },
@@ -3189,6 +3249,7 @@ private fun ImageBlockView(
             fieldFocusRequester = fieldFocusRequester,
             onFieldFocusChanged = onFieldFocusChanged,
             onValueChange = onUpdateCaption,
+            enabled = editingEnabled,
         )
         // Only a video frame gets a "From …" line (AnnBlock.Image.displayProvenance) — it
         // disappears entirely for a pasted or dropped image, which is why this is one nullable
@@ -3238,7 +3299,7 @@ private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
 // glyph, since a bare "Edit" label read as noisy chrome next to the icon-only ↑/↓/× controls it
 // sits beside.
 @Composable
-private fun EditIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun EditIconButton(enabled: Boolean = true, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     TooltipArea(tooltip = { ToolbarTooltip("Open in editor") }) {
@@ -3247,7 +3308,7 @@ private fun EditIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
                 .size(18.dp)
                 .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
                 .clip(CORNER_MD)
-                .clickable(onClick = onClick)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false },
             contentAlignment = Alignment.Center,
@@ -3276,16 +3337,21 @@ private fun BlockControls(
     onEdit: (() -> Unit)? = null,
     afterBadgeContent: (@Composable () -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
+    mutationEnabled: Boolean = true,
+    /** Navigation remains usable while Notes mutations are locked. */
+    navigationEnabled: Boolean = true,
+    /** Copying an already-rendered image is read-only and remains usable while locked. */
+    copyEnabled: Boolean = true,
 ) {
     val badgeShape = CORNER_SM
-    val isNavigationBadge = onNavigate != null
+    val isNavigationBadge = onNavigate != null && navigationEnabled
     val badgeModifier = Modifier.height(18.dp)
         .defaultMinSize(minWidth = if (isNavigationBadge) 48.dp else 34.dp)
-        .background(typeColor.copy(if (onNavigate != null) .24f else .14f), badgeShape)
-        .border(1.dp, typeColor.copy(if (onNavigate != null) .9f else .35f), badgeShape)
+        .background(typeColor.copy(if (isNavigationBadge) .24f else .14f), badgeShape)
+        .border(1.dp, typeColor.copy(if (isNavigationBadge) .9f else .35f), badgeShape)
         .clip(badgeShape)
         .then(
-            if (onNavigate != null) {
+            if (onNavigate != null && navigationEnabled) {
                 Modifier
                     .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.HAND_CURSOR)))
                     .clickable(onClick = onNavigate)
@@ -3309,7 +3375,8 @@ private fun BlockControls(
                     "⠿",
                     color = tc().td,
                     fontSize = 12.sp,
-                    modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+                    modifier = (if (mutationEnabled) dragHandleModifier else Modifier)
+                        .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
                 )
                 val badge: @Composable () -> Unit = {
                     Box(
@@ -3353,14 +3420,14 @@ private fun BlockControls(
             ) {
                 // Leads the actions group, before the arrows — see BlockHeaderLayout's doc for
                 // why this can never be the thing that gets clipped.
-                if (onCopyImage != null) CopyImageIconButton(onClick = onCopyImage)
-                if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
-                if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
-                LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
+                if (onCopyImage != null) CopyImageIconButton(enabled = copyEnabled, onClick = onCopyImage)
+                if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, enabled = mutationEnabled, onClick = onMoveUp)
+                if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, enabled = mutationEnabled, onClick = onMoveDown)
+                LabelIconButton("+ Note", fontSize = 10.sp, enabled = mutationEnabled, onClick = onAddBelow)
                 // Icon button (not a text label) that opens the full editor dialog — placed right
                 // before × per the header action order.
-                onEdit?.let { EditIconButton(onClick = it) }
-                SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
+                onEdit?.let { EditIconButton(enabled = mutationEnabled, onClick = it) }
+                SquareIconButton("×", fontSize = 14.sp, enabled = mutationEnabled, onClick = onRemove)
             }
         },
     )
@@ -3370,7 +3437,7 @@ private fun BlockControls(
 // glyph instead of the old "copy image" text badge — a copy glyph with a small picture badge
 // pinned at its bottom-end so it reads as "copy this image" rather than a generic copy action.
 @Composable
-private fun CopyImageIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun CopyImageIconButton(enabled: Boolean = true, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     TooltipArea(tooltip = { ToolbarTooltip("Copy image to clipboard") }) {
@@ -3379,7 +3446,7 @@ private fun CopyImageIconButton(onClick: () -> Unit, modifier: Modifier = Modifi
                 .size(18.dp)
                 .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
                 .clip(CORNER_MD)
-                .clickable(onClick = onClick)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false },
             contentAlignment = Alignment.Center,

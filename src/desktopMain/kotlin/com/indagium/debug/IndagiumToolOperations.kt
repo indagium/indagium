@@ -10,6 +10,7 @@ import com.indagium.diagram3.Seq3Range
 import com.indagium.diagram3.generateSeq3
 import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.toSource
+import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.model.AnnBlock
 import com.indagium.model.CrashSite
 import com.indagium.model.Filter
@@ -196,6 +197,9 @@ internal class IndagiumToolOperations(
         },
         "update_note_block" to { a ->
             updateAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("text") ?: "", a.bool("force") ?: false)
+        },
+        "update_note_caption" to { a ->
+            updateNoteCaptionRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.str("caption"))
         },
         "move_note_block" to { a ->
             moveAnnotationRoute(a.str("tabId") ?: "", a.str("blockId") ?: "", a.anyInt("delta") ?: 0)
@@ -1498,6 +1502,44 @@ internal class IndagiumToolOperations(
         }
         appState.updateBlock(tabId, blockId, text)
         return mapOf("ok" to true, "tabId" to tabId, "blockId" to blockId)
+    }
+
+    /** Updates only the user-visible caption of a LogRef, Image, or structured Seq3 diagram Note.
+     *  Ordinary text notes intentionally have no caption field: callers must use
+     *  update_note_block, whose full-replacement semantics are explicit in the catalogue. */
+    private fun updateNoteCaptionRoute(tabId: String, blockId: String, caption: String?): Map<String, Any?> {
+        if (tabId.isBlank()) return mapOf("error" to "missing tabId")
+        if (blockId.isBlank()) return mapOf("error" to "missing blockId")
+        if (caption == null) return mapOf("error" to "missing caption (provide a string; blank is allowed)")
+        val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
+        val block = tab.annotations.blocks.firstOrNull { it.id == blockId }
+            ?: return mapOf("error" to "no such annotation block: $blockId")
+        return when (block) {
+            is AnnBlock.LogRef -> {
+                appState.updateBlock(tabId, blockId, caption)
+                mapOf("ok" to true, "tabId" to tabId, "blockId" to blockId, "type" to "log", "caption" to caption)
+            }
+            is AnnBlock.Image -> {
+                appState.updateBlock(tabId, blockId, caption)
+                mapOf("ok" to true, "tabId" to tabId, "blockId" to blockId, "type" to "image", "caption" to caption)
+            }
+            is AnnBlock.Note -> {
+                val parsed = parseSeq3Note(block.text)
+                    ?: return mapOf(
+                        "error" to "block $blockId is an ordinary text note (or a malformed/unsupported diagram); " +
+                            "update_note_caption supports LogRef, Image, and structured indagium:diagram3 Notes. " +
+                            "Use update_note_block for ordinary note Markdown, which replaces the full text.",
+                    )
+                val updated = updateSeq3NoteCaption(block.text, caption)
+                    ?: return mapOf("error" to "block $blockId contains an unsupported or malformed diagram note")
+                appState.updateBlock(tabId, blockId, updated)
+                mapOf(
+                    "ok" to true, "tabId" to tabId, "blockId" to blockId,
+                    "type" to "diagram", "caption" to caption,
+                    "dialect" to parsed.dialect.name.lowercase(),
+                )
+            }
+        }
     }
 
     private fun moveAnnotationRoute(tabId: String, blockId: String, delta: Int): Map<String, Any?> {

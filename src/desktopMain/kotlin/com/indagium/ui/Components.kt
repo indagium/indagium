@@ -778,6 +778,7 @@ fun ScrollableTextArea(
     // null → tc.br
     borderColor: Color? = null,
     contentPadding: PaddingValues = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+    enabled: Boolean = true,
     onClear: (() -> Unit)? = null,
 ) {
     val tc = tc()
@@ -807,10 +808,12 @@ fun ScrollableTextArea(
     Box(Modifier.fillMaxWidth()) {
         BasicTextField(
             value = fieldValue,
-            onValueChange = {
+                onValueChange = {
+                if (!enabled) return@BasicTextField
                 fieldValue = it
                 onValue(it.text)
             },
+            readOnly = !enabled,
             textStyle = TextStyle(color = tc.tx, fontSize = fontSize, lineHeight = lineHeight, fontFamily = FontFamily.Default),
             cursorBrush = SolidColor(tc.ac),
             onTextLayout = { layout = it },
@@ -853,7 +856,7 @@ fun ScrollableTextArea(
         }
         if (clearAction != null) {
             SquareIconButton(
-                "×", fontSize = 12.sp, onClick = clearAction,
+                "×", fontSize = 12.sp, enabled = enabled, onClick = clearAction,
                 modifier = Modifier.align(Alignment.TopEnd).padding(4.dp), size = 16.dp,
             )
         }
@@ -931,7 +934,7 @@ fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
 // 18dp matches the height of the adjacent type badge (BlockControls' Note/LogRef pill) they sit
 // next to in the same row.
 @Composable
-fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 18.dp) {
+fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier, size: Dp = 18.dp, enabled: Boolean = true) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
@@ -939,7 +942,7 @@ fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modi
             .size(size)
             .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clip(CORNER_MD)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,
@@ -951,7 +954,7 @@ fun SquareIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modi
 // Same height/shape/hover convention as SquareIconButton, for multi-character labels (e.g.
 // "+ note") that can't fit a fixed square — auto-width via horizontal padding instead.
 @Composable
-fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
@@ -959,7 +962,7 @@ fun LabelIconButton(text: String, fontSize: TextUnit, onClick: () -> Unit, modif
             .height(18.dp)
             .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clip(CORNER_MD)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false },
         contentAlignment = Alignment.Center,

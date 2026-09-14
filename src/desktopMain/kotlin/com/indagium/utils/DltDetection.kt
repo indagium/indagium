@@ -125,15 +125,15 @@ internal fun resolveDltCsvHeader(headerLine: String): Pair<Char, DltCsvColumns>?
  * content (fewer bytes were available than the sniff budget); it lets a short, complete raw DLT
  * stream (no storage header) be accepted on fewer than the [MIN_CHAINED_FRAMES] threshold normally
  * required to rule out arbitrary binary that merely starts with a plausible-looking frame.
- * [fileName] is used only to gate an ambiguous, headerless v2 frame (rule 4 below) — a real DLT
+ * [fileName] is used only to gate an ambiguous, headerless v2 frame (rule 5 below) — a real DLT
  * storage header (`DLT\x01`/`DLT\x02`) is always unambiguous and never needs it.
  *
  * Rules, in order:
  * 1. `DLT\x01` storage magic -> [LogContentKind.DLT_STORAGE]; `DLT\x02` -> [LogContentKind.DLT_UNSUPPORTED_V2].
- * 2. A NUL-free sample -> a DLT Viewer CSV/ASCII export, or plain [LogContentKind.TEXT].
- * 3. A chain of >= [MIN_CHAINED_FRAMES] structurally valid v1 frames from offset 0 (or, when
+ * 2. A chain of >= [MIN_CHAINED_FRAMES] structurally valid v1 frames from offset 0 (or, when
  *    [atEof], >= 1 frame that consumes the sample or ends in a truncated frame) -> [LogContentKind.DLT_RAW].
- * 4. Remaining text-like (UTF-16) content -> as rule 2.
+ * 3. A NUL-free sample -> a DLT Viewer CSV/ASCII export, or plain [LogContentKind.TEXT].
+ * 4. Remaining text-like (UTF-16) content -> as rule 3.
  * 5. A lone byte with v2's version bits, name-gated to files ending in `.dlt` -> [LogContentKind.DLT_UNSUPPORTED_V2].
  * 6. Otherwise -> [LogContentKind.OTHER].
  */
@@ -141,17 +141,16 @@ internal fun classifyLogContent(sample: ByteArray, atEof: Boolean, fileName: Str
     if (hasStorageMagic(sample, version = 1)) return LogContentKind.DLT_STORAGE
     if (hasStorageMagic(sample, version = 2)) return LogContentKind.DLT_UNSUPPORTED_V2
 
-    // A NUL-free sample is ASCII/UTF-8 text or non-DLT binary: every real frame header carries NULs
-    // (LEN's high byte, padded ids), and NUL-free bytes 2..3 make LEN too large to chain in the
-    // sample. Only a sample that contains NULs can be DLT — and it must be tested for frames before
-    // the UTF-16 heuristic, which otherwise claims small NUL-dense frames as UTF-16 text.
-    if (sample.none { it == 0.toByte() }) return classifyText(sample)
-
+    // Walk raw frames before any text heuristic. A valid raw-v1 stream is allowed to contain no
+    // NUL bytes (for example, a sufficiently long frame whose length bytes and ids are all
+    // printable), so the old NUL-free fast path misclassified chained partial samples as text.
+    // The structural walk is bounded to this sniff sample and does not decode payload bytes.
     val chain = walkRawV1Frames(sample)
     val completeOrTruncatedTail = chain.endOffset == sample.size || chain.stoppedAtTruncatedFrame
     if (chain.completeFrames >= MIN_CHAINED_FRAMES || (atEof && chain.completeFrames >= 1 && completeOrTruncatedTail)) {
         return LogContentKind.DLT_RAW
     }
+    if (sample.none { it == 0.toByte() }) return classifyText(sample)
     if (isLikelyTextSample(sample)) return classifyText(sample)
     if (isVersion2Header(sample) && fileName.hasDltExtension()) return LogContentKind.DLT_UNSUPPORTED_V2
     return LogContentKind.OTHER

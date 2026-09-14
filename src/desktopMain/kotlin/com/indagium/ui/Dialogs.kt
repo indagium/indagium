@@ -340,6 +340,7 @@ internal fun AddAnnDialog(
     rows: List<LogEntry>,
     windowSize: IntSize,
     fileLabel: String? = null,
+    locked: Boolean = false,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -350,6 +351,7 @@ internal fun AddAnnDialog(
         rows = rows,
         windowSize = windowSize,
         fileLabel = fileLabel,
+        locked = locked,
         onConfirm = onConfirm,
         onDismiss = onDismiss,
     )
@@ -376,6 +378,9 @@ internal fun AnnotationMarkdownEditorDialog(
     windowSize: IntSize,
     rows: List<LogEntry> = emptyList(),
     fileLabel: String? = null,
+    /** Stable identity of the edited block; keeps a draft alive while upstream Notes change. */
+    sessionKey: Any? = null,
+    locked: Boolean = false,
     onDelete: (() -> Unit)? = null,
     onConfirm: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -389,7 +394,9 @@ internal fun AnnotationMarkdownEditorDialog(
     // Capped at 760dp so a large monitor doesn't turn this into an oversized modal.
     val dialogHeight = with(density) { (windowSize.height * 0.88f).toDp() }.coerceAtMost(760.dp)
 
-    var editorValue by remember(initialText) { mutableStateOf(TextFieldValue(initialText)) }
+    var baselineText by remember(sessionKey) { mutableStateOf(initialText) }
+    var editorValue by remember(sessionKey) { mutableStateOf(TextFieldValue(initialText)) }
+    var conflictLatest by remember(sessionKey) { mutableStateOf<String?>(null) }
     var previewMode by remember { mutableStateOf(false) }
     var evidenceExpanded by remember { mutableStateOf(false) }
     var headingMenuOpen by remember { mutableStateOf(false) }
@@ -401,7 +408,20 @@ internal fun AnnotationMarkdownEditorDialog(
 
     val summary = remember(rows) { evidenceSummary(rows) }
     val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
-    val hasUnsavedChanges = editorValue.text != initialText
+    // MCP/external and AI writes can arrive while this dialog is open. Keep a pristine draft in
+    // sync; preserve a dirty draft and make the user resolve it explicitly.
+    LaunchedEffect(initialText) {
+        val sync = reconcileMarkdownDraft(baselineText, editorValue.text, initialText)
+        if (sync.conflict) {
+            conflictLatest = sync.latest
+        } else {
+            baselineText = sync.baseline
+            editorValue = TextFieldValue(sync.draft, TextRange(sync.draft.length))
+            conflictLatest = null
+        }
+    }
+    val hasUnsavedChanges = editorValue.text != baselineText
+    val hasConflict = conflictLatest != null
     val shortcutHint = if (isMacOs) "⌘↵ save · esc cancel" else "Ctrl↵ save · esc cancel"
     val displayTitle = if (rows.isNotEmpty()) {
         "Note on ${rows.size} log line${if (rows.size == 1) "" else "s"}"
@@ -428,17 +448,35 @@ internal fun AnnotationMarkdownEditorDialog(
     }
 
     fun updateEditor(updated: TextFieldValue) {
+        if (locked) return
         retainedSelection = retainedMarkdownSelectionAfterEditorUpdate(editorValue, updated, retainedSelection)
         editorValue = updated
     }
 
     fun applyFormat(action: MarkdownFormatAction) {
+        if (locked || hasConflict) return
         val valueForAction = restoreMarkdownSelection(editorValue, retainedSelection)
         editorValue = applyMarkdownFormat(valueForAction, action)
         // Keep the newly selected formatted content available if the toolbar click causes a
         // second focus-collapse callback before the next action is dispatched.
         retainedSelection = editorValue.selection.takeIf { it.start != it.end }
         runCatching { editorFocusRequester.requestFocus() }
+    }
+
+    fun reloadLatest() {
+        val latest = conflictLatest ?: initialText
+        baselineText = latest
+        editorValue = TextFieldValue(latest, TextRange(latest.length))
+        conflictLatest = null
+        retainedSelection = null
+    }
+
+    fun overwriteLatest() {
+        if (locked) return
+        val draft = editorValue.text
+        baselineText = conflictLatest ?: initialText
+        conflictLatest = null
+        onConfirm(draft)
     }
 
     val dialogShape = RoundedCornerShape(10.dp)
@@ -455,7 +493,7 @@ internal fun AnnotationMarkdownEditorDialog(
                     headingMenuOpen && ev.key == Key.Escape -> { closeHeadingMenu(); true }
                     ev.key == Key.Escape -> { onDismiss(); true }
                     ev.isActionKey && (ev.key == Key.Enter || ev.key == Key.NumPadEnter) -> {
-                        onConfirm(editorValue.text)
+                        if (!locked && !hasConflict) onConfirm(editorValue.text)
                         true
                     }
                     else -> false
@@ -481,6 +519,31 @@ internal fun AnnotationMarkdownEditorDialog(
                 CloseButton(onClick = onDismiss)
             }
             NoteDialogDivider()
+
+            if (locked) {
+                AppText(
+                    NOTES_EDIT_LOCK_MESSAGE,
+                    color = tc.td,
+                    fontSize = 11.sp,
+                    modifier = Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 16.dp, vertical = 7.dp),
+                )
+            }
+            if (hasConflict) {
+                Row(
+                    Modifier.fillMaxWidth().background(tc.abg).padding(horizontal = 16.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AppText(
+                        "Notes changed elsewhere. Resolve this conflict before saving.",
+                        color = tc.tx,
+                        fontSize = 11.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    EditorDialogActionButton("Reload latest", filled = false, onClick = ::reloadLatest)
+                    EditorDialogActionButton("Overwrite with my draft", filled = true, enabled = !locked, onClick = ::overwriteLatest)
+                }
+            }
 
             // ── Evidence panel (collapsed by default) ────────────────────
             if (rows.isNotEmpty()) {
@@ -523,7 +586,7 @@ internal fun AnnotationMarkdownEditorDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box {
-                                MarkdownToolbarButton(onClick = { headingMenuOpen = true }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { headingMenuOpen = true }) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -540,36 +603,36 @@ internal fun AnnotationMarkdownEditorDialog(
                                 }
                             }
                             MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Bold) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Bold) }) {
                                 AppText("B", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                             }
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Italic) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Italic) }) {
                                 // AppText has no italic param; this is the one glyph that needs it. Serif,
                                 // because a sans-serif italic capital I renders as a bare slash.
                                 Text("I", color = tc.ts, fontSize = 13.sp, fontStyle = FontStyle.Italic, fontFamily = FontFamily.Serif)
                             }
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Strikethrough) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Strikethrough) }) {
                                 AppText("S", color = tc.ts, fontSize = 12.sp, textDecoration = TextDecoration.LineThrough)
                             }
                             MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.InlineCode) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.InlineCode) }) {
                                 AppText("Code", color = tc.ts, fontSize = 11.sp)
                             }
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.CodeBlock) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.CodeBlock) }) {
                                 AppText("Code block", color = tc.ts, fontSize = 11.sp)
                             }
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Quote) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Quote) }) {
                                 AppText("Quote", color = tc.ts, fontSize = 11.sp)
                             }
                             MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.BulletList) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.BulletList) }) {
                                 AppText("• List", color = tc.ts, fontSize = 11.sp)
                             }
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.NumberedList) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.NumberedList) }) {
                                 AppText("1. List", color = tc.ts, fontSize = 11.sp)
                             }
                             MarkdownToolbarSeparator()
-                            MarkdownToolbarButton(onClick = { applyFormat(MarkdownFormatAction.Link) }) {
+                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { applyFormat(MarkdownFormatAction.Link) }) {
                                 AppText("Link", color = tc.ts, fontSize = 11.sp)
                             }
                         }
@@ -589,6 +652,7 @@ internal fun AnnotationMarkdownEditorDialog(
                                 onValueChange = ::updateEditor,
                                 placeholder = "Write your note…",
                                 focusRequester = editorFocusRequester,
+                                enabled = !locked && !hasConflict,
                             )
                         }
                     }
@@ -623,10 +687,10 @@ internal fun AnnotationMarkdownEditorDialog(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (onDelete != null) DeleteNoteButton(onClick = onDelete)
+                if (onDelete != null) DeleteNoteButton(enabled = !locked, onClick = onDelete)
                 Spacer(Modifier.weight(1f))
                 EditorDialogActionButton("Cancel", filled = false, onClick = onDismiss)
-                EditorDialogActionButton(confirmLabel, filled = true, onClick = { onConfirm(editorValue.text) })
+                EditorDialogActionButton(confirmLabel, filled = true, enabled = !locked && !hasConflict, onClick = { onConfirm(editorValue.text) })
             }
         }
     }
@@ -745,7 +809,7 @@ private fun EvidenceLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
 /** One borderless, hover-only toolbar button (26dp min). Shared shell for both the plain-label
  *  buttons and the bespoke B/I/S glyphs, which need styling AppText's fixed param set can't express. */
 @Composable
-private fun MarkdownToolbarButton(onClick: () -> Unit, content: @Composable () -> Unit) {
+private fun MarkdownToolbarButton(enabled: Boolean = true, onClick: () -> Unit, content: @Composable () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(5.dp)
@@ -755,7 +819,7 @@ private fun MarkdownToolbarButton(onClick: () -> Unit, content: @Composable () -
             .widthIn(min = 26.dp)
             .background(if (hovered) tc.hv else Color.Transparent, shape)
             .clip(shape)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 8.dp),
@@ -815,6 +879,7 @@ private fun MarkdownWriteArea(
     onValueChange: (TextFieldValue) -> Unit,
     placeholder: String,
     focusRequester: FocusRequester,
+    enabled: Boolean = true,
 ) {
     val tc = tc()
     val editorScroll = rememberScrollState()
@@ -866,7 +931,7 @@ private fun MarkdownWriteArea(
                     val plainEnter = ev.type == KeyEventType.KeyDown &&
                         (ev.key == Key.Enter || ev.key == Key.NumPadEnter) &&
                         !ev.isShiftPressed && !ev.isCtrlPressed && !ev.isMetaPressed && !ev.isAltPressed
-                    if (!plainEnter) return@onPreviewKeyEvent false
+                    if (!enabled || !plainEnter) return@onPreviewKeyEvent false
                     val continued = continueMarkdownListOnEnter(value)
                     if (continued != null) {
                         onValueChange(continued)
@@ -887,6 +952,7 @@ private fun MarkdownWriteArea(
                 if (value.text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = 13.sp)
                 inner()
             },
+            readOnly = !enabled,
         )
         VerticalScrollbar(
             adapter = rememberScrollbarAdapter(editorScroll),
@@ -916,14 +982,14 @@ private fun MarkdownPreviewArea(text: String, tc: ThemeColors) {
 }
 
 @Composable
-private fun DeleteNoteButton(onClick: () -> Unit) {
+private fun DeleteNoteButton(enabled: Boolean = true, onClick: () -> Unit) {
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(6.dp)
     Box(
         Modifier
             .background(if (hovered) DANGER_RED.copy(alpha = .1f) else Color.Transparent, shape)
             .clip(shape)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 10.dp, vertical = 7.dp),
@@ -938,7 +1004,7 @@ private fun DeleteNoteButton(onClick: () -> Unit) {
  *  or Cancel's outlined look: a 1dp `tc.br` border on a `tc.p` fill, `tc.hv` on hover, `tc.tx`
  *  text. */
 @Composable
-private fun EditorDialogActionButton(label: String, filled: Boolean, onClick: () -> Unit) {
+private fun EditorDialogActionButton(label: String, filled: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(6.dp)
@@ -953,7 +1019,7 @@ private fun EditorDialogActionButton(label: String, filled: Boolean, onClick: ()
             .then(if (!filled) Modifier.border(1.dp, tc.br, shape) else Modifier)
             .background(fill, shape)
             .clip(shape)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 16.dp),
@@ -961,7 +1027,11 @@ private fun EditorDialogActionButton(label: String, filled: Boolean, onClick: ()
     ) {
         AppText(
             label,
-            color = if (filled) tc.p else tc.tx,
+            color = if (enabled) {
+                if (filled) tc.p else tc.tx
+            } else {
+                tc.td
+            },
             fontSize = 12.sp,
             fontWeight = if (filled) FontWeight.SemiBold else FontWeight.Normal,
         )

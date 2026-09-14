@@ -307,7 +307,12 @@ internal class AiSidebarRuntime(
         }}
         Use the provided tools for evidence; pass this pinned tab id to tools that require tabId unless
         the user explicitly asks about another open tab. Do not invent facts, log lines, source
-        mappings, or completed actions. State uncertainty and the next useful check clearly.
+        mappings, or completed actions. Notes sections, text notes, and log/image/diagram captions
+        are Markdown: headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced
+        code are supported and may be used when they improve readability. `update_note_block`
+        replaces an ordinary note's full Markdown, so read it first when preserving content; use
+        `update_note_caption` for a LogRef, Image, or structured diagram caption. State uncertainty
+        and the next useful check clearly.
         """.trimIndent()
 
     private fun startProblem(

@@ -895,22 +895,26 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "get_annotation_sections",
-        "Read the Notes panel's From and Next steps text. `prefix` is the configurable From " +
-            "section (labelled From by default); `suffix` is Next steps. This does not list " +
-            "annotation blocks; call get_annotation_blocks for those.",
+        "Read the Notes panel's From and Next steps Markdown. `prefix` is the configurable From " +
+            "section (labelled From by default); `suffix` is Next steps. Both support Markdown " +
+            "headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code. " +
+            "This does not list annotation blocks; call get_annotation_blocks for those.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "get_annotation_blocks",
         "List every existing Notes annotation block with its id and safe identifying details. " +
-            "Text and log blocks include their text/caption and line ids; image blocks include caption, " +
-            "format, byte size, and video metadata but never image bytes.",
+            "Text and log blocks include their Markdown text/caption and line ids; image blocks " +
+            "include Markdown caption, format, byte size, and video metadata but never image bytes. " +
+            "Markdown supports headings, bold/italic/strikethrough, lists, quotes, links, and " +
+            "inline/fenced code.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "append_annotation_section",
-        "Append non-blank text to one Notes section without replacing its existing content. Use " +
-            "section `prefix` for From or `suffix` for Next steps.",
+        "Append non-blank Markdown to one Notes section without replacing its existing content. " +
+            "Use section `prefix` for From or `suffix` for Next steps. Markdown supports headings, " +
+            "bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
         schema(
             "tabId" to "string", "section" to "string", "text" to "string", required = listOf("tabId", "section", "text"),
             enums = mapOf("section" to listOf("prefix", "suffix")),
@@ -918,9 +922,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "set_annotation_section",
-        "Replace one Notes section's text entirely, discarding whatever was there before. Omitting " +
-            "or blanking `text` clears the section. Prefer append_annotation_section instead if the " +
-            "existing content should be kept.",
+        "Replace one Notes section's Markdown entirely, discarding whatever was there before. " +
+            "Omitting or blanking `text` clears the section. Markdown supports headings, " +
+            "bold/italic/strikethrough, lists, quotes, links, and inline/fenced code. Prefer " +
+            "append_annotation_section instead if the existing content should be kept.",
         schema(
             "tabId" to "string", "section" to "string", "text" to "string", required = listOf("tabId", "section"),
             enums = mapOf("section" to listOf("prefix", "suffix")),
@@ -928,7 +933,9 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "add_text_note",
-        "Append a plain text analysis note block, optionally after an existing block id.",
+        "Append a Markdown analysis note block, optionally after an existing block id. Markdown " +
+            "supports headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced " +
+            "code. The text is stored verbatim.",
         schema("tabId" to "string", "text" to "string", "afterId" to "string", required = listOf("tabId", "text")),
     ),
     McpTool(
@@ -936,7 +943,9 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Append an annotation block referencing one or more log line ids. lineIds must be bare " +
             "integers from get_visible_lines, never quoted strings or descriptive text — for a " +
             "large multi-line block (e.g. a stack trace), pass just its first and last line id as " +
-            "anchors rather than enumerating every line, and put the full description in caption.",
+            "anchors rather than enumerating every line, and put the full Markdown description in " +
+            "caption. Captions support headings, bold/italic/strikethrough, lists, quotes, links, " +
+            "and inline/fenced code.",
         schema("tabId" to "string", "lineIds" to "array<integer>", "caption" to "string", required = listOf("tabId", "lineIds")),
     ),
     McpTool(
@@ -957,14 +966,18 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "imagePath" to "Absolute path to an image file. Mutually exclusive with imageBase64 and videoMs.",
                 "videoMs" to "Position in the tab's attached video to capture, in milliseconds. " +
                     "Mutually exclusive with imageBase64 and imagePath.",
-                "caption" to "Optional caption shown above the image.",
+                "caption" to "Optional Markdown caption shown above the image. Supports headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
                 "afterId" to "Optional existing block id to insert after; appended at the end when omitted.",
             ),
         ),
     ),
     McpTool(
         "update_note_block",
-        "Update a text note's text or a log note's caption. Refuses to overwrite a diagram note " +
+        "Update a text note's full Markdown text or a log note's full Markdown caption. This " +
+            "operation replaces the ordinary note's entire stored Markdown; read the note first " +
+            "with get_annotation_blocks if preserving existing content matters. Markdown supports " +
+            "headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code. " +
+            "Refuses to overwrite a diagram note " +
             "(one holding a generated sequence diagram) with non-diagram text unless force=true is " +
             "set — diagram notes are outside this tool's contract; pass force to override anyway.",
         schema(
@@ -973,6 +986,22 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             descriptions = mapOf(
                 "force" to "Overwrite a diagram note's text with non-diagram content anyway, " +
                     "destroying its generated model. Defaults to false (refused).",
+            ),
+        ),
+    ),
+    McpTool(
+        "update_note_caption",
+        "Update only a Notes block's Markdown caption. Supports LogRef, Image, and structured " +
+            "indagium:diagram3 Note blocks; ordinary text Notes have no caption and are rejected " +
+            "with guidance to use update_note_block, which full-replaces their Markdown (read first " +
+            "when preserving content). Captions support headings, bold/italic/strikethrough, lists, " +
+            "quotes, links, and inline/fenced code. For diagrams, the model, source fence, and source " +
+            "hash are preserved.",
+        schema(
+            "tabId" to "string", "blockId" to "string", "caption" to "string",
+            required = listOf("tabId", "blockId", "caption"),
+            descriptions = mapOf(
+                "caption" to "Replacement Markdown caption; blank is allowed. Supports headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
             ),
         ),
     ),
@@ -1380,6 +1409,7 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/annotations/log", "add_log_note"),
     Triple(HttpMethod.Post, "/annotations/image", "add_image_note"),
     Triple(HttpMethod.Post, "/annotations/update", "update_note_block"),
+    Triple(HttpMethod.Post, "/annotations/caption", "update_note_caption"),
     Triple(HttpMethod.Post, "/annotations/move", "move_note_block"),
     Triple(HttpMethod.Post, "/annotations/delete", "delete_note_block"),
     Triple(HttpMethod.Post, "/annotations/clear-all", "clear_all_notes"),

@@ -141,6 +141,11 @@ fun App(
     val theme = themeColors(state.settings.theme)
     val platformDensity = LocalDensity.current
     val mainWindowSize = LocalWindowInfo.current.containerSize
+    // The runtime revision is the single Compose invalidation source for active AI runs. App-level
+    // dialogs (such as Add Annotation) sit outside RightSidebarPanel, so they observe it here too.
+    val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
+    @Suppress("UNUSED_VARIABLE")
+    val observedAiRevision = aiRevision
     val interfaceScale = state.settings.interfaceScalePercent / 100f
     val scaledDensity = remember(platformDensity, interfaceScale) {
         Density(
@@ -1074,6 +1079,7 @@ fun App(
                         rows = rows,
                         windowSize = mainWindowSize,
                         fileLabel = req.sourceFilename ?: state.tab(req.sourceTabId)?.filename,
+                        locked = state.aiSessions.sessionFor(req.targetTabId).activeRun != null,
                         onConfirm = { caption ->
                             state.confirmAddAnn(
                                 req.targetTabId,
