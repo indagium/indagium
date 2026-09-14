@@ -68,6 +68,7 @@ import com.indagium.diagram3.Seq3InsertionPosition
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -1624,7 +1625,7 @@ private fun Seq3FragmentsAndNotesSection(
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    val total = document.fragments.size + document.notes.size + document.delays.size
+    val total = document.fragments.size + document.notes.size + document.delays.size + document.manualActivations.size
     // WP8 3b (revised): "+ note" attaches to the current message selection, same as the title
     // bar's own "Note" action (Seq3TitleActionButton in Seq3Workspace.kt) — but when nothing is
     // selected it now falls back to a free-floating note at `seq3DefaultNotePlacement`'s default
@@ -1676,7 +1677,7 @@ private fun Seq3FragmentsAndNotesSection(
         )
         hint?.let { AppText(it, color = tc.warn, fontSize = 9.sp, modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)) }
         if (view.artifactsExpanded) {
-            if (document.fragments.isEmpty() && document.notes.isEmpty() && document.delays.isEmpty()) {
+            if (document.fragments.isEmpty() && document.notes.isEmpty() && document.delays.isEmpty() && document.manualActivations.isEmpty()) {
                 // WP8 (revised): the section now renders even with nothing to show (see
                 // `artifactsVisible`'s own comment above) — replace the now-empty scrolling list
                 // with a small hint so the section still claims its weighted section space
@@ -1689,6 +1690,7 @@ private fun Seq3FragmentsAndNotesSection(
                     document.fragments.forEach { fragment -> Seq3FragmentRenameRow(state, session, view, fragment) }
                     document.notes.forEach { note -> Seq3NoteRenameRow(state, session, view, note) }
                     document.delays.forEach { delayItem -> Seq3DelayRenameRow(state, session, view, delayItem) }
+                    document.manualActivations.forEach { activation -> Seq3ManualActivationRow(state, session, view, document, activation) }
                 }
             }
         }
@@ -1916,6 +1918,79 @@ private fun Seq3DelayRenameRow(state: AppState, session: Seq3WorkspaceSession, v
     )
 }
 
+/** Resolves a manual activation's endpoint to a short human label — the message's own
+ *  [Seq3Message.labelTemplate] when it still resolves, else the raw id (dangling-reference-draws-
+ *  something-never-crashes, same posture every other artifact row in this file already takes). */
+private fun seq3ManualActivationEndpointLabel(document: Seq3Document, messageId: String): String =
+    document.messages.firstOrNull { it.id == messageId }?.labelTemplate ?: messageId
+
+/** The Artifacts-panel row label for a manual activation bar (phase 2 of the manual-UML-
+ *  activation-bars feature): `"Activation · <lifeline> · <start> → <end or 'end'>"`. Reuses
+ *  [seq3DisplayName] for the lifeline the same way every other lifeline-facing label in this file
+ *  does, and [Seq3ManualActivation.endMessageId] null's own "until the end of the diagram" contract
+ *  reads as the literal word "end". */
+internal fun seq3ManualActivationRowLabel(document: Seq3Document, activation: Seq3ManualActivation): String {
+    val lifeline = document.lifelines.firstOrNull { it.id == activation.lifelineId }
+    val lifelineName = lifeline?.let { seq3DisplayName(it.name, it.displaySegments, document.lifelineDisplaySegments) }
+        ?: activation.lifelineId
+    val startLabel = seq3ManualActivationEndpointLabel(document, activation.startMessageId)
+    val endLabel = activation.endMessageId?.let { seq3ManualActivationEndpointLabel(document, it) } ?: "end"
+    return "Activation · $lifelineName · $startLabel → $endLabel"
+}
+
+/** The manual-activation-bar counterpart of [Seq3DelayRenameRow] above — same select/hover/hide/
+ *  remove recipe via [Seq3ArtifactRow]. No rename affordance: [seq3ManualActivationRowLabel] is
+ *  fully derived from the bar's own anchors, so `onRename = null` hides [Seq3ArtifactRow]'s rename
+ *  button entirely rather than wiring it to a command that doesn't exist. */
+@Composable
+private fun Seq3ManualActivationRow(
+    state: AppState,
+    session: Seq3WorkspaceSession,
+    view: Seq3ViewState,
+    document: Seq3Document,
+    activation: Seq3ManualActivation,
+) {
+    Seq3ArtifactRow(
+        id = activation.id,
+        kindWord = "activation",
+        label = seq3ManualActivationRowLabel(document, activation),
+        messageCount = 0,
+        hidden = activation.visibility == Seq3Visibility.HIDDEN,
+        selected = view.selectedManualActivationId == activation.id,
+        hovered = view.hoveredManualActivationId == activation.id,
+        onSelect = {
+            seq3ToggleManualActivationSelection(view, activation.id)
+            runCatching { view.focusRequester.requestFocus() }
+        },
+        onHoverEnter = { view.hoveredManualActivationId = activation.id },
+        onHoverExit = { if (view.hoveredManualActivationId == activation.id) view.hoveredManualActivationId = null },
+        editing = false,
+        editingText = "",
+        onEditingText = {},
+        onCommitRename = {},
+        onCancelRename = {},
+        onRename = null,
+        onToggleVisibility = {
+            state.seq3Sessions.applyCommand(
+                session.id,
+                Seq3Command.Bulk(
+                    emptySet(),
+                    Seq3BulkAction.SetManualActivationVisibility(
+                        activation.id,
+                        if (activation.visibility == Seq3Visibility.HIDDEN) Seq3Visibility.VISIBLE else Seq3Visibility.HIDDEN,
+                    ),
+                ),
+            )
+        },
+        onRemove = {
+            state.seq3Sessions.applyCommand(session.id, Seq3Command.Bulk(emptySet(), Seq3BulkAction.DeleteManualActivation(activation.id)))
+            if (view.selectedManualActivationId == activation.id) view.selectedManualActivationId = null
+            if (view.hoveredManualActivationId == activation.id) view.hoveredManualActivationId = null
+        },
+        view = view,
+    )
+}
+
 /** Shared row body for [Seq3FragmentRenameRow]/[Seq3NoteRenameRow] (item 9) — same container/
  *  title/controls recipe as [Seq3LifelineRow] and [Seq3QueueRow]. WP8 3a: this used to have a
  *  checkbox driving a bare local `remember` — no shared selection, no bulk action, no canvas
@@ -1941,7 +2016,8 @@ private fun Seq3ArtifactRow(
     onEditingText: (String) -> Unit,
     onCommitRename: () -> Unit,
     onCancelRename: () -> Unit,
-    onRename: () -> Unit,
+    // Null hides the rename badge entirely — for rows whose label is derived, not user-editable.
+    onRename: (() -> Unit)?,
     onToggleVisibility: () -> Unit,
     onRemove: () -> Unit,
     view: Seq3ViewState,
@@ -2042,14 +2118,16 @@ private fun Seq3ArtifactRow(
                             shape = CORNER_SM,
                             onClick = onToggleVisibility,
                         )
-                        ToolbarBtn(
-                            label = "✎",
-                            tooltip = "Rename",
-                            contentPadding = PaddingValues(0.dp),
-                            modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
-                            shape = CORNER_SM,
-                            onClick = onRename,
-                        )
+                        if (onRename != null) {
+                            ToolbarBtn(
+                                label = "✎",
+                                tooltip = "Rename",
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier.size(SEQ3_ACTION_BADGE_SIZE),
+                                shape = CORNER_SM,
+                                onClick = onRename,
+                            )
+                        }
                         // WP12: fragment kind change + hide-operator-word toggle — mirrors the
                         // lifeline-kind Seq3DropdownButton above (`Seq3LifelineRow`). Absent for a
                         // note row, which has no kind at all.

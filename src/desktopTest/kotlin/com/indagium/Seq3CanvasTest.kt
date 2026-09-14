@@ -10,6 +10,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -25,6 +26,7 @@ import com.indagium.ui.SEQ3_ROW_HIT_Y_TOLERANCE
 import com.indagium.ui.Seq3CanvasRowRef
 import com.indagium.ui.Seq3DragEndpoint
 import com.indagium.ui.Seq3EndpointSide
+import com.indagium.ui.Seq3ActivationEndCandidate
 import com.indagium.ui.seq3ActorGlyphGeometry
 import com.indagium.ui.seq3ArrowEndpointAt
 import com.indagium.ui.seq3ArrowStrokeWidths
@@ -36,6 +38,7 @@ import com.indagium.ui.seq3FitWidthZoom
 import com.indagium.ui.seq3FragmentIsEmphasized
 import com.indagium.ui.seq3IsEmptyCanvasBackground
 import com.indagium.ui.seq3LifelineDropIndex
+import com.indagium.ui.seq3ManualActivationEndCandidates
 import com.indagium.ui.seq3NearestLifelineId
 import com.indagium.ui.seq3NoteIsEmphasized
 import com.indagium.ui.seq3PointInBox
@@ -48,6 +51,7 @@ import com.indagium.ui.seq3RowRefsInSelection
 import com.indagium.ui.seq3RowsInSelection
 import com.indagium.ui.seq3SelectionRect
 import com.indagium.ui.seq3SelfLoopEndpointAt
+import com.indagium.ui.seq3SnapActivationEnd
 import com.indagium.ui.seq3ZoomByWheel
 import com.indagium.ui.seq3ZoomPercentLabel
 import kotlin.test.Test
@@ -687,5 +691,134 @@ class Seq3CanvasTest {
         val row = layout.rows.filterIsInstance<Seq3ArrowRow>().single()
 
         assertTrue(!seq3IsEmptyCanvasBackground(layout, (row.fromX + row.toX) / 2, row.y, SEQ3_BAND_START_Y_TOLERANCE))
+    }
+
+    // ── Phase 2 (manual-UML-activation-bars): end candidates + snapping ────────────────────────
+    //
+    // seq3ManualActivationEndCandidates re-derives its own emission-index space from a REAL
+    // Seq3Layout.rows (never a second, ad-hoc geometry — this phase's own second absolute rule,
+    // restated at this file's own header), so every fixture below goes through layoutSeq3, exactly
+    // like every other test in this file.
+
+    private fun threeMessageDocOnB(): Seq3Document = Seq3Document(
+        lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+        messages = listOf(
+            message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+            message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+            message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+        ),
+    )
+
+    @Test
+    fun manualActivationEndCandidatesExcludeRowsBeforeTheStartAndIncludeEndOfDiagram() {
+        val activation = Seq3ManualActivation(id = "man1", lifelineId = "B", startMessageId = "m2")
+        val doc = threeMessageDocOnB().copy(manualActivations = listOf(activation))
+        val layout = layoutSeq3(doc, opts())
+
+        val candidates = seq3ManualActivationEndCandidates(layout, doc, "man1")
+
+        assertEquals(
+            setOf("m2" to 2, "m3" to 3, null to null),
+            candidates.map { it.messageId to it.occurrenceEntryId }.toSet(),
+        )
+        assertTrue(candidates.none { it.messageId == "m1" }, "a row before the bar's own start must never be offered")
+    }
+
+    @Test
+    fun manualActivationEndCandidatesPlaceEndOfDiagramAtTheLifelinesOwnBottomStrictlyBelowTheLastRow() {
+        // User-observed correction: the "end of diagram" candidate used to share the last real
+        // row's own y exactly — seq3SnapActivationEnd's tie-break then always kept the earlier (row)
+        // candidate, making a null end unreachable by dragging. It must now sit at the SAME y
+        // Seq3Layout.kt's buildActivationBars draws a `toDiagramEnd` bar's bottom to (the lifeline's
+        // own bottom), which is strictly below its last drawn row.
+        val activation = Seq3ManualActivation(id = "man1", lifelineId = "B", startMessageId = "m1")
+        val doc = threeMessageDocOnB().copy(manualActivations = listOf(activation))
+        val layout = layoutSeq3(doc, opts())
+        val lastRowCandidateY = layout.rows.maxOf { it.y }
+        val lifelineBottom = layout.lifelines.single { it.lifelineId == "B" }.lifelineBottom
+
+        val candidates = seq3ManualActivationEndCandidates(layout, doc, "man1")
+        val diagramEnd = candidates.single { it.messageId == null }
+
+        assertEquals(lifelineBottom, diagramEnd.bottomY)
+        assertTrue(diagramEnd.bottomY > lastRowCandidateY, "'end of diagram' must sit strictly below the last real row's own candidate")
+    }
+
+    @Test
+    fun snappingAtTheLifelinesOwnBottomPicksEndOfDiagramRatherThanTheLastRealRow() {
+        // The regression this whole fix exists to prevent: before it, dragging all the way down to
+        // where the lifeline's guide line actually ends resolved to the LAST ROW's candidate (same
+        // y, earlier in list order), never to "end of diagram" — so a manual bar could never be
+        // dragged back to "keep reaching the bottom even if more messages are added later".
+        val activation = Seq3ManualActivation(id = "man1", lifelineId = "B", startMessageId = "m1")
+        val doc = threeMessageDocOnB().copy(manualActivations = listOf(activation))
+        val layout = layoutSeq3(doc, opts())
+        val candidates = seq3ManualActivationEndCandidates(layout, doc, "man1")
+        val diagramEnd = candidates.single { it.messageId == null }
+
+        val snapped = seq3SnapActivationEnd(candidates, diagramEnd.bottomY)
+
+        assertNull(snapped?.messageId, "dragging down to the lifeline's own bottom must resolve to 'end of diagram'")
+        assertEquals(diagramEnd.bottomY, snapped?.bottomY)
+    }
+
+    @Test
+    fun manualActivationEndCandidatesExcludeARowThatWouldCrossAnExistingManualBar() {
+        // "outer" already claims B from m1 to m2; "inner" starts at m2 (outer's own end), so
+        // anything past m2 (m3, and "end of diagram", which resolves to the very same row) would
+        // cross outer's end once merged — only a zero-length bar ending right at m2 is offered.
+        val outer = Seq3ManualActivation(id = "outer", lifelineId = "B", startMessageId = "m1", endMessageId = "m2")
+        val inner = Seq3ManualActivation(id = "inner", lifelineId = "B", startMessageId = "m2")
+        val doc = threeMessageDocOnB().copy(manualActivations = listOf(outer, inner))
+        val layout = layoutSeq3(doc, opts())
+
+        val candidates = seq3ManualActivationEndCandidates(layout, doc, "inner")
+
+        assertEquals(listOf("m2" to 2), candidates.map { it.messageId to it.occurrenceEntryId })
+    }
+
+    @Test
+    fun manualActivationEndCandidatesAreEmptyForAnUnknownId() {
+        val doc = threeMessageDocOnB()
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(seq3ManualActivationEndCandidates(layout, doc, "does-not-exist").isEmpty())
+    }
+
+    @Test
+    fun snapActivationEndPicksTheNearestCandidate() {
+        val candidates = listOf(
+            Seq3ActivationEndCandidate("m1", 1, 10.0),
+            Seq3ActivationEndCandidate("m2", 2, 20.0),
+            Seq3ActivationEndCandidate("m3", 3, 30.0),
+        )
+        assertEquals("m1", seq3SnapActivationEnd(candidates, 12.0)?.messageId)
+        assertEquals("m3", seq3SnapActivationEnd(candidates, 29.0)?.messageId)
+    }
+
+    @Test
+    fun snapActivationEndBreaksATieByKeepingTheEarlierCandidateInListOrder() {
+        val candidates = listOf(
+            Seq3ActivationEndCandidate("m2", 2, 20.0),
+            Seq3ActivationEndCandidate("m3", 3, 30.0),
+        )
+        // |25 - 20| == |25 - 30| == 5: an exact tie.
+        assertEquals("m2", seq3SnapActivationEnd(candidates, 25.0)?.messageId)
+    }
+
+    @Test
+    fun snapActivationEndBeyondTheLastCandidateStillSnapsToTheFarthestOne() {
+        val candidates = listOf(
+            Seq3ActivationEndCandidate("m1", 1, 10.0),
+            Seq3ActivationEndCandidate(null, null, 30.0), // "end of diagram" sentinel
+        )
+        val snapped = seq3SnapActivationEnd(candidates, 500.0)
+        assertNull(snapped?.messageId)
+        assertEquals(30.0, snapped?.bottomY)
+    }
+
+    @Test
+    fun snapActivationEndIsNullWhenThereAreNoCandidates() {
+        assertNull(seq3SnapActivationEnd(emptyList(), 10.0))
     }
 }
