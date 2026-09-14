@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -644,6 +647,17 @@ fun AnnotationPanel(
         ?: ann.blocks.firstOrNull { it.id == id }?.let(::estimateBlockHeightPx)
         ?: (90f * blockDensity)
     val blockIds = ann.blocks.map { it.id }
+    // A pure height change (expanding/collapsing a diagram note or a LogRef excerpt) must move
+    // every block below it to its new position immediately — springing them down over several
+    // frames left the growing block's new content briefly covered by the next opaque card, read
+    // by the user as flicker. A real reorder (drag release, ↑/↓, Alt+↑/↓, or a block added/
+    // removed) still animates: blockIds changing identity is what opens this window. Computed
+    // synchronously during composition (not a LaunchedEffect, which runs after composition and
+    // would let the first reorder frame snap) via `remember(blockIds)`, which re-evaluates its
+    // initializer exactly when the key changes.
+    val blockIdsChangedAtNanos = remember(blockIds) { System.nanoTime() }
+    val springWindow = dragBlockId != null || justReleasedBlockId != null ||
+        System.nanoTime() - blockIdsChangedAtNanos < 700_000_000L
     LaunchedEffect(blockIds, dragBlockId, justReleasedBlockId) {
         if (shouldSyncSequenceVisualOrder(dragBlockId, justReleasedBlockId)) {
             liveVisualBlockIds = blockIds
@@ -1152,7 +1166,7 @@ fun AnnotationPanel(
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
                         Spacer(Modifier.weight(1f))
-                        LabelIconButton("Edit", fontSize = 10.sp, onClick = { editingTarget = EditDialogTarget.Prefix })
+                        EditIconButton(onClick = { editingTarget = EditDialogTarget.Prefix })
                     }
                     Spacer(Modifier.height(3.dp))
                     ScrollableTextArea(
@@ -1290,7 +1304,13 @@ fun AnnotationPanel(
                                 isJustReleased = justReleasedBlockId == block.id,
                                 pointerY = (blockStartOffsets[block.id] ?: 0f) + dragOffsetY,
                                 targetY = targetY,
-                                animatedY = animatedY,
+                                // Outside the spring window (see blockIdsChangedAtNanos above), feed
+                                // sequenceRenderY the target directly so a pure height change snaps
+                                // to its new position at once instead of gliding into view frame by
+                                // frame — animateFloatAsState above keeps tracking its target either
+                                // way, so a real reorder's spring still starts from the old settled
+                                // position and plays normally.
+                                animatedY = if (springWindow) animatedY else targetY,
                             )
                             val dragHandleModifier = Modifier.pointerInput(block.id) {
                                 detectDragGestures(
@@ -1384,7 +1404,7 @@ fun AnnotationPanel(
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             AppText("Next steps", color = tc.td, fontSize = 11.sp, fontFamily = UI)
                             Spacer(Modifier.weight(1f))
-                            LabelIconButton("Edit", fontSize = 10.sp, onClick = { editingTarget = EditDialogTarget.Suffix })
+                            EditIconButton(onClick = { editingTarget = EditDialogTarget.Suffix })
                         }
                         Spacer(Modifier.height(3.dp))
                         ScrollableTextArea(
@@ -2946,6 +2966,35 @@ private fun ImageBlockView(
 private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
     runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
 
+// Same 18dp footprint/hover convention as SquareIconButton (Components.kt), but rendering the
+// outlined pencil glyph (Icons.Outlined.Edit — already used by Seq3Canvas.kt) instead of a text
+// glyph, since a bare "Edit" label read as noisy chrome next to the icon-only ↑/↓/× controls it
+// sits beside.
+@Composable
+private fun EditIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    TooltipArea(tooltip = { ToolbarTooltip("Open in editor") }) {
+        Box(
+            modifier
+                .size(18.dp)
+                .background(if (hovered) tc.hv else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
+                .clickable(onClick = onClick)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.Edit,
+                contentDescription = "Open in editor",
+                tint = tc.td,
+                modifier = Modifier.size(13.dp),
+            )
+        }
+    }
+}
+
 // ── Block controls (move / delete / add note) ──────────────────────────
 @Composable
 private fun BlockControls(
@@ -3039,10 +3088,10 @@ private fun BlockControls(
             if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
             if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
             if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
-            // Renamed from the bare "✎" glyph, which at this size read as a paperclip rather than the
-            // button that opens the full editor dialog.
-            onEdit?.let { LabelIconButton("Edit", fontSize = 10.sp, onClick = it) }
             LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
+            // Icon button (not a text label) that opens the full editor dialog — placed right
+            // before × per the header action order.
+            onEdit?.let { EditIconButton(onClick = it) }
             SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
         }
     }

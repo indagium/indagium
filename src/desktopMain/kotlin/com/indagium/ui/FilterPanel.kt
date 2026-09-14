@@ -1089,26 +1089,13 @@ internal fun FilterPanel(
             .verticalScroll(scroll),
     ) {
         // ── Filter mode tabs ──────────────────────────────────────
-        Row(Modifier.fillMaxWidth()) {
-            listOf("Tags" to FilterMode.TAGS, "Regex" to FilterMode.KEYWORD).forEach { (label, mode) ->
-                val active = filter.mode == mode
-                Column(
-                    Modifier.weight(1f).clickable {
-                        if (mode == FilterMode.KEYWORD) onStartRegexSearch() else onSetFilterMode(mode)
-                    },
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    AppText(
-                        label,
-                        color = if (active) tc.ac else tc.td,
-                        fontSize = 11.sp,
-                        fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                        modifier = Modifier.padding(vertical = 8.dp),
-                    )
-                    Box(Modifier.fillMaxWidth().height(2.dp).background(if (active) tc.ac else tc.br))
-                }
-            }
-        }
+        UnderlineTabs(
+            labels = listOf("Tags", "Regex"),
+            selectedIndex = if (filter.mode == FilterMode.KEYWORD) 1 else 0,
+            onSelect = { index ->
+                if (index == 1) onStartRegexSearch() else onSetFilterMode(FilterMode.TAGS)
+            },
+        )
 
         // ── Positive: Tags ────────────────────────────────────────
         if (filter.mode == FilterMode.TAGS) {
