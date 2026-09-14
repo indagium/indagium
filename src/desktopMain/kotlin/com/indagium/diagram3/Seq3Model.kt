@@ -596,6 +596,55 @@ data class Seq3StateInvariant(
     val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
 )
 
+// ── Manual activation bars (phase 1 of the manual-UML-activation-bars feature) ─────────────────
+//
+// A [Seq3ActivationSpan] (Seq3Activation.kt) drawn from the auto call/return pairing is inferred —
+// this is the opposite: a bar the USER explicitly places, phase 2's "Add activation block"/"Add
+// activation on sender" context-menu verbs. Deliberately its own document-level list rather than a
+// field folded onto [Seq3Message] (mirrors [Seq3Delay]/[Seq3StateInvariant]'s own reasoning): a bar
+// has no evidence of its own, spans a RANGE of rows rather than decorating one, and — the whole
+// point of this feature — must keep drawing independent of whichever message anchors its ends being
+// hidden, merged, or deleted later, same as every other document-level artifact's "dangling
+// reference draws nothing, never crashes" contract.
+
+/**
+ * One user-placed UML activation bar (ExecutionSpecification) on [lifelineId], anchored to two
+ * message occurrences rather than to raw row indices — the same reasoning [Seq3Delay]/
+ * [Seq3StateInvariant] already document for themselves: row/emission indices are not stable across
+ * an edit (a hidden message, a merge, a regenerate), while a (messageId, occurrenceEntryId) pair
+ * survives everything except the referenced message/occurrence itself disappearing.
+ *
+ * **Anchoring.** [startMessageId] plus the optional [startOccurrenceEntryId] name the exact row the
+ * bar begins at — null picks the message's first (only, for most messages) emission, matching
+ * [Seq3Delay.afterOccurrenceEntryId]'s own "null means the first/only occurrence" default.
+ * [endMessageId] is the bar's bottom anchor the same way; **null means "until the end of the
+ * diagram"**, not "no end chosen" — a fresh bar (phase 2's default-end helper,
+ * [seq3DefaultManualActivationEnd]) starts this way and a user can always drag the bottom handle up
+ * to an earlier row later. [endOccurrenceEntryId] mirrors [startOccurrenceEntryId] and is only read
+ * when [endMessageId] is non-null.
+ *
+ * **Dangling references draw nothing, never crash** — the same contract every other stored id in
+ * this package documents for itself ([Seq3Delay.afterMessageId], [Seq3StateInvariant.messageId],
+ * [Seq3Fragment.refDiagramId]): a [startMessageId] naming no message, or naming a message whose
+ * [lifelineId] is hidden/removed, drops the bar entirely (see `seq3ResolveManualActivations` in
+ * Seq3Activation.kt); a stale [endMessageId] clamps back to the start rather than failing.
+ *
+ * **Independent of [Seq3Document.showActivations].** That flag is the master on/off switch for the
+ * AUTOMATIC call/return bars only — a manual bar the user explicitly placed is always drawn and
+ * always exported, in the canvas, the PNG, and both text dialects, regardless of the flag's value.
+ * See `seq3MergedActivationSpans`'s own doc (Seq3Activation.kt) for the one shared function every
+ * consumer (layout, Mermaid, PlantUML) calls so they can never disagree about this.
+ */
+data class Seq3ManualActivation(
+    val id: String,
+    val lifelineId: String,
+    val startMessageId: String,
+    val startOccurrenceEntryId: Int? = null,
+    val endMessageId: String? = null,
+    val endOccurrenceEntryId: Int? = null,
+    val visibility: Seq3Visibility = Seq3Visibility.VISIBLE,
+)
+
 // ── Range ────────────────────────────────────────────────────────────────────────────────────
 
 /** How [Seq3Generator]'s `generateSeq3` selects which of the supplied entries to scan. Simplified
@@ -703,6 +752,12 @@ data class Seq3Document(
     /** A9: document-wide message-label presentation. Appended LAST so notes written before A9
      *  decode as [Seq3MessageLabelStyle.FREE_TEXT] and retain their previous rendering exactly. */
     val messageLabelStyle: Seq3MessageLabelStyle = Seq3MessageLabelStyle.FREE_TEXT,
+    /** User-placed UML activation bars (phase 1 of the manual-activation-bars feature) — see
+     *  [Seq3ManualActivation]'s own doc for the whole shape, and for why this is ALWAYS drawn and
+     *  exported independent of [showActivations]. Appended LAST (CLAUDE.md's "append-last field
+     *  versioning" invariant). Defaults empty so every document written before this field existed
+     *  decodes to its original, bar-free-except-for-auto rendering. */
+    val manualActivations: List<Seq3ManualActivation> = emptyList(),
 )
 
 // ── Generation options ──────────────────────────────────────────────────────────────────────

@@ -8,6 +8,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Occurrence
@@ -117,6 +118,28 @@ class Seq3RasterTest {
         assertEquals(plainLayout.height, activatedLayout.height, "an activation bar must never grow the diagram's own height")
 
         val rendered = renderSeq3(activatedLayout, Seq3RasterTheme.DEFAULT_LIGHT)
+        val bytes = rendered.toPngBytes()
+        assertTrue(bytes.isNotEmpty())
+        val decoded = ImageIO.read(ByteArrayInputStream(bytes))
+        assertEquals(rendered.widthPx, decoded.width)
+        assertEquals(rendered.heightPx, decoded.height)
+    }
+
+    @Test
+    fun aDocumentWithManualActivationBarsRastersWithoutThrowingAndKeepsTheSameHeight() {
+        // Manual bars are drawn ON TOP of the existing lifeline/rows exactly like auto bars
+        // (aDocumentWithActivationBarsRastersWithoutThrowingAndKeepsTheSameHeight above), and are
+        // drawn even with showActivations off — this fixture leaves it at its default false.
+        val base = fixedDocument()
+        val withManualBar = base.copy(
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")),
+        )
+        val plainLayout = layout(base)
+        val manualLayout = layout(withManualBar)
+        assertTrue(manualLayout.activations.isNotEmpty(), "this fixture must actually produce a bar, or the height comparison below would be vacuous")
+        assertEquals(plainLayout.height, manualLayout.height, "a manual activation bar must never grow the diagram's own height")
+
+        val rendered = renderSeq3(manualLayout, Seq3RasterTheme.DEFAULT_LIGHT)
         val bytes = rendered.toPngBytes()
         assertTrue(bytes.isNotEmpty())
         val decoded = ImageIO.read(ByteArrayInputStream(bytes))

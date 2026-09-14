@@ -60,6 +60,11 @@ private const val MAX_SEQ3_DELAYS = 400
 // WP18: same posture/bound as MAX_SEQ3_DELAYS just above — a state invariant is the same lightweight
 // "one document-level artifact per promotion" shape, folded into the same document bounds check.
 private const val MAX_SEQ3_STATE_INVARIANTS = 400
+
+// Phase 1 of the manual-activation-bars feature: same posture/bound as MAX_SEQ3_STATE_INVARIANTS
+// just above — a manual activation is the same lightweight "one document-level artifact per
+// placement" shape.
+private const val MAX_SEQ3_MANUAL_ACTIVATIONS = 400
 private const val MAX_SEQ3_MESSAGE_IDS_PER_FRAGMENT = 5_000
 
 // WP4: guards are short strings against a 512 KB header cap, so this bound exists to match the
@@ -424,6 +429,9 @@ private fun documentToMap(d: Seq3Document): Map<String, Any?> = mapOf(
     // A9: append-last, so every note written before message-label presentation existed decodes
     // with the original FREE_TEXT rendering.
     "messageLabelStyle" to d.messageLabelStyle.name,
+    // Phase 1 (manual activation bars): append-last, same invariant — see Seq3Model.kt's own doc
+    // on manualActivations for why an absent key decoding to emptyList() (below) is load-bearing.
+    "manualActivations" to d.manualActivations.map(::manualActivationToMap),
 )
 
 // Pulled out of documentFromMap purely to keep that function's own return-statement count under
@@ -436,10 +444,12 @@ private fun withinSeq3DocumentBounds(
     noteMaps: List<*>,
     delayMaps: List<*>,
     stateInvariantMaps: List<*>,
+    manualActivationMaps: List<*>,
 ): Boolean =
     lifelineMaps.size <= MAX_SEQ3_LIFELINES && messageMaps.size <= MAX_SEQ3_MESSAGES &&
         fragmentMaps.size <= MAX_SEQ3_FRAGMENTS && noteMaps.size <= MAX_SEQ3_NOTES &&
-        delayMaps.size <= MAX_SEQ3_DELAYS && stateInvariantMaps.size <= MAX_SEQ3_STATE_INVARIANTS
+        delayMaps.size <= MAX_SEQ3_DELAYS && stateInvariantMaps.size <= MAX_SEQ3_STATE_INVARIANTS &&
+        manualActivationMaps.size <= MAX_SEQ3_MANUAL_ACTIVATIONS
 
 /**
  * Validates an in-memory candidate before import/session mutation using the same caps as decode.
@@ -453,6 +463,7 @@ internal fun seq3DocumentBoundsViolation(document: Seq3Document): String? = when
     document.notes.size > MAX_SEQ3_NOTES -> "Document has too many notes."
     document.delays.size > MAX_SEQ3_DELAYS -> "Document has too many delays."
     document.stateInvariants.size > MAX_SEQ3_STATE_INVARIANTS -> "Document has too many state invariants."
+    document.manualActivations.size > MAX_SEQ3_MANUAL_ACTIVATIONS -> "Document has too many manual activation bars."
     document.messages.any { it.occurrences.size > MAX_SEQ3_OCCURRENCES_PER_MESSAGE } ->
         "A message has too many occurrences."
     document.messages.any { it.match.captures.size > MAX_SEQ3_CAPTURES_PER_MATCH } ->
@@ -544,6 +555,12 @@ private suspend fun SequenceScope<String>.yieldSeq3StructureStrings(document: Se
         yield(invariant.messageId)
         yield(invariant.captureName)
     }
+    document.manualActivations.forEach { activation ->
+        yield(activation.id)
+        yield(activation.lifelineId)
+        yield(activation.startMessageId)
+        activation.endMessageId?.let { yield(it) }
+    }
 }
 
 private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
@@ -555,7 +572,11 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
     // WP18: appended last, same "fold the new list's own bound into the existing document bounds
     // check" posture MAX_SEQ3_DELAYS already has (see this file's header).
     val stateInvariantMaps = map.mapList("stateInvariants").orEmpty()
-    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps, stateInvariantMaps)) return null
+    // Phase 1 (manual activation bars): appended last in turn, same posture.
+    val manualActivationMaps = map.mapList("manualActivations").orEmpty()
+    if (!withinSeq3DocumentBounds(lifelineMaps, messageMaps, fragmentMaps, noteMaps, delayMaps, stateInvariantMaps, manualActivationMaps)) {
+        return null
+    }
 
     val messages = messageMaps.mapNotNull(::messageFromMap)
     val fragments = fragmentMaps.mapNotNull(::fragmentFromMap)
@@ -599,6 +620,11 @@ private fun documentFromMap(map: Map<String, Any?>): Seq3Document? {
         stateInvariants = stateInvariantMaps.mapNotNull(::stateInvariantFromMap),
         // A9: old codecs have no label-style key and therefore retain the pre-A9 free-text output.
         messageLabelStyle = enumFromName(map.str("messageLabelStyle"), Seq3MessageLabelStyle.FREE_TEXT),
+        // Phase 1 (manual activation bars): absent "manualActivations" key (every document written
+        // before this field existed) -> emptyList() -> no manual bars drawn -> byte-identical
+        // rendering to today, same contract as "delays"/"stateInvariants" above. A malformed
+        // individual element drops out via mapNotNull rather than failing the whole document.
+        manualActivations = manualActivationMaps.mapNotNull(::manualActivationFromMap),
     )
 }
 
@@ -935,6 +961,38 @@ private fun stateInvariantFromMap(map: Map<String, Any?>): Seq3StateInvariant? {
         id = id,
         messageId = messageId,
         captureName = captureName,
+        visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
+    )
+}
+
+// ── Manual activation (phase 1 of the manual-activation-bars feature) ──────────────────────────
+
+private fun manualActivationToMap(a: Seq3ManualActivation): Map<String, Any?> = mapOf(
+    "id" to a.id,
+    "lifelineId" to a.lifelineId,
+    "startMessageId" to a.startMessageId,
+    "startOccurrenceEntryId" to a.startOccurrenceEntryId,
+    "endMessageId" to a.endMessageId,
+    "endOccurrenceEntryId" to a.endOccurrenceEntryId,
+    "visibility" to a.visibility.name,
+)
+
+// Same "a malformed element drops out, the document survives" posture as stateInvariantFromMap/
+// delayFromMap above: a blank/missing id, lifelineId, or startMessageId means there is nothing
+// coherent to anchor a bar to, so the whole element is dropped rather than decoded with a
+// fabricated blank. The end fields are genuinely optional — see Seq3ManualActivation's own doc on
+// why a missing endMessageId means "until the end of the diagram", not "malformed".
+private fun manualActivationFromMap(map: Map<String, Any?>): Seq3ManualActivation? {
+    val id = boundedString(map.str("id")) ?: return null
+    val lifelineId = boundedString(map.str("lifelineId")) ?: return null
+    val startMessageId = boundedString(map.str("startMessageId")) ?: return null
+    return Seq3ManualActivation(
+        id = id,
+        lifelineId = lifelineId,
+        startMessageId = startMessageId,
+        startOccurrenceEntryId = map.int("startOccurrenceEntryId"),
+        endMessageId = boundedString(map.str("endMessageId")),
+        endOccurrenceEntryId = map.int("endOccurrenceEntryId"),
         visibility = enumFromName(map.str("visibility"), Seq3Visibility.VISIBLE),
     )
 }

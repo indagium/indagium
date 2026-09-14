@@ -12,6 +12,7 @@ import com.indagium.diagram3.Seq3Fragment
 import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -725,6 +726,133 @@ class Seq3QueueTest {
         val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteStateInvariant("no-such-invariant"))
         assertFalse(result.applied)
         assertEquals(doc, result.document)
+    }
+
+    // ── Manual activation bars (phase 1) — same id-keyed/selection-independent shape as Delay/
+    //    state-invariant above ──────────────────────────────────────────────────────────────────
+
+    @Test
+    fun addManualActivationAppendsANewOneIndependentOfSelection() {
+        val doc = baseDocument()
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddManualActivation(activation))
+        assertTrue(result.applied)
+        assertEquals(listOf(activation), result.document.manualActivations)
+    }
+
+    @Test
+    fun addManualActivationIsASafeNoOpForABlankIdACollidingIdAnUnknownMessageOrAnUnknownLifeline() {
+        val existing = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
+        val doc = baseDocument().copy(manualActivations = listOf(existing))
+
+        val blankId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddManualActivation(Seq3ManualActivation("", lifelineId = "B", startMessageId = "m1")))
+        assertFalse(blankId.applied)
+        assertEquals(doc, blankId.document)
+
+        val collidingId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddManualActivation(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m3")))
+        assertFalse(collidingId.applied)
+        assertEquals(doc, collidingId.document)
+
+        val unknownMessage = applySeq3BulkAction(
+            doc, emptySet(),
+            Seq3BulkAction.AddManualActivation(Seq3ManualActivation("bar2", lifelineId = "B", startMessageId = "no-such-message")),
+        )
+        assertFalse(unknownMessage.applied)
+        assertEquals(doc, unknownMessage.document)
+
+        val unknownLifeline = applySeq3BulkAction(
+            doc, emptySet(),
+            Seq3BulkAction.AddManualActivation(Seq3ManualActivation("bar2", lifelineId = "no-such-lifeline", startMessageId = "m1")),
+        )
+        assertFalse(unknownLifeline.applied)
+        assertEquals(doc, unknownLifeline.document)
+    }
+
+    @Test
+    fun setManualActivationEndMovesOnlyTheBottomAnchorByIdIndependentOfSelection() {
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", startOccurrenceEntryId = 11)
+        val doc = baseDocument().copy(manualActivations = listOf(activation))
+        val result = applySeq3BulkAction(doc, setOf("m4"), Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = "m3", endOccurrenceEntryId = null))
+        assertTrue(result.applied)
+        val moved = result.document.manualActivations.single()
+        assertEquals("m3", moved.endMessageId)
+        assertEquals("m1", moved.startMessageId, "resizing the end must never touch the start anchor")
+        assertEquals(11, moved.startOccurrenceEntryId)
+    }
+
+    @Test
+    fun setManualActivationEndCanReExtendToTheEndOfTheDiagramWithANullEndMessageId() {
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m3")
+        val doc = baseDocument().copy(manualActivations = listOf(activation))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = null, endOccurrenceEntryId = null))
+        assertTrue(result.applied)
+        assertNull(result.document.manualActivations.single().endMessageId)
+    }
+
+    @Test
+    fun setManualActivationEndIsASafeNoOpForAnUnknownIdAnUnknownMessageOrNoChange() {
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m3")
+        val doc = baseDocument().copy(manualActivations = listOf(activation))
+
+        val unknownId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("no-such-bar", endMessageId = "m3", endOccurrenceEntryId = null))
+        assertFalse(unknownId.applied)
+        assertEquals(doc, unknownId.document)
+
+        val unknownMessage = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = "no-such-message", endOccurrenceEntryId = null))
+        assertFalse(unknownMessage.applied)
+        assertEquals(doc, unknownMessage.document)
+
+        val noChange = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = "m3", endOccurrenceEntryId = null))
+        assertFalse(noChange.applied)
+        assertEquals(doc, noChange.document)
+    }
+
+    @Test
+    fun deleteManualActivationRemovesOnlyTheRequestedOneAndTouchesNoMessage() {
+        val bar1 = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
+        val bar2 = Seq3ManualActivation("bar2", lifelineId = "A", startMessageId = "m3")
+        val doc = baseDocument().copy(manualActivations = listOf(bar1, bar2))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteManualActivation("bar1"))
+        assertTrue(result.applied)
+        assertEquals(listOf(bar2), result.document.manualActivations)
+        assertEquals(doc.messages, result.document.messages)
+    }
+
+    @Test
+    fun deleteManualActivationIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.DeleteManualActivation("no-such-bar"))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun setManualActivationVisibilityHidesAnExistingBarByIdIndependentOfSelectionAndTouchesNoMessages() {
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
+        val doc = baseDocument().copy(manualActivations = listOf(activation))
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationVisibility("bar1", Seq3Visibility.HIDDEN))
+        assertTrue(result.applied)
+        assertEquals(Seq3Visibility.HIDDEN, result.document.manualActivations.single().visibility)
+        assertEquals(doc.messages, result.document.messages, "hiding a manual activation must not touch any of its messages")
+    }
+
+    @Test
+    fun setManualActivationVisibilityIsASafeNoOpForAnUnknownId() {
+        val doc = baseDocument()
+        val result = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationVisibility("no-such-bar", Seq3Visibility.HIDDEN))
+        assertFalse(result.applied)
+        assertEquals(doc, result.document)
+    }
+
+    @Test
+    fun addManualActivationIsUndoableThroughSeq3Command() {
+        val doc = baseDocument()
+        val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
+        val result = applySeq3Command(doc, Seq3Command.Bulk(emptySet(), Seq3BulkAction.AddManualActivation(activation)))
+
+        assertTrue(result.applied)
+        assertEquals(listOf(activation), result.document.manualActivations)
+        assertEquals(doc, undoSeq3Command(result.undo!!))
     }
 
     @Test

@@ -12,6 +12,7 @@ import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -1708,6 +1709,86 @@ class Seq3EmitterTest {
         val document = Seq3Document(lifelines = listOf(a, b, c, d, e), messages = messages, showActivations = true)
 
         listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            assertValidActivationSequence(out, dialect)
+        }
+    }
+
+    // ── Manual activation bars (phase 1) ─────────────────────────────────────────────────────
+
+    @Test
+    fun manualActivationEmitsActivateDeactivateEvenWhenShowActivationsIsFalse() {
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call1"),
+            message(id = "m2", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call2"),
+        )
+        val document = doc(messages).copy(
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m2")),
+            showActivations = false,
+        )
+
+        val mermaid = document.toMermaid()
+        val plantUml = document.toPlantUml()
+
+        assertTrue(mermaid.contains("activate B"), "a manual bar must draw independent of showActivations; got:\n$mermaid")
+        assertTrue(mermaid.contains("deactivate B"), "got:\n$mermaid")
+        assertTrue(plantUml.contains("activate B"), "got:\n$plantUml")
+        assertTrue(plantUml.contains("deactivate B"), "got:\n$plantUml")
+    }
+
+    @Test
+    fun aManualActivationCrossingAnAutoSpanClampsAndTheWholeMergedSequenceStaysValid() {
+        // call1/return1 form a matched auto span on B (idx0..idx2, "mid" — a neutral NOTE row on A
+        // — sits between them at idx1 purely to give the manual bar a start anchor strictly INSIDE
+        // the still-open auto span, rather than tied to its own start). The manual bar starts at
+        // "mid" and asks for "until the end of the diagram" (idx3, call2's own trailing row) — past
+        // return1's own close at idx2 — so it must be CLAMPED to idx2, never left crossing it. call2
+        // then opens its own separate, unmatched auto span after everything else has closed.
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call1"),
+            message(id = "mid", from = "A", to = null, kind = Seq3Kind.NOTE, label = "mid"),
+            message(id = "m2", from = "B", to = "A", kind = Seq3Kind.RETURN, label = "return1"),
+            message(id = "m3", from = "A", to = "B", kind = Seq3Kind.CALL, label = "call2"),
+        )
+        val document = doc(messages).copy(
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "mid")),
+            showActivations = true,
+        )
+
+        listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            val activateCount = out.lines().count { it.trim().startsWith("activate ") }
+            val deactivateCount = out.lines().count { it.trim().startsWith("deactivate ") }
+            assertEquals(3, activateCount, "$dialect: call1, the manual bar, and call2 must each open exactly one bar; got:\n$out")
+            assertEquals(deactivateCount, activateCount, "$dialect: every activate must have a matching deactivate; got:\n$out")
+            assertValidActivationSequence(out, dialect)
+        }
+    }
+
+    @Test
+    fun aDocumentWhereAnAutoSpanCrossesAnEnclosingManualSpanStillEmitsAValidOpenCloseSequence() {
+        // manualStart/manualEnd bracket a manual bar on B ([0,2]); autoOpen (a real CALL into B,
+        // never returned) starts INSIDE that bracket but bSends later touches B again as sender,
+        // pushing autoOpen's own unmatched fallback close out to [1,3] — past the manual bar's own
+        // end. The auto span must stay completely untouched; the manual bar must shrink instead —
+        // this is the reverse-direction crossing (manual encloses first, but a nested AUTO span is
+        // the one that sticks out) the merge's fixed-point pass exists to catch.
+        val c = Seq3Lifeline("C", "Lifeline C", setOf("C"), 2)
+        val messages = listOf(
+            message(id = "m1", from = "A", to = "A", kind = Seq3Kind.SELF, label = "manualStart"),
+            message(id = "m2", from = "A", to = "B", kind = Seq3Kind.CALL, label = "autoOpen"),
+            message(id = "m3", from = "A", to = "A", kind = Seq3Kind.SELF, label = "manualEnd"),
+            message(id = "m4", from = "B", to = "C", kind = Seq3Kind.CALL, label = "bSends"),
+        )
+        val document = Seq3Document(lifelines = listOf(a, b, c), messages = messages, showActivations = true).copy(
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m3")),
+        )
+
+        listOf(document.toMermaid() to "mermaid", document.toPlantUml() to "plantuml").forEach { (out, dialect) ->
+            val activateCount = out.lines().count { it.trim().startsWith("activate ") }
+            val deactivateCount = out.lines().count { it.trim().startsWith("deactivate ") }
+            // bar1 (manual, on B), autoOpen's own unmatched span (auto, on B), and bSends' own
+            // unmatched span (auto, on C) — three independent bars, all balanced.
+            assertEquals(3, activateCount, "$dialect: got:\n$out")
+            assertEquals(deactivateCount, activateCount, "$dialect: every activate must have a matching deactivate; got:\n$out")
             assertValidActivationSequence(out, dialect)
         }
     }

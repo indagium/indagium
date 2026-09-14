@@ -15,6 +15,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3Note
@@ -583,6 +584,77 @@ class Seq3CodecTest {
 
         assertNotNull(parsed)
         assertTrue(parsed.document.stateInvariants.isEmpty())
+    }
+
+    // ── Manual activation bars (phase 1) ──────────────────────────────────────────────────────
+
+    @Test
+    fun manualActivationsRoundTripThroughEncodeAndParse() {
+        val original = fixedDocument().copy(
+            manualActivations = listOf(
+                Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = null),
+                Seq3ManualActivation(
+                    "bar2", lifelineId = "A", startMessageId = "m1", startOccurrenceEntryId = 42,
+                    endMessageId = "m1", endOccurrenceEntryId = 42, visibility = Seq3Visibility.HIDDEN,
+                ),
+            ),
+        )
+
+        val parsed = parseSeq3Note(encodeSeq3Note(original))
+
+        assertNotNull(parsed)
+        assertEquals(original, parsed.document)
+        assertEquals(original.manualActivations, parsed.document.manualActivations)
+        assertNull(parsed.document.manualActivations.single { it.id == "bar1" }.endMessageId)
+        assertEquals(Seq3Visibility.HIDDEN, parsed.document.manualActivations.single { it.id == "bar2" }.visibility)
+    }
+
+    @Test
+    fun aDocumentMissingTheManualActivationsKeyDecodesToAnEmptyList() {
+        // A note saved by a build predating this phase has no "manualActivations" key at all — the
+        // same "old document degrades quietly" shape as aDocumentMissingTheStateInvariantsKeyDecodesToAnEmptyList.
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val legacyText = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(legacyText)
+
+        assertNotNull(parsed)
+        assertTrue(parsed.document.manualActivations.isEmpty())
+    }
+
+    @Test
+    fun aManualActivationElementMissingTheOptionalEndKeysDecodesToNullEnds() {
+        val legacyMap = mapOf(
+            "lifelines" to listOf(mapOf("id" to "A", "name" to "A", "tagIds" to listOf("A"), "ordinal" to 0)),
+            "messages" to emptyList<Any?>(),
+            "fragments" to emptyList<Any?>(),
+            "notes" to emptyList<Any?>(),
+            "manualActivations" to listOf(
+                mapOf("id" to "bar1", "lifelineId" to "A", "startMessageId" to "m1"),
+            ),
+        )
+        val source = "sequenceDiagram\n"
+        val header = mapOf("dialect" to "mermaid", "sourceHash" to seq3SourceHash(source), "document" to legacyMap)
+        val text = "<!-- indagium:diagram3 v1 ${Json.encode(header)} -->\n```mermaid\n$source```\n"
+
+        val parsed = parseSeq3Note(text)
+
+        assertNotNull(parsed)
+        val bar = parsed.document.manualActivations.single()
+        assertEquals("bar1", bar.id)
+        assertEquals("A", bar.lifelineId)
+        assertEquals("m1", bar.startMessageId)
+        assertNull(bar.startOccurrenceEntryId)
+        assertNull(bar.endMessageId)
+        assertNull(bar.endOccurrenceEntryId)
+        assertEquals(Seq3Visibility.VISIBLE, bar.visibility)
     }
 
     @Test

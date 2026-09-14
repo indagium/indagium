@@ -359,6 +359,45 @@ sealed class Seq3BulkAction {
         override val targetsById: Boolean get() = true
     }
 
+    // ── Manual activation bars (phase 1) ────────────────────────────────────────────────────
+    //
+    // Same "identify the target by its own id/param, entirely independent of the message
+    // selection" shape as the Delay/state-invariant verbs above — phase 2's canvas context menu
+    // always already knows the message/lifeline it fired on, so requiring a non-empty
+    // `selectedIds` here would be the same pointless block [AddDelay]'s own doc already argues
+    // against.
+
+    /** Adds a new [Seq3ManualActivation] — see that type's own doc (Seq3Model.kt) for the whole
+     *  shape. Mirrors [AddDelay]/[AddStateInvariant]'s "caller builds the whole artifact, including
+     *  its own fresh id" shape. */
+    data class AddManualActivation(val activation: Seq3ManualActivation) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Moves an EXISTING manual activation's bottom anchor — phase 2's drag-to-resize verb. Unlike
+     *  [AddManualActivation] this never touches [Seq3ManualActivation.startMessageId]/
+     *  [Seq3ManualActivation.startOccurrenceEntryId]: only the bottom end moves. `endMessageId ==
+     *  null` re-extends the bar to the end of the diagram, matching [Seq3ManualActivation
+     *  .endMessageId]'s own "null means until the end" contract. */
+    data class SetManualActivationEnd(
+        val manualActivationId: String,
+        val endMessageId: String?,
+        val endOccurrenceEntryId: Int? = null,
+    ) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Removes one manual activation bar without touching the message(s) it was anchored to. */
+    data class DeleteManualActivation(val manualActivationId: String) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
+    /** Shows/hides an EXISTING manual activation bar without touching its anchors — the manual
+     *  counterpart of [SetDelayVisibility]/[SetFragmentVisibility] above. */
+    data class SetManualActivationVisibility(val manualActivationId: String, val visibility: Seq3Visibility) : Seq3BulkAction() {
+        override val targetsById: Boolean get() = true
+    }
+
     /** Swaps `fromLifelineId`/`toLifelineId` across the selection (WP5's `⇄` control) — the
      *  one-click fix for "the auto drawing can not find to/from normally" instead of two dropdown
      *  round-trips. A no-op for [Seq3Kind.NOTE] (a note has no `to` — see [Seq3Kind.NOTE]'s own
@@ -423,6 +462,10 @@ fun applySeq3BulkAction(document: Seq3Document, selectedIds: Set<String>, action
         is Seq3BulkAction.RemoveFragmentOperand -> applyRemoveFragmentOperand(document, action)
         is Seq3BulkAction.AddStateInvariant -> applyAddStateInvariant(document, action)
         is Seq3BulkAction.DeleteStateInvariant -> applyDeleteStateInvariant(document, action)
+        is Seq3BulkAction.AddManualActivation -> applyAddManualActivation(document, action)
+        is Seq3BulkAction.SetManualActivationEnd -> applySetManualActivationEnd(document, action)
+        is Seq3BulkAction.DeleteManualActivation -> applyDeleteManualActivation(document, action)
+        is Seq3BulkAction.SetManualActivationVisibility -> applySetManualActivationVisibility(document, action)
         Seq3BulkAction.SwapEndpoints -> applySwapEndpoints(document, selectedIds)
     }
 }
@@ -775,6 +818,82 @@ private fun applyDeleteStateInvariant(document: Seq3Document, action: Seq3BulkAc
     if (document.stateInvariants.none { it.id == action.stateInvariantId }) return unapplied(document, "Unknown state invariant")
     return Seq3BulkResult(
         document.copy(stateInvariants = document.stateInvariants.filterNot { it.id == action.stateInvariantId }),
+        applied = true,
+    )
+}
+
+// ── Manual activation bars (phase 1) ────────────────────────────────────────────────────────
+
+/** Adds a new [Seq3ManualActivation] — see [Seq3BulkAction.AddManualActivation]'s own doc. Rejects
+ *  a blank id, a colliding id (mirrors [applyAddDelay]/[applyAddStateInvariant]'s own "id already
+ *  exists" guard), an unknown [Seq3ManualActivation.startMessageId], and an unknown
+ *  [Seq3ManualActivation.lifelineId] — a bar anchored to nothing, or placed on a lifeline that
+ *  doesn't exist, would never draw. [Seq3ManualActivation.endMessageId] is deliberately NOT
+ *  validated here the same way: a fresh bar's end usually names an existing message too (phase 2's
+ *  own default-end helper, `seq3DefaultManualActivationEnd`), but `null` is a legitimate, common
+ *  value ("until the end of the diagram") that must not be rejected. */
+private fun applyAddManualActivation(document: Seq3Document, action: Seq3BulkAction.AddManualActivation): Seq3BulkResult {
+    val activation = action.activation
+    return when {
+        activation.id.isBlank() -> unapplied(document, "Activation id is required")
+        document.manualActivations.any { it.id == activation.id } -> unapplied(document, "Activation id already exists")
+        document.messages.none { it.id == activation.startMessageId } -> unapplied(document, "Unknown message")
+        document.lifelines.none { it.id == activation.lifelineId } -> unapplied(document, "Unknown lifeline")
+        else -> Seq3BulkResult(document.copy(manualActivations = document.manualActivations + activation), applied = true)
+    }
+}
+
+/** Moves an EXISTING manual activation's bottom anchor — see [Seq3BulkAction.SetManualActivationEnd]'s
+ *  own doc. Same unknown-id-is-a-safe-no-op contract as [applySetDelayLabel]; an [action.endMessageId]
+ *  that names no message in the document is ALSO a no-op (unlike `null`, which is always valid —
+ *  see [applyAddManualActivation]'s own doc on why the end is not validated the same way there). A
+ *  no-change edit (identical end already stored) reports unapplied too, mirroring
+ *  `Seq3BulkAction.SetManualActivationEnd`'s own doc that this is a pure move, never a no-op
+ *  masquerading as an edit. */
+private fun applySetManualActivationEnd(document: Seq3Document, action: Seq3BulkAction.SetManualActivationEnd): Seq3BulkResult {
+    val existing = document.manualActivations.firstOrNull { it.id == action.manualActivationId }
+        ?: return unapplied(document, "Unknown activation")
+    if (action.endMessageId != null && document.messages.none { it.id == action.endMessageId }) {
+        return unapplied(document, "Unknown message")
+    }
+    if (existing.endMessageId == action.endMessageId && existing.endOccurrenceEntryId == action.endOccurrenceEntryId) {
+        return unapplied(document, "No change")
+    }
+    return Seq3BulkResult(
+        document.copy(
+            manualActivations = document.manualActivations.map {
+                if (it.id == action.manualActivationId) {
+                    it.copy(endMessageId = action.endMessageId, endOccurrenceEntryId = action.endOccurrenceEntryId)
+                } else {
+                    it
+                }
+            },
+        ),
+        applied = true,
+    )
+}
+
+/** Removes one manual activation bar without touching the message(s) it was anchored to. Same
+ *  unknown-id-is-a-safe-no-op contract as [applyDeleteDelay]/[applyDeleteStateInvariant]. */
+private fun applyDeleteManualActivation(document: Seq3Document, action: Seq3BulkAction.DeleteManualActivation): Seq3BulkResult {
+    if (document.manualActivations.none { it.id == action.manualActivationId }) return unapplied(document, "Unknown activation")
+    return Seq3BulkResult(
+        document.copy(manualActivations = document.manualActivations.filterNot { it.id == action.manualActivationId }),
+        applied = true,
+    )
+}
+
+/** Shows/hides an EXISTING manual activation bar — the visibility counterpart
+ *  [applySetManualActivationEnd] doesn't have. Same unknown-id safe-no-op contract as
+ *  [applySetDelayVisibility]/[applySetFragmentVisibility]. */
+private fun applySetManualActivationVisibility(document: Seq3Document, action: Seq3BulkAction.SetManualActivationVisibility): Seq3BulkResult {
+    if (document.manualActivations.none { it.id == action.manualActivationId }) return unapplied(document, "Unknown activation")
+    return Seq3BulkResult(
+        document.copy(
+            manualActivations = document.manualActivations.map {
+                if (it.id == action.manualActivationId) it.copy(visibility = action.visibility) else it
+            },
+        ),
         applied = true,
     )
 }

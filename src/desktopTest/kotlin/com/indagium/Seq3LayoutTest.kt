@@ -16,6 +16,7 @@ import com.indagium.diagram3.Seq3LayoutOptions
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
 import com.indagium.diagram3.Seq3LifelineSegment
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageNoteRow
@@ -33,6 +34,7 @@ import com.indagium.diagram3.Seq3UnresolvedStubRow
 import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.diagram3.renderSeq3
+import com.indagium.diagram3.seq3DefaultManualActivationEnd
 import com.indagium.diagram3.seq3LifelineSegments
 import com.indagium.ui.Seq3ViewState
 import com.indagium.ui.seq3CanGroupSelection
@@ -42,6 +44,7 @@ import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class Seq3LayoutTest {
@@ -1650,6 +1653,156 @@ class Seq3LayoutTest {
         assertEquals("B", outer.lifelineId)
         assertEquals("B", inner.lifelineId)
         assertTrue(inner.box.x > outer.box.x, "a deeper (reentrant) activation must be inset further right than its parent")
+    }
+
+    // ── Manual activation bars (phase 1) ─────────────────────────────────────────────────────
+
+    @Test
+    fun manualActivationBarDrawsEvenWhenShowActivationsIsFalse() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m2")),
+            showActivations = false,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val bar = layout.activations.single()
+        assertEquals("bar1", bar.manualId)
+        assertEquals("B", bar.lifelineId)
+        assertFalse(bar.unmatched, "a manual bar was never supposed to close via a RETURN, so it is never reported unmatched")
+        val m1Row = layout.rows.single { it.messageId == "m1" }
+        val m2Row = layout.rows.single { it.messageId == "m2" }
+        assertEquals(m1Row.y, bar.box.y)
+        assertEquals(m2Row.y, bar.box.y + bar.box.height)
+    }
+
+    @Test
+    fun manualActivationBarDrawsAlongsideAutoBarsWhenShowActivationsIsTrue() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("call", "A", "B", kind = Seq3Kind.CALL, occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("ret", "B", "A", kind = Seq3Kind.RETURN, occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "A", startMessageId = "call")),
+            showActivations = true,
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertEquals(2, layout.activations.size)
+        assertTrue(layout.activations.any { it.manualId == "bar1" })
+        assertTrue(layout.activations.any { it.manualId == null }, "the auto CALL/RETURN pair must still produce its own bar")
+    }
+
+    @Test
+    fun manualActivationWithAnUnknownStartMessageProducesNoBar() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B")),
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "no-such-message")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.activations.isEmpty(), "a manual bar anchored to nothing must draw nothing, never crash")
+    }
+
+    @Test
+    fun aHiddenManualActivationProducesNoBar() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(message("m1", "A", "B")),
+            manualActivations = listOf(
+                Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", visibility = Seq3Visibility.HIDDEN),
+            ),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        assertTrue(layout.activations.isEmpty())
+    }
+
+    @Test
+    fun manualActivationWithANullEndReachesTheLastDrawnRow() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2, ts = 2_000L))),
+                message("m3", "A", "B", occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+            manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")),
+        )
+        val layout = layoutSeq3(doc, opts())
+
+        val bar = layout.activations.single()
+        val lastRow = layout.rows.last { it.messageId == "m3" }
+        assertEquals(lastRow.y, bar.box.y + bar.box.height, "a null end must reach the diagram's own last drawn row")
+    }
+
+    @Test
+    fun rowYPositionsAreIdenticalWithAndWithoutManualActivations() {
+        // The manual-bar counterpart of rowYPositionsAreIdenticalWithActivationsOnAndOff above: a
+        // bar is drawn ON TOP of the already-placed rows and must add ZERO vertical pitch.
+        val baseDoc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1))),
+                message("m2", "A", "B", occurrences = listOf(occurrence(2))),
+            ),
+        )
+        val withoutBars = layoutSeq3(baseDoc, opts())
+        val withBars = layoutSeq3(
+            baseDoc.copy(manualActivations = listOf(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m2"))),
+            opts(),
+        )
+
+        assertEquals(withoutBars.rows.map { it.y }, withBars.rows.map { it.y }, "manual activation bars must add ZERO vertical pitch to any row")
+        assertEquals(withoutBars.height, withBars.height, "adding a manual bar must never reflow the diagram's own height")
+        assertTrue(withBars.activations.isNotEmpty(), "this fixture must actually produce a bar, or the comparison above would be vacuous")
+    }
+
+    @Test
+    fun defaultManualActivationEndReturnsTheNextEmissionTouchingTheLifeline() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1), lifeline("C", 2)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                // Doesn't touch B at all — must be skipped.
+                message("m2", "A", "C", occurrences = listOf(occurrence(2, ts = 2_000L))),
+                // First row after m1 that touches B (as sender this time).
+                message("m3", "B", "A", occurrences = listOf(occurrence(3, ts = 3_000L))),
+            ),
+        )
+
+        val end = seq3DefaultManualActivationEnd(doc, lifelineId = "B", startMessageId = "m1", startOccurrenceEntryId = null)
+
+        assertEquals("m3" to 3, end)
+    }
+
+    @Test
+    fun defaultManualActivationEndReturnsNullWhenNothingLaterTouchesTheLifeline() {
+        val doc = Seq3Document(
+            lifelines = listOf(lifeline("A", 0), lifeline("B", 1)),
+            messages = listOf(
+                message("m1", "A", "B", occurrences = listOf(occurrence(1, ts = 1_000L))),
+                message("m2", "A", "A", kind = Seq3Kind.SELF, occurrences = listOf(occurrence(2, ts = 2_000L))),
+            ),
+        )
+
+        val end = seq3DefaultManualActivationEnd(doc, lifelineId = "B", startMessageId = "m1", startOccurrenceEntryId = null)
+
+        assertNull(end, "meaning 'until the end of the diagram' — nothing after m1 ever touches B again")
+    }
+
+    @Test
+    fun defaultManualActivationEndReturnsNullForAnUnknownStartMessageOrLifeline() {
+        val doc = Seq3Document(lifelines = listOf(lifeline("A", 0)), messages = listOf(message("m1", "A", null)))
+
+        assertNull(seq3DefaultManualActivationEnd(doc, lifelineId = "A", startMessageId = "no-such-message", startOccurrenceEntryId = null))
+        assertNull(seq3DefaultManualActivationEnd(doc, lifelineId = "no-such-lifeline", startMessageId = "m1", startOccurrenceEntryId = null))
     }
 
     // ── WP6: fragment operand dividers ───────────────────────────────────────────────────────
