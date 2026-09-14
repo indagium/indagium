@@ -280,6 +280,10 @@ private fun bulkLabel(action: Seq3BulkAction): String = when (action) {
     is Seq3BulkAction.RemoveFragmentOperand -> "Remove branch"
     is Seq3BulkAction.AddStateInvariant -> "Promote to state invariant"
     is Seq3BulkAction.DeleteStateInvariant -> "Remove state invariant"
+    is Seq3BulkAction.AddManualActivation -> "Add activation block"
+    is Seq3BulkAction.SetManualActivationEnd -> "Resize activation block"
+    is Seq3BulkAction.DeleteManualActivation -> "Remove activation block"
+    is Seq3BulkAction.SetManualActivationVisibility -> if (action.visibility == Seq3Visibility.HIDDEN) "Hide activation block" else "Show activation block"
     Seq3BulkAction.SwapEndpoints -> "Swap direction"
 }
 

@@ -324,6 +324,12 @@ data class Seq3ActivationBar(
     val box: Seq3Box,
     val depth: Int,
     val unmatched: Boolean,
+    /** Phase 1 of the manual-activation-bars feature: non-null exactly when this bar came from a
+     *  user-placed [Seq3ManualActivation] rather than the automatic call/return pairing — see
+     *  [Seq3ActivationSpan.manualId]'s own doc, whose value this carries straight through.
+     *  Appended LAST, this file's own versioning rule. Phase 2's canvas reads this to hit-test and
+     *  drag the right bar; every other consumer (raster, emitters) ignores it. */
+    val manualId: String? = null,
 )
 
 /** One vertical run of a lifeline's dashed guide line: the ordinary dash pattern outside a delay
@@ -1125,12 +1131,18 @@ private fun activationEventOf(index: Int, emission: Emission): Seq3ActivationEve
 }
 
 /**
- * Turns [emissions] into [Seq3ActivationBar]s, entirely gated on [Seq3Document.showActivations] so
- * an old/toggled-off document allocates NOTHING here — not even the `events` list — matching the
- * load-bearing invariant this work package's brief calls out: bars must add zero vertical pitch
- * AND zero cost when off.
+ * Turns [emissions] into [Seq3ActivationBar]s. The AUTO call/return pairing
+ * ([seq3ActivationSpans], Seq3Activation.kt, WP1) is gated on [Seq3Document.showActivations] exactly
+ * as before — an old/toggled-off document with no manual activations either allocates NOTHING here
+ * (not even the `events` list), preserving the original zero-cost-when-off invariant. Phase 1 of the
+ * manual-activation-bars feature adds a SECOND, INDEPENDENT source: [Seq3Document.manualActivations]
+ * is resolved and merged in via `seq3ResolveManualActivations`/`seq3MergedActivationSpans`
+ * (Seq3Activation.kt) regardless of [Seq3Document.showActivations] — see [Seq3ManualActivation]'s
+ * own doc for why a user-placed bar is never gated on that flag. When BOTH are empty this still
+ * returns `emptyList()` without building the emission-index maps, matching the "nothing to draw,
+ * nothing computed" posture the empty-manual-list case had before this feature existed.
  *
- * [seq3ActivationSpans] (Seq3Activation.kt, WP1) works in EMISSION-index space — see
+ * [seq3ActivationSpans]/`seq3MergedActivationSpans` both work in EMISSION-index space — see
  * [activationEventOf]'s own doc — so [rowYByIndex] (also emission-index-keyed, precisely to make
  * this lookup possible; see `buildRows`' own doc on why that map exists) converts each span's
  * start/end index back to real y geometry. A span whose either endpoint's row never got built
@@ -1138,6 +1150,12 @@ private fun activationEventOf(index: Int, emission: Emission): Seq3ActivationEve
  * "dangling reference draws nothing, never crash" is this package's documented contract for every
  * geometry lookup that can fail, the same posture [layoutFragments]/[layoutNotes] already take on
  * their own dangling references.
+ *
+ * "End of diagram" (a manual bar with `endMessageId == null`) resolves to [Emission]s' own
+ * `lastIndex` — the same fallback index [seq3ActivationSpans]' own rule 1 already uses for an
+ * unmatched AUTO call — so its drawn bottom is the LAST drawn row's own extent, not the lifeline
+ * column's full height. Consistent by construction: both cases flow through the identical
+ * `rowYByIndex[lastIndex]` lookup below.
  */
 private fun buildActivationBars(
     doc: Seq3Document,
@@ -1146,9 +1164,24 @@ private fun buildActivationBars(
     lifelineIndex: Map<String, Int>,
     centers: DoubleArray,
 ): List<Seq3ActivationBar> {
-    if (!doc.showActivations) return emptyList()
-    val events = emissions.mapIndexed(::activationEventOf)
-    return seq3ActivationSpans(events, emissions.lastIndex).mapNotNull { span ->
+    if (!doc.showActivations && doc.manualActivations.isEmpty()) return emptyList()
+    val autoSpans = if (doc.showActivations) {
+        seq3ActivationSpans(emissions.mapIndexed(::activationEventOf), emissions.lastIndex)
+    } else {
+        emptyList()
+    }
+    val firstIndexByMessage = HashMap<String, Int>()
+    val lastIndexByMessage = HashMap<String, Int>()
+    val indexByOccurrence = HashMap<Seq3OccurrenceRef, Int>()
+    emissions.forEachIndexed { index, emission ->
+        firstIndexByMessage.putIfAbsent(emission.messageId, index)
+        lastIndexByMessage[emission.messageId] = index
+        emission.entryId?.let { entryId -> indexByOccurrence[Seq3OccurrenceRef(emission.messageId, entryId)] = index }
+    }
+    val resolvedManual = seq3ResolveManualActivations(
+        doc.manualActivations, lifelineIndex.keys, firstIndexByMessage, lastIndexByMessage, indexByOccurrence, emissions.lastIndex,
+    )
+    return seq3MergedActivationSpans(autoSpans, resolvedManual, emissions.lastIndex).mapNotNull { span ->
         val (top, _) = rowYByIndex[span.startIndex] ?: return@mapNotNull null
         val (_, bottom) = rowYByIndex[span.endIndex] ?: return@mapNotNull null
         val lifelineIdx = lifelineIndex[span.lifelineId] ?: return@mapNotNull null
@@ -1157,8 +1190,67 @@ private fun buildActivationBars(
         // next drawn row would otherwise compute a near-zero-height span — see ACTIVATION_MIN_H's
         // own doc.
         val height = max(bottom - top, ACTIVATION_MIN_H)
-        Seq3ActivationBar(span.lifelineId, Seq3Box(x, top, ACTIVATION_W, height), span.depth, span.unmatched)
+        Seq3ActivationBar(span.lifelineId, Seq3Box(x, top, ACTIVATION_W, height), span.depth, span.unmatched, span.manualId)
     }
+}
+
+/**
+ * Phase 1 of the manual-activation-bars feature: the default bottom anchor for a manual bar freshly
+ * placed by "Add activation block"/"Add activation on sender" (phase 2's context-menu verbs) —
+ * the (messageId, occurrenceEntryId) of the next drawn row AFTER (startMessageId,
+ * startOccurrenceEntryId) that touches [lifelineId] as EITHER endpoint (sender or receiver), or
+ * `null` meaning "until the end of the diagram" ([Seq3ManualActivation.endMessageId]'s own contract)
+ * when nothing later ever touches it. Walks the SAME chronological emission order
+ * [layoutSeq3]/`buildActivationBars` itself draws rows in (`expandForLayout` + `seq3ChronologicalOrder`),
+ * rebuilt here rather than threaded through from a live layout call so this stays a small, pure,
+ * layout-independent helper phase 2 can call from a context-menu handler with just a [Seq3Document]
+ * in hand.
+ *
+ * A [startMessageId] naming no visible message, or a [lifelineId] that is hidden/unknown, returns
+ * `null` too — same as "no later row found" from this function's own caller's point of view, there
+ * is nothing useful to suggest either way (phase 2's UI is expected to only ever call this with a
+ * lifeline/message pair it just resolved from a real right-click, so this is a defensive fallback,
+ * not an expected path).
+ */
+fun seq3DefaultManualActivationEnd(
+    document: Seq3Document,
+    lifelineId: String,
+    startMessageId: String,
+    startOccurrenceEntryId: Int?,
+): Pair<String, Int?>? {
+    val lifelinesSorted = document.lifelines.filter { it.visibility == Seq3Visibility.VISIBLE }.sortedBy { it.ordinal }
+    val lifelineIndex = lifelinesSorted.withIndex().associate { (i, l) -> l.id to i }
+    if (lifelineId !in lifelineIndex) return null
+    val visibleMessages = document.messages.filter {
+        it.visibility == Seq3Visibility.VISIBLE &&
+            it.fromLifelineId in lifelineIndex &&
+            (it.toLifelineId == null || it.toLifelineId in lifelineIndex)
+    }
+    val elapsedByEntryId = seq3ElapsedByEntryId(document)
+    val emissions = seq3ChronologicalOrder(
+        document,
+        visibleMessages.flatMap { message -> expandForLayout(message, document.messageLabelStyle) },
+        messageIdOf = { emission -> emission.messageId },
+        timestampMillisOf = { emission -> emissionOrderingMillis(emission, elapsedByEntryId) },
+        entryIdOf = { emission -> emission.entryId },
+    )
+    val startIndex = startOccurrenceEntryId
+        ?.let { entryId -> emissions.indexOfFirst { it.messageId == startMessageId && it.entryId == entryId } }
+        ?.takeIf { it >= 0 }
+        ?: emissions.indexOfFirst { it.messageId == startMessageId }.takeIf { it >= 0 }
+        ?: return null
+    for (i in (startIndex + 1)..emissions.lastIndex) {
+        val emission = emissions[i]
+        val touches = when (emission) {
+            is Emission.Arrow -> emission.fromLifelineId == lifelineId || emission.toLifelineId == lifelineId
+            is Emission.Self -> emission.fromLifelineId == lifelineId
+            is Emission.Stub -> emission.fromLifelineId == lifelineId
+            is Emission.Note -> emission.fromLifelineId == lifelineId
+            is Emission.Elision -> emission.fromLifelineId == lifelineId
+        }
+        if (touches) return emission.messageId to emission.entryId
+    }
+    return null
 }
 
 /**

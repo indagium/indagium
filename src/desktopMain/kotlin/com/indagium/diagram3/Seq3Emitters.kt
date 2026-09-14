@@ -1082,23 +1082,38 @@ private fun activationEventOf(index: Int, emission: Seq3Emission, visibleLifelin
 private class Seq3ActivationMaps(val activateAt: Map<Int, List<Seq3ActivationSpan>>, val deactivateAt: Map<Int, List<Seq3ActivationSpan>>)
 
 /**
- * Gated on [Seq3Document.showActivations] so a document with the feature off produces two empty
- * maps and neither dialect's output changes by a single byte from before this work package — the
- * default-off contract every other WP10/WP11 toggle in this file already keeps.
+ * The AUTO call/return pairing stays gated on [Seq3Document.showActivations] exactly as before — a
+ * document with the feature off AND no manual activations produces two empty maps, and neither
+ * dialect's output changes by a single byte from before this work package — the default-off
+ * contract every other WP10/WP11 toggle in this file already keeps. Phase 1 of the
+ * manual-activation-bars feature adds a SECOND, INDEPENDENT source on top: [Seq3Document
+ * .manualActivations] is resolved and merged in via `seq3ResolveManualActivations`/
+ * `seq3MergedActivationSpans` (Seq3Activation.kt) regardless of [Seq3Document.showActivations] —
+ * see [Seq3ManualActivation]'s own doc for why a user-placed bar is never gated on that flag. Both
+ * dialects share this one function (unmodified below), so a manual bar can never appear in Mermaid
+ * but not PlantUML or vice versa.
  *
- * Every span [seq3ActivationSpans] returns is built from events at indices `0..plan.emissions
- * .lastIndex` (one event per emission, via `mapIndexed`), so its `startIndex`/`endIndex` are
- * always in range — the `filter` below can never actually drop anything from THIS call site. It
- * stays anyway as this package's usual posture on a geometry/index lookup that could in principle
- * fail (see `Seq3Layout.kt`'s `buildActivationBars`, which keeps an identical "not expected to be
- * reachable" `mapNotNull` for the same reason): emitting only one half of a span — an `activate`
- * with no matching `deactivate`, or vice versa — is not a cosmetic wart, it is a Mermaid PARSE
- * ERROR, so "drop the whole span" is the only acceptable failure mode here, never "emit half".
+ * Every span [seq3ActivationSpans]/`seq3MergedActivationSpans` returns is built from events/indices
+ * at `0..plan.emissions.lastIndex`, so its `startIndex`/`endIndex` are always in range — the
+ * `filter` below can never actually drop anything from THIS call site. It stays anyway as this
+ * package's usual posture on a geometry/index lookup that could in principle fail (see
+ * `Seq3Layout.kt`'s `buildActivationBars`, which keeps an identical "not expected to be reachable"
+ * `mapNotNull` for the same reason): emitting only one half of a span — an `activate` with no
+ * matching `deactivate`, or vice versa — is not a cosmetic wart, it is a Mermaid PARSE ERROR, so
+ * "drop the whole span" is the only acceptable failure mode here, never "emit half".
  */
 private fun activationMaps(document: Seq3Document, plan: Seq3EmissionPlan, visibleLifelines: List<Seq3Lifeline>): Seq3ActivationMaps {
-    if (!document.showActivations) return Seq3ActivationMaps(emptyMap(), emptyMap())
-    val events = plan.emissions.mapIndexed { index, emission -> activationEventOf(index, emission, visibleLifelines) }
-    val spans = seq3ActivationSpans(events, plan.emissions.lastIndex)
+    if (!document.showActivations && document.manualActivations.isEmpty()) return Seq3ActivationMaps(emptyMap(), emptyMap())
+    val autoSpans = if (document.showActivations) {
+        val events = plan.emissions.mapIndexed { index, emission -> activationEventOf(index, emission, visibleLifelines) }
+        seq3ActivationSpans(events, plan.emissions.lastIndex)
+    } else {
+        emptyList()
+    }
+    val resolvedManual = seq3ResolveManualActivations(
+        document.manualActivations, plan.lifelineIndex.keys, plan.firstIndexByMessage, plan.lastIndexByMessage, plan.indexByOccurrence, plan.emissions.lastIndex,
+    )
+    val spans = seq3MergedActivationSpans(autoSpans, resolvedManual, plan.emissions.lastIndex)
         .filter { it.startIndex in plan.emissions.indices && it.endIndex in plan.emissions.indices }
     return Seq3ActivationMaps(spans.groupBy { it.startIndex }, spans.groupBy { it.endIndex })
 }

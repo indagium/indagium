@@ -11,6 +11,7 @@ import com.indagium.diagram3.Seq3FragmentKind
 import com.indagium.diagram3.Seq3Kind
 import com.indagium.diagram3.Seq3Lifeline
 import com.indagium.diagram3.Seq3LifelineKind
+import com.indagium.diagram3.Seq3ManualActivation
 import com.indagium.diagram3.Seq3Match
 import com.indagium.diagram3.Seq3Message
 import com.indagium.diagram3.Seq3MessageLabelStyle
@@ -360,6 +361,11 @@ class Seq3SourceImportTest {
             notes = listOf(Seq3Note("note", "explain <both>", listOf("every", "return", "firstlast"))),
             delays = listOf(Seq3Delay("delay", "every", "wait", afterOccurrenceEntryId = 3)),
             stateInvariants = listOf(Seq3StateInvariant("state", "collapse", "s")),
+            // Phase 1 (manual activation bars): a manual bar on C, drawn independent of
+            // showActivations and always exported alongside the auto activate/deactivate lines —
+            // `result` must keep it via `existing.copy(...)`, so an unchanged round trip still
+            // matches on both the document and its re-derived source.
+            manualActivations = listOf(Seq3ManualActivation("bar", lifelineId = "C", startMessageId = "tail")),
             showSequenceNumbers = true,
             showTimestamps = true,
             showElapsed = true,
