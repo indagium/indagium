@@ -329,11 +329,23 @@ private fun rememberExpandedDiagram(
     return result
 }
 
-private data class DiagramScrollAnchor(
+// Anchors a block's on-screen position across a height change caused by the reader expanding or
+// collapsing it — originally just the diagram note's expand/collapse, now shared by the LogRef
+// excerpt's expand/collapse too (see anchorBeforeBlockResize in AnnotationPanel).
+private data class BlockResizeScrollAnchor(
     val blockId: String,
     val viewportTopPx: Float,
     val blockHeightPx: Float,
 )
+
+/** Where the rich Markdown editor dialog (AnnotationMarkdownEditorDialog) is currently pointed:
+ *  a block's own text/caption, or one of the panel-level Prefix/Next steps fields. One `editingTarget`
+ *  var and one Dialog call site in AnnotationPanel serve all three. */
+private sealed class EditDialogTarget {
+    data class Block(val id: String) : EditDialogTarget()
+    data object Prefix : EditDialogTarget()
+    data object Suffix : EditDialogTarget()
+}
 
 internal fun annotationPreviewCopyShortcutHandled(actionPressed: Boolean, key: Key, textFieldFocused: Boolean): Boolean =
     actionPressed && key == Key.C && !textFieldFocused
@@ -517,7 +529,7 @@ fun AnnotationPanel(
     var navIndex by remember(tab.id) { mutableStateOf(0) }
     // The rich editor deliberately keeps an independent draft.  The panel's existing inline
     // field stays available, but Update is the only action that writes this dialog's draft.
-    var editingBlockId by remember(tab.id) { mutableStateOf<String?>(null) }
+    var editingTarget by remember(tab.id) { mutableStateOf<EditDialogTarget?>(null) }
     // Log excerpt expand/collapse per LogRef block ("Note popup redesign" 1b) — panel-level so a
     // reader's choice survives recomposition, keyed by block id rather than tab.id: block ids are
     // unique across the whole session (same reasoning as blockHeights above), so this can just
@@ -580,11 +592,11 @@ fun AnnotationPanel(
             val lines = kotlin.math.ceil(text.length / charsPerLine).coerceAtLeast(1f)
             return maxOf(emptyDp, lines * lineHeightDp + 10f)
         }
-        // BlockCard's header row (an 18dp control row plus 7dp top/bottom padding), its 1-1.5dp
+        // BlockCard's header row (a 20dp control row plus 7dp top/bottom padding), its 1-1.5dp
         // top+bottom border, the body's own 9dp bottom padding, the 7dp spacing between body
         // children, and the 8dp gap BlockCard now carries as its own bottom padding in place of
         // the old edge-to-edge coloured border (see BlockCard's doc comment).
-        val headerDp = 18f + 14f
+        val headerDp = 20f + 14f
         val cardChromeDp = 3f
         val bodyBottomDp = 9f
         val spacingDp = 7f
@@ -762,39 +774,100 @@ fun AnnotationPanel(
         }
     }
 
-    val editingBlock = editingBlockId?.let { blockId -> ann.blocks.firstOrNull { it.id == blockId } }
-    editingBlock?.let { block ->
-        val text = when (block) {
-            is AnnBlock.Note -> block.text
-            is AnnBlock.LogRef -> block.caption
-            is AnnBlock.Image -> null
-        }
-        // Diagram notes have a dedicated editor that keeps their model/source contract intact;
-        // Image captions are intentionally outside this prose-editor scope.
-        if (text != null) {
-            Dialog(
-                onDismissRequest = { editingBlockId = null },
-                properties = DialogProperties(
-                    usePlatformDefaultWidth = false,
-                    dismissOnClickOutside = false,
-                ),
-            ) {
+    // One Dialog call site for every rich-editor target ("Note popup redesign" fixes): a plain
+    // Note/LogRef block, a diagram Note's caption (never its encoded header — see EditDialogTarget's
+    // KDoc), or the panel-level Prefix/Next steps fields. editingDialogContent is null exactly when
+    // there is nothing to show (target cleared, block since removed, or an Image block's onEdit,
+    // which is never wired) so no blank Dialog ever flashes up.
+    val editingDialogContent: (@Composable () -> Unit)? = when (val target = editingTarget) {
+        null -> null
+        EditDialogTarget.Prefix -> {
+            {
                 AnnotationMarkdownEditorDialog(
-                    title = "Edit note",
-                    initialText = text,
-                    confirmLabel = "Save note",
+                    title = "Edit prefix",
+                    initialText = ann.prefix,
+                    confirmLabel = "Save",
                     windowSize = mainWindowSize,
-                    rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
-                    fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
-                    onDelete = { onRemoveBlock(block.id); editingBlockId = null },
-                    onConfirm = { updated ->
-                        onUpdateBlock(block.id, updated)
-                        editingBlockId = null
-                    },
-                    onDismiss = { editingBlockId = null },
+                    fileLabel = tab.filename,
+                    onConfirm = { onUpdatePrefix(it); editingTarget = null },
+                    onDismiss = { editingTarget = null },
                 )
             }
         }
+        EditDialogTarget.Suffix -> {
+            {
+                AnnotationMarkdownEditorDialog(
+                    title = "Edit next steps",
+                    initialText = ann.suffix,
+                    confirmLabel = "Save",
+                    windowSize = mainWindowSize,
+                    fileLabel = tab.filename,
+                    onConfirm = { onUpdateSuffix(it); editingTarget = null },
+                    onDismiss = { editingTarget = null },
+                )
+            }
+        }
+        is EditDialogTarget.Block -> {
+            val block = ann.blocks.firstOrNull { it.id == target.id }
+            val diagramSummary = (block as? AnnBlock.Note)?.let { Seq3NoteSummaryCache.summary(it.text) }
+            when {
+                block == null -> null
+                // Diagram notes have a dedicated editor that keeps their model/source contract
+                // intact — this dialog only ever touches the diagram's caption, never the raw
+                // Note.text carrying the encoded <!-- indagium:diagram3 --> header.
+                diagramSummary != null -> {
+                    {
+                        AnnotationMarkdownEditorDialog(
+                            title = "Edit caption",
+                            initialText = diagramSummary.caption,
+                            confirmLabel = "Save caption",
+                            windowSize = mainWindowSize,
+                            fileLabel = tab.filename,
+                            onConfirm = { newCaption ->
+                                updateSeq3NoteCaption(block.text, newCaption)?.let { onUpdateBlock(block.id, it) }
+                                editingTarget = null
+                            },
+                            onDismiss = { editingTarget = null },
+                        )
+                    }
+                }
+                else -> {
+                    val text = when (block) {
+                        is AnnBlock.Note -> block.text
+                        is AnnBlock.LogRef -> block.caption
+                        // Image captions are intentionally outside this prose-editor scope.
+                        is AnnBlock.Image -> null
+                    }
+                    if (text == null) null else {
+                        {
+                            AnnotationMarkdownEditorDialog(
+                                title = "Edit note",
+                                initialText = text,
+                                confirmLabel = "Save note",
+                                windowSize = mainWindowSize,
+                                rows = (block as? AnnBlock.LogRef)?.resolveRows(tab).orEmpty(),
+                                fileLabel = (block as? AnnBlock.LogRef)?.sourceFilename ?: tab.filename,
+                                onDelete = { onRemoveBlock(block.id); editingTarget = null },
+                                onConfirm = { updated ->
+                                    onUpdateBlock(block.id, updated)
+                                    editingTarget = null
+                                },
+                                onDismiss = { editingTarget = null },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    editingDialogContent?.let { content ->
+        Dialog(
+            onDismissRequest = { editingTarget = null },
+            properties = DialogProperties(
+                usePlatformDefaultWidth = false,
+                dismissOnClickOutside = false,
+            ),
+        ) { content() }
     }
 
     Column(
@@ -974,13 +1047,28 @@ fun AnnotationPanel(
         var stickToBottom by remember(tab.id) {
             mutableStateOf(scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx)
         }
-        var diagramScrollAnchor by remember(tab.id) { mutableStateOf<DiagramScrollAnchor?>(null) }
-        LaunchedEffect(scroll, diagramScrollAnchor) {
-            snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
-                .collect { if (diagramScrollAnchor == null) stickToBottom = it }
+        var blockResizeScrollAnchor by remember(tab.id) { mutableStateOf<BlockResizeScrollAnchor?>(null) }
+        // Captures the block's current on-screen viewport position before an expand/collapse
+        // toggle changes its height, so the effect below can keep that position once the new
+        // height settles — shared by the diagram note's expand/collapse and every LogRef excerpt
+        // expand/collapse path (the summary row, "show N more", and "show less" all funnel through
+        // one onToggleExpanded callback per block, so one call here at the panel level covers all
+        // of them).
+        fun anchorBeforeBlockResize(blockId: String) {
+            val blockTop = blockStartOffsets[blockId] ?: 0f
+            blockResizeScrollAnchor = BlockResizeScrollAnchor(
+                blockId = blockId,
+                viewportTopPx = blockTop - scroll.value,
+                blockHeightPx = blockHeightOf(blockId),
+            )
+            stickToBottom = false
         }
-        LaunchedEffect(totalBlockHeightPx, scroll, diagramScrollAnchor) {
-            val anchor = diagramScrollAnchor
+        LaunchedEffect(scroll, blockResizeScrollAnchor) {
+            snapshotFlow { scroll.maxValue <= 0 || scroll.value >= scroll.maxValue - stickToBottomPx }
+                .collect { if (blockResizeScrollAnchor == null) stickToBottom = it }
+        }
+        LaunchedEffect(totalBlockHeightPx, scroll, blockResizeScrollAnchor) {
+            val anchor = blockResizeScrollAnchor
             if (anchor != null) {
                 val currentHeight = blockHeightOf(anchor.blockId)
                 if (kotlin.math.abs(currentHeight - anchor.blockHeightPx) > 0.5f) {
@@ -988,7 +1076,7 @@ fun AnnotationPanel(
                     val blockTop = blockStartOffsets[anchor.blockId] ?: 0f
                     val targetScroll = (blockTop - anchor.viewportTopPx).roundToInt()
                     scroll.scrollTo(targetScroll.coerceIn(0, scroll.maxValue))
-                    diagramScrollAnchor = null
+                    blockResizeScrollAnchor = null
                     stickToBottom = false
                 }
             } else if (stickToBottom) {
@@ -1000,8 +1088,8 @@ fun AnnotationPanel(
         // keep the bottom section in view. When Next steps has focus, follow that growth after the
         // new layout is measured; this keeps the same bottom inset visible as in the one-line
         // state instead of letting the field run into the panel's rounded bottom edge.
-        LaunchedEffect(ann.suffix, suffixFocused, scroll, diagramScrollAnchor) {
-            if (!suffixFocused || diagramScrollAnchor != null) return@LaunchedEffect
+        LaunchedEffect(ann.suffix, suffixFocused, scroll, blockResizeScrollAnchor) {
+            if (!suffixFocused || blockResizeScrollAnchor != null) return@LaunchedEffect
             withFrameNanos { }
             scroll.scrollTo(scroll.maxValue)
         }
@@ -1061,7 +1149,11 @@ fun AnnotationPanel(
 
                 // Prefix
                 AnnSection(tc) {
-                    AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        AppText("Prefix", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                        Spacer(Modifier.weight(1f))
+                        LabelIconButton("Edit", fontSize = 10.sp, onClick = { editingTarget = EditDialogTarget.Prefix })
+                    }
                     Spacer(Modifier.height(3.dp))
                     ScrollableTextArea(
                         value = ann.prefix,
@@ -1103,21 +1195,13 @@ fun AnnotationPanel(
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
                             onUpdate = { onUpdateBlock(block.id, it) },
-                            onEdit = { editingBlockId = block.id },
+                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             dragHandleModifier = dragHandleModifier,
-                            onBeforeToggleDiagram = {
-                                val blockTop = blockStartOffsets[block.id] ?: 0f
-                                diagramScrollAnchor = DiagramScrollAnchor(
-                                    blockId = block.id,
-                                    viewportTopPx = blockTop - scroll.value,
-                                    blockHeightPx = blockHeightOf(block.id),
-                                )
-                                stickToBottom = false
-                            },
+                            onBeforeToggleDiagram = { anchorBeforeBlockResize(block.id) },
                             onEditDiagram = { onEditDiagram(block.id) },
                             onNavigateDiagramLine = onNavigateDiagramLine,
                             onImportLinkedDiagram = { source, dialect, confirm -> onImportLinkedDiagram(block.id, source, dialect, confirm) },
@@ -1134,14 +1218,17 @@ fun AnnotationPanel(
                                 else if (activeBlockFieldId == block.id) activeBlockFieldId = null
                             },
                             onUpdateCaption = { onUpdateBlock(block.id, it) },
-                            onEdit = { editingBlockId = block.id },
+                            onEdit = { editingTarget = EditDialogTarget.Block(block.id) },
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
                             onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
-                            onToggleExcerpt = { logExcerptExpanded[block.id] = !(logExcerptExpanded[block.id] ?: false) },
+                            onToggleExcerpt = {
+                                anchorBeforeBlockResize(block.id)
+                                logExcerptExpanded[block.id] = !(logExcerptExpanded[block.id] ?: false)
+                            },
                             dragHandleModifier = dragHandleModifier,
                         )
                         is AnnBlock.Image -> ImageBlockView(
@@ -1294,7 +1381,11 @@ fun AnnotationPanel(
 
                     // Suffix
                     AnnSection(tc) {
-                        AppText("Next steps", color = tc.td, fontSize = 11.sp, fontFamily = UI)
+                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                            AppText("Next steps", color = tc.td, fontSize = 11.sp, fontFamily = UI)
+                            Spacer(Modifier.weight(1f))
+                            LabelIconButton("Edit", fontSize = 10.sp, onClick = { editingTarget = EditDialogTarget.Suffix })
+                        }
                         Spacer(Modifier.height(3.dp))
                         ScrollableTextArea(
                             value = ann.suffix,
@@ -2215,8 +2306,11 @@ private fun NoteBlock(
     onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
 ) {
     // Diagram notes are cards, not an exposed model header plus dialect source. Opening the
-    // workspace is the only normal editing route, which keeps the rendered model and saved source
-    // in sync. A malformed/non-diagram note remains the ordinary editable text control below.
+    // workspace is the normal route for editing the model itself, which keeps the rendered model
+    // and saved source in sync — but the caption alongside it is plain text, so Edit still opens
+    // the rich editor dialog on that caption (never on the raw Note.text carrying the encoded
+    // header; see the editingTarget handling in AnnotationPanel). A malformed/non-diagram note
+    // remains the ordinary editable text control below.
     val diagram = remember(block.text) { Seq3NoteSummaryCache.summary(block.text) }
     var diagramExpanded by remember(block.id, block.text) { mutableStateOf(false) }
     BlockCard(
@@ -2227,7 +2321,7 @@ private fun NoteBlock(
             BlockControls(
                 if (diagram != null) "diagram" else "text",
                 tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
-                onEdit = if (diagram == null) onEdit else null,
+                onEdit = onEdit,
                 onNavigate = if (diagram != null) onEditDiagram else null,
                 onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
                 onCopyImage = diagram?.let { summary ->
@@ -2696,11 +2790,13 @@ private fun LogExcerpt(
                 if (!canToggle) "" else if (expanded) "▾" else "▸",
                 color = tc.ts, fontSize = 9.sp, modifier = Modifier.width(8.dp),
             )
+            // Ellipsizes before the level chip on a narrow panel instead of pushing the chip out.
             AppText(
                 summary.rangeLabel(),
                 color = tc.ts, fontSize = 10.sp, fontFamily = mono,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
             )
-            Spacer(Modifier.weight(1f))
             worst?.let { (level, count) -> LogExcerptLevelChip(level, count, mono) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
@@ -2850,15 +2946,6 @@ private fun ImageBlockView(
 private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
     runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
 
-/** A move arrow that can't be used here (↑ on the first block, ↓ on the last): same 18dp
- *  footprint as the live SquareIconButton, dimmed and not clickable. */
-@Composable
-private fun DisabledMoveArrow(text: String) {
-    Box(Modifier.size(18.dp), contentAlignment = Alignment.Center) {
-        AppText(text, color = tc().td.copy(alpha = .35f), fontSize = 12.sp)
-    }
-}
-
 // ── Block controls (move / delete / add note) ──────────────────────────
 @Composable
 private fun BlockControls(
@@ -2891,63 +2978,73 @@ private fun BlockControls(
             },
         )
         .padding(horizontal = 6.dp)
-    Row(
+    // Two groups in a FlowRow: the drag handle/type chip/afterBadgeContent, then the actions
+    // right-aligned. When a narrow panel can't fit both on one line the actions wrap onto a second
+    // line instead of being squeezed out (× vanishing) or clipping Img|Src away.
+    FlowRow(
         Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        AppText(
-            "⠿",
-            color = tc().td,
-            fontSize = 12.sp,
-            modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
-        )
-        val badge: @Composable () -> Unit = {
-            Box(
-                badgeModifier,
-                contentAlignment = Alignment.Center,
-            ) {
-                if (isNavigationBadge) {
-                    androidx.compose.material3.Text(
-                        "$typeLabel ↗",
-                        color = typeColor,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        textDecoration = TextDecoration.Underline,
-                        maxLines = 1,
-                    )
-                } else {
-                    AppText(
-                        typeLabel,
-                        color = typeColor,
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+        Row(
+            Modifier.height(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppText(
+                "⠿",
+                color = tc().td,
+                fontSize = 12.sp,
+                modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+            )
+            val badge: @Composable () -> Unit = {
+                Box(
+                    badgeModifier,
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isNavigationBadge) {
+                        androidx.compose.material3.Text(
+                            "$typeLabel ↗",
+                            color = typeColor,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            textDecoration = TextDecoration.Underline,
+                            maxLines = 1,
+                        )
+                    } else {
+                        AppText(
+                            typeLabel,
+                            color = typeColor,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                    }
                 }
             }
+            if (onNavigateTooltip != null) {
+                TooltipArea(tooltip = { ToolbarTooltip(onNavigateTooltip) }) { badge() }
+            } else {
+                badge()
+            }
+            afterBadgeContent?.let {
+                it()
+            }
         }
-        if (onNavigateTooltip != null) {
-            TooltipArea(tooltip = { ToolbarTooltip(onNavigateTooltip) }) { badge() }
-        } else {
-            badge()
-        }
-        afterBadgeContent?.let {
-            it()
-        }
-        Spacer(Modifier.weight(1f))
 
-        // Fixed-width ↑/↓ slots: the first/last block shows its unavailable arrow dimmed rather than
-        // hiding it, so the action row keeps the same layout on every block instead of shifting as
-        // arrows appear and disappear — and without the blank gap an invisible placeholder leaves.
-        if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp) else DisabledMoveArrow("↑")
-        if (!isLast) SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown) else DisabledMoveArrow("↓")
-        if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
-        // Renamed from the bare "✎" glyph, which at this size read as a paperclip rather than the
-        // button that opens the full editor dialog.
-        onEdit?.let { LabelIconButton("Edit", fontSize = 10.sp, onClick = it) }
-        LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
-        Box(Modifier.width(1.dp).height(14.dp).background(tc().br))
-        SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
+        Row(
+            Modifier.weight(1f).height(20.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+        ) {
+            if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
+            if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+            if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
+            // Renamed from the bare "✎" glyph, which at this size read as a paperclip rather than the
+            // button that opens the full editor dialog.
+            onEdit?.let { LabelIconButton("Edit", fontSize = 10.sp, onClick = it) }
+            LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
+            SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
+        }
     }
 }
 
