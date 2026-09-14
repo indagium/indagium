@@ -19,13 +19,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.clipPath
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -3427,6 +3432,63 @@ private fun RowScope.HeaderMessageCell(
     }
 }
 
+// Group-header radius, matching AnnotationPanel's BlockCard note-card rounding.
+private val HEADER_ROW_CORNER_RADIUS_DP = 6.dp
+private val HEADER_ROW_BAR_WIDTH_DP = 3.dp
+
+/**
+ * Rounded-left-edge tinted background for a collapsible group header row (SeqHeaderRow,
+ * ManualHeaderRow, StackTraceHeaderRow), mirroring the note-card look of AnnotationPanel's
+ * BlockCard: a colored bar sits inside a background region whose LEFT corners are rounded,
+ * starting at the nested-indent guide line (`indent * INDENT_STEP`, zero for [ManualHeaderRow]
+ * which has no nesting). The area left of that guide — the gutter for shallower ancestor guide
+ * lines — keeps its own square tint, unrounded, exactly as before.
+ *
+ * Collapsed rows ([collapsed] = true) round both the top-left and bottom-left corners. Expanded
+ * rows round only the top-left, so the bar reads as visually continuous into the child rows
+ * rendered directly below (each with their own guide line) rather than looking like a closed box.
+ *
+ * Built with [drawWithCache] so the [Path]/[RoundRect] — the only per-frame allocation risk here —
+ * is rebuilt only when the row's size, [indent] or [collapsed] change (all read directly in the
+ * cache-building block, so a change to any of them invalidates the cache exactly once). [tint] and
+ * [barColor] are read inside `onDrawBehind` instead: they flip on hover/selection/search-match,
+ * which happen far more often than a resize or an expand/collapse, and reading them at draw time
+ * repaints without forcing a Path rebuild. LogViewer rows are LazyColumn items so this matters —
+ * hundreds of them can be live at once while the pointer moves across the list.
+ */
+private fun Modifier.headerGroupBackground(
+    indent: Int,
+    collapsed: Boolean,
+    tint: () -> Color,
+    barColor: () -> Color,
+): Modifier = drawWithCache {
+    val guideX = indent * INDENT_STEP.toPx()
+    val cornerPx = HEADER_ROW_CORNER_RADIUS_DP.toPx()
+    val barWidthPx = HEADER_ROW_BAR_WIDTH_DP.toPx()
+    val topLeftRadius = CornerRadius(cornerPx, cornerPx)
+    val bottomLeftRadius = if (collapsed) CornerRadius(cornerPx, cornerPx) else CornerRadius.Zero
+    val roundedRegionWidth = (size.width - guideX).coerceAtLeast(0f)
+    val clipPathForRegion = Path().apply {
+        addRoundRect(
+            RoundRect(
+                left = guideX, top = 0f, right = guideX + roundedRegionWidth, bottom = size.height,
+                topLeftCornerRadius = topLeftRadius,
+                topRightCornerRadius = CornerRadius.Zero,
+                bottomRightCornerRadius = CornerRadius.Zero,
+                bottomLeftCornerRadius = bottomLeftRadius,
+            ),
+        )
+    }
+    onDrawBehind {
+        val t = tint()
+        if (guideX > 0f) drawRect(t, topLeft = Offset.Zero, size = Size(guideX, size.height))
+        clipPath(clipPathForRegion) {
+            drawRect(t, topLeft = Offset(guideX, 0f), size = Size(roundedRegionWidth, size.height))
+            drawRect(barColor(), topLeft = Offset(guideX, 0f), size = Size(barWidthPx, size.height))
+        }
+    }
+}
+
 @Composable
 private fun SeqHeaderRow(
     item: LogItem.SeqHeader,
@@ -3473,17 +3535,20 @@ private fun SeqHeaderRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(when {
-                isSel -> tc.sl
-                isCurrentSearchMatch -> tc.searchCurrentBg
-                isSearchMatch -> tc.searchMatchBg
-                hov -> sc.copy(.15f)
-                else -> sc.copy(.07f)
-            })
-            .drawBehind {
-                val guideX = item.indent * INDENT_STEP.toPx()
-                drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
-            }
+            .headerGroupBackground(
+                indent = item.indent,
+                collapsed = !item.expanded,
+                tint = {
+                    when {
+                        isSel -> tc.sl
+                        isCurrentSearchMatch -> tc.searchCurrentBg
+                        isSearchMatch -> tc.searchMatchBg
+                        hov -> sc.copy(.15f)
+                        else -> sc.copy(.07f)
+                    }
+                },
+                barColor = { sc },
+            )
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
@@ -3580,14 +3645,20 @@ private fun ManualHeaderRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(when {
-                isSel -> tc.sl
-                isCurrentSearchMatch -> tc.searchCurrentBg
-                isSearchMatch -> tc.searchMatchBg
-                hov -> sc.copy(.13f)
-                else -> sc.copy(.06f)
-            })
-            .drawBehind { drawRect(sc, topLeft = Offset.Zero, size = Size(4f, size.height)) }
+            .headerGroupBackground(
+                indent = 0,
+                collapsed = !item.expanded,
+                tint = {
+                    when {
+                        isSel -> tc.sl
+                        isCurrentSearchMatch -> tc.searchCurrentBg
+                        isSearchMatch -> tc.searchMatchBg
+                        hov -> sc.copy(.13f)
+                        else -> sc.copy(.06f)
+                    }
+                },
+                barColor = { sc },
+            )
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)
@@ -3685,17 +3756,20 @@ private fun StackTraceHeaderRow(
     Row(
         Modifier
             .fillMaxWidth()
-            .background(when {
-                isSel -> tc.sl
-                isCurrentSearchMatch -> tc.searchCurrentBg
-                isSearchMatch -> tc.searchMatchBg
-                hov -> sc.copy(.15f)
-                else -> sc.copy(.07f)
-            })
-            .drawBehind {
-                val guideX = item.indent * INDENT_STEP.toPx()
-                drawRect(sc, topLeft = Offset(guideX, 0f), size = Size(4f, size.height))
-            }
+            .headerGroupBackground(
+                indent = item.indent,
+                collapsed = !item.expanded,
+                tint = {
+                    when {
+                        isSel -> tc.sl
+                        isCurrentSearchMatch -> tc.searchCurrentBg
+                        isSearchMatch -> tc.searchMatchBg
+                        hov -> sc.copy(.15f)
+                        else -> sc.copy(.07f)
+                    }
+                },
+                barColor = { sc },
+            )
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 rowBoundsAbs[item.entry.id] = pos.y to (pos.y + coords.size.height)

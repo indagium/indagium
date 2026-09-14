@@ -5,6 +5,7 @@
 
 package com.indagium.ui
 
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
@@ -28,6 +29,7 @@ import androidx.compose.ui.draganddrop.DragAndDropEvent
 import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.dragData
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -1258,6 +1260,7 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
                             dragHandleModifier = dragHandleModifier,
                             onBeforeToggleDiagram = { anchorBeforeBlockResize(block.id) },
                             onEditDiagram = { onEditDiagram(block.id) },
@@ -1280,6 +1283,7 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
                             onToggleExcerpt = {
@@ -1301,6 +1305,7 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
+                            onAddBelow = { onAddNoteAfter(block.id) },
                             onCopyImage = { onCopyImage(block) },
                             onNavigateVideoFrame = block.videoFrame?.let { frame -> { onNavigateVideoFrame(frame) } },
                             dragHandleModifier = dragHandleModifier,
@@ -2357,6 +2362,7 @@ private fun NoteBlock(
     onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
+    onAddBelow: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
     onBeforeToggleDiagram: () -> Unit = {},
     onEditDiagram: () -> Unit = {},
@@ -2379,7 +2385,7 @@ private fun NoteBlock(
         header = {
             BlockControls(
                 if (diagram != null) "diagram" else "text",
-                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, dragHandleModifier = dragHandleModifier,
+                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
                 onEdit = onEdit,
                 onNavigate = if (diagram != null) onEditDiagram else null,
                 onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
@@ -2778,6 +2784,7 @@ private fun LogRefBlock(
     onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
+    onAddBelow: () -> Unit,
     onNavigate: () -> Unit,
     excerptExpanded: Boolean,
     onToggleExcerpt: () -> Unit,
@@ -2794,7 +2801,7 @@ private fun LogRefBlock(
         focused = focused,
         header = {
             BlockControls(
-                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onNavigate,
+                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
                 onNavigateTooltip = "Show in log",
                 onEdit = onEdit,
                 dragHandleModifier = dragHandleModifier,
@@ -2875,7 +2882,10 @@ private fun LogExcerpt(
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(tc.br))
         Column(
-            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            Modifier.fillMaxWidth()
+                .clipToBounds()
+                .animateContentSize(animationSpec = spring(stiffness = 650f, dampingRatio = 0.86f))
+                .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             if (expanded || !canToggle) {
@@ -2947,6 +2957,7 @@ private fun ImageBlockView(
     onUpdateCaption: (String) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
+    onAddBelow: () -> Unit,
     onCopyImage: () -> Unit,
     onNavigateVideoFrame: (() -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
@@ -2961,7 +2972,7 @@ private fun ImageBlockView(
         focused = focused,
         header = {
             BlockControls(
-                "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove,
+                "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
                 onNavigate = onNavigateVideoFrame,
                 onCopyImage = onCopyImage,
                 dragHandleModifier = dragHandleModifier,
@@ -3055,6 +3066,7 @@ private fun BlockControls(
     isFirst: Boolean, isLast: Boolean,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onRemove: () -> Unit,
+    onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
     onNavigateTooltip: String? = null,
     onCopyImage: (() -> Unit)? = null,
@@ -3141,6 +3153,7 @@ private fun BlockControls(
                 if (onCopyImage != null) CopyImageIconButton(onClick = onCopyImage)
                 if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
                 if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+                LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
                 // Icon button (not a text label) that opens the full editor dialog — placed right
                 // before × per the header action order.
                 onEdit?.let { EditIconButton(onClick = it) }
