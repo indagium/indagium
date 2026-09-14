@@ -965,6 +965,11 @@ data class AppSettings(
     val autoSaveFilters: Boolean = true,
     val annotationLogBlockStyle: AnnotationLogBlockStyle = AnnotationLogBlockStyle.JIRA_JAVA,
     val numberAnnotationBlocks: Boolean = false,
+    // When enabled, non-empty text/caption fields in the Notes panel show their rendered
+    // Markdown inline. Clicking a rendered field opens the shared rich editor; empty fields stay
+    // editable so creating a note never requires an extra click. JSON-only (see AutosaveCodec),
+    // with a default-on migration for existing settings snapshots.
+    val renderAnnotationMarkdownInline: Boolean = true,
     val annotationPrefixLabel: String = "From",
     val navScrollMargin: Int = 5,
     val logRowWrapLimitChars: Int = 480,

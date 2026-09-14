@@ -5173,6 +5173,7 @@ class AppStateBehaviorTest {
         autoSaveFilters = false,
         annotationLogBlockStyle = AnnotationLogBlockStyle.INDENTED,
         numberAnnotationBlocks = true,
+        renderAnnotationMarkdownInline = false,
         annotationPrefixLabel = "Cite",
         navScrollMargin = 10,
         logRowWrapLimitChars = 777,

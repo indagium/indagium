@@ -584,6 +584,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("autoSaveFilters", autoSaveFilters)
     put("annotationLogBlockStyle", annotationLogBlockStyle.name)
     put("numberAnnotationBlocks", numberAnnotationBlocks)
+    put("renderAnnotationMarkdownInline", renderAnnotationMarkdownInline)
     put("annotationPrefixLabel", annotationPrefixLabel)
     put("navScrollMargin", navScrollMargin)
     put("logRowWrapLimitChars", logRowWrapLimitChars)
@@ -858,6 +859,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?.let { runCatching { AnnotationLogBlockStyle.valueOf(it) }.getOrNull() }
             ?: AnnotationLogBlockStyle.JIRA_JAVA,
         numberAnnotationBlocks = o.boolOrDefault("numberAnnotationBlocks", false),
+        renderAnnotationMarkdownInline = o.boolOrDefault("renderAnnotationMarkdownInline", true),
         annotationPrefixLabel = o.stringOrNull("annotationPrefixLabel")?.takeIf { it.isNotBlank() } ?: "From",
         navScrollMargin = o.intOrDefault("navScrollMargin", 5).coerceIn(0, 30),
         logRowWrapLimitChars = o.intOrDefault("logRowWrapLimitChars", DEFAULT_LOG_ROW_WRAP_LIMIT_CHARS)
