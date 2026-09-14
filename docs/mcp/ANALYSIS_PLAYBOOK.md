@@ -46,3 +46,8 @@ as a real conversation, not a one-shot report.
 Write findings as you go, not just at the end: `add_log_note` anchored to the specific
 lines that support each claim, `add_text_note` for narrative conclusions. The user should
 be able to reread your notes later without you.
+
+Notes sections, text notes, and captions accept Markdown: headings, bold/italic/strikethrough,
+lists, quotes, links, inline code, and fenced code. `update_note_block` replaces an ordinary
+note's complete Markdown, so read it before updating when preserving existing content; use
+`update_note_caption` for LogRef, Image, and structured diagram captions.

@@ -140,6 +140,23 @@ class DltDetectionTest {
     }
 
     @Test
+    fun threeChainedNulFreeFramesAreAcceptedInAPartialSample() {
+        val sample = dltNulFreeRawFrame() + dltNulFreeRawFrame() + dltNulFreeRawFrame()
+        assertTrue(sample.none { it == 0.toByte() })
+        assertEquals(LogContentKind.DLT_RAW, classify(sample, atEof = false))
+    }
+
+    @Test
+    fun oneNulFreeFrameIsAcceptedWhenTheSampleEndsAtEof() {
+        val sample = dltNulFreeRawFrame()
+        assertTrue(sample.none { it == 0.toByte() })
+        assertEquals(LogContentKind.DLT_RAW, classify(sample, atEof = true))
+        // With more data still expected, a single valid-looking frame falls through to the
+        // existing NUL-free text fallback rather than claiming DLT on one frame alone.
+        assertEquals(LogContentKind.TEXT, classify(sample, atEof = false))
+    }
+
+    @Test
     fun aSingleValidFrameIsAcceptedOnlyWhenTheSampleIsTheWholeStream() {
         val sample = rawFrame(payloadSize = 4)
         assertEquals(LogContentKind.DLT_RAW, classify(sample, atEof = true))

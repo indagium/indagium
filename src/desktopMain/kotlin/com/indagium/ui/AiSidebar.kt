@@ -143,6 +143,12 @@ internal enum class AiSidebarSection { PROVIDER, ACTIONS }
  */
 internal val LocalVideoSidebarExpandedChange = staticCompositionLocalOf<(Boolean) -> Unit> { {} }
 
+/** True while the tab's in-app AI run may write Notes. Notes remains readable, navigable, and
+ * copyable during that window, but every manual mutation is disabled to avoid racing the agent. */
+internal val LocalNotesEditLocked = staticCompositionLocalOf { false }
+
+internal const val NOTES_EDIT_LOCK_MESSAGE = "AI is updating Notes — stop the run to edit."
+
 private fun AiSidebarSection?.toggled(section: AiSidebarSection): AiSidebarSection? =
     if (this == section) null else section
 
@@ -161,6 +167,13 @@ internal fun RightSidebarPanel(
     notesContent: @Composable () -> Unit,
     videoContent: (@Composable () -> Unit)? = null,
 ) {
+    // AiSidebarRuntime batches active-run changes through this revision flow. Observing it here is
+    // important: RightSidebarPanel owns Notes, while AiSidebarPanel is a sibling and otherwise a
+    // run starting/stopping would not recompose the Notes subtree's lock state.
+    val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
+    @Suppress("UNUSED_VARIABLE")
+    val observedAiRevision = aiRevision
+    val notesLocked = state.aiSessions.sessionFor(tab.id).activeRun != null
     val notesOn = state.annotationVisible
     val aiOn = state.aiPanelVisible
     val videoOn = videoContent != null
@@ -211,7 +224,11 @@ internal fun RightSidebarPanel(
                 if (notesOn || aiOn) {
                     Column(Modifier.weight(if (videoOn && videoSidebarVisible) 1f - videoSplit else 1f).fillMaxWidth()) {
                         if (notesOn) {
-                            Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) { notesContent() }
+                            Box(Modifier.weight(if (aiOn) state.rightSidebarSplit else 1f).fillMaxWidth()) {
+                                CompositionLocalProvider(LocalNotesEditLocked provides notesLocked) {
+                                    notesContent()
+                                }
+                            }
                         }
                         if (notesOn && aiOn) {
                             VDivider { delta ->

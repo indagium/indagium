@@ -390,9 +390,15 @@ class ControlServerTest {
         assertEquals(logId, blocks.first().id)
         assertEquals("Updated note", assertIs<AnnBlock.Note>(blocks[1]).text)
 
+        val captionResult = Json.decode(
+            post("/annotations/caption", """{"tabId":"t1","blockId":"$logId","caption":"**Failure**"}"""),
+        ) as Map<*, *>
+        assertEquals(true, captionResult["ok"])
+        assertEquals("**Failure**", assertIs<AnnBlock.LogRef>(state.tab("t1")!!.annotations.blocks.first()).caption)
+
         val exportFile = File.createTempFile("openlog-control-export", ".md")
         post("/export/analysis", """{"tabId":"t1","path":"${exportFile.absolutePath.replace("\\", "\\\\")}"}""")
-        assertTrue(exportFile.readText().contains("Failure line"))
+        assertTrue(exportFile.readText().contains("Failure"))
 
         post("/annotations/delete", """{"tabId":"t1","blockId":"$noteId"}""")
         assertEquals(listOf(logId), state.tab("t1")!!.annotations.blocks.map { it.id })

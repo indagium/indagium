@@ -62,6 +62,24 @@ class DltSplitterTest {
     }
 
     @Test
+    fun nulFreeRawFramesSplitWithoutByteLossAndEachPartParsesAsDlt() {
+        val dir = createTempDirectory("dlt-split-nul-free").toFile()
+        val frames = (1..12).map { dltNulFreeRawFrame() }
+        val source = frames.reduce { acc, frame -> acc + frame }
+        val outs = outputs(dir, ".dlt")
+
+        assertTrue(source.none { it == 0.toByte() })
+        val written = splitDltStreamToFiles(ByteArrayInputStream(source), outs, source.size.toLong(), LogContentKind.DLT_RAW)
+
+        assertEquals(source.toList(), written.flatMap { it.readBytes().toList() })
+        assertEquals(12, written.sumOf { part ->
+            val parsed = part.inputStream().use { parseLogContent(it, fileName = part.name) }
+            assertEquals(LogFormat.DLT, parsed.format)
+            parsed.entries.size
+        })
+    }
+
+    @Test
     fun trailingGarbageAfterTheLastValidFrameIsPreservedByteExactly() {
         val dir = createTempDirectory("dlt-split-garbage").toFile()
         val frames = (1..10).map { i -> dltStorageHeader(ecu = "ECU1") + dltTestFrame("frame $i") }

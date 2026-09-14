@@ -48,8 +48,11 @@ Recent state; file-open calls must still use explicit approved fixture paths.
   `get_annotation_blocks` for every block id plus safe type/text/caption/line-id/image metadata.
   `set_annotation_section` replaces a section outright instead — omitting or blanking `text`
   clears it — so reach for `append_annotation_section` first unless the existing content needs to
-  go. `add_text_note`, `add_log_note`, `add_image_note`, `update_note_block`, `move_note_block`,
-  and `delete_note_block` manage individual evidence blocks. `clear_all_notes` is the explicit,
+  go. `add_text_note`, `add_log_note`, `add_image_note`, `update_note_block`, `update_note_caption`,
+  `move_note_block`, and `delete_note_block` manage individual evidence blocks. Notes and captions
+  are Markdown (headings, bold/italic/strikethrough, lists, quotes, links, inline/fenced code).
+  `update_note_block` full-replaces ordinary note Markdown; read first when preserving content.
+  `clear_all_notes` is the explicit,
   confirmation-required bulk clear for both sections and every block; it preserves the private
   issue description and case metadata.
 - `export_analysis`, `export_filtered_log`, `save_annotations`, and `load_annotations` write or
