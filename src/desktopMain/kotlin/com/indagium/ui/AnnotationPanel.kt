@@ -165,7 +165,6 @@ internal object Seq3NoteSummaryCache {
     private const val UNKNOWN_RANGE_ENDPOINT = "?"
     private const val SUPPORTED_VERSION = "v1"
     private val payloadKeys = listOf("\"lifelines\"", "\"messages\"")
-    private val unicodeEscapeRegex = Regex("\\\\u([0-9a-fA-F]{4})")
     private val rangeRegex = Regex("\\\"range\\\"\\s*:\\s*\\{([^}]*)}")
 
     private data class Cached(val summary: Seq3NoteSummary?)
@@ -238,13 +237,40 @@ internal object Seq3NoteSummaryCache {
     private fun jsonString(text: String, name: String): String? {
         val encoded = Regex("\\\"$name\\\"\\s*:\\s*\\\"((?:\\\\.|[^\\\"\\\\])*)\\\"")
             .find(text)?.groupValues?.get(1) ?: return null
-        // This small unescaper covers JSON scalar escapes without decoding the carried document.
-        return encoded.replace("\\\\\"", "\"")
-            .replace("\\\\\\\\", "\\")
-            .replace("\\\\n", "\n")
-            .replace("\\\\r", "\r")
-            .replace("\\\\t", "\t")
-            .replace(unicodeEscapeRegex) { it.groupValues[1].toInt(16).toChar().toString() }
+        return unescapeJsonString(encoded)
+    }
+
+    /** Decodes JSON string escapes (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, `\uXXXX`) in one
+     *  left-to-right pass without decoding the carried document. The previous chained `replace`s
+     *  matched a doubled backslash, so a caption's `\n` stayed a literal backslash-n on screen and
+     *  was re-escaped on every save. */
+    internal fun unescapeJsonString(encoded: String): String {
+        if ('\\' !in encoded) return encoded
+        val out = StringBuilder(encoded.length)
+        var i = 0
+        while (i < encoded.length) {
+            val c = encoded[i]
+            if (c != '\\' || i + 1 >= encoded.length) {
+                out.append(c)
+                i++
+                continue
+            }
+            when (val next = encoded[i + 1]) {
+                '"', '\\', '/' -> { out.append(next); i += 2 }
+                'b' -> { out.append('\b'); i += 2 }
+                'f' -> { out.append(''); i += 2 }
+                'n' -> { out.append('\n'); i += 2 }
+                'r' -> { out.append('\r'); i += 2 }
+                't' -> { out.append('\t'); i += 2 }
+                'u' -> {
+                    val hex = encoded.substring(i + 2, minOf(i + 6, encoded.length))
+                    val code = hex.takeIf { it.length == 4 }?.toIntOrNull(16)
+                    if (code != null) { out.append(code.toChar()); i += 6 } else { out.append(c); i++ }
+                }
+                else -> { out.append(c); i++ }
+            }
+        }
+        return out.toString()
     }
 
     private fun jsonNumber(text: String, name: String): Long? =
