@@ -53,6 +53,7 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -647,17 +648,6 @@ fun AnnotationPanel(
         ?: ann.blocks.firstOrNull { it.id == id }?.let(::estimateBlockHeightPx)
         ?: (90f * blockDensity)
     val blockIds = ann.blocks.map { it.id }
-    // A pure height change (expanding/collapsing a diagram note or a LogRef excerpt) must move
-    // every block below it to its new position immediately — springing them down over several
-    // frames left the growing block's new content briefly covered by the next opaque card, read
-    // by the user as flicker. A real reorder (drag release, ↑/↓, Alt+↑/↓, or a block added/
-    // removed) still animates: blockIds changing identity is what opens this window. Computed
-    // synchronously during composition (not a LaunchedEffect, which runs after composition and
-    // would let the first reorder frame snap) via `remember(blockIds)`, which re-evaluates its
-    // initializer exactly when the key changes.
-    val blockIdsChangedAtNanos = remember(blockIds) { System.nanoTime() }
-    val springWindow = dragBlockId != null || justReleasedBlockId != null ||
-        System.nanoTime() - blockIdsChangedAtNanos < 700_000_000L
     LaunchedEffect(blockIds, dragBlockId, justReleasedBlockId) {
         if (shouldSyncSequenceVisualOrder(dragBlockId, justReleasedBlockId)) {
             liveVisualBlockIds = blockIds
@@ -1213,7 +1203,6 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
                             dragHandleModifier = dragHandleModifier,
                             onBeforeToggleDiagram = { anchorBeforeBlockResize(block.id) },
                             onEditDiagram = { onEditDiagram(block.id) },
@@ -1236,7 +1225,6 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
                             onNavigate = { onNavigateLogRef(block) },
                             excerptExpanded = logExcerptExpanded[block.id] ?: false,
                             onToggleExcerpt = {
@@ -1258,7 +1246,6 @@ fun AnnotationPanel(
                             onRemove = { onRemoveBlock(block.id) },
                             onMoveUp = { onMoveBlock(block.id, -1) },
                             onMoveDown = { onMoveBlock(block.id, 1) },
-                            onAddBelow = { onAddNoteAfter(block.id) },
                             onCopyImage = { onCopyImage(block) },
                             onNavigateVideoFrame = block.videoFrame?.let { frame -> { onNavigateVideoFrame(frame) } },
                             dragHandleModifier = dragHandleModifier,
@@ -1304,13 +1291,7 @@ fun AnnotationPanel(
                                 isJustReleased = justReleasedBlockId == block.id,
                                 pointerY = (blockStartOffsets[block.id] ?: 0f) + dragOffsetY,
                                 targetY = targetY,
-                                // Outside the spring window (see blockIdsChangedAtNanos above), feed
-                                // sequenceRenderY the target directly so a pure height change snaps
-                                // to its new position at once instead of gliding into view frame by
-                                // frame — animateFloatAsState above keeps tracking its target either
-                                // way, so a real reorder's spring still starts from the old settled
-                                // position and plays normally.
-                                animatedY = if (springWindow) animatedY else targetY,
+                                animatedY = animatedY,
                             )
                             val dragHandleModifier = Modifier.pointerInput(block.id) {
                                 detectDragGestures(
@@ -2317,7 +2298,6 @@ private fun NoteBlock(
     onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
-    onAddBelow: () -> Unit,
     dragHandleModifier: Modifier = Modifier,
     onBeforeToggleDiagram: () -> Unit = {},
     onEditDiagram: () -> Unit = {},
@@ -2340,7 +2320,7 @@ private fun NoteBlock(
         header = {
             BlockControls(
                 if (diagram != null) "diagram" else "text",
-                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, dragHandleModifier = dragHandleModifier,
+                tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, dragHandleModifier = dragHandleModifier,
                 onEdit = onEdit,
                 onNavigate = if (diagram != null) onEditDiagram else null,
                 onNavigateTooltip = if (diagram != null) "Open diagram workspace" else null,
@@ -2723,7 +2703,6 @@ private fun LogRefBlock(
     onEdit: () -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
-    onAddBelow: () -> Unit,
     onNavigate: () -> Unit,
     excerptExpanded: Boolean,
     onToggleExcerpt: () -> Unit,
@@ -2740,7 +2719,7 @@ private fun LogRefBlock(
         focused = focused,
         header = {
             BlockControls(
-                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow, onNavigate,
+                "log", borderColor, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onNavigate,
                 onNavigateTooltip = "Show in log",
                 onEdit = onEdit,
                 dragHandleModifier = dragHandleModifier,
@@ -2893,7 +2872,6 @@ private fun ImageBlockView(
     onUpdateCaption: (String) -> Unit,
     onRemove: () -> Unit,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
-    onAddBelow: () -> Unit,
     onCopyImage: () -> Unit,
     onNavigateVideoFrame: (() -> Unit)? = null,
     dragHandleModifier: Modifier = Modifier,
@@ -2908,7 +2886,7 @@ private fun ImageBlockView(
         focused = focused,
         header = {
             BlockControls(
-                "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove, onAddBelow,
+                "image", tc.ac, isFirst, isLast, onMoveUp, onMoveDown, onRemove,
                 onNavigate = onNavigateVideoFrame,
                 onCopyImage = onCopyImage,
                 dragHandleModifier = dragHandleModifier,
@@ -2995,14 +2973,13 @@ private fun EditIconButton(onClick: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-// ── Block controls (move / delete / add note) ──────────────────────────
+// ── Block controls (move / delete) ──────────────────────────────────────
 @Composable
 private fun BlockControls(
     typeLabel: String, typeColor: Color,
     isFirst: Boolean, isLast: Boolean,
     onMoveUp: () -> Unit, onMoveDown: () -> Unit,
     onRemove: () -> Unit,
-    onAddBelow: () -> Unit,
     onNavigate: (() -> Unit)? = null,
     onNavigateTooltip: String? = null,
     onCopyImage: (() -> Unit)? = null,
@@ -3027,72 +3004,157 @@ private fun BlockControls(
             },
         )
         .padding(horizontal = 6.dp)
-    // Two groups in a FlowRow: the drag handle/type chip/afterBadgeContent, then the actions
-    // right-aligned. When a narrow panel can't fit both on one line the actions wrap onto a second
-    // line instead of being squeezed out (× vanishing) or clipping Img|Src away.
-    FlowRow(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Row(
-            Modifier.height(20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            AppText(
-                "⠿",
-                color = tc().td,
-                fontSize = 12.sp,
-                modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
-            )
-            val badge: @Composable () -> Unit = {
-                Box(
-                    badgeModifier,
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (isNavigationBadge) {
-                        androidx.compose.material3.Text(
-                            "$typeLabel ↗",
-                            color = typeColor,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            textDecoration = TextDecoration.Underline,
-                            maxLines = 1,
-                        )
-                    } else {
-                        AppText(
-                            typeLabel,
-                            color = typeColor,
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Medium,
-                        )
+    // Two groups, laid out by BlockHeaderLayout (not a FlowRow — see that composable's own doc
+    // for why): the drag handle/type chip/afterBadgeContent on the left, then the actions —
+    // right-aligned, never clipped or squeezed — on the right, wrapping to their own second line
+    // only when the left group truly doesn't leave room for them.
+    BlockHeaderLayout(
+        left = {
+            Row(
+                Modifier.height(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                AppText(
+                    "⠿",
+                    color = tc().td,
+                    fontSize = 12.sp,
+                    modifier = dragHandleModifier.pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.MOVE_CURSOR))),
+                )
+                val badge: @Composable () -> Unit = {
+                    Box(
+                        badgeModifier,
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        if (isNavigationBadge) {
+                            androidx.compose.material3.Text(
+                                "$typeLabel ↗",
+                                color = typeColor,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textDecoration = TextDecoration.Underline,
+                                maxLines = 1,
+                            )
+                        } else {
+                            AppText(
+                                typeLabel,
+                                color = typeColor,
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                        }
                     }
                 }
+                if (onNavigateTooltip != null) {
+                    TooltipArea(tooltip = { ToolbarTooltip(onNavigateTooltip) }) { badge() }
+                } else {
+                    badge()
+                }
+                afterBadgeContent?.let {
+                    it()
+                }
             }
-            if (onNavigateTooltip != null) {
-                TooltipArea(tooltip = { ToolbarTooltip(onNavigateTooltip) }) { badge() }
-            } else {
-                badge()
+        },
+        actions = {
+            Row(
+                Modifier.height(20.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // Leads the actions group, before the arrows — see BlockHeaderLayout's doc for
+                // why this can never be the thing that gets clipped.
+                if (onCopyImage != null) CopyImageBadge(onClick = onCopyImage)
+                if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
+                if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
+                // Icon button (not a text label) that opens the full editor dialog — placed right
+                // before × per the header action order.
+                onEdit?.let { EditIconButton(onClick = it) }
+                SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
             }
-            afterBadgeContent?.let {
-                it()
-            }
-        }
+        },
+    )
+}
 
-        Row(
-            Modifier.weight(1f).height(20.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+// "copy image" rendered as a bordered badge in the same visual family as
+// DiagramExportModeSwitcher's Img|Src pills, rather than the plain LabelIconButton it used to be —
+// it now leads the actions group (before ↑/↓) so it reads as a distinct, always-visible affordance
+// instead of one more text button jostling for space next to ×.
+@Composable
+private fun CopyImageBadge(onClick: () -> Unit) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(6.dp)
+    TooltipArea(tooltip = { ToolbarTooltip("Copy as PNG to the clipboard") }) {
+        Box(
+            Modifier.height(18.dp)
+                .background(if (hovered) tc.hv else Color.Transparent, shape)
+                .border(0.5.dp, tc.br, shape)
+                .clip(shape)
+                .clickable(onClick = onClick)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(horizontal = 7.dp),
+            contentAlignment = Alignment.Center,
         ) {
-            if (!isFirst) SquareIconButton("↑", fontSize = 12.sp, onClick = onMoveUp)
-            if (!isLast)  SquareIconButton("↓", fontSize = 12.sp, onClick = onMoveDown)
-            if (onCopyImage != null) LabelIconButton("copy image", fontSize = 10.sp, onClick = onCopyImage)
-            LabelIconButton("+ Note", fontSize = 10.sp, onClick = onAddBelow)
-            // Icon button (not a text label) that opens the full editor dialog — placed right
-            // before × per the header action order.
-            onEdit?.let { EditIconButton(onClick = it) }
-            SquareIconButton("×", fontSize = 14.sp, onClick = onRemove)
+            AppText("copy image", color = tc.ts, fontSize = 10.sp)
+        }
+    }
+}
+
+// Replaces the FlowRow BlockControls used to lay its two groups out in. FlowRow could still keep
+// the whole weighted actions row (↑ ↓ ✎ ×) on the first line with too little width left over at
+// some panel widths — the actions row being `Modifier.weight(1f)` doesn't stop FlowRow from
+// squeezing it, so × silently clipped off the trailing edge (see the "× cut off" report). This
+// measures `actions` FIRST, at its own natural width, and only ever shrinks/wraps `left` — so the
+// actions group is always placed at its full natural size and never squeezed or clipped.
+//
+// The left group's natural width comes from `maxIntrinsicWidth` rather than a measure-unbounded-
+// then-measure-again probe: a Measurable can only be measured once per layout pass, and none of
+// `left`'s content here (plain Row/Box/TooltipArea) is backed by a SubcomposeLayout — the case
+// where intrinsics are known to misbehave (SubcomposeLayout defers composition, which intrinsics
+// cannot see through) — so the default intrinsic-delegation Compose gives ordinary layout nodes
+// is exact here, with no extra measure pass or subcompose restructuring needed.
+@Composable
+private fun BlockHeaderLayout(
+    left: @Composable () -> Unit,
+    actions: @Composable () -> Unit,
+) {
+    val gap = 6.dp
+    val lineGap = 4.dp
+    Layout(
+        modifier = Modifier.fillMaxWidth(),
+        content = {
+            left()
+            actions()
+        },
+    ) { measurables, constraints ->
+        val (leftMeasurable, actionsMeasurable) = measurables
+        val gapPx = gap.roundToPx()
+        val loose = constraints.copy(minWidth = 0)
+        val actionsPlaceable = actionsMeasurable.measure(loose)
+        val aw = actionsPlaceable.width
+        val leftNatural = leftMeasurable.maxIntrinsicWidth(constraints.maxHeight)
+        val maxWidth = constraints.maxWidth
+        if (leftNatural + gapPx + aw <= maxWidth) {
+            // Single line: left takes whatever width remains, actions pin to the right, both
+            // centered vertically in the taller of the two.
+            val leftPlaceable = leftMeasurable.measure(
+                loose.copy(maxWidth = (maxWidth - aw - gapPx).coerceAtLeast(0)),
+            )
+            val h = maxOf(leftPlaceable.height, actionsPlaceable.height)
+            layout(maxWidth, h) {
+                leftPlaceable.placeRelative(0, (h - leftPlaceable.height) / 2)
+                actionsPlaceable.placeRelative(maxWidth - aw, (h - actionsPlaceable.height) / 2)
+            }
+        } else {
+            // Two lines: left gets the full width on its own line, actions right-align below it.
+            val leftPlaceable = leftMeasurable.measure(loose)
+            val lineGapPx = lineGap.roundToPx()
+            val totalHeight = leftPlaceable.height + lineGapPx + actionsPlaceable.height
+            layout(maxWidth, totalHeight) {
+                leftPlaceable.placeRelative(0, 0)
+                actionsPlaceable.placeRelative(maxWidth - aw, leftPlaceable.height + lineGapPx)
+            }
         }
     }
 }
