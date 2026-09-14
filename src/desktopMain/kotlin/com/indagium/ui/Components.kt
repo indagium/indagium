@@ -1043,6 +1043,40 @@ fun ColorPickerSwatch(color: Color, pickerOpen: Boolean, onClick: () -> Unit, si
     }
 }
 
+// ── Underline tabs ────────────────────────────────────────────────────
+// Extracted from FilterPanel's original "Tags / Regex" filter-mode switcher (now built on this
+// too) so a second, unrelated call site (the note editor dialog's Write/Preview switcher) can
+// share the exact same visuals instead of re-implementing them: a Row of weight(1f) columns, an
+// 11sp label (tc.ac + SemiBold when active, tc.td + Normal otherwise) over a 2dp underline (tc.ac
+// active, tc.br otherwise), the whole column clickable.
+@Composable
+fun UnderlineTabs(
+    labels: List<String>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    Row(modifier.fillMaxWidth()) {
+        labels.forEachIndexed { index, label ->
+            val active = index == selectedIndex
+            Column(
+                Modifier.weight(1f).clickable { onSelect(index) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                AppText(
+                    label,
+                    color = if (active) tc.ac else tc.td,
+                    fontSize = 11.sp,
+                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                    modifier = Modifier.padding(vertical = 8.dp),
+                )
+                Box(Modifier.fillMaxWidth().height(2.dp).background(if (active) tc.ac else tc.br))
+            }
+        }
+    }
+}
+
 // ── Segmented control ────────────────────────────────────────────────
 @Composable
 fun SegmentedControl(

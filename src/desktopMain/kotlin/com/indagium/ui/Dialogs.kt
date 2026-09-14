@@ -11,10 +11,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
@@ -41,7 +39,6 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
-import androidx.compose.ui.zIndex
 import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
 import java.io.File
@@ -174,16 +171,18 @@ internal fun AddAnnDialog(
     )
 }
 
-// Top-left corner stays square so the editor box visually joins the selected "Write" tab above it.
-private val EDITOR_BOX_SHAPE = RoundedCornerShape(topStart = 0.dp, topEnd = 6.dp, bottomEnd = 6.dp, bottomStart = 6.dp)
+// Plain rounded box — the tabs above no longer join it directly (see the 8dp gap in the
+// Write/Preview tabs + editor box section below), so every corner stays the same radius.
+private val EDITOR_BOX_SHAPE = RoundedCornerShape(6.dp)
 
 /**
  * Shared large Markdown editor for a new log annotation and an existing annotation edit
  * ("Note editor redesign" 1a). Layout, top to bottom: header (title, file chip, ✕) → a
- * collapsed-by-default evidence summary (only when [rows] is non-empty) → Write/Preview tabs
- * joined to an editor box (borderless hover toolbar, text field or rendered preview, a footer
- * strip with word count / unsaved-changes / the save-shortcut hint) → an action bar with an
- * optional Delete, Cancel and a solid-accent Save.
+ * collapsed-by-default evidence summary (only when [rows] is non-empty) → Write/Preview
+ * [UnderlineTabs] (the same tab visuals as FilterPanel's Tags/Regex switcher) above a separate
+ * bordered editor box (borderless hover toolbar, text field or rendered preview, a footer strip
+ * with the Markdown hint / word count / unsaved-changes / the save-shortcut hint) → an action bar
+ * with an optional Delete, Cancel and a solid-accent Save.
  */
 @Composable
 internal fun AnnotationMarkdownEditorDialog(
@@ -317,26 +316,17 @@ internal fun AnnotationMarkdownEditorDialog(
 
             // ── Write / Preview tabs + editor box ────────────────────────
             Column(Modifier.weight(1f).padding(start = 16.dp, end = 16.dp, top = 14.dp)) {
-                Row(
-                    // Overlaps the editor box's own top border by exactly its own 1dp (design:
-                    // "position:relative; top:1px") and draws above it (zIndex), so the selected
-                    // tab's tc.p background paints over that seam instead of leaving the editor
-                    // box's border line crossing behind the tab.
-                    Modifier.offset(y = 1.dp).zIndex(1f),
-                    verticalAlignment = Alignment.Bottom,
-                ) {
-                    NoteEditorTab("Write", selected = !previewMode, onClick = { previewMode = false })
-                    Spacer(Modifier.width(2.dp))
-                    NoteEditorTab("Preview", selected = previewMode, onClick = { previewMode = true })
-                    Spacer(Modifier.weight(1f))
-                    AppText(
-                        "Markdown",
-                        color = tc.td,
-                        fontSize = 10.sp,
-                        fontFamily = mono,
-                        modifier = Modifier.padding(bottom = 7.dp),
-                    )
-                }
+                UnderlineTabs(
+                    labels = listOf("Write", "Preview"),
+                    selectedIndex = if (previewMode) 1 else 0,
+                    onSelect = { index ->
+                        previewMode = index == 1
+                        // The tab is clickable, so it takes focus; re-clicking an already-active
+                        // Write tab wouldn't re-run LaunchedEffect(previewMode), so reclaim here too.
+                        if (index == 0) runCatching { editorFocusRequester.requestFocus() }
+                    },
+                )
+                Spacer(Modifier.height(8.dp))
                 Column(
                     Modifier.weight(1f).fillMaxWidth()
                         .border(1.dp, tc.br, EDITOR_BOX_SHAPE)
@@ -428,6 +418,11 @@ internal fun AnnotationMarkdownEditorDialog(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
+                        // "Markdown" used to sit at the trailing end of the tab row; moved here
+                        // (left side of the footer strip) once the tabs stopped joining the editor
+                        // box directly.
+                        AppText("Markdown", color = tc.td, fontSize = 10.sp, fontFamily = mono)
+                        AppText("·", color = tc.td, fontSize = 10.sp, fontFamily = mono)
                         AppText("$wordCount words", color = tc.td, fontSize = 10.sp, fontFamily = mono)
                         if (hasUnsavedChanges) {
                             AppText("·", color = tc.td, fontSize = 10.sp, fontFamily = mono)
@@ -449,8 +444,8 @@ internal fun AnnotationMarkdownEditorDialog(
             ) {
                 if (onDelete != null) DeleteNoteButton(onClick = onDelete)
                 Spacer(Modifier.weight(1f))
-                AppButton("Cancel", onClick = onDismiss, variant = ButtonVariant.Secondary)
-                SaveNoteButton(confirmLabel, onClick = { onConfirm(editorValue.text) })
+                EditorDialogActionButton("Cancel", filled = false, onClick = onDismiss)
+                EditorDialogActionButton(confirmLabel, filled = true, onClick = { onConfirm(editorValue.text) })
             }
         }
     }
@@ -563,49 +558,6 @@ private fun EvidenceLevelChip(level: LogLevel, count: Int, mono: FontFamily) {
             .padding(horizontal = 5.dp, vertical = 1.dp),
     ) {
         AppText("$count ${level.key}", color = color, fontSize = 10.sp, fontFamily = mono, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-/** A "Write"/"Preview" tab. The selected tab draws its own top/left/right border and paints its
- *  background the same colour as the editor box below it, so the shared seam between them reads
- *  as one continuous outline instead of two stacked boxes (no bottom border on the selected tab). */
-@Composable
-private fun NoteEditorTab(label: String, selected: Boolean, onClick: () -> Unit) {
-    val tc = tc()
-    var hovered by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp)
-    Box(
-        Modifier
-            // background must draw BEFORE the border lines below, or the fill paints over them —
-            // a plain Modifier chain draws top-to-bottom, so background has to come first here.
-            .background(if (selected) tc.p else if (hovered) tc.hv else Color.Transparent, shape)
-            // clip before drawBehind so the straight corner-crossing stroke segments below get cut
-            // to the same rounded corners as the fill, instead of poking past the curve.
-            .clip(shape)
-            .then(
-                if (selected) {
-                    Modifier.drawBehind {
-                        val stroke = 1.dp.toPx()
-                        val half = stroke / 2
-                        drawLine(tc.br, Offset(half, 0f), Offset(half, size.height), stroke)
-                        drawLine(tc.br, Offset(size.width - half, 0f), Offset(size.width - half, size.height), stroke)
-                        drawLine(tc.br, Offset(0f, half), Offset(size.width, half), stroke)
-                    }
-                } else {
-                    Modifier
-                },
-            )
-            .clickable(onClick = onClick)
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-    ) {
-        AppText(
-            label,
-            color = if (selected) tc.tx else tc.td,
-            fontSize = 12.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-        )
     }
 }
 
@@ -747,24 +699,42 @@ private fun DeleteNoteButton(onClick: () -> Unit) {
     ) { AppText("Delete note", color = DANGER_RED, fontSize = 12.sp) }
 }
 
-/** The dialog's one solid-fill button. Unlike [AppButton]'s Primary variant (a fixed fill that
- *  doesn't react to hover), this one darkens toward black on hover, matching the design handoff. */
+/** Cancel and Save share this shell so the two read as one pair instead of Cancel (previously a
+ *  plain [AppButton]) looking visibly shorter than Save: both render at the same 34dp height, 6dp
+ *  corner radius, 16dp horizontal padding and 12sp label. [filled] picks which of the two looks —
+ *  Save's solid `tc.ac` fill with SemiBold `tc.p` text, darkening toward black on hover (unlike
+ *  [AppButton]'s Primary variant, whose fill doesn't react to hover, matching the design handoff),
+ *  or Cancel's outlined look: a 1dp `tc.br` border on a `tc.p` fill, `tc.hv` on hover, `tc.tx`
+ *  text. */
 @Composable
-private fun SaveNoteButton(label: String, onClick: () -> Unit) {
+private fun EditorDialogActionButton(label: String, filled: Boolean, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(6.dp)
-    val fill = if (hovered) lerp(tc.ac, Color.Black, 0.15f) else tc.ac
+    val fill = when {
+        filled -> if (hovered) lerp(tc.ac, Color.Black, 0.15f) else tc.ac
+        hovered -> tc.hv
+        else -> tc.p
+    }
     Box(
         Modifier
+            .height(34.dp)
+            .then(if (!filled) Modifier.border(1.dp, tc.br, shape) else Modifier)
             .background(fill, shape)
             .clip(shape)
             .clickable(onClick = onClick)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 18.dp, vertical = 9.dp),
+            .padding(horizontal = 16.dp),
         contentAlignment = Alignment.Center,
-    ) { AppText(label, color = tc.p, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+    ) {
+        AppText(
+            label,
+            color = if (filled) tc.p else tc.tx,
+            fontSize = 12.sp,
+            fontWeight = if (filled) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
 }
 
 // ── Custom AI command editor ──────────────────────────────────────────
