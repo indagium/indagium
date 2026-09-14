@@ -18,6 +18,10 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isAltPressed
+import androidx.compose.ui.input.key.isCtrlPressed
+import androidx.compose.ui.input.key.isMetaPressed
+import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
@@ -75,7 +79,7 @@ internal fun applyMarkdownFormat(value: TextFieldValue, action: MarkdownFormatAc
     MarkdownFormatAction.Heading2 -> prefixMarkdownLines(value, "## ")
     MarkdownFormatAction.Heading3 -> prefixMarkdownLines(value, "### ")
     MarkdownFormatAction.BulletList -> prefixMarkdownLines(value, "- ")
-    MarkdownFormatAction.NumberedList -> prefixMarkdownLines(value, "1. ")
+    MarkdownFormatAction.NumberedList -> numberMarkdownLines(value)
     MarkdownFormatAction.Quote -> prefixMarkdownLines(value, "> ")
 }
 
@@ -113,6 +117,90 @@ private fun prefixMarkdownLines(value: TextFieldValue, prefix: String): TextFiel
         .joinToString("\n") { "$prefix$it" }
     val text = value.text.replaceRange(lineStart, lineEnd, replacement)
     return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
+}
+
+// Matches a numbered-list line's leading "N. " marker, used only to detect the number to continue
+// from — the line directly above a numbered-list toolbar selection.
+private val NUMBERED_LINE_MARKER = Regex("""^(\d+)\.\s""")
+
+/** Like [prefixMarkdownLines] but for [MarkdownFormatAction.NumberedList]: each selected line gets
+ *  an incrementing "1. ", "2. ", "3. ", … instead of the same literal prefix repeated on every
+ *  line. Continues numbering from the line directly above the selection when that line is itself a
+ *  numbered item (so appending to an existing "4. foo" starts the new block at "5. "), otherwise
+ *  starts at 1. Selection-restoring behaviour matches [prefixMarkdownLines] exactly. */
+private fun numberMarkdownLines(value: TextFieldValue): TextFieldValue {
+    val start = minOf(value.selection.start, value.selection.end)
+    val end = maxOf(value.selection.start, value.selection.end)
+    val lineStart = value.text.lastIndexOf('\n', start - 1).let { it + 1 }
+    val effectiveEnd = if (end > start && end <= value.text.length && value.text[end - 1] == '\n') end - 1 else end
+    val lineEnd = value.text.indexOf('\n', effectiveEnd).takeIf { it >= 0 } ?: value.text.length
+
+    val startNumber = if (lineStart > 0) {
+        val prevLineEnd = lineStart - 1 // index of the '\n' right before lineStart
+        val prevLineStart = value.text.lastIndexOf('\n', prevLineEnd - 1).let { it + 1 }
+        val prevLine = value.text.substring(prevLineStart, prevLineEnd)
+        NUMBERED_LINE_MARKER.find(prevLine)?.groupValues?.get(1)?.toIntOrNull()?.plus(1) ?: 1
+    } else {
+        1
+    }
+
+    val replacement = value.text.substring(lineStart, lineEnd)
+        .split('\n')
+        .mapIndexed { index, line -> "${startNumber + index}. $line" }
+        .joinToString("\n")
+    val text = value.text.replaceRange(lineStart, lineEnd, replacement)
+    return TextFieldValue(text, TextRange(lineStart, lineStart + replacement.length))
+}
+
+// Line patterns [continueMarkdownListOnEnter] recognizes, each capturing leading indentation plus
+// whatever comes after the marker. Task items are matched ahead of the plain bullet pattern since
+// "- [ ] foo" also satisfies the bullet regex; the caller tries these in the order they're declared.
+private val TASK_LIST_LINE = Regex("""^(\s*)([-*+]) \[([ xX])] (.*)$""")
+private val ORDERED_LIST_LINE = Regex("""^(\s*)(\d+)([.)]) (.*)$""")
+private val QUOTE_LIST_LINE = Regex("""^(\s*)> (.*)$""")
+private val BULLET_LIST_LINE = Regex("""^(\s*)([-*+]) (.*)$""")
+
+/**
+ * Standard "Enter continues a list/quote" editor behaviour (GitHub/Notion/Obsidian): pressing plain
+ * Enter with the caret on a list/quote line either continues that line's marker onto a new line, or
+ * — when the item is empty — removes the marker and ends the list instead of inserting a newline.
+ * Returns null when none of this applies (no selection collapse, or the caret line isn't a
+ * list/quote line at all), so the caller can fall back to plain newline insertion.
+ */
+internal fun continueMarkdownListOnEnter(value: TextFieldValue): TextFieldValue? {
+    if (value.selection.start != value.selection.end) return null
+    val caret = value.selection.start
+    val text = value.text
+    val lineStart = text.lastIndexOf('\n', caret - 1).let { it + 1 }
+    val lineEnd = text.indexOf('\n', caret).takeIf { it >= 0 } ?: text.length
+    val line = text.substring(lineStart, lineEnd)
+
+    val (indent, nextMarker, content) = TASK_LIST_LINE.find(line)?.let { m ->
+        val (ind, bullet, _, rest) = m.destructured
+        Triple(ind, "$bullet [ ] ", rest)
+    } ?: ORDERED_LIST_LINE.find(line)?.let { m ->
+        val (ind, num, delim, rest) = m.destructured
+        val next = (num.toIntOrNull() ?: 0) + 1
+        Triple(ind, "$next$delim ", rest)
+    } ?: QUOTE_LIST_LINE.find(line)?.let { m ->
+        val (ind, rest) = m.destructured
+        Triple(ind, "> ", rest)
+    } ?: BULLET_LIST_LINE.find(line)?.let { m ->
+        val (ind, bullet, rest) = m.destructured
+        Triple(ind, "$bullet ", rest)
+    } ?: return null
+
+    if (content.isBlank()) {
+        // Enter on an empty item: drop the marker (and its indentation) entirely, leaving a bare
+        // empty line, no newline inserted — this ends the list the same way GitHub/Notion do.
+        val newText = text.removeRange(lineStart, lineEnd)
+        return TextFieldValue(newText, TextRange(lineStart, lineStart))
+    }
+
+    // Non-empty item: split the line at the caret and continue the marker on the new line.
+    val newText = text.substring(0, caret) + "\n" + indent + nextMarker + text.substring(caret)
+    val newCaret = caret + 1 + indent.length + nextMarker.length
+    return TextFieldValue(newText, TextRange(newCaret, newCaret))
 }
 
 /** Read-only rollup of a note's attached log lines, feeding the evidence panel's collapsed summary
@@ -650,6 +738,23 @@ private fun MarkdownWriteArea(
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.fillMaxSize()
                 .focusRequester(focusRequester)
+                .onPreviewKeyEvent { ev ->
+                    // Plain Enter/NumPadEnter only — no modifiers. The dialog root's own
+                    // onPreviewKeyEvent sees ⌘/Ctrl+Enter (save) first since preview events
+                    // dispatch top-down, and Shift+Enter must still insert a plain newline, so both
+                    // are excluded here rather than relied on to fall through.
+                    val plainEnter = ev.type == KeyEventType.KeyDown &&
+                        (ev.key == Key.Enter || ev.key == Key.NumPadEnter) &&
+                        !ev.isShiftPressed && !ev.isCtrlPressed && !ev.isMetaPressed && !ev.isAltPressed
+                    if (!plainEnter) return@onPreviewKeyEvent false
+                    val continued = continueMarkdownListOnEnter(value)
+                    if (continued != null) {
+                        onValueChange(continued)
+                        true
+                    } else {
+                        false
+                    }
+                }
                 .padding(horizontal = 14.dp, vertical = 12.dp)
                 .verticalScroll(editorScroll),
             decorationBox = { inner ->

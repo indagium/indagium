@@ -392,8 +392,10 @@ private fun Seq3CanvasContent(
     // stale preview over.
     var dragPreview by remember(session.id) { mutableStateOf<Seq3EndpointDragPreview?>(null) }
     // Phase 2: live preview while dragging a manual activation bar's bottom resize handle — same
-    // "hoisted here so the draw pass can read it every frame" shape as [dragPreview] just above.
-    var manualActivationDragPreview by remember(session.id) { mutableStateOf<Seq3ManualActivationDragPreview?>(null) }
+    // "hoisted here so the draw pass can read it every frame" shape as [dragPreview] just above,
+    // except this one lives on `view` (not a local `remember`) so an Esc press — handled at the
+    // workspace root, far from this composable — can clear it directly for an immediate cancel.
+    val manualActivationDragPreview = view.manualActivationDragPreview
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val viewportWidth = maxWidth.value.toDouble()
         val viewportHeight = maxHeight.value.toDouble()
@@ -452,7 +454,7 @@ private fun Seq3CanvasContent(
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
                         layout.delays.forEach { delay -> Seq3DelayLabelOverlay(state, session, view, delay, docTheme) }
                         Seq3ManualActivationOverlays(state, session, view, layout, document, docTheme) { preview ->
-                            manualActivationDragPreview = preview
+                            view.manualActivationDragPreview = preview
                         }
                         // WP18: shape painted in drawSeq3Diagram below (the shapes-vs-text split
                         // WP6 already established for fragment dividers); the text itself is a
@@ -1522,13 +1524,26 @@ private fun Seq3ManualActivationOverlay(
                 .pointerHoverIcon(PointerIcon(handleCursor))
                 .pointerInput(session.id, manualId, bar.box) {
                     detectDragGestures(
-                        onDragStart = { dragCursorOverride.value = handleCursor },
+                        onDragStart = {
+                            dragCursorOverride.value = handleCursor
+                            // Esc handling lives on the workspace root's onPreviewKeyEvent (WP7
+                            // item 6's pattern); reclaim focus here so it's actually the one
+                            // holding it when Esc arrives, the same guard every other click
+                            // handler in this overlay already applies.
+                            view.activeManualActivationDragId = manualId
+                            view.manualActivationDragCancelled = false
+                            reclaimFocus()
+                        },
                         onDrag = { change, amount ->
                             change.consume()
-                            dragDeltaY += amount.y
-                            val candidateBottomY = bar.box.y + bar.box.height + latestDeltaY.value / density
-                            val snapped = seq3SnapActivationEnd(candidates, candidateBottomY)
-                            onDragPreview(snapped?.let { Seq3ManualActivationDragPreview(manualId, it.bottomY) })
+                            // After Esc cancelled this drag the pointer is still down; keep moving
+                            // from re-showing the preview until the button is released.
+                            if (!view.manualActivationDragCancelled) {
+                                dragDeltaY += amount.y
+                                val candidateBottomY = bar.box.y + bar.box.height + latestDeltaY.value / density
+                                val snapped = seq3SnapActivationEnd(candidates, candidateBottomY)
+                                onDragPreview(snapped?.let { Seq3ManualActivationDragPreview(manualId, it.bottomY) })
+                            }
                         },
                         onDragEnd = {
                             val candidateBottomY = bar.box.y + bar.box.height + latestDeltaY.value / density
@@ -1536,8 +1551,11 @@ private fun Seq3ManualActivationOverlay(
                             dragDeltaY = 0f
                             dragCursorOverride.value = null
                             onDragPreview(null)
+                            val cancelled = view.manualActivationDragCancelled
+                            view.activeManualActivationDragId = null
+                            view.manualActivationDragCancelled = false
                             val currentActivation = document.manualActivations.firstOrNull { it.id == manualId }
-                            if (snapped != null && currentActivation != null &&
+                            if (!cancelled && snapped != null && currentActivation != null &&
                                 (snapped.messageId != currentActivation.endMessageId || snapped.occurrenceEntryId != currentActivation.endOccurrenceEntryId)
                             ) {
                                 state.seq3Sessions.applyCommand(
@@ -1554,6 +1572,8 @@ private fun Seq3ManualActivationOverlay(
                             dragDeltaY = 0f
                             dragCursorOverride.value = null
                             onDragPreview(null)
+                            view.activeManualActivationDragId = null
+                            view.manualActivationDragCancelled = false
                         },
                     )
                 },
