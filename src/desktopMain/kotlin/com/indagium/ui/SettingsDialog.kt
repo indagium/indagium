@@ -1122,16 +1122,6 @@ private fun IssuesSettingsSection(state: AppState) {
 private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
-    CompactSettingWithTooltip(
-        label = "Inline Markdown",
-        tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
-    ) {
-        SegmentedControl(
-            options = listOf("On", "Off"),
-            selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
-            onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
-        )
-    }
     CopyMetadataSettingsRow(state)
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
@@ -1233,12 +1223,24 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     }
 }
 
-/** Metadata uses the same four-column rhythm and hover help as the annotation controls above.
+/** Copy settings share one five-column row and the same hover help as the annotation controls above.
  * The dependent name choice remains remembered while PID/TID copying is switched off. */
 @Composable
 internal fun CopyMetadataSettingsRow(state: AppState) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         CompactSettingWithTooltip(
+            modifier = Modifier.weight(1f),
+            label = "Inline Markdown",
+            tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
+        ) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            modifier = Modifier.weight(1f),
             label = "Pid/Tid copy",
             tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
         ) {
@@ -1249,6 +1251,7 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
+            modifier = Modifier.weight(1f),
             label = "Pid copy as name",
             tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
         ) {
@@ -1260,6 +1263,7 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
+            modifier = Modifier.weight(1f),
             label = "Row number copy",
             tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
         ) {
@@ -1270,6 +1274,7 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
+            modifier = Modifier.weight(1f),
             label = "Time delta copy",
             tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
         ) {
