@@ -14,6 +14,10 @@ private const val DLT_SPLIT_BUFFER_BYTES = 1 shl 20
 private const val STORAGE_HEADER_SIZE = 16
 private const val STD_HEADER_SIZE = 4
 private const val STORAGE_RECORD_HEAD_SIZE = STORAGE_HEADER_SIZE + STD_HEADER_SIZE // 20: storage header + std frame header
+private const val DLT_BYTE_MASK = 0xff
+private const val DLT_VERSION_SHIFT = 5
+private const val DLT_V1_VERSION = 1
+private const val BITS_PER_BYTE = 8
 private val STORAGE_MAGIC = byteArrayOf('D'.code.toByte(), 'L'.code.toByte(), 'T'.code.toByte(), 1)
 
 /**
@@ -51,6 +55,7 @@ internal fun splitDltStreamToFiles(
     return outputFiles
 }
 
+@Suppress("MagicNumber")
 private fun copyStorageRecords(stream: InputStream, writer: DltSplitWriter) {
     while (true) {
         val head = ByteArray(STORAGE_RECORD_HEAD_SIZE)
@@ -72,6 +77,7 @@ private fun copyStorageRecords(stream: InputStream, writer: DltSplitWriter) {
     }
 }
 
+@Suppress("MagicNumber")
 private fun copyRawRecords(stream: InputStream, writer: DltSplitWriter) {
     while (true) {
         val head = ByteArray(STD_HEADER_SIZE)
@@ -93,6 +99,7 @@ private fun copyRawRecords(stream: InputStream, writer: DltSplitWriter) {
     }
 }
 
+@Suppress("MagicNumber")
 private fun isValidStorageRecordHead(head: ByteArray): Boolean {
     if (head[0] != STORAGE_MAGIC[0] || head[1] != STORAGE_MAGIC[1] || head[2] != STORAGE_MAGIC[2] || head[3] != STORAGE_MAGIC[3]) return false
     val htyp = head[16].toInt() and 0xff
@@ -101,11 +108,12 @@ private fun isValidStorageRecordHead(head: ByteArray): Boolean {
 }
 
 private fun isValidRawRecordHead(head: ByteArray): Boolean {
-    val htyp = head[0].toInt() and 0xff
-    return (htyp ushr 5) == 1
+    val htyp = head[0].toInt() and DLT_BYTE_MASK
+    return (htyp ushr DLT_VERSION_SHIFT) == DLT_V1_VERSION
 }
 
-private fun unsigned16BE(msb: Byte, lsb: Byte): Int = ((msb.toInt() and 0xff) shl 8) or (lsb.toInt() and 0xff)
+private fun unsigned16BE(msb: Byte, lsb: Byte): Int =
+    ((msb.toInt() and DLT_BYTE_MASK) shl BITS_PER_BYTE) or (lsb.toInt() and DLT_BYTE_MASK)
 
 // Reads until `target` is full or the stream ends; returns how many bytes actually landed (fewer
 // than target.size means EOF hit mid-read — same contract as DltParser.kt's readAvailable).

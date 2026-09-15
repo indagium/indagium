@@ -1,3 +1,5 @@
+@file:Suppress("MagicNumber")
+
 package com.indagium
 
 private const val DLT_V1_EXTENDED_HEADER = 0x21

@@ -11,7 +11,13 @@ import java.util.Locale
  * [OTHER] is anything else (binary, or text too ambiguous to call).
  */
 internal enum class LogContentKind {
-    DLT_STORAGE, DLT_RAW, DLT_UNSUPPORTED_V2, DLT_VIEWER_CSV, DLT_VIEWER_TEXT, TEXT, OTHER
+    DLT_STORAGE,
+    DLT_RAW,
+    DLT_UNSUPPORTED_V2,
+    DLT_VIEWER_CSV,
+    DLT_VIEWER_TEXT,
+    TEXT,
+    OTHER
 }
 
 /**
@@ -85,6 +91,7 @@ internal val DLT_CSV_DELIMITERS = listOf(',', ';', '\t')
  */
 internal fun resolveDltCsvColumns(headers: List<String>): DltCsvColumns? {
     val norm = headers.map { it.trim().lowercase(Locale.ROOT) }
+
     fun idx(aliases: Set<String>) = norm.indexOfFirst { it in aliases }
     val ecu = idx(CSV_ECU_ALIASES)
     val app = idx(CSV_APP_ALIASES)
@@ -137,6 +144,7 @@ internal fun resolveDltCsvHeader(headerLine: String): Pair<Char, DltCsvColumns>?
  * 5. A lone byte with v2's version bits, name-gated to files ending in `.dlt` -> [LogContentKind.DLT_UNSUPPORTED_V2].
  * 6. Otherwise -> [LogContentKind.OTHER].
  */
+@Suppress("ReturnCount")
 internal fun classifyLogContent(sample: ByteArray, atEof: Boolean, fileName: String? = null): LogContentKind {
     if (hasStorageMagic(sample, version = 1)) return LogContentKind.DLT_STORAGE
     if (hasStorageMagic(sample, version = 2)) return LogContentKind.DLT_UNSUPPORTED_V2
@@ -182,6 +190,7 @@ private data class RawFrameWalk(val completeFrames: Int, val endOffset: Int, val
  * this never decodes a payload. Stops at the first offset that isn't a complete, structurally
  * valid frame (or runs off the end of [sample]); [RawFrameWalk.endOffset] is where it stopped.
  */
+@Suppress("LoopWithTooManyJumpStatements")
 private fun walkRawV1Frames(sample: ByteArray): RawFrameWalk {
     var offset = 0
     var frames = 0

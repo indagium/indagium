@@ -34,6 +34,7 @@ import java.awt.event.MouseEvent
 import java.io.File
 import kotlin.system.exitProcess
 
+@Suppress("LongMethod")
 fun main(args: Array<String>) {
     // Compose Desktop on Linux is AWT/Skiko (ComposeWindow is a java.awt.Window) and the bundled
     // JDK has no Wayland backend, so it always needs a real X11/XWayland display. Left unchecked,

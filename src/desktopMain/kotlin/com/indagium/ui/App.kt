@@ -144,6 +144,7 @@ fun App(
     // The runtime revision is the single Compose invalidation source for active AI runs. App-level
     // dialogs (such as Add Annotation) sit outside RightSidebarPanel, so they observe it here too.
     val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
+
     @Suppress("UNUSED_VARIABLE")
     val observedAiRevision = aiRevision
     val interfaceScale = state.settings.interfaceScalePercent / 100f

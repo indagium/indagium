@@ -23,10 +23,10 @@ import com.indagium.diagram3.Seq3Visibility
 import com.indagium.diagram3.layoutSeq3
 import com.indagium.ui.SEQ3_BAND_START_Y_TOLERANCE
 import com.indagium.ui.SEQ3_ROW_HIT_Y_TOLERANCE
+import com.indagium.ui.Seq3ActivationEndCandidate
 import com.indagium.ui.Seq3CanvasRowRef
 import com.indagium.ui.Seq3DragEndpoint
 import com.indagium.ui.Seq3EndpointSide
-import com.indagium.ui.Seq3ActivationEndCandidate
 import com.indagium.ui.seq3ActorGlyphGeometry
 import com.indagium.ui.seq3ArrowEndpointAt
 import com.indagium.ui.seq3ArrowStrokeWidths
@@ -810,7 +810,8 @@ class Seq3CanvasTest {
     fun snapActivationEndBeyondTheLastCandidateStillSnapsToTheFarthestOne() {
         val candidates = listOf(
             Seq3ActivationEndCandidate("m1", 1, 10.0),
-            Seq3ActivationEndCandidate(null, null, 30.0), // "end of diagram" sentinel
+            // "end of diagram" sentinel
+            Seq3ActivationEndCandidate(null, null, 30.0),
         )
         val snapped = seq3SnapActivationEnd(candidates, 500.0)
         assertNull(snapped?.messageId)

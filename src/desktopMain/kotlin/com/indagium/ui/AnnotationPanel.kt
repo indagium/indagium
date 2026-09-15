@@ -152,6 +152,7 @@ internal fun annotationMarkdownSoftLineBreaksEnabled(): Boolean =
  * never changed. The conservative candidate set also avoids touching ordinary prose that merely
  * contains punctuation on a line of its own.
  */
+@Suppress("LoopWithTooManyJumpStatements")
 internal fun annotationMarkdownRenderSource(text: String): String {
     if (text.isEmpty()) return text
     val lineSeparator = if (text.contains("\r\n")) "\r\n" else "\n"
@@ -470,7 +471,9 @@ private data class BlockResizeScrollAnchor(
  *  var and one Dialog call site in AnnotationPanel serve all three. */
 private sealed class EditDialogTarget {
     data class Block(val id: String) : EditDialogTarget()
+
     data object Prefix : EditDialogTarget()
+
     data object Suffix : EditDialogTarget()
 }
 
@@ -631,6 +634,7 @@ fun AnnotationPanel(
 ) {
     val tc = tc()
     val notesLocked = LocalNotesEditLocked.current
+
     fun mutate(action: () -> Unit) {
         if (notesMutationAllowed(notesLocked)) action()
     }
@@ -753,7 +757,9 @@ fun AnnotationPanel(
                 // Collapsed excerpt (the common case): a 26dp summary row plus up to 3 single-line
                 // rows at 16dp each, plus a 16dp "show N more" link when there's more to hide.
                 val visibleRows = logExcerptVisibleRowCount(rowCount, expanded = false)
-                val excerptDp = if (rowCount == 0) 0f else {
+                val excerptDp = if (rowCount == 0) {
+                    0f
+                } else {
                     26f + visibleRows * 16f + (if (rowCount > 3) 16f else 0f)
                 }
                 val filenameBadgeDp = if (block.sourceFilename != null) 21f + spacingDp else 0f
@@ -1205,6 +1211,7 @@ fun AnnotationPanel(
         // true for that programmatic scroll exactly as it would for a real drag/wheel scroll, so
         // the user-scroll detector a little further down needs this flag to tell the two apart.
         var applyingAnchorScroll by remember(tab.id) { mutableStateOf(false) }
+
         // Captures the block's current on-screen viewport position before an expand/collapse
         // toggle changes its height, so the effect below can keep that position once the new
         // height settles — shared by the diagram note's expand/collapse and every LogRef excerpt
@@ -2653,8 +2660,8 @@ private fun NoteBlock(
                         DiagramExportModeSwitcher(
                             noteText = block.text,
                             exportMode = summary.exportMode,
-                        onUpdateDiagramText = onUpdate,
-                        enabled = editingEnabled,
+                            onUpdateDiagramText = onUpdate,
+                            enabled = editingEnabled,
                         )
                     }
                 },
@@ -2769,6 +2776,7 @@ private fun DiagramExportModeSwitcher(
  * express (see DiagramSpecCodec's modelToMap).
  */
 @Composable
+@Suppress("MaxLineLength")
 private fun DiagramNoteView(
     noteText: String,
     summary: Seq3NoteSummary,
@@ -2884,7 +2892,14 @@ private fun DiagramNoteView(
                 pendingEvidenceImport?.let {
                     AppText("Import removes marked log evidence. Confirm to continue.", color = tc.td, fontSize = 10.sp)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Box((if (editingEnabled) Modifier.clickable { pendingEvidenceImport = null } else Modifier).padding(3.dp)) { AppText("Cancel", color = tc.td, fontSize = 10.sp) }
+                        val cancelModifier = if (editingEnabled) {
+                            Modifier.clickable { pendingEvidenceImport = null }
+                        } else {
+                            Modifier
+                        }
+                        Box(cancelModifier.padding(3.dp)) {
+                            AppText("Cancel", color = tc.td, fontSize = 10.sp)
+                        }
                         Box((if (editingEnabled) Modifier.clickable {
                             val parsed = expandedDiagram.parsed
                             if (parsed.attachment?.mode == Seq3AttachmentMode.LINKED) {

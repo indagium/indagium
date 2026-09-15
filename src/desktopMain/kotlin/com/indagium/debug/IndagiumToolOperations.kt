@@ -1507,6 +1507,7 @@ internal class IndagiumToolOperations(
     /** Updates only the user-visible caption of a LogRef, Image, or structured Seq3 diagram Note.
      *  Ordinary text notes intentionally have no caption field: callers must use
      *  update_note_block, whose full-replacement semantics are explicit in the catalogue. */
+    @Suppress("ReturnCount")
     private fun updateNoteCaptionRoute(tabId: String, blockId: String, caption: String?): Map<String, Any?> {
         if (tabId.isBlank()) return mapOf("error" to "missing tabId")
         if (blockId.isBlank()) return mapOf("error" to "missing blockId")
