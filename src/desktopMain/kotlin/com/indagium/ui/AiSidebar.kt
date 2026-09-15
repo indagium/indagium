@@ -171,6 +171,7 @@ internal fun RightSidebarPanel(
     // important: RightSidebarPanel owns Notes, while AiSidebarPanel is a sibling and otherwise a
     // run starting/stopping would not recompose the Notes subtree's lock state.
     val aiRevision by state.aiSidebarRuntime.revision.collectAsState()
+
     @Suppress("UNUSED_VARIABLE")
     val observedAiRevision = aiRevision
     val notesLocked = state.aiSessions.sessionFor(tab.id).activeRun != null

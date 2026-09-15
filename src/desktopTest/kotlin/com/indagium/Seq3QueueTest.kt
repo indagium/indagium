@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.indagium
 
 import com.indagium.diagram3.Seq3Authoring
@@ -745,11 +747,19 @@ class Seq3QueueTest {
         val existing = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1")
         val doc = baseDocument().copy(manualActivations = listOf(existing))
 
-        val blankId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddManualActivation(Seq3ManualActivation("", lifelineId = "B", startMessageId = "m1")))
+        val blankId = applySeq3BulkAction(
+            doc,
+            emptySet(),
+            Seq3BulkAction.AddManualActivation(Seq3ManualActivation("", lifelineId = "B", startMessageId = "m1")),
+        )
         assertFalse(blankId.applied)
         assertEquals(doc, blankId.document)
 
-        val collidingId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.AddManualActivation(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m3")))
+        val collidingId = applySeq3BulkAction(
+            doc,
+            emptySet(),
+            Seq3BulkAction.AddManualActivation(Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m3")),
+        )
         assertFalse(collidingId.applied)
         assertEquals(doc, collidingId.document)
 
@@ -794,11 +804,19 @@ class Seq3QueueTest {
         val activation = Seq3ManualActivation("bar1", lifelineId = "B", startMessageId = "m1", endMessageId = "m3")
         val doc = baseDocument().copy(manualActivations = listOf(activation))
 
-        val unknownId = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("no-such-bar", endMessageId = "m3", endOccurrenceEntryId = null))
+        val unknownId = applySeq3BulkAction(
+            doc,
+            emptySet(),
+            Seq3BulkAction.SetManualActivationEnd("no-such-bar", endMessageId = "m3", endOccurrenceEntryId = null),
+        )
         assertFalse(unknownId.applied)
         assertEquals(doc, unknownId.document)
 
-        val unknownMessage = applySeq3BulkAction(doc, emptySet(), Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = "no-such-message", endOccurrenceEntryId = null))
+        val unknownMessage = applySeq3BulkAction(
+            doc,
+            emptySet(),
+            Seq3BulkAction.SetManualActivationEnd("bar1", endMessageId = "no-such-message", endOccurrenceEntryId = null),
+        )
         assertFalse(unknownMessage.applied)
         assertEquals(doc, unknownMessage.document)
 

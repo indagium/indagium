@@ -1,3 +1,5 @@
+@file:Suppress("MaxLineLength")
+
 package com.indagium
 
 import com.indagium.diagram3.Seq3ActivationEvent
@@ -365,7 +367,11 @@ class Seq3ActivationTest {
         assertEquals(0, autoResult.depth, "once m1 shrinks out of its way, the auto span is no longer enclosed by anything")
         assertEquals(9, m1Result.endIndex, "m1 crosses the auto span directly and must clamp to just before it")
         assertEquals(0, m1Result.depth)
-        assertEquals(9, m2Result.endIndex, "m2's own crossing is with m1, not the auto span directly — it must settle at m1's FINAL (already-shrunk) end, not m1's original one")
+        assertEquals(
+            9,
+            m2Result.endIndex,
+            "m2 must settle at m1's final, already-shrunk end rather than its original one",
+        )
         assertEquals(1, m2Result.depth, "m2 still nests inside m1's shrunk span")
     }
 
@@ -475,7 +481,15 @@ class Seq3ActivationTest {
         val existing = manual("bar1", "B", 2, 4)
 
         assertTrue(
-            seq3IsValidManualActivationEnd(emptyList(), listOf(outer, existing), "B", startIndex = 2, candidateEndIndex = 20, lastIndex = 20, excludeManualId = "bar1"),
+            seq3IsValidManualActivationEnd(
+                emptyList(),
+                listOf(outer, existing),
+                "B",
+                startIndex = 2,
+                candidateEndIndex = 20,
+                lastIndex = 20,
+                excludeManualId = "bar1",
+            ),
         )
     }
 }

@@ -453,7 +453,7 @@ private fun Seq3CanvasContent(
                         layout.rows.forEach { row -> Seq3RowOverlay(state, session, view, row, docTheme) }
                         layout.notes.forEach { note -> Seq3NoteTextOverlay(state, session, view, note, docTheme) }
                         layout.delays.forEach { delay -> Seq3DelayLabelOverlay(state, session, view, delay, docTheme) }
-                        Seq3ManualActivationOverlays(state, session, view, layout, document, docTheme) { preview ->
+                        Seq3ManualActivationOverlays(state, session, view, layout, document) { preview ->
                             view.manualActivationDragPreview = preview
                         }
                         // WP18: shape painted in drawSeq3Diagram below (the shapes-vs-text split
@@ -1187,6 +1187,16 @@ private fun DrawScope.drawSeq3Diagram(
     }
 }
 
+// Phase 2: a selected/hovered MANUAL bar (never an auto one — [Seq3ActivationBar.manualId] is
+// null for those) draws with an accent border, same "thicker accent stroke" language every other
+// emphasized shape in this file already uses. While the bottom handle is being dragged, the bar
+// being resized additionally dims its own committed fill and grows an accent-outlined preview
+// rectangle down to the live snapped candidate — so the user always sees both "what it is right
+// now" (dimmed) and "what it will become on release" (the outline) at once, rather than one
+// replacing the other mid-drag.
+private const val SEQ3_ACTIVATION_DRAG_DIM_ALPHA = 0.35f
+private const val SEQ3_ACTIVATION_PREVIEW_FILL_ALPHA = 0.18f
+
 /**
  * WP2: UML activation bars — pulled out of [drawSeq3Diagram] itself purely to keep that function
  * under this file's detekt `LongMethod` threshold; called right where the bars belong in the draw
@@ -1213,15 +1223,6 @@ private fun DrawScope.drawSeq3Diagram(
  * meaning instead of adding a distinct one; see `Seq3Raster.kt`'s `paintActivationBar` for the
  * renderer this is required to stay pixel-structurally in step with.
  */
-// Phase 2: a selected/hovered MANUAL bar (never an auto one — [Seq3ActivationBar.manualId] is
-// null for those) draws with an accent border, same "thicker accent stroke" language every other
-// emphasized shape in this file already uses. While the bottom handle is being dragged, the bar
-// being resized additionally dims its own committed fill and grows an accent-outlined preview
-// rectangle down to the live snapped candidate — so the user always sees both "what it is right
-// now" (dimmed) and "what it will become on release" (the outline) at once, rather than one
-// replacing the other mid-drag.
-private const val SEQ3_ACTIVATION_DRAG_DIM_ALPHA = 0.35f
-private const val SEQ3_ACTIVATION_PREVIEW_FILL_ALPHA = 0.18f
 
 private fun DrawScope.drawSeq3ActivationBars(
     layout: Seq3Layout,
@@ -1400,16 +1401,16 @@ private fun Seq3ManualActivationOverlays(
     view: Seq3ViewState,
     layout: Seq3Layout,
     document: Seq3Document,
-    docTheme: ThemeColors,
     onDragPreview: (Seq3ManualActivationDragPreview?) -> Unit,
 ) {
     layout.activations.forEach { bar ->
         val manualId = bar.manualId ?: return@forEach
-        Seq3ManualActivationOverlay(state, session, view, layout, document, bar, manualId, docTheme, onDragPreview)
+        Seq3ManualActivationOverlay(state, session, view, layout, document, bar, manualId, onDragPreview)
     }
 }
 
 @Composable
+@Suppress("LoopWithTooManyJumpStatements", "ComplexCondition")
 private fun Seq3ManualActivationOverlay(
     state: AppState,
     session: Seq3WorkspaceSession,
@@ -1418,7 +1419,6 @@ private fun Seq3ManualActivationOverlay(
     document: Seq3Document,
     bar: Seq3ActivationBar,
     manualId: String,
-    docTheme: ThemeColors,
     onDragPreview: (Seq3ManualActivationDragPreview?) -> Unit,
 ) {
     val tc = tc()
@@ -1555,9 +1555,10 @@ private fun Seq3ManualActivationOverlay(
                             view.activeManualActivationDragId = null
                             view.manualActivationDragCancelled = false
                             val currentActivation = document.manualActivations.firstOrNull { it.id == manualId }
-                            if (!cancelled && snapped != null && currentActivation != null &&
-                                (snapped.messageId != currentActivation.endMessageId || snapped.occurrenceEntryId != currentActivation.endOccurrenceEntryId)
-                            ) {
+                            val endChanged = snapped != null && currentActivation != null &&
+                                (snapped.messageId != currentActivation.endMessageId ||
+                                    snapped.occurrenceEntryId != currentActivation.endOccurrenceEntryId)
+                            if (!cancelled && endChanged) {
                                 state.seq3Sessions.applyCommand(
                                     session.id,
                                     Seq3Command.Bulk(

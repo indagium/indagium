@@ -4,12 +4,12 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.indagium.model.AppSettings
 import com.indagium.ui.MarkdownFormatAction
-import com.indagium.ui.applyMarkdownFormat
 import com.indagium.ui.annotationMarkdownRenderSource
 import com.indagium.ui.annotationMarkdownSoftLineBreaksEnabled
+import com.indagium.ui.applyMarkdownFormat
 import com.indagium.ui.continueMarkdownListOnEnter
-import com.indagium.ui.retainedMarkdownSelectionAfterEditorUpdate
 import com.indagium.ui.restoreMarkdownSelection
+import com.indagium.ui.retainedMarkdownSelectionAfterEditorUpdate
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import org.intellij.markdown.MarkdownElementTypes
@@ -17,8 +17,8 @@ import org.intellij.markdown.ast.ASTNode
 import org.intellij.markdown.flavours.commonmark.CommonMarkFlavourDescriptor
 import org.intellij.markdown.parser.MarkdownParser
 import kotlin.test.Test
-import kotlin.test.assertFalse
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue

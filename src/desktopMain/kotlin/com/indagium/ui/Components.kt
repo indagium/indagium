@@ -808,7 +808,7 @@ fun ScrollableTextArea(
     Box(Modifier.fillMaxWidth()) {
         BasicTextField(
             value = fieldValue,
-                onValueChange = {
+            onValueChange = {
                 if (!enabled) return@BasicTextField
                 fieldValue = it
                 onValue(it.text)

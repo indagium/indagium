@@ -349,6 +349,7 @@ fun seq3ResolveManualActivations(
  * end, so this always terminates well before the cap; the cap only guards against a case this
  * function's own invariants say cannot happen).
  */
+@Suppress("LoopWithTooManyJumpStatements")
 private fun seq3ResolveActivationCrossings(spans: List<Seq3ActivationSpan>): List<Seq3ActivationSpan> {
     if (spans.size < 2) return spans
     val working = spans.toMutableList()
@@ -419,6 +420,7 @@ private fun seq3ResolveActivationCrossings(spans: List<Seq3ActivationSpan>): Lis
  * The returned list is sorted by [Seq3ActivationSpan.startIndex] then [Seq3ActivationSpan.lifelineId]
  * — the same contract [seq3ActivationSpans] documents for its own return value.
  */
+@Suppress("UnusedParameter")
 fun seq3MergedActivationSpans(
     autoSpans: List<Seq3ActivationSpan>,
     manual: List<Seq3ResolvedManualActivation>,

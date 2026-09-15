@@ -1111,7 +1111,12 @@ private fun activationMaps(document: Seq3Document, plan: Seq3EmissionPlan, visib
         emptyList()
     }
     val resolvedManual = seq3ResolveManualActivations(
-        document.manualActivations, plan.lifelineIndex.keys, plan.firstIndexByMessage, plan.lastIndexByMessage, plan.indexByOccurrence, plan.emissions.lastIndex,
+        document.manualActivations,
+        plan.lifelineIndex.keys,
+        plan.firstIndexByMessage,
+        plan.lastIndexByMessage,
+        plan.indexByOccurrence,
+        plan.emissions.lastIndex,
     )
     val spans = seq3MergedActivationSpans(autoSpans, resolvedManual, plan.emissions.lastIndex)
         .filter { it.startIndex in plan.emissions.indices && it.endIndex in plan.emissions.indices }

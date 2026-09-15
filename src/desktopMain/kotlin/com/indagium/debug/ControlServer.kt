@@ -966,7 +966,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "imagePath" to "Absolute path to an image file. Mutually exclusive with imageBase64 and videoMs.",
                 "videoMs" to "Position in the tab's attached video to capture, in milliseconds. " +
                     "Mutually exclusive with imageBase64 and imagePath.",
-                "caption" to "Optional Markdown caption shown above the image. Supports headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
+                "caption" to "Optional Markdown caption shown above the image. Supports headings, " +
+                    "bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
                 "afterId" to "Optional existing block id to insert after; appended at the end when omitted.",
             ),
         ),
@@ -1001,7 +1002,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "tabId" to "string", "blockId" to "string", "caption" to "string",
             required = listOf("tabId", "blockId", "caption"),
             descriptions = mapOf(
-                "caption" to "Replacement Markdown caption; blank is allowed. Supports headings, bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
+                "caption" to "Replacement Markdown caption; blank is allowed. Supports headings, " +
+                    "bold/italic/strikethrough, lists, quotes, links, and inline/fenced code.",
             ),
         ),
     ),

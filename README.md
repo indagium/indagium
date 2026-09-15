@@ -1,8 +1,8 @@
 # Indagium
 
-A desktop log viewer for Android logcat files, built with Kotlin and Compose Multiplatform.
+A desktop Android logcat analysis tool and viewer for investigating crashes, ANRs, bug reports, and supported DLT captures, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.8.4-blue)
+![Version](https://img.shields.io/badge/version-1.8.5-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ![Folding a repeating region into a collapsible sequence](docs/images/gif-05-sequences.gif)
@@ -51,7 +51,7 @@ A desktop log viewer for Android logcat files, built with Kotlin and Compose Mul
 - **Autosave** — session is fully restored on next launch
 - **Update checker** — optional in-app check against GitHub Releases
 
-### Supported logcat formats
+### Supported log formats
 
 Indagium also opens Diagnostic Log and Trace (DLT) captures (`.dlt`), raw DLT streams, and
 DLT Viewer text/CSV exports. Binary captures are decoded as framed records; non-verbose payloads

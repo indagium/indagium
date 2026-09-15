@@ -1,8 +1,8 @@
 package com.indagium
 
-import com.indagium.ui.reconcileMarkdownDraft
-import com.indagium.ui.notesMutationAllowed
 import com.indagium.ui.forwardedDropFilesWhenNotesLocked
+import com.indagium.ui.notesMutationAllowed
+import com.indagium.ui.reconcileMarkdownDraft
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

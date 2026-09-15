@@ -149,6 +149,7 @@ private fun wrapMarkdown(value: TextFieldValue, prefix: String, suffix: String, 
     return TextFieldValue(text, TextRange(selectedStart, selectedStart + content.length))
 }
 
+@Suppress("CyclomaticComplexMethod")
 private fun prefixMarkdownLines(value: TextFieldValue, prefix: String): TextFieldValue {
     val start = minOf(value.selection.start, value.selection.end)
     val end = maxOf(value.selection.start, value.selection.end)
@@ -272,12 +273,12 @@ internal fun continueMarkdownListOnEnter(value: TextFieldValue): TextFieldValue?
     val line = text.substring(lineStart, lineEnd)
 
     val (indent, nextMarker, content) = TASK_LIST_LINE.find(line)?.let { m ->
-        val (ind, bullet, _, rest) = m.destructured
-        Triple(ind, "$bullet [ ] ", rest)
+        val groups = m.groupValues
+        Triple(groups[1], "${groups[2]} [ ] ", groups[4])
     } ?: ORDERED_LIST_LINE.find(line)?.let { m ->
-        val (ind, num, delim, rest) = m.destructured
-        val next = (num.toIntOrNull() ?: 0) + 1
-        Triple(ind, "$next$delim ", rest)
+        val groups = m.groupValues
+        val next = (groups[2].toIntOrNull() ?: 0) + 1
+        Triple(groups[1], "$next${groups[3]} ", groups[4])
     } ?: QUOTE_LIST_LINE.find(line)?.let { m ->
         val (ind, rest) = m.destructured
         Triple(ind, "> ", rest)
@@ -586,7 +587,7 @@ internal fun AnnotationMarkdownEditorDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box {
-                            MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { headingMenuOpen = true }) {
+                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { headingMenuOpen = true }) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),

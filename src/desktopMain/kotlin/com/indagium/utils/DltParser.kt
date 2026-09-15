@@ -183,7 +183,9 @@ private fun decodeStorageStream(input: CountingInputStream, startId: Int, tagCac
     val entries = ArrayList<LogEntry>()
     var id = startId
     var frameCount = 0
+
     fun intern(value: String) = tagCache.getOrPut(value) { value }
+
     fun mark(message: String) { entries += LogEntry(id++, "", LogLevel.W, "RAW", message) }
 
     while (true) {
@@ -248,7 +250,9 @@ private fun decodeRawStream(input: CountingInputStream, startId: Int, tagCache: 
     val entries = ArrayList<LogEntry>()
     var id = startId
     var frameCount = 0
+
     fun intern(value: String) = tagCache.getOrPut(value) { value }
+
     fun mark(message: String) { entries += LogEntry(id++, "", LogLevel.W, "RAW", message) }
 
     while (true) {
@@ -445,7 +449,7 @@ private fun decodeDltPayload(payload: ByteArray, argumentCount: Int, msin: Int?,
         val parseStart = offset
         val parsed = try {
             parseVerboseArgument(payload, offset, msbf)
-        } catch (malformed: IllegalArgumentException) {
+        } catch (_: IllegalArgumentException) {
             val tail = hex(payload.copyOfRange(parseStart, payload.size))
             return (rendered + "[undecodable payload $tail]").joinToString(" ")
         }
@@ -469,6 +473,7 @@ private data class ParsedDltArgument(val text: String, val nextOffset: Int, val 
  * with VARI has no unit (`nameLen, name, value`); STRG/RAWD write their data length first, then
  * (if VARI) the name length/name, then the data; TRAI is STRG's layout without VARI ever applying.
  */
+@Suppress("CyclomaticComplexMethod")
 private fun parseVerboseArgument(bytes: ByteArray, start: Int, msbf: Boolean): ParsedDltArgument {
     requireRange(bytes, start, UINT32_SIZE, "type info")
     val type = readUnsigned(bytes, start, UINT32_SIZE, msbf).toInt()
@@ -658,7 +663,7 @@ private fun decodeText(bytes: ByteArray): String? {
         .onUnmappableCharacter(CodingErrorAction.REPORT)
     val decoded = try {
         decoder.decode(ByteBuffer.wrap(bytes, 0, nul)).toString()
-    } catch (malformed: CharacterCodingException) {
+    } catch (_: CharacterCodingException) {
         return null
     }
     val printable = decoded.count { it == '\t' || it == '\r' || it == '\n' || !it.isISOControl() }
@@ -730,6 +735,7 @@ internal fun parseDltViewerAsciiLine(line: String, id: Int, intern: (String) -> 
 
 private fun parseDltViewerAsciiLines(lines: Sequence<String>, startId: Int): List<LogEntry> {
     val tagCache = HashMap<String, String>()
+
     fun intern(value: String) = tagCache.getOrPut(value) { value }
     var id = startId
     return lines.mapNotNull { raw ->
@@ -770,6 +776,7 @@ private fun joinQuotedCsvLines(lines: Iterator<String>): Sequence<String> = sequ
 private fun parseDltViewerCsv(lines: Sequence<String>, startId: Int): List<LogEntry> {
     val logical = joinQuotedCsvLines(lines.iterator())
     val tagCache = HashMap<String, String>()
+
     fun intern(value: String) = tagCache.getOrPut(value) { value }
     var id = startId
     val entries = ArrayList<LogEntry>()
