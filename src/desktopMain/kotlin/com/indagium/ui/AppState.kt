@@ -40,6 +40,7 @@ import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
 import com.indagium.update.ReleaseInfo
 import com.indagium.update.RuntimePackage
+import com.indagium.update.SponsorChecker
 import com.indagium.update.UpdateCheckResult
 import com.indagium.update.UpdateChecker
 import com.indagium.update.assetForCurrentOs
@@ -172,6 +173,10 @@ private const val MAX_NOTE_TARGET_SUFFIX = 1000
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
 // then simply stops growing (later paths still resolve, just uncached).
 private const val CANONICAL_PATH_CACHE_MAX = 200_000
+
+// Minimum gap between two "Do you like Indagium?" support popups (see supportPromptDue,
+// maybeShowSupportPromptOnStartup below).
+private const val SUPPORT_PROMPT_INTERVAL_MS = 10L * 24 * 60 * 60 * 1000
 
 // Auto-export runs on Dispatchers.IO, whose workers can finish two consecutive edits out of order.
 // Keep one write lane per output file and let a queued newer snapshot supersede an older one before
@@ -1331,6 +1336,9 @@ class AppState(
         pickSaveFile(title, suggestedName, initialDirectory)
     },
     private val updateChecker: UpdateChecker = UpdateChecker(),
+    // Same injectable-client seam as updateChecker, for the "Sponsor" button's runtime FUNDING.yml
+    // check (see update/SponsorCheck.kt) — tests substitute a MockEngine here too.
+    private val sponsorChecker: SponsorChecker = SponsorChecker(),
     // Reveal the completed update in the platform file manager. This callback is injectable so
     // download tests can record the requested file without opening Finder/Explorer.
     private val fileRevealer: (File) -> Unit = ::revealInFileManager,
@@ -2342,6 +2350,59 @@ class AppState(
                 AppLogger.error("update", "Update download failed", error)
             }
         }
+    }
+
+    // ── Support popup ("Do you like Indagium?", see ui/SupportDialog.kt) ──────
+    var supportDialogOpen by mutableStateOf(false)
+
+    // Null until openSupportDialog()'s one-shot fetch resolves; stays null (no Sponsor button)
+    // when FUNDING.yml doesn't exist yet or the fetch fails.
+    var sponsorUrl by mutableStateOf<String?>(null)
+
+    // Guards the one-shot sponsor fetch to once per session (not once per dialog open) — the
+    // manual "Support project" link in Settings and an auto-shown popup both call openSupportDialog,
+    // and after the first successful (or failed) check there's nothing new to learn until restart.
+    private var sponsorCheckStarted = false
+
+    /** Pure and testable on its own: due once [now] is at least [SUPPORT_PROMPT_INTERVAL_MS] past
+     *  [last], and never due before any prompt has ever been recorded ([last] == 0). */
+    internal fun supportPromptDue(now: Long, last: Long): Boolean =
+        last > 0 && now - last >= SUPPORT_PROMPT_INTERVAL_MS
+
+    /**
+     * Called once at startup (see Main.kt). First run ever just records [now] as a baseline and
+     * never opens the popup, so the first prompt lands a full interval after first use rather than
+     * greeting a brand-new user immediately. Otherwise opens only when due AND the license gate
+     * isn't blocking the UI yet.
+     */
+    fun maybeShowSupportPromptOnStartup(now: Long = System.currentTimeMillis()) {
+        val last = settings.lastSupportPromptAt
+        if (last == 0L) {
+            updateSettings { it.copy(lastSupportPromptAt = now) }
+            return
+        }
+        if (supportPromptDue(now, last) && !needsLicenseAcceptance) {
+            openSupportDialog()
+            updateSettings { it.copy(lastSupportPromptAt = now) }
+        }
+    }
+
+    /** Opens the popup. Used both by the startup auto-prompt and by the manual "Support project"
+     *  link in Settings — a manual open never touches lastSupportPromptAt, so it doesn't reset the
+     *  10-day timer. */
+    fun openSupportDialog() {
+        supportDialogOpen = true
+        if (!sponsorCheckStarted) {
+            sponsorCheckStarted = true
+            ioScope.launch {
+                sponsorUrl = sponsorChecker.fetchSponsorUrl()
+            }
+        }
+    }
+
+    /** Every dismissal path (Star, Sponsor, Already starred, Not now, Esc) routes through here. */
+    fun dismissSupportDialog() {
+        supportDialogOpen = false
     }
 
     internal fun pickDirectory(title: String, initialDirectory: File? = null): File? =

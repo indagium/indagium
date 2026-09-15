@@ -2215,6 +2215,10 @@ fun App(
                 )
             }
 
+            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible) {
+                SupportDialog(state)
+            }
+
             if (state.updateDialogVisible) {
                 UpdateDialog(state)
             }

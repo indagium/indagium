@@ -51,6 +51,7 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
+import com.indagium.update.PROJECT_REPO_URL
 import com.indagium.voice.VoiceLanguageCatalog
 import com.indagium.voice.VoiceModelCatalog
 import com.indagium.voice.VoiceModelInstallResult
@@ -59,9 +60,7 @@ import com.indagium.voice.VoiceRecognitionEngines
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.awt.Desktop
 import java.io.File
-import java.net.URI
 import java.util.UUID
 
 // ── Settings dialog ───────────────────────────────────────────────────
@@ -233,6 +232,15 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                                 AppText("GitHub repository ↗", color = tc.ac, fontSize = 10.sp, fontFamily = UI)
                             }
                         }
+                        AppText("  |  ", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                        HoverBox(
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp)),
+                            onClick = { state.openSupportDialog() },
+                        ) {
+                            Box(Modifier.padding(horizontal = 4.dp, vertical = 2.dp)) {
+                                AppText("Support project ♥", color = tc.ac, fontSize = 10.sp, fontFamily = UI)
+                            }
+                        }
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.width(52.dp)) {
@@ -303,11 +311,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
 }
 
 private fun openProjectRepository() {
-    runCatching {
-        if (Desktop.isDesktopSupported() && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
-            Desktop.getDesktop().browse(URI("https://github.com/indagium/indagium"))
-        }
-    }
+    openExternalUrl(PROJECT_REPO_URL)
 }
 
 /** Shared modal shape for the confirm/discard prompts in this file - title, message, an optional
