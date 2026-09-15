@@ -195,6 +195,10 @@ fun main(args: Array<String>) {
         // One-shot startup update check (see update/UpdateChecker.kt, AppState.checkForUpdates).
         DisposableEffect(Unit) {
             maybeAutoCheckForUpdates(appState, isPackaged)
+            // Not gated on isPackaged (unlike the update check above) so the "Do you like
+            // Indagium?" popup can be exercised with desktopRun too — the sponsor fetch it may
+            // trigger only happens once the dialog actually opens.
+            appState.maybeShowSupportPromptOnStartup()
             onDispose {}
         }
         Window(

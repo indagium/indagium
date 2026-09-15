@@ -1127,6 +1127,11 @@ data class AppSettings(
     // conflict occurs. JSON form ONLY (settingsJson/settingsFromJson) — the legacy positional
     // settingsFromToken decoder is frozen by AutosaveGoldenV1Test and must never gain a field.
     val suppressTagPrefixConflictPrompt: Boolean = false,
+    // Epoch millis of the last time the "Do you like Indagium?" support popup was shown (or, on
+    // first run, simply recorded without showing). 0L means never — AppState.supportPromptDue
+    // treats that as "not due yet" rather than "overdue", so a fresh install waits out one full
+    // interval before ever prompting. JSON form ONLY, same rule as the field above.
+    val lastSupportPromptAt: Long = 0L,
 )
 
 enum class ThemePreset(val label: String) {

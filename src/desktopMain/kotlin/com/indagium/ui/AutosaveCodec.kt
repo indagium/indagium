@@ -17,6 +17,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.File
 import java.util.Base64
@@ -644,6 +645,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("diagramLinkedNotePrimary", diagramLinkedNotePrimary)
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
     put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
+    put("lastSupportPromptAt", lastSupportPromptAt)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -732,6 +734,8 @@ private fun JsonObject.boolOrDefault(key: String, default: Boolean): Boolean =
 private fun JsonObject.boolOrNull(key: String): Boolean? = this[key]?.jsonPrimitive?.booleanOrNull
 
 private fun JsonObject.intOrDefault(key: String, default: Int): Int = this[key]?.jsonPrimitive?.intOrNull ?: default
+
+private fun JsonObject.longOrDefault(key: String, default: Long): Long = this[key]?.jsonPrimitive?.longOrNull ?: default
 
 private fun JsonObject.stringArray(key: String): List<String> =
     (this[key] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull } ?: emptyList()
@@ -940,6 +944,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?.let { raw -> runCatching { com.indagium.diagram3.DiagramExportMode.valueOf(raw) }.getOrNull() }
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
         suppressTagPrefixConflictPrompt = o.boolOrDefault("suppressTagPrefixConflictPrompt", false),
+        lastSupportPromptAt = o.longOrDefault("lastSupportPromptAt", 0L),
     )
 }.getOrNull()
 
