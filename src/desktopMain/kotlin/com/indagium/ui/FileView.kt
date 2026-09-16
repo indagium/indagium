@@ -224,6 +224,46 @@ internal fun FileView(
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
             },
         )
+        // Horizontal filter bar (ui/FilterBar.kt) — gated on `!state.filterVisible` (BoundFilterPanel
+        // above returns early on that exact same condition, see FilterBar.kt's own mutual-exclusion
+        // doc). `filterBarModel` is a plain data class of values recomputed per recomposition (cheap,
+        // and content-equality is what keeps LogViewer skippable); `filterBarActions` holds lambdas
+        // and is `remember`ed, following the `logCompositionActions` precedent just above.
+        val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
+            tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
+        }
+        val filterBarModel = if (!state.filterVisible) {
+            FilterBarModel(
+                sortedTags = filterBarSortedTags,
+                tagUsage = state.tagUsage,
+                mostUsedTagLimit = state.settings.mostUsedTagLimit,
+                regexHistory = state.regexPatternHistory,
+            )
+        } else {
+            null
+        }
+        val filterBarActions = remember(state, tab.id) {
+            FilterBarActions(
+                onSetFilterMode = { mode -> state.setFilterMode(tab.id, mode) },
+                onStartRegexSearch = { state.startRegexSearch(tab.id) },
+                onToggleTag = { state.toggleTag(tab.id, it) },
+                onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
+                onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
+                onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
+                onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
+                onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
+                onSetKwInTag = { state.setKwInTag(tab.id, it) },
+                onToggleKwInTagRegex = { state.toggleKwInTagRx(tab.id) },
+                onSetKw = { state.setKw(tab.id, it) },
+                onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
+                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
+                },
+                onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+                onRememberRegexPattern = { state.rememberRegexPattern(it) },
+                onClearRegexHistory = { state.clearRegexPatternHistory() },
+                onOpenFilterPanel = { state.updateFilterVisible(true) },
+            )
+        }
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
             settings = state.settings,
@@ -271,6 +311,8 @@ internal fun FileView(
             onSearchNext = { state.searchNext(tab.id) },
             onSearchPrev = { state.searchPrev(tab.id) },
             onSearchClose = { state.closeSearch(tab.id) },
+            filterBar = filterBarModel,
+            filterBarActions = filterBarActions,
         )
         if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && tab.attachedVideo != null)) {
             HDivider { delta ->

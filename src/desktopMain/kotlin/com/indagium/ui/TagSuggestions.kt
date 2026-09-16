@@ -32,6 +32,36 @@ fun tagCandidates(
         .take(limit.coerceAtLeast(0))
 }
 
+// Lifted out of ui/FilterPanel.kt's own `combinedTagCandidates` remember block (Tags-mode unified
+// pkg-prefix/tag search field) so ui/FilterBar.kt (the horizontal filter bar) can share the exact
+// same candidate ordering without either duplicating the logic or reaching into FilterPanel.kt's
+// private composable state — FilterPanel.kt itself keeps its own inline copy untouched (see that
+// file's own combinedTagCandidates remember() for why: it is the one composable in this codebase
+// explicitly frozen against edits while the horizontal bar is exploratory).
+//
+// Result shape mirrors the panel's: pkg-prefix matches first (only when [search] has input), then
+// tag matches — each entry paired with whether it's a package prefix (true) or a plain tag (false),
+// so a caller can render/apply the two differently (add-prefix vs include/exclude-tag) without a
+// second lookup.
+fun combinedTagCandidates(
+    sortedTags: List<String>,
+    search: String,
+    packagePrefixes: Set<String>,
+    tagUsage: Map<String, Int>,
+    mostUsedTagLimit: Int,
+): List<Pair<String, Boolean>> {
+    val pkgs = packagePrefixCandidates(sortedTags, search, limit = 4).map { it to true }
+    val tags = tagCandidates(
+        sortedTags = sortedTags,
+        search = search,
+        selectedTags = emptySet(),
+        packagePrefixes = packagePrefixes,
+        tagUsage = tagUsage,
+        mostUsedLimit = mostUsedTagLimit,
+    ).map { it to false }
+    return pkgs + tags
+}
+
 fun packagePrefixCandidates(sortedTags: List<String>, search: String, limit: Int = 8): List<String> {
     if (search.isBlank()) return emptyList()
     val needle = search.trim()

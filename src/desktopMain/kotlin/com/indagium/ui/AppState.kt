@@ -91,6 +91,7 @@ import com.indagium.utils.invalidateComputeCache
 import com.indagium.utils.isLikelyDltSourceFile
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isSupportedArchiveFile
+import com.indagium.utils.isValidRegexPattern
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.matchingHighlighter
 import com.indagium.utils.matchingMessageRule
@@ -682,6 +683,11 @@ internal const val SEARCH_RECOMPUTE_DEBOUNCE_MS = 150L
 // Debounce for the Case Library dialog's search box (AppState.updateCaseLibraryQuery) — per the
 // feature brief, typing shouldn't re-scan the notes corpus on every keystroke.
 internal const val CASE_LIBRARY_SEARCH_DEBOUNCE_MS = 200L
+
+// Cap for AppState.regexPatternHistory (ui/FilterBar.kt's Regex-mode history) — same cap and
+// most-recent-first/dedupe shape as recentFiles above, chosen for the same reason: enough to be
+// useful across a session without the dropdown growing unbounded.
+internal const val MAX_REGEX_HISTORY = 50
 
 // Bounds for attachFirstVideoCandidateAsync's wait on a just-triggered zip-entry tab load — same
 // bounded-poll shape as IndagiumToolOperations.awaitLoad, duplicated here (not shared) since that
@@ -1838,6 +1844,14 @@ class AppState(
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
+
+    /** Persisted history of regex patterns committed from the horizontal filter bar's Regex mode
+     *  (ui/FilterBar.kt) — see [rememberRegexPattern]'s own doc for the commit contract. Global
+     *  across tabs (not per-tab), same reasoning as [recentFiles] above: a pattern used to hunt for
+     *  e.g. "OutOfMemoryError" in one log is exactly as useful against the next tab opened, even
+     *  when that tab is a different log from the same bug report. FilterPanel.kt's own Regex-mode
+     *  field has no equivalent history — this is new surface, not a migration of existing state. */
+    var regexPatternHistory by mutableStateOf<List<String>>(emptyList())
     var recentNotes by mutableStateOf<List<String>>(emptyList())
     var recentNotesMenuOpen by mutableStateOf(false)
     var cacheClearConfirmOpen by mutableStateOf(false)
@@ -5635,6 +5649,33 @@ class AppState(
         autosaveNow()
     }
 
+    // Commit contract for ui/FilterBar.kt's Regex-mode history: commit on Enter (or an explicit
+    // history-entry pick) ONLY — never on every debounced keystroke the field applies live, which
+    // would otherwise record every intermediate prefix of a pattern the user is still typing (e.g.
+    // "O", "Ou", "Out", ..., "OutOfMemoryError" as five separate, mostly-useless entries). Rejects
+    // blank and syntactically invalid patterns (isValidRegexPattern, utils/TextMatch.kt:146) so
+    // every stored entry is always safe to re-apply and to autocomplete against without
+    // re-validating first. Trims before comparing/storing so " foo" and "foo" collapse to the same
+    // history entry. Move-to-front + cap at MAX_REGEX_HISTORY, same shape as rememberRecentFile
+    // above.
+    fun rememberRegexPattern(pattern: String) {
+        val trimmed = pattern.trim()
+        if (trimmed.isBlank() || !isValidRegexPattern(trimmed)) return
+        regexPatternHistory = (listOf(trimmed) + regexPatternHistory.filter { it != trimmed }).take(MAX_REGEX_HISTORY)
+        autosaveNow()
+    }
+
+    // A stored regex pattern can itself carry confidential log fragments (a customer's package
+    // name, an internal hostname, part of a stack trace) typed into the Regex-mode field — unlike
+    // recentFiles (a path is far less likely to be sensitive on its own), this history needs an
+    // explicit, user-initiated way to wipe it. ui/FilterBar.kt exposes this as a "Clear history"
+    // footer in the pattern dropdown rather than an auto-expiring cap.
+    fun clearRegexPatternHistory() {
+        if (regexPatternHistory.isEmpty()) return
+        regexPatternHistory = emptyList()
+        autosaveNow()
+    }
+
     private fun removeRecentFile(file: File) {
         val path = file.absolutePath
         val next = recentFiles.filter { it != path }
@@ -8669,6 +8710,7 @@ class AppState(
             "drafts" -> restoreDraftsFromToken(value.unb64())
             "transientRegex" -> transientRegexSearchTabIds = value.pathTokenList().toSet()
             "recent" -> recentFiles = value.pathTokenList()
+            "regexHistory" -> regexPatternHistory = value.pathTokenList()
             "recentNotes" -> recentNotes = value.pathTokenList()
             "filterPanel" -> fpState.restoreFilterPanelToken(value.unb64())
             // "diagramTabs"/"activeDiagram"/"tabOrder" are deliberately absent here — see
@@ -8808,6 +8850,10 @@ class AppState(
         appendLine("drafts\t${draftsToken().b64()}")
         appendLine("transientRegex\t${transientRegexSearchTabIds.joinToString(",") { it.b64() }.b64()}")
         appendLine("recent\t${recentFiles.joinToString(",") { it.b64() }.b64()}")
+        // Keyed line, additive by construction (restoreAutosaveKey's `when` has no `else`) — a
+        // cache written before this field existed simply has no "regexHistory" line and restores
+        // regexPatternHistory at its emptyList() default. Same encoding as "recent" above.
+        appendLine("regexHistory\t${regexPatternHistory.joinToString(",") { it.b64() }.b64()}")
         appendLine("recentNotes\t${recentNotes.joinToString(",") { it.b64() }.b64()}")
         appendLine("filterPanel\t${fpState.filterPanelToken().b64()}")
         appendLine("diagramTabs\t${diagramTabsToken().b64()}")

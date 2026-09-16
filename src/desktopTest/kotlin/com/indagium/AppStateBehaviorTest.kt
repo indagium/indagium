@@ -46,6 +46,7 @@ import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SettingsSection
 import com.indagium.ui.SplitMode
 import com.indagium.ui.annotationsToken
+import com.indagium.ui.b64
 import com.indagium.ui.blockOrderDuringDrag
 import com.indagium.ui.consumeFilterSearchRequest
 import com.indagium.ui.cumulativeBlockOffsets
@@ -2203,6 +2204,123 @@ class AppStateBehaviorTest {
         assertTrue(state.recentFiles.isEmpty())
         assertEquals("Could not open file", state.openError?.title)
         assertEquals(missing.absolutePath, state.openError?.path)
+    }
+
+    // ── Regex-mode pattern history (ui/FilterBar.kt) ───────────────────────
+    // rememberRegexPattern/clearRegexPatternHistory back the horizontal filter bar's Regex-mode
+    // pattern dropdown (AppState.kt, near recentFiles) — see that function's own doc for the
+    // "commit on Enter only" contract these tests pin.
+    @Test
+    fun rememberRegexPatternDedupesAndMovesToFront() {
+        val state = AppState()
+        state.rememberRegexPattern("foo.*")
+        state.rememberRegexPattern("bar\\d+")
+        state.rememberRegexPattern("foo.*")
+
+        assertEquals(listOf("foo.*", "bar\\d+"), state.regexPatternHistory)
+    }
+
+    @Test
+    fun rememberRegexPatternCapsAtFifty() {
+        val state = AppState()
+        repeat(60) { i -> state.rememberRegexPattern("pattern$i") }
+
+        assertEquals(50, state.regexPatternHistory.size)
+        // Most-recent-first: the last 50 committed (pattern10..pattern59) survive, oldest dropped.
+        assertEquals("pattern59", state.regexPatternHistory.first())
+        assertEquals("pattern10", state.regexPatternHistory.last())
+    }
+
+    @Test
+    fun rememberRegexPatternRejectsBlankPattern() {
+        val state = AppState()
+        state.rememberRegexPattern("   ")
+
+        assertTrue(state.regexPatternHistory.isEmpty())
+    }
+
+    @Test
+    fun rememberRegexPatternRejectsSyntacticallyInvalidPattern() {
+        val state = AppState()
+        state.rememberRegexPattern("(")
+
+        assertTrue(state.regexPatternHistory.isEmpty(), "an unbalanced paren must not be recorded")
+    }
+
+    @Test
+    fun rememberRegexPatternTrimsWhitespaceBeforeStoring() {
+        val state = AppState()
+        state.rememberRegexPattern("  foo.*  ")
+
+        assertEquals(listOf("foo.*"), state.regexPatternHistory)
+    }
+
+    @Test
+    fun clearRegexPatternHistoryNoOpsWhenAlreadyEmpty() {
+        val state = AppState()
+
+        state.clearRegexPatternHistory()
+
+        assertTrue(state.regexPatternHistory.isEmpty())
+    }
+
+    @Test
+    fun clearRegexPatternHistoryEmptiesAPopulatedHistory() {
+        val state = AppState()
+        state.rememberRegexPattern("foo.*")
+
+        state.clearRegexPatternHistory()
+
+        assertTrue(state.regexPatternHistory.isEmpty())
+    }
+
+    @Test
+    fun regexPatternHistoryRoundTripsThroughAutosave() {
+        val dir = createTempDirectory("openlog-regex-history-roundtrip").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val state = AppState(cacheFile)
+        state.rememberRegexPattern("foo.*")
+        state.rememberRegexPattern("bar\\d+")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(state.regexPatternHistory, restored.regexPatternHistory)
+    }
+
+    @Test
+    fun regexPatternHistoryDefaultsToEmptyWhenTheKeyIsAbsentFromAnOlderCache() {
+        val dir = createTempDirectory("openlog-regex-history-absent-key").toFile()
+        val cacheFile = File(dir, "state.cache")
+        // A cache written before this feature existed: no "regexHistory" line at all. Assembled
+        // by hand (rather than via a real AppState) so it stays deliberately minimal — the point
+        // is that restoreAutosaveKey's `when` has no `else`, so an absent key must be silently
+        // ignored rather than throwing.
+        cacheFile.writeText("$AUTOSAVE_MAGIC_CURRENT\nactive\t\ntabs\n")
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertTrue(restored.regexPatternHistory.isEmpty())
+    }
+
+    @Test
+    fun anUnknownAutosaveKeyIsIgnoredWithoutDisturbingOtherRestoredState() {
+        val dir = createTempDirectory("openlog-regex-history-unknown-key").toFile()
+        val cacheFile = File(dir, "state.cache")
+        // A key this version of restoreAutosaveKey doesn't recognise (e.g. from a future or
+        // downgraded version) must be dropped silently rather than crashing the whole restore —
+        // the same "additive keyed lines" contract regexHistory itself relies on going forward.
+        cacheFile.writeText(
+            "$AUTOSAVE_MAGIC_CURRENT\n" +
+                "active\t\n" +
+                "recent\t${listOf("/a.log").joinToString(",") { it.b64() }.b64()}\n" +
+                "someFutureKeyNobodyKnowsYet\t${"whatever".b64()}\n" +
+                "tabs\n",
+        )
+
+        val restored = AppState(cacheFile, restoreOnCreate = true)
+
+        assertEquals(listOf("/a.log"), restored.recentFiles)
+        assertTrue(restored.regexPatternHistory.isEmpty())
     }
 
     @Test
