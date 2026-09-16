@@ -700,6 +700,10 @@ fun InlineField(
     singleLine: Boolean = true,
     centerTextVertically: Boolean = false,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    // When true, the field paints no background/border of its own and relies on its container's
+    // chrome instead — used by ui/FilterBar.kt so its fields read as part of one bar, matching
+    // ui/SearchBar.kt's flat BasicTextField. Defaults false so every existing call site is unchanged.
+    flat: Boolean = false,
 ) {
     val tc = tc()
     BasicTextField(
@@ -719,8 +723,7 @@ fun InlineField(
                     false
                 }
             }
-            .background(tc.bg, CORNER_SM)
-            .border(1.dp, tc.br, CORNER_SM)
+            .then(if (flat) Modifier else Modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM))
             .padding(horizontal = 7.dp, vertical = 4.dp),
         decorationBox = { inner ->
             if (onClear != null) {

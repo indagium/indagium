@@ -1067,6 +1067,15 @@ fun LogViewer(
     onSearchNext: () -> Unit = {},
     onSearchPrev: () -> Unit = {},
     onSearchClose: () -> Unit = {},
+    // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
+    // and single-panel layouts below, only while the vertical FilterPanel is hidden. `null` (the
+    // default) is what keeps CompareView, previews, and every other existing LogViewer call site
+    // byte-for-byte unaffected: FileView.kt is the only real caller that ever passes non-null,
+    // gated on `!state.filterVisible` — see ui/FilterBar.kt's own header for the mutual-exclusion
+    // invariant this rests on. `filterBar` is a plain data class of values (keeps this composable
+    // skippable); `filterBarActions` holds lambdas and must be `remember`ed by the caller.
+    filterBar: FilterBarModel? = null,
+    filterBarActions: FilterBarActions? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -2167,6 +2176,23 @@ fun LogViewer(
                 // Clicking a row here scrolls the Original panel to the same entry.
                 Column(Modifier.fillMaxWidth().weight(1f)) {
                     SectionBanner("Filtered — $visCnt lines", tc.ac, tc)
+                    // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view, not
+                    // the tab as a whole — it edits `tab.filter`, which only this panel (and the
+                    // single-view branch below) applies, so it renders here, directly above the
+                    // Find bar, same placement contract as SearchBar itself. This and the
+                    // single-view site below are the two mutually exclusive branches of
+                    // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given
+                    // tab, so exactly one FilterBar is ever composed despite there being two call
+                    // sites in source: the single-writer property FilterBar.kt's own header
+                    // documents still holds structurally. Do not "fix" this by rendering both.
+                    if (filterBar != null && filterBarActions != null) {
+                        FilterBar(
+                            tab = tab,
+                            model = filterBar,
+                            actions = filterBarActions,
+                            logFocusRequester = focusRequester,
+                        )
+                    }
                     // Split view shows the Find bar over the Filtered panel only (not Original) —
                     // one search state per tab (see LogTab.search), no independent per-panel state
                     // in v1 (plan's explicit scope note in AppState.openSearch's doc comment).
@@ -2340,6 +2366,22 @@ fun LogViewer(
                     satisfiedSearchNavId = request.id
                 }
                 onConsumeSearchNavigation(request.id)
+            }
+            // The horizontal filter bar (ui/FilterBar.kt) belongs to the FILTERED view — it edits
+            // `tab.filter`, which this single-view branch applies directly — so it renders here,
+            // directly above the Find bar, same placement contract as SearchBar itself. This and
+            // the split-view site above are the two mutually exclusive branches of
+            // `if (tab.showUnfiltered)` — exactly one of them is ever composed for a given tab, so
+            // exactly one FilterBar is ever composed despite there being two call sites in source:
+            // the single-writer property FilterBar.kt's own header documents still holds
+            // structurally. Do not "fix" this by rendering both.
+            if (filterBar != null && filterBarActions != null) {
+                FilterBar(
+                    tab = tab,
+                    model = filterBar,
+                    actions = filterBarActions,
+                    logFocusRequester = focusRequester,
+                )
             }
             if (tab.search.active) {
                 SearchBar(
