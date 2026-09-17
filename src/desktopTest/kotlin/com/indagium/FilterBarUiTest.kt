@@ -6,6 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -104,6 +105,33 @@ class FilterBarUiTest {
         assertTrue("com.example.Alpha" in latestFilter.activeTags)
         rule.onNodeWithTag("filter-bar-tags-candidate-1-exclude").performClick()
         assertTrue("com.example.Alpha" in latestFilter.excludeTags)
+    }
+
+    @Test
+    fun deepTagSelectionStaysVisibleWhenMovingDownAndUp() {
+        val tags = (0 until 40).map { "com.example.Tag%02d".format(it) }
+        installBar(
+            Filter(mode = TAGS),
+            model = TEST_MODEL.copy(
+                sortedTags = tags,
+                tagUsage = tags.associateWith { 1 },
+            ),
+        ) { }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        rule.onNodeWithTag(TAG_INPUT).performTextInput("Tag")
+        waitForTagCandidates()
+        repeat(30) {
+            rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.DirectionDown) }
+        }
+        rule.waitUntilAtLeastOneExists(hasTestTag("filter-bar-tags-candidate-29"), 2_000)
+        rule.onNodeWithTag("filter-bar-tags-candidate-29").assertIsDisplayed()
+
+        repeat(20) {
+            rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.DirectionUp) }
+        }
+        rule.waitUntilAtLeastOneExists(hasTestTag("filter-bar-tags-candidate-9"), 2_000)
+        rule.onNodeWithTag("filter-bar-tags-candidate-9").assertIsDisplayed()
     }
 
     @Test
@@ -285,6 +313,7 @@ class FilterBarUiTest {
     private fun installBar(
         initialFilter: Filter,
         logData: List<LogEntry> = emptyList(),
+        model: FilterBarModel = TEST_MODEL,
         onRememberRegex: () -> Unit = {},
         onFilterChanged: (Filter) -> Unit,
     ) {
@@ -297,7 +326,7 @@ class FilterBarUiTest {
             }
             FilterBar(
                 tab = tab,
-                model = TEST_MODEL,
+                model = model,
                 actions = FilterBarActions(
                     onSetFilterMode = { mode -> updateFilter(tab.filter.copy(mode = mode)) },
                     onStartRegexSearch = { updateFilter(tab.filter.copy(mode = FilterMode.KEYWORD)) },
