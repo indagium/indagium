@@ -784,6 +784,7 @@ private fun TagsModeBarContent(
                 segmentHeight = 20.dp,
                 segmentFontSize = 10.sp,
                 segmentHorizontalPadding = 6.dp,
+                selectedSolid = true,
             )
         }
         val fields: @Composable () -> Unit = {
@@ -1844,6 +1845,7 @@ private fun RegexModeBarContent(
                 segmentHeight = 20.dp,
                 segmentFontSize = 10.sp,
                 segmentHorizontalPadding = 6.dp,
+                selectedSolid = true,
             )
             TooltipArea(tooltip = { ToolbarTooltip("Regex search history") }) {
                 SquareIconButton(

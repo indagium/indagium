@@ -1125,6 +1125,7 @@ fun SegmentedControl(
     selectedColors: List<Color>? = null,
     fillWidth: Boolean = false,
     enabled: Boolean = true,
+    selectedSolid: Boolean = false,
     segmentHeight: Dp = 28.dp,
     segmentFontSize: TextUnit = 12.sp,
     segmentHorizontalPadding: Dp = 10.dp,
@@ -1153,13 +1154,25 @@ fun SegmentedControl(
                 modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(segmentHeight)
                     .clip(segmentShape)
-                    .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent, segmentShape)
+                    .background(
+                        if (selected && enabled) {
+                            if (selectedSolid) selColor else selColor.copy(.2f)
+                        } else {
+                            Color.Transparent
+                        },
+                        segmentShape,
+                    )
                     .clickable(enabled = enabled) { onToggle(index) },
             ) {
                 DisableSelection {
                     AppText(
                         text = label,
-                        color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
+                        color = when {
+                            !enabled -> tc.td.copy(.5f)
+                            selected && selectedSolid -> Color.White
+                            selected -> selColor
+                            else -> tc.ts
+                        },
                         fontSize = segmentFontSize,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                         modifier = Modifier.padding(horizontal = segmentHorizontalPadding),
