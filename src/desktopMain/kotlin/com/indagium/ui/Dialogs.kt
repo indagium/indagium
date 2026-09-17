@@ -404,6 +404,10 @@ internal fun AnnotationMarkdownEditorDialog(
     var previewMode by remember { mutableStateOf(false) }
     var evidenceExpanded by remember { mutableStateOf(false) }
     var headingMenuOpen by remember { mutableStateOf(false) }
+    // See AiModelDropdown for why this guard is needed: the Popup's onDismissRequest also fires for
+    // a click back on the "Heading" button itself, which would otherwise race the button's own
+    // toggle and net out to "stayed open" instead of closing.
+    var suppressHeadingToggleUntilMs by remember { mutableStateOf(0L) }
     // A toolbar click can cause the text field to report a collapsed selection before its click
     // callback runs. Retain the last real selection so formatting still wraps what the user saw
     // highlighted instead of appending a placeholder after it.
@@ -450,6 +454,7 @@ internal fun AnnotationMarkdownEditorDialog(
     // keep typing right after, and so this dialog's own root Esc/save shortcuts keep working.
     fun closeHeadingMenu() {
         headingMenuOpen = false
+        suppressHeadingToggleUntilMs = System.currentTimeMillis() + 200
         runCatching { editorFocusRequester.requestFocus() }
     }
 
@@ -616,7 +621,14 @@ internal fun AnnotationMarkdownEditorDialog(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Box {
-                                MarkdownToolbarButton(enabled = !locked && !hasConflict, onClick = { headingMenuOpen = true }) {
+                                MarkdownToolbarButton(
+                                    enabled = !locked && !hasConflict,
+                                    onClick = {
+                                        if (System.currentTimeMillis() >= suppressHeadingToggleUntilMs) {
+                                            headingMenuOpen = !headingMenuOpen
+                                        }
+                                    },
+                                ) {
                                     Row(
                                         verticalAlignment = Alignment.CenterVertically,
                                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1027,12 +1039,14 @@ private fun DeleteNoteButton(enabled: Boolean = true, onClick: () -> Unit) {
     val shape = RoundedCornerShape(6.dp)
     Box(
         Modifier
+            .height(34.dp)
             .background(if (hovered) DANGER_RED.copy(alpha = .1f) else Color.Transparent, shape)
             .clip(shape)
             .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 10.dp, vertical = 7.dp),
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
     ) { AppText("Delete note", color = DANGER_RED, fontSize = 12.sp) }
 }
 
