@@ -1633,6 +1633,10 @@ class AppState(
 
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
+    // Independent horizontal filter-bar visibility. This deliberately does not mirror
+    // filterVisible: the bar can remain visible while the full filter panel is open or closed.
+    // The default is off so existing sessions keep the previous layout until the user opts in.
+    var filterBarVisible by mutableStateOf(false)
     var annotationVisible by mutableStateOf(true)
 
     // Notes and the AI panel are independent visibility toggles sharing one sidebar slot (see
@@ -2153,6 +2157,12 @@ class AppState(
     fun updateFilterVisible(visible: Boolean) {
         if (filterVisible == visible) return
         filterVisible = visible
+        autosaveNow()
+    }
+
+    fun updateFilterBarVisible(visible: Boolean) {
+        if (filterBarVisible == visible) return
+        filterBarVisible = visible
         autosaveNow()
     }
 

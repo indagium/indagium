@@ -982,6 +982,7 @@ internal fun AppState.compareStateToken(): String = tokenFields(
     rightSidebarSplit.toString(),
     videoPanelVisible.toString(),
     videoPanelWidth.toString(),
+    filterBarVisible.toString(),
 )
 
 internal fun AppState.restoreCompareState(token: String) {
@@ -1003,6 +1004,8 @@ internal fun AppState.restoreCompareState(token: String) {
     videoPanelVisible = p.getOrNull(10)?.toBooleanStrictOrNull() ?: true
     videoPanelWidth = (p.getOrNull(11)?.toFloatOrNull() ?: videoPanelWidth)
         .coerceIn(VIDEO_PANEL_MIN_WIDTH, VIDEO_PANEL_MAX_WIDTH)
+    // Trailing field: absent on tokens from before the horizontal filter-bar visibility toggle.
+    filterBarVisible = p.getOrNull(12)?.toBooleanStrictOrNull() ?: false
 }
 
 // ── Diagram workspace tabs (WP-diagram-restore) ────────────────────────────────────────────────

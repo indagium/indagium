@@ -65,26 +65,11 @@ import kotlinx.coroutines.withContext
 // over them, following the LogCompositionActions precedent — see FilterPanel.kt's own doc on that
 // class). There is exactly one filter engine; this file only draws a different view of it.
 //
-// ── Mutual exclusion (the invariant everything below rests on) ──────────────────────────────────
-// FilterBar composes ⟺ state.filterVisible == false ⟺ BoundFilterPanel returned early
-// (ui/FileView.kt's own early `if (!state.filterVisible) return`) ⟺ FilterPanel is not in the tree.
-// FilterPanel.kt's debounced write-through (its kwDisplay/kwLastSent and msgRuleInput/
-// msgRuleLastSent pairs, FilterPanel.kt:719-727 and :745-762) assumes a SINGLE writer: it tracks
-// "the last value I pushed" so it can tell its own debounce settling apart from an external change
-// and never re-syncs a value it just wrote itself back into the field being typed in. Two
-// simultaneous writers (this bar and the panel both mounted) would each hold their own timer and
-// sentinel; the two debounces would race and a stale value could get pushed back into whichever
-// field the user is still typing in. Mutual exclusion removes that whole bug class structurally —
-// this bar can reuse the exact same sentinel shape below because it is, by construction, the only
-// writer while it is composed.
-//
-// Accepted loss: pressing Shift+F mid-debounce (within ~350ms of the last keystroke, largeFileMode)
-// discards up to that much just-typed, not-yet-applied text along with this composable itself. A
-// DisposableEffect flush on unmount was considered and rejected: it would fire concurrently with
-// FilterPanel's own mount-time seeding (it reads `filter.kwText`/`filter.kwInTag` once, on first
-// composition) — i.e. exactly the two-writer race this design avoids everywhere else. A half-typed
-// filter losing its last keystroke on a deliberate panel-visibility toggle is a small, honest
-// tradeoff next to reintroducing that race.
+// ── Shared-state ownership ─────────────────────────────────────────────────────────────────────
+// The bar and panel can now be mounted together, but FilterPanel hides its duplicate Tags/Regex/
+// message-rule editors whenever the bar is visible. That keeps exactly one mounted writer for the
+// debounced tag/message fields while still allowing the panel's advanced sections to remain open.
+// The two surfaces continue to edit the same Filter object through the same AppState callbacks.
 //
 // ── Focus rule (the CLAUDE.md "a dismissed Popup steals focus" trap) ────────────────────────────
 // This bar sits directly above a LogViewer that owns root key handling (arrows move selection,
@@ -1200,9 +1185,8 @@ private fun MessageRuleField(
 
     var input by remember(tab.id) { mutableStateOf(filter.kwInTag) }
     // Same single-writer sentinel shape as FilterPanel.kt's msgRuleInput/msgRuleLastSent
-    // (FilterPanel.kt:745-762) — safe here only because of this bar's mutual-exclusion invariant
-    // (see the file header): while this composable is mounted, FilterPanel.kt is not, so there is
-    // only ever one writer racing this debounce.
+    // (FilterPanel.kt:745-762). FilterPanel hides its corresponding editor while this bar is
+    // mounted, so there is only ever one writer racing this debounce.
     var lastSent by remember(tab.id) { mutableStateOf(filter.kwInTag) }
     var search by remember(tab.id) { mutableStateOf("") }
     var fieldFocused by remember { mutableStateOf(false) }
@@ -1776,8 +1760,7 @@ private fun RegexModeBarContent(
     val fr = remember(tab.id) { FocusRequester() }
 
     // Same single-writer debounce sentinel shape as FilterPanel.kt's kwDisplay/kwLastSent
-    // (FilterPanel.kt:719-727) — safe here for the same mutual-exclusion reason as
-    // MessageRuleField's own sentinel above.
+    // (FilterPanel.kt:719-727); the panel hides its corresponding editor while this bar is active.
     var display by remember(tab.id) { mutableStateOf(filter.kwText) }
     var lastSent by remember(tab.id) { mutableStateOf(filter.kwText) }
     var fieldFocused by remember { mutableStateOf(false) }
