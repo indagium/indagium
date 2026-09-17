@@ -2534,43 +2534,16 @@ internal fun FilterPanel(
     }
 
     if (regexEditorOpen) {
-        Dialog(onDismissRequest = { regexEditorOpen = false }) {
-            val dialogTheme = tc()
-            Column(
-                Modifier.width(640.dp)
-                    .background(dialogTheme.p, RoundedCornerShape(8.dp))
-                    .border(1.dp, dialogTheme.br, RoundedCornerShape(8.dp))
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                AppText("Edit regex search", color = dialogTheme.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                AppText(
-                    "Searches the exact text shown in a log row. Apply keeps this as a transient search; save it manually from Saved filters when needed.",
-                    color = dialogTheme.td,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                )
-                InlineField(
-                    value = regexEditorText,
-                    onValue = { regexEditorText = it },
-                    placeholder = "regex…",
-                    modifier = Modifier.fillMaxWidth().height(220.dp),
-                    fontSize = 12.sp,
-                    singleLine = false,
-                )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                ) {
-                    AppButton("Apply", onClick = {
-                        kwDisplay = regexEditorText
-                        onSetKw(regexEditorText)
-                        regexEditorOpen = false
-                    }, variant = ButtonVariant.Primary)
-                    AppButton("Cancel", onClick = { regexEditorOpen = false }, variant = ButtonVariant.Secondary)
-                }
-            }
-        }
+        RegexSearchEditor(
+            text = regexEditorText,
+            onTextChange = { regexEditorText = it },
+            onApply = {
+                kwDisplay = regexEditorText
+                onSetKw(regexEditorText)
+                regexEditorOpen = false
+            },
+            onDismiss = { regexEditorOpen = false },
+        )
     }
 
     if (createSavedFilterFolderOpen || renameSavedFilterFolderId != null) {

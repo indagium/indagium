@@ -687,6 +687,7 @@ fun InlineField(
     placeholder: String = "", modifier: Modifier = Modifier,
     fontSize: TextUnit = LocalFontBase.current.sp,
     onClear: (() -> Unit)? = null,
+    clearButtonModifier: Modifier = Modifier,
     onSubmit: (() -> Unit)? = null,
     // WP7 item 6 (round-2 corrections plan): the one Esc hook every inline editor in the workspace
     // needed and didn't have — previously each of the four canvas editors (and the panel's own
@@ -735,7 +736,7 @@ fun InlineField(
                     if (value.isNotEmpty()) {
                         SquareIconButton(
                             "×", fontSize = 12.sp, onClick = onClear,
-                            modifier = Modifier.padding(start = 4.dp), size = 16.dp,
+                            modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
                         )
                     }
                 }
