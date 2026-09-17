@@ -10,6 +10,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -27,6 +28,7 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -43,6 +45,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.zIndex
 import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
 import java.io.File
@@ -406,6 +409,7 @@ internal fun AnnotationMarkdownEditorDialog(
     // highlighted instead of appending a placeholder after it.
     var retainedSelection by remember { mutableStateOf<TextRange?>(null) }
     val editorFocusRequester = remember { FocusRequester() }
+    val editorHistory = remember(sessionKey) { MarkdownEditorUndoHistory() }
 
     val summary = remember(rows) { evidenceSummary(rows) }
     val wordCount = remember(editorValue.text) { markdownWordCount(editorValue.text) }
@@ -419,6 +423,7 @@ internal fun AnnotationMarkdownEditorDialog(
             baselineText = sync.baseline
             editorValue = TextFieldValue(sync.draft, TextRange(sync.draft.length))
             conflictLatest = null
+            editorHistory.clear()
         }
     }
     val hasUnsavedChanges = editorValue.text != baselineText
@@ -451,13 +456,16 @@ internal fun AnnotationMarkdownEditorDialog(
     fun updateEditor(updated: TextFieldValue) {
         if (locked) return
         retainedSelection = retainedMarkdownSelectionAfterEditorUpdate(editorValue, updated, retainedSelection)
+        editorHistory.record(editorValue, updated)
         editorValue = updated
     }
 
     fun applyFormat(action: MarkdownFormatAction) {
         if (locked || hasConflict) return
         val valueForAction = restoreMarkdownSelection(editorValue, retainedSelection)
-        editorValue = applyMarkdownFormat(valueForAction, action)
+        val updated = applyMarkdownFormat(valueForAction, action)
+        editorHistory.record(editorValue, updated)
+        editorValue = updated
         // Keep the newly selected formatted content available if the toolbar click causes a
         // second focus-collapse callback before the next action is dispatched.
         retainedSelection = editorValue.selection.takeIf { it.start != it.end }
@@ -470,6 +478,23 @@ internal fun AnnotationMarkdownEditorDialog(
         editorValue = TextFieldValue(latest, TextRange(latest.length))
         conflictLatest = null
         retainedSelection = null
+        editorHistory.clear()
+    }
+
+    fun undoEditor() {
+        if (locked || hasConflict) return
+        editorHistory.undo(editorValue)?.let {
+            editorValue = it
+            retainedSelection = null
+        }
+    }
+
+    fun redoEditor() {
+        if (locked || hasConflict) return
+        editorHistory.redo(editorValue)?.let {
+            editorValue = it
+            retainedSelection = null
+        }
     }
 
     fun overwriteLatest() {
@@ -493,6 +518,10 @@ internal fun AnnotationMarkdownEditorDialog(
                     // Esc closes the Heading popup first, same as the header's own ✕/dismiss.
                     headingMenuOpen && ev.key == Key.Escape -> { closeHeadingMenu(); true }
                     ev.key == Key.Escape -> { onDismiss(); true }
+                    ev.isActionKey && ev.key == Key.Z && !ev.isAltPressed && !previewMode -> {
+                        if (ev.isShiftPressed) redoEditor() else undoEditor()
+                        true
+                    }
                     ev.isActionKey && (ev.key == Key.Enter || ev.key == Key.NumPadEnter) -> {
                         if (!locked && !hasConflict) onConfirm(editorValue.text)
                         true
@@ -645,15 +674,23 @@ internal fun AnnotationMarkdownEditorDialog(
                     // dialog; 120dp is just enough to keep the editor usable while still yielding
                     // to the header/evidence/toolbar/footer/action-bar chrome around it.
                     Box(Modifier.weight(1f).fillMaxWidth().heightIn(min = 120.dp)) {
+                        // Keep the BasicTextField mounted while Preview is active. Its legacy
+                        // Compose undo manager is remembered inside the field, so conditionally
+                        // removing it here used to discard the history and make Ctrl/Cmd+Z a
+                        // no-op after a Preview -> Write round trip.
+                        MarkdownWriteArea(
+                            value = editorValue,
+                            onValueChange = ::updateEditor,
+                            placeholder = "Write your note…",
+                            focusRequester = editorFocusRequester,
+                            enabled = !locked && !hasConflict && !previewMode,
+                            modifier = Modifier.alpha(if (previewMode) 0f else 1f),
+                        )
                         if (previewMode) {
-                            MarkdownPreviewArea(editorValue.text, tc)
-                        } else {
-                            MarkdownWriteArea(
-                                value = editorValue,
-                                onValueChange = ::updateEditor,
-                                placeholder = "Write your note…",
-                                focusRequester = editorFocusRequester,
-                                enabled = !locked && !hasConflict,
+                            MarkdownPreviewArea(
+                                text = editorValue.text,
+                                tc = tc,
+                                modifier = Modifier.zIndex(1f),
                             )
                         }
                     }
@@ -881,6 +918,7 @@ private fun MarkdownWriteArea(
     placeholder: String,
     focusRequester: FocusRequester,
     enabled: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
     val tc = tc()
     val editorScroll = rememberScrollState()
@@ -911,7 +949,7 @@ private fun MarkdownWriteArea(
         editorScroll.animateScrollTo(target.roundToInt().coerceIn(0, editorScroll.maxValue))
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize()) {
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
@@ -923,6 +961,7 @@ private fun MarkdownWriteArea(
             ),
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.fillMaxSize()
+                .testTag("annotation-markdown-editor")
                 .focusRequester(focusRequester)
                 .onPreviewKeyEvent { ev ->
                     // Plain Enter/NumPadEnter only — no modifiers. The dialog root's own
@@ -964,9 +1003,9 @@ private fun MarkdownWriteArea(
 }
 
 @Composable
-private fun MarkdownPreviewArea(text: String, tc: ThemeColors) {
+private fun MarkdownPreviewArea(text: String, tc: ThemeColors, modifier: Modifier = Modifier) {
     val scroll = rememberScrollState()
-    Box(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize().background(tc.p)) {
         Column(Modifier.fillMaxSize().verticalScroll(scroll).padding(horizontal = 14.dp, vertical = 12.dp)) {
             if (text.isBlank()) {
                 AppText("Nothing to preview", color = tc.td, fontSize = 13.sp)
