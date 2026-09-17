@@ -4,6 +4,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.indagium.model.AppSettings
 import com.indagium.ui.MarkdownFormatAction
+import com.indagium.ui.MarkdownEditorUndoHistory
 import com.indagium.ui.annotationMarkdownRenderSource
 import com.indagium.ui.annotationMarkdownSoftLineBreaksEnabled
 import com.indagium.ui.applyMarkdownFormat
@@ -24,6 +25,20 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class MarkdownAnnotationEditorTest {
+    @Test
+    fun formattingUndoRestoresTheWholeDraftAndRedoRestoresFormatting() {
+        val plainText = "first\nsecond\nthird\nfourth"
+        val boldText = "first\nsecond\n**third**\nfourth"
+        val plain = TextFieldValue(plainText, TextRange(plainText.length))
+        val bold = TextFieldValue(boldText, TextRange(boldText.length))
+        val history = MarkdownEditorUndoHistory()
+
+        history.record(plain, bold)
+
+        assertEquals(plain, history.undo(bold))
+        assertEquals(bold, history.redo(plain))
+    }
+
     @Test
     fun inlineActionsWrapTheSelectedText() {
         val selected = TextFieldValue("crash", TextRange(0, 5))
