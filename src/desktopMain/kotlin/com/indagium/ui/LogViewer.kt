@@ -1156,11 +1156,11 @@ fun LogViewer(
     // optional filter-bar button can be inserted without leaving stale hard-coded indexes behind.
     val toolbarActions = buildList {
         add(LogViewerToolbarAction("export", true) { exportMenuOpen = true })
-        add(LogViewerToolbarAction("time-delta", true, onToggleTimeDelta))
-        add(LogViewerToolbarAction("search", true, onOpenSearch))
         if (filterBarVisible != null && onToggleFilterBar != null) {
             add(LogViewerToolbarAction("filter-bar", true, onToggleFilterBar))
         }
+        add(LogViewerToolbarAction("time-delta", true, onToggleTimeDelta))
+        add(LogViewerToolbarAction("search", true, onOpenSearch))
         add(LogViewerToolbarAction("expand-all", canExpandAll, onExpandAll))
         add(LogViewerToolbarAction("collapse-all", canCollapseAll, onCollapseAll))
         add(LogViewerToolbarAction("unfiltered", true, onToggleUnfiltered))
@@ -1215,6 +1215,16 @@ fun LogViewer(
                     )
                 }
             }
+            if (filterBarVisible != null && onToggleFilterBar != null) {
+                Spacer(Modifier.width(8.dp))
+                FilterBarToolbarButton(
+                    visible = filterBarVisible,
+                    onToggle = onToggleFilterBar,
+                    modifier = Modifier
+                        .testTag("filter-bar-toolbar-toggle")
+                        .border(1.dp, if (toolbarIndex == toolbarIndexFor("filter-bar")) tc.ac else Color.Transparent, CORNER_MD),
+                )
+            }
             Spacer(Modifier.width(8.dp))
             // Primary variant when on is this toolbar's only "active" state affordance (Unfiltered,
             // the other stateful toggle here, signals its state via label text instead — "Δt on/off"
@@ -1235,16 +1245,6 @@ fun LogViewer(
                 modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("search")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
-            if (filterBarVisible != null && onToggleFilterBar != null) {
-                FilterBarToolbarButton(
-                    visible = filterBarVisible,
-                    onToggle = onToggleFilterBar,
-                    modifier = Modifier
-                        .testTag("filter-bar-toolbar-toggle")
-                        .border(1.dp, if (toolbarIndex == toolbarIndexFor("filter-bar")) tc.ac else Color.Transparent, CORNER_MD),
-                )
-                Spacer(Modifier.width(8.dp))
-            }
             val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
             AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(

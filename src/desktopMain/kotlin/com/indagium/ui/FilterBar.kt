@@ -1033,7 +1033,7 @@ private fun TagAndPkgField(
                                 ) {
                                     if (isPkg) {
                                         Row(
-                                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                         ) {
@@ -1093,7 +1093,7 @@ private fun TagAndPkgField(
                                     } else {
                                         val (label, packageLabel) = displayTagForPrefix(value, filter.pkgPrefixes)
                                         Row(
-                                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+                                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
                                             verticalAlignment = Alignment.CenterVertically,
                                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                                         ) {

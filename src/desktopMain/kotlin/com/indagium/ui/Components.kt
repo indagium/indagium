@@ -337,6 +337,26 @@ internal fun TagPill(
 
 // Bounded scrollable list that works inside a verticalScroll parent.
 // heightIn(max=X) breaks inside an unbounded parent; height(X) is reliable.
+internal fun scrollTargetForIndex(
+    itemIndex: Int,
+    rowPx: Int,
+    viewportPx: Int,
+    currentScrollPx: Int,
+    maxScrollPx: Int,
+): Int {
+    if (itemIndex < 0 || rowPx <= 0 || viewportPx <= 0) return currentScrollPx
+    val itemTop = itemIndex * rowPx
+    val itemBottom = itemTop + rowPx
+    val visibleTop = currentScrollPx
+    val visibleBottom = visibleTop + viewportPx
+    val target = when {
+        itemTop < visibleTop -> itemTop
+        itemBottom > visibleBottom -> itemBottom - viewportPx
+        else -> currentScrollPx
+    }
+    return target.coerceIn(0, maxScrollPx)
+}
+
 @Composable
 internal fun ScrollableItems(
     itemCount: Int,
@@ -347,29 +367,40 @@ internal fun ScrollableItems(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     if (itemCount == 0) return
-    val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
+    // maxDp is only a cap. Let the measured content determine the height for short lists instead
+    // of imposing a guessed row-height-based bound on variable-height content.
+    val h = maxDp.dp
     val scrollState = rememberScrollState()
     val density = LocalDensity.current.density
-    LaunchedEffect(scrollToIndex) {
-        if (scrollToIndex >= 0) {
-            val rowPx = (rowDp * density).roundToInt()
-            val itemTop = scrollToIndex * rowPx
-            val itemBot = itemTop + rowPx
-            val viewTop = scrollState.value
-            val viewBot = viewTop + (maxDp * density).roundToInt()
-            when {
-                itemTop < viewTop -> scrollState.animateScrollTo(itemTop)
-                itemBot > viewBot -> scrollState.animateScrollTo(itemBot - (maxDp * density).roundToInt())
-            }
+    var viewportPx by remember { mutableIntStateOf(0) }
+    val maxScrollPx = scrollState.maxValue
+    LaunchedEffect(scrollToIndex, viewportPx, maxScrollPx) {
+        if (scrollToIndex in 0 until itemCount && viewportPx > 0) {
+            val target = scrollTargetForIndex(
+                itemIndex = scrollToIndex,
+                rowPx = (rowDp * density).roundToInt(),
+                viewportPx = viewportPx,
+                currentScrollPx = scrollState.value,
+                maxScrollPx = maxScrollPx,
+            )
+            if (target != scrollState.value) scrollState.scrollTo(target)
         }
     }
-    Box(modifier.fillMaxWidth().height(h)) {
-        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scrollState),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc()),
-        )
+    // Use a cap rather than a fixed height: content can wrap (for example, a tag with a
+    // package-label line), so a guessed item-count height must not clip the last visible row.
+    // The matchParentSize scrollbar does not participate in sizing, preserving the content-sized
+    // behavior for short lists.
+    Box(
+        modifier.fillMaxWidth().heightIn(max = h).onSizeChanged { viewportPx = it.height },
+    ) {
+        Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
     }
 }
 
