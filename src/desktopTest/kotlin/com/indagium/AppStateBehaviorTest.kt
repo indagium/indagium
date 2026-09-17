@@ -2738,7 +2738,9 @@ class AppStateBehaviorTest {
         val cacheFile = File(dir, "state.cache")
         val state = AppState(cacheFile)
 
+        assertEquals(false, state.filterBarVisible)
         state.updateFilterVisible(false)
+        state.updateFilterBarVisible(true)
         state.updateAnnotationVisible(false)
         state.updateCompareMode(true)
         state.updateCompareFilterRight(false)
@@ -2755,6 +2757,7 @@ class AppStateBehaviorTest {
         val restored = AppState(cacheFile, restoreOnCreate = true)
 
         assertEquals(false, restored.filterVisible)
+        assertEquals(true, restored.filterBarVisible)
         assertEquals(false, restored.annotationVisible)
         assertEquals(false, restored.compareMode)
         assertEquals(false, restored.compareFilterRight)

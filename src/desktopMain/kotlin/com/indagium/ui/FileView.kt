@@ -33,6 +33,7 @@ internal fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester? = null,
+    filterBarVisible: Boolean = false,
     filterSearchRequest: FilterSearchRequest? = null,
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -161,6 +162,7 @@ internal fun BoundFilterPanel(
         customIssueRules = state.settings.customIssueRules,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
+        filterBarVisible = filterBarVisible,
         filterSearchRequest = filterSearchRequest,
         onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
         onPanelFocusChanged = onPanelFocusChanged,
@@ -218,21 +220,22 @@ internal fun FileView(
         BoundFilterPanel(
             state, tab,
             focusRequester = filterFr,
+            filterBarVisible = state.filterBarVisible,
             filterSearchRequest = filterSearchRequest,
             onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
             onPanelFocusChanged = { focused ->
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
             },
         )
-        // Horizontal filter bar (ui/FilterBar.kt) — gated on `!state.filterVisible` (BoundFilterPanel
-        // above returns early on that exact same condition, see FilterBar.kt's own mutual-exclusion
-        // doc). `filterBarModel` is a plain data class of values recomputed per recomposition (cheap,
-        // and content-equality is what keeps LogViewer skippable); `filterBarActions` holds lambdas
-        // and is `remember`ed, following the `logCompositionActions` precedent just above.
+        // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
+        // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
+        // its duplicate Tags/Regex/message-rule controls while this bar is active. The model is a
+        // plain data class of values recomputed per recomposition (cheap, and content-equality is
+        // what keeps LogViewer skippable); actions holds lambdas and is remembered below.
         val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
             tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
         }
-        val filterBarModel = if (!state.filterVisible) {
+        val filterBarModel = if (state.filterBarVisible) {
             FilterBarModel(
                 sortedTags = filterBarSortedTags,
                 tagUsage = state.tagUsage,
@@ -313,6 +316,8 @@ internal fun FileView(
             onSearchClose = { state.closeSearch(tab.id) },
             filterBar = filterBarModel,
             filterBarActions = filterBarActions,
+            filterBarVisible = state.filterBarVisible,
+            onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
         )
         if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && tab.attachedVideo != null)) {
             HDivider { delta ->

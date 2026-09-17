@@ -11,6 +11,7 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Movie
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
@@ -37,6 +38,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -991,6 +993,29 @@ private fun logContentWidthDp(wrapLimitChars: Int, charWidthDp: Float): Dp {
         .coerceAtLeast(MIN_LOG_CONTENT_WIDTH_DP.dp)
 }
 
+private data class LogViewerToolbarAction(
+    val id: String,
+    val enabled: Boolean,
+    val onClick: () -> Unit,
+)
+
+@Composable
+internal fun FilterBarToolbarButton(
+    visible: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    ToolbarBtn(
+        label = "",
+        icon = Icons.Outlined.FilterList,
+        showLabel = false,
+        tooltip = if (visible) "Hide filter bar" else "Show filter bar",
+        active = visible,
+        modifier = modifier,
+        onClick = onToggle,
+    )
+}
+
 @Composable
 fun LogViewer(
     tab: LogTab,
@@ -1068,14 +1093,14 @@ fun LogViewer(
     onSearchPrev: () -> Unit = {},
     onSearchClose: () -> Unit = {},
     // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
-    // and single-panel layouts below, only while the vertical FilterPanel is hidden. `null` (the
-    // default) is what keeps CompareView, previews, and every other existing LogViewer call site
-    // byte-for-byte unaffected: FileView.kt is the only real caller that ever passes non-null,
-    // gated on `!state.filterVisible` — see ui/FilterBar.kt's own header for the mutual-exclusion
-    // invariant this rests on. `filterBar` is a plain data class of values (keeps this composable
-    // skippable); `filterBarActions` holds lambdas and must be `remember`ed by the caller.
+    // and single-panel layouts below. `null` (the default) keeps CompareView, previews, and every
+    // other existing LogViewer call site unchanged: FileView.kt is the only real caller that wires
+    // the independent visibility toggle. `filterBar` is a plain data class of values (keeps this
+    // composable skippable); `filterBarActions` holds lambdas and must be remembered by the caller.
     filterBar: FilterBarModel? = null,
     filterBarActions: FilterBarActions? = null,
+    filterBarVisible: Boolean? = null,
+    onToggleFilterBar: (() -> Unit)? = null,
 ) {
     val tc        = tc()
     val mono      = monoFont()
@@ -1126,21 +1151,25 @@ fun LogViewer(
     // Clear stale bounds from previous tab so drag-select uses correct positions
     LaunchedEffect(tab.id) { rowBoundsAbs.clear() }
 
-    // Order here MUST match the toolbar's actual left-to-right button order below — toolbarIndex
-    // (roving keyboard nav) indexes into this same list, and the per-button border highlight is
-    // literally `toolbarIndex == <that button's position in this list>`. Adding/reordering a
-    // toolbar button means updating BOTH this list and every `toolbarIndex == N` check below.
-    fun toolbarActions(): List<Pair<Boolean, () -> Unit>> = listOf(
-        true to { exportMenuOpen = true },
-        true to onToggleTimeDelta,
-        true to onOpenSearch,
-        canExpandAll to onExpandAll,
-        canCollapseAll to onCollapseAll,
-        true to onToggleUnfiltered,
-    )
+    // Order here MUST match the toolbar's actual left-to-right button order below. Roving
+    // navigation and the focus border both derive their indexes from these stable ids, so the
+    // optional filter-bar button can be inserted without leaving stale hard-coded indexes behind.
+    val toolbarActions = buildList {
+        add(LogViewerToolbarAction("export", true) { exportMenuOpen = true })
+        add(LogViewerToolbarAction("time-delta", true, onToggleTimeDelta))
+        add(LogViewerToolbarAction("search", true, onOpenSearch))
+        if (filterBarVisible != null && onToggleFilterBar != null) {
+            add(LogViewerToolbarAction("filter-bar", true, onToggleFilterBar))
+        }
+        add(LogViewerToolbarAction("expand-all", canExpandAll, onExpandAll))
+        add(LogViewerToolbarAction("collapse-all", canCollapseAll, onCollapseAll))
+        add(LogViewerToolbarAction("unfiltered", true, onToggleUnfiltered))
+    }
+
+    fun toolbarIndexFor(id: String): Int = toolbarActions.indexOfFirst { it.id == id }
 
     fun toolbarRovingItems(): List<RovingItem> =
-        toolbarActions().mapIndexed { idx, action -> RovingItem(idx.toString(), action.first) }
+        toolbarActions.mapIndexed { idx, action -> RovingItem(idx.toString(), action.enabled) }
 
     Column(modifier.fillMaxSize().background(tc.bg)) {
         Row(
@@ -1175,7 +1204,7 @@ fun LogViewer(
                 AppButton(
                     "Export ▾",
                     onClick = { exportMenuOpen = true },
-                    modifier = Modifier.border(1.dp, if (toolbarIndex == 0) tc.ac else Color.Transparent, CORNER_MD),
+                    modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("export")) tc.ac else Color.Transparent, CORNER_MD),
                 )
                 if (exportMenuOpen) {
                     ExportMenuPopup(
@@ -1194,7 +1223,7 @@ fun LogViewer(
                 "Δt",
                 onClick = onToggleTimeDelta,
                 variant = if (tab.showTimeDelta) ButtonVariant.Primary else ButtonVariant.Secondary,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 1) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("time-delta")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
             AppButton(
@@ -1203,29 +1232,39 @@ fun LogViewer(
                 variant = if (tab.search.active) ButtonVariant.Primary else ButtonVariant.Secondary,
                 leadingIcon = Icons.Outlined.Search,
                 horizontalPadding = 10.dp,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 2) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("search")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
+            if (filterBarVisible != null && onToggleFilterBar != null) {
+                FilterBarToolbarButton(
+                    visible = filterBarVisible,
+                    onToggle = onToggleFilterBar,
+                    modifier = Modifier
+                        .testTag("filter-bar-toolbar-toggle")
+                        .border(1.dp, if (toolbarIndex == toolbarIndexFor("filter-bar")) tc.ac else Color.Transparent, CORNER_MD),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
             val countLabel = if (tab.largeFileMode) "$visCnt / $totalCnt entries - large file mode" else "$visCnt / $totalCnt entries"
             AppText(countLabel, color = tc.td, fontSize = 11.sp, fontFamily = MONO, modifier = Modifier.weight(1f))
             AppButton(
                 "Expand all",
                 onClick = onExpandAll,
                 enabled = canExpandAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 3) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("expand-all")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 "Collapse all",
                 onClick = onCollapseAll,
                 enabled = canCollapseAll,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 4) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("collapse-all")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(4.dp))
             AppButton(
                 if (tab.showUnfiltered) "Hide original" else "Unfiltered",
                 onClick = onToggleUnfiltered,
-                modifier = Modifier.border(1.dp, if (toolbarIndex == 5) tc.ac else Color.Transparent, CORNER_MD),
+                modifier = Modifier.border(1.dp, if (toolbarIndex == toolbarIndexFor("unfiltered")) tc.ac else Color.Transparent, CORNER_MD),
             )
             Spacer(Modifier.width(8.dp))
             if (toolbarContextMenuOpen) {
@@ -1433,7 +1472,7 @@ fun LogViewer(
                             onCursorChange = { cursorId = it },
                         )
                         if (ev.type == KeyEventType.KeyDown && toolbarIndex != null) {
-                            val actions = toolbarActions()
+                            val actions = toolbarActions
                             when (ev.key) {
                                 Key.DirectionLeft -> {
                                     toolbarIndex = rovingMove(
@@ -1459,7 +1498,7 @@ fun LogViewer(
                                 }
                                 Key.Enter, Key.NumPadEnter, Key.Spacebar -> {
                                     val idx = toolbarIndex ?: 0
-                                    actions.getOrNull(idx)?.takeIf { it.first }?.second?.invoke()
+                                    actions.getOrNull(idx)?.takeIf { it.enabled }?.onClick?.invoke()
                                     return@onPreviewKeyEvent true
                                 }
                             }

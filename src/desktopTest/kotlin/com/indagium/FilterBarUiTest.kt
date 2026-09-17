@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -26,6 +27,7 @@ import com.indagium.model.LogTab
 import com.indagium.ui.FilterBar
 import com.indagium.ui.FilterBarActions
 import com.indagium.ui.FilterBarModel
+import com.indagium.ui.FilterBarToolbarButton
 import org.junit.Rule
 import org.junit.Test
 import kotlin.test.assertEquals
@@ -42,6 +44,22 @@ import kotlin.test.assertTrue
 class FilterBarUiTest {
     @get:Rule
     val rule = createComposeRule()
+
+    @Test
+    fun filterBarToolbarButtonTogglesAndExplainsItsCurrentAction() {
+        rule.setContent {
+            var visible by remember { mutableStateOf(false) }
+            FilterBarToolbarButton(
+                visible = visible,
+                onToggle = { visible = !visible },
+            )
+        }
+
+        rule.onNodeWithContentDescription("Show filter bar")
+            .assertExists()
+            .performClick()
+        rule.onNodeWithContentDescription("Hide filter bar").assertExists()
+    }
 
     @Test
     fun focusedBlankTagsFieldShowsFrequentTagsAndClearKeepsThemVisible() {
