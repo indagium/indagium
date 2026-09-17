@@ -1,5 +1,6 @@
 @file:OptIn(
     androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
     androidx.compose.foundation.layout.ExperimentalLayoutApi::class,
 )
 
@@ -8,6 +9,7 @@ package com.indagium.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -32,13 +34,17 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
@@ -118,7 +124,7 @@ import kotlinx.coroutines.withContext
 // pills and fields — so reusing it would double-report those fields in the chip, and it omits
 // highlighters entirely (never mentions them at all). [filterBarResidualSummary] below is a
 // separate, narrower function that reports ONLY what this bar does not already show as a pill or a
-// field: levels, highlighters, excludeKw, pidTidFilter, and inert (wrong-mode) message rules.
+// field: levels, highlighters, excludeKw, and pidTidFilter.
 // Sequences are deliberately excluded from this list — see the "Honesty" section below.
 // FilterBarTest's negative test pins this: it fails the day someone "simplifies" this chip back
 // to describeFilter.
@@ -142,11 +148,12 @@ import kotlinx.coroutines.withContext
 // ── Honesty ──────────────────────────────────────────────────────────────────────────────────────
 // This bar shows tags, package prefixes (included/excluded), message rules (Tags-mode only, both
 // directions), and its own two input fields. It does NOT show `levels`, `highlighters`,
-// `excludeKw`, `pidTidFilter`, or KEYWORD-mode-authored message rules while in Tags mode (they're
-// preserved but inert — see MessageRule.mode's own doc). Whenever any of those is non-default,
+// `excludeKw`, or `pidTidFilter`. Whenever any of those is non-default,
 // [filterBarResidualSummary] renders a single clickable "+ …" chip summarizing them; clicking it
-// opens the full panel (an "ends an interaction" click — see the focus rule above). `sequences`
-// is a separate case: this bar never reports it at all, in a pill or in the chip — by design, not
+// opens the full panel (an "ends an interaction" click — see the focus rule above). Persisted
+// wrong-mode message rules are deliberately omitted: they are not shown in the panel and do not
+// affect the current result, so surfacing them here would only add noise. `sequences` is a
+// separate case: this bar never reports it at all, in a pill or in the chip — by design, not
 // oversight (the user does not want sequence info surfaced in this bar).
 
 /**
@@ -290,6 +297,67 @@ private const val FILTER_BAR_REOPEN_GUARD_MS = 250L
 // function's own `tagPopup`/`msgPopup`.
 private enum class FilterFieldPopup { NONE, PILLS }
 
+private const val FILTER_BAR_BADGE_POPUP_MAX_HEIGHT_DP = 220
+private const val FILTER_BAR_BADGE_POPUP_GAP_DP = 4
+
+private data class FilterBarBadgePopupPlacement(
+    val maxHeightDp: Int,
+    val openAbove: Boolean,
+    val gapPx: Int,
+)
+
+/**
+ * Keeps the pill dropdown inside the current window when the badge is near an edge. The popup
+ * still prefers the existing 220dp cap, but uses whichever side of the badge has more room and
+ * shrinks the scroll viewport when the available space is smaller.
+ */
+@Composable
+private fun filterBarBadgePopupPlacement(anchorTopPx: Int, anchorHeightPx: Int): FilterBarBadgePopupPlacement {
+    val density = LocalDensity.current
+    val windowHeightPx = LocalWindowInfo.current.containerSize.height
+    val gapPx = with(density) { FILTER_BAR_BADGE_POPUP_GAP_DP.dp.roundToPx() }
+    val anchorBottomPx = anchorTopPx + anchorHeightPx
+    val spaceBelowPx = (windowHeightPx - anchorBottomPx - gapPx).coerceAtLeast(1)
+    val spaceAbovePx = (anchorTopPx - gapPx).coerceAtLeast(1)
+    val largestAvailableSpacePx = maxOf(spaceBelowPx, spaceAbovePx)
+    val maxHeightDp = with(density) {
+        minOf(
+            FILTER_BAR_BADGE_POPUP_MAX_HEIGHT_DP.dp,
+            largestAvailableSpacePx.toDp(),
+        ).coerceAtLeast(1.dp).roundToPx()
+    }
+    val maxHeightPx = with(density) { FILTER_BAR_BADGE_POPUP_MAX_HEIGHT_DP.dp.roundToPx() }
+    return FilterBarBadgePopupPlacement(
+        maxHeightDp = maxHeightDp,
+        openAbove = spaceBelowPx < maxHeightPx && spaceAbovePx > spaceBelowPx,
+        gapPx = gapPx,
+    )
+}
+
+private class FilterBarBadgePopupPositionProvider(
+    private val gapPx: Int,
+    private val openAbove: Boolean,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: androidx.compose.ui.unit.IntRect,
+        windowSize: androidx.compose.ui.unit.IntSize,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        popupContentSize: androidx.compose.ui.unit.IntSize,
+    ): androidx.compose.ui.unit.IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val maxY = (windowSize.height - popupContentSize.height).coerceAtLeast(0)
+        val preferredY = if (openAbove) {
+            anchorBounds.top - popupContentSize.height - gapPx
+        } else {
+            anchorBounds.bottom + gapPx
+        }
+        return androidx.compose.ui.unit.IntOffset(
+            x = anchorBounds.left.coerceIn(0, maxX),
+            y = preferredY.coerceIn(0, maxY),
+        )
+    }
+}
+
 /**
  * Pure, testable summary of everything this bar does NOT already render as a pill or a field —
  * see the file header's "Honesty" section for the exact field list and why this is a separate
@@ -313,10 +381,6 @@ internal fun filterBarResidualSummary(filter: Filter): String {
     }
     if (filter.excludeKw.isNotBlank()) parts += "excl-kw=\"${filter.excludeKw}\""
     if (filter.pidTidFilter.isNotBlank()) parts += "pid/tid=${filter.pidTidFilter}"
-    // A rule authored in the OTHER mode is preserved but inert (MessageRule.mode's own doc) —
-    // never counted among the pills this bar renders for the CURRENT mode.
-    val inertRules = filter.messageRules.count { it.mode != filter.mode }
-    if (inertRules > 0) parts += "$inertRules inert rule${if (inertRules == 1) "" else "s"}"
     return parts.joinToString(" · ")
 }
 
@@ -327,6 +391,14 @@ internal fun filterBarPillCount(filter: Filter): Int =
     filter.pkgPrefixes.size + filter.excludePkgPrefixes.size +
         filter.activeTags.size + filter.excludeTags.size +
         filter.messageRules.count { it.mode == filter.mode }
+
+/**
+ * Candidate popups mirror FilterPanel's inline candidates: a dismiss callback must not hide them
+ * while either the anchor field or the candidate surface is still active. Focus/hover loss is the
+ * only state that should close the popup.
+ */
+internal fun filterBarCandidatesStayVisible(fieldFocused: Boolean, candidatesHovered: Boolean): Boolean =
+    fieldFocused || candidatesHovered
 
 // Async, cancellable wrapper around FilterPanel.kt's internal computeUnifiedCandidatesSync —
 // same "stale but usable" shape as that file's own private rememberUnifiedCandidates (FilterPanel.
@@ -493,14 +565,16 @@ private fun TagFieldBadge(
     LaunchedEffect(hasAny) { if (!hasAny && expanded) popupState = FilterFieldPopup.NONE }
     if (!hasAny) return
 
-    // Bug fix (popup covered the anchor): a Popup's `alignment` positions it WITHIN the anchor's
-    // own bounds, not below them — BottomStart pinned the popup's bottom-left to the badge's
-    // bottom-left, so it grew upward and covered whatever sat above the badge instead of appearing
-    // below it. Measuring the badge's own height here and using TopStart + a matching downward
-    // offset is what actually places the popup directly under the badge, with no magic constant.
+    // Capture the badge's window position so the shared placement helper can choose the roomier
+    // side of the badge and keep the popup inside the current window.
+    var badgeTopPx by remember { mutableStateOf(0) }
     var badgeHeightPx by remember { mutableStateOf(0) }
+    val popupPlacement = filterBarBadgePopupPlacement(badgeTopPx, badgeHeightPx)
 
-    Box(Modifier.onGloballyPositioned { coords -> badgeHeightPx = coords.size.height }) {
+    Box(Modifier.onGloballyPositioned {
+        badgeTopPx = it.positionInWindow().y.toInt()
+        badgeHeightPx = it.size.height
+    }) {
         DisableSelection {
             Row(
                 Modifier
@@ -525,23 +599,22 @@ private fun TagFieldBadge(
                 AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
             }
         }
-        // badgeHeightPx > 0 (i.e. the badge has actually been laid out and measured at least once)
-        // guards the first-frame case: without it, `expanded` could in principle turn true before
-        // onGloballyPositioned has ever fired, and offset = IntOffset(0, 0) would render the popup
-        // right back on top of the badge — exactly the bug this fix removes.
+        // badgeHeightPx > 0 guards the first-frame case: the placement helper needs real anchor
+        // geometry before the popup can be positioned safely.
         if (expanded && badgeHeightPx > 0) {
-            // Fix 2 (layout): TopStart + an offset equal to the badge's own measured height places
-            // the popup directly BELOW the badge at any font size — no more BottomStart-within-
-            // bounds misread and no hardcoded dp guess that only matched one row height.
+            // The shared provider flips above the badge when the bottom edge is tight and clamps
+            // the popup's content to the available viewport.
             Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, badgeHeightPx),
+                popupPositionProvider = FilterBarBadgePopupPositionProvider(
+                    gapPx = popupPlacement.gapPx,
+                    openAbove = popupPlacement.openAbove,
+                ),
                 properties = PopupProperties(focusable = false),
                 onDismissRequest = { dismiss(); refocusField() },
             ) {
                 DisableSelection {
                     BoundedScrollBoxDp(
-                        maxHeightDp = 220,
+                        maxHeightDp = popupPlacement.maxHeightDp,
                         modifier = Modifier
                             .width(320.dp)
                             .background(tc.p, FILTER_BAR_POPUP_SHAPE)
@@ -580,8 +653,8 @@ private fun TagFieldBadge(
  * The message field's trailing count badge — message-rule counts only (`N msg+`/`N msg−`),
  * mirroring [TagFieldBadge] in every other respect (styling, focus handling, dropdown mechanics).
  * Only current-mode rules count/render, same as the removed inline pills row used to filter
- * (`it.mode == filter.mode` — a rule authored in Regex mode is preserved but inert here, see the
- * file header's "Honesty" section on inert rules).
+ * (`it.mode == filter.mode` — a rule authored in Regex mode is preserved but inert here, see
+ * `MessageRule.mode` in the model).
  */
 @Composable
 private fun MessageFieldBadge(
@@ -621,12 +694,16 @@ private fun MessageFieldBadge(
     val incCount = rules.count { it.include }
     val excCount = rules.count { !it.include }
 
-    // Bug fix (popup covered the anchor) — see TagFieldBadge's own doc on badgeHeightPx above for
-    // why BottomStart-with-no-offset was wrong and why measuring the badge's height + TopStart is
-    // the fix.
+    // Same adaptive placement geometry as TagFieldBadge; both dropdowns must stay inside the
+    // current window and share the same maximum scroll viewport.
+    var badgeTopPx by remember { mutableStateOf(0) }
     var badgeHeightPx by remember { mutableStateOf(0) }
+    val popupPlacement = filterBarBadgePopupPlacement(badgeTopPx, badgeHeightPx)
 
-    Box(Modifier.onGloballyPositioned { coords -> badgeHeightPx = coords.size.height }) {
+    Box(Modifier.onGloballyPositioned {
+        badgeTopPx = it.positionInWindow().y.toInt()
+        badgeHeightPx = it.size.height
+    }) {
         DisableSelection {
             Row(
                 Modifier
@@ -647,16 +724,19 @@ private fun MessageFieldBadge(
         }
         // See TagFieldBadge's own doc on the badgeHeightPx > 0 guard — same first-frame concern.
         if (expanded && badgeHeightPx > 0) {
-            // Fix 2 (layout): TopStart + measured-height offset, same anchoring fix as TagFieldBadge.
+            // The shared provider flips above the badge when needed and clamps the popup height to
+            // the available space.
             Popup(
-                alignment = Alignment.TopStart,
-                offset = IntOffset(0, badgeHeightPx),
+                popupPositionProvider = FilterBarBadgePopupPositionProvider(
+                    gapPx = popupPlacement.gapPx,
+                    openAbove = popupPlacement.openAbove,
+                ),
                 properties = PopupProperties(focusable = false),
                 onDismissRequest = { dismiss(); refocusField() },
             ) {
                 DisableSelection {
                     BoundedScrollBoxDp(
-                        maxHeightDp = 220,
+                        maxHeightDp = popupPlacement.maxHeightDp,
                         modifier = Modifier
                             .width(320.dp)
                             .background(tc.p, FILTER_BAR_POPUP_SHAPE)
@@ -820,14 +900,22 @@ private fun TagAndPkgField(
         combinedTagCandidates(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit)
     }
 
-    // Matches FilterPanel.kt's clearTagSearch (FilterPanel.kt:1002-1007) exactly: a single-stage
-    // full clear, including hiding candidates — no "close the popup first, clear on a second
-    // Escape" staging (see the Escape handler below).
-    fun clear() {
+    // Escape is the panel's explicit cancel path: clear the query, clear the debounced search
+    // immediately, and hide candidates even though the field itself keeps focus. The field's
+    // clear button is deliberately separate below: FilterPanel.kt's clear-button handler only
+    // clears tagInput, so its focused inline candidate list remains visible and returns to the
+    // most-used tags after the normal search debounce.
+    fun clearTagSearch() {
         input = ""
         search = ""
         selectedIdx = -1
         showCandidates = false
+    }
+
+    fun clearTagInput() {
+        input = ""
+        selectedIdx = -1
+        if (filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = true
     }
 
     // Fix 2 (layout): wraps only the field itself — the Popup below is a zero-size overlay child
@@ -849,6 +937,7 @@ private fun TagAndPkgField(
             "pkg prefix or tag…",
             Modifier.fillMaxWidth()
                 .focusRequester(fr)
+                .testTag("filter-bar-tags-input")
                 .onFocusChanged { fieldFocused = it.isFocused }
                 .onPreviewKeyEvent { ev ->
                     if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -857,17 +946,11 @@ private fun TagAndPkgField(
                         Key.DirectionDown -> { selectedIdx = (selectedIdx + 1).coerceAtMost(candidates.lastIndex); true }
                         Key.DirectionUp -> { selectedIdx = (selectedIdx - 1).coerceAtLeast(-1); true }
                         Key.Escape -> {
-                            // PILLS has no panel equivalent at all (the panel's pill list is an
-                            // always-inline expandable section, not a focus-anchored popup), so
-                            // closing it on Escape is a bar-only accessibility affordance, not a
-                            // panel-parity concern. With PILLS not open, this is a single-stage
-                            // full clear — matches FilterPanel.kt's clearTagSearch exactly, no
-                            // "close the candidates popup first, clear on a second Escape" staging.
-                            if (popupState == FilterFieldPopup.PILLS) {
-                                popupState = FilterFieldPopup.NONE
-                            } else {
-                                clear()
-                            }
+                            // The pills popup is a bar-only presentation detail. Close it as UI
+                            // cleanup, then perform the panel's actual Escape behavior (clear and
+                            // hide the candidate list).
+                            if (popupState == FilterFieldPopup.PILLS) popupState = FilterFieldPopup.NONE
+                            clearTagSearch()
                             true
                         }
                         Key.DirectionRight -> {
@@ -899,7 +982,8 @@ private fun TagAndPkgField(
                         else -> false
                     }
                 },
-            onClear = { clear(); runCatching { fr.requestFocus() } },
+            onClear = { clearTagInput(); runCatching { fr.requestFocus() } },
+            clearButtonModifier = Modifier.testTag("filter-bar-tags-clear"),
             flat = true, // Fix 1: this bar's own row carries the chrome, matching SearchBar.kt.
         )
         // popupState != PILLS is the mutual-exclusion check — see FilterFieldPopup's own doc for
@@ -913,7 +997,14 @@ private fun TagAndPkgField(
                 alignment = Alignment.TopStart,
                 offset = IntOffset(0, fieldHeightPx),
                 properties = PopupProperties(focusable = false),
-                onDismissRequest = { showCandidates = false },
+                // A non-focusable Popup can receive an outside-dismiss callback while the anchor
+                // field is still focused (for example when the user clicks back into the field).
+                // The panel keeps its inline candidates visible in that state, so only dismiss
+                // when neither the field nor the popup content is still active; the focus/hover
+                // effect below handles the normal focus-loss path.
+                onDismissRequest = {
+                    if (!filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = false
+                },
             ) {
                 DisableSelection {
                     Box(
@@ -923,13 +1014,14 @@ private fun TagAndPkgField(
                             .background(tc.p, CORNER_SM)
                             .border(1.dp, tc.br, CORNER_SM),
                     ) {
-                        ScrollableItems(
-                            candidates.size,
-                            maxDp = 220,
-                            scrollToIndex = selectedIdx,
-                            modifier = Modifier
-                                .onPointerEvent(PointerEventType.Enter) { candidatesHovered = true }
-                                .onPointerEvent(PointerEventType.Exit) { candidatesHovered = false },
+                            ScrollableItems(
+                                candidates.size,
+                                maxDp = 220,
+                                scrollToIndex = selectedIdx,
+                                modifier = Modifier
+                                    .testTag("filter-bar-tags-candidates")
+                                    .onPointerEvent(PointerEventType.Enter) { candidatesHovered = true }
+                                    .onPointerEvent(PointerEventType.Exit) { candidatesHovered = false },
                         ) {
                             candidates.forEachIndexed { idx, (value, isPkg) ->
                                 val isRowSelected = idx == selectedIdx
@@ -939,7 +1031,8 @@ private fun TagAndPkgField(
                                 // a pkg-prefix candidate's row commits on click; a plain-tag candidate's
                                 // row does NOT — only its own +/- boxes do.
                                 HoverBox(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                        .testTag("filter-bar-tags-candidate-$idx"),
                                     baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                     hoverBg = tc.hv,
                                     onClick = if (isPkg) {
@@ -986,6 +1079,7 @@ private fun TagAndPkgField(
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
                                                 Modifier.size(20.dp)
+                                                    .testTag("filter-bar-tags-candidate-$idx-include")
                                                     .background(if (isIncluded) pkgTagColor.copy(.2f) else if (incKbd) pkgTagColor.copy(.1f) else Color.Transparent, CORNER_SM)
                                                     .border(1.dp, if (isIncluded || incKbd) pkgTagColor else tc.br, CORNER_SM)
                                                     .clickable {
@@ -999,6 +1093,7 @@ private fun TagAndPkgField(
                                             val exKbd = isRowSelected && selectedAction == 1
                                             Box(
                                                 Modifier.size(20.dp)
+                                                    .testTag("filter-bar-tags-candidate-$idx-exclude")
                                                     .background(if (isExcluded) DANGER_RED.copy(.2f) else if (exKbd) DANGER_RED.copy(.1f) else Color.Transparent, CORNER_SM)
                                                     .border(1.dp, if (isExcluded || exKbd) DANGER_RED else tc.br, CORNER_SM)
                                                     .clickable {
@@ -1057,6 +1152,7 @@ private fun TagAndPkgField(
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
                                                 Modifier.size(20.dp)
+                                                    .testTag("filter-bar-tags-candidate-$idx-include")
                                                     .background(if (isIncluded) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
                                                     .border(1.dp, if (isIncluded || incKbd) tc.ac else tc.br, CORNER_SM)
                                                     .clickable {
@@ -1068,6 +1164,7 @@ private fun TagAndPkgField(
                                             val exKbd = isRowSelected && selectedAction == 1
                                             Box(
                                                 Modifier.size(20.dp)
+                                                    .testTag("filter-bar-tags-candidate-$idx-exclude")
                                                     .background(if (isExcluded) DANGER_RED.copy(.2f) else if (exKbd) DANGER_RED.copy(.1f) else Color.Transparent, CORNER_SM)
                                                     .border(1.dp, if (isExcluded || exKbd) DANGER_RED else tc.br, CORNER_SM)
                                                     .clickable {
@@ -1137,7 +1234,7 @@ private fun MessageRuleField(
     LaunchedEffect(input) {
         val snap = input
         delay(if (tab.largeFileMode) 350 else 120)
-        if (snap == input) {
+        if (snap == input && snap != lastSent) {
             search = input
             lastSent = input
             actions.onSetKwInTag(input)
@@ -1162,7 +1259,6 @@ private fun MessageRuleField(
     LaunchedEffect(msgRuleScopeOpen) {
         if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
     }
-
     val candidates = rememberBarUnifiedCandidates(tab, filter, search)
 
     // computeRelevantScopeTagsSync is `internal` in FilterPanel.kt; its own composable wrapper
@@ -1194,6 +1290,17 @@ private fun MessageRuleField(
         runCatching { fr.requestFocus() }
     }
 
+    // Matches FilterPanel.kt's main message-field clear button. Clearing the discovery query must
+    // not discard a pending rule or close its scope chooser; Escape and the chooser's explicit
+    // close affordances remain the cancellation path.
+    fun clearMessageInput() {
+        input = ""
+        search = ""
+        lastSent = ""
+        actions.onSetKwInTag("")
+        if (filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = true
+    }
+
     // Matches FilterPanel.kt's openMessageRuleScopeChooser (FilterPanel.kt:952-958) exactly.
     fun openMessageRuleScopeChooser(include: Boolean, pattern: String, regex: Boolean, target: RuleTarget) {
         pendingMessageRule = PendingMessageRuleDraft(include, pattern, regex, target)
@@ -1213,6 +1320,10 @@ private fun MessageRuleField(
         msgRuleScopeSelectedIdx = 0
         selectedIdx = -1
         selectedAction = 0
+        // The chooser temporarily hides discovery candidates. Keep them available after a
+        // scoped commit when the main field still owns focus, matching the panel's preserved
+        // discovery query and making a second include/exclude action immediately reachable.
+        if (input.isNotBlank()) showCandidates = true
         runCatching { fr.requestFocus() }
     }
 
@@ -1253,6 +1364,7 @@ private fun MessageRuleField(
                     if (filter.kwInTagRegex) "/pattern/…" else "search in messages…",
                     Modifier.fillMaxWidth()
                         .focusRequester(fr)
+                        .testTag("filter-bar-message-input")
                         .onFocusChanged { fieldFocused = it.isFocused }
                         .onPreviewKeyEvent { ev ->
                             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -1260,6 +1372,25 @@ private fun MessageRuleField(
                             // Right only get consumed when there's a selected candidate to act on
                             // (otherwise they're normal cursor movement in the text field).
                             val hasActionCandidate = candidates.getOrNull(selectedIdx) != null
+                            if (msgRuleScopeOpen) {
+                                return@onPreviewKeyEvent when (ev.key) {
+                                    Key.DirectionDown -> {
+                                        msgRuleScopeSelectedIdx =
+                                            (msgRuleScopeSelectedIdx + 1).coerceAtMost(msgRuleScopeOptions.lastIndex)
+                                        true
+                                    }
+                                    Key.DirectionUp -> {
+                                        msgRuleScopeSelectedIdx = (msgRuleScopeSelectedIdx - 1).coerceAtLeast(0)
+                                        true
+                                    }
+                                    Key.Enter, Key.NumPadEnter -> {
+                                        msgRuleScopeOptions.getOrNull(msgRuleScopeSelectedIdx)?.let { commitPendingMessageRule(it) }
+                                        true
+                                    }
+                                    Key.Escape -> { cancelPendingMessageRule(); true }
+                                    else -> false
+                                }
+                            }
                             if (!messageRuleInputConsumesKey(ev.key, hasActionCandidate)) return@onPreviewKeyEvent false
                             when (ev.key) {
                                 Key.DirectionDown -> { selectedIdx = (selectedIdx + 1).coerceAtMost(candidates.lastIndex); true }
@@ -1267,16 +1398,11 @@ private fun MessageRuleField(
                                 Key.DirectionLeft -> { selectedAction = 0; true }
                                 Key.DirectionRight -> { selectedAction = 1; true }
                                 Key.Escape -> {
-                                    // PILLS has no panel equivalent (see TagAndPkgField's own
-                                    // Escape doc) — closing it first is a bar-only affordance. With
-                                    // PILLS not open this is a single-stage full clear, matching
-                                    // FilterPanel.kt's cancelPendingMessageRule exactly (including
-                                    // cancelling any pending scope-chooser draft).
-                                    if (popupState == FilterFieldPopup.PILLS) {
-                                        popupState = FilterFieldPopup.NONE
-                                    } else {
-                                        cancelPendingMessageRule()
-                                    }
+                                    // Close the bar-only pills popup as UI cleanup, then perform
+                                    // the panel's Escape behavior: cancel the pending scope draft
+                                    // and clear the discovery query.
+                                    if (popupState == FilterFieldPopup.PILLS) popupState = FilterFieldPopup.NONE
+                                    cancelPendingMessageRule()
                                     true
                                 }
                                 Key.Enter, Key.NumPadEnter -> {
@@ -1297,7 +1423,15 @@ private fun MessageRuleField(
                                 else -> false
                             }
                         },
-                    onClear = { cancelPendingMessageRule() },
+                    onClear = { clearMessageInput(); runCatching { fr.requestFocus() } },
+                    // A focusable chooser is a separate native popup, so keep the visible clear
+                    // affordance in a field-aligned overlay while it is open. The underlying
+                    // button remains available for the ordinary (no chooser) state.
+                    clearButtonModifier = if (msgRuleScopeOpen) {
+                        Modifier.testTag("filter-bar-message-clear-covered")
+                    } else {
+                        Modifier.testTag("filter-bar-message-clear")
+                    },
                     flat = true, // Fix 1: this bar's own row carries the chrome, matching SearchBar.kt.
                 )
                 // !msgRuleScopeOpen matches FilterPanel.kt:1596's own gate — the scope chooser and
@@ -1309,7 +1443,12 @@ private fun MessageRuleField(
                         alignment = Alignment.TopStart,
                         offset = IntOffset(0, fieldHeightPx),
                         properties = PopupProperties(focusable = false),
-                        onDismissRequest = { showCandidates = false },
+                        // Preserve the panel's focused-field behavior if Popup asks to dismiss
+                        // while the anchor field is still active. Focus/hover changes handle the
+                        // ordinary dismissal path.
+                        onDismissRequest = {
+                            if (!filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = false
+                        },
                     ) {
                         DisableSelection {
                             Box(
@@ -1324,6 +1463,7 @@ private fun MessageRuleField(
                                     maxDp = 220,
                                     scrollToIndex = selectedIdx,
                                     modifier = Modifier
+                                        .testTag("filter-bar-message-candidates")
                                         .onPointerEvent(PointerEventType.Enter) { candidatesHovered = true }
                                         .onPointerEvent(PointerEventType.Exit) { candidatesHovered = false },
                                 ) {
@@ -1351,7 +1491,8 @@ private fun MessageRuleField(
                                         // Fix 3 (panel parity, FilterPanel.kt:1624-1683): the row
                                         // itself does NOT commit on click — only the +/- boxes do.
                                         HoverBox(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                                .testTag("filter-bar-message-candidate-$idx"),
                                             baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                             hoverBg = tc.hv,
                                         ) {
@@ -1399,6 +1540,7 @@ private fun MessageRuleField(
                                                 val incKbd = isRowSelected && selectedAction == 0
                                                 Box(
                                                     Modifier.size(20.dp)
+                                                        .testTag("filter-bar-message-candidate-$idx-include")
                                                         .background(if (isIncluded) tc.ac.copy(.2f) else if (incKbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
                                                         .border(1.dp, if (isIncluded || incKbd) tc.ac else tc.br, CORNER_SM)
                                                         .clickable { addMessageRuleCandidate(true, candidate) },
@@ -1407,6 +1549,7 @@ private fun MessageRuleField(
                                                 val exKbd = isRowSelected && selectedAction == 1
                                                 Box(
                                                     Modifier.size(20.dp)
+                                                        .testTag("filter-bar-message-candidate-$idx-exclude")
                                                         .background(if (isExcluded) DANGER_RED.copy(.2f) else if (exKbd) DANGER_RED.copy(.1f) else Color.Transparent, CORNER_SM)
                                                         .border(1.dp, if (isExcluded || exKbd) DANGER_RED else tc.br, CORNER_SM)
                                                         .clickable { addMessageRuleCandidate(false, candidate) },
@@ -1425,28 +1568,56 @@ private fun MessageRuleField(
                 // label/"All" row/search field/option list, same commit semantics — but rendered as
                 // a Popup anchored to this field instead of an inline block, so opening it doesn't
                 // change the bar's own height (see the file header's "Popups, not inline dropdowns"
-                // section). `focusable = true` (unlike the read-only candidate/pills popups above)
-                // because this popup hosts its own editable InlineField that must receive real
-                // keyboard focus and input — same precedent as e.g. AnnotationPanel.kt's
-                // CreateDiagramPopup/FilterPanel.kt:3105's SavedFilterOptionsMenu.
+                // section). This popup remains focusable because it hosts the editable scope
+                // field; outside dismissal is explicitly disabled so the pending draft survives
+                // clicks elsewhere.
                 // fieldHeightPx > 0 guards the first-frame case — see TagAndPkgField's own doc.
                 if (msgRuleScopeOpen && fieldHeightPx > 0) {
                     Popup(
                         alignment = Alignment.TopStart,
-                        offset = IntOffset(0, fieldHeightPx),
-                        properties = PopupProperties(focusable = true),
+                        // Start at the field itself so the focusable popup can own the clear
+                        // affordance as well as the chooser. The transparent first row preserves
+                        // the chooser's compact visual position below the field.
+                        offset = IntOffset(0, 0),
+                        // The panel's inline scope chooser cannot be dismissed by clicking
+                        // outside it. Keep the pending draft until its X button, Escape/back, or
+                        // a scope commit explicitly closes it.
+                        properties = PopupProperties(
+                            focusable = true,
+                            dismissOnClickOutside = false,
+                        ),
                         onDismissRequest = { cancelPendingMessageRule() },
                     ) {
                         DisableSelection {
                             Column(
-                                Modifier
-                                    .widthIn(min = 240.dp)
-                                    .width(fieldWidthDp)
-                                    .background(tc.p, FILTER_BAR_POPUP_SHAPE)
-                                    .border(1.dp, tc.br, FILTER_BAR_POPUP_SHAPE)
-                                    .padding(horizontal = 8.dp, vertical = 6.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                                Modifier.width(fieldWidthDp),
                             ) {
+                                Box(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(with(density) { fieldHeightPx.toDp() }),
+                                    contentAlignment = Alignment.CenterEnd,
+                                ) {
+                                    SquareIconButton(
+                                        "×",
+                                        fontSize = 12.sp,
+                                        onClick = { clearMessageInput(); runCatching { fr.requestFocus() } },
+                                        modifier = Modifier
+                                            .padding(end = 7.dp)
+                                            .testTag("filter-bar-message-clear"),
+                                        size = 16.dp,
+                                    )
+                                }
+                                Column(
+                                    Modifier
+                                        .widthIn(min = 240.dp)
+                                        .width(fieldWidthDp)
+                                        .background(tc.p, FILTER_BAR_POPUP_SHAPE)
+                                        .border(1.dp, tc.br, FILTER_BAR_POPUP_SHAPE)
+                                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                                        .testTag("filter-bar-message-scope-chooser"),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
                                 Row(
                                     Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -1460,7 +1631,12 @@ private fun MessageRuleField(
                                         fontWeight = FontWeight.SemiBold,
                                         modifier = Modifier.weight(1f),
                                     )
-                                    SquareIconButton("×", fontSize = 12.sp, onClick = { cancelPendingMessageRule() })
+                                    SquareIconButton(
+                                        "×",
+                                        fontSize = 12.sp,
+                                        onClick = { cancelPendingMessageRule() },
+                                        modifier = Modifier.testTag("filter-bar-message-scope-cancel"),
+                                    )
                                 }
                                 pendingMessageRule?.let { pending ->
                                     FullTextHint(pendingMessageRulePatternLabel(pending)) { onTextLayout ->
@@ -1477,7 +1653,8 @@ private fun MessageRuleField(
                                     }
                                 }
                                 HoverBox(
-                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                        .testTag("filter-bar-message-scope-all"),
                                     baseBg = if (msgRuleScopeSelectedIdx == 0) tc.abg else Color.Transparent,
                                     hoverBg = tc.hv,
                                     onClick = { commitPendingMessageRule(messageRuleAllScope()) },
@@ -1499,6 +1676,7 @@ private fun MessageRuleField(
                                     { msgRuleScopeSearch = it; msgRuleScopeSelectedIdx = 0 },
                                     "scope tag or prefix…",
                                     Modifier.fillMaxWidth()
+                                        .testTag("filter-bar-message-scope-input")
                                         .focusRequester(msgRuleScopeFr)
                                         .onPreviewKeyEvent { ev ->
                                             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
@@ -1530,7 +1708,8 @@ private fun MessageRuleField(
                                     searchedMsgRuleScopeOptions.forEachIndexed { idx, scope ->
                                         val optionIndex = idx + 1
                                         HoverBox(
-                                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                            modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
+                                                .testTag("filter-bar-message-scope-option-$optionIndex"),
                                             baseBg = if (msgRuleScopeSelectedIdx == optionIndex) tc.abg else Color.Transparent,
                                             hoverBg = tc.hv,
                                             onClick = { commitPendingMessageRule(scope) },
@@ -1572,6 +1751,7 @@ private fun MessageRuleField(
                                         }
                                     }
                                 }
+                                }
                             }
                         }
                     }
@@ -1603,16 +1783,20 @@ private fun RegexModeBarContent(
     var fieldFocused by remember { mutableStateOf(false) }
     var historyHovered by remember { mutableStateOf(false) }
     var showHistory by remember { mutableStateOf(false) }
+    var historyButtonOpen by remember { mutableStateOf(false) }
+    var lastHistoryDismissAt by remember { mutableStateOf(0L) }
     var selectedIdx by remember { mutableStateOf(-1) }
     var fieldWidthDp by remember { mutableStateOf(0.dp) }
     // Bug fix (popup covered the field) — see TagAndPkgField's own fieldHeightPx doc above.
     var fieldHeightPx by remember { mutableStateOf(0) }
+    var regexEditorOpen by remember(tab.id) { mutableStateOf(false) }
+    var regexEditorText by remember(tab.id) { mutableStateOf("") }
     val density = LocalDensity.current
 
     LaunchedEffect(display) {
         val snap = display
         delay(if (tab.largeFileMode) 350 else 150)
-        if (snap == display) { lastSent = display; actions.onSetKw(display) }
+        if (snap == display && snap != lastSent) { lastSent = display; actions.onSetKw(display) }
     }
     LaunchedEffect(filter.kwText) { if (filter.kwText != lastSent) display = filter.kwText }
     LaunchedEffect(fieldFocused, historyHovered) {
@@ -1620,13 +1804,19 @@ private fun RegexModeBarContent(
             showHistory = true
         } else {
             delay(100)
-            if (!fieldFocused && !historyHovered) showHistory = false
+            if (!fieldFocused && !historyHovered) {
+                showHistory = false
+                historyButtonOpen = false
+            }
         }
     }
 
     val matchingHistory = remember(model.regexHistory, display) {
         if (display.isBlank()) model.regexHistory else model.regexHistory.filter { it.contains(display, ignoreCase = true) }
     }
+    // The explicit button opens the complete recent-history list, even when the field currently
+    // contains a pattern that would narrow the autocomplete suggestions to one entry.
+    val visibleHistory = if (historyButtonOpen) model.regexHistory else matchingHistory
     val invalid = display.isNotBlank() && !isValidRegexPattern(display)
 
     // Commit contract (file header / AppState.rememberRegexPattern's own doc): Enter or an
@@ -1639,6 +1829,20 @@ private fun RegexModeBarContent(
         actions.onSetKw(pattern)
         actions.onRememberRegexPattern(pattern)
         showHistory = false
+        historyButtonOpen = false
+        selectedIdx = -1
+    }
+
+    // The panel applies an explicit clear immediately, rather than waiting for the normal typing
+    // debounce. Leave the last-sent sentinel alone until the normal display effect settles, just
+    // as the panel does; changing it before AppState publishes the clear could let an older
+    // filter.kwText briefly re-seed the field.
+    fun clearRegexSearch() {
+        display = ""
+        lastSent = ""
+        actions.onSetKw("")
+        showHistory = false
+        historyButtonOpen = false
         selectedIdx = -1
     }
 
@@ -1658,62 +1862,87 @@ private fun RegexModeBarContent(
                 segmentFontSize = 10.sp,
                 segmentHorizontalPadding = 6.dp,
             )
+            TooltipArea(tooltip = { ToolbarTooltip("Regex search history") }) {
+                SquareIconButton(
+                    "↺",
+                    fontSize = 15.sp,
+                    onClick = {
+                        val now = System.currentTimeMillis()
+                        if (now - lastHistoryDismissAt >= FILTER_BAR_REOPEN_GUARD_MS) {
+                            historyButtonOpen = !historyButtonOpen
+                            showHistory = historyButtonOpen
+                            selectedIdx = -1
+                            runCatching { fr.requestFocus() }
+                        }
+                    },
+                    modifier = Modifier.testTag("filter-bar-regex-history-button"),
+                    size = 22.dp,
+                    enabled = model.regexHistory.isNotEmpty(),
+                )
+            }
             Box(
                 Modifier.weight(1f)
+                    .then(if (invalid) Modifier.testTag("filter-bar-regex-invalid") else Modifier)
                     .onGloballyPositioned { coords ->
                         fieldWidthDp = with(density) { coords.size.width.toDp() }
                         fieldHeightPx = coords.size.height
                     },
             ) {
-                InlineField(
-                    display,
-                    { display = it; selectedIdx = -1 },
-                    "visible log row regex…",
-                    Modifier.fillMaxWidth()
-                        .focusRequester(fr)
-                        .onFocusChanged { fieldFocused = it.isFocused }
-                        .border(if (invalid) 1.dp else 0.dp, if (invalid) DANGER_RED else Color.Transparent, CORNER_SM)
-                        .onPreviewKeyEvent { ev ->
-                            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            when (ev.key) {
-                                Key.DirectionDown -> { selectedIdx = (selectedIdx + 1).coerceAtMost(matchingHistory.lastIndex); true }
-                                Key.DirectionUp -> { selectedIdx = (selectedIdx - 1).coerceAtLeast(-1); true }
-                                // The panel's own KEYWORD/regex field (FilterPanel.kt's kwDisplay,
-                                // :1334-1341) has no Escape handling at all — no revert-to-committed-
-                                // value stage and no "return to the log" stage. This used to add
-                                // both; per explicit user direction, identical-to-panel now wins over
-                                // that earlier design note. The only thing left is closing this bar's
-                                // own history dropdown (no panel equivalent to be unfaithful to,
-                                // same as PILLS elsewhere in this file) — with it closed, Escape is
-                                // simply not consumed here, same as the panel.
-                                Key.Escape -> {
-                                    if (showHistory && matchingHistory.isNotEmpty()) {
-                                        showHistory = false
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    InlineField(
+                        display,
+                        { display = it; historyButtonOpen = false; selectedIdx = -1 },
+                        "visible log row regex…",
+                        Modifier.weight(1f)
+                            .focusRequester(fr)
+                            .testTag("filter-bar-regex-input")
+                            .onFocusChanged { fieldFocused = it.isFocused }
+                            .border(if (invalid) 1.dp else 0.dp, if (invalid) DANGER_RED else Color.Transparent, CORNER_SM)
+                            .onPreviewKeyEvent { ev ->
+                                if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                                when (ev.key) {
+                                    Key.DirectionDown -> { selectedIdx = (selectedIdx + 1).coerceAtMost(visibleHistory.lastIndex); true }
+                                    Key.DirectionUp -> { selectedIdx = (selectedIdx - 1).coerceAtLeast(-1); true }
+                                    Key.Escape -> {
+                                        clearRegexSearch()
                                         true
-                                    } else {
-                                        false
                                     }
-                                }
-                                Key.Enter, Key.NumPadEnter -> {
-                                    val picked = matchingHistory.getOrNull(selectedIdx)
-                                    if (picked != null) {
-                                        commit(picked)
-                                    } else if (display.isNotBlank()) {
-                                        commit(display)
-                                    } else {
-                                        return@onPreviewKeyEvent false
+                                    Key.Enter, Key.NumPadEnter -> {
+                                        val picked = visibleHistory.getOrNull(selectedIdx)
+                                        if (picked != null) {
+                                            commit(picked)
+                                        } else if (display.isNotBlank()) {
+                                            commit(display)
+                                        } else {
+                                            return@onPreviewKeyEvent false
+                                        }
+                                        runCatching { fr.requestFocus() } // Enter continues — stays in the field.
+                                        true
                                     }
-                                    runCatching { fr.requestFocus() } // Enter continues — stays in the field.
-                                    true
+                                    else -> false
                                 }
-                                else -> false
-                            }
+                            },
+                        onClear = { clearRegexSearch(); runCatching { fr.requestFocus() } },
+                        clearButtonModifier = Modifier.testTag("filter-bar-regex-clear"),
+                        flat = true, // Fix 1: this bar's own row carries the chrome, matching SearchBar.kt.
+                    )
+                    SquareIconButton(
+                        "⤢",
+                        fontSize = 12.sp,
+                        onClick = {
+                            regexEditorText = display
+                            regexEditorOpen = true
                         },
-                    onClear = { display = ""; runCatching { fr.requestFocus() } },
-                    flat = true, // Fix 1: this bar's own row carries the chrome, matching SearchBar.kt.
-                )
+                        modifier = Modifier.testTag("filter-bar-regex-expand"),
+                        size = 16.dp,
+                    )
+                }
                 // fieldHeightPx > 0 guards the first-frame case — see TagAndPkgField's own doc.
-                if (showHistory && matchingHistory.isNotEmpty() && fieldHeightPx > 0) {
+                if (showHistory && visibleHistory.isNotEmpty() && fieldHeightPx > 0) {
                     // Fix 2 (layout): TopStart + the field's own measured height as the offset,
                     // same treatment as the tag/message candidate popups above — BottomStart pinned
                     // within the anchor's own bounds and grew upward, covering the field; no more
@@ -1722,7 +1951,11 @@ private fun RegexModeBarContent(
                         alignment = Alignment.TopStart,
                         offset = IntOffset(0, fieldHeightPx),
                         properties = PopupProperties(focusable = false),
-                        onDismissRequest = { showHistory = false },
+                        onDismissRequest = {
+                            showHistory = false
+                            historyButtonOpen = false
+                            lastHistoryDismissAt = System.currentTimeMillis()
+                        },
                     ) {
                         DisableSelection {
                             Column(
@@ -1731,11 +1964,12 @@ private fun RegexModeBarContent(
                                     .width(fieldWidthDp)
                                     .background(tc.p, CORNER_SM)
                                     .border(1.dp, tc.br, CORNER_SM)
+                                    .testTag("filter-bar-regex-history")
                                     .onPointerEvent(PointerEventType.Enter) { historyHovered = true }
                                     .onPointerEvent(PointerEventType.Exit) { historyHovered = false },
                             ) {
                                 BoundedScrollBoxDp(maxHeightDp = 200) {
-                                    matchingHistory.forEachIndexed { idx, pattern ->
+                                    visibleHistory.forEachIndexed { idx, pattern ->
                                         val isRowSelected = idx == selectedIdx
                                         HoverBox(
                                             modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
@@ -1775,5 +2009,20 @@ private fun RegexModeBarContent(
             // message field, so this is simply the last element here).
             FilterBarResidualChip(filter, actions, logFocusRequester)
         }
+    }
+
+    // Same expanded editor as FilterPanel.kt, with bar-local synchronous Apply state semantics.
+    if (regexEditorOpen) {
+        RegexSearchEditor(
+            text = regexEditorText,
+            onTextChange = { regexEditorText = it },
+            onApply = {
+                display = regexEditorText
+                lastSent = regexEditorText
+                actions.onSetKw(regexEditorText)
+                regexEditorOpen = false
+            },
+            onDismiss = { regexEditorOpen = false },
+        )
     }
 }

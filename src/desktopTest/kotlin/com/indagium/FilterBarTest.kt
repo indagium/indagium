@@ -9,6 +9,7 @@ import com.indagium.model.MessageRule
 import com.indagium.model.RuleTarget
 import com.indagium.model.SequenceDef
 import com.indagium.ui.combinedTagCandidates
+import com.indagium.ui.filterBarCandidatesStayVisible
 import com.indagium.ui.filterBarPillCount
 import com.indagium.ui.filterBarResidualSummary
 import kotlin.test.Test
@@ -65,6 +66,13 @@ class FilterBarTest {
         )
 
         assertTrue(result.isNotEmpty(), "a blank search with non-empty tagUsage must still propose most-used tags")
+    }
+
+    @Test
+    fun candidatePopupStaysVisibleWhileFieldOrPopupIsActive() {
+        assertTrue(filterBarCandidatesStayVisible(fieldFocused = true, candidatesHovered = false))
+        assertTrue(filterBarCandidatesStayVisible(fieldFocused = false, candidatesHovered = true))
+        assertFalse(filterBarCandidatesStayVisible(fieldFocused = false, candidatesHovered = false))
     }
 
     @Test
@@ -179,15 +187,16 @@ class FilterBarTest {
     }
 
     @Test
-    fun inertKeywordModeRulesAreCountedWhileInTagsMode() {
+    fun inertKeywordModeRulesAreNotReportedInTagsMode() {
         // A rule authored while the filter was in Regex mode is preserved but inert in Tags mode
-        // (MessageRule.mode's own doc) — never rendered as a pill, but still worth surfacing.
+        // (MessageRule.mode's own doc). It is not rendered by the panel and does not affect the
+        // current result, so the bar must not surface it either.
         val filter = Filter(
             mode = FilterMode.TAGS,
             messageRules = listOf(MessageRule(id = "r1", include = true, pattern = "x", mode = FilterMode.KEYWORD)),
         )
 
-        assertEquals("1 inert rule", filterBarResidualSummary(filter))
+        assertEquals("", filterBarResidualSummary(filter))
     }
 
     @Test
