@@ -1,5 +1,12 @@
 package com.indagium
 
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -248,7 +255,7 @@ class FilterBarUiTest {
     }
 
     @Test
-    fun regexClearAndEscapeApplySynchronouslyAndExpandedEditorHonorsApplyCancel() {
+    fun regexClearAndEscapeApplySynchronouslyAndLineBreaksAreStripped() {
         var latestFilter = Filter(mode = FilterMode.KEYWORD, kwText = "initial")
         installBar(latestFilter) { latestFilter = it }
 
@@ -260,17 +267,11 @@ class FilterBarUiTest {
         assertEquals("", latestFilter.kwText, "regex Escape must update the filter without debounce")
         rule.onNodeWithTag(REGEX_HISTORY).assertDoesNotExist()
 
-        rule.onNodeWithTag(REGEX_EXPAND).performClick()
-        rule.onNodeWithTag(REGEX_EDITOR_INPUT).assertExists().performTextInput("cancelled")
-        rule.onNodeWithTag(REGEX_EDITOR_CANCEL).performClick()
-        assertEquals("", latestFilter.kwText)
-        rule.onNodeWithTag(REGEX_EDITOR_DIALOG).assertDoesNotExist()
-
-        rule.onNodeWithTag(REGEX_EXPAND).performClick()
-        rule.onNodeWithTag(REGEX_EDITOR_INPUT).performTextInput("applied")
-        rule.onNodeWithTag(REGEX_EDITOR_APPLY).performClick()
-        assertEquals("applied", latestFilter.kwText)
-        rule.onNodeWithTag(REGEX_EDITOR_DIALOG).assertDoesNotExist()
+        // The field wraps (multi-line) but a pasted line break must not end up in the pattern.
+        rule.onNodeWithTag(REGEX_INPUT).performTextInput("a\nb")
+        rule.onNodeWithTag(REGEX_INPUT).performKeyInput { pressKey(Key.Enter) }
+        assertEquals("ab", latestFilter.kwText)
+        rule.onNodeWithTag(REGEX_EXPAND).assertDoesNotExist()
     }
 
     @Test
@@ -297,6 +298,26 @@ class FilterBarUiTest {
     }
 
     @Test
+    fun leavingTheRegexFieldRecordsThePatternButAQuickRefocusDoesNot() {
+        val remembered = mutableListOf<String>()
+        installBar(Filter(mode = FilterMode.KEYWORD), onRememberRegex = { remembered += it }, onFilterChanged = {})
+
+        // The ".*" button takes focus and hands it straight back — must not record "main".
+        rule.onNodeWithTag(REGEX_INPUT).performTextInput("main")
+        rule.onNodeWithTag(REGEX_SNIPPETS_BUTTON).performClick()
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.waitForIdle()
+        assertEquals(emptyList(), remembered)
+
+        // Clicking away (e.g. a log row) without pressing Enter records the pattern.
+        rule.onNodeWithTag(REGEX_SNIPPETS_BUTTON).performClick() // close the menu again
+        rule.onNodeWithTag(OUTSIDE).performClick()
+        rule.mainClock.advanceTimeBy(1_000)
+        rule.waitForIdle()
+        assertEquals(listOf("main"), remembered)
+    }
+
+    @Test
     fun regexHistoryButtonOpensTheFullHistoryList() {
         var latestFilter = Filter(mode = FilterMode.KEYWORD, kwText = "initial")
         installBar(latestFilter, onFilterChanged = { latestFilter = it })
@@ -314,7 +335,7 @@ class FilterBarUiTest {
         initialFilter: Filter,
         logData: List<LogEntry> = emptyList(),
         model: FilterBarModel = TEST_MODEL,
-        onRememberRegex: () -> Unit = {},
+        onRememberRegex: (String) -> Unit = {},
         onFilterChanged: (Filter) -> Unit,
     ) {
         val initialTab = testTab(initialFilter, logData)
@@ -324,6 +345,7 @@ class FilterBarUiTest {
                 onFilterChanged(next)
                 tab = tab.copy(filter = next)
             }
+            Column {
             FilterBar(
                 tab = tab,
                 model = model,
@@ -369,12 +391,15 @@ class FilterBarUiTest {
                             } + next)))
                     },
                     onRemoveMessageRule = {},
-                    onRememberRegexPattern = { onRememberRegex() },
+                    onRememberRegexPattern = { onRememberRegex(it) },
                     onClearRegexHistory = {},
                     onOpenFilterPanel = {},
                 ),
                 logFocusRequester = null,
             )
+            // Something outside the bar to click, standing in for a log row.
+            Box(Modifier.size(20.dp).testTag(OUTSIDE).clickable {})
+            }
         }
     }
 
@@ -420,12 +445,10 @@ class FilterBarUiTest {
         const val REGEX_CLEAR = "filter-bar-regex-clear"
         const val REGEX_HISTORY = "filter-bar-regex-history"
         const val REGEX_HISTORY_BUTTON = "filter-bar-regex-history-button"
+        const val REGEX_SNIPPETS_BUTTON = "filter-bar-regex-snippets-button"
+        const val OUTSIDE = "outside-the-bar"
         const val REGEX_INVALID = "filter-bar-regex-invalid"
         const val REGEX_EXPAND = "filter-bar-regex-expand"
-        const val REGEX_EDITOR_DIALOG = "regex-editor-dialog"
-        const val REGEX_EDITOR_INPUT = "regex-editor-input"
-        const val REGEX_EDITOR_APPLY = "regex-editor-apply"
-        const val REGEX_EDITOR_CANCEL = "regex-editor-cancel"
 
         val TEST_MODEL = FilterBarModel(
             sortedTags = listOf("com.example.Alpha", "com.example.Beta"),
