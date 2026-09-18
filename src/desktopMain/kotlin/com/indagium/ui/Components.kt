@@ -53,6 +53,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -712,6 +714,15 @@ fun CloseButton(
     }
 }
 
+/** Measures and draws the child at its own size but reports zero height to the parent, with the
+ * child centred on that zero-height slot — so a control taller than a text line (CloseButton
+ * inside InlineField) stays centred on the line without growing the field. Compose does not
+ * clip pointer input to the parent's bounds, so the overhang stays clickable. */
+fun Modifier.overflowVertically(): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity))
+    layout(placeable.width, 0) { placeable.place(0, -placeable.height / 2) }
+}
+
 @Composable
 fun InlineField(
     value: String, onValue: (String) -> Unit,
@@ -736,6 +747,10 @@ fun InlineField(
     // chrome instead — used by ui/FilterBar.kt so its fields read as part of one bar, matching
     // ui/SearchBar.kt's flat BasicTextField. Defaults false so every existing call site is unchanged.
     flat: Boolean = false,
+    // The clear button as SearchBar's own CloseButton (24dp box, 16sp ×) instead of the compact
+    // 16dp one — for fields that sit beside that bar (ui/FilterBar.kt). Drawn without growing the
+    // field's height; see overflowVertically.
+    searchStyleClear: Boolean = false,
 ) {
     val tc = tc()
     BasicTextField(
@@ -765,10 +780,14 @@ fun InlineField(
                         inner()
                     }
                     if (value.isNotEmpty()) {
-                        SquareIconButton(
-                            "×", fontSize = 12.sp, onClick = onClear,
-                            modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
-                        )
+                        if (searchStyleClear) {
+                            CloseButton(onClick = onClear, modifier = clearButtonModifier.padding(start = 4.dp).overflowVertically())
+                        } else {
+                            SquareIconButton(
+                                "×", fontSize = 12.sp, onClick = onClear,
+                                modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
+                            )
+                        }
                     }
                 }
             } else {
@@ -804,6 +823,10 @@ fun InlineField(
     centerTextVertically: Boolean = false,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     flat: Boolean = false,
+    // The clear button as SearchBar's own CloseButton (24dp box, 16sp ×) instead of the compact
+    // 16dp one — for fields that sit beside that bar (ui/FilterBar.kt). Drawn without growing the
+    // field's height; see overflowVertically.
+    searchStyleClear: Boolean = false,
 ) {
     val tc = tc()
     val text = value.text
@@ -834,10 +857,14 @@ fun InlineField(
                         inner()
                     }
                     if (text.isNotEmpty()) {
-                        SquareIconButton(
-                            "×", fontSize = 12.sp, onClick = onClear,
-                            modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
-                        )
+                        if (searchStyleClear) {
+                            CloseButton(onClick = onClear, modifier = clearButtonModifier.padding(start = 4.dp).overflowVertically())
+                        } else {
+                            SquareIconButton(
+                                "×", fontSize = 12.sp, onClick = onClear,
+                                modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
+                            )
+                        }
                     }
                 }
             } else {
