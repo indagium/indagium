@@ -100,7 +100,7 @@ class VideoDropBehaviorTest {
 
         state.openDroppedFiles(listOf(firstLog, secondLog, video))
 
-        waitUntil { state.tabs.size == 3 && !state.isLoading }
+        waitUntil { state.tabs.size == 3 && !state.isLoading && state.openError != null }
         assertTrue(state.tabs.all { it.attachedVideo == null })
         assertEquals("Videos were not attached", state.openError?.title)
     }
