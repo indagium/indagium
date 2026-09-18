@@ -1,6 +1,6 @@
 # Indagium
 
-A desktop Android logcat analysis tool and viewer for investigating crashes, ANRs, bug reports, and supported DLT captures, built with Kotlin and Compose Multiplatform.
+Android log viewer and logcat analyzer for Windows, macOS and Linux — investigate crashes, ANRs, adb bug reports, and supported DLT captures, built with Kotlin and Compose Multiplatform.
 
 ![Version](https://img.shields.io/badge/version-1.8.6-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)

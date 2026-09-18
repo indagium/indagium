@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Learn how to read an ANR in Android logcat: timeout reasons, where the evidence lives, a reading method, and how Indagium's ANR log analyzer finds the block." />
+    <link rel="canonical" href="https://indagium.com/guides/read-android-anr/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content="How to Read an ANR in Logcat | Indagium" />
+    <meta property="og:description" content="Learn how to read an ANR in Android logcat: timeout reasons, where the evidence lives, a reading method, and how Indagium's ANR log analyzer finds the block." />
+    <meta property="og:url" content="https://indagium.com/guides/read-android-anr/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
+    <meta property="og:image:alt" content="Indagium showing a filtered Android log open for an investigation." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="How to Read an ANR in Logcat | Indagium" />
+    <meta name="twitter:description" content="Learn how to read an ANR in Android logcat: timeout reasons, where the evidence lives, a reading method, and how Indagium's ANR log analyzer finds the block." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
+    <title>How to Read an ANR in Logcat | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+        { "@type": "ListItem", "position": 2, "name": "Guide", "item": "https://indagium.com/guides/analyze-android-logcat/" },
+        { "@type": "ListItem", "position": 3, "name": "How to Read an ANR in Logcat", "item": "https://indagium.com/guides/read-android-anr/" }
+      ]
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "What does the ANR Reason field mean?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "The Reason: on the ActivityManager: ANR in <package> line names which timeout fired — for example \"Input dispatching timed out\", or a broadcast or service description — so you know which of the ANR triggers to investigate first."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Where do ANR thread dumps live in a bug report?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Under /data/anr/ — a single traces.txt file on older Android versions, or separate per-process trace files on newer ones. Indagium's bug-report picker surfaces them as log candidates when you open the .zip or .7z."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can Indagium capture an ANR from a connected device?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. Indagium opens files you've already captured — with adb logcat -d > log.txt, adb bugreport bugreport.zip, or a device's saved bug report — it does not talk to adb itself."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "How do I find what's blocking the main thread?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "In the trace file, find the thread named main and read its state. A BLOCKED state names the lock and the thread holding it (\"held by thread …\"); a WAITING state points at the call it's stuck in."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is Indagium free to try?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes — Indagium is free to use and source-available under the PolyForm Perimeter license. Download it for macOS, Windows, or Linux from the GitHub releases page."
+          }
+        }
+      ]
+    }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero guide-hero" aria-labelledby="page-title"><div><p class="eyebrow">Guide <span>/</span> Android ANR</p><h1 id="page-title">How to read an ANR in logcat.</h1><p class="page-lede">Android ANR log analysis starts in one place: the <code>ActivityManager: ANR in &lt;package&gt;</code> line logcat writes when the system gives up waiting on the app. This guide covers what triggers an ANR, where the supporting evidence lives, a repeatable method for reading it, and how Indagium works as an ANR log analyzer once the file is open.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">Follow the logcat analysis guide <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/hero-investigation.webp" alt="Indagium showing a filtered Android log open for an investigation." /><figcaption>Keep the ANR reason, the thread dump, and your notes in the same window.</figcaption></figure></section>
+
+      <section class="section" aria-labelledby="anr-what-title"><p class="eyebrow">The timeout clock</p><h2 id="anr-what-title">What actually triggers an <em>ANR.</em></h2><p class="section-lede">"Application Not Responding" is Android's way of saying a specific timeout expired while the app's main thread was busy with something else. Which timeout fired is part of the evidence, not just the headline.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Input dispatch</h3><p>The system waits about 5 seconds for the app to respond to a key or touch event before that alone can trigger an ANR &mdash; the most common cause reported in the field.</p></article><article class="evidence-card"><span>02</span><h3>Broadcast receiver</h3><p>A <code>BroadcastReceiver.onReceive()</code> that blocks past its execution window &mdash; a shorter window when the app is in the foreground &mdash; produces an ANR tagged with the broadcast's action.</p></article><article class="evidence-card"><span>03</span><h3>Service</h3><p>A service that doesn't finish its startup work in time, again under a shorter foreground window, produces an ANR naming the service class.</p></article><article class="evidence-card"><span>04</span><h3>Content provider</h3><p>A <code>ContentProvider</code> that blocks while publishing itself during app startup can also trigger an ANR, though it's rarer than the other three.</p></article></div></section>
+
+      <section class="section split-callout" aria-labelledby="anr-evidence-title"><div><p class="eyebrow">The evidence trail</p><h2 id="anr-evidence-title">Where the evidence <em>actually lives.</em></h2><p class="section-lede">Logcat gives you the alarm; the thread dump gives you the explanation. Reading an ANR means moving between the two.</p><p>The first clue is the line <code>ActivityManager</code> writes to logcat at the moment of the timeout: <code>ANR in &lt;package&gt;</code>, followed by a <code>Reason:</code> field naming the timeout and a timestamp you can anchor on. ActivityManager typically follows it with a block of CPU usage lines &mdash; per-process and per-thread load over the preceding window &mdash; which is often the fastest way to see whether the device was simply overloaded.</p><p>The full picture is a thread dump. Pull one with <code>adb bugreport bugreport.zip</code>, or use a bug report a device already saved, and look under <code>/data/anr/</code> &mdash; a single <code>traces.txt</code> file on older Android versions, or separate per-process trace files on newer ones. Logcat tells you an ANR happened; the trace file tells you which thread the main thread was actually blocked on.</p></div><figure class="evidence-card image-card"><img src="/assets/media/posters/demo-filtering.webp" alt="Indagium filtering an Android logcat trace down to the relevant lines." /><figcaption>Narrow to the process and thread named in the trace before you read further.</figcaption></figure></section>
+
+      <section class="section" aria-labelledby="anr-method-title"><p class="eyebrow">A repeatable method</p><h2 id="anr-method-title">Five steps from <em>alarm to cause.</em></h2><ol class="guide-steps"><li><div class="step-number">01</div><div><h3>Find the ANR line</h3><p>Search or filter the logcat for <code>ANR in</code> from the <code>ActivityManager</code> tag. This is your anchor timestamp for everything that follows.</p></div></li><li><div class="step-number">02</div><div><h3>Note the reason and timestamp</h3><p>The <code>Reason:</code> field tells you which timeout fired &mdash; input dispatch, a broadcast, a service, or a content provider &mdash; before you go looking for a cause.</p></div></li><li><div class="step-number">03</div><div><h3>Look back before it</h3><p>Scroll or filter to what the main thread logged in the seconds leading up to the timeout. A long gap between two adjacent lines is often the stall itself.</p></div></li><li><div class="step-number">04</div><div><h3>Check the main thread stack</h3><p>In the trace file, find the thread named <code>main</code> and read its state. <code>BLOCKED</code> names the lock and the thread holding it; <code>WAITING</code> points at the call it's stuck in.</p></div></li><li><div class="step-number">05</div><div><h3>Correlate with GC, binder, and IO</h3><p>Cross-reference nearby garbage-collection pauses, binder transactions, or disk and network waits that line up with the stall &mdash; the blocking call is rarely the whole story.</p></div></li></ol></section>
+
+      <section class="section" aria-labelledby="anr-indagium-title"><p class="eyebrow">From clue to explanation</p><h2 id="anr-indagium-title">How Indagium helps as an <em>ANR log analyzer.</em></h2><p class="section-lede">Start from the bug report itself: drop the <code>.zip</code> or <code>.7z</code> and Indagium scans it for log candidates &mdash; including ANR traces &mdash; before you filter anything.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Automatic detection</h3><p>Indagium recognises <code>ActivityManager</code> ANR messages and groups them into a jumpable ANR category alongside crashes and exceptions &mdash; nothing to configure first.</p></article><article class="evidence-card"><span>02</span><h3>Folded stack traces</h3><p>Stack traces fold automatically, so a long thread dump collapses to a header you expand only when you need the frames.</p></article><article class="evidence-card"><span>03</span><h3>Time deltas</h3><p>Turn on Δt in the log toolbar to see the gap between adjacent rows, or the offset from a selected anchor &mdash; the fastest way to spot the stall before the ANR fires.</p></article><article class="evidence-card"><span>04</span><h3>Thread map</h3><p>Right-click a row and choose Threads: Show map to colour every thread in that process and see interleaved activity in a branch gutter beside the log.</p></article><article class="evidence-card"><span>05</span><h3>PID/TID filtering</h3><p>The PID/TID box narrows the log to the exact process and thread named in the trace, so you can watch just the main thread's timeline.</p></article><article class="evidence-card"><span>06</span><h3>Compare and record</h3><p>Open two tabs side by side to compare a healthy run against the one that ANR'd, then annotate the finding and export it as Markdown or Jira markup.</p></article></div></section>
+
+      <section class="section" aria-labelledby="anr-faq-title"><p class="eyebrow">Common questions</p><h2 id="anr-faq-title">Frequently asked <em>questions.</em></h2><div class="feature-matrix"><article class="evidence-card"><span>Q1</span><h3>What does the ANR Reason field mean?</h3><p>The <code>Reason:</code> on the <code>ActivityManager: ANR in &lt;package&gt;</code> line names which timeout fired &mdash; for example "Input dispatching timed out", or a broadcast or service description &mdash; so you know which of the ANR triggers to investigate first.</p></article><article class="evidence-card"><span>Q2</span><h3>Where do ANR thread dumps live in a bug report?</h3><p>Under <code>/data/anr/</code> &mdash; a single <code>traces.txt</code> file on older Android versions, or separate per-process trace files on newer ones. Indagium's bug-report picker surfaces them as log candidates when you open the <code>.zip</code> or <code>.7z</code>.</p></article><article class="evidence-card"><span>Q3</span><h3>Can Indagium capture an ANR from a connected device?</h3><p>No. Indagium opens files you've already captured &mdash; with <code>adb logcat -d &gt; log.txt</code>, <code>adb bugreport bugreport.zip</code>, or a device's saved bug report &mdash; it does not talk to adb itself.</p></article><article class="evidence-card"><span>Q4</span><h3>How do I find what's blocking the main thread?</h3><p>In the trace file, find the thread named <code>main</code> and read its state. A <code>BLOCKED</code> state names the lock and the thread holding it ("held by thread &hellip;"); a <code>WAITING</code> state points at the call it's stuck in.</p></article><article class="evidence-card"><span>Q5</span><h3>Is Indagium free to try?</h3><p>Yes &mdash; Indagium is free to use and source-available under the PolyForm Perimeter license. Download it for macOS, Windows, or Linux from the GitHub releases page.</p></article></div></section>
+
+      <section class="section guide-band" aria-labelledby="anr-next-title"><p class="eyebrow">Keep going</p><h2 id="anr-next-title">The trace is one file in a <em>bigger report.</em></h2><div class="guide-links"><a href="/guides/open-android-bugreport/"><span>Bug reports</span><b>Open the archive an ANR trace shipped in →</b></a><a href="/logcat-analyzer/"><span>Analyzer</span><b>Explore filters, folding, and exports →</b></a><a href="/android-bug-report-viewer/"><span>Viewer</span><b>See how Indagium opens .zip and .7z reports →</b></a></div></section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>
