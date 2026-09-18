@@ -3,8 +3,8 @@ package com.indagium
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
 import com.indagium.model.AppSettings
-import com.indagium.ui.MarkdownFormatAction
 import com.indagium.ui.MarkdownEditorUndoHistory
+import com.indagium.ui.MarkdownFormatAction
 import com.indagium.ui.annotationMarkdownRenderSource
 import com.indagium.ui.annotationMarkdownSoftLineBreaksEnabled
 import com.indagium.ui.applyMarkdownFormat

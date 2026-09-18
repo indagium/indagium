@@ -4,18 +4,18 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.size
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -25,7 +25,7 @@ import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.waitUntilAtLeastOneExists
-import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.unit.dp
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
 import com.indagium.model.FilterMode.TAGS
@@ -346,73 +346,73 @@ class FilterBarUiTest {
                 tab = tab.copy(filter = next)
             }
             Column {
-            FilterBar(
-                tab = tab,
-                model = model,
-                actions = FilterBarActions(
-                    onSetFilterMode = { mode -> updateFilter(tab.filter.copy(mode = mode)) },
-                    onStartRegexSearch = { updateFilter(tab.filter.copy(mode = FilterMode.KEYWORD)) },
-                    onToggleTag = { value ->
-                        updateFilter(tab.filter.copy(activeTags = tab.filter.activeTags.toggle(value)))
-                    },
-                    onToggleExcludeTag = { value ->
-                        updateFilter(tab.filter.copy(excludeTags = tab.filter.excludeTags.toggle(value)))
-                    },
-                    onAddPkgPrefix = { value ->
-                        updateFilter(tab.filter.copy(pkgPrefixes = tab.filter.pkgPrefixes + value))
-                    },
-                    onRemovePkgPrefix = { value ->
-                        updateFilter(tab.filter.copy(pkgPrefixes = tab.filter.pkgPrefixes - value))
-                    },
-                    onAddExcludePkgPrefix = { value ->
-                        updateFilter(tab.filter.copy(excludePkgPrefixes = tab.filter.excludePkgPrefixes + value))
-                    },
-                    onRemoveExcludePkgPrefix = { value ->
-                        updateFilter(tab.filter.copy(excludePkgPrefixes = tab.filter.excludePkgPrefixes - value))
-                    },
-                    onSetKwInTag = { value -> updateFilter(tab.filter.copy(kwInTag = value)) },
-                    onToggleKwInTagRegex = {},
-                    onSetKw = { value -> updateFilter(tab.filter.copy(kwText = value)) },
-                    onAddMessageRule = { include, pattern, regex, tag, packagePrefix, target ->
-                        val next = com.indagium.model.MessageRule(
-                            id = "test-${tab.filter.messageRules.size}",
-                            include = include,
-                            pattern = pattern,
-                            regex = regex,
-                            tag = tag,
-                            packagePrefix = packagePrefix,
-                            target = target,
-                            mode = tab.filter.mode,
-                        )
-                        updateFilter(tab.filter.copy(messageRules = (tab.filter.messageRules
-                            .filterNot {
-                                it.pattern == pattern && it.regex == regex && it.tag == tag &&
-                                    it.packagePrefix == packagePrefix && it.target == target && it.mode == tab.filter.mode
-                            } + next)))
-                    },
-                    onRemoveMessageRule = {},
-                    onRememberRegexPattern = { onRememberRegex(it) },
-                    onClearRegexHistory = {},
-                    onOpenFilterPanel = {},
-                ),
-                logFocusRequester = null,
-            )
-            // Something outside the bar to click, standing in for a log row.
-            Box(Modifier.size(20.dp).testTag(OUTSIDE).clickable {})
+                FilterBar(
+                    tab = tab,
+                    model = model,
+                    actions = FilterBarActions(
+                        onSetFilterMode = { mode -> updateFilter(tab.filter.copy(mode = mode)) },
+                        onStartRegexSearch = { updateFilter(tab.filter.copy(mode = FilterMode.KEYWORD)) },
+                        onToggleTag = { value ->
+                            updateFilter(tab.filter.copy(activeTags = tab.filter.activeTags.toggle(value)))
+                        },
+                        onToggleExcludeTag = { value ->
+                            updateFilter(tab.filter.copy(excludeTags = tab.filter.excludeTags.toggle(value)))
+                        },
+                        onAddPkgPrefix = { value ->
+                            updateFilter(tab.filter.copy(pkgPrefixes = tab.filter.pkgPrefixes + value))
+                        },
+                        onRemovePkgPrefix = { value ->
+                            updateFilter(tab.filter.copy(pkgPrefixes = tab.filter.pkgPrefixes - value))
+                        },
+                        onAddExcludePkgPrefix = { value ->
+                            updateFilter(tab.filter.copy(excludePkgPrefixes = tab.filter.excludePkgPrefixes + value))
+                        },
+                        onRemoveExcludePkgPrefix = { value ->
+                            updateFilter(tab.filter.copy(excludePkgPrefixes = tab.filter.excludePkgPrefixes - value))
+                        },
+                        onSetKwInTag = { value -> updateFilter(tab.filter.copy(kwInTag = value)) },
+                        onToggleKwInTagRegex = {},
+                        onSetKw = { value -> updateFilter(tab.filter.copy(kwText = value)) },
+                        onAddMessageRule = { include, pattern, regex, tag, packagePrefix, target ->
+                            val next = com.indagium.model.MessageRule(
+                                id = "test-${tab.filter.messageRules.size}",
+                                include = include,
+                                pattern = pattern,
+                                regex = regex,
+                                tag = tag,
+                                packagePrefix = packagePrefix,
+                                target = target,
+                                mode = tab.filter.mode,
+                            )
+                            updateFilter(tab.filter.copy(messageRules = (tab.filter.messageRules
+                                .filterNot {
+                                    it.pattern == pattern && it.regex == regex && it.tag == tag &&
+                                        it.packagePrefix == packagePrefix && it.target == target && it.mode == tab.filter.mode
+                                } + next)))
+                        },
+                        onRemoveMessageRule = {},
+                        onRememberRegexPattern = { onRememberRegex(it) },
+                        onClearRegexHistory = {},
+                        onOpenFilterPanel = {},
+                    ),
+                    logFocusRequester = null,
+                )
+                // Something outside the bar to click, standing in for a log row.
+                Box(Modifier.size(20.dp).testTag(OUTSIDE).clickable {})
             }
         }
     }
 
     private fun waitForTagCandidates() {
-        rule.waitUntilAtLeastOneExists(hasTestTag(TAG_CANDIDATES), 2_000)
+        rule.waitUntilAtLeastOneExists(hasTestTag(TAG_CANDIDATES), POPUP_TIMEOUT_MS)
     }
 
     private fun waitForMessageCandidates() {
-        rule.waitUntilAtLeastOneExists(hasTestTag(MESSAGE_CANDIDATES), 2_000)
+        rule.waitUntilAtLeastOneExists(hasTestTag(MESSAGE_CANDIDATES), POPUP_TIMEOUT_MS)
     }
 
     private fun waitForScopeChooser() {
-        rule.waitUntilAtLeastOneExists(hasTestTag(SCOPE_CHOOSER), 2_000)
+        rule.waitUntilAtLeastOneExists(hasTestTag(SCOPE_CHOOSER), POPUP_TIMEOUT_MS)
     }
 
     private fun testTab(filter: Filter, logData: List<LogEntry> = emptyList()) = LogTab(
@@ -447,6 +447,7 @@ class FilterBarUiTest {
         const val REGEX_HISTORY_BUTTON = "filter-bar-regex-history-button"
         const val REGEX_SNIPPETS_BUTTON = "filter-bar-regex-snippets-button"
         const val OUTSIDE = "outside-the-bar"
+        const val POPUP_TIMEOUT_MS = 2_000L
         const val REGEX_INVALID = "filter-bar-regex-invalid"
         const val REGEX_EXPAND = "filter-bar-regex-expand"
 

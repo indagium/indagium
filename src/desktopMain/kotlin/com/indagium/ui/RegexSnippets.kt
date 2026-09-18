@@ -25,13 +25,21 @@ internal data class RegexSnippetTemplate(
 // and the logcat-specific presets follow.
 internal val REGEX_SNIPPET_TEMPLATES = listOf(
     RegexSnippetTemplate("Any characters", ".*", "Anything in between, e.g. start.*done") { wrap(it, ".*", "", "") },
-    RegexSnippetTemplate("Or (alternative)", "a|b", "Adds \"|\" at the cursor: rows matching either side. Selected text becomes (text|other).") { orSnippet(it) },
+    RegexSnippetTemplate(
+        "Or (alternative)",
+        "a|b",
+        "Adds \"|\" at the cursor: rows matching either side. Selected text becomes (text|other).",
+    ) { orSnippet(it) },
     RegexSnippetTemplate("Whole word", "\\bword\\b", "Matches \"id\" but not \"android\". Wraps the selection.") { wrap(it, "\\b", "word", "\\b") },
     RegexSnippetTemplate("Exclude rows with (NOT)", "^(?!.*text)", "Hides rows containing this text. Applies to the | alternative the cursor is in.") {
         lineCondition(it, negative = true)
     },
     RegexSnippetTemplate("Number", "\\d+", "One or more digits, e.g. pid=\\d+") { wrap(it, "\\d+", "", "") },
-    RegexSnippetTemplate("Must also contain (AND)", "^(?=.*text)", "Row must also contain this text, anywhere. Applies to the | alternative the cursor is in.") {
+    RegexSnippetTemplate(
+        "Must also contain (AND)",
+        "^(?=.*text)",
+        "Row must also contain this text, anywhere. Applies to the | alternative the cursor is in.",
+    ) {
         lineCondition(it, negative = false)
     },
     RegexSnippetTemplate("Literal text", "\\Q…\\E", "No special characters inside — paste class names, paths, brackets as-is.") {

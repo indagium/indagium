@@ -1633,6 +1633,7 @@ class AppState(
 
     // ── Layout ──────────────────────────────────────────────────────
     var filterVisible by mutableStateOf(true)
+
     // Independent horizontal filter-bar visibility. This deliberately does not mirror
     // filterVisible: the bar can remain visible while the full filter panel is open or closed.
     // The default is off so existing sessions keep the previous layout until the user opts in.

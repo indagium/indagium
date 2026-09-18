@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.TextContextMenu
+import androidx.compose.foundation.text.TextContextMenuArea
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ContentCut
@@ -48,8 +50,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.rememberPopupPositionProviderAtPosition
-import androidx.compose.foundation.text.TextContextMenu
-import androidx.compose.foundation.text.TextContextMenuArea
 
 private val TEXT_CONTEXT_MENU_WIDTH = 200.dp
 private val TEXT_CONTEXT_MENU_SHAPE = RoundedCornerShape(7.dp)

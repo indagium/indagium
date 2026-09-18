@@ -6,7 +6,6 @@ import com.indagium.model.FilterMode
 import com.indagium.model.Highlighter
 import com.indagium.model.LogLevel
 import com.indagium.model.MessageRule
-import com.indagium.model.RuleTarget
 import com.indagium.model.SequenceDef
 import com.indagium.ui.combinedTagCandidates
 import com.indagium.ui.filterBarCandidatesStayVisible
@@ -211,7 +210,8 @@ class FilterBarTest {
             kwText = "topSecretPattern",
             kwInTag = "anotherSecretPattern",
             messageRules = listOf(MessageRule(id = "r1", include = true, pattern = "secretRulePattern", mode = FilterMode.TAGS)),
-            levels = setOf(LogLevel.E), // also exercise a genuine residual field alongside the above
+            // Also exercise a genuine residual field alongside the above.
+            levels = setOf(LogLevel.E),
         )
 
         val summary = filterBarResidualSummary(filter)

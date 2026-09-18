@@ -3495,7 +3495,9 @@ class AppStateBehaviorTest {
 
         // The pin only takes effect once the user actually writes something.
         state.addNoteBlock("log", "second analysis")
-        waitUntil { File(notesDir, "sample_analysis_2.md").exists() }
+        // Wait for the content, not just the file: the export can be observed between creating
+        // the file and it holding the new block, which made this flaky on a loaded machine.
+        waitUntil { File(notesDir, "sample_analysis_2.md").let { it.exists() && it.readText().contains("second analysis") } }
         val secondMdText = File(notesDir, "sample_analysis_2.md").readText()
         assertTrue(secondMdText.contains("second analysis"))
         assertTrue(!secondMdText.contains("first analysis"))
