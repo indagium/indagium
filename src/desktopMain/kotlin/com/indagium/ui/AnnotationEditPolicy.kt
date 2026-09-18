@@ -1,5 +1,7 @@
 package com.indagium.ui
 
+import androidx.compose.ui.text.input.TextFieldValue
+
 /** Result of reconciling a rich-editor draft with a newer Notes value from another writer. */
 internal data class MarkdownDraftSync(
     val baseline: String,
@@ -19,6 +21,42 @@ internal fun reconcileMarkdownDraft(baseline: String, draft: String, latest: Str
         draft == baseline -> MarkdownDraftSync(latest, latest, latest, conflict = false)
         else -> MarkdownDraftSync(baseline, draft, latest, conflict = true)
     }
+
+/**
+ * Undo/redo history for the Markdown editor. Toolbar actions mutate [TextFieldValue] directly,
+ * outside BasicTextField's keyboard edit pipeline, so they need an explicit history boundary.
+ * Store the complete value (including selection) so undoing formatting restores the exact draft
+ * that was on screen immediately before the action.
+ */
+internal class MarkdownEditorUndoHistory {
+    private val undoStack = ArrayDeque<TextFieldValue>()
+    private val redoStack = ArrayDeque<TextFieldValue>()
+
+    fun record(previous: TextFieldValue, current: TextFieldValue) {
+        if (previous.text == current.text) return
+        undoStack.addLast(previous)
+        redoStack.clear()
+    }
+
+    fun undo(current: TextFieldValue): TextFieldValue? {
+        if (undoStack.isEmpty()) return null
+        val previous = undoStack.removeLast()
+        redoStack.addLast(current)
+        return previous
+    }
+
+    fun redo(current: TextFieldValue): TextFieldValue? {
+        if (redoStack.isEmpty()) return null
+        val next = redoStack.removeLast()
+        undoStack.addLast(current)
+        return next
+    }
+
+    fun clear() {
+        undoStack.clear()
+        redoStack.clear()
+    }
+}
 
 /** Central predicate used by Notes mutation callbacks and controls. */
 internal fun notesMutationAllowed(notesLocked: Boolean): Boolean = !notesLocked

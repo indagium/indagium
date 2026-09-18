@@ -229,6 +229,8 @@ kotlin {
         val desktopTest by getting
         desktopTest.dependencies {
             implementation(kotlin("test"))
+            implementation(compose.desktop.uiTestJUnit4)
+            implementation(compose.desktop.currentOs)
             implementation("io.ktor:ktor-client-mock:$ktorVersion")
             // Parser/render-backed validation for exported PlantUML sequence sources. Keeping this
             // on desktopTest avoids bundling the sizeable PlantUML runtime into the application.

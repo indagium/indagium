@@ -11,6 +11,7 @@ import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.LocalTextContextMenu
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
@@ -167,6 +168,8 @@ fun App(
         LocalFontBase provides state.settings.fontSize,
         LocalUseMono provides state.settings.fontMono,
         LocalDensity provides scaledDensity,
+        LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
+        LocalTextContextMenu provides IndagiumTextContextMenu,
     ) {
         val tc = tc()
         // PERF-4: keyed on each tab's persistedSnapshot() (id/filename/sourcePath/filter/
