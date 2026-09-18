@@ -73,6 +73,19 @@ footer { align-items:center; border-top:1px solid var(--line); display:flex; jus
 .faq-list h3 { font-size:1.05rem; margin:0 0 10px; }
 .faq-list p { color:var(--copy); font-family:var(--mono); font-size:.8rem; line-height:1.75; margin:0; max-width:700px; }
 .inline-link { text-decoration:underline; text-decoration-color:var(--green); text-underline-offset:3px; }.inline-link:hover { color:var(--green); }
+.split-callout:has(> figure) { grid-template-columns:minmax(0,5fr) minmax(0,7fr); gap:56px; }
+.split-callout > .image-card, .split-callout > .image-card:nth-child(even) { border:0; margin:0; padding:0; }
+.zoomable { cursor:zoom-in; }
+.zoomable:focus-visible { outline:2px solid var(--green); outline-offset:3px; }
+html:has(.zoom-dialog[open]) { overflow:hidden; }
+.zoom-dialog { background:transparent; border:0; height:100vh; margin:0; max-height:none; max-width:none; overflow:auto; padding:0; width:100vw; }
+.zoom-dialog::backdrop { background:rgba(24,26,23,.88); }
+.zoom-stage { align-items:center; display:flex; justify-content:center; min-height:100%; padding:56px 24px; }
+.zoom-dialog img { background:#fff; box-shadow:0 24px 70px rgba(0,0,0,.45); cursor:zoom-in; display:block; max-height:calc(100vh - 112px); max-width:100%; }
+.zoom-dialog.is-full .zoom-stage { align-items:flex-start; justify-content:flex-start; min-width:max-content; }
+.zoom-dialog.is-full img { cursor:zoom-out; max-height:none; max-width:none; }
+.zoom-close { background:rgba(255,255,255,.12); border:1px solid rgba(255,255,255,.3); color:#fff; cursor:pointer; font-size:1.5rem; height:42px; line-height:1; position:fixed; right:18px; top:14px; width:42px; z-index:1; }
+.zoom-close:hover { background:rgba(255,255,255,.24); }
 video { background:var(--paper); }
 
 @media (max-width:760px) {
