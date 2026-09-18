@@ -292,9 +292,10 @@ class SourceIndexAppStateTest {
         state.cancelAllLoads()
 
         assertTrue(rootAbs in state.cancelledIndexingFolders || rootAbs !in state.indexingFolders)
-        // The scan must actually unwind and release the folder, not merely be flagged.
-        waitUntil { rootAbs !in state.indexingFolders }
-        assertTrue(state.cancelledIndexingFolders.isEmpty())
+        // The scan must actually unwind and release the folder, not merely be flagged. The two sets
+        // are cleared in consecutive writes (AppState.reindexSources' finally), so wait for both —
+        // asserting the second right after the first is observed raced on slow runners.
+        waitUntil { rootAbs !in state.indexingFolders && state.cancelledIndexingFolders.isEmpty() }
     }
 
     @Test
