@@ -1,0 +1,24 @@
+# Indagium
+
+> Indagium is a free, offline Android log viewer and logcat analyzer for macOS, Windows, and Linux. It opens logcat .txt/.log files, adb bugreports (.zip/.7z), and DLT captures, then adds filters, folded sequences, crash/ANR detection, compare view, source lookup, annotations, and evidence exports — with an optional in-app AI assistant and a local MCP server, off by default. It is source-available under the PolyForm Perimeter License, not open source.
+
+## Pages
+
+- [Home](https://indagium.com/): Overview of Indagium as an Android log viewer and logcat analyzer, with feature highlights and download links.
+- [Android Logcat Viewer](https://indagium.com/android-logcat-viewer/): Opening and reading large logcat .txt/.log files, minimap, thread map, and multi-tab comparison.
+- [Android Logcat Analyzer](https://indagium.com/logcat-analyzer/): Filtering by level, tag, package, message, PID, and TID, folding sequences, and exporting findings.
+- [Android Bug Report Viewer](https://indagium.com/android-bug-report-viewer/): Opening adb bugreport .zip/.7z archives directly, choosing what to load, and exporting a record.
+- [Log Analysis Workflow](https://indagium.com/log-analysis-workflow/): How Indagium's investigation workspace compares to generic text or log viewing.
+- [Analyze Android Logcat Guide](https://indagium.com/guides/analyze-android-logcat/): A five-step repeatable workflow for analyzing Android logcat, bugreports, and DLT captures.
+- [DLT Viewer](https://indagium.com/dlt-viewer/): Opening .dlt captures, raw DLT streams, and DLT Viewer text/CSV exports on macOS, Windows, and Linux, with honest limitations.
+- [Logcat MCP Server](https://indagium.com/logcat-mcp-server/): The optional, loopback-only MCP server that lets AI assistants query an open Android log, and the in-app AI assistant.
+- [Guides](https://indagium.com/guides/): Index of Android logcat, bugreport, and ANR guides.
+- [View Logcat Without Android Studio](https://indagium.com/guides/logcat-without-android-studio/): Capture with adb logcat and open the saved .txt/.log file in a desktop viewer.
+- [Open an Android Bugreport](https://indagium.com/guides/open-android-bugreport/): Capture with adb bugreport, open the .zip/.7z directly, and find crashes and ANRs.
+- [Read an ANR in Logcat](https://indagium.com/guides/read-android-anr/): Where ANR evidence lives and a method for finding what blocked the main thread.
+
+## Docs
+
+- [README](https://github.com/indagium/indagium/blob/master/README.md): Feature list, supported log formats, installation, and licensing.
+- [User Guide](https://github.com/indagium/indagium/blob/master/docs/USER_GUIDE.md): How to use every feature, keyboard shortcuts, and worked recipes.
+- [MCP Guide](https://github.com/indagium/indagium/blob/master/docs/mcp/README.md): Connecting an external MCP client to Indagium's local control server.

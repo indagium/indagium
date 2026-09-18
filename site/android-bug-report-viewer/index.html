@@ -3,29 +3,86 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Open .zip and .7z Android bug reports directly in Indagium, choose what to load, investigate the trace, and export a clear record of the finding." />
+    <meta name="description" content="Open an adb bugreport .zip or .7z directly in Indagium, choose what to load, investigate the trace offline, and export a clear record of the finding." />
     <link rel="canonical" href="https://indagium.com/android-bug-report-viewer/" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Android Bug Report Viewer | Indagium" />
-    <meta property="og:description" content="Open .zip and .7z Android bug reports directly in Indagium, choose what to load, investigate the trace, and export a clear record of the finding." />
+    <meta property="og:title" content="Android Bugreport Viewer – Open adb bugreport .zip | Indagium" />
+    <meta property="og:description" content="Open an adb bugreport .zip or .7z directly in Indagium, choose what to load, investigate the trace offline, and export a clear record of the finding." />
     <meta property="og:url" content="https://indagium.com/android-bug-report-viewer/" />
     <meta property="og:image" content="https://indagium.com/assets/media/posters/demo-notes-export.webp" />
     <meta property="og:image:alt" content="Indagium showing notes and an exported record beside an Android log." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Android Bug Report Viewer | Indagium" />
-    <meta name="twitter:description" content="Open .zip and .7z Android bug reports directly in Indagium, choose what to load, investigate the trace, and export a clear record of the finding." />
+    <meta name="twitter:title" content="Android Bugreport Viewer – Open adb bugreport .zip | Indagium" />
+    <meta name="twitter:description" content="Open an adb bugreport .zip or .7z directly in Indagium, choose what to load, investigate the trace offline, and export a clear record of the finding." />
     <meta name="twitter:image" content="https://indagium.com/assets/media/posters/demo-notes-export.webp" />
-    <title>Android Bug Report Viewer | Indagium</title>
+    <title>Android Bugreport Viewer – Open adb bugreport .zip | Indagium</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Android Bug Report Viewer", "item": "https://indagium.com/android-bug-report-viewer/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What bug report formats can Indagium open?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Android bug reports as .zip or .7z archives, opened directly — no manual unzip step." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I choose which part of the bug report to load?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Indagium lets you pick the report content that matters instead of loading everything into one tab." }
+          },
+          {
+            "@type": "Question",
+            "name": "Does opening a bugreport require adb or a connected device?",
+            "acceptedAnswer": { "@type": "Answer", "text": "No — capture the bugreport once with adb bugreport, then open the resulting archive in Indagium; no device connection is needed to analyze it offline." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I export findings from a bug report?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Annotate selections with notes, images, and video frames, then export as Markdown or Jira markup, or export the filtered log as TXT or CSV." }
+          },
+          {
+            "@type": "Question",
+            "name": "Is DLT data inside a bug report supported?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Indagium opens DLT (.dlt) captures, raw DLT streams, and DLT Viewer text/CSV exports as their own tabs; support depends on what's included in the report." }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
-    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/analyze-android-logcat/">Guide</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
     <main id="main">
-      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Features <span>/</span> Android bug reports</p><h1 id="page-title">Open the bug report, keep the context.</h1><p class="page-lede">Bug reports collect more than one clue. Open Android <code>.zip</code> and <code>.7z</code> reports directly in Indagium, choose what to load, then work through the relevant log in the same investigation space.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">Follow the analysis guide <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-notes-export.webp" alt="Indagium annotating an Android log and preparing an export." /><figcaption>Choose the useful evidence before you write the explanation.</figcaption></figure></section>
-      <section class="section" aria-labelledby="bug-report-title"><p class="eyebrow">A report is a record</p><h2 id="bug-report-title">From archive to <em>evidence.</em></h2><p class="section-lede">A bug report can be large and full of adjacent detail. Indagium keeps the opening step, the reading step, and the handoff step close together.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Open directly</h3><p>Open <code>.zip</code> and <code>.7z</code> Android bug reports without unpacking the archive first.</p></article><article class="evidence-card"><span>02</span><h3>Choose what to load</h3><p>Pick the report content that belongs in the active tab instead of losing the case in an extracted folder.</p></article><article class="evidence-card"><span>03</span><h3>Investigate in place</h3><p>Use filters, crash and ANR detection, thread maps, time deltas, and compare view to read the evidence.</p></article><article class="evidence-card"><span>04</span><h3>Share the finding</h3><p>Annotate selections with notes, images, and video frames, then export Markdown or Jira markup.</p></article></div></section>
-      <section class="section split-callout" aria-labelledby="bug-report-next-title"><div><p class="eyebrow">A clear handoff</p><h2 id="bug-report-next-title">Keep the proof close to <em>the claim.</em></h2><p class="section-lede">The final record can include the filtered log, annotations, and the context another person needs to understand the issue without reopening the entire report.</p><a class="text-link" href="/logcat-analyzer/">Explore analysis tools <span aria-hidden="true">→</span></a></div><figure class="evidence-card image-card"><img src="/assets/media/posters/demo-video-sync.webp" alt="Indagium synchronizing a screen recording with an Android log line." /><figcaption>Attach a screen recording to a log line when the visual symptom matters.</figcaption></figure></section>
+      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Features <span>/</span> Android bug reports</p><h1 id="page-title">Open the bugreport, keep the context.</h1><p class="page-lede">Bug reports collect more than one clue. Open an adb bugreport's <code>.zip</code> and <code>.7z</code> archives directly in Indagium, choose what to load, then work through the relevant log offline in the same investigation space — free, and without Android Studio.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/open-android-bugreport/">Follow the bugreport guide <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-notes-export.webp" alt="Indagium annotating an Android log and preparing an export." /><figcaption>Choose the useful evidence before you write the explanation.</figcaption></figure></section>
+      <section class="section" aria-labelledby="bug-report-title"><p class="eyebrow">A report is a record</p><h2 id="bug-report-title">From archive to <em>evidence.</em></h2><p class="section-lede">A bugreport can be large and full of adjacent detail. Indagium keeps the opening step, the reading step, and the handoff step close together.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Open the archive directly</h3><p>Open <code>.zip</code> and <code>.7z</code> Android bug reports without unpacking the archive first.</p></article><article class="evidence-card"><span>02</span><h3>Choose what to load</h3><p>Pick the report content that belongs in the active tab instead of losing the case in an extracted folder.</p></article><article class="evidence-card"><span>03</span><h3>Investigate in place</h3><p>Use filters, crash and <a class="inline-link" href="/guides/read-android-anr/">ANR detection</a>, thread maps, time deltas, and compare view to read the evidence.</p></article><article class="evidence-card"><span>04</span><h3>Share the finding</h3><p>Annotate selections with notes, images, and video frames, then export Markdown or Jira markup.</p></article></div></section>
+      <section class="section" id="formats" aria-labelledby="bug-report-formats-title"><p class="eyebrow">What you can open</p><h2 id="bug-report-formats-title">Everything a bugreport <em>carries.</em></h2><p class="section-lede">A bugreport archive is more than one log; Indagium reads the formats inside it the same way it reads a standalone file, without unpacking anything by hand first.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Bugreport archives</h3><p>Open the <code>.zip</code> or <code>.7z</code> produced by <code>adb bugreport</code> or a device's own bug report tool, and choose which section to load.</p></article><article class="evidence-card"><span>02</span><h3>Logcat text</h3><p>Read the logcat content inside the report in threadtime, time, brief, or bare format; unrecognised lines are tagged RAW.</p></article><article class="evidence-card"><span>03</span><h3>DLT captures</h3><p>Open any bundled <code>.dlt</code> captures or raw DLT streams as their own tab, decoded as framed records.</p></article><article class="evidence-card"><span>04</span><h3>DLT Viewer exports</h3><p>Open DLT Viewer text and CSV exports alongside the rest of the report, ready to filter with the same tools.</p></article></div></section>
+      <section class="section" aria-labelledby="bug-report-why-title"><p class="eyebrow">Why open it offline</p><h2 id="bug-report-why-title">The report stays <em>on your machine.</em></h2><p class="section-lede">A bugreport can contain sensitive device and app data. Indagium reads it locally as a desktop app, so nothing is uploaded unless you deliberately turn on the optional AI assistant.</p></section>
+      <section class="section split-callout" aria-labelledby="bug-report-next-title"><div><p class="eyebrow">A clear handoff</p><h2 id="bug-report-next-title">Keep the proof close to <em>the claim.</em></h2><p class="section-lede">The final record can include the filtered log, annotations, and the context another person needs to understand the issue without reopening the entire report, or the log viewer that produced it.</p><a class="text-link" href="/logcat-analyzer/">Explore log analyzer tools <span aria-hidden="true">→</span></a></div><figure class="evidence-card image-card"><img src="/assets/media/posters/demo-video-sync.webp" alt="Indagium synchronizing a screen recording with an Android log line." /><figcaption>Attach a screen recording to a log line when the visual symptom matters.</figcaption></figure></section>
+      <section class="section" id="faq" aria-labelledby="bug-report-faq-title">
+        <p class="eyebrow">Questions</p>
+        <h2 id="bug-report-faq-title">Android bug report viewer, <em>answered.</em></h2>
+        <p class="section-lede">Common questions about opening, choosing content from, and exporting from an Android bugreport in Indagium.</p>
+        <div class="faq-list">
+          <div><h3>What bug report formats can Indagium open?</h3><p>Android bug reports as <code>.zip</code> or <code>.7z</code> archives, opened directly — no manual unzip step.</p></div>
+          <div><h3>Can I choose which part of the bug report to load?</h3><p>Yes. Indagium lets you pick the report content that matters instead of loading everything into one tab.</p></div>
+          <div><h3>Does opening a bugreport require adb or a connected device?</h3><p>No — capture the bugreport once with <code>adb bugreport</code>, then open the resulting archive in Indagium; no device connection is needed to analyze it offline.</p></div>
+          <div><h3>Can I export findings from a bug report?</h3><p>Yes. Annotate selections with notes, images, and video frames, then export as Markdown or Jira markup, or export the filtered log as TXT or CSV.</p></div>
+          <div><h3>Is DLT data inside a bug report supported?</h3><p>Indagium opens DLT (.dlt) captures, raw DLT streams, and DLT Viewer text/CSV exports as their own tabs; support depends on what's included in the report.</p></div>
+        </div>
+      </section>
     </main>
-    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/analyze-android-logcat/">Guide</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
   </body>
 </html>
