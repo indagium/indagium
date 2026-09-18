@@ -33,6 +33,7 @@ internal fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
     focusRequester: FocusRequester? = null,
+    filterBarVisible: Boolean = false,
     filterSearchRequest: FilterSearchRequest? = null,
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -161,6 +162,7 @@ internal fun BoundFilterPanel(
         customIssueRules = state.settings.customIssueRules,
         width = state.filterPanelWidth,
         focusRequester = focusRequester,
+        filterBarVisible = filterBarVisible,
         filterSearchRequest = filterSearchRequest,
         onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
         onPanelFocusChanged = onPanelFocusChanged,
@@ -218,12 +220,53 @@ internal fun FileView(
         BoundFilterPanel(
             state, tab,
             focusRequester = filterFr,
+            filterBarVisible = state.filterBarVisible,
             filterSearchRequest = filterSearchRequest,
             onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
             onPanelFocusChanged = { focused ->
                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
             },
         )
+        // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
+        // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
+        // its duplicate Tags/Regex/message-rule controls while this bar is active. The model is a
+        // plain data class of values recomputed per recomposition (cheap, and content-equality is
+        // what keeps LogViewer skippable); actions holds lambdas and is remembered below.
+        val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
+            tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
+        }
+        val filterBarModel = if (state.filterBarVisible) {
+            FilterBarModel(
+                sortedTags = filterBarSortedTags,
+                tagUsage = state.tagUsage,
+                mostUsedTagLimit = state.settings.mostUsedTagLimit,
+                regexHistory = state.regexPatternHistory,
+            )
+        } else {
+            null
+        }
+        val filterBarActions = remember(state, tab.id) {
+            FilterBarActions(
+                onSetFilterMode = { mode -> state.setFilterMode(tab.id, mode) },
+                onStartRegexSearch = { state.startRegexSearch(tab.id) },
+                onToggleTag = { state.toggleTag(tab.id, it) },
+                onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
+                onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
+                onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
+                onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
+                onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
+                onSetKwInTag = { state.setKwInTag(tab.id, it) },
+                onToggleKwInTagRegex = { state.toggleKwInTagRx(tab.id) },
+                onSetKw = { state.setKw(tab.id, it) },
+                onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
+                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
+                },
+                onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+                onRememberRegexPattern = { state.rememberRegexPattern(it) },
+                onClearRegexHistory = { state.clearRegexPatternHistory() },
+                onOpenFilterPanel = { state.updateFilterVisible(true) },
+            )
+        }
         LogViewer(
             tab = tab, modifier = Modifier.weight(1f),
             settings = state.settings,
@@ -271,6 +314,10 @@ internal fun FileView(
             onSearchNext = { state.searchNext(tab.id) },
             onSearchPrev = { state.searchPrev(tab.id) },
             onSearchClose = { state.closeSearch(tab.id) },
+            filterBar = filterBarModel,
+            filterBarActions = filterBarActions,
+            filterBarVisible = state.filterBarVisible,
+            onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
         )
         if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && tab.attachedVideo != null)) {
             HDivider { delta ->

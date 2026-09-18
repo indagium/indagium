@@ -154,6 +154,7 @@ class AutosaveGoldenV1Test {
         assertEquals("", restored.compareTabId)
         assertEquals(false, restored.compareFilterRight)
         assertEquals(false, restored.filterVisible)
+        assertEquals(false, restored.filterBarVisible)
         assertEquals(true, restored.annotationVisible)
         assertEquals(true, restored.aiPanelVisible)
         assertEquals(0.35f, restored.rightSidebarSplit)

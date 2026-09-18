@@ -53,6 +53,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -67,6 +68,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -337,6 +339,26 @@ internal fun TagPill(
 
 // Bounded scrollable list that works inside a verticalScroll parent.
 // heightIn(max=X) breaks inside an unbounded parent; height(X) is reliable.
+internal fun scrollTargetForIndex(
+    itemIndex: Int,
+    rowPx: Int,
+    viewportPx: Int,
+    currentScrollPx: Int,
+    maxScrollPx: Int,
+): Int {
+    if (itemIndex < 0 || rowPx <= 0 || viewportPx <= 0) return currentScrollPx
+    val itemTop = itemIndex * rowPx
+    val itemBottom = itemTop + rowPx
+    val visibleTop = currentScrollPx
+    val visibleBottom = visibleTop + viewportPx
+    val target = when {
+        itemTop < visibleTop -> itemTop
+        itemBottom > visibleBottom -> itemBottom - viewportPx
+        else -> currentScrollPx
+    }
+    return target.coerceIn(0, maxScrollPx)
+}
+
 @Composable
 internal fun ScrollableItems(
     itemCount: Int,
@@ -347,29 +369,40 @@ internal fun ScrollableItems(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     if (itemCount == 0) return
-    val h = (itemCount * rowDp).coerceAtMost(maxDp).dp
+    // maxDp is only a cap. Let the measured content determine the height for short lists instead
+    // of imposing a guessed row-height-based bound on variable-height content.
+    val h = maxDp.dp
     val scrollState = rememberScrollState()
     val density = LocalDensity.current.density
-    LaunchedEffect(scrollToIndex) {
-        if (scrollToIndex >= 0) {
-            val rowPx = (rowDp * density).roundToInt()
-            val itemTop = scrollToIndex * rowPx
-            val itemBot = itemTop + rowPx
-            val viewTop = scrollState.value
-            val viewBot = viewTop + (maxDp * density).roundToInt()
-            when {
-                itemTop < viewTop -> scrollState.animateScrollTo(itemTop)
-                itemBot > viewBot -> scrollState.animateScrollTo(itemBot - (maxDp * density).roundToInt())
-            }
+    var viewportPx by remember { mutableIntStateOf(0) }
+    val maxScrollPx = scrollState.maxValue
+    LaunchedEffect(scrollToIndex, viewportPx, maxScrollPx) {
+        if (scrollToIndex in 0 until itemCount && viewportPx > 0) {
+            val target = scrollTargetForIndex(
+                itemIndex = scrollToIndex,
+                rowPx = (rowDp * density).roundToInt(),
+                viewportPx = viewportPx,
+                currentScrollPx = scrollState.value,
+                maxScrollPx = maxScrollPx,
+            )
+            if (target != scrollState.value) scrollState.scrollTo(target)
         }
     }
-    Box(modifier.fillMaxWidth().height(h)) {
-        Column(Modifier.fillMaxSize().verticalScroll(scrollState), content = content)
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(scrollState),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc()),
-        )
+    // Use a cap rather than a fixed height: content can wrap (for example, a tag with a
+    // package-label line), so a guessed item-count height must not clip the last visible row.
+    // The matchParentSize scrollbar does not participate in sizing, preserving the content-sized
+    // behavior for short lists.
+    Box(
+        modifier.fillMaxWidth().heightIn(max = h).onSizeChanged { viewportPx = it.height },
+    ) {
+        Column(Modifier.fillMaxWidth().verticalScroll(scrollState), content = content)
+        Box(Modifier.matchParentSize()) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scrollState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc()),
+            )
+        }
     }
 }
 
@@ -681,12 +714,22 @@ fun CloseButton(
     }
 }
 
+/** Measures and draws the child at its own size but reports zero height to the parent, with the
+ * child centred on that zero-height slot — so a control taller than a text line (CloseButton
+ * inside InlineField) stays centred on the line without growing the field. Compose does not
+ * clip pointer input to the parent's bounds, so the overhang stays clickable. */
+fun Modifier.overflowVertically(): Modifier = layout { measurable, constraints ->
+    val placeable = measurable.measure(constraints.copy(minHeight = 0, maxHeight = Constraints.Infinity))
+    layout(placeable.width, 0) { placeable.place(0, -placeable.height / 2) }
+}
+
 @Composable
 fun InlineField(
     value: String, onValue: (String) -> Unit,
     placeholder: String = "", modifier: Modifier = Modifier,
     fontSize: TextUnit = LocalFontBase.current.sp,
     onClear: (() -> Unit)? = null,
+    clearButtonModifier: Modifier = Modifier,
     onSubmit: (() -> Unit)? = null,
     // WP7 item 6 (round-2 corrections plan): the one Esc hook every inline editor in the workspace
     // needed and didn't have — previously each of the four canvas editors (and the panel's own
@@ -700,6 +743,14 @@ fun InlineField(
     singleLine: Boolean = true,
     centerTextVertically: Boolean = false,
     visualTransformation: VisualTransformation = VisualTransformation.None,
+    // When true, the field paints no background/border of its own and relies on its container's
+    // chrome instead — used by ui/FilterBar.kt so its fields read as part of one bar, matching
+    // ui/SearchBar.kt's flat BasicTextField. Defaults false so every existing call site is unchanged.
+    flat: Boolean = false,
+    // The clear button as SearchBar's own CloseButton (24dp box, 16sp ×) instead of the compact
+    // 16dp one — for fields that sit beside that bar (ui/FilterBar.kt). Drawn without growing the
+    // field's height; see overflowVertically.
+    searchStyleClear: Boolean = false,
 ) {
     val tc = tc()
     BasicTextField(
@@ -719,8 +770,7 @@ fun InlineField(
                     false
                 }
             }
-            .background(tc.bg, CORNER_SM)
-            .border(1.dp, tc.br, CORNER_SM)
+            .then(if (flat) Modifier else Modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM))
             .padding(horizontal = 7.dp, vertical = 4.dp),
         decorationBox = { inner ->
             if (onClear != null) {
@@ -730,10 +780,14 @@ fun InlineField(
                         inner()
                     }
                     if (value.isNotEmpty()) {
-                        SquareIconButton(
-                            "×", fontSize = 12.sp, onClick = onClear,
-                            modifier = Modifier.padding(start = 4.dp), size = 16.dp,
-                        )
+                        if (searchStyleClear) {
+                            CloseButton(onClick = onClear, modifier = clearButtonModifier.padding(start = 4.dp).overflowVertically())
+                        } else {
+                            SquareIconButton(
+                                "×", fontSize = 12.sp, onClick = onClear,
+                                modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
+                            )
+                        }
                     }
                 }
             } else {
@@ -744,6 +798,83 @@ fun InlineField(
                     }
                 } else {
                     if (value.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                    inner()
+                }
+            }
+        },
+    )
+}
+
+// TextFieldValue overload of the above — same look and decoration, but surfaces cursor/selection
+// to the caller. Needed by callers that programmatically insert text at the caret (ui/FilterBar.kt's
+// regex-snippet menu); the String overload above discards caret position on every recomposition, so
+// there is no way for a caller to know where to insert. Kept as a separate overload rather than
+// changing the String one, since the vast majority of call sites have no need to track the caret.
+@Composable
+fun InlineField(
+    value: TextFieldValue, onValue: (TextFieldValue) -> Unit,
+    placeholder: String = "", modifier: Modifier = Modifier,
+    fontSize: TextUnit = LocalFontBase.current.sp,
+    onClear: (() -> Unit)? = null,
+    clearButtonModifier: Modifier = Modifier,
+    onSubmit: (() -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
+    singleLine: Boolean = true,
+    centerTextVertically: Boolean = false,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    flat: Boolean = false,
+    // The clear button as SearchBar's own CloseButton (24dp box, 16sp ×) instead of the compact
+    // 16dp one — for fields that sit beside that bar (ui/FilterBar.kt). Drawn without growing the
+    // field's height; see overflowVertically.
+    searchStyleClear: Boolean = false,
+) {
+    val tc = tc()
+    val text = value.text
+    BasicTextField(
+        value = value, onValueChange = onValue,
+        visualTransformation = visualTransformation,
+        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
+        cursorBrush = SolidColor(tc.ac),
+        singleLine = singleLine,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
+        modifier = modifier
+            .onPreviewKeyEvent { event ->
+                if (onCancel != null && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onCancel()
+                    true
+                } else {
+                    false
+                }
+            }
+            .then(if (flat) Modifier else Modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        decorationBox = { inner ->
+            if (onClear != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                    if (text.isNotEmpty()) {
+                        if (searchStyleClear) {
+                            CloseButton(onClick = onClear, modifier = clearButtonModifier.padding(start = 4.dp).overflowVertically())
+                        } else {
+                            SquareIconButton(
+                                "×", fontSize = 12.sp, onClick = onClear,
+                                modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
+                            )
+                        }
+                    }
+                }
+            } else {
+                if (centerTextVertically) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                        if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                } else {
+                    if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
                     inner()
                 }
             }
@@ -1090,6 +1221,7 @@ fun SegmentedControl(
     selectedColors: List<Color>? = null,
     fillWidth: Boolean = false,
     enabled: Boolean = true,
+    selectedSolid: Boolean = false,
     segmentHeight: Dp = 28.dp,
     segmentFontSize: TextUnit = 12.sp,
     segmentHorizontalPadding: Dp = 10.dp,
@@ -1118,13 +1250,25 @@ fun SegmentedControl(
                 modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(segmentHeight)
                     .clip(segmentShape)
-                    .background(if (selected && enabled) selColor.copy(.2f) else Color.Transparent, segmentShape)
+                    .background(
+                        if (selected && enabled) {
+                            if (selectedSolid) selColor else selColor.copy(.2f)
+                        } else {
+                            Color.Transparent
+                        },
+                        segmentShape,
+                    )
                     .clickable(enabled = enabled) { onToggle(index) },
             ) {
                 DisableSelection {
                     AppText(
                         text = label,
-                        color = if (!enabled) tc.td.copy(.5f) else if (selected) selColor else tc.ts,
+                        color = when {
+                            !enabled -> tc.td.copy(.5f)
+                            selected && selectedSolid -> Color.White
+                            selected -> selColor
+                            else -> tc.ts
+                        },
                         fontSize = segmentFontSize,
                         fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
                         modifier = Modifier.padding(horizontal = segmentHorizontalPadding),

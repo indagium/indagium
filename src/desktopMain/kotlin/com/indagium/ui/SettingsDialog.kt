@@ -960,50 +960,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                 }
             }
         }
-
-        // The two diagram defaults used to sit one-per-row above, each spending a full row on a
-        // single control and leaving the section's last row's worth of space empty below. They
-        // share one row instead, natural-width like the rest of this section's rows — NOT
-        // stretched into equal fifths like the Ctrl+F row's tracks, which squeezed "Snapshot"
-        // down to a couple of clipped letters.
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(24.dp),
-        ) {
-            CompactSettingWithTooltip(
-                label = "Diagram note action",
-                tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
-                    "This chooses which half of the split action is primary.",
-            ) {
-                SegmentedControl(
-                    options = listOf("Snapshot", "Link"),
-                    selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
-                    onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
-                )
-            }
-            CompactSettingWithTooltip(
-                label = "Diagram export",
-                tooltip = "Sets the representation for newly added sequence-diagram notes. " +
-                    "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
-                    "Src keeps the editable diagram text. Existing notes keep their own choice.",
-            ) {
-                SegmentedControl(
-                    options = listOf("Img", "Src"),
-                    selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
-                    onToggle = { index ->
-                        state.updateSettings {
-                            it.copy(
-                                diagramDefaultExportMode = if (index == 0) {
-                                    DiagramExportMode.IMAGE
-                                } else {
-                                    DiagramExportMode.SOURCE
-                                },
-                            )
-                        }
-                    },
-                )
-            }
-        }
     }
 }
 
@@ -1127,6 +1083,49 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
     CopyMetadataSettingsRow(state)
+    // The two diagram defaults used to sit one-per-row, each spending a full row on a single
+    // control and leaving the section's last row's worth of space empty below. They share one
+    // row instead, natural-width like the rest of this section's rows — NOT stretched into equal
+    // fifths like CopyMetadataSettingsRow's tracks, which squeezed "Snapshot" down to a couple of
+    // clipped letters.
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        CompactSettingWithTooltip(
+            label = "Diagram note action",
+            tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
+                "This chooses which half of the split action is primary.",
+        ) {
+            SegmentedControl(
+                options = listOf("Snapshot", "Link"),
+                selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+                onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Diagram export",
+            tooltip = "Sets the representation for newly added sequence-diagram notes. " +
+                "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
+                "Src keeps the editable diagram text. Existing notes keep their own choice.",
+        ) {
+            SegmentedControl(
+                options = listOf("Img", "Src"),
+                selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
+                onToggle = { index ->
+                    state.updateSettings {
+                        it.copy(
+                            diagramDefaultExportMode = if (index == 0) {
+                                DiagramExportMode.IMAGE
+                            } else {
+                                DiagramExportMode.SOURCE
+                            },
+                        )
+                    }
+                },
+            )
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",

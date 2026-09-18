@@ -90,6 +90,24 @@ class KeyboardNavigationTest {
     }
 
     @Test
+    fun filterTargetsOmitHiddenModeControlsWhenTheHorizontalBarOwnsThem() {
+        val targets = filterKeyboardTargets(
+            levelCount = 2,
+            sequenceIds = emptyList(),
+            manualCollapseIds = emptyList(),
+            savedFilterIds = emptyList(),
+            includeModeControls = false,
+        )
+
+        assertTrue(targets.none { it.kind == KeyboardTargetKind.FilterModeTags })
+        assertTrue(targets.none { it.kind == KeyboardTargetKind.FilterModeRegex })
+        assertTrue(targets.none { it.kind == KeyboardTargetKind.FilterTagInput })
+        assertTrue(targets.none { it.kind == KeyboardTargetKind.FilterMessageInput })
+        assertEquals(KeyboardTargetKind.FilterHighlighterInput, targets.first().kind)
+        assertTrue(targets.any { it.id == "filter-section-log-composition" })
+    }
+
+    @Test
     fun annotationTargetsIncludeHeaderActionsBlocksAndSuffix() {
         val targets = annotationKeyboardTargets(
             blockIds = listOf("note-a", "log-a"),

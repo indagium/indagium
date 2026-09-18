@@ -106,11 +106,14 @@ fun filterKeyboardTargets(
     sequenceIds: List<String>,
     manualCollapseIds: List<String>,
     savedFilterIds: List<String>,
+    includeModeControls: Boolean = true,
 ): List<KeyboardTarget> = buildList {
-    add(KeyboardTarget("filter-mode-tags", KeyboardTargetKind.FilterModeTags))
-    add(KeyboardTarget("filter-mode-regex", KeyboardTargetKind.FilterModeRegex))
-    add(KeyboardTarget("filter-tag-input", KeyboardTargetKind.FilterTagInput))
-    add(KeyboardTarget("filter-message-input", KeyboardTargetKind.FilterMessageInput))
+    if (includeModeControls) {
+        add(KeyboardTarget("filter-mode-tags", KeyboardTargetKind.FilterModeTags))
+        add(KeyboardTarget("filter-mode-regex", KeyboardTargetKind.FilterModeRegex))
+        add(KeyboardTarget("filter-tag-input", KeyboardTargetKind.FilterTagInput))
+        add(KeyboardTarget("filter-message-input", KeyboardTargetKind.FilterMessageInput))
+    }
     add(KeyboardTarget("filter-highlighter-input", KeyboardTargetKind.FilterHighlighterInput))
     add(KeyboardTarget("filter-section-log-composition", KeyboardTargetKind.FilterSection))
     add(KeyboardTarget("filter-section-levels", KeyboardTargetKind.FilterSection))

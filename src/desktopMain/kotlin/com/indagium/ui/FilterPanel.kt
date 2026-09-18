@@ -619,6 +619,7 @@ internal fun FilterPanel(
     customIssueRules: List<CustomIssueRule>,
     width: Float,
     focusRequester: FocusRequester? = null,
+    filterBarVisible: Boolean = false,
     filterSearchRequest: FilterSearchRequest? = null,
     onFilterSearchRequestConsumed: (FilterSearchRequest) -> Unit = {},
     onPanelFocusChanged: (Boolean) -> Unit = {},
@@ -775,12 +776,14 @@ internal fun FilterPanel(
         tab.filter,
         tab.manualBlocks,
         savedFilters,
+        filterBarVisible,
     ) {
         filterKeyboardTargets(
             levelCount = LogLevel.entries.size,
             sequenceIds = tab.filter.sequences.map { it.id },
             manualCollapseIds = tab.manualBlocks.map { it.id },
             savedFilterIds = savedFilters.map { it.id },
+            includeModeControls = !filterBarVisible,
         )
     }
 
@@ -874,9 +877,16 @@ internal fun FilterPanel(
         return true
     }
 
-    LaunchedEffect(filterSearchRequest?.nonce, tab.id) {
+    LaunchedEffect(filterSearchRequest?.nonce, tab.id, filterBarVisible) {
         val request = filterSearchRequest ?: return@LaunchedEffect
-        when (filterSearchTargetForTab(request, tab.id) ?: return@LaunchedEffect) {
+        val target = filterSearchTargetForTab(request, tab.id) ?: return@LaunchedEffect
+        if (filterBarVisible && target != CtrlFTarget.FIND_BAR) {
+            // The horizontal bar owns these inputs while it is visible. Consume the global
+            // request so a hidden panel field is never focused or changed behind the bar.
+            onFilterSearchRequestConsumed(request)
+            return@LaunchedEffect
+        }
+        when (target) {
             CtrlFTarget.TAGS -> {
                 if (filter.mode != FilterMode.TAGS) {
                     pendingSearchFocusTarget = CtrlFTarget.TAGS
@@ -909,7 +919,11 @@ internal fun FilterPanel(
         }
         onFilterSearchRequestConsumed(request)
     }
-    LaunchedEffect(filter.mode, pendingSearchFocusTarget) {
+    LaunchedEffect(filter.mode, pendingSearchFocusTarget, filterBarVisible) {
+        if (filterBarVisible) {
+            pendingSearchFocusTarget = null
+            return@LaunchedEffect
+        }
         when (pendingSearchFocusTarget) {
             CtrlFTarget.TAGS -> if (filter.mode == FilterMode.TAGS) {
                 runCatching { tagFr.requestFocus() }
@@ -1088,14 +1102,15 @@ internal fun FilterPanel(
             }
             .verticalScroll(scroll),
     ) {
-        // ── Filter mode tabs ──────────────────────────────────────
-        UnderlineTabs(
+        if (!filterBarVisible) {
+            // ── Filter mode tabs ──────────────────────────────────────
+            UnderlineTabs(
             labels = listOf("Tags", "Regex"),
             selectedIndex = if (filter.mode == FilterMode.KEYWORD) 1 else 0,
             onSelect = { index ->
                 if (index == 1) onStartRegexSearch() else onSetFilterMode(FilterMode.TAGS)
             },
-        )
+            )
 
         // ── Positive: Tags ────────────────────────────────────────
         if (filter.mode == FilterMode.TAGS) {
@@ -1682,9 +1697,10 @@ internal fun FilterPanel(
                         }
                     }
                 }
-            }
-            Divider()
+        }
+        Divider()
         } // end TAGS-only MESSAGE RULES block
+        }
 
         // ── Log composition ──────────────────────────────────────
         // Ranked list of masked message templates (utils/MessageTemplates.kt) — turns "scroll
@@ -2534,43 +2550,16 @@ internal fun FilterPanel(
     }
 
     if (regexEditorOpen) {
-        Dialog(onDismissRequest = { regexEditorOpen = false }) {
-            val dialogTheme = tc()
-            Column(
-                Modifier.width(640.dp)
-                    .background(dialogTheme.p, RoundedCornerShape(8.dp))
-                    .border(1.dp, dialogTheme.br, RoundedCornerShape(8.dp))
-                    .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                AppText("Edit regex search", color = dialogTheme.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                AppText(
-                    "Searches the exact text shown in a log row. Apply keeps this as a transient search; save it manually from Saved filters when needed.",
-                    color = dialogTheme.td,
-                    fontSize = 11.sp,
-                    maxLines = 2,
-                )
-                InlineField(
-                    value = regexEditorText,
-                    onValue = { regexEditorText = it },
-                    placeholder = "regex…",
-                    modifier = Modifier.fillMaxWidth().height(220.dp),
-                    fontSize = 12.sp,
-                    singleLine = false,
-                )
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-                ) {
-                    AppButton("Apply", onClick = {
-                        kwDisplay = regexEditorText
-                        onSetKw(regexEditorText)
-                        regexEditorOpen = false
-                    }, variant = ButtonVariant.Primary)
-                    AppButton("Cancel", onClick = { regexEditorOpen = false }, variant = ButtonVariant.Secondary)
-                }
-            }
-        }
+        RegexSearchEditor(
+            text = regexEditorText,
+            onTextChange = { regexEditorText = it },
+            onApply = {
+                kwDisplay = regexEditorText
+                onSetKw(regexEditorText)
+                regexEditorOpen = false
+            },
+            onDismiss = { regexEditorOpen = false },
+        )
     }
 
     if (createSavedFilterFolderOpen || renameSavedFilterFolderId != null) {
