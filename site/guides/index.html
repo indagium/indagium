@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Android log analysis guides: view logcat without Android Studio, open an adb bugreport, read an ANR, and analyze logcat with a repeatable workflow." />
+    <link rel="canonical" href="https://indagium.com/guides/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Android Logcat &amp; Bugreport Guides | Indagium" />
+    <meta property="og:description" content="Android log analysis guides: view logcat without Android Studio, open an adb bugreport, read an ANR, and analyze logcat with a repeatable workflow." />
+    <meta property="og:url" content="https://indagium.com/guides/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
+    <meta property="og:image:alt" content="Indagium showing an Android log investigation with a filtered trace and annotations." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Android Logcat &amp; Bugreport Guides | Indagium" />
+    <meta name="twitter:description" content="Android log analysis guides: view logcat without Android Studio, open an adb bugreport, read an ANR, and analyze logcat with a repeatable workflow." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
+    <title>Android Logcat &amp; Bugreport Guides | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Guides", "item": "https://indagium.com/guides/" }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero guide-hero" aria-labelledby="page-title"><div><p class="eyebrow">Guides <span>/</span> Android logs</p><h1 id="page-title">Android logcat and bugreport guides.</h1><p class="page-lede">Practical, step-by-step guides for the files you actually receive: a logcat .txt someone captured with adb, an adb bugreport .zip from QA, or an ANR you need to explain. Each guide works with any Android log viewer and shows where Indagium, a free desktop log viewer and logcat analyzer, shortens the path.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a></div></div></section>
+      <section class="section" aria-labelledby="guides-title"><p class="eyebrow">All guides</p><h2 id="guides-title">Start from the file <em>you have.</em></h2><ol class="guide-steps">
+        <li><div class="step-number">01</div><div><h3><a href="/guides/logcat-without-android-studio/">View a logcat file without Android Studio</a></h3><p>Install platform-tools, capture with <code>adb logcat</code>, and open the saved .txt or .log file in a desktop log viewer — no IDE or live device session needed.</p></div></li>
+        <li><div class="step-number">02</div><div><h3><a href="/guides/analyze-android-logcat/">Analyze Android logcat step by step</a></h3><p>A repeatable five-step trail: open the evidence, narrow the signal with filters, fold repeating sequences, check the source, and export the record.</p></div></li>
+        <li><div class="step-number">03</div><div><h3><a href="/guides/open-android-bugreport/">Open an Android bugreport</a></h3><p>Capture with <code>adb bugreport</code> or Developer options, open the .zip or .7z directly, choose what to load, and find crashes and ANRs inside it.</p></div></li>
+        <li><div class="step-number">04</div><div><h3><a href="/guides/read-android-anr/">Read an ANR in logcat</a></h3><p>Why ANRs fire, where the evidence lives in logcat and the thread dump, and a reading method for finding what blocked the main thread.</p></div></li>
+      </ol></section>
+      <section class="section guide-band" aria-labelledby="guide-next-title"><p class="eyebrow">By file type</p><h2 id="guide-next-title">Pick the tool page for <em>your capture.</em></h2><div class="guide-links"><a href="/android-logcat-viewer/"><span>Logcat files</span><b>Android log viewer for .txt and .log →</b></a><a href="/android-bug-report-viewer/"><span>Bugreports</span><b>Open adb bugreport .zip and .7z →</b></a><a href="/dlt-viewer/"><span>DLT captures</span><b>DLT viewer for macOS, Windows, Linux →</b></a></div></section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>

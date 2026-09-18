@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Indagium's logcat MCP server lets Claude Code, Codex, LM Studio, or any MCP client read an open Android log over a local, loopback-only URL. Off by default." />
+    <link rel="canonical" href="https://indagium.com/logcat-mcp-server/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Logcat MCP Server – Let AI Read Android Logs | Indagium" />
+    <meta property="og:description" content="Indagium's logcat MCP server lets Claude Code, Codex, LM Studio, or any MCP client read an open Android log over a local, loopback-only URL. Off by default." />
+    <meta property="og:url" content="https://indagium.com/logcat-mcp-server/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/demo-ai-investigation.webp" />
+    <meta property="og:image:alt" content="Indagium's AI panel investigating an open Android log tab." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Logcat MCP Server – Let AI Read Android Logs | Indagium" />
+    <meta name="twitter:description" content="Indagium's logcat MCP server lets Claude Code, Codex, LM Studio, or any MCP client read an open Android log over a local, loopback-only URL. Off by default." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/demo-ai-investigation.webp" />
+    <title>Logcat MCP Server – Let AI Read Android Logs | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Indagium", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Logcat MCP Server", "item": "https://indagium.com/logcat-mcp-server/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Is the MCP server on by default?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. It's off by default and never runs in a packaged build until you turn it on — Settings → Automation → MCP control server → On for an installed app, or an environment variable for a dev run."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can another machine on the network connect to it?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The server binds to 127.0.0.1 (loopback) only, and every request also needs the bearer token shown by Connection info… in Settings, so nothing is reachable from the network even while it's on."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does using AI mean my log leaves my machine?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Not by itself. The MCP server and the in-app AI panel call the same local tools either way; whether the log content reaches a cloud API depends on which AI provider you connect — point a local LM Studio server at it and nothing has to leave the machine, or choose Anthropic, OpenAI, Codex, or another provider and the tool results become part of that provider's conversation."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How many tools does it expose?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "AVAILABLE_METHODS.md documents close to 60 tools across five groups — reading and narrowing logs, filters and sequences, notes and exports, source/case/video, and diagrams. The running app's tools/list response is the authoritative schema for exact parameters."
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Automation <span>/</span> MCP server</p><h1 id="page-title">A logcat MCP server that lets AI assistants read your Android log.</h1><p class="page-lede">The control server built into Indagium turns an open trace into something an AI assistant can query directly: narrow it with the same filters you'd use by hand, pull crash sites, and cite the exact lines behind a claim. It's how to analyze logcat with AI while the server itself stays on your machine — it is off by default, bound to 127.0.0.1, and unlocked only with a bearer token you copy yourself.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">See the analysis guide <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-ai-investigation.webp" alt="Indagium's AI panel investigating an open Android log tab." /><figcaption>The in-app AI panel calls the same tools an external MCP client would.</figcaption></figure></section>
+      <section class="section" aria-labelledby="mcp-what-title"><p class="eyebrow">A local automation surface</p><h2 id="mcp-what-title">Built for a client, not a cloud service.</h2><p class="section-lede">The control server is part of the desktop app itself — there's nothing extra to install, and nothing reachable outside your machine unless you turn it on.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Speaks plain MCP</h3><p>Streamable HTTP, the transport LM Studio, Claude Code, Codex, and custom tooling already support. Point a client at a URL — no Node.js, npm, or repo checkout.</p></article><article class="evidence-card"><span>02</span><h3>Off by default</h3><p>Never runs in a packaged build until you switch it on: Settings → Automation → MCP control server → On. A dev run enables it with an environment variable instead.</p></article><article class="evidence-card"><span>03</span><h3>Loopback and a token</h3><p>Binds to 127.0.0.1 on a configurable port (8991 by default). Every request also needs the bearer token shown by Connection info… in Settings.</p></article><article class="evidence-card"><span>04</span><h3>A REST escape hatch</h3><p>The same server exposes a plain JSON/REST surface on the same port for quick curl or scripting, without an MCP client in the middle.</p></article></div></section>
+      <section class="section split-callout" aria-labelledby="mcp-connect-title"><div><p class="eyebrow">Connect a client</p><h2 id="mcp-connect-title">Paste a URL, not a config file.</h2><p class="section-lede">Every request needs the bearer token from Connection info… in Settings, plus the endpoint at <code>http://127.0.0.1:8991/mcp</code> (swap the port if you changed it). Claude Code adds it with one command: <code>claude mcp add --transport http indagium http://127.0.0.1:8991/mcp</code>. LM Studio and Cursor-style clients take the same URL as an <code>mcp.json</code> entry with the token as an <code>Authorization: Bearer</code> header; Codex takes it as a streamable-HTTP server in <code>~/.codex/config.toml</code>.</p><a class="text-link" href="/logcat-analyzer/">See what a client can search <span aria-hidden="true">→</span></a></div><figure class="evidence-card image-card"><img src="/assets/media/posters/demo-filtering.webp" alt="Indagium's filter panel — the same filters an MCP client reads and sets." /><figcaption>get_filter and set_filter read and change exactly this panel.</figcaption></figure></section>
+      <section class="section" aria-labelledby="mcp-tools-title"><p class="eyebrow">What's in the catalogue</p><h2 id="mcp-tools-title">Close to 60 tools, five groups.</h2><p class="section-lede"><code>AVAILABLE_METHODS.md</code> is the version-controlled map; the running app's <code>tools/list</code> response is the authoritative schema. Almost every read is scoped to a <code>tabId</code> — start with <code>list_tabs</code> rather than a filename.</p><div class="comparison-table-wrap"><table class="comparison-table"><thead><tr><th scope="col">Group</th><th scope="col">Example tools</th></tr></thead><tbody><tr><th scope="row">Read logs, narrow evidence</th><td><code>list_tabs</code>, <code>get_visible_lines</code>, <code>get_crash_sites</code>, <code>get_log_composition</code></td></tr><tr><th scope="row">Filters, sequences, navigation</th><td><code>get_filter</code>/<code>set_filter</code>, <code>add_sequence</code>, <code>get_sequence_summary</code>, <code>toggle_group</code></td></tr><tr><th scope="row">Notes, exports, follow-up</th><td><code>add_text_note</code>, <code>get_annotation_blocks</code>, <code>export_analysis</code>, <code>export_filtered_log</code></td></tr><tr><th scope="row">Source, cases, video</th><td><code>get_source_declarations</code>, <code>search_similar_cases</code>, <code>get_video_frame</code></td></tr><tr><th scope="row">Diagrams</th><td><code>build_sequence_diagram</code></td></tr></tbody></table></div></section>
+      <section class="section" aria-labelledby="mcp-workflow-title"><p class="eyebrow">How an agent actually investigates</p><h2 id="mcp-workflow-title">Narrow first, <em>read second.</em></h2><p class="section-lede">The analysis playbook that ships with the server teaches a client the same discipline a human investigator uses on a file too large to read end to end.</p><ol class="guide-steps"><li><div class="step-number">01</div><div><h3>Start at the anchors</h3><p><code>get_crash_sites</code> first — exceptions and ANRs are the highest-signal anchors — then <code>get_issue_description</code> if the user reported a symptom.</p></div></li><li><div class="step-number">02</div><div><h3>Narrow before reading</h3><p><code>set_filter</code> by tag, level, or PID, then <code>get_visible_lines</code> in roughly 200–500-line pages instead of the whole file.</p></div></li><li><div class="step-number">03</div><div><h3>Corroborate without losing the filter</h3><p><code>get_line_context</code> pulls raw surrounding rows regardless of the active filter or folding; <code>get_log_composition</code> ranks a view's repeats so the noise can be filtered out next.</p></div></li><li><div class="step-number">04</div><div><h3>Leave the trail</h3><p><code>add_log_note</code> anchored to the deciding lines, <code>add_text_note</code> for the narrative — so the notes stand alone without you re-explaining them later.</p></div></li></ol></section>
+      <section class="section" aria-labelledby="mcp-provider-title"><p class="eyebrow">Your assistant, your choice</p><h2 id="mcp-provider-title">Local model or hosted — you decide.</h2><p class="section-lede">Indagium doesn't bundle or require a specific AI vendor. The in-app AI panel's default profile is an OpenAI-compatible Chat Completions endpoint, so a local LM Studio server works out of the box with a tool-capable model; switch the provider to OpenAI, Anthropic, Codex, Claude Code, or another compatible endpoint when you'd rather use a hosted model. An external MCP client reaches the same tool surface over the control server instead of the in-app panel, so the choice of who reads your log — a model on your machine or one in the cloud — stays yours either way.</p></section>
+      <section class="section" aria-labelledby="mcp-faq-title"><p class="eyebrow">Questions</p><h2 id="mcp-faq-title">Logcat MCP server FAQ</h2><div class="feature-matrix"><article class="evidence-card"><h3>Is the MCP server on by default?</h3><p>No. It's off by default and never runs in a packaged build until you turn it on — Settings → Automation → MCP control server → On for an installed app, or an environment variable for a dev run.</p></article><article class="evidence-card"><h3>Can another machine on the network connect to it?</h3><p>No. The server binds to 127.0.0.1 (loopback) only, and every request also needs the bearer token shown by Connection info… in Settings, so nothing is reachable from the network even while it's on.</p></article><article class="evidence-card"><h3>Does using AI mean my log leaves my machine?</h3><p>Not by itself. The MCP server and the in-app AI panel call the same local tools either way; whether the log content reaches a cloud API depends on which AI provider you connect — point a local LM Studio server at it and nothing has to leave the machine, or choose Anthropic, OpenAI, Codex, or another provider and the tool results become part of that provider's conversation.</p></article><article class="evidence-card"><h3>How many tools does it expose?</h3><p><code>AVAILABLE_METHODS.md</code> documents close to 60 tools across five groups — reading and narrowing logs, filters and sequences, notes and exports, source/case/video, and diagrams. The running app's <code>tools/list</code> response is the authoritative schema for exact parameters.</p></article></div></section>
+      <section class="section guide-band" aria-labelledby="mcp-next-title"><p class="eyebrow">Keep going</p><h2 id="mcp-next-title">The log is one client away from <em>a second reader.</em></h2><div class="guide-links"><a href="/logcat-analyzer/"><span>Analyzer</span><b>See the filters and exports a client calls →</b></a><a href="/android-logcat-viewer/"><span>Viewer</span><b>Start with the Android logcat viewer →</b></a><a href="/log-analysis-workflow/"><span>Comparison</span><b>See why context changes the work →</b></a></div></section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>
