@@ -3,29 +3,86 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Compare generic text or log viewing with Indagium's investigation workspace for Android evidence, from filtering and patterns to notes, source context, and exports." />
+    <meta name="description" content="Compare generic text or log viewing with Indagium: a free, offline Android log viewer and logcat analyzer with filters, sequences, source lookup, and exports." />
     <link rel="canonical" href="https://indagium.com/log-analysis-workflow/" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="Log Analysis Workflow | Indagium" />
-    <meta property="og:description" content="Compare generic text or log viewing with Indagium's investigation workspace for Android evidence, from filtering and patterns to notes, source context, and exports." />
+    <meta property="og:description" content="Compare generic text or log viewing with Indagium: a free, offline Android log viewer and logcat analyzer with filters, sequences, source lookup, and exports." />
     <meta property="og:url" content="https://indagium.com/log-analysis-workflow/" />
     <meta property="og:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
     <meta property="og:image:alt" content="Indagium's investigation workspace showing a structured Android log trace." />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Log Analysis Workflow | Indagium" />
-    <meta name="twitter:description" content="Compare generic text or log viewing with Indagium's investigation workspace for Android evidence, from filtering and patterns to notes, source context, and exports." />
+    <meta name="twitter:description" content="Compare generic text or log viewing with Indagium: a free, offline Android log viewer and logcat analyzer with filters, sequences, source lookup, and exports." />
     <meta name="twitter:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
     <title>Log Analysis Workflow | Indagium</title>
     <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Log Analysis Workflow", "item": "https://indagium.com/log-analysis-workflow/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What's the difference between a text/log viewer and an investigation workspace?",
+            "acceptedAnswer": { "@type": "Answer", "text": "A viewer displays a file. Indagium's workspace keeps filters, folded sequences, comparisons, source lookup, and notes attached to that file so the trail survives past the first read." }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need Android Studio to follow this workflow?",
+            "acceptedAnswer": { "@type": "Answer", "text": "No — the whole workflow runs in Indagium, without Android Studio, on macOS, Windows, or Linux." }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I compare two logs side by side?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Open two tabs and compare them side by side, each with its own filter or mirroring the other's." }
+          },
+          {
+            "@type": "Question",
+            "name": "Does the workflow cover DLT logs as well as Android logcat?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. The same filter, sequence, and export tools apply to DLT (.dlt) captures, raw DLT streams, and DLT Viewer exports alongside logcat." }
+          },
+          {
+            "@type": "Question",
+            "name": "Is Indagium free for this workflow?",
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes, Indagium is free to use; it's source-available, not open source." }
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
-    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/analyze-android-logcat/">Guide</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
     <main id="main">
-      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Comparison <span>/</span> The investigation surface</p><h1 id="page-title">A log viewer shows text. An investigation workspace keeps the case.</h1><p class="page-lede">Generic text or log viewing is useful for opening a file. Indagium adds the connected tools needed to ask what happened, preserve the trail, and hand the evidence to someone else.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Try Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">See the workflow <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-video-sync.webp" alt="Indagium connecting an Android log line with a screen recording." /><figcaption>Keep the visual symptom and the timestamp in one place.</figcaption></figure></section>
-      <section class="section" aria-labelledby="comparison-title"><p class="eyebrow">A grounded comparison</p><h2 id="comparison-title">Text is the starting point. <em>Context is the work.</em></h2><p class="section-lede">This workflow describes the difference between generic text or log viewing and the capabilities documented for Indagium.</p><div class="comparison-table-wrap"><table class="comparison-table"><thead><tr><th scope="col">Investigation need</th><th scope="col">Generic text or log viewing</th><th scope="col">Indagium workspace</th></tr></thead><tbody><tr><th scope="row">Find the signal</th><td>Read or search a text stream.</td><td>Combine level, tag, package, message, PID, and TID rules, with substring or regex matching.</td></tr><tr><th scope="row">See the pattern</th><td>Scroll through repeated lines.</td><td>Fold recurring regions into colored, nestable sequences and use thread maps and time deltas.</td></tr><tr><th scope="row">Compare context</th><td>Open another file or window.</td><td>Use multiple tabs and compare two tabs side by side, each with its own filter.</td></tr><tr><th scope="row">Connect the symptom</th><td>Keep a recording or source reference elsewhere.</td><td>Attach video to a log line and view the source method that emitted it when configured.</td></tr><tr><th scope="row">Explain the finding</th><td>Copy a snippet into a message.</td><td>Annotate selections and export logs or notes as a record others can follow.</td></tr></tbody></table></div></section>
+      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Comparison <span>/</span> The investigation surface</p><h1 id="page-title">A log viewer shows text. An investigation workspace keeps the case.</h1><p class="page-lede">Generic text or log viewing is useful for opening a file. Indagium adds the connected tools of a full log analyzer — needed to ask what happened, preserve the trail, and hand the evidence to someone else, entirely offline.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Try Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">See the workflow <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-video-sync.webp" alt="Indagium connecting an Android log line with a screen recording." /><figcaption>Keep the visual symptom and the timestamp in one place.</figcaption></figure></section>
+      <section class="section" aria-labelledby="comparison-title"><p class="eyebrow">A grounded comparison</p><h2 id="comparison-title">Text is the starting point. <em>Context is the work.</em></h2><p class="section-lede">This workflow describes the difference between generic text or log viewing and the capabilities documented for Indagium, without Android Studio.</p><div class="comparison-table-wrap"><table class="comparison-table"><thead><tr><th scope="col">Investigation need</th><th scope="col">Generic text or log viewing</th><th scope="col">Indagium workspace</th></tr></thead><tbody><tr><th scope="row">Find the signal</th><td>Read or search a text stream.</td><td>Combine level, tag, package, message, PID, and TID rules, with substring or regex matching.</td></tr><tr><th scope="row">See the pattern</th><td>Scroll through repeated lines.</td><td>Fold recurring regions into colored, nestable sequences and use thread maps and time deltas.</td></tr><tr><th scope="row">Compare context</th><td>Open another file or window.</td><td>Use multiple tabs and compare two tabs side by side, each with its own filter.</td></tr><tr><th scope="row">Connect the symptom</th><td>Keep a recording or source reference elsewhere.</td><td>Attach video to a log line and view the source method that emitted it when configured.</td></tr><tr><th scope="row">Explain the finding</th><td>Copy a snippet into a message.</td><td>Annotate selections and export logs or notes as a record others can follow.</td></tr></tbody></table></div></section>
+      <section class="section" id="formats" aria-labelledby="workflow-formats-title"><p class="eyebrow">What you can open</p><h2 id="workflow-formats-title">The same workflow, <em>every format.</em></h2><p class="section-lede">The workflow above applies whether you start from a raw logcat file, an adb bugreport, or a DLT capture — the filters, sequences, and exports don't change.</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Logcat text</h3><p>Open logcat .txt or .log files in threadtime, time, brief, or bare format; unrecognised lines are tagged RAW.</p></article><article class="evidence-card"><span>02</span><h3>Android bugreports</h3><p>Open a bugreport .zip or .7z archive directly and pick what to load, instead of extracting it to a folder first.</p></article><article class="evidence-card"><span>03</span><h3>DLT captures</h3><p>Open .dlt binary captures and raw DLT streams; non-verbose payloads are kept as readable text/hex.</p></article><article class="evidence-card"><span>04</span><h3>DLT Viewer exports</h3><p>Open DLT Viewer text and CSV exports the same way as a logcat file.</p></article></div></section>
+      <section class="section" aria-labelledby="workflow-why-title"><p class="eyebrow">Why offline matters</p><h2 id="workflow-why-title">The trail stays <em>on your machine.</em></h2><p class="section-lede">Every step in this workflow — opening, filtering, folding, comparing, and exporting — runs locally in the desktop app; nothing is uploaded unless you turn on the optional AI assistant or MCP connection yourself.</p></section>
       <section class="section guide-band" aria-labelledby="comparison-next-title"><p class="eyebrow">A connected next step</p><h2 id="comparison-next-title">When the file becomes a <em>case.</em></h2><div class="guide-links"><a href="/android-logcat-viewer/"><span>Open</span><b>Start with the Android logcat viewer →</b></a><a href="/logcat-analyzer/"><span>Investigate</span><b>Shape the signal with analysis tools →</b></a><a href="/android-bug-report-viewer/"><span>Handoff</span><b>Carry context out of a bug report →</b></a></div></section>
+      <section class="section" id="faq" aria-labelledby="workflow-faq-title">
+        <p class="eyebrow">Questions</p>
+        <h2 id="workflow-faq-title">The workflow, <em>answered.</em></h2>
+        <p class="section-lede">Common questions about how Indagium's investigation workspace differs from a plain text or log viewer.</p>
+        <div class="faq-list">
+          <div><h3>What's the difference between a text/log viewer and an investigation workspace?</h3><p>A viewer displays a file. Indagium's workspace keeps filters, folded sequences, comparisons, source lookup, and notes attached to that file so the trail survives past the first read.</p></div>
+          <div><h3>Do I need Android Studio to follow this workflow?</h3><p>No — the whole workflow runs in Indagium, without Android Studio, on macOS, Windows, or Linux.</p></div>
+          <div><h3>Can I compare two logs side by side?</h3><p>Yes. Open two tabs and compare them side by side, each with its own filter or mirroring the other's.</p></div>
+          <div><h3>Does the workflow cover DLT logs as well as Android logcat?</h3><p>Yes. The same filter, sequence, and export tools apply to DLT (.dlt) captures, raw DLT streams, and DLT Viewer exports alongside logcat.</p></div>
+          <div><h3>Is Indagium free for this workflow?</h3><p>Yes, Indagium is free to use; it's source-available, not open source.</p></div>
+        </div>
+      </section>
     </main>
-    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/analyze-android-logcat/">Guide</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
   </body>
 </html>

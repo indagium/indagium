@@ -43,22 +43,30 @@ https://indagium.com/
 Set the repository description to this exact text:
 
 ```
-Desktop Android logcat viewer and analysis tool for crashes, ANRs, and bug reports.
+Android log viewer & logcat analyzer for Windows, macOS and Linux — crashes, ANRs, adb bugreports, DLT.
 ```
 
 Set exactly these topics (and remove unrelated topics):
 
 ```
 android
-android-logcat
-log-analysis
+logcat
+logcat-viewer
 log-viewer
+log-analysis
+android-logcat
 android-debugging
+adb
+anr
 bugreport
+crash-analysis
+dlt-viewer
+mcp-server
 desktop-application
 kotlin
 compose-multiplatform
 source-available
+developer-tools
 ```
 
 ### Search Console and Bing baseline
@@ -69,8 +77,8 @@ once for each search service:
 1. Verify the `indagium.com` property using the provider's supported DNS or
    site-ownership method.
 2. Submit the exact sitemap URL `https://indagium.com/sitemap.xml`.
-3. Request indexing/recrawl for the homepage and each of the five canonical
-   routes listed in the sitemap. Record the submission date and any reported
+3. Request indexing/recrawl for the homepage and each canonical
+   route listed in the sitemap. Record the submission date and any reported
    validation errors.
 4. After the first crawl, confirm that the homepage and route pages resolve
    with status 200, use their canonical URL, and expose the intended title and

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Indagium is a DLT viewer for macOS, Windows, and Linux: open .dlt captures, raw DLT streams, and DLT Viewer exports, then filter, fold, and annotate them." />
+    <link rel="canonical" href="https://indagium.com/dlt-viewer/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="DLT Viewer for macOS, Windows and Linux | Indagium" />
+    <meta property="og:description" content="Indagium is a DLT viewer for macOS, Windows, and Linux: open .dlt captures, raw DLT streams, and DLT Viewer exports, then filter, fold, and annotate them." />
+    <meta property="og:url" content="https://indagium.com/dlt-viewer/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/demo-filtering.webp" />
+    <meta property="og:image:alt" content="Indagium filtering a decoded DLT trace." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="DLT Viewer for macOS, Windows and Linux | Indagium" />
+    <meta name="twitter:description" content="Indagium is a DLT viewer for macOS, Windows, and Linux: open .dlt captures, raw DLT streams, and DLT Viewer exports, then filter, fold, and annotate them." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/demo-filtering.webp" />
+    <title>DLT Viewer for macOS, Windows and Linux | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Indagium", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "DLT Viewer", "item": "https://indagium.com/dlt-viewer/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Does Indagium replace COVESA DLT Viewer?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Not for capturing or FIBEX/ARXML-based non-verbose decoding. Indagium opens .dlt captures, raw DLT streams, and DLT Viewer's own text/CSV exports as a desktop analysis workspace — you can bring an existing DLT Viewer export into Indagium for filtering, folding, and annotation."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there a good DLT log viewer for Mac?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Indagium runs natively on Apple Silicon Macs as a .dmg, alongside Windows (.msi) and Linux (.deb, AppImage, Flatpak) builds, so a DLT capture opens in the same desktop app regardless of platform."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Indagium decode non-verbose DLT payloads with FIBEX or ARXML files?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Binary captures are decoded into framed records, but non-verbose payloads stay as safe text/hex rather than being interpreted through FIBEX or ARXML definitions."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can Indagium split a large DLT capture?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes, for DLT protocol v1: splitting is frame-aware, so every part is a valid standalone DLT stream, and DLT Viewer CSV exports repeat the header row in each part. DLT protocol v2 streams are not supported and cannot be split."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is Indagium free, and is it open source?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Indagium is free to use. It's source-available under the PolyForm Perimeter License, not open source and free to use for commercial and non-commercial purposes."
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero" aria-labelledby="page-title"><div><p class="eyebrow">Features <span>/</span> DLT viewer</p><h1 id="page-title">A DLT viewer for macOS, Windows, and Linux.</h1><p class="page-lede">Indagium opens Diagnostic Log and Trace (DLT) captures alongside Android logcat, so a desktop trace and a DLT capture from the same investigation can sit in the same workspace — filtered, folded, and annotated the same way, including on macOS where a native DLT viewer has been hard to find.</p><div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/logcat-analyzer/">See the analysis tools <span aria-hidden="true">→</span></a></div></div><figure class="page-hero-figure"><img src="/assets/media/posters/demo-filtering.webp" alt="Indagium filtering a decoded DLT trace." /><figcaption>The same filter, fold, and export tools apply to a DLT capture.</figcaption></figure></section>
+
+      <section class="section" aria-labelledby="formats-title"><p class="eyebrow">Supported DLT formats</p><h2 id="formats-title">Three ways a DLT trace <em>reaches Indagium.</em></h2><p class="section-lede">Indagium opens files — it does not connect to a DLT daemon or vehicle network to capture traffic itself. Bring the capture from your existing DLT tooling, then open it directly:</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>Binary <code>.dlt</code> captures</h3><p>Binary DLT captures are decoded as framed records, the same way a logcat file is parsed into rows you can filter and read.</p></article><article class="evidence-card"><span>02</span><h3>Raw DLT streams</h3><p>A raw DLT stream — without a surrounding container — opens the same way as a saved <code>.dlt</code> file.</p></article><article class="evidence-card"><span>03</span><h3>DLT Viewer text/CSV exports</h3><p>Already exported a trace from DLT Viewer as text or CSV? Open that export directly in Indagium to filter, fold, and annotate it.</p></article><article class="evidence-card"><span>04</span><h3>The same investigation tools</h3><p>Level, tag, and message filters, sequence folding, thread maps, time deltas, compare view, and note export all apply to a DLT tab.</p></article></div></section>
+
+      <section class="section split-callout" aria-labelledby="protocol-title"><div><p class="eyebrow">DLT protocol handling</p><h2 id="protocol-title">Framed records, <em>read safely.</em></h2><p class="section-lede">Non-verbose DLT payloads are retained as safe text/hex rather than interpreted through FIBEX or ARXML definitions — so a capture opens and reads without needing project-specific description files on hand. An oversized DLT capture can be split like any other large log: binary captures are split frame-aware, so every resulting part is a valid standalone DLT stream, and DLT Viewer CSV parts repeat the header row so each part stays independently readable.</p><a class="text-link" href="/log-analysis-workflow/">Compare the workspace to a plain viewer <span aria-hidden="true">→</span></a></div><figure class="evidence-card image-card"><img src="/assets/media/posters/demo-notes-export.webp" alt="Indagium annotating a trace and preparing an export." /><figcaption>Filter a DLT capture, annotate the finding, and export the record.</figcaption></figure></section>
+
+      <section class="section" aria-labelledby="limits-title"><p class="eyebrow">Stated plainly</p><h2 id="limits-title">What a DLT tab <em>does not</em> do.</h2><p class="section-lede">These limits are worth knowing before you rely on Indagium for a DLT capture:</p><div class="feature-matrix"><article class="evidence-card"><span>01</span><h3>No FIBEX/ARXML decoding</h3><p>Non-verbose payloads are shown as safe text/hex, not decoded through FIBEX or ARXML definitions — the raw payload is preserved, not reconstructed into typed fields.</p></article><article class="evidence-card"><span>02</span><h3>No DLT protocol v2 support</h3><p>DLT protocol v2 streams are not supported and cannot be split. Only DLT protocol v1 binary captures, raw streams, and DLT Viewer text/CSV exports are covered.</p></article><article class="evidence-card"><span>03</span><h3>No live tailing on DLT tabs</h3><p>Live tailing works on plain-text logs as they're written, but DLT tabs do not support live UTF-8 tailing — open a completed capture instead.</p></article><article class="evidence-card"><span>04</span><h3>No capture from device</h3><p>Indagium does not talk to a DLT daemon or vehicle network. Capture with your existing tooling, then open the resulting file here.</p></article></div></section>
+
+      <section class="section" aria-labelledby="faq-title"><p class="eyebrow">Frequently asked</p><h2 id="faq-title">Before you <em>open a capture.</em></h2><div class="feature-matrix"><article class="evidence-card"><h3>Does Indagium replace COVESA DLT Viewer?</h3><p>Not for capturing or FIBEX/ARXML-based non-verbose decoding. Indagium opens <code>.dlt</code> captures, raw DLT streams, and DLT Viewer's own text/CSV exports as a desktop analysis workspace — you can bring an existing DLT Viewer export into Indagium for filtering, folding, and annotation.</p></article><article class="evidence-card"><h3>Is there a good DLT log viewer for Mac?</h3><p>Indagium runs natively on Apple Silicon Macs as a <code>.dmg</code>, alongside Windows (<code>.msi</code>) and Linux (<code>.deb</code>, AppImage, Flatpak) builds, so a DLT capture opens in the same desktop app regardless of platform.</p></article><article class="evidence-card"><h3>Does Indagium decode non-verbose DLT payloads with FIBEX or ARXML files?</h3><p>No. Binary captures are decoded into framed records, but non-verbose payloads stay as safe text/hex rather than being interpreted through FIBEX or ARXML definitions.</p></article><article class="evidence-card"><h3>Can Indagium split a large DLT capture?</h3><p>Yes, for DLT protocol v1: splitting is frame-aware, so every part is a valid standalone DLT stream, and DLT Viewer CSV exports repeat the header row in each part. DLT protocol v2 streams are not supported and cannot be split.</p></article><article class="evidence-card"><h3>Is Indagium free, and is it open source?</h3><p>Indagium is free to use. It's source-available under the PolyForm Perimeter License, not open source and free to use for commercial and non-commercial purposes.</p></article></div></section>
+
+      <section class="section guide-band" aria-labelledby="dlt-next-title"><p class="eyebrow">Keep going</p><h2 id="dlt-next-title">One workspace, <em>every trace.</em></h2><div class="guide-links"><a href="/android-logcat-viewer/"><span>Viewer</span><b>See how Indagium holds the whole trace →</b></a><a href="/logcat-analyzer/"><span>Analyzer</span><b>Explore filters, folding, and exports →</b></a><a href="/android-bug-report-viewer/"><span>Bug reports</span><b>Open .zip and .7z reports directly →</b></a></div></section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>

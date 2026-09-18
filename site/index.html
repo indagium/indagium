@@ -3,21 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Indagium is a desktop Android logcat analysis tool and viewer. Filter large logs, investigate crashes and ANRs, open bug reports and DLT captures, and export evidence." />
+    <meta name="description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Open adb logcat files and bugreports offline, filter crashes, and export evidence." />
     <meta name="theme-color" content="#faf9f6" />
     <link rel="canonical" href="https://indagium.com/" />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Indagium: Android Logcat Analysis Tool &amp; Desktop Viewer" />
-    <meta property="og:description" content="Indagium is a desktop Android logcat analysis tool and viewer. Filter large logs, investigate crashes and ANRs, open bug reports and DLT captures, and export evidence." />
+    <meta property="og:title" content="Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux" />
+    <meta property="og:description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Open adb logcat files and bugreports offline, filter crashes, and export evidence." />
     <meta property="og:url" content="https://indagium.com/" />
     <meta property="og:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
     <meta property="og:image:alt" content="Indagium showing an Android log, a crash trace, annotations, and an AI investigation." />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Indagium: Android Logcat Analysis Tool &amp; Desktop Viewer" />
-    <meta name="twitter:description" content="Indagium is a desktop Android logcat analysis tool and viewer. Filter large logs, investigate crashes and ANRs, open bug reports and DLT captures, and export evidence." />
+    <meta name="twitter:title" content="Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux" />
+    <meta name="twitter:description" content="Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Open adb logcat files and bugreports offline, filter crashes, and export evidence." />
     <meta name="twitter:image" content="https://indagium.com/assets/media/posters/hero-investigation.webp" />
     <meta name="twitter:image:alt" content="Indagium showing an Android log, a crash trace, annotations, and an AI investigation." />
-    <title>Indagium: Android Logcat Analysis Tool &amp; Desktop Viewer</title>
+    <title>Indagium – Android Log &amp; Logcat Viewer for Mac, Windows, Linux</title>
     <link rel="stylesheet" href="/styles.css" />
     <script type="application/ld+json">
       {
@@ -27,7 +27,10 @@
         "applicationCategory": "DeveloperApplication",
         "operatingSystem": "macOS, Windows, Linux",
         "url": "https://indagium.com/",
-        "description": "Indagium is a desktop Android logcat analysis tool and viewer. Filter large logs, investigate crashes and ANRs, open bug reports and DLT captures, and export evidence.",
+        "description": "Free Android log viewer and logcat analyzer for Mac, Windows, and Linux. Open adb logcat files and bugreports offline, filter crashes, and export evidence.",
+        "softwareVersion": "1.8.6",
+        "downloadUrl": "https://github.com/indagium/indagium/releases/latest",
+        "screenshot": "https://indagium.com/assets/media/posters/hero-investigation.webp",
         "isAccessibleForFree": true,
         "offers": {
           "@type": "Offer",
@@ -61,7 +64,7 @@
       <a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a>
       <nav aria-label="Primary navigation">
         <a href="/android-logcat-viewer/#features">Features</a>
-        <a href="/guides/analyze-android-logcat/">Guide</a>
+        <a href="/guides/">Guides</a>
         <a href="/log-analysis-workflow/">Comparison</a>
         <a href="https://github.com/indagium/indagium">GitHub</a>
       </nav>
@@ -74,7 +77,7 @@
           <p class="eyebrow">The Log Analysis Studio</p>
           <h1 id="hero-title">Android logcat analysis, from noise <em>to evidence.</em></h1>
           <p class="supporting-line">Every incident has a story.</p>
-          <p class="lede">Indagium is a desktop Android logcat app for investigating files — from the first strange line to a clear, shareable explanation.</p>
+          <p class="lede">Indagium is a free, offline Android log viewer and logcat analyzer for investigating adb logcat files, bugreports, and DLT captures — from the first strange line to a clear, shareable explanation.</p>
           <div class="hero-actions">
             <a class="button" href="https://github.com/indagium/indagium/releases/latest">Get Indagium <span aria-hidden="true">↗</span></a>
             <a class="text-link" href="/guides/analyze-android-logcat/">Read the analysis guide <span aria-hidden="true">→</span></a>
@@ -92,18 +95,18 @@
 
       <section class="studio section" id="features" aria-labelledby="studio-title">
         <p class="eyebrow">01 <span>/</span> Read the evidence</p>
-        <h2 id="studio-title">Log files hold evidence. <em>Indagium helps it speak.</em></h2>
+        <h2 id="studio-title">A log viewer and log analyzer in one. <em>Indagium helps it speak.</em></h2>
         <p class="section-lede">Work through the real sequence of events without flattening it into an endless stream of text. Filter, compare, fold recurring behavior, connect source and video, and leave an explanation the next person can follow.</p>
         <div class="case-index" aria-label="Investigation workflow">
-          <article><span>01</span><h3>Read</h3><p>Open logcat, bug reports, large traces, and supported DLT captures in a calm, native workspace.</p></article>
-          <article><span>02</span><h3>Connect</h3><p>Follow the timing, repetition, thread activity, source, and video around an incident.</p></article>
-          <article><span>03</span><h3>Explain</h3><p>Annotate the proof and export a record that is useful outside the app.</p></article>
+          <article><span>01</span><h3>Read the log</h3><p>Open logcat .txt/.log files, Android bugreports, large traces, and supported <a class="inline-link" href="/dlt-viewer/">DLT captures</a> in a calm, native workspace — no Android Studio required.</p></article>
+          <article><span>02</span><h3>Connect the clues</h3><p>Follow the timing, repetition, thread activity, source, and video around an incident.</p></article>
+          <article><span>03</span><h3>Explain the finding</h3><p>Annotate the proof and export a record that is useful outside the app.</p></article>
         </div>
       </section>
 
       <section class="evidence-section section" id="evidence" aria-labelledby="evidence-title">
         <p class="eyebrow">Collected evidence</p>
-        <h2 id="evidence-title">Find the <em>moment</em> everything changed.</h2>
+        <h2 id="evidence-title">Find the moment your logcat <em>changed.</em></h2>
         <div class="exhibits">
           <article class="exhibit">
             <video controls muted playsinline preload="metadata" poster="/assets/media/posters/demo-filtering.webp" aria-label="Indagium filtering an Android log"><source src="/assets/media/web/demo-filtering.mp4" type="video/mp4" /></video>
@@ -133,7 +136,7 @@
 
       <section class="deep-evidence section" aria-label="Advanced investigation tools">
         <article class="feature">
-          <div><p class="eyebrow">Exhibit D <span>/</span> Assisted investigation</p><h2>Ask better questions of <em>the evidence.</em></h2><p>Bring your preferred local or hosted AI provider into the active log. The assistant can investigate using Indagium’s tools, while every file-changing action stays under your control.</p><a class="text-link" href="https://github.com/indagium/indagium#in-app-ai-assistant">Explore the AI assistant <span aria-hidden="true">→</span></a></div>
+          <div><p class="eyebrow">Exhibit D <span>/</span> Assisted investigation</p><h2>Ask better questions of <em>the evidence.</em></h2><p>Bring your preferred local or hosted AI provider into the active log, or connect any MCP client to Indagium’s own local MCP server. The assistant can investigate using Indagium’s tools, while every file-changing action stays under your control.</p><a class="text-link" href="/logcat-mcp-server/">Explore the AI assistant and MCP server <span aria-hidden="true">→</span></a></div>
           <video controls muted playsinline preload="metadata" poster="/assets/media/posters/demo-ai-investigation.webp" aria-label="Indagium AI assistant investigating a log"><source src="/assets/media/web/demo-ai-investigation.mp4" type="video/mp4" /></video>
         </article>
         <article class="feature reversed">
@@ -152,7 +155,7 @@
 
     <footer>
       <div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div>
-      <nav aria-label="Footer navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/analyze-android-logcat/">Guide</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav>
+      <nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav>
     </footer>
   </body>
 </html>
