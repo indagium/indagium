@@ -2010,7 +2010,9 @@ class AppStateBehaviorTest {
         assertEquals(1, restored.tabs.size)
 
         restored.startPendingRestoredTabLoads()
-        waitUntil { restored.tabs.isEmpty() && !restored.isLoading }
+        // The loader closes the tab and ends loading before it publishes the error
+        // (scheduleRestoredTabLoad's MissingArchiveEntry branch), so wait for the error too.
+        waitUntil { restored.tabs.isEmpty() && !restored.isLoading && restored.openError != null }
 
         assertEquals("Restored archive entry is unavailable", restored.openError?.title)
         assertTrue(restored.openError?.path.orEmpty().endsWith("!$entryPath"))
@@ -2362,7 +2364,7 @@ class AppStateBehaviorTest {
         )
 
         state.openFile(logFile)
-        waitUntil { !state.isLoading }
+        waitUntil { !state.isLoading && state.openError != null }
 
         assertTrue(state.tabs.isEmpty())
         assertEquals("Could not open file", state.openError?.title)
@@ -4400,7 +4402,7 @@ class AppStateBehaviorTest {
 
         state.openZipEntries(archive, listOf(candidate))
 
-        waitUntil { !state.isLoading }
+        waitUntil { !state.isLoading && state.openError != null }
         assertTrue(state.tabs.isEmpty())
         assertEquals("Could not open DLT", state.openError?.title)
         assertEquals("DLT protocol v2 is not supported", state.openError?.message)
@@ -7091,7 +7093,7 @@ class AppStateBehaviorTest {
         )
 
         state.openFile(logFile)
-        waitUntil { !state.isLoading }
+        waitUntil { !state.isLoading && state.openError != null }
 
         assertTrue(state.tabs.isEmpty())
         assertEquals("Could not open file", state.openError?.title)
