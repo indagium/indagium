@@ -10,6 +10,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.outlined.OpenInFull
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
@@ -21,11 +25,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.runtime.MutableState
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -38,8 +47,11 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -220,6 +232,77 @@ private const val NARROW_BAR_WIDTH_DP = 560
 //    is an InlineField carrying that same font-scaled size, so at any font size both modes grow by
 //    the same amount past the floor and stay equal to each other.
 private val FILTER_BAR_ROW_MIN_HEIGHT = 34.dp
+
+// Fix (control parity within a row): the mode switcher, the regex row's history/snippet icon
+// buttons, and the input fields used to each pick their own height independently (the switcher's
+// segmentHeight, SquareIconButton's size, InlineField's font-driven natural height), which left
+// them visibly misaligned against one another inside the same row even though the row itself was
+// already height-matched across modes (see FILTER_BAR_ROW_MIN_HEIGHT above). One shared floor for
+// every control in a row — never a fixed `height()`, same reasoning as FILTER_BAR_ROW_MIN_HEIGHT's
+// own doc — keeps them reading as one toolbar at any AppSettings.fontSize.
+private val FILTER_BAR_CONTROL_HEIGHT = 22.dp
+
+// The regex row's icon buttons draw vectors, not font glyphs: "↺", "{ }" and "⤢" came from
+// different fonts (SF vs. a fallback), and Compose centres text by the font's line box rather
+// than the glyph's own ink, so each glyph landed at a different height inside the same box. A
+// vector's viewport IS its ink box, so Alignment.Center really centres it.
+// Box and ink sized to match the search bar's ↑/↓ (SquareIconButton, 20dp box, 12sp glyph ≈ 9-10dp
+// of ink at a ~1.1dp stroke — see SearchBar.kt), so the filter row and the find row below it read
+// as the same family of controls.
+private val FILTER_BAR_ICON_BUTTON_SIZE = 20.dp
+private val FILTER_BAR_ICON_SIZE = 14.dp
+
+// "Insert a regex building block" — the `.*` mark IDEs use for regex, drawn on Material's 24-unit
+// grid with its 2-unit stroke so it sits next to OpenInFull at the same weight. The
+// dot/asterisk geometry is chosen so the combined ink (round caps included) is centred on (12,12).
+private val RegexSnippetsIcon: ImageVector by lazy {
+    val ink = SolidColor(Color.Black) // Icon's tint replaces this.
+    ImageVector.Builder("RegexSnippets", 24.dp, 24.dp, 24f, 24f).apply {
+        path(fill = ink) {
+            moveTo(4.4f, 18.2f)
+            arcToRelative(1.9f, 1.9f, 0f, true, true, 3.8f, 0f)
+            arcToRelative(1.9f, 1.9f, 0f, true, true, -3.8f, 0f)
+            close()
+        }
+        path(stroke = ink, strokeLineWidth = 2f, strokeLineCap = StrokeCap.Round) {
+            moveTo(14.83f, 4.9f); lineTo(14.83f, 13.9f)
+            moveTo(10.93f, 7.15f); lineTo(18.73f, 11.65f)
+            moveTo(10.93f, 11.65f); lineTo(18.73f, 7.15f)
+        }
+    }.build()
+}
+
+@Composable
+private fun FilterBarIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    // Keeps the hover fill while the button's own popup is open, so it reads as the popup's anchor.
+    active: Boolean = false,
+    iconSize: Dp = FILTER_BAR_ICON_SIZE,
+) {
+    val tc = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .size(FILTER_BAR_ICON_BUTTON_SIZE)
+            .background(if ((hovered && enabled) || active) tc.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            icon,
+            contentDescription = contentDescription,
+            tint = if (enabled) tc.td else tc.td.copy(alpha = 0.4f),
+            modifier = Modifier.size(iconSize),
+        )
+    }
+}
 
 @Composable
 private fun FilterBarInputRow(
@@ -781,7 +864,7 @@ private fun TagsModeBarContent(
                     if (index == 1) actions.onStartRegexSearch() else actions.onSetFilterMode(FilterMode.TAGS)
                     refocusLog() // "ends an interaction" — see the file header's focus rule.
                 },
-                segmentHeight = 20.dp,
+                segmentHeight = FILTER_BAR_CONTROL_HEIGHT,
                 segmentFontSize = 10.sp,
                 segmentHorizontalPadding = 6.dp,
                 selectedSolid = true,
@@ -1748,6 +1831,35 @@ private fun MessageRuleField(
 }
 
 // ── Regex mode ───────────────────────────────────────────────────────────────────────────────────
+
+// `preview` is what the snippets-menu row shows at its trailing edge; `before`/`after`/`placeholder`
+// feed insertRegexSnippet below. A zero-width insert like OR's "|" just leaves `after` and
+// `placeholder` empty, so nothing ends up selected and the caret lands right after it.
+private data class RegexSnippetTemplate(val label: String, val preview: String, val before: String, val after: String, val placeholder: String)
+
+private val REGEX_SNIPPET_TEMPLATES = listOf(
+    RegexSnippetTemplate("OR", "a|b", "|", "", ""),
+    RegexSnippetTemplate("Exclude (NOT)", "(?!text)", "(?!", ")", "text"),
+    RegexSnippetTemplate("Any of", "(a|b|c)", "(", ")", "first|second|third"),
+    RegexSnippetTemplate("Case-insensitive", "(?i)", "(?i)", "", ""),
+    RegexSnippetTemplate("Digits", "\\d+", "\\d+", "", ""),
+    RegexSnippetTemplate("Any characters", ".*", ".*", "", ""),
+)
+
+// Inserts `before` + (the current selection, or the template's placeholder when there is none) +
+// `after` at the caret, and selects that middle span so the user can immediately type over it.
+// Mirrors Dialogs.kt's wrapMarkdown for the Markdown note editor's formatting toolbar — same "wrap
+// the selection or insert a placeholder" idea, just without that function's per-line handling, which
+// a single-line regex field never needs.
+private fun insertRegexSnippet(value: TextFieldValue, template: RegexSnippetTemplate): TextFieldValue {
+    val selStart = value.selection.min
+    val selEnd = value.selection.max
+    val middle = if (selStart != selEnd) value.text.substring(selStart, selEnd) else template.placeholder
+    val newText = value.text.substring(0, selStart) + template.before + middle + template.after + value.text.substring(selEnd)
+    val middleStart = selStart + template.before.length
+    return TextFieldValue(newText, TextRange(middleStart, middleStart + middle.length))
+}
+
 @Composable
 private fun RegexModeBarContent(
     tab: LogTab,
@@ -1762,7 +1874,11 @@ private fun RegexModeBarContent(
 
     // Same single-writer debounce sentinel shape as FilterPanel.kt's kwDisplay/kwLastSent
     // (FilterPanel.kt:719-727); the panel hides its corresponding editor while this bar is active.
-    var display by remember(tab.id) { mutableStateOf(filter.kwText) }
+    // TextFieldValue (not String) so the snippet-insert menu below knows where the caret is —
+    // see insertRegexSnippet's doc. Everywhere this used to compare/store the field's text as a
+    // String now reads `display.text`; only sites that reposition the caret (commit, clear, the
+    // filter.kwText sync, the snippet insert itself) touch the TextFieldValue directly.
+    var display by remember(tab.id) { mutableStateOf(TextFieldValue(filter.kwText, TextRange(filter.kwText.length))) }
     var lastSent by remember(tab.id) { mutableStateOf(filter.kwText) }
     var fieldFocused by remember { mutableStateOf(false) }
     var historyHovered by remember { mutableStateOf(false) }
@@ -1775,17 +1891,29 @@ private fun RegexModeBarContent(
     var fieldHeightPx by remember { mutableStateOf(0) }
     var regexEditorOpen by remember(tab.id) { mutableStateOf(false) }
     var regexEditorText by remember(tab.id) { mutableStateOf("") }
+    var snippetMenuOpen by remember { mutableStateOf(false) }
+    var lastSnippetDismissAt by remember { mutableStateOf(0L) }
+    // Opening the snippet menu calls fr.requestFocus() (same "reclaim focus" pattern as everywhere
+    // else in this file), which re-fires the fieldFocused effect below and would otherwise flip
+    // showHistory back to true on the very same click that just turned it off — the autocomplete
+    // popup has no delay on its "becomes true" branch. Gating the snippet popup's own visibility on
+    // `!showHistory` (an earlier attempt) just made that race visible as the snippet menu itself
+    // flashing open then closed. Suppressing the autoshow effect for a short window after any
+    // snippet-menu interaction is the fix that doesn't fight the effect.
+    var suppressHistoryAutoShowUntilMs by remember { mutableStateOf(0L) }
     val density = LocalDensity.current
 
-    LaunchedEffect(display) {
-        val snap = display
+    LaunchedEffect(display.text) {
+        val snap = display.text
         delay(if (tab.largeFileMode) 350 else 150)
-        if (snap == display && snap != lastSent) { lastSent = display; actions.onSetKw(display) }
+        if (snap == display.text && snap != lastSent) { lastSent = snap; actions.onSetKw(snap) }
     }
-    LaunchedEffect(filter.kwText) { if (filter.kwText != lastSent) display = filter.kwText }
+    LaunchedEffect(filter.kwText) {
+        if (filter.kwText != lastSent) display = TextFieldValue(filter.kwText, TextRange(filter.kwText.length))
+    }
     LaunchedEffect(fieldFocused, historyHovered) {
         if (fieldFocused || historyHovered) {
-            showHistory = true
+            if (System.currentTimeMillis() >= suppressHistoryAutoShowUntilMs) showHistory = true
         } else {
             delay(100)
             if (!fieldFocused && !historyHovered) {
@@ -1795,20 +1923,20 @@ private fun RegexModeBarContent(
         }
     }
 
-    val matchingHistory = remember(model.regexHistory, display) {
-        if (display.isBlank()) model.regexHistory else model.regexHistory.filter { it.contains(display, ignoreCase = true) }
+    val matchingHistory = remember(model.regexHistory, display.text) {
+        if (display.text.isBlank()) model.regexHistory else model.regexHistory.filter { it.contains(display.text, ignoreCase = true) }
     }
     // The explicit button opens the complete recent-history list, even when the field currently
     // contains a pattern that would narrow the autocomplete suggestions to one entry.
     val visibleHistory = if (historyButtonOpen) model.regexHistory else matchingHistory
-    val invalid = display.isNotBlank() && !isValidRegexPattern(display)
+    val invalid = display.text.isNotBlank() && !isValidRegexPattern(display.text)
 
     // Commit contract (file header / AppState.rememberRegexPattern's own doc): Enter or an
     // explicit history pick applies onSetKw SYNCHRONOUSLY — otherwise, inside the debounce window,
     // Enter would look like a no-op — and records history only for a non-blank, syntactically
     // valid pattern.
     fun commit(pattern: String) {
-        display = pattern
+        display = TextFieldValue(pattern, TextRange(pattern.length))
         lastSent = pattern
         actions.onSetKw(pattern)
         actions.onRememberRegexPattern(pattern)
@@ -1822,7 +1950,7 @@ private fun RegexModeBarContent(
     // as the panel does; changing it before AppState publishes the clear could let an older
     // filter.kwText briefly re-seed the field.
     fun clearRegexSearch() {
-        display = ""
+        display = TextFieldValue("")
         lastSent = ""
         actions.onSetKw("")
         showHistory = false
@@ -1842,28 +1970,82 @@ private fun RegexModeBarContent(
                     if (index == 1) actions.onStartRegexSearch() else actions.onSetFilterMode(FilterMode.TAGS)
                     refocusLog() // "ends an interaction" — see the file header's focus rule.
                 },
-                segmentHeight = 20.dp,
+                segmentHeight = FILTER_BAR_CONTROL_HEIGHT,
                 segmentFontSize = 10.sp,
                 segmentHorizontalPadding = 6.dp,
                 selectedSolid = true,
             )
-            TooltipArea(tooltip = { ToolbarTooltip("Regex search history") }) {
-                SquareIconButton(
-                    "↺",
-                    fontSize = 15.sp,
-                    onClick = {
-                        val now = System.currentTimeMillis()
-                        if (now - lastHistoryDismissAt >= FILTER_BAR_REOPEN_GUARD_MS) {
-                            historyButtonOpen = !historyButtonOpen
-                            showHistory = historyButtonOpen
-                            selectedIdx = -1
-                            runCatching { fr.requestFocus() }
+            // Not everyone reaching for a regex filter remembers lookahead/alternation syntax by
+            // heart. This inserts the common building blocks — OR, NOT, alternation groups, etc. —
+            // at the caret instead of requiring the user to type them from memory. Same reopen-race
+            // guard shape as the history dropdown button (see FILTER_BAR_REOPEN_GUARD_MS's doc).
+            Box {
+                TooltipArea(tooltip = { ToolbarTooltip("Insert common regex patterns") }) {
+                    FilterBarIconButton(
+                        icon = RegexSnippetsIcon,
+                        contentDescription = "Insert common regex patterns",
+                        active = snippetMenuOpen,
+                        onClick = {
+                            val now = System.currentTimeMillis()
+                            if (now - lastSnippetDismissAt >= FILTER_BAR_REOPEN_GUARD_MS) {
+                                snippetMenuOpen = !snippetMenuOpen
+                                // Mutual exclusion with the history/autocomplete popup below: its
+                                // own render condition checks !snippetMenuOpen, and the refocus call
+                                // just below would otherwise flip showHistory straight back to true
+                                // (see suppressHistoryAutoShowUntilMs's doc above) — suppress it
+                                // instead of just clearing it.
+                                showHistory = false
+                                historyButtonOpen = false
+                                suppressHistoryAutoShowUntilMs = now + FILTER_BAR_REOPEN_GUARD_MS
+                                runCatching { fr.requestFocus() }
+                            }
+                        },
+                        modifier = Modifier.testTag("filter-bar-regex-snippets-button"),
+                    )
+                }
+                if (snippetMenuOpen) {
+                    Popup(
+                        alignment = Alignment.TopStart,
+                        offset = IntOffset(0, with(density) { (FILTER_BAR_ICON_BUTTON_SIZE + 2.dp).roundToPx() }),
+                        properties = PopupProperties(focusable = false),
+                        onDismissRequest = {
+                            snippetMenuOpen = false
+                            lastSnippetDismissAt = System.currentTimeMillis()
+                        },
+                    ) {
+                        DisableSelection {
+                            Column(
+                                Modifier
+                                    .width(220.dp)
+                                    .background(tc.p, CORNER_SM)
+                                    .border(1.dp, tc.br, CORNER_SM)
+                                    .testTag("filter-bar-regex-snippets-menu"),
+                            ) {
+                                REGEX_SNIPPET_TEMPLATES.forEach { template ->
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp),
+                                        hoverBg = tc.hv,
+                                        onClick = {
+                                            display = insertRegexSnippet(display, template)
+                                            snippetMenuOpen = false
+                                            suppressHistoryAutoShowUntilMs = System.currentTimeMillis() + FILTER_BAR_REOPEN_GUARD_MS
+                                            runCatching { fr.requestFocus() }
+                                        },
+                                    ) {
+                                        Row(
+                                            Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 5.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            AppText(template.label, color = tc.tx, fontSize = 11.sp, fontFamily = UI)
+                                            AppText(template.preview, color = tc.td, fontSize = 10.sp, fontFamily = MONO)
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    },
-                    modifier = Modifier.testTag("filter-bar-regex-history-button"),
-                    size = 22.dp,
-                    enabled = model.regexHistory.isNotEmpty(),
-                )
+                    }
+                }
             }
             Box(
                 Modifier.weight(1f)
@@ -1876,13 +2058,14 @@ private fun RegexModeBarContent(
                 Row(
                     Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp), // SearchBar.kt's own gap between its trailing buttons.
                 ) {
                     InlineField(
                         display,
-                        { display = it; historyButtonOpen = false; selectedIdx = -1 },
+                        { display = it; historyButtonOpen = false; snippetMenuOpen = false; selectedIdx = -1 },
                         "visible log row regex…",
                         Modifier.weight(1f)
+                            .heightIn(min = FILTER_BAR_CONTROL_HEIGHT)
                             .focusRequester(fr)
                             .testTag("filter-bar-regex-input")
                             .onFocusChanged { fieldFocused = it.isFocused }
@@ -1900,8 +2083,8 @@ private fun RegexModeBarContent(
                                         val picked = visibleHistory.getOrNull(selectedIdx)
                                         if (picked != null) {
                                             commit(picked)
-                                        } else if (display.isNotBlank()) {
-                                            commit(display)
+                                        } else if (display.text.isNotBlank()) {
+                                            commit(display.text)
                                         } else {
                                             return@onPreviewKeyEvent false
                                         }
@@ -1915,19 +2098,41 @@ private fun RegexModeBarContent(
                         clearButtonModifier = Modifier.testTag("filter-bar-regex-clear"),
                         flat = true, // Fix 1: this bar's own row carries the chrome, matching SearchBar.kt.
                     )
-                    SquareIconButton(
-                        "⤢",
-                        fontSize = 12.sp,
+                    // Combo-box style: the history list is this field's own dropdown, so its
+                    // trigger sits at the field's trailing edge (after the clear ×), not with the
+                    // row-level buttons on the left.
+                    TooltipArea(tooltip = { ToolbarTooltip("Regex search history") }) {
+                        FilterBarIconButton(
+                            icon = Icons.Filled.ArrowDropDown,
+                            contentDescription = "Regex search history",
+                            iconSize = 20.dp,
+                            active = historyButtonOpen && showHistory,
+                            onClick = {
+                                val now = System.currentTimeMillis()
+                                if (now - lastHistoryDismissAt >= FILTER_BAR_REOPEN_GUARD_MS) {
+                                    historyButtonOpen = !historyButtonOpen
+                                    showHistory = historyButtonOpen
+                                    snippetMenuOpen = false
+                                    selectedIdx = -1
+                                    runCatching { fr.requestFocus() }
+                                }
+                            },
+                            modifier = Modifier.testTag("filter-bar-regex-history-button"),
+                            enabled = model.regexHistory.isNotEmpty(),
+                        )
+                    }
+                    FilterBarIconButton(
+                        icon = Icons.Outlined.OpenInFull,
+                        contentDescription = "Open regex editor",
                         onClick = {
-                            regexEditorText = display
+                            regexEditorText = display.text
                             regexEditorOpen = true
                         },
                         modifier = Modifier.testTag("filter-bar-regex-expand"),
-                        size = 16.dp,
                     )
                 }
                 // fieldHeightPx > 0 guards the first-frame case — see TagAndPkgField's own doc.
-                if (showHistory && visibleHistory.isNotEmpty() && fieldHeightPx > 0) {
+                if (showHistory && !snippetMenuOpen && visibleHistory.isNotEmpty() && fieldHeightPx > 0) {
                     // Fix 2 (layout): TopStart + the field's own measured height as the offset,
                     // same treatment as the tag/message candidate popups above — BottomStart pinned
                     // within the anchor's own bounds and grew upward, covering the field; no more
@@ -2002,7 +2207,7 @@ private fun RegexModeBarContent(
             text = regexEditorText,
             onTextChange = { regexEditorText = it },
             onApply = {
-                display = regexEditorText
+                display = TextFieldValue(regexEditorText, TextRange(regexEditorText.length))
                 lastSent = regexEditorText
                 actions.onSetKw(regexEditorText)
                 regexEditorOpen = false

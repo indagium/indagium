@@ -786,6 +786,75 @@ fun InlineField(
     )
 }
 
+// TextFieldValue overload of the above — same look and decoration, but surfaces cursor/selection
+// to the caller. Needed by callers that programmatically insert text at the caret (ui/FilterBar.kt's
+// regex-snippet menu); the String overload above discards caret position on every recomposition, so
+// there is no way for a caller to know where to insert. Kept as a separate overload rather than
+// changing the String one, since the vast majority of call sites have no need to track the caret.
+@Composable
+fun InlineField(
+    value: TextFieldValue, onValue: (TextFieldValue) -> Unit,
+    placeholder: String = "", modifier: Modifier = Modifier,
+    fontSize: TextUnit = LocalFontBase.current.sp,
+    onClear: (() -> Unit)? = null,
+    clearButtonModifier: Modifier = Modifier,
+    onSubmit: (() -> Unit)? = null,
+    onCancel: (() -> Unit)? = null,
+    singleLine: Boolean = true,
+    centerTextVertically: Boolean = false,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    flat: Boolean = false,
+) {
+    val tc = tc()
+    val text = value.text
+    BasicTextField(
+        value = value, onValueChange = onValue,
+        visualTransformation = visualTransformation,
+        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
+        cursorBrush = SolidColor(tc.ac),
+        singleLine = singleLine,
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+        keyboardActions = KeyboardActions(onDone = { onSubmit?.invoke() }),
+        modifier = modifier
+            .onPreviewKeyEvent { event ->
+                if (onCancel != null && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                    onCancel()
+                    true
+                } else {
+                    false
+                }
+            }
+            .then(if (flat) Modifier else Modifier.background(tc.bg, CORNER_SM).border(1.dp, tc.br, CORNER_SM))
+            .padding(horizontal = 7.dp, vertical = 4.dp),
+        decorationBox = { inner ->
+            if (onClear != null) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.weight(1f)) {
+                        if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                    if (text.isNotEmpty()) {
+                        SquareIconButton(
+                            "×", fontSize = 12.sp, onClick = onClear,
+                            modifier = clearButtonModifier.padding(start = 4.dp), size = 16.dp,
+                        )
+                    }
+                }
+            } else {
+                if (centerTextVertically) {
+                    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+                        if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                        inner()
+                    }
+                } else {
+                    if (text.isEmpty()) AppText(placeholder, color = tc.td, fontSize = fontSize)
+                    inner()
+                }
+            }
+        },
+    )
+}
+
 // Grows with content up to `maxHeight`, then scrolls internally — shared by the Notes panel's
 // From/Next-steps fields and the Project-info Description field, all of which used to either grow
 // without limit or clip silently past a fixed height with no way to see the rest. Lifted from
