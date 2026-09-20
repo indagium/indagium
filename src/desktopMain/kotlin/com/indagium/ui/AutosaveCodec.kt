@@ -573,6 +573,7 @@ internal fun settingsFromToken(token: String): AppSettings? = runCatching {
 // @Serializable data classes, so this migration doesn't need a new Gradle plugin.
 internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("formatVersion", 1)
+    put("capture", Json.parseToJsonElement(com.indagium.capture.captureSettingsToJson(captureSettings)))
     put("theme", theme.name)
     put("fontSize", fontSize)
     put("interfaceScalePercent", interfaceScalePercent)
@@ -844,10 +845,13 @@ private fun JsonObject.customIssueRulesFromJson(key: String): List<CustomIssueRu
 // guarantee. Never throws: a malformed document (or an unexpected element type via jsonPrimitive's
 // cast) is caught by the outer runCatching and reported as a hard failure (null), same contract as
 // settingsFromToken() above.
+@Suppress("CyclomaticComplexMethod")
 internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     val o = Json.parseToJsonElement(raw).jsonObject
     val editorCommandValue = o.stringOrNull("editorCommand").orEmpty()
     AppSettings(
+        captureSettings = o["capture"]?.let { com.indagium.capture.captureSettingsFromJson(it.toString()) }
+            ?: com.indagium.capture.CaptureSettings(),
         theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
         fontSize = o.intOrDefault("fontSize", 12),
         interfaceScalePercent = o.intOrDefault("interfaceScalePercent", DEFAULT_INTERFACE_SCALE_PERCENT)
@@ -1605,6 +1609,10 @@ private fun VideoAttachment.attachedVideoToken(): String {
         // token written before this field had no separate choice; its anchored attachment restores
         // enabled (the historic/default behavior), while an unlinked attachment remains inactive.
         doubleClickSeekEnabled.toString(),
+        // Fields 10-11: compact durable portable-capture descriptor. The row-level timeline is
+        // intentionally absent; restore rehydrates it from captureSourcePath after parsing the log.
+        captureSourcePath.orEmpty(),
+        captureOffsetMs.toString(),
     )
 }
 
@@ -1636,6 +1644,9 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         // Field index 9 (append-only). Legacy anchored tokens predate the local state and restore
         // enabled to match the prior default; no anchor is always effectively inactive in AppState.
         doubleClickSeekEnabled = p.getOrNull(9)?.toBooleanStrictOrNull() ?: (anchorVideoMs != null && anchorLogId != null),
+        // Fields 10-11 (append-only). Old attachments remain ordinary anchor-mapped videos.
+        captureSourcePath = p.getOrNull(10)?.takeIf { it.isNotBlank() },
+        captureOffsetMs = p.getOrNull(11)?.toLongOrNull() ?: 0L,
     )
 }.getOrNull()
 

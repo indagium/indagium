@@ -231,7 +231,13 @@ private fun VideoHeaderFollowActions(
     followLogs: Boolean,
 ) {
     val anchor = attachment.anchor
-    val clearTooltip = if (anchor != null) {
+    val captureLinked = attachment.captureSourcePath != null && tab.captureTimeline != null
+    val hasMapping = anchor != null || captureLinked
+    val clearTooltip = if (captureLinked) {
+        val timeline = tab.captureTimeline!!
+        val uncertainty = timeline.uncertaintyMs?.let { " ±${it}ms" }.orEmpty()
+        "Portable capture mapping (${timeline.quality}$uncertainty). Click to unlink the mapping; the video stays attached."
+    } else if (anchor != null) {
         // Enabled tooltip has to carry two things since Clear is icon-only: what the log row's
         // right-click Video → "Link to <time>" action silently captured — the anchored log line's
         // own timestamp alongside it when available (ts is empty for RAW/unparsed rows) — and,
@@ -241,14 +247,14 @@ private fun VideoHeaderFollowActions(
         val anchorSummary = if (!anchorLogTs.isNullOrEmpty()) "⚓ $anchorLogTs = ${formatVideoTime(anchor.videoMs)}" else "⚓ ${formatVideoTime(anchor.videoMs)}"
         "$anchorSummary — click to clear this anchor. The video itself stays attached."
     } else {
-        "No anchor to clear yet — right-click a log row and use Video → \"Link to <time>\" first."
+        "No video mapping to clear yet — right-click a log row and use Video → \"Link to <time>\" first."
     }
     ToolbarBtn(
         label = "Clear",
         icon = Icons.Outlined.LinkOff,
         showLabel = false,
         tooltip = clearTooltip,
-        enabled = anchor != null,
+        enabled = hasMapping,
         onClick = { state.clearVideoAnchor(tab.id) },
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
     )
@@ -259,8 +265,12 @@ private fun VideoHeaderFollowActions(
         // active-state cue once ToolbarBtn's `active` fill kicks in below.
         icon = Icons.Outlined.Sync,
         showLabel = false,
-        tooltip = "Keeps the log selection continuously tracking the video as it plays. Needs a log line " +
-            "linked to a video moment — right-click a log row and use Video → \"Link to <time>\".",
+        tooltip = if (captureLinked) {
+            "Keeps the log selection tracking this portable capture's recorded row mapping. Unmapped interruptions are preserved."
+        } else {
+            "Keeps the log selection continuously tracking the video as it plays. Needs a log line " +
+                "linked to a video moment — right-click a log row and use Video → \"Link to <time>\"."
+        },
         active = followLogs,
         enabled = targetLogId != null,
         onClick = { state.setVideoFollowLog(tab.id, !followLogs) },
@@ -270,13 +280,15 @@ private fun VideoHeaderFollowActions(
         label = "Double-click seeks video",
         icon = Icons.Outlined.MyLocation,
         showLabel = false,
-        tooltip = if (anchor != null) {
+        tooltip = if (captureLinked) {
+            "Double-click a captured log row to seek this video to its recorded time"
+        } else if (anchor != null) {
             "Double-click a log row to seek this video to its mapped time"
         } else {
             "Link a log row to a video moment first; without an anchor, rows have no video time to seek to."
         },
         active = state.isVideoDoubleClickSeekEnabled(tab.id),
-        enabled = anchor != null,
+        enabled = hasMapping,
         onClick = { state.setVideoDoubleClickSeekEnabled(tab.id, !state.isVideoDoubleClickSeekEnabled(tab.id)) },
         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 5.dp),
     )
@@ -820,17 +832,27 @@ private fun VideoTransportBar(
 private fun VideoFollowReadout(state: AppState, tab: LogTab, mapping: VideoFollowMapping, positionMs: Long) {
     val tc = tc()
     val posLabel = formatVideoTime(positionMs)
-    val targetClock = mapping.mappedElapsedMs?.let { com.indagium.utils.formatElapsedAsClock(it) }
+    val targetClock = mapping.mappedElapsedMs?.let {
+        if (mapping.mappingKind == VideoMappingKind.CAPTURE) "capture +${formatVideoTime(it)}"
+        else com.indagium.utils.formatElapsedAsClock(it)
+    }
     val videoArrow = if (targetClock != null) "$posLabel → $targetClock" else posLabel
     val target = "log ${mapping.mappedNearestLogTs} · #${mapping.mappedNearestLogId}"
+    val captureSync = if (mapping.mappingKind == VideoMappingKind.CAPTURE) {
+        val uncertainty = mapping.captureUncertaintyMs?.let { " ±${it}ms" }.orEmpty()
+        "Capture sync (${mapping.captureQuality ?: "estimated"}$uncertainty): "
+    } else {
+        ""
+    }
     val line = when (mapping.status) {
         FollowMappingStatus.NO_ANCHOR -> "Link a log line to a video moment to enable follow"
-        FollowMappingStatus.BEFORE_FIRST -> "video $videoArrow → before first log line"
-        FollowMappingStatus.AFTER_LAST -> "video $videoArrow → past last log line"
-        FollowMappingStatus.NO_VISIBLE_ROW -> "video $videoArrow → no matching log line is visible (filtered out)"
-        FollowMappingStatus.HIDDEN_BY_FILTER -> "video $videoArrow → holding at $target (matching line hidden by filter)"
-        FollowMappingStatus.HIDDEN_BY_COLLAPSE -> "video $videoArrow → holding at $target (matching line folded inside a collapsed group)"
-        FollowMappingStatus.ON_VISIBLE_ROW -> "video $videoArrow → $target"
+        FollowMappingStatus.UNMAPPED_GAP -> "${captureSync}video $posLabel is inside an unmapped capture gap"
+        FollowMappingStatus.BEFORE_FIRST -> "${captureSync}video $videoArrow → before first log line"
+        FollowMappingStatus.AFTER_LAST -> "${captureSync}video $videoArrow → past last log line"
+        FollowMappingStatus.NO_VISIBLE_ROW -> "${captureSync}video $videoArrow → no matching log line is visible (filtered out)"
+        FollowMappingStatus.HIDDEN_BY_FILTER -> "${captureSync}video $videoArrow → holding at $target (matching line hidden by filter)"
+        FollowMappingStatus.HIDDEN_BY_COLLAPSE -> "${captureSync}video $videoArrow → holding at $target (matching line folded inside a collapsed group)"
+        FollowMappingStatus.ON_VISIBLE_ROW -> "${captureSync}video $videoArrow → $target"
     }
     // pointerInput below is keyed on tab.id alone (so right-clicking doesn't restart a coroutine on
     // every decoded frame) — which means its awaitPointerEventScope loop, once launched, keeps
@@ -892,6 +914,13 @@ private fun VideoFollowReadout(state: AppState, tab: LogTab, mapping: VideoFollo
                     if (mapping.anchorLogTs != null && mapping.anchorVideoMs != null) {
                         AppText(
                             "⚓ log ${mapping.anchorLogTs} = video ${formatVideoTime(mapping.anchorVideoMs)}",
+                            color = tc.tx,
+                            fontSize = 11.sp,
+                        )
+                    } else if (mapping.mappingKind == VideoMappingKind.CAPTURE) {
+                        val uncertainty = mapping.captureUncertaintyMs?.let { " ±${it}ms" }.orEmpty()
+                        AppText(
+                            "Portable capture mapping · ${mapping.captureQuality ?: "estimated"}$uncertainty",
                             color = tc.tx,
                             fontSize = 11.sp,
                         )

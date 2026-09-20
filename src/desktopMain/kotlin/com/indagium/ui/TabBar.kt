@@ -18,6 +18,7 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -154,6 +155,15 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.activeTab()?.id?.let(state::openCaseLibrary) }
+        ToolbarBtn(
+            "Capture",
+            icon = Icons.Outlined.PhoneAndroid,
+            showLabel = showToolbarText,
+            tooltip = "Capture Android logs and screen",
+            active = state.captureWorkspaceOpen,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.captureWorkspaceOpen = !state.captureWorkspaceOpen }
         ToolbarBtn(
             "Open",
             icon = Icons.Outlined.FolderOpen,

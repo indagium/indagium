@@ -326,6 +326,16 @@ fun App(
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {
+                    state.captureWorkspaceOpen -> {
+                        val capture = state.captureCoordinator
+                        LaunchedEffect(capture) {
+                            while (true) {
+                                capture.refreshDevices()
+                                delay(3_000)
+                            }
+                        }
+                        CaptureWorkspace(capture.state, capture.actions, Modifier.weight(1f))
+                    }
                     state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
                         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                             AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
@@ -719,7 +729,7 @@ fun App(
                                                 videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
                                                 state.ctx = null
                                             },
-                                            showEnabled = attachedVideo.anchor != null && hasValidMappedPosition,
+                                            showEnabled = hasValidMappedPosition,
                                             onShow = {
                                                 mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
                                                 state.ctx = null

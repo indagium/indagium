@@ -71,6 +71,24 @@ class VideoAttachmentTokenTest {
     }
 
     @Test
+    fun roundTripsPortableCaptureDescriptorWithoutInliningTimeline() {
+        val original = tabFixture(
+            VideoAttachment(
+                path = "/videos/capture.mkv",
+                sourceLabel = "capture.zip/video/screen.mkv",
+                captureSourcePath = "/reports/capture.zip",
+                captureOffsetMs = -275L,
+            ),
+        )
+
+        val restored = original.tabToken().tabShellFromToken()
+
+        assertEquals("/reports/capture.zip", restored?.tab?.attachedVideo?.captureSourcePath)
+        assertEquals(-275L, restored?.tab?.attachedVideo?.captureOffsetMs)
+        assertNull(restored?.tab?.captureTimeline)
+    }
+
+    @Test
     fun roundTripsNoAttachedVideoAsNull() {
         val original = tabFixture(attachedVideo = null)
         val restored = original.tabToken().tabShellFromToken()

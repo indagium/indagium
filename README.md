@@ -62,6 +62,33 @@ streams are not supported and cannot be split. DLT tabs do not support live UTF-
 
 `threadtime`, `time`, `brief`, `bare` — unrecognised lines are shown with tag `RAW`.
 
+### Capture workspace
+
+The Capture workspace records one physical Android device or emulator selected through `adb`.
+It checks the installed `adb` and optional `scrcpy`, reports actionable states such as unauthorized
+or offline devices, and keeps the raw log stream independently of the read-only live preview.
+Indagium does not bundle `adb`, `scrcpy`, or other host tools; install them through the platform's
+normal Android SDK and scrcpy setup.
+
+On Linux Flatpak, host-installed tools will be invoked through
+`flatpak-spawn --host --watch-bus`; the package therefore needs the narrowly scoped
+`org.freedesktop.Flatpak` D-Bus talk permission. Diagnostics will show actionable setup and device
+errors inside Indagium rather than asking the user to operate a terminal.
+
+A capture keeps all log history and can optionally mirror the screen as H.264 MKV at the configured
+size, frame rate, and bitrate (1080p/30 fps/8 Mbps by default), with audio disabled by default. The
+default storage guard stops at 10 GiB and preserves a 1 GiB reserve. ZIP export supports all
+history, the last 5 minutes, the last 10 minutes, a custom range, or the rows since the previous
+save. The portable ZIP contains `capture.indagium.json`,
+`logs/logcat.log`, `mapping/log-video.jsonl`, and optional video and screenshots. Opening either the
+ZIP or an extracted descriptor will auto-link the available log, mapping, and video artifacts.
+
+Timing starts as an estimate and can be calibrated with a millisecond offset. Video export snapshots
+the growing recording and starts at the preceding readable keyframe when one is available. Saving
+live capture data does not require restarting the session. Automated coverage exercises process,
+archive, persistence, and mapping behavior; live device and scrcpy testing across macOS, Windows,
+and Linux is unavailable in the current environment.
+
 ## Documentation
 
 | Document | What it covers |

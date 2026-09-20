@@ -13,6 +13,9 @@ import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.ai.validateAiProviderProfile
+import com.indagium.capture.CaptureTimeline
+import com.indagium.capture.CaptureTimelineIndex
+import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -100,6 +103,7 @@ import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.newId
 import com.indagium.utils.openArchiveCandidateStream
 import com.indagium.utils.parseLogFileResult
+import com.indagium.utils.parseLogcat
 import com.indagium.utils.passesFilter
 import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.presentLogLine
@@ -1001,6 +1005,10 @@ data class AnnotationNavigationRequest(
  */
 enum class FollowMappingStatus {
     NO_ANCHOR,
+
+    /** A portable capture is linked, but this playhead position falls in an explicitly unmapped
+     *  recording interruption. Follow must hold still rather than bridge the missing rows. */
+    UNMAPPED_GAP,
     BEFORE_FIRST,
     AFTER_LAST,
 
@@ -1022,6 +1030,8 @@ enum class FollowMappingStatus {
     ON_VISIBLE_ROW,
 }
 
+enum class VideoMappingKind { NONE, ANCHOR, CAPTURE }
+
 /** Everything a Follow readout needs to explain the current playhead-to-log mapping, including why
  *  it might look "stuck" — see [FollowMappingStatus]. */
 data class VideoFollowMapping(
@@ -1032,7 +1042,7 @@ data class VideoFollowMapping(
     val status: FollowMappingStatus,
     // The raw (day-unrolled) elapsed timestamp Follow computed for the current playhead, BEFORE any
     // visible/full-log floor resolution — i.e. what "the video says" independent of what's actually
-    // selectable. Null exactly when status is NO_ANCHOR (no anchor to map from at all). Lets a
+    // selectable. Null when there is no mapping or the playhead is in an explicit capture gap. Lets a
     // readout show the computed target time alongside whatever row Follow actually holds on,
     // instead of leaving the reader to guess whether "holding" means "close" or "very far behind."
     val mappedElapsedMs: Long? = null,
@@ -1042,6 +1052,9 @@ data class VideoFollowMapping(
     // navigation reads it to decide whether there is a folded row worth revealing; see
     // AppState.followRevealTarget.
     val mappedFullFloorLogId: Int? = null,
+    val mappingKind: VideoMappingKind = VideoMappingKind.NONE,
+    val captureQuality: String? = null,
+    val captureUncertaintyMs: Long? = null,
 )
 
 /** One row-shaped fact inside a [FollowDiagnostics] dump: id/ts/elapsed ONLY, deliberately never
@@ -1071,8 +1084,7 @@ data class FollowDiagnostics(
     val anchor: FollowDiagnosticRow?,
     val anchorVideoMs: Long?,
     val playheadVideoMs: Long,
-    // Null only when hasAnchor is false — everything below is what Follow computed FROM this value,
-    // so a null here means every "chosen"/"candidates"/"status" field downstream is meaningless.
+    // Null when there is no mapping or a capture playhead is in an explicitly unmapped gap.
     val mappedElapsedMs: Long?,
     val mappedElapsedClock: String?,
     val chosenVisibleFloor: FollowDiagnosticRow?,
@@ -1107,6 +1119,9 @@ data class FollowDiagnostics(
     val filterActive: Boolean,
     val totalLogDataSize: Int,
     val displayedItemCount: Int,
+    val mappingKind: VideoMappingKind = if (hasAnchor) VideoMappingKind.ANCHOR else VideoMappingKind.NONE,
+    val captureQuality: String? = null,
+    val captureUncertaintyMs: Long? = null,
 )
 
 private fun FollowDiagnosticRow.format(): String = "id=$id ts=${ts ?: "?"} elapsed=${elapsedMs?.toString() ?: "?"}ms"
@@ -1123,6 +1138,13 @@ fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
     appendLine("Indagium Follow diagnostics — tab ${d.tabId}")
     appendLine("app-data migration: ${migrationOutcomeSummary(DesktopStorage.lastMigrationOutcome)}")
     appendLine("has anchor: ${d.hasAnchor}")
+    appendLine("mapping kind: ${d.mappingKind}")
+    if (d.mappingKind == VideoMappingKind.CAPTURE) {
+        appendLine(
+            "capture sync: quality=${d.captureQuality ?: "unknown"} " +
+                "uncertaintyMs=${d.captureUncertaintyMs ?: "?"}",
+        )
+    }
     if (d.anchor != null) appendLine("anchor: ${d.anchor.format()} videoMs=${d.anchorVideoMs}")
     appendLine("playhead videoMs: ${d.playheadVideoMs}")
     appendLine("mapped target: elapsed=${d.mappedElapsedMs?.toString() ?: "?"}ms clock=${d.mappedElapsedClock ?: "?"}")
@@ -1729,6 +1751,16 @@ class AppState(
     // each is started on ioScope.
     private val tailCoordinator = TailCoordinator(this, ioScope)
 
+    var captureWorkspaceOpen by mutableStateOf(false)
+    private val captureCoordinatorDelegate = lazy {
+        CaptureCoordinator(this, ioScope, File(autosaveFile.absoluteFile.parentFile, "captures"))
+    }
+    internal val captureCoordinator: CaptureCoordinator get() = captureCoordinatorDelegate.value
+
+    internal fun updateCaptureSessionCalibration(sourcePath: String, additionalOffsetMs: Long) {
+        captureCoordinator.applyCalibration(sourcePath, additionalOffsetMs)
+    }
+
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
 
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
@@ -1979,6 +2011,7 @@ class AppState(
         aiSidebarRuntime.close()
         aiSessions.clear()
         controlServerManager.stopControlServer()
+        if (captureCoordinatorDelegate.isInitialized()) captureCoordinator.close()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
@@ -4060,18 +4093,26 @@ class AppState(
      * independent from Follow: either may be on while the other is off. An attachment without an
      * anchor has no mapping, so it cannot expose an active double-click seek action.
      */
-    fun setVideoDoubleClickSeekEnabled(tabId: String, enabled: Boolean) = upTab(tabId) { tab ->
-        val video = tab.attachedVideo ?: return@upTab tab
-        // Normalize a malformed/stale stored flag away when there is no linkage. The UI and seek
-        // path also gate on anchor, but keeping the durable state coherent prevents it reviving
-        // unexpectedly if a later operation supplies an anchor without going through setVideoAnchor.
-        if (video.anchor == null) tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
-        else tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
+    fun setVideoDoubleClickSeekEnabled(tabId: String, enabled: Boolean) {
+        upTab(tabId) { tab ->
+            val video = tab.attachedVideo ?: return@upTab tab
+            // Normalize a malformed/stale stored flag away when there is no linkage. The UI and
+            // seek path also gate on anchor, but keeping the durable state coherent prevents it
+            // reviving unexpectedly if a later operation supplies an anchor without going through
+            // setVideoAnchor.
+            if (video.anchor == null && captureTimelineIndex(tab) == null) {
+                tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
+            } else {
+                tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
+            }
+        }
+        autosaveNow()
     }
 
     fun isVideoDoubleClickSeekEnabled(tabId: String): Boolean {
         val video = tab(tabId)?.attachedVideo
-        return video?.anchor != null && video.doubleClickSeekEnabled
+        val currentTab = tab(tabId)
+        return video != null && (video.anchor != null || currentTab?.let(::captureTimelineIndex) != null) && video.doubleClickSeekEnabled
     }
 
     /**
@@ -4147,28 +4188,147 @@ class AppState(
         return startMs..endMs
     }
 
-    fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) = upTab(tabId) { t ->
-        if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
-        t.attachedVideo?.let {
-            t.copy(
-                attachedVideo = it.copy(
-                    anchor = VideoAnchor(videoMs, logId),
-                    // A created/replaced linkage takes today's default exactly once. Later
-                    // setting changes must not silently rewrite this explicit per-video choice.
-                    doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
-                ),
-            )
-        } ?: t
+    fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) {
+        upTab(tabId) { t ->
+            if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
+            t.attachedVideo?.let {
+                val captureIndex = captureTimelineIndex(t)
+                if (captureIndex != null) {
+                    val ordinal = t.logData.indexOfEntryId(logId).takeIf { index -> index >= 0 }?.plus(1)
+                        ?: return@let t
+                    val importedVideoMs = captureIndex.videoMsForOrdinal(ordinal) ?: return@let t
+                    val calibratedOffsetMs = videoMs - importedVideoMs
+                    it.captureSourcePath?.let { sourcePath ->
+                        updateCaptureSessionCalibration(sourcePath, calibratedOffsetMs)
+                    }
+                    return@let t.copy(
+                        attachedVideo = it.copy(
+                            anchor = null,
+                            captureOffsetMs = calibratedOffsetMs,
+                            doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                        ),
+                    )
+                }
+                t.copy(
+                    attachedVideo = it.copy(
+                        anchor = VideoAnchor(videoMs, logId),
+                        // A created/replaced linkage takes today's default exactly once. Later
+                        // setting changes must not silently rewrite this explicit per-video choice.
+                        doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                    ),
+                )
+            } ?: t
+        }
+        autosaveNow()
     }
 
-    fun clearVideoAnchor(tabId: String) = upTab(tabId) { t ->
-        t.attachedVideo?.let {
-            t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
-        } ?: t
+    fun clearVideoAnchor(tabId: String) {
+        upTab(tabId) { t ->
+            t.attachedVideo?.let {
+                if (captureTimelineIndex(t) != null) {
+                    t.copy(
+                        attachedVideo = it.copy(
+                            anchor = null,
+                            doubleClickSeekEnabled = false,
+                            captureSourcePath = null,
+                            captureOffsetMs = 0L,
+                        ),
+                        captureTimeline = null,
+                    )
+                } else {
+                    t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
+                }
+            } ?: t
+        }
+        autosaveNow()
+    }
+
+    private class CaptureIndexCache(
+        val logDataRef: List<LogEntry>,
+        val timelineRef: CaptureTimeline,
+        val index: CaptureTimelineIndex,
+    )
+
+    private val captureIndexByTab = ConcurrentHashMap<String, CaptureIndexCache>()
+
+    private fun captureTimelineIndex(tab: LogTab): CaptureTimelineIndex? {
+        if (tab.attachedVideo?.captureSourcePath == null) return null
+        val timeline = tab.captureTimeline ?: return null
+        captureIndexByTab[tab.id]
+            ?.takeIf { it.logDataRef === tab.logData && it.timelineRef === timeline }
+            ?.let { return it.index }
+        return CaptureTimelineIndex(timeline, tab.logData.size).also { index ->
+            captureIndexByTab[tab.id] = CaptureIndexCache(tab.logData, timeline, index)
+        }
+    }
+
+    private class CaptureFollowFloorIndex(
+        val logDataRef: List<LogEntry>,
+        val visibleIdsRef: IntArray,
+        val summaryVersion: Int,
+        val ids: IntArray,
+        val ordinals: IntArray,
+    )
+
+    private val captureFollowFloorIndexByTab = ConcurrentHashMap<String, CaptureFollowFloorIndex>()
+
+    /** Visible-row floor by parser ordinal; unlike clock mapping this also supports timestamp-less rows. */
+    private fun captureFollowFloorIndex(tab: LogTab): CaptureFollowFloorIndex {
+        val captureIndex = captureTimelineIndex(tab)
+        val version = visibleItemsVersion
+        val reported = visibleItemsByTab[tab.id]?.allIds
+        val visibleIds = reported ?: computeItems(tab, applyFilter = true).map(::logItemEntryId).toIntArray()
+        if (reported != null) {
+            captureFollowFloorIndexByTab[tab.id]
+                ?.takeIf {
+                    it.logDataRef === tab.logData && it.visibleIdsRef === reported && it.summaryVersion == version
+                }
+                ?.let { return it }
+        }
+        val ids = IntArray(visibleIds.size)
+        val ordinals = IntArray(visibleIds.size)
+        var count = 0
+        for (id in visibleIds) {
+            val sourceIndex = tab.logData.indexOfEntryId(id)
+            if (sourceIndex < 0) continue
+            if (captureIndex?.pointForOrdinal(sourceIndex + 1) == null) continue
+            ids[count] = id
+            ordinals[count] = sourceIndex + 1
+            count++
+        }
+        return CaptureFollowFloorIndex(
+            logDataRef = tab.logData,
+            visibleIdsRef = visibleIds,
+            summaryVersion = version,
+            ids = ids.copyOf(count),
+            ordinals = ordinals.copyOf(count),
+        ).also { if (reported != null) captureFollowFloorIndexByTab[tab.id] = it }
+    }
+
+    private fun captureVisibleLogIdAtOrBefore(tab: LogTab, ordinal: Int, segmentFirstOrdinal: Int): Int? {
+        val index = captureFollowFloorIndex(tab)
+        if (index.ids.isEmpty()) return null
+        var lo = 0
+        var hi = index.ordinals.lastIndex
+        var floor = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (index.ordinals[mid] <= ordinal) {
+                floor = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return floor.takeIf { it >= 0 && index.ordinals[it] >= segmentFirstOrdinal }?.let { index.ids[it] }
     }
 
     /** Video-time (ms) for [logId], relative to [tab]'s single anchor. */
     fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
+        captureTimelineIndex(tab)?.let { index ->
+            val ordinal = tab.logData.indexOfEntryId(logId).takeIf { it >= 0 }?.plus(1) ?: return null
+            return index.videoMsForOrdinal(ordinal, tab.attachedVideo?.captureOffsetMs ?: 0L)
+        }
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
         val anchorElapsed = elapsed[anchor.logId] ?: return null
@@ -4178,6 +4338,10 @@ class AppState(
 
     /** Inverse of [logIdToVideoMs]: the entry whose mapped video-time is closest to [videoMs]. */
     fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
+        captureTimelineIndex(tab)?.let { index ->
+            val point = index.nearest(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point ?: return null
+            return tab.logData.getOrNull(point.ordinal - 1)?.id
+        }
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
         val anchorElapsed = elapsed[anchor.logId] ?: return null
@@ -4315,9 +4479,14 @@ class AppState(
      * not a nearest-neighbor lookup: playback must never jump ahead to a future visible line.
      */
     fun followTargetVisibleLogId(tabId: String, videoMs: Long): Int? =
-        tab(tabId)?.let { tab ->
-            val anchor = tab.attachedVideo?.anchor ?: return@let null
-            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@let null
+        tab(tabId)?.let tabLookup@{ tab ->
+            captureTimelineIndex(tab)?.let { index ->
+                val point = index.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point
+                    ?: return@tabLookup null
+                return@tabLookup captureVisibleLogIdAtOrBefore(tab, point.ordinal, point.segmentFirstOrdinal)
+            }
+            val anchor = tab.attachedVideo?.anchor ?: return@tabLookup null
+            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@tabLookup null
             lastVisibleLogIdAtOrBefore(tab, anchorElapsed + (videoMs - anchor.videoMs))
         }
 
@@ -4331,6 +4500,11 @@ class AppState(
      * is returned rather than jumping to the end.
      */
     private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
+        if (captureTimelineIndex(tab) != null) {
+            val ordinal = tab.logData.indexOfEntryId(mappedLogId).takeIf { it >= 0 }?.plus(1) ?: return null
+            val point = captureTimelineIndex(tab)?.pointForOrdinal(ordinal) ?: return null
+            return captureVisibleLogIdAtOrBefore(tab, ordinal, point.segmentFirstOrdinal)
+        }
         val mappedElapsed = logElapsedIndex(tab).byId[mappedLogId] ?: return null
         return lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
     }
@@ -4475,8 +4649,39 @@ class AppState(
      * actually select — the same value [followTargetVisibleLogId] returns — so the readout can never
      * disagree with the selection. Pure (no controller access), so it is directly unit-testable.
      */
+    @Suppress("CyclomaticComplexMethod")
     fun videoFollowMapping(tabId: String, videoMs: Long): VideoFollowMapping {
         val tab = tab(tabId)
+        val captureIndex = tab?.let(::captureTimelineIndex)
+        if (tab != null && captureIndex != null) {
+            val timeline = tab.captureTimeline!!
+            val resolved = captureIndex.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L)
+            val point = resolved.point
+            val fullFloorId = point?.let { tab.logData.getOrNull(it.ordinal - 1)?.id }
+            val visibleFloorId = point?.let { captureVisibleLogIdAtOrBefore(tab, it.ordinal, it.segmentFirstOrdinal) }
+            val status = when (resolved.kind) {
+                CapturePositionKind.BEFORE_FIRST -> FollowMappingStatus.BEFORE_FIRST
+                CapturePositionKind.AFTER_LAST -> FollowMappingStatus.AFTER_LAST
+                CapturePositionKind.GAP, CapturePositionKind.EMPTY -> FollowMappingStatus.UNMAPPED_GAP
+                CapturePositionKind.MAPPED -> when {
+                    visibleFloorId == null -> FollowMappingStatus.NO_VISIBLE_ROW
+                    fullFloorId != null && fullFloorId != visibleFloorId -> fullFloorHiddenReason(tab, fullFloorId)
+                    else -> FollowMappingStatus.ON_VISIBLE_ROW
+                }
+            }
+            return VideoFollowMapping(
+                anchorLogTs = null,
+                anchorVideoMs = null,
+                mappedNearestLogId = visibleFloorId,
+                mappedNearestLogTs = visibleFloorId?.let { tab.rmap[it]?.ts },
+                status = status,
+                mappedElapsedMs = point?.elapsedMs,
+                mappedFullFloorLogId = fullFloorId,
+                mappingKind = VideoMappingKind.CAPTURE,
+                captureQuality = timeline.quality,
+                captureUncertaintyMs = timeline.uncertaintyMs,
+            )
+        }
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
         val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
@@ -4488,6 +4693,7 @@ class AppState(
                 mappedNearestLogTs = null,
                 status = FollowMappingStatus.NO_ANCHOR,
                 mappedElapsedMs = null,
+                mappingKind = VideoMappingKind.NONE,
             )
         }
 
@@ -4513,6 +4719,7 @@ class AppState(
             status = status,
             mappedElapsedMs = mappedElapsed,
             mappedFullFloorLogId = fullFloorId,
+            mappingKind = VideoMappingKind.ANCHOR,
         )
     }
 
@@ -4560,12 +4767,60 @@ class AppState(
      * threading positions through the hot per-frame function just for this rarely-called diagnostic
      * would cost every real caller a signature change for no benefit.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     fun followDiagnostics(tabId: String, videoMs: Long): FollowDiagnostics {
         val tab = tab(tabId)
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
         val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
         val summary = visibleItemsByTab[tabId]
+        val captureIndex = tab?.let(::captureTimelineIndex)
+        if (tab != null && captureIndex != null) {
+            val mapping = videoFollowMapping(tabId, videoMs)
+            val visibleIndex = captureFollowFloorIndex(tab)
+
+            fun diagnosticRow(id: Int): FollowDiagnosticRow {
+                val ordinal = tab.logData.indexOfEntryId(id).takeIf { it >= 0 }?.plus(1)
+                val captureElapsed = ordinal?.let { captureIndex.pointForOrdinal(it)?.elapsedMs }
+                return FollowDiagnosticRow(id, tab.rmap[id]?.ts, captureElapsed)
+            }
+            val chosenId = mapping.mappedNearestLogId
+            val chosenPos = chosenId?.let { id -> visibleIndex.ids.indexOf(id) } ?: -1
+            val candidates = if (chosenPos >= 0) {
+                ((chosenPos + 1) until visibleIndex.ids.size)
+                    .take(FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT)
+                    .map { diagnosticRow(visibleIndex.ids[it]) }
+            } else {
+                emptyList()
+            }
+            return FollowDiagnostics(
+                tabId = tabId,
+                hasAnchor = false,
+                anchor = null,
+                anchorVideoMs = null,
+                playheadVideoMs = videoMs,
+                mappedElapsedMs = mapping.mappedElapsedMs,
+                mappedElapsedClock = mapping.mappedElapsedMs?.let(::formatElapsedAsClock),
+                chosenVisibleFloor = chosenId?.let(::diagnosticRow),
+                nextVisibleCandidatesAfterFloor = candidates,
+                visibleCandidateCount = visibleIndex.ids.size,
+                candidatesFromSummaryFallback = summary == null,
+                fullLogFloor = mapping.mappedFullFloorLogId?.let(::diagnosticRow),
+                status = mapping.status,
+                rolloverAppliedCount = 0,
+                rolloverAppliedSamples = emptyList(),
+                rolloverSuppressedCount = 0,
+                rolloverSuppressedSamples = emptyList(),
+                dayOffsetModelValid = true,
+                showUnfiltered = tab.showUnfiltered,
+                filterActive = isFilterConfigured(tab.filter),
+                totalLogDataSize = tab.logData.size,
+                displayedItemCount = summary?.allIds?.size ?: computeItems(tab, applyFilter = true).size,
+                mappingKind = VideoMappingKind.CAPTURE,
+                captureQuality = tab.captureTimeline?.quality,
+                captureUncertaintyMs = tab.captureTimeline?.uncertaintyMs,
+            )
+        }
         if (tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()) {
             return FollowDiagnostics(
                 tabId = tabId,
@@ -4590,6 +4845,7 @@ class AppState(
                 filterActive = tab?.let { isFilterConfigured(it.filter) } ?: false,
                 totalLogDataSize = tab?.logData?.size ?: 0,
                 displayedItemCount = summary?.allIds?.size ?: 0,
+                mappingKind = VideoMappingKind.NONE,
             )
         }
 
@@ -4649,6 +4905,7 @@ class AppState(
             filterActive = isFilterConfigured(tab.filter),
             totalLogDataSize = tab.logData.size,
             displayedItemCount = displayedItemCount,
+            mappingKind = VideoMappingKind.ANCHOR,
         )
     }
 
@@ -5707,7 +5964,12 @@ class AppState(
         recentMenuOpen = !recentMenuOpen
     }
 
-    fun openPath(file: File): String? = when (detectArchiveFormat(file)) {
+    fun openPath(file: File): String? = when {
+        file.name == "capture.indagium.json" -> openCaptureFile(file)
+        else -> openOrdinaryPath(file)
+    }
+
+    private fun openOrdinaryPath(file: File): String? = when (detectArchiveFormat(file)) {
         // Zip/SevenZ/Sequential all go through the picker-capable archive path.
         ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file); null }
         is ArchiveFormat.Sequential -> { openZipFile(file); null }
@@ -5719,6 +5981,95 @@ class AppState(
         // and None both land here too — openFile's own existence/readability check produces the
         // right error for those, same as before this change.
         else -> openFile(file)
+    }
+
+    /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
+    @Suppress("TooGenericExceptionCaught")
+    fun openCaptureFile(file: File): String {
+        val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
+        if (existing != null) {
+            setActiveSurfaceToTab(existing.id)
+            captureWorkspaceOpen = false
+            return existing.id
+        }
+        val tabId = "t${tabCounter.getAndIncrement()}"
+        beginLoading("Opening capture session...")
+        val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
+            try {
+                val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
+                val logData = parseLogcat(imported.logFile)
+                ensureActive()
+                val sourcePath = if (file.name == "capture.indagium.json") {
+                    imported.logFile.absolutePath
+                } else {
+                    "${file.absolutePath}!${imported.descriptor.log.path}"
+                }
+                val video = imported.videoFile?.let { localVideo ->
+                    val videoSource = if (file.name == "capture.indagium.json") {
+                        VideoSource.LocalFile(localVideo.absolutePath)
+                    } else {
+                        VideoSource.ArchiveEntry(file.absolutePath, imported.descriptor.video!!.path, localVideo.name)
+                    }
+                    VideoAttachment(
+                        source = videoSource,
+                        sourceLabel = "${file.name}/${localVideo.name}",
+                        captureSourcePath = file.absolutePath,
+                        doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                    )
+                }
+                val captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
+                    analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
+                    .copy(sourcePath = sourcePath, attachedVideo = video, captureTimeline = imported.timeline,
+                        largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
+                        showUnfiltered = settings.openNewFilesWithUnfiltered)
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + captureTab
+                    setActiveSurfaceToTab(tabId)
+                    captureWorkspaceOpen = false
+                    if (video != null) videoPanelVisible = true
+                }
+                rememberRecentFile(file)
+                markActiveLoadFinished(tabId)
+                published = true
+                val analysis = buildLogAnalysis(logData, settings.customIssueRules)
+                ensureActive()
+                upTab(tabId) { it.copy(analysis = analysis) }
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showOpenError("Capture link could not be opened", file.absolutePath,
+                    "${error.message}. You can open the log and video separately without automatic synchronization.")
+                if (file.name != "capture.indagium.json") openZipFile(file, ignoreCaptureDescriptor = true)
+            } finally {
+                val load = activeLoads.remove(tabId)
+                if (!published) finishActiveLoad(load)
+            }
+        }
+        activeLoads[tabId] = ActiveLoad(job)
+        job.start()
+        return tabId
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun restoreCaptureLink(tabId: String) {
+        val original = tab(tabId)?.attachedVideo ?: return
+        val path = original.captureSourcePath ?: return
+        try {
+            val imported = com.indagium.capture.CaptureArchiveReader.open(File(path), File(archiveCacheDir, "captures"))
+            val loaded = tab(tabId) ?: return
+            // The restored source could have been replaced separately from its descriptor.
+            require(parseLogcat(imported.logFile) == loaded.logData) { "Restored logs no longer match the capture" }
+            upTab(tabId) { current ->
+                if (current.attachedVideo?.captureSourcePath == path) current.copy(captureTimeline = imported.timeline) else current
+            }
+        } catch (error: Exception) {
+            upTab(tabId) { current -> current.copy(captureTimeline = null,
+                attachedVideo = current.attachedVideo?.copy(doubleClickSeekEnabled = false)) }
+            showOpenError("Capture synchronization unavailable", path,
+                "${error.message}. The log remains open; automatic video linking is disabled.")
+        }
     }
 
     fun dismissOpenError() {
@@ -5735,7 +6086,11 @@ class AppState(
     // user must be able to see and confirm the optional log/video association. 2+ log candidates
     // also show a picker rather than guessing. 0 candidates reports that no log-like entries were
     // found.
-    fun openZipFile(file: File) {
+    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false) {
+        if (!ignoreCaptureDescriptor && com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) {
+            openCaptureFile(file)
+            return
+        }
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
             removeRecentFile(file)
@@ -8802,6 +9157,7 @@ class AppState(
                         largeFileMode = result.largeFileMode,
                     )
                 }
+                restoreCaptureLink(tabId)
                 markActiveLoadFinished(tabId)
                 published = true
                 val issueRules = settings.customIssueRules
