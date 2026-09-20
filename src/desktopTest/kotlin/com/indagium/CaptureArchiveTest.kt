@@ -244,6 +244,23 @@ class CaptureArchiveTest {
     }
 
     @Test
+    fun sinceSaveRejectsAFirstSaveWithoutACanonicalOrLegacyCheckpoint() {
+        val root = createTempDirectory("capture-since-save-without-checkpoint").toFile()
+        val session = session(root)
+        writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
+        val request = CaptureExportRequest(
+            destination = File(root, "missing-checkpoint.zip"),
+            range = CaptureRange.SINCE_SAVE,
+            cutoffElapsedMs = 1_000,
+        )
+        val exporter = CaptureArchiveExporter()
+
+        assertFailsWith<IllegalArgumentException> { exporter.preview(session, request) }
+        assertFailsWith<IllegalArgumentException> { exporter.export(session, request) }
+        assertFalse(request.destination.exists())
+    }
+
+    @Test
     fun exportBeforeVideoStartsSucceedsWithLogOnlyArchiveAndNullMapping() {
         val root = createTempDirectory("capture-export-before-video").toFile()
         val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 5_000, elapsedMs = 40_000)

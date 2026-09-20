@@ -20,6 +20,8 @@ import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
+import com.indagium.capture.mirror.EmbeddedMirrorState
+import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -725,6 +727,11 @@ internal const val LARGE_FILE_MODE_ROWS = 500_000
 // Capture logs are flushed frequently enough for responsive rows while avoiding the heavier
 // whole-list filter pass on every half-second default tail tick.
 private const val CAPTURE_TAIL_POLL_INTERVAL_MS = 1_000L
+
+// Keep the debounce below the recorder's 250ms publish cadence so a preview eventually lands
+// while a capture is still running. The per-tab cancellation/generation guard means a new tick
+// replaces the old work instead of queueing a 250ms job storm.
+private const val CAPTURE_PREVIEW_DEBOUNCE_MS = 150L
 
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
@@ -1802,6 +1809,10 @@ class AppState(
     }
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+    /** Embedded mirror handles are presentation resources, separate from recorder ownership. */
+    private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
+    private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
+    private var embeddedMirrorVersion by mutableStateOf(0)
     private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
     private val captureLaunchDrafts = mutableMapOf<String, com.indagium.capture.CaptureSettings>()
 
@@ -1826,6 +1837,9 @@ class AppState(
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
     private var captureExportJob: Job? = null
+    /** One cancellable, latest-only preview lane per live capture tab. */
+    private val capturePreviewJobsByTab = mutableMapOf<String, Job>()
+    private val capturePreviewGenerationByTab = mutableMapOf<String, Long>()
     internal val liveCaptureTabId: String?
         get() = synchronized(stateLock) { tabs.firstOrNull { it.captureSessionId != null }?.id }
 
@@ -1920,17 +1934,79 @@ class AppState(
         }
     }
 
-    /** Opens or reuses one auxiliary, non-recording scrcpy mirror window. */
-    internal fun openCaptureMirror(tabId: String) {
-        // Same reachable-but-silent case as screenshotCapture above: was a bare `?: return`.
-        val controller = captureControllerFor(tabId) ?: run {
-            captureService.reportError("Mirror could not open: capture has already stopped")
+    /** Current UI bridge for a live tab. Reading the version makes map publication observable. */
+    internal fun embeddedMirrorFor(tabId: String): EmbeddedMirrorHandle? {
+        embeddedMirrorVersion
+        return synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
+    }
+
+    /**
+     * Creates/reuses the embedded runtime for a live capture. Tool resolution happens on the IO
+     * lane; the log recorder is never stopped when mirror setup fails. Automatic start follows the
+     * capture session's mirror setting, while the explicit Open/Connect action passes true here.
+     */
+    internal fun ensureEmbeddedMirror(tabId: String, autoStart: Boolean) {
+        val controller = captureControllerFor(tabId) ?: return
+        val existing = synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
+        if (existing != null) {
+            if (autoStart) startEmbeddedMirror(tabId, existing, controller)
             return
         }
-        ioScope.launch {
-            val result = runCatching { controller.openMirror() }
-            result.onFailure { captureService.reportError("Mirror could not open: ${it.message}") }
+        synchronized(stateLock) {
+            if (embeddedMirrorStartJobsByTab.containsKey(tabId)) return
+            embeddedMirrorStartJobsByTab[tabId] = ioScope.launch {
+                try {
+                    val session = controller.selectedSession.value
+                        ?: error("capture session is not ready")
+                    val tools = captureService.toolsForStart(session.settings)
+                    val handle = EmbeddedMirrorHandle.create(
+                        tools = tools,
+                        root = File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
+                    )
+                    synchronized(stateLock) {
+                        if (captureControllersByTab[tabId] !== controller) {
+                            handle.close()
+                            return@launch
+                        }
+                        embeddedMirrorsByTab[tabId] = handle
+                        embeddedMirrorVersion++
+                    }
+                    if (autoStart) startEmbeddedMirror(tabId, handle, controller)
+                } catch (failure: Throwable) {
+                    captureService.reportError("Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}")
+                } finally {
+                    synchronized(stateLock) { embeddedMirrorStartJobsByTab.remove(tabId) }
+                }
+            }
         }
+    }
+
+    /** Explicit Open/Connect action; retained for the existing toolbar/strip call sites. */
+    internal fun openCaptureMirror(tabId: String) = ensureEmbeddedMirror(tabId, autoStart = true)
+
+    internal fun stopEmbeddedMirror(tabId: String) {
+        synchronized(stateLock) { embeddedMirrorsByTab[tabId] }?.stop()
+    }
+
+    private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {
+        val session = controller.selectedSession.value ?: return
+        if (session.device.serial.isBlank()) return
+        handle.start(
+            session.device.serial,
+            MirrorStreamOptions(
+                maxSize = session.settings.maxSize,
+                maxFps = session.settings.maxFps,
+                bitrateMbps = session.settings.bitrateMbps,
+            ),
+        )
+    }
+
+    private fun closeEmbeddedMirror(tabId: String) {
+        val handle = synchronized(stateLock) {
+            embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+            embeddedMirrorsByTab.remove(tabId)?.also { embeddedMirrorVersion++ }
+        }
+        handle?.close()
     }
 
     /**
@@ -1947,6 +2023,7 @@ class AppState(
      */
     @Suppress("TooGenericExceptionCaught")
     internal fun exportCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+        cancelCapturePreview(tabId)
         val controller = captureControllerFor(tabId) ?: run {
             captureExportError = "Capture export failed: capture has already stopped"
             return
@@ -1954,6 +2031,7 @@ class AppState(
         if (captureExportBusy) return
         captureExportBusy = true
         captureExportResult = null
+        captureExportPreview = null
         captureExportError = null
         captureExportJob = ioScope.launch {
             try {
@@ -1976,12 +2054,41 @@ class AppState(
         // captureExportError — but leaving a stale preview on screen from before the capture
         // stopped would be actively misleading, so clear it instead of the previous silent no-op.
         val controller = captureControllerFor(tabId) ?: run {
+            cancelCapturePreview(tabId)
             captureExportPreview = null
             return
         }
-        ioScope.launch {
-            captureExportPreview = runCatching { controller.preview(request) }.getOrNull()
+        val generation = synchronized(stateLock) {
+            capturePreviewJobsByTab[tabId]?.cancel()
+            val next = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            capturePreviewGenerationByTab[tabId] = next
+            next
         }
+        val job = ioScope.launch {
+            try {
+                // Recorder snapshots are published at ~250ms cadence. Keep the popover responsive
+                // by coalescing those updates instead of starting one exporter job per cadence
+                // tick; cancellation also interrupts a growing-video preview/remux promptly.
+                delay(CAPTURE_PREVIEW_DEBOUNCE_MS)
+                val preview = runInterruptible { controller.preview(request) }
+                synchronized(stateLock) {
+                    if (capturePreviewGenerationByTab[tabId] == generation && isActive) {
+                        captureExportPreview = preview
+                        capturePreviewJobsByTab.remove(tabId)
+                    }
+                }
+            } catch (_: CancellationException) {
+                // A newer range edit, Save press, or popover dismissal owns the preview lane now.
+            } catch (_: Throwable) {
+                synchronized(stateLock) {
+                    if (capturePreviewGenerationByTab[tabId] == generation) {
+                        captureExportPreview = null
+                        capturePreviewJobsByTab.remove(tabId)
+                    }
+                }
+            }
+        }
+        synchronized(stateLock) { capturePreviewJobsByTab[tabId] = job }
     }
 
     /** Cancels only the export job; the per-tab recorder remains active. */
@@ -1990,9 +2097,28 @@ class AppState(
     }
 
     internal fun clearCaptureExportStatus() {
+        cancelAllCapturePreviews()
         captureExportResult = null
         captureExportPreview = null
         captureExportError = null
+    }
+
+    private fun cancelCapturePreview(tabId: String) {
+        val job = synchronized(stateLock) {
+            capturePreviewGenerationByTab[tabId] = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            capturePreviewJobsByTab.remove(tabId)
+        }
+        job?.cancel()
+    }
+
+    private fun cancelAllCapturePreviews() {
+        val jobs = synchronized(stateLock) {
+            capturePreviewGenerationByTab.keys.forEach { tabId ->
+                capturePreviewGenerationByTab[tabId] = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            }
+            capturePreviewJobsByTab.values.toList().also { capturePreviewJobsByTab.clear() }
+        }
+        jobs.forEach { it.cancel() }
     }
 
     internal fun updateCaptureSessionCalibration(sourcePath: String, additionalOffsetMs: Long) {
@@ -2232,6 +2358,9 @@ class AppState(
         // session afterward — the raw session directory and logs/logcat.log survive independently
         // of finalization, so export should too.
         val sourceSessionId = tab(tabId)?.captureSessionId
+        // Stop the presentation transport immediately; finalization may take time, and mirror
+        // sockets must not outlive the recorder/tab that owns their device session.
+        stopEmbeddedMirror(tabId)
         captureFinalizationStatusByTab[tabId] = CAPTURE_FINALIZING_STATUS
         ioScope.launch {
             try {
@@ -2267,6 +2396,7 @@ class AppState(
             } finally {
                 synchronized(stateLock) { captureMonitorJobsByTab.remove(tabId)?.cancel() }
                 synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+                closeEmbeddedMirror(tabId)
                 controller.close()
                 captureService.updateSessions()
             }
@@ -2540,6 +2670,7 @@ class AppState(
         if (!closed.compareAndSet(false, true)) return
         if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
         autosaveScheduler.cancelPending()
+        cancelAllCapturePreviews()
         aiProviderApiKeys.clear()
         aiSidebarRuntime.close()
         aiSessions.clear()
@@ -2565,6 +2696,15 @@ class AppState(
     /** Stops recorder processes outside stateLock before the IO scope is cancelled. */
     private fun stopAllLiveCaptures() {
         val live = synchronized(stateLock) { captureControllersByTab.toList().also { captureControllersByTab.clear() } }
+        val mirrors = synchronized(stateLock) {
+            embeddedMirrorsByTab.toList().also {
+                embeddedMirrorsByTab.clear()
+                embeddedMirrorStartJobsByTab.values.forEach { job -> job.cancel() }
+                embeddedMirrorStartJobsByTab.clear()
+                embeddedMirrorVersion++
+            }
+        }
+        mirrors.forEach { (_, mirror) -> runCatching { mirror.close() } }
         live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
     }
 
@@ -6090,6 +6230,17 @@ class AppState(
         val liveControllers = synchronized(stateLock) {
             tabIds.mapNotNull { tabId -> captureControllersByTab[tabId]?.let { tabId to it } }
         }
+        val liveMirrors = synchronized(stateLock) {
+            tabIds.mapNotNull { tabId -> embeddedMirrorsByTab[tabId]?.let { tabId to it } }
+        }
+        liveMirrors.forEach { (tabId, mirror) ->
+            runCatching { mirror.close() }
+            synchronized(stateLock) {
+                embeddedMirrorsByTab.remove(tabId, mirror)
+                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                embeddedMirrorVersion++
+            }
+        }
         liveControllers.forEach { (tabId, controller) ->
             synchronized(stateLock) { captureControllersByTab.remove(tabId) }
             stopControllerNow(tabId, controller)
@@ -6102,6 +6253,9 @@ class AppState(
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
+                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                embeddedMirrorsByTab.remove(tabId)?.close()
+                embeddedMirrorVersion++
                 // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
                 // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
                 // above) and were never removed here — every closed capture tab leaked its entire
@@ -6110,6 +6264,8 @@ class AppState(
                 captureFollowFloorIndexByTab.remove(tabId)
                 captureLaunchDrafts.remove(tabId)
                 captureScreenshotCapabilities.remove(tabId)
+                capturePreviewGenerationByTab.remove(tabId)
+                capturePreviewJobsByTab.remove(tabId)?.cancel()
                 videoFollowSuppressionByTab.remove(tabId)
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)

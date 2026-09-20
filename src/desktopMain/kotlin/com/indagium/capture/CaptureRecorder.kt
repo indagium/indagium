@@ -476,7 +476,15 @@ class CaptureRecorder(
         logCheckpointMs: Long,
         videoCheckpointMs: Long?,
     ): CaptureSession = updateSession(sessionId) { session ->
+        // A snapshot is one atomic archive, so logs and video must share one cursor.  The log
+        // coverage end is the durable cursor even when the video is unavailable; advancing from
+        // the video end would make a successful log-only snapshot repeat rows forever.
+        val checkpoint = maxOf(session.effectiveSnapshotCheckpointMs, logCheckpointMs)
         session.copy(
+            snapshotCheckpointMs = checkpoint,
+            // Keep the old constructor fields meaningful for source compatibility with callers
+            // compiled against the pre-canonical model. They are no longer persisted or used for
+            // range selection.
             logCheckpointMs = maxOf(session.logCheckpointMs, logCheckpointMs),
             videoCheckpointMs = videoCheckpointMs?.let { maxOf(session.videoCheckpointMs, it) } ?: session.videoCheckpointMs,
             exportCounter = session.exportCounter + 1,
@@ -840,8 +848,7 @@ private fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("elapsedMs", session.elapsedMs)
     put("status", session.status.name)
     session.videoStartElapsedMs?.let { put("videoStartElapsedMs", it) }
-    put("logCheckpointMs", session.logCheckpointMs)
-    put("videoCheckpointMs", session.videoCheckpointMs)
+    put("snapshotCheckpointMs", session.effectiveSnapshotCheckpointMs)
     put("exportCounter", session.exportCounter)
     put("interruptions", buildJsonArray { session.interruptions.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
     put("manualOffsetMs", session.manualOffsetMs)
@@ -867,6 +874,13 @@ private fun sessionFromJson(raw: String, directory: File): CaptureSession? = run
         elapsedMs = root["elapsedMs"]?.jsonPrimitive?.longOrNull ?: 0,
         status = root["status"]?.jsonPrimitive?.contentOrNull?.let { CaptureStatus.valueOf(it) } ?: CaptureStatus.INTERRUPTED,
         videoStartElapsedMs = root["videoStartElapsedMs"]?.jsonPrimitive?.longOrNull,
+        // Sessions written before the canonical cursor used logCheckpointMs. Prefer the new
+        // field when present, otherwise migrate the old log cursor in memory. The video cursor is
+        // intentionally ignored: it was a separate cursor and could not describe one atomic
+        // archive boundary.
+        snapshotCheckpointMs = root["snapshotCheckpointMs"]?.jsonPrimitive?.longOrNull
+            ?: root["logCheckpointMs"]?.jsonPrimitive?.longOrNull
+            ?: -1,
         logCheckpointMs = root["logCheckpointMs"]?.jsonPrimitive?.longOrNull ?: -1,
         videoCheckpointMs = root["videoCheckpointMs"]?.jsonPrimitive?.longOrNull ?: -1,
         exportCounter = root["exportCounter"]?.jsonPrimitive?.intOrNull ?: 0,

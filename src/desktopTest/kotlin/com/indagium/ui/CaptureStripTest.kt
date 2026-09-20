@@ -11,6 +11,7 @@ import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class CaptureStripTest {
     @Test
@@ -40,6 +41,24 @@ class CaptureStripTest {
         )
         assertEquals("Video idle", captureVideoStatus(RecorderSnapshot(session = session)))
         assertEquals("Video REC", captureVideoStatus(RecorderSnapshot(session = session, videoRecording = true)))
+    }
+
+    @Test
+    fun sinceSaveIsDisabledUntilARealCheckpointAndThenShowsItsAge() {
+        val session = CaptureSession(
+            id = "session",
+            directory = File("capture"),
+            device = CaptureDevice("serial", "device"),
+            settings = CaptureSettings(),
+            startedEpochMs = 0,
+            elapsedMs = 5_000,
+        )
+        assertTrue(!captureSinceSaveEnabled(session))
+        assertTrue(captureSinceSaveHint(session).contains("first successful snapshot"))
+
+        val saved = session.copy(snapshotCheckpointMs = 2_000)
+        assertTrue(captureSinceSaveEnabled(saved))
+        assertEquals("Last save 00:03 ago.", captureSinceSaveHint(saved))
     }
 
     @Test

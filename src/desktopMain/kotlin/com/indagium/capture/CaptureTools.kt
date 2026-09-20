@@ -46,7 +46,12 @@ class CaptureTools(
         val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
             add("--record=${destination.absolutePath}")
             add("--record-format=mkv")
-            if (!settings.mirror) add("--no-window")
+            // Recording is always headless. The embedded mirror owns the in-app preview and must
+            // never race a second native scrcpy window or steal focus from the desktop UI.
+            add("--no-window")
+            // Headless recording must not require a host audio output device. Keep audio capture
+            // enabled when requested, while disabling only scrcpy's local playback path.
+            add("--no-audio-playback")
         }
         if (!settings.audio) arguments += "--no-audio"
         return if (executable.runOnHost) {
