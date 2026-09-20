@@ -15,9 +15,11 @@ import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.passesFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -50,8 +52,15 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
     // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
     // by a real, currently-existing file path can be tailed (not a zip-extracted or merged tab).
+    // startOffset/pollIntervalMs are a pass-through to FileTailer, added for a capture tab (Phase
+    // 2b, not this change): a capture starts empty and must replay from byte 0 rather than the v1
+    // default of "only new growth" (see FileTailer's own class doc), and a chatty live capture
+    // wants a longer poll than the menu-driven default so each batch's full-list copy
+    // (appendTailedLines' `cur.logData + newEntries`) and computeItems memo invalidation
+    // (Filter.kt) don't fire twice as often as necessary. Defaults preserve every existing
+    // caller's behavior unchanged (AppState.startTailing, the context menu, the MCP tools).
     @Suppress("ReturnCount") // Each early return is a separate, side-effect-free tailing precondition.
-    fun startTailing(tabId: String) {
+    fun startTailing(tabId: String, startOffset: Long? = null, pollIntervalMs: Long = 500) {
         if (activeTails.containsKey(tabId)) return
         val t = appState.tab(tabId) ?: return
         // DLT is a framed binary stream; FileTailer intentionally emits UTF-8 lines and cannot
@@ -70,7 +79,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // into NULs and split lines at the wrong byte boundary, so static import supports it but
         // live watching remains unavailable until a streaming decoder is designed for it.
         if (isUtf16LogFile(file)) return
-        val tailer = FileTailer(file, onNewLines = { newLines -> appendTailedLines(tabId, newLines) })
+        val tailer = FileTailer(
+            file,
+            onNewLines = { newLines -> appendTailedLines(tabId, newLines) },
+            pollIntervalMs = pollIntervalMs,
+            startOffset = startOffset,
+        )
         val job = tailer.start(scope)
         activeTails[tabId] = ActiveTail(tailer, job)
         appState.upTab(tabId) { it.copy(tailing = true) }
@@ -85,6 +99,44 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
         // explicitly save now that this tab has settled.
         appState.autosaveNow()
+    }
+
+    // Reads everything appended since the tailer's last poll and appends it synchronously, then
+    // stops tailing. Needed because stopTailing()'s plain Job.cancel() can leave up to one poll
+    // interval of already-written bytes unread — for a capture tab, tab.logData would then be
+    // short of the row count in the capture's own mapping index, and CaptureTimelineIndex's
+    // `row.ordinal in 1..logRowCount` guard would silently drop the tail of the video mapping
+    // (log↔video sync would look fine and be wrong at the end of every recording).
+    //
+    // BLOCKS the calling thread — call only from ioScope (the intended caller, the capture-stop
+    // path), never from the UI/AWT thread. See below for why.
+    //
+    // cancelAndJoin(), not a bare cancel(): cancel() returns as soon as cancellation is
+    // *requested*, not once the tailer coroutine has actually stopped RUNNING. Inside FileTailer's
+    // poll loop, `offset` is advanced BEFORE onNewLines (== appendTailedLines, which blocks on
+    // appState.stateLock) is called. So a bare cancel() immediately followed by readToEndOfFile()
+    // is racy: readToEndOfFile() can read from the tailer's already-advanced offset and then win
+    // the race for stateLock (Java monitors aren't FIFO-fair), appending those "newer" bytes
+    // BEFORE the still-in-flight poll iteration appends its "older" ones underneath it — reversing
+    // their order in logData and breaking the strictly-increasing-id invariant
+    // utils/EntryIdMap.kt's get() (dense-guess-then-binary-search) and utils/Filter.kt:219 depend
+    // on, which this very change leans on harder (the maxOfOrNull → lastOrNull().id fix above).
+    // There is no duplicate-read risk either way — offset only ever advances — the bug is purely
+    // ordering. cancelAndJoin() blocks until the coroutine has fully exited: appendTailedLines
+    // isn't a suspend fun, so cancellation can't preempt a call already in flight, and the poll
+    // loop only rechecks isActive AFTER that call returns (at the do-while condition or the next
+    // delay()) — so by the time cancelAndJoin() returns, any in-flight append has already landed
+    // and released stateLock, and no further one can start. runBlocking is the same "cancel and
+    // synchronously wait for shutdown" pattern ControlServer.kt already uses for its own
+    // `runBlocking { session.close() }`; Dispatchers.IO's pool is elastic and built for exactly
+    // this kind of short blocking wait (at most one file read + one appendTailedLines call).
+    fun drainAndStopTailing(tabId: String) {
+        activeTails[tabId]?.let { active ->
+            runBlocking { active.job.cancelAndJoin() }
+            val remaining = active.tailer.readToEndOfFile()
+            if (remaining.isNotEmpty()) appendTailedLines(tabId, remaining)
+        }
+        stopTailing(tabId)
     }
 
     // Called from AppState.closeTabsById, inside its own synchronized(stateLock) block — plain
@@ -108,7 +160,13 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         if (newRawLines.isEmpty()) return
         synchronized(appState.stateLock) {
             val t = appState.tab(tabId) ?: return
-            val nextId = (t.logData.maxOfOrNull { it.id } ?: 0) + 1
+            // Entry ids are strictly increasing by construction (LogParser assigns startId..n,
+            // mergeLogs re-ids sequentially, and tailing itself only ever appends from max+1) — an
+            // invariant already asserted and relied on at utils/EntryIdMap.kt's dense-guess-then-
+            // binary-search get() and utils/Filter.kt:219. So the highest id is always the LAST
+            // entry's id; scanning the whole (ever-growing) tab with maxOfOrNull on every batch was
+            // O(n) per batch, O(n^2) over a long tail session. Do not "fix" this back to maxOfOrNull.
+            val nextId = (t.logData.lastOrNull()?.id ?: 0) + 1
             val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
             appState.tabs = appState.tabs.map { cur ->
                 if (cur.id == tabId) {
@@ -162,6 +220,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     cur.copy(
                         logData = nextData,
                         rmap = mkRmap(nextData),
+                        // largeFileMode is normally decided once at open time from the file's
+                        // on-disk byte length (AppState.kt's openFile, LARGE_FILE_MODE_BYTES) and
+                        // never re-evaluated — but a tail has no file-length signal to hand, and a
+                        // long-running tail (e.g. a live capture) can grow well past that threshold
+                        // in row count alone. LARGE_FILE_MODE_ROWS is the row-count analogue,
+                        // checked here on every batch. Deliberately one-way (`||`, never turns back
+                        // off) — same as the byte-based decision it mirrors.
+                        largeFileMode = cur.largeFileMode || nextData.size >= LARGE_FILE_MODE_ROWS,
                         messageComposition = nextComposition,
                         analysis = cur.analysis.copy(
                             tagCounts = cur.analysis.tagCounts.toMutableMap().apply {

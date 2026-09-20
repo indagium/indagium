@@ -969,10 +969,15 @@ fun App(
                         // offer an action startTailing would silently no-op on. DLT additionally
                         // uses framed binary records, so its authoritative format must disable
                         // the menu action even when the source itself is a real plain file.
-                        val canTail = remember(ttab.sourcePath, ttab.logFormat) {
+                        // A capture tab's sourcePath IS a real, currently-existing plain file, so
+                        // it would otherwise pass every check above — but its tailing is driven by
+                        // the recording itself, not the user. Offering "Stop Live Watching" here
+                        // would freeze the live view while the recorder kept appending underneath
+                        // it, silently desyncing the view from what's actually being recorded.
+                        val canTail = remember(ttab.sourcePath, ttab.logFormat, ttab.captureSessionId) {
                             val p = ttab.sourcePath
-                            ttab.logFormat != LogFormat.DLT && p != null && '!' !in p && File(p).isFile &&
-                                detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
+                            ttab.logFormat != LogFormat.DLT && ttab.captureSessionId == null && p != null && '!' !in p &&
+                                File(p).isFile && detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
                         }
                         val canSplit = remember(ttab.sourcePath) {
                             ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
