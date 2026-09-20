@@ -126,7 +126,12 @@ class CaptureRecorder(
             require(device.available) { deviceStateGuidance(device.state) ?: "Device is not available" }
             check(!active.get()) { "A capture session is already recording" }
             check(!starting) { "A capture session is already starting" }
-            check(settings.buffers.isNotEmpty()) { "Select at least one logcat buffer" }
+            // Only CUSTOM depends on `buffers` being non-empty (DEFAULT/ALL never read it — see
+            // logcatBufferArgs()). Guarding on `buffers` alone (the old check) blocked a user who
+            // emptied the custom list and then switched back to Default from ever recording again.
+            check(settings.bufferMode != CaptureBufferMode.CUSTOM || settings.buffers.isNotEmpty()) {
+                "Select at least one logcat buffer"
+            }
             starting = true
             startCancellationRequested = false
             starterThread = Thread.currentThread()
@@ -227,7 +232,11 @@ class CaptureRecorder(
             val logcatArguments = buildList {
                 add("logcat")
                 addAll(listOf("-v", "threadtime"))
-                settings.buffers.distinct().forEach { addAll(listOf("-b", it)) }
+                // DEFAULT mode emits no -b at all (see CaptureBufferMode/logcatBufferArgs doc) —
+                // previously this always hardcoded -b main -b system -b crash, which silently
+                // dropped adb's own real default buffer (`kernel`) and could error out on a
+                // device missing one of the three named buffers.
+                addAll(settings.logcatBufferArgs())
                 if (!settings.includeBufferedLogs) addAll(listOf("-T", "1"))
             }
             val process = runner.start(tools.adbSpec(device.serial, logcatArguments))
@@ -266,7 +275,7 @@ class CaptureRecorder(
         }
 
         if (settings.recordVideo) {
-            val scrcpyValidation = runCatching { tools.validateScrcpy(settings) }.getOrElse { failure ->
+            val scrcpyValidation = runCatching { tools.validateScrcpy() }.getOrElse { failure ->
                 CaptureToolValidation(
                     available = false,
                     message = "scrcpy validation failed: ${failure.message ?: failure::class.simpleName}",

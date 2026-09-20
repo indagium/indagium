@@ -85,14 +85,111 @@ class CaptureToolsTest {
     }
 
     @Test
-    fun validatesToolIdentityAndRequiredCapabilities() {
+    fun validatesAdbByVersionAloneAgainstARealisticModernHelpPayload() {
+        // Fixture is a trimmed excerpt of REAL `adb version` / `adb help` output from
+        // platform-tools 35.0.2 (verified on the machine this test was written on). The full
+        // `adb help` text is 8,839 bytes and contains the substring "exec-out" ZERO times, even
+        // though `adb exec-out` itself works fine -- that gap is exactly the B1 bug: the old
+        // validateAdb() grepped `adb help` for "devices", "logcat" and "exec-out" and rejected
+        // every modern adb as a result. validateAdb() no longer runs `adb help` at all, so this
+        // fixture only needs to be realistic, not exhaustive.
         val runner = FakeCaptureRunner().apply {
-            enqueue(CompletedFakeProcess("Android Debug Bridge version 1.0.41\n"))
-            enqueue(CompletedFakeProcess("devices logcat exec-out\n"))
+            enqueue(
+                CompletedFakeProcess(
+                    "Android Debug Bridge version 1.0.41\n" +
+                        "Version 35.0.2-12147458\n" +
+                        "Installed as /opt/homebrew/bin/adb\n" +
+                        "Running on Darwin 25.6.0 (arm64)\n",
+                ),
+            )
         }
         val validation = CaptureTools(CaptureExecutable("adb"), null, runner).validateAdb()
 
         assertTrue(validation.available)
         assertEquals("Android Debug Bridge version 1.0.41", validation.version)
+        // Only one process should have run -- no `adb help` round trip.
+        assertEquals(1, runner.specs.size)
+    }
+
+    @Test
+    fun aGenuinelyBrokenAdbFailsValidationWithTheDiagnosticSurfaced() {
+        val nonZeroExit = FakeCaptureRunner().apply {
+            enqueue(CompletedFakeProcess(stdout = byteArrayOf(), stderr = "adb: command not found".toByteArray(), code = 127))
+        }
+        val nonZeroValidation = CaptureTools(CaptureExecutable("adb"), null, nonZeroExit).validateAdb()
+        assertFalse(nonZeroValidation.available)
+        assertTrue(nonZeroValidation.message.contains("adb: command not found"))
+
+        val wrongProgram = FakeCaptureRunner().apply {
+            enqueue(CompletedFakeProcess("BusyBox v1.36.1\n"))
+        }
+        val wrongProgramValidation = CaptureTools(CaptureExecutable("adb"), null, wrongProgram).validateAdb()
+        assertFalse(wrongProgramValidation.available)
+        assertEquals("BusyBox v1.36.1", wrongProgramValidation.version)
+    }
+
+    @Test
+    fun macLoginShellFallbackResolvesAToolMissingFromTheScannedPath() {
+        // Simulates a macOS .app launched from Finder: PATH is launchd's minimal set, so the
+        // ordinary PATH scan (executableExists always false) and the hardcoded candidate
+        // directories both miss a Homebrew-installed adb -- only the login shell knows about it.
+        // resolve() also probes scrcpy the same way; that probe reports "not found" here since
+        // only adb is stubbed as installed.
+        val runner = FakeCaptureRunner().apply {
+            enqueue(CompletedFakeProcess("/opt/homebrew/bin/adb\n"))
+            enqueue(CompletedFakeProcess(stdout = byteArrayOf(), code = 1))
+        }
+        val resolver = CaptureToolResolver(
+            runner = runner,
+            environment = mapOf("PATH" to "/usr/bin:/bin", "SHELL" to "/bin/zsh"),
+            executableExists = { it == "/opt/homebrew/bin/adb" },
+            flatpak = false,
+            isMacOs = true,
+        )
+        val tools = resolver.resolve(CaptureSettings())
+
+        assertEquals("/opt/homebrew/bin/adb", tools.adb.path)
+        assertEquals(null, tools.scrcpy)
+        assertEquals(listOf("/bin/zsh", "-lc", "command -v adb"), runner.specs[0].command)
+        assertEquals(listOf("/bin/zsh", "-lc", "command -v scrcpy"), runner.specs[1].command)
+    }
+
+    @Test
+    fun macLoginShellFallbackIsCachedAndNotRepeatedOnAnotherResolution() {
+        val runner = FakeCaptureRunner().apply {
+            enqueue(CompletedFakeProcess("/opt/homebrew/bin/adb\n"))
+            enqueue(CompletedFakeProcess(stdout = byteArrayOf(), code = 1))
+        }
+        val resolver = CaptureToolResolver(
+            runner = runner,
+            environment = mapOf("PATH" to "", "SHELL" to "/bin/zsh"),
+            executableExists = { it == "/opt/homebrew/bin/adb" },
+            flatpak = false,
+            isMacOs = true,
+        )
+
+        resolver.resolve(CaptureSettings())
+        resolver.resolve(CaptureSettings())
+
+        // Both tool probes ran exactly once across two resolve() calls -- the per-name cache in
+        // loginShellPath() means a second "Recheck tools" click doesn't re-spawn a shell.
+        assertEquals(2, runner.specs.size)
+    }
+
+    @Test
+    fun loginShellFallbackNeverRunsOnNonMacHostsOrUnderFlatpak() {
+        val runner = FakeCaptureRunner()
+        val resolver = CaptureToolResolver(
+            runner = runner,
+            environment = mapOf("PATH" to ""),
+            executableExists = { false },
+            flatpak = false,
+            isMacOs = false,
+        )
+
+        val failure = runCatching { resolver.resolve(CaptureSettings()) }
+
+        assertTrue(failure.isFailure)
+        assertTrue(runner.specs.isEmpty())
     }
 }

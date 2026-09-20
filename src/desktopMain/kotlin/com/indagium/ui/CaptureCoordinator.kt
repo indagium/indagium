@@ -152,7 +152,7 @@ internal class CaptureCoordinator(
                     found = runInterruptible { resolver.resolve(settings) }
                     val adb = runInterruptible { found.validateAdb() }
                     val scrcpy = runInterruptible { found.validateScrcpy() }
-                    toolsStatus = "${adb.version ?: adb.message}\n${scrcpy.version ?: scrcpy.message}"
+                    toolsStatus = "${toolStatusLine(adb)}\n${toolStatusLine(scrcpy)}"
                     if (!adb.available) {
                         devices = emptyList()
                         tools = found
@@ -345,6 +345,17 @@ internal class CaptureCoordinator(
         session.exportCounter + 1, session.settings.label,
     )
 }
+
+/**
+ * Renders one line of `toolsStatus` for a single tool's validation result (B2 fix). Previously
+ * this was inlined as `adb.version ?: adb.message`: since a version check failing AFTER the
+ * version string was already captured still leaves `version` non-null, that expression showed a
+ * green-looking version line and silently hid the real failure reason -- the user just saw "No
+ * devices discovered" with no clue why. `message` must always be visible when `available` is
+ * false, regardless of whether `version` is set.
+ */
+internal fun toolStatusLine(validation: CaptureToolValidation): String =
+    if (validation.available) validation.version ?: validation.message else validation.message
 
 private fun availableDestination(directory: File, suggested: String): File {
     var target = File(directory, suggested)
