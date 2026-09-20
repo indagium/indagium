@@ -105,7 +105,7 @@ target.
 |---|---|
 | Production Kotlin | ~46,800 lines in `src/desktopMain` |
 | Test Kotlin | ~26,000 lines in `src/desktopTest` |
-| Packages | 11 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `video`, `voice`, `update`, `singleinstance`) |
+| Packages | 13 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`) |
 | Test classes | ~90 |
 | MCP/automation tools exposed | 55 |
 
@@ -307,6 +307,7 @@ flowchart TB
 
     subgraph media["Media & platform"]
         video["video/ FFmpeg player"]
+        capture["capture/ adb + scrcpy recorder<br/>archive + timing index"]
         voice["voice/ Whisper · Apple · Windows"]
         update["update/ UpdateChecker"]
         single["singleinstance/"]
@@ -322,6 +323,8 @@ flowchart TB
     diagrams --> engine
     diagrams --> indexes
     state --> media
+    state --> capture
+    capture --> io
     ops --> state
     gateway --> ops
     server --> gateway
@@ -365,6 +368,7 @@ observed in the code and enforced by convention and review rather than by toolin
 | `diagram3` | UI-free sequence-diagram model, generator, layout, raster, text emitters, and note codec. | `model`, `utils`, `debug` (`Json.kt` only — see §7) | `ui`, `ai`, `source`, Compose UI |
 | `cases` | Similarity index over previously written analysis notes. | `model`, `utils` | `ui`, `ai`, `debug` |
 | `video` | FFmpeg-backed playback and frame grabbing. | `model` | `ui` |
+| `capture` | Device capture adapters, session writing, versioned capture descriptors, ZIP export, and log/video timing records. | `utils` | Compose UI, viewer rendering, AI, and diagnostics UI |
 | `voice` | Audio capture and the three transcription backends. | — | `ui` |
 | `update` | GitHub release check and asset download. | — | `ui` |
 | `singleinstance` | File-lock + loopback-socket single-instance IPC. | — | Everything else |
@@ -390,6 +394,29 @@ observed in the code and enforced by convention and review rather than by toolin
   done by adapter composables — `BoundFilterPanel` (`ui/FileView.kt:32`) and the inline binding at
   `ui/FileView.kt:188-231`. See [§11.4](#114-the-bound-adapter-pattern) for the trade-off this makes.
 
+### 6.2 Capture workspace boundary
+
+`CaptureCoordinator` owns the UI-facing wiring for the implemented `capture` package. It resolves
+user-supplied host `adb` and optional `scrcpy`, lists device states, starts and stops one-device
+sessions, publishes a bounded preview, and sends export work off the Compose thread. The capture
+package owns process adapters, session recovery, raw log and index writing, screenshots, disk
+guards, ZIP range export, and the versioned `capture.indagium.json` codec. It has no Compose
+rendering, viewer state, AI, or terminal-oriented diagnostics dependency.
+
+The descriptor is the stable hand-off between capture and review. Its versioned metadata points to
+`logs/logcat.log`, `mapping/log-video.jsonl`, and optional video/screenshots inside a portable ZIP;
+opening a ZIP or an extracted descriptor verifies the assets and auto-links the available log,
+mapping, and video artifacts. Export takes a frozen byte boundary, so saving live capture data does
+not restart the session. Mapping rows carry an estimated video position or an explicit gap, while a
+persisted millisecond offset supports manual calibration. Video export snapshots the growing MKV and
+selects a readable preceding keyframe when available.
+
+On macOS, Windows, and Linux (x86 or ARM), host `adb` and optional `scrcpy` are resolved from the
+normal platform installation. A Linux Flatpak launch uses `flatpak-spawn --host --watch-bus` for
+those host tools and requires only the `org.freedesktop.Flatpak` talk permission. Automated tests
+cover the capture process, archive, persistence, and mapping paths; live device and scrcpy testing
+across all supported platforms is unavailable in the current environment.
+
 ---
 
 ## 7. Package dependency graph
@@ -408,6 +435,7 @@ flowchart TB
     voice["voice"]
     update["update"]
     single["singleinstance"]
+    capture["capture"]
 
     ui --> ai
     ui --> debug
@@ -419,6 +447,7 @@ flowchart TB
     ui --> video
     ui --> voice
     ui --> update
+    ui --> capture
 
     ai --> debug
     ai --> ui
@@ -439,6 +468,7 @@ flowchart TB
     cases --> utils
     cases --> model
     video --> model
+    capture --> utils
     utils --> model
 
     single -.->|"no dependencies"| single
@@ -1263,6 +1293,7 @@ flowchart LR
     subgraph native["Dedicated Java threads"]
         decode["Video decode"]
         capture["Audio capture"]
+        recorder["Capture log/video/watchdog"]
         accept["Single-instance accept"]
     end
 
@@ -1277,6 +1308,7 @@ flowchart LR
     tools --> state
     decode --> state
     capture --> state
+    recorder --> state
     accept --> state
     save --> state
     minimap --> state
@@ -2228,6 +2260,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | The legacy positional autosave format still parses byte-identically | `AutosaveGoldenV1Test` |
 | Autosave scheduling, debouncing, and write ordering | `AutosaveSchedulerTest` |
 | Tailer offset capture, rotation, partial lines | `FileTailerTest` |
+| Capture process, session recovery, archive integrity, and video/log mapping | `capture/*Test`, `CaptureArchiveTest`, `CaptureAppRoundTripTest`, `CaptureVideoMappingTest` |
 | Video frame-drop policy | `FrameDropPolicyTest` |
 | MCP and REST contract behaviour | `ControlServerTest`, `ControlServerMcpTest`, `IndagiumToolGatewayTest` |
 | Every AI provider's stream parsing | `AnthropicMessagesProviderTest`, `OpenAiCompatibleProviderTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |

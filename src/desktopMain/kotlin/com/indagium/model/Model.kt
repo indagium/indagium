@@ -1,6 +1,7 @@
 package com.indagium.model
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.capture.CaptureTimeline
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
@@ -602,6 +603,13 @@ data class VideoAttachment(
     // with attachment tokens saved before this field existed. AppState initializes newly created
     // links from AppSettings.enableDoubleClickVideoSeekOnLink instead.
     val doubleClickSeekEnabled: Boolean = anchor != null,
+    // Non-null only for a recording imported from an Indagium portable capture. The descriptor is
+    // durable and small; the potentially very large row mapping is rehydrated into
+    // LogTab.captureTimeline after the log has been parsed.
+    val captureSourcePath: String? = null,
+    // User calibration applied on top of the imported clip-relative mapping. Export-time manual
+    // offset is already baked into CaptureTimeline.rows[].videoMs and must not be added here.
+    val captureOffsetMs: Long = 0,
 ) {
     constructor(
         path: String,
@@ -609,12 +617,16 @@ data class VideoAttachment(
         durationMs: Long = 0,
         anchor: VideoAnchor? = null,
         doubleClickSeekEnabled: Boolean = anchor != null,
+        captureSourcePath: String? = null,
+        captureOffsetMs: Long = 0,
     ) : this(
         source = VideoSource.LocalFile(path),
         sourceLabel = sourceLabel,
         durationMs = durationMs,
         anchor = anchor,
         doubleClickSeekEnabled = doubleClickSeekEnabled,
+        captureSourcePath = captureSourcePath,
+        captureOffsetMs = captureOffsetMs,
     )
 
     /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */
@@ -708,8 +720,8 @@ data class LogTab(
     // meaningful only in that mode; OFF/ALL ignore it entirely.
     val manualProcessNamePicks: Set<Int> = emptySet(),
     // The video (if any) attached to this tab (ui/AppState.kt's attachVideoToActiveTab/
-    // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked to it via
-    // at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
+    // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked through a
+    // portable capture timeline or at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
     // so old tab tokens still parse. Unlike tidMap/search/tailing above, this DOES survive a
     // restart — re-attaching a multi-hundred-MB recording by hand every launch would defeat the
     // point of it being attached at all.
@@ -754,6 +766,10 @@ data class LogTab(
     // Optional absolute R8/ProGuard mapping selected for this tab. Persisted as the final
     // append-only tab-token field; retraced output is deliberately transient and never stored.
     val retraceMappingPath: String? = null,
+    // Session-only row-to-video mapping for an imported portable capture. Autosave persists only
+    // VideoAttachment.captureSourcePath/captureOffsetMs; restore reparses that compact descriptor
+    // after the log rows exist instead of embedding millions of mapping rows in the tab token.
+    val captureTimeline: CaptureTimeline? = null,
 )
 
 /**
@@ -1132,6 +1148,7 @@ data class AppSettings(
     // treats that as "not due yet" rather than "overdue", so a fresh install waits out one full
     // interval before ever prompting. JSON form ONLY, same rule as the field above.
     val lastSupportPromptAt: Long = 0L,
+    val captureSettings: com.indagium.capture.CaptureSettings = com.indagium.capture.CaptureSettings(),
 )
 
 enum class ThemePreset(val label: String) {
