@@ -49,6 +49,7 @@ import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.capture.renderCaptureFilename
 import com.indagium.model.LogTab
+import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
 
@@ -58,6 +59,7 @@ internal const val CAPTURE_STRIP_HEIGHT_DP = 46
 // 20dp side padding and the 8dp gaps the centered action row uses between them.
 private val CAPTURE_SNAPSHOT_POPOVER_WIDTH = 480.dp
 private const val CAPTURE_DIAGNOSTICS_ROW_LIMIT = 6
+private const val CAPTURE_PREVIEW_REFRESH_INTERVAL_MS = 1_000L
 private const val CAPTURE_BYTES_PER_KIB = 1024L
 private const val CAPTURE_BYTES_PER_MIB = CAPTURE_BYTES_PER_KIB * 1024L
 private const val CAPTURE_BYTES_PER_GIB = CAPTURE_BYTES_PER_MIB * 1024L
@@ -95,6 +97,17 @@ internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
     snapshot.session?.settings?.recordVideo == true -> "Video idle"
     else -> "Video off"
 }
+
+internal fun captureSinceSaveEnabled(session: CaptureSession?): Boolean =
+    session?.hasSnapshotCheckpoint == true
+
+internal fun captureSinceSaveHint(session: CaptureSession?, atElapsedMs: Long = session?.elapsedMs ?: 0L): String =
+    if (session == null || !session.hasSnapshotCheckpoint) {
+        "Since last save is unavailable until the first successful snapshot."
+    } else {
+        val age = session.snapshotCheckpointAgeMs(atElapsedMs) ?: 0L
+        "Last save ${formatCaptureElapsed(age)} ago."
+    }
 
 /** Maps the current tab selection to source capture ordinals without assuming row ids start at 1. */
 internal fun selectedCaptureOrdinals(tab: LogTab): IntRange? {
@@ -532,8 +545,10 @@ private fun CaptureSnapshotPopover(
     val destinationDirectory = state.settings.defaultSaveDir?.let(::File) ?: File(".")
     val filename = captureArchiveName(basename)
     val destination = filename?.let { File(destinationDirectory, it) } ?: File(destinationDirectory, "capture.zip")
+    val sinceSaveEnabled = captureSinceSaveEnabled(session)
     val enabled = session != null && !state.captureExportBusy &&
         (rangeChoice != SnapshotRangeChoice.LAST_MINUTES || customMinutes > 0) &&
+        (rangeChoice != SnapshotRangeChoice.SINCE_SAVE || sinceSaveEnabled) &&
         (rangeChoice != SnapshotRangeChoice.SELECTION || selection != null) && filename != null
     val request = session?.let {
         CaptureExportRequest(
@@ -547,8 +562,16 @@ private fun CaptureSnapshotPopover(
             overwriteExisting = overwriteConfirmed,
         )
     }
-    LaunchedEffect(rangeChoice, customMinutes, includeVideo, selection, basename, session?.elapsedMs) {
-        if (enabled && request != null) state.previewCaptureSnapshot(tab.id, request)
+    LaunchedEffect(rangeChoice, customMinutes, includeVideo, selection, basename, enabled) {
+        if (!enabled || request == null) return@LaunchedEffect
+        // Recorder state is published every ~250ms. Previewing on that raw elapsed value starts
+        // an unbounded stream of index scans/remuxes while the popover is open. Controls still
+        // refresh immediately (effect keys above), while this bounded tick keeps growing-video
+        // coverage reasonably current without coupling preview work to recorder publication.
+        while (true) {
+            state.previewCaptureSnapshot(tab.id, request)
+            delay(CAPTURE_PREVIEW_REFRESH_INTERVAL_MS)
+        }
     }
 
     // Dialog chrome matches the app's other dialogs (see SplitPromptDialog in Dialogs.kt, the
@@ -583,7 +606,11 @@ private fun CaptureSnapshotPopover(
                 // which was the semantic bug here even though it happened to render one selection
                 // at a time.
                 SnapshotRangeChoice.entries.forEach { choice ->
-                    val choiceEnabled = choice != SnapshotRangeChoice.SELECTION || selection != null
+                    val choiceEnabled = when (choice) {
+                        SnapshotRangeChoice.SELECTION -> selection != null
+                        SnapshotRangeChoice.SINCE_SAVE -> sinceSaveEnabled
+                        else -> true
+                    }
                     RadioRow(
                         selected = rangeChoice == choice,
                         onSelect = {
@@ -595,6 +622,11 @@ private fun CaptureSnapshotPopover(
                         AppText(choice.label, color = if (choiceEnabled) colors.ts else colors.td, fontSize = 11.sp)
                     }
                 }
+                AppText(
+                    captureSinceSaveHint(session),
+                    color = if (sinceSaveEnabled) colors.td else colors.ts,
+                    fontSize = 10.sp,
+                )
             }
             if (rangeChoice == SnapshotRangeChoice.LAST_MINUTES) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -624,6 +656,15 @@ private fun CaptureSnapshotPopover(
                 },
             ) {
                 AppText("Include video", color = if (session?.settings?.recordVideo == true) colors.ts else colors.td, fontSize = 11.sp)
+            }
+            if (includeVideo && session?.settings?.recordVideo == true &&
+                (session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() <= 0L)
+            ) {
+                AppText(
+                    "Video is unavailable for the current range; the archive will still save logs and advance Since last save.",
+                    color = colors.ts,
+                    fontSize = 10.sp,
+                )
             }
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 AppText("Destination", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
@@ -783,17 +824,18 @@ private fun CaptureDiagnosticsDrawer(
     }
 }
 
-/** Status-only right-sidebar card for a live capture; live video remains in scrcpy's window.
- * Structured per Problem 5 of the restyle plan: an uppercase "DEVICE" section label, a bordered
- * mirror placeholder (no embedded video — see [CaptureMirrorPlaceholder]), a labelled value grid,
- * then a subtle diagnostics footer. Scrolls so it never clips at the panel's ~360–500dp width
- * ([ANNOTATION_PANEL_MAX_WIDTH]) when the host window is short. */
+/** Right-sidebar card for a live capture. The embedded mirror is deliberately kept separate from
+ * recorder state: a mirror failure only updates its own status and never stops log recording. */
 @Composable
 internal fun CaptureCard(state: AppState, tab: LogTab) {
     if (tab.captureSessionId == null) return
     val snapshot = rememberCaptureSnapshot(state, tab)
     val colors = tc()
     val session = snapshot.session
+    LaunchedEffect(tab.id, session?.id, session?.settings?.mirror) {
+        state.ensureEmbeddedMirror(tab.id, autoStart = session?.settings?.mirror == true)
+    }
+    val mirror = state.embeddedMirrorFor(tab.id)
     val deviceLabel = captureSessionDeviceLabel(session, tab.filename.removePrefix("Capture — "))
     val storageLabel = session?.let {
         "${formatCaptureBytes(snapshot.logBytes)} / ${formatCaptureBytes(it.settings.sessionLimitBytes)}"
@@ -803,7 +845,12 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         SectionHeader("DEVICE")
-        CaptureMirrorPlaceholder(onOpenMirror = { state.openCaptureMirror(tab.id) })
+        EmbeddedMirrorPanel(
+            handle = mirror,
+            onConnect = { state.openCaptureMirror(tab.id) },
+            onDisconnect = { state.stopEmbeddedMirror(tab.id) },
+            modifier = Modifier.fillMaxWidth(),
+        )
         CaptureCardValueGrid(
             deviceLabel = deviceLabel,
             elapsedLabel = formatCaptureElapsed(sessionElapsed(snapshot)),
@@ -816,31 +863,6 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
         if (snapshot.diagnostics.isNotEmpty()) {
             AppText("${snapshot.diagnostics.size} diagnostic message(s)", color = colors.td, fontSize = 10.sp)
         }
-    }
-}
-
-/** Bordered, rounded placeholder for where the design showed a live mirror preview. We
- * deliberately do not embed video here — the player cannot follow a growing capture file — so
- * this explains that the mirror is a separate scrcpy window and hosts the button that opens it. */
-@Composable
-private fun CaptureMirrorPlaceholder(onOpenMirror: () -> Unit) {
-    val colors = tc()
-    Column(
-        Modifier.fillMaxWidth().height(132.dp)
-            .border(1.dp, colors.br, RoundedCornerShape(8.dp))
-            .background(colors.p2, RoundedCornerShape(8.dp))
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Spacer(Modifier.weight(1f))
-        Icon(Icons.Outlined.PhoneAndroid, contentDescription = null, tint = colors.td, modifier = Modifier.size(22.dp))
-        AppText(
-            "Live mirror opens in a separate scrcpy window",
-            color = colors.td, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
-        )
-        AppButton("Open mirror", onOpenMirror, ButtonVariant.Secondary)
-        Spacer(Modifier.weight(1f))
     }
 }
 

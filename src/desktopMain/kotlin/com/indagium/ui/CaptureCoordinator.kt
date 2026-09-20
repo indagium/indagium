@@ -267,7 +267,10 @@ internal class TabCaptureController(
     fun export(request: CaptureExportRequest): CaptureExportResult {
         val session = requireNotNull(selectedSession.value) { "Capture has no session to export" }
         val boundary = recorder.snapshotForExport(session.id)
-        val boundedRequest = request.copy(cutoffElapsedMs = minOf(request.cutoffElapsedMs, boundary.elapsedMs))
+        // Save is a point-in-time operation: ignore the preview's stale cutoff and take a fresh
+        // recorder boundary immediately before staging the archive. Selection bounds remain
+        // ordinal-based; cutoff only bounds the non-selection ranges.
+        val boundedRequest = request.copy(cutoffElapsedMs = boundary.elapsedMs)
         val result = archiveExporter.export(boundary.session, boundedRequest)
         recorder.updateSuccessfulExportCheckpoints(
             sessionId = boundary.session.id,
@@ -289,8 +292,10 @@ internal class TabCaptureController(
     fun preview(request: CaptureExportRequest): CaptureExportPreview {
         val session = requireNotNull(selectedSession.value) { "Capture has no session to preview" }
         val boundary = recorder.snapshotForExport(session.id)
-        val cutoff = minOf(request.cutoffElapsedMs, boundary.elapsedMs)
-        return archiveExporter.preview(boundary.session, request.copy(cutoffElapsedMs = cutoff))
+        // Preview requests may be held by the popover for several recorder publication ticks.
+        // Rebind the cutoff to this freshly flushed boundary so the bounded refresh observes a
+        // growing capture even though the controls request itself is immutable.
+        return archiveExporter.preview(boundary.session, request.copy(cutoffElapsedMs = boundary.elapsedMs))
     }
 
     override fun close() = recorder.close()

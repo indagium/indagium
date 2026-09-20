@@ -245,6 +245,7 @@ class CaptureArchiveExporter(
     fun preview(session: CaptureSession, request: CaptureExportRequest): CaptureExportPreview {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
+        val snapshotCheckpoint = requireSnapshotCheckpoint(session, request)
         require(session.logFile.isFile) { "Capture log is missing: ${session.logFile}" }
         require(session.indexFile.isFile) { "Capture index is missing: ${session.indexFile}" }
         val frozenLogBytes = session.logFile.length()
@@ -271,12 +272,12 @@ class CaptureArchiveExporter(
         // findSelectionBounds) fixes both directions. Deliberately NOT reused for the video range
         // below — video coverage is independent of whether any *log* row matched.
         val logBounds = selectionBounds ?: run {
-            val requestedStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.logCheckpointMs)
-            val excludeStart = request.range == CaptureRange.SINCE_SAVE && session.logCheckpointMs >= 0
+            val requestedStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
+            val excludeStart = request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0
             scanElapsedBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, requestedStartMs, request.cutoffElapsedMs, excludeStart)
         }
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.videoCheckpointMs)
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
         val videoRangeEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
         val includeVideo = session.settings.recordVideo && request.includeVideo
         val videoCoverage = if (includeVideo) {
@@ -365,6 +366,7 @@ class CaptureArchiveExporter(
     fun export(session: CaptureSession, request: CaptureExportRequest): CaptureExportResult {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
+        val snapshotCheckpoint = requireSnapshotCheckpoint(session, request)
         val destination = request.destination.absoluteFile
         require(request.overwriteExisting || !destination.exists()) {
             "Capture destination already exists: $destination"
@@ -392,10 +394,10 @@ class CaptureArchiveExporter(
             null
         }
         val logStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.logCheckpointMs)
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
         val selectedEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.videoCheckpointMs)
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
         val videoConfigured = session.settings.recordVideo && request.includeVideo
         val videoStartElapsed = session.videoStartElapsedMs
         val requestedSourceStart = videoStartElapsed?.let {
@@ -429,7 +431,7 @@ class CaptureArchiveExporter(
                 frozenLogBytes = frozenLogBytes,
                 selectedStartMs = logStartMs,
                 selectedEndMs = selectedEndMs,
-                excludeStart = request.range == CaptureRange.SINCE_SAVE && session.logCheckpointMs >= 0,
+                excludeStart = request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0,
                 selectedFirstRowOrdinal = request.selectedFirstRowOrdinal.takeIf { request.range == CaptureRange.SELECTION },
                 selectedLastRowOrdinal = request.selectedLastRowOrdinal.takeIf { request.range == CaptureRange.SELECTION },
                 destination = File(work, ".selected-index.jsonl"),
@@ -1021,6 +1023,14 @@ private fun rangeStartMs(range: CaptureRange, cutoffMs: Long, customMinutes: Int
     CaptureRange.CUSTOM -> cutoffMs - customMinutes.toLong() * RANGE_MINUTES
     CaptureRange.SINCE_SAVE -> if (checkpointMs >= 0) checkpointMs else Long.MIN_VALUE
     CaptureRange.SELECTION -> error("Selection range requires explicit row bounds")
+}
+
+private fun requireSnapshotCheckpoint(session: CaptureSession, request: CaptureExportRequest): Long {
+    val checkpoint = session.effectiveSnapshotCheckpointMs
+    require(request.range != CaptureRange.SINCE_SAVE || checkpoint >= 0) {
+        "Since last save is unavailable until the first successful snapshot"
+    }
+    return checkpoint
 }
 
 private fun copySelectedLog(source: File, selectionIndex: File, destination: File) {

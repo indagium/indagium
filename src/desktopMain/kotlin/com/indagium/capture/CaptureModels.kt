@@ -64,7 +64,16 @@ data class CaptureSession(
     val elapsedMs: Long = 0,
     val status: CaptureStatus = CaptureStatus.RECORDING,
     val videoStartElapsedMs: Long? = null,
+    /**
+     * The single cursor used by the Since last save range.  This supersedes the old, split
+     * log/video cursors.  The legacy fields below remain source-compatible for one release so
+     * callers/tests that construct an old session can still be read; persistence writes only this
+     * canonical value.
+     */
+    val snapshotCheckpointMs: Long = -1,
+    @Deprecated("Use snapshotCheckpointMs")
     val logCheckpointMs: Long = -1,
+    @Deprecated("Use snapshotCheckpointMs")
     val videoCheckpointMs: Long = -1,
     val exportCounter: Int = 0,
     val interruptions: List<String> = emptyList(),
@@ -73,6 +82,16 @@ data class CaptureSession(
     val logFile: File get() = File(directory, "logs/logcat.log")
     val indexFile: File get() = File(directory, "mapping/capture-index.jsonl")
     val videoFile: File get() = File(directory, "video/screen.mkv")
+
+    /** Effective cursor, including sessions loaded from the legacy logCheckpointMs format. */
+    val effectiveSnapshotCheckpointMs: Long
+        get() = snapshotCheckpointMs.takeIf { it >= 0 } ?: logCheckpointMs
+
+    val hasSnapshotCheckpoint: Boolean get() = effectiveSnapshotCheckpointMs >= 0
+
+    /** Age of the last successful save at the current capture elapsed position. */
+    fun snapshotCheckpointAgeMs(atElapsedMs: Long): Long? =
+        effectiveSnapshotCheckpointMs.takeIf { it >= 0 }?.let { (atElapsedMs - it).coerceAtLeast(0L) }
 }
 
 /** One complete raw line; separators have no parsed ordinal. Elapsed time uses a monotonic clock. */

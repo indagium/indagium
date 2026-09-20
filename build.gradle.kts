@@ -4,6 +4,7 @@ import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.security.MessageDigest
 
 plugins {
     // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
@@ -59,9 +60,31 @@ val licenseVersion = "2026-07-19"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
+val scrcpyServerResource = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server-v4.1")
+val scrcpyServerMetadata = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server.properties")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
 val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
 val isLinuxHost = org.gradle.internal.os.OperatingSystem.current().isLinux
+
+// The embedded mirror is deliberately offline-only: this exact, independently verified scrcpy
+// server asset is packaged when present, but Gradle never downloads it. A source checkout with
+// the asset removed remains buildable and the runtime reports an actionable message.
+val validateScrcpyServerAsset by tasks.registering {
+    inputs.file(scrcpyServerMetadata)
+    doLast {
+        if (!scrcpyServerResource.asFile.isFile) {
+            logger.lifecycle("Embedded scrcpy mirror disabled: ${scrcpyServerResource.asFile} is absent")
+            return@doLast
+        }
+        val expected = "deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae"
+        val actual = MessageDigest.getInstance("SHA-256")
+            .digest(scrcpyServerResource.asFile.readBytes())
+            .joinToString("") { byte -> "%02x".format(byte) }
+        check(actual == expected) {
+            "Embedded scrcpy server checksum mismatch: expected $expected, got $actual"
+        }
+    }
+}
 
 // Compose Desktop's native distribution plugin delegates Linux installers to jpackage, which
 // supports .deb but not portable AppImage or sandboxed Flatpak bundles.  These wrappers both use
@@ -553,6 +576,10 @@ ktlint {
 
 tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configureEach {
     dependsOn(generateBuildInfo)
+}
+
+tasks.matching { it.name == "desktopProcessResources" || it.name == "desktopTest" }.configureEach {
+    dependsOn(validateScrcpyServerAsset)
 }
 
 // ── Kover ───────────────────────────────────────────────────────────

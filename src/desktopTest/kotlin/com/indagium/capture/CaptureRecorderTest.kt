@@ -282,6 +282,8 @@ class CaptureRecorderTest {
 
             val updated = recorder.updateSuccessfulExportCheckpoints(first.id, 1_200, 900)
             val sessions = recorder.listSessions().associateBy { it.id }
+            assertEquals(1_200, updated.snapshotCheckpointMs)
+            assertEquals(1_200, sessions.getValue(first.id).snapshotCheckpointMs)
             assertEquals(1_200, updated.logCheckpointMs)
             assertEquals(900, updated.videoCheckpointMs)
             assertEquals(1, updated.exportCounter)
