@@ -6,18 +6,30 @@ import java.io.File
 import java.io.InputStream
 
 // Threadtime:  MM-DD HH:MM:SS.mmm  PID  TID Level Tag: message
-private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEA])\s+([^:]+):\s*(.*)$""")
+// Level accepts VDIWEA plus F (FATAL) — see androidLogLevelFrom() below for why F maps to
+// LogLevel.A instead of getting its own enum constant.
+private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s*(.*)$""")
 
 // Time:        MM-DD HH:MM:SS.mmm Level/Tag( PID): message
-private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEAF])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
 
 // Brief:       Level/Tag( PID): message
-private val RE_BRIEF      = Regex("""^([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+private val RE_BRIEF      = Regex("""^([VDIWEAF])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
 
 // Bare time:   HH:MM:SS.mmm Level/Tag: message
-private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:]+):\s*(.*)$""")
+private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEAF])/([^:]+):\s*(.*)$""")
 
 private const val TEXT_SNIFF_BYTES = 8000
+
+// Android also emits 'F' for FATAL (libc/DEBUG tombstone lines use it, e.g. "F libc  : Fatal
+// signal 6"), one tier above 'E' in Android's own log-level tooling — the same tier as 'A'
+// (ASSERT), which is how logcat's own `-v` formatter groups it. LogLevel is a persisted enum
+// whose .key char round-trips through filter chips, AutosaveCodec, and FilterCodec, so adding an
+// F-specific constant would mean teaching every one of those a level logcat itself doesn't have a
+// separate filter flag for. Mapping to the existing A tier keeps a tombstone's severity visible
+// and filterable without widening that surface; LogLevel.from() is left untouched (still V for any
+// unrecognized char) so this mapping stays local to parsing Android's own level chars.
+private fun androidLogLevelFrom(c: Char): LogLevel = if (c == 'F') LogLevel.A else LogLevel.from(c)
 
 // Sniffs the first few KB for NUL bytes (the same heuristic git/most editors use to distinguish
 // text from binary), while allowing an aligned UTF-16 layout, so files can be opened by content,
@@ -62,7 +74,7 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         RE_THREADTIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
                 id++, stripDatePrefix(m.groupValues[1]),
-                LogLevel.from(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
+                androidLogLevelFrom(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
                 pid = m.groupValues[2].toIntOrNull() ?: 0,
                 tid = m.groupValues[3].toIntOrNull() ?: 0,
             )
@@ -70,16 +82,16 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
         RE_TIME.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
                 id++, stripDatePrefix(m.groupValues[1]),
-                LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
+                androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
                 pid = m.groupValues[4].toIntOrNull() ?: 0,
             )
         }
         RE_BARE.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
+            return@mapNotNull LogEntry(id++, m.groupValues[1], androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
         }
         RE_BRIEF.matchEntire(line)?.let { m ->
             return@mapNotNull LogEntry(
-                id++, "", LogLevel.from(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
+                id++, "", androidLogLevelFrom(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
                 pid = m.groupValues[3].toIntOrNull() ?: 0,
             )
         }
@@ -112,7 +124,7 @@ private class ThreadtimeParts(
     val tid: Int,
 )
 
-private const val LEVEL_CHARS = "VDIWEA"
+private const val LEVEL_CHARS = "VDIWEAF"
 
 private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
 
@@ -181,7 +193,7 @@ private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
     var p = afterTid
     while (p < n && line[p].isSeparator()) p++
     if (p == afterTid || p >= n || line[p] !in LEVEL_CHARS) return null
-    val level = LogLevel.from(line[p])
+    val level = androidLogLevelFrom(line[p])
     p++
     val beforeTag = p
     while (p < n && line[p].isSeparator()) p++

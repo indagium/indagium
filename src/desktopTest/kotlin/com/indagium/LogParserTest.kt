@@ -89,6 +89,31 @@ class LogParserTest {
         assertEquals(5678, e.tid)
     }
 
+    // Regression: Android's tombstone/libc crash lines use level 'F' (FATAL), which none of the
+    // four format regexes (nor the LEVEL_CHARS fast path) accepted — only VDIWEA. Those lines fell
+    // through to the RAW fallback, with the wrong level and tag "RAW", which capture surfaces
+    // constantly since its default buffers include `crash`. 'F' is mapped to the existing
+    // LogLevel.A (Assert) tier rather than a new enum constant — see androidLogLevelFrom() in
+    // LogParser.kt.
+    @Test
+    fun parsesThreadtimeFatalTombstoneLineAsAssertLevel() {
+        val file = createTempFile(prefix = "openlog-tombstone", suffix = ".log")
+        file.writeText(
+            "09-20 20:27:37.659 10674 10674 F libc  : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 10674",
+        )
+
+        val entries = parseLogcat(file.toFile())
+
+        assertEquals(1, entries.size)
+        val e = entries.single()
+        assertEquals("20:27:37.659", e.ts)
+        assertEquals(LogLevel.A, e.level)
+        assertEquals("libc", e.tag)
+        assertEquals("Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 10674", e.msg)
+        assertEquals(10674, e.pid)
+        assertEquals(10674, e.tid)
+    }
+
     @Test
     fun parsesTimeFormat() {
         val file = createTempFile(prefix = "openlog-time", suffix = ".log")
