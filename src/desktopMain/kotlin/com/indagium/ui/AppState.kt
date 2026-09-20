@@ -679,6 +679,13 @@ private fun launchEditor(template: String, file: File, line: Int): Boolean = run
 // the 100-512MB range freezing the UI on every filter keystroke.
 internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 
+// Row-count analogue of LARGE_FILE_MODE_BYTES above, for a tailed tab: an opened-from-disk tab
+// decides largeFileMode once from file.length(), but a tail (in particular a live capture, which
+// starts as an empty file and can run for hours) has no file-length signal to re-check against as
+// it grows. TailCoordinator.appendTailedLines checks this on every batch instead — see its own
+// comment for why the flip is deliberately one-way, never turning back off.
+internal const val LARGE_FILE_MODE_ROWS = 500_000
+
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
 // feels the same as typing into the filter's keyword field.
@@ -5545,6 +5552,12 @@ class AppState(
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
+                // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
+                // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
+                // above) and were never removed here — every closed capture tab leaked its entire
+                // log for the lifetime of the app.
+                captureIndexByTab.remove(tabId)
+                captureFollowFloorIndexByTab.remove(tabId)
                 videoFollowSuppressionByTab.remove(tabId)
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)
@@ -5625,6 +5638,13 @@ class AppState(
     fun startTailing(tabId: String) = tailCoordinator.startTailing(tabId)
 
     fun stopTailing(tabId: String) = tailCoordinator.stopTailing(tabId)
+
+    // See TailCoordinator.drainAndStopTailing's own doc — a synchronous final catch-up read before
+    // stopping, so a caller that needs tab.logData to be fully caught up the moment tailing stops
+    // (a capture tab's Stop action, so its log↔video mapping doesn't lose its tail) doesn't race
+    // stopTailing's plain Job.cancel(). BLOCKS the calling thread (runBlocking { cancelAndJoin() }
+    // internally) — call from ioScope, never from the UI/AWT thread.
+    fun drainAndStopTailing(tabId: String) = tailCoordinator.drainAndStopTailing(tabId)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 

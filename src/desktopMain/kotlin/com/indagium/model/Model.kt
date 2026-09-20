@@ -770,6 +770,14 @@ data class LogTab(
     // VideoAttachment.captureSourcePath/captureOffsetMs; restore reparses that compact descriptor
     // after the log rows exist instead of embedding millions of mapping rows in the tab token.
     val captureTimeline: CaptureTimeline? = null,
+    // Links this tab to a live capture recording session (ui/CaptureCoordinator.kt), if it's the
+    // tab streaming one. Session-only, like tailing/search/tidMap above — deliberately ABSENT from
+    // AutosaveCodec's tabToken()/tabShellFromToken()/persistedSnapshot(). A capture cannot survive
+    // a restart (adb is gone), and the log file at sourcePath restores as an ordinary tab anyway,
+    // which is the correct outcome — the recording is over. If you're adding a field to those
+    // functions later and reflexively including every LogTab field, this one is the deliberate
+    // exception, same as tidMap/manualProcessNamePicks/recoveredNoteRows above: do not add it there.
+    val captureSessionId: String? = null,
 )
 
 /**
