@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import java.io.File
 import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
 
 data class CaptureExecutable(
     val path: String,
@@ -60,54 +61,63 @@ class CaptureTools(
         }
     }
 
+    // Identity only: `adb version` exits 0 and prints "Android Debug Bridge ..." for every
+    // platform-tools release we care about, so that's the whole check. This function used to also
+    // run `adb help` and grep its TEXT for the literal substrings "devices", "logcat" and
+    // "exec-out" -- but help text is not an API. On platform-tools 35.0.2, `adb help` never prints
+    // the string "exec-out" anywhere in its ~8.8 KB of output (verified: 0 occurrences), even
+    // though `adb exec-out` itself works fine, so that grep rejected every modern adb with "adb is
+    // missing required commands: exec-out" and capture could never start. Do not resurrect a
+    // help-text grep here; if a specific subcommand's *availability* ever needs checking, probe it
+    // functionally (see supportsScreenshots() below for the pattern) rather than parsing --help.
     fun validateAdb(): CaptureToolValidation {
         val version = runner.run(CaptureProcessSpec(adb.command(listOf("version"))))
         if (version.timedOut) return CaptureToolValidation(false, message = "adb version check timed out")
         val versionText = (version.stdoutText() + "\n" + version.stderrText())
             .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
-        if (version.exitCode != 0 || versionText?.contains("Android Debug Bridge", ignoreCase = true) != true) {
-            return CaptureToolValidation(false, versionText, boundedDiagnostic("adb version failed", version))
-        }
-        val help = runner.run(CaptureProcessSpec(adb.command(listOf("help"))))
-        if (help.timedOut) {
-            return CaptureToolValidation(false, versionText, message = "adb capability check timed out")
-        }
-        val helpText = help.stdoutText() + help.stderrText()
-        val missing = listOf("devices", "logcat", "exec-out").filterNot { helpText.contains(it, ignoreCase = true) }
-        return if (help.exitCode == 0 && missing.isEmpty()) {
+        return if (version.exitCode == 0 && versionText?.contains("Android Debug Bridge", ignoreCase = true) == true) {
             CaptureToolValidation(true, versionText, "adb is ready")
-        } else if (help.exitCode != 0) {
-            CaptureToolValidation(false, versionText, boundedDiagnostic("adb capability check failed", help))
         } else {
-            CaptureToolValidation(false, versionText, "adb is missing required commands: ${missing.joinToString()}")
+            CaptureToolValidation(false, versionText, boundedDiagnostic("adb version failed", version))
         }
     }
 
-    fun validateScrcpy(settings: CaptureSettings? = null): CaptureToolValidation {
+    /**
+     * Whether `adb exec-out` works against this device, probed by actually running it rather than
+     * grepping `adb help` for the flag name -- the same class of bug fixed in validateAdb() above.
+     * This needs a live, connected device, so it is deliberately NOT part of validateAdb() or
+     * device discovery, both of which must stay fast and device-independent; callers invoke this
+     * lazily (e.g. to enable/disable a screenshot action for a specific serial) once a device is
+     * selected. Cached per serial so repeated screenshots don't repeat the round trip. A probe that
+     * can't reach a conclusion (exception, timeout, unexpected output) defaults to "available" --
+     * an inconclusive probe must never disable a feature that would in fact have worked; a real
+     * failure at screenshot time still surfaces its own error (see CaptureRecorder.screenshot()).
+     */
+    fun supportsScreenshots(serial: String): Boolean = screenshotSupport.getOrPut(serial) {
+        runCatching {
+            val probe = runner.run(
+                adbSpec(serial, "exec-out", "echo", SCREENSHOT_PROBE_TOKEN),
+                timeout = Duration.ofSeconds(SCREENSHOT_PROBE_TIMEOUT_SECONDS),
+            )
+            !probe.timedOut && probe.exitCode == 0 && probe.stdoutText().contains(SCREENSHOT_PROBE_TOKEN)
+        }.getOrDefault(true)
+    }
+
+    // Identity only, same rationale as validateAdb() above: `scrcpy --help` was grepped for CLI
+    // flag names (--serial, --record, --max-fps, ...) that are reliably present in every scrcpy
+    // build we support, so that grep was never going to catch a real incompatibility -- and it
+    // added a second subprocess round-trip for no protective value. A genuinely unsupported option
+    // now surfaces as a runtime failure when scrcpy is actually launched (CaptureRecorder.kt already
+    // treats that as a diagnostic, not a reason to stop log capture -- see startCapture()).
+    fun validateScrcpy(): CaptureToolValidation {
         val executable = scrcpy ?: return CaptureToolValidation(false, message = "scrcpy was not found")
         val version = runner.run(CaptureProcessSpec(executable.command(listOf("--version"))))
         val versionText = (version.stdoutText() + "\n" + version.stderrText())
             .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
-        if (version.timedOut || version.exitCode != 0 || versionText?.contains("scrcpy", ignoreCase = true) != true) {
-            return CaptureToolValidation(false, versionText, boundedDiagnostic("scrcpy version failed", version))
-        }
-        val help = runner.run(CaptureProcessSpec(executable.command(listOf("--help"))))
-        if (help.timedOut) {
-            return CaptureToolValidation(false, versionText, message = "scrcpy capability check timed out")
-        }
-        val helpText = help.stdoutText() + help.stderrText()
-        val required = buildList {
-            addAll(SCRCPY_ALWAYS_REQUIRED_OPTIONS)
-            if (settings?.mirror == false) add("--no-window")
-            if (settings?.audio != true) add("--no-audio")
-        }
-        val missing = required.filterNot(helpText::contains)
-        return if (help.exitCode == 0 && missing.isEmpty()) {
+        return if (!version.timedOut && version.exitCode == 0 && versionText?.contains("scrcpy", ignoreCase = true) == true) {
             CaptureToolValidation(true, versionText, "scrcpy is ready")
-        } else if (help.exitCode != 0) {
-            CaptureToolValidation(false, versionText, boundedDiagnostic("scrcpy capability check failed", help))
         } else {
-            CaptureToolValidation(false, versionText, "scrcpy is missing required options: ${missing.joinToString()}")
+            CaptureToolValidation(false, versionText, boundedDiagnostic("scrcpy version failed", version))
         }
     }
 
@@ -117,6 +127,8 @@ class CaptureTools(
         check(result.exitCode == 0) { boundedDiagnostic("adb devices failed", result) }
         return parseAdbDevices(result.stdoutText())
     }
+
+    private val screenshotSupport = ConcurrentHashMap<String, Boolean>()
 }
 
 class CaptureToolResolver(
@@ -124,7 +136,12 @@ class CaptureToolResolver(
     private val environment: Map<String, String> = System.getenv(),
     private val executableExists: (String) -> Boolean = { path -> File(path).isFile && File(path).canExecute() },
     private val flatpak: Boolean = File("/.flatpak-info").isFile || environment["FLATPAK_ID"] != null,
+    // Injectable (rather than read live via System.getProperty) so B3's login-shell fallback below
+    // is deterministic in tests regardless of the host the test suite happens to run on.
+    private val isMacOs: Boolean = System.getProperty("os.name").lowercase().contains("mac"),
 ) {
+    private val loginShellPathCache = mutableMapOf<String, String?>()
+
     fun resolve(settings: CaptureSettings): CaptureTools {
         val adb = resolveExecutable("adb", settings.adbPath, adbCandidates())
             ?: error("adb was not found. Configure its path or install Android platform-tools.")
@@ -163,8 +180,56 @@ class CaptureToolResolver(
             .filter(String::isNotBlank)
             .map { File(it, platformExecutableName(name)).absolutePath }
             .firstOrNull(executableExists)
-        val found = fromPath ?: common.firstOrNull(executableExists)
+        // A macOS .app launched from Finder inherits launchd's minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) rather than the user's shell PATH, so the scan above
+        // misses Homebrew, nix, asdf, sdkman, ~/bin, etc. Before falling back to the hardcoded
+        // candidate directories (which only cover Homebrew's default prefix), ask the user's own
+        // login shell what it resolves `name` to -- the same PATH `./gradlew desktopRun` already
+        // inherits from an interactive terminal, which is exactly why this gap is invisible in dev
+        // and only bites a packaged build. Skipped once `fromPath` already found something, and
+        // never attempted on non-macOS or under Flatpak (handled above).
+        val fromLoginShell = if (fromPath == null && isMacOs) {
+            loginShellPath(name)?.takeIf(executableExists)
+        } else {
+            null
+        }
+        val found = fromPath ?: fromLoginShell ?: common.firstOrNull(executableExists)
         return found?.let(::CaptureExecutable)
+    }
+
+    /**
+     * Resolves `name` via the user's login shell: `$SHELL -lc 'command -v name'`, falling back to
+     * /bin/zsh when $SHELL is unset or not a sane executable (macOS's default since Catalina).
+     * Runs through the same CaptureProcessRunner/CaptureProcessSpec seam as every other capture
+     * subprocess, so it is bounded by a real timeout and cannot hang app startup, and it is
+     * testable through FakeCaptureRunner like everything else in this file. Cached per tool name so
+     * a hanging or slow shell is paid for at most once per resolver instance, not once per
+     * resolution (resolve() can be called repeatedly, e.g. on every "Recheck tools" click).
+     */
+    private fun loginShellPath(name: String): String? = synchronized(loginShellPathCache) {
+        // NOT `getOrPut`: a "not found" result caches as a `null` value, and `getOrPut` treats a
+        // stored `null` the same as a missing key (it calls `get(key) == null`, not
+        // `containsKey`), so it would re-probe forever whenever the shell doesn't have the tool.
+        // `containsKey` is the only correct way to distinguish "cached miss" from "never probed".
+        if (loginShellPathCache.containsKey(name)) return@synchronized loginShellPathCache.getValue(name)
+        val configuredShell = environment["SHELL"]
+        val shell = if (!configuredShell.isNullOrBlank() && executableExists(configuredShell)) {
+            configuredShell
+        } else {
+            DEFAULT_LOGIN_SHELL
+        }
+        val result = runner.run(
+            CaptureProcessSpec(listOf(shell, "-lc", "command -v $name")),
+            timeout = Duration.ofSeconds(LOGIN_SHELL_TIMEOUT_SECONDS),
+            outputLimitBytes = LOGIN_SHELL_OUTPUT_LIMIT_BYTES,
+        )
+        val resolved = if (result.timedOut || result.exitCode != 0) {
+            null
+        } else {
+            result.stdoutText().lineSequence().map(String::trim).firstOrNull { it.startsWith('/') }
+        }
+        loginShellPathCache[name] = resolved
+        resolved
     }
 
     private fun hostExecutableExists(path: String): Boolean {
@@ -244,13 +309,8 @@ private const val HOST_PROBE_OUTPUT_LIMIT_BYTES = 4 * 1024
 private const val MAX_TOOL_DIAGNOSTIC_CHARS = 4_096
 private const val MIN_ADB_DEVICE_FIELDS = 2
 private const val NO_PERMISSIONS_FIELD_INDEX = 2
-
-private val SCRCPY_ALWAYS_REQUIRED_OPTIONS = listOf(
-    "--serial",
-    "--record",
-    "--record-format",
-    "--max-size",
-    "--max-fps",
-    "--video-bit-rate",
-    "--video-codec",
-)
+private const val SCREENSHOT_PROBE_TOKEN = "indagium-exec-out-probe"
+private const val SCREENSHOT_PROBE_TIMEOUT_SECONDS = 3L
+private const val LOGIN_SHELL_TIMEOUT_SECONDS = 3L
+private const val LOGIN_SHELL_OUTPUT_LIMIT_BYTES = 4 * 1024
+private const val DEFAULT_LOGIN_SHELL = "/bin/zsh"

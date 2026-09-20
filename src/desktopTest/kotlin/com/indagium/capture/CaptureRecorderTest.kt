@@ -52,6 +52,10 @@ class CaptureRecorderTest {
 
     @Test
     fun defaultLogcatStartsAtCurrentTailAndAlwaysSelectsTheDevice() {
+        // DEFAULT buffer mode emits no -b at all (CaptureBufferMode.DEFAULT / logcatBufferArgs()):
+        // this used to assert 3 hardcoded "-b" flags (main/system/crash), but that silently
+        // dropped adb's real default buffer `kernel` and could error out on a device missing one
+        // of the three named buffers. Passing no -b tracks whatever plain `adb logcat` does.
         val root = Files.createTempDirectory("capture-command-test").toFile()
         val runner = FakeCaptureRunner()
         runner.enqueue(StreamingFakeProcess())
@@ -61,7 +65,50 @@ class CaptureRecorderTest {
             val command = runner.specs.single().command
             assertEquals(listOf("adb", "-s", DEVICE.serial), command.take(3))
             assertTrue(command.containsAll(listOf("logcat", "-v", "threadtime", "-T", "1")))
-            assertEquals(3, command.count { it == "-b" })
+            assertEquals(0, command.count { it == "-b" })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun allBufferModeEmitsSingleAllFlag() {
+        val root = Files.createTempDirectory("capture-command-all-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(
+                DEVICE,
+                testSettings().copy(bufferMode = CaptureBufferMode.ALL),
+                CaptureTools(ADB, null, runner),
+            )
+            val command = runner.specs.single().command
+            assertEquals(listOf("all"), command.zipWithNext().filter { it.first == "-b" }.map { it.second })
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun customBufferModeEmitsOneFlagPairPerDistinctBuffer() {
+        val root = Files.createTempDirectory("capture-command-custom-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(
+                DEVICE,
+                testSettings().copy(bufferMode = CaptureBufferMode.CUSTOM, buffers = listOf("main", "crash", "main")),
+                CaptureTools(ADB, null, runner),
+            )
+            val command = runner.specs.single().command
+            assertEquals(
+                listOf("main", "crash"),
+                command.zipWithNext().filter { it.first == "-b" }.map { it.second },
+            )
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -96,13 +143,9 @@ class CaptureRecorderTest {
         val runner = FakeCaptureRunner()
         val logcat = StreamingFakeProcess()
         runner.enqueue(logcat)
+        // validateScrcpy() (B1b) now checks `scrcpy --version` only, not `--help`, so only one
+        // fake process is consumed before the actual scrcpy launch below.
         runner.enqueue(CompletedFakeProcess("scrcpy 3.3.1\n"))
-        runner.enqueue(
-            CompletedFakeProcess(
-                "--serial --record --record-format --max-size --max-fps " +
-                    "--video-bit-rate --video-codec --no-audio\n",
-            ),
-        )
         runner.enqueue(CompletedFakeProcess(stdout = byteArrayOf(), stderr = "encoder failed".toByteArray(), code = 1))
         val tools = CaptureTools(ADB, CaptureExecutable("scrcpy"), runner)
         val recorder = CaptureRecorder(root, runner)

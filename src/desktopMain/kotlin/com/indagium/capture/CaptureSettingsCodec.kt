@@ -40,6 +40,7 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("freeSpaceReserveBytes", settings.freeSpaceReserveBytes)
     put("filenameTemplate", settings.filenameTemplate)
     put("label", settings.label)
+    put("bufferMode", settings.bufferMode.name)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -63,12 +64,28 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         freeSpaceReserveBytes = root.optional("freeSpaceReserveBytes", defaults.freeSpaceReserveBytes, ::longValue).coerceAtLeast(0),
         filenameTemplate = root.optional("filenameTemplate", defaults.filenameTemplate, ::stringValue),
         label = root.optional("label", defaults.label, ::stringValue),
+        // Deliberately NOT `root.optional(..., ::bufferModeValue)`: that helper errors on a
+        // present-but-malformed value, which fails the whole `runCatching` block and silently
+        // resets every OTHER capture setting to defaults too (see captureSettingsFromJson's own
+        // doc). bufferMode is a forward-compatible enum — an older build reading a settings file
+        // written by a newer build with a buffer mode it doesn't know about should keep the rest
+        // of the user's preferences intact and just fall back this one field to DEFAULT, not
+        // nuke everything. So both "absent" and "present but unrecognized" resolve to DEFAULT here.
+        bufferMode = root.bufferModeOrDefault("bufferMode", defaults.bufferMode),
     )
 }.getOrNull()
 
 private fun <T> JsonObject.optional(key: String, default: T, parser: (JsonElement) -> T?): T {
     val value = this[key] ?: return default
     return parser(value) ?: error("Capture setting $key is invalid")
+}
+
+/** Absent key, wrong JSON type, or a name this build doesn't recognize (e.g. an older build
+ *  reading a file written by a newer one) all fall back to [default] rather than failing the
+ *  decode — see the call site's comment for why this key deviates from its neighbours. */
+private fun JsonObject.bufferModeOrDefault(key: String, default: CaptureBufferMode): CaptureBufferMode {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureBufferMode.valueOf(raw) }.getOrDefault(default)
 }
 
 private fun stringValue(value: JsonElement): String? =
