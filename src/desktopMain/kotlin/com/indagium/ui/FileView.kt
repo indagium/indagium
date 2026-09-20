@@ -190,7 +190,7 @@ internal fun FileView(
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
         if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
         add(KeyboardPanel.LOG_VIEW to logViewerFr)
-        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
+        if (state.annotationVisible && !tab.isCaptureLauncher) add(KeyboardPanel.NOTES to annotationFr)
         if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
     }
 
@@ -201,7 +201,7 @@ internal fun FileView(
         onPanelFocusConsumed()
     }
 
-    Row(
+    Column(
         Modifier.fillMaxSize().onPreviewKeyEvent { ev ->
             if (ev.type == KeyEventType.KeyDown && ev.key == Key.F6) {
                 val frs = visiblePanelFrs()
@@ -217,193 +217,224 @@ internal fun FileView(
             }
         },
     ) {
-        BoundFilterPanel(
-            state, tab,
-            focusRequester = filterFr,
-            filterBarVisible = state.filterBarVisible,
-            filterSearchRequest = filterSearchRequest,
-            onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
-            onPanelFocusChanged = { focused ->
-                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
-            },
-        )
-        // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
-        // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
-        // its duplicate Tags/Regex/message-rule controls while this bar is active. The model is a
-        // plain data class of values recomputed per recomposition (cheap, and content-equality is
-        // what keeps LogViewer skippable); actions holds lambdas and is remembered below.
-        val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
-            tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
-        }
-        val filterBarModel = if (state.filterBarVisible) {
-            FilterBarModel(
-                sortedTags = filterBarSortedTags,
-                tagUsage = state.tagUsage,
-                mostUsedTagLimit = state.settings.mostUsedTagLimit,
-                regexHistory = state.regexPatternHistory,
-            )
-        } else {
-            null
-        }
-        val filterBarActions = remember(state, tab.id) {
-            FilterBarActions(
-                onSetFilterMode = { mode -> state.setFilterMode(tab.id, mode) },
-                onStartRegexSearch = { state.startRegexSearch(tab.id) },
-                onToggleTag = { state.toggleTag(tab.id, it) },
-                onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
-                onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
-                onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
-                onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
-                onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
-                onSetKwInTag = { state.setKwInTag(tab.id, it) },
-                onToggleKwInTagRegex = { state.toggleKwInTagRx(tab.id) },
-                onSetKw = { state.setKw(tab.id, it) },
-                onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
-                    state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
-                },
-                onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
-                onRememberRegexPattern = { state.rememberRegexPattern(it) },
-                onClearRegexHistory = { state.clearRegexPatternHistory() },
-                onOpenFilterPanel = { state.updateFilterVisible(true) },
-            )
-        }
-        LogViewer(
-            tab = tab, modifier = Modifier.weight(1f),
-            settings = state.settings,
-            onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
-            onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
-            onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
-            onToggleGroup = { state.toggleGroup(tab.id, it) },
-            onClearFilter = { state.requestClearFilter(tab.id) },
-            onExpandAll = { state.expandAll(tab.id) },
-            onCollapseAll = { state.collapseAll(tab.id) },
-            onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
-            onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-            onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
-            onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
-            onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
-            onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
-            onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
-            onExportTxt = { state.exportFilteredTxt(tab.id) },
-            onExportCsv = { state.exportFilteredCsv(tab.id) },
-            scrollStateStore = state.logViewerScrollStateStore,
-            annotationNavigationRequest = state.pendingAnnotationNavigation,
-            onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-            searchNavigationRequest = state.pendingSearchNavigation,
-            onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
-            onSelectAll = { state.selectAll(tab.id) },
-            onClearSelection = { state.clearSelection(tab.id) },
-            onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
-            onCopyText = { text -> state.copyToClipboard(text) },
-            onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
-            onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
-            onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
-            navScrollMargin = state.settings.navScrollMargin,
-            focusRequester = logViewerFr,
-            onPanelFocusChanged = { focused ->
-                if (focused) {
-                    focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
-                    state.searchFocusTabId = tab.id
-                }
-            },
-            keyboardFocusVisible = state.keyboardFocusVisible,
-            onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
-            onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-            onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
-            onSearchToggleCase = { state.toggleSearchCase(tab.id) },
-            onSearchNext = { state.searchNext(tab.id) },
-            onSearchPrev = { state.searchPrev(tab.id) },
-            onSearchClose = { state.closeSearch(tab.id) },
-            filterBar = filterBarModel,
-            filterBarActions = filterBarActions,
-            filterBarVisible = state.filterBarVisible,
-            onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
-        )
-        if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && tab.attachedVideo != null)) {
-            HDivider { delta ->
-                state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
-            }
-            RightSidebarPanel(
+        // captureSourceSessionId keeps the strip mounted after a stop finishes and
+        // captureFinalizationStatus clears — otherwise Save ZIP/Open folder vanished the instant
+        // finalization succeeded, the exact moment a user is most likely to want to export.
+        if (tab.captureSessionId != null || tab.isCaptureLauncher ||
+            state.captureFinalizationStatus(tab.id) != null || tab.captureSourceSessionId != null
+        ) {
+            CaptureStrip(
                 state = state,
                 tab = tab,
-                width = state.annotationPanelWidth,
-                aiFocusRequester = aiFr,
-                onAiPanelFocusChanged = { focused ->
-                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
-                },
-                notesContent = {
-                    AnnotationPanel(
-                        tab = tab,
-                        settings = state.settings,
-                        recentNotes = state.recentNotesForTab(tab),
-                        recentNotesMenuOpen = state.recentNotesMenuOpen,
-                        activeNotePath = state.activeNoteFilePath(tab),
-                        onToggleMd = { state.toggleMd(tab.id) },
-                        onCopy = { state.copyAnn(tab.id) },
-                        onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
-                        onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-                        onCopyRichPreview = { state.copyRichPreview(tab.id) },
-                        onExportFrames = { state.exportAnnotationFrames(tab.id) },
-                        onSave = { state.saveAnalysis(tab.id) },
-                        onNewAnalysis = { state.newAnalysis(tab.id) },
-                        onToggleRecentNotes = { state.toggleRecentNotesMenu() },
-                        onOpenNote = { state.openNoteFileAsync(tab.id, it) },
-                        onLocateLog = { state.locateLogForTab(tab.id, it) },
-                        showUnverifiedRelinkNotice = state.logRelinkUnverifiedTabId == tab.id,
-                        onDismissUnverifiedRelinkNotice = { state.dismissLogRelinkUnverifiedNotice() },
-                        onUpdatePrefix = { state.setPrefix(tab.id, it) },
-                        onUpdateSuffix = { state.setSuffix(tab.id, it) },
-                        onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
-                        onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
-                        onRemoveBlock = { state.removeBlock(tab.id, it) },
-                        onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
-                        onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
-                        onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
-                        onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
-                        onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
-                        onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
-                        onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
-                        onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
-                        onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
-                        onImportLinkedDiagram = { blockId, source, dialect, confirm ->
-                            val diagramId = (tab.annotations.blocks.filterIsInstance<com.indagium.model.AnnBlock.Note>()
-                                .firstOrNull { it.id == blockId }?.text?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
-                                ?.attachment?.diagramId)
-                            val session = diagramId?.let { id -> state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id } }
-                                ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
-                            if (session == null) {
-                                state.pendingDiagramNotice = DiagramNotice("Couldn't import diagram edits", "This linked diagram is not open in a workspace.")
-                                com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
-                            } else {
-                                state.seq3Sessions.importSource(session.id, source, dialect, confirm)
-                            }
-                        },
-                        diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
-                        onCreateDiagram = { state.seq3Sessions.begin(tab.id, tab.selected) },
-                        onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
-                        // seq3NotesSelection is a cheap list walk, but keyed on the two inputs it
-                        // actually reads so it isn't rerun on every recomposition (e.g. a selection
-                        // drag or an unrelated panel resize) — see that function's own doc.
-                        notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
-                        onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
-                        onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
-                        width = state.annotationPanelWidth,
-                        focusRequester = annotationFr,
-                        onPanelFocusChanged = { focused ->
-                            if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
-                        },
-                        keyboardFocusVisible = state.keyboardFocusVisible,
-                        scrollStateStore = state.logViewerScrollStateStore,
-                        highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                },
-                videoContent = if (state.videoPanelVisible && tab.attachedVideo != null) {
-                    { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
-                } else {
-                    null
+                onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
+            )
+        }
+        Row(Modifier.weight(1f).fillMaxWidth()) {
+            BoundFilterPanel(
+                state, tab,
+                focusRequester = filterFr,
+                filterBarVisible = state.filterBarVisible,
+                filterSearchRequest = filterSearchRequest,
+                onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,
+                onPanelFocusChanged = { focused ->
+                    if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == filterFr }
                 },
             )
+            // Horizontal filter bar (ui/FilterBar.kt) — independently gated by filterBarVisible.
+            // BoundFilterPanel remains mounted whenever filterVisible is true; FilterPanel hides only
+            // its duplicate Tags/Regex/message-rule controls while this bar is active. The model is a
+            // plain data class of values recomputed per recomposition (cheap, and content-equality is
+            // what keeps LogViewer skippable); actions holds lambdas and is remembered below.
+            val filterBarSortedTags = remember(tab.id, tab.analysis.tagCounts) {
+                tab.analysis.tagCounts.entries.sortedByDescending { it.value }.map { it.key }
+            }
+            val filterBarModel = if (state.filterBarVisible) {
+                FilterBarModel(
+                    sortedTags = filterBarSortedTags,
+                    tagUsage = state.tagUsage,
+                    mostUsedTagLimit = state.settings.mostUsedTagLimit,
+                    regexHistory = state.regexPatternHistory,
+                )
+            } else {
+                null
+            }
+            val filterBarActions = remember(state, tab.id) {
+                FilterBarActions(
+                    onSetFilterMode = { mode -> state.setFilterMode(tab.id, mode) },
+                    onStartRegexSearch = { state.startRegexSearch(tab.id) },
+                    onToggleTag = { state.toggleTag(tab.id, it) },
+                    onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
+                    onAddPkgPrefix = { state.addPkgPrefix(tab.id, it) },
+                    onRemovePkgPrefix = { state.removePkgPrefix(tab.id, it) },
+                    onAddExcludePkgPrefix = { state.addExcludePkgPrefix(tab.id, it) },
+                    onRemoveExcludePkgPrefix = { state.removeExcludePkgPrefix(tab.id, it) },
+                    onSetKwInTag = { state.setKwInTag(tab.id, it) },
+                    onToggleKwInTagRegex = { state.toggleKwInTagRx(tab.id) },
+                    onSetKw = { state.setKw(tab.id, it) },
+                    onAddMessageRule = { include, pattern, regex, tag, prefix, target ->
+                        state.addMessageRule(tab.id, include, pattern, regex, tag, prefix, target)
+                    },
+                    onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
+                    onRememberRegexPattern = { state.rememberRegexPattern(it) },
+                    onClearRegexHistory = { state.clearRegexPatternHistory() },
+                    onOpenFilterPanel = { state.updateFilterVisible(true) },
+                )
+            }
+            if (tab.isCaptureLauncher) {
+                CaptureLauncher(state, Modifier.weight(1f).fillMaxSize())
+            } else {
+                LogViewer(
+                    tab = tab, modifier = Modifier.weight(1f),
+                    settings = state.settings,
+                    onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
+                    onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
+                    onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
+                    onToggleGroup = { state.toggleGroup(tab.id, it) },
+                    onClearFilter = { state.requestClearFilter(tab.id) },
+                    onExpandAll = { state.expandAll(tab.id) },
+                    onCollapseAll = { state.collapseAll(tab.id) },
+                    onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+                    onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
+                    onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
+                    onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
+                    onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
+                    onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
+                    onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
+                    onExportTxt = { state.exportFilteredTxt(tab.id) },
+                    onExportCsv = { state.exportFilteredCsv(tab.id) },
+                    scrollStateStore = state.logViewerScrollStateStore,
+                    annotationNavigationRequest = state.pendingAnnotationNavigation,
+                    onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+                    searchNavigationRequest = state.pendingSearchNavigation,
+                    onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
+                    onSelectAll = { state.selectAll(tab.id) },
+                    onClearSelection = { state.clearSelection(tab.id) },
+                    onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
+                    onCopyText = { text -> state.copyToClipboard(text) },
+                    onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
+                    onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
+                    onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
+                    navScrollMargin = state.settings.navScrollMargin,
+                    focusRequester = logViewerFr,
+                    onPanelFocusChanged = { focused ->
+                        if (focused) {
+                            focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+                            state.searchFocusTabId = tab.id
+                        }
+                    },
+                    keyboardFocusVisible = state.keyboardFocusVisible,
+                    onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
+                    onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
+                    onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
+                    onSearchToggleCase = { state.toggleSearchCase(tab.id) },
+                    onSearchNext = { state.searchNext(tab.id) },
+                    onSearchPrev = { state.searchPrev(tab.id) },
+                    onSearchClose = { state.closeSearch(tab.id) },
+                    filterBar = filterBarModel,
+                    filterBarActions = filterBarActions,
+                    filterBarVisible = state.filterBarVisible,
+                    onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
+                )
+            }
+            val liveStatusSidebarVisible = state.videoPanelVisible &&
+                (tab.attachedVideo != null || tab.captureSessionId != null || tab.isCaptureLauncher)
+            val notesVisibleForTab = state.annotationVisible && !tab.isCaptureLauncher
+            if (notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible) {
+                HDivider { delta ->
+                    state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
+                }
+                RightSidebarPanel(
+                    state = state,
+                    tab = tab,
+                    width = state.annotationPanelWidth,
+                    aiFocusRequester = aiFr,
+                    onAiPanelFocusChanged = { focused ->
+                        if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
+                    },
+                    notesVisible = notesVisibleForTab,
+                    notesContent = {
+                        AnnotationPanel(
+                            tab = tab,
+                            settings = state.settings,
+                            recentNotes = state.recentNotesForTab(tab),
+                            recentNotesMenuOpen = state.recentNotesMenuOpen,
+                            activeNotePath = state.activeNoteFilePath(tab),
+                            onToggleMd = { state.toggleMd(tab.id) },
+                            onCopy = { state.copyAnn(tab.id) },
+                            onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
+                            onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
+                            onCopyRichPreview = { state.copyRichPreview(tab.id) },
+                            onExportFrames = { state.exportAnnotationFrames(tab.id) },
+                            onSave = { state.saveAnalysis(tab.id) },
+                            onNewAnalysis = { state.newAnalysis(tab.id) },
+                            onToggleRecentNotes = { state.toggleRecentNotesMenu() },
+                            onOpenNote = { state.openNoteFileAsync(tab.id, it) },
+                            onLocateLog = { state.locateLogForTab(tab.id, it) },
+                            showUnverifiedRelinkNotice = state.logRelinkUnverifiedTabId == tab.id,
+                            onDismissUnverifiedRelinkNotice = { state.dismissLogRelinkUnverifiedNotice() },
+                            onUpdatePrefix = { state.setPrefix(tab.id, it) },
+                            onUpdateSuffix = { state.setSuffix(tab.id, it) },
+                            onUpdateIssueDescription = { state.setIssueDescription(tab.id, it) },
+                            onUpdateBlock = { blockId, text -> state.updateBlock(tab.id, blockId, text) },
+                            onRemoveBlock = { state.removeBlock(tab.id, it) },
+                            onMoveBlock = { blockId, d -> state.moveBlock(tab.id, blockId, d) },
+                            onReorderBlock = { blockId, idx -> state.reorderBlock(tab.id, blockId, idx) },
+                            onAddNoteAfter = { state.addNoteBlock(tab.id, it) },
+                            onAddImage = { bytes, provenance, after -> state.addImageBlock(tab.id, bytes, provenance, after) },
+                            onUnhandledFileDrop = { files -> state.openDroppedFiles(files) },
+                            onNavigateLogRef = { state.requestAnnotationNavigation(tab.id, it) },
+                            onNavigateVideoFrame = { state.navigateToVideoFrame(tab.id, it) },
+                            onEditDiagram = { blockId -> state.seq3Sessions.beginEdit(tab.id, blockId) },
+                            onNavigateDiagramLine = { entryId -> state.navigateToLogLine(tab.id, entryId) },
+                            onImportLinkedDiagram = { blockId, source, dialect, confirm ->
+                                val diagramId = (tab.annotations.blocks.filterIsInstance<com.indagium.model.AnnBlock.Note>()
+                                    .firstOrNull { it.id == blockId }?.text?.let { text -> com.indagium.diagram3.parseSeq3Note(text) }
+                                    ?.attachment?.diagramId)
+                                val session = diagramId?.let { id -> state.seq3Sessions.sessions.singleOrNull { it.libraryItemId == id } }
+                                    ?: state.seq3Sessions.sessions.singleOrNull { it.confirmedBlockId == blockId }
+                                if (session == null) {
+                                    state.pendingDiagramNotice = DiagramNotice(
+                                        "Couldn't import diagram edits",
+                                        "This linked diagram is not open in a workspace.",
+                                    )
+                                    com.indagium.diagram3.Seq3SourceImportResult.Failure(emptyList())
+                                } else {
+                                    state.seq3Sessions.importSource(session.id, source, dialect, confirm)
+                                }
+                            },
+                            diagramLibraryItems = state.seq3Sessions.libraryForTab(tab),
+                            onCreateDiagram = {
+                                state.seq3Sessions.begin(tab.id, tab.selected)
+                            },
+                            onCreateDiagramFromNotes = { state.seq3Sessions.beginFromNotes(tab.id) },
+                            // seq3NotesSelection is a cheap list walk, but keyed on the two inputs it
+                            // actually reads so it isn't rerun on every recomposition (e.g. a selection
+                            // drag or an unrelated panel resize) — see that function's own doc.
+                            notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
+                            onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
+                            onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
+                            width = state.annotationPanelWidth,
+                            focusRequester = annotationFr,
+                            onPanelFocusChanged = { focused ->
+                                if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
+                            },
+                            keyboardFocusVisible = state.keyboardFocusVisible,
+                            scrollStateStore = state.logViewerScrollStateStore,
+                            highlightedBlockId = state.aiEvidenceNoteTarget?.takeIf { it.tabId == tab.id }?.blockId,
+                            modifier = Modifier.fillMaxSize(),
+                        )
+                    },
+                    videoContent = if (state.videoPanelVisible && tab.captureSessionId != null) {
+                        { CaptureCard(state = state, tab = tab) }
+                    } else if (state.videoPanelVisible && tab.isCaptureLauncher) {
+                        { CaptureIdleCard(state) }
+                    } else if (state.videoPanelVisible && tab.attachedVideo != null) {
+                        { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
+                    } else {
+                        null
+                    },
+                )
+            }
         }
     }
 }

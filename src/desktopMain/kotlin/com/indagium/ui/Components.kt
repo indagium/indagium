@@ -36,6 +36,8 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -1012,6 +1014,38 @@ fun CheckRow(
             Checkbox(checked = checked, onCheckedChange = { onToggle() },
                 colors = CheckboxDefaults.colors(checkedColor = accentColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
                 modifier = Modifier.size(16.dp))
+            content()
+        }
+    }
+}
+
+/** [CheckRow]'s mutually-exclusive counterpart: a Material3 [RadioButton] instead of a checkbox,
+ * for a single choice among several options (checkboxes imply "choose any"; radios imply "choose
+ * one" — see [ArchiveVideoChoiceRow] in EntryPickerDialog.kt, the existing radio-row pattern this
+ * mirrors). [enabled] greys the row out and disables the click without needing the caller to gate
+ * [onSelect] itself. */
+@Composable
+fun RadioRow(
+    selected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val tc = tc()
+    DisableSelection {
+        Row(
+            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                .then(if (enabled) Modifier.clickable(onClick = onSelect) else Modifier),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = if (enabled) onSelect else null,
+                enabled = enabled,
+                colors = RadioButtonDefaults.colors(selectedColor = tc.ac, unselectedColor = tc.td),
+                modifier = Modifier.size(16.dp),
+            )
             content()
         }
     }

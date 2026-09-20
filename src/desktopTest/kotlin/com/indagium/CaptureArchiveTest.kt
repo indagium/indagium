@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.capture.CAPTURE_DESCRIPTOR_NAME
+import com.indagium.capture.CaptureArchiveException
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureDevice
@@ -22,6 +23,7 @@ import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -63,6 +65,303 @@ class CaptureArchiveTest {
         assertEquals("mapping/log-video.jsonl", imported.descriptor.mapping.path)
         assertEquals("video/screen.mkv", imported.descriptor.video?.path)
         assertFalse(imported.descriptor.settings.adbPath.isNotEmpty())
+    }
+
+    @Test
+    fun selectionRangeKeepsRawRecordsBetweenSelectedRowsAndUsesTheirTemporalBounds() {
+        val root = createTempDirectory("capture-archive-selection").toFile()
+        val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 0)
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 1_000, 1),
+            RawRow("----- separator before\n", 1_500, null),
+            RawRow("row-2\n", 2_000, 2),
+            RawRow("----- separator inside\n", 2_500, null),
+            RawRow("row-3\n", 3_000, 3),
+            RawRow("----- separator after\n", 3_500, null),
+            RawRow("row-4\n", 4_000, 4),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        session.directory.resolve("screenshots").mkdirs()
+        session.directory.resolve("screenshots/screenshot-1500.png").writeBytes(byteArrayOf(1))
+        session.directory.resolve("screenshots/screenshot-2500.png").writeBytes(byteArrayOf(2))
+        session.directory.resolve("screenshots/screenshot-3500.png").writeBytes(byteArrayOf(3))
+        var requestedStart = Long.MIN_VALUE
+        var requestedEnd = Long.MIN_VALUE
+        val destination = File(root, "selection.zip")
+        val fakeVideo = CaptureVideoExporter { _, target, start, end ->
+            requestedStart = start
+            requestedEnd = end
+            target.writeText("video")
+            CaptureVideoClip(start, end, end - start)
+        }
+
+        CaptureArchiveExporter(fakeVideo).export(
+            session,
+            CaptureExportRequest(
+                destination = destination,
+                range = CaptureRange.SELECTION,
+                cutoffElapsedMs = 4_000,
+                selectedFirstRowOrdinal = 2,
+                selectedLastRowOrdinal = 3,
+            ),
+        )
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+
+        assertEquals("row-2\n----- separator inside\nrow-3\n", imported.logFile.readText())
+        assertEquals(listOf(2_000L, 3_000L), imported.timeline.rows.map { it.elapsedMs })
+        assertEquals(CaptureRange.SELECTION, imported.descriptor.range)
+        assertEquals(2_000L, requestedStart)
+        assertEquals(3_000L, requestedEnd)
+        assertEquals(1, imported.descriptor.screenshots.size)
+    }
+
+    @Test
+    fun selectionRangeRequiresValidOrderedBounds() {
+        val root = createTempDirectory("capture-archive-selection-invalid").toFile()
+        val session = session(root)
+        writeCaptureInput(session, listOf(RawRow("row\n", 1_000, 1)))
+        val exporter = CaptureArchiveExporter(CaptureVideoExporter { _, _, _, _ -> error("unused") })
+        assertFails {
+            exporter.export(session, CaptureExportRequest(
+                File(root, "missing.zip"), CaptureRange.SELECTION, cutoffElapsedMs = 1_000,
+            ))
+        }
+        assertFails {
+            exporter.export(session, CaptureExportRequest(
+                File(root, "reversed.zip"), CaptureRange.SELECTION, cutoffElapsedMs = 1_000,
+                selectedFirstRowOrdinal = 2, selectedLastRowOrdinal = 1,
+            ))
+        }
+    }
+
+    @Test
+    fun previewReportsActualGrowingVideoCoverageWithoutPublishingOrMutatingSession() {
+        val root = createTempDirectory("capture-preview-video").toFile()
+        val session = session(root, recordVideo = true, manualOffsetMs = 100)
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 100_000, 1),
+            RawRow("row-2\n", 400_000, 2),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        var requestedStart = Long.MIN_VALUE
+        var requestedEnd = Long.MIN_VALUE
+        var previewDestination: File? = null
+        val fakeVideo = CaptureVideoExporter { _, destination, start, end ->
+            requestedStart = start
+            requestedEnd = end
+            previewDestination = destination
+            destination.writeText("preview-only")
+            CaptureVideoClip(actualStartMs = 25_000, coveredEndMs = 250_000, durationMs = 225_000)
+        }
+        val request = CaptureExportRequest(
+            destination = File(root, "not-published.zip"),
+            range = CaptureRange.LAST_FIVE,
+            cutoffElapsedMs = 400_000,
+            includeVideo = true,
+        )
+
+        val preview = CaptureArchiveExporter(fakeVideo).preview(session, request)
+
+        assertEquals(50_100, requestedStart)
+        assertEquals(350_100, requestedEnd)
+        assertEquals(299_900, preview.videoCoveredEndMs)
+        assertEquals(100_100, preview.videoShortfallMs)
+        assertTrue(preview.includeVideo)
+        assertFalse(preview.destinationExists)
+        assertFalse(previewDestination?.exists() == true)
+        assertEquals(byteArrayOf(1, 2, 3).toList(), session.videoFile.readBytes().toList())
+    }
+
+    @Test
+    fun previewReportsFullVideoShortfallWhenGrowingVideoIsMissing() {
+        val root = createTempDirectory("capture-preview-video-missing").toFile()
+        val session = session(root, recordVideo = true)
+        writeCaptureInput(session, listOf(RawRow("row\n", 400_000, 1)))
+
+        val preview = CaptureArchiveExporter().preview(
+            session,
+            CaptureExportRequest(
+                destination = File(root, "missing-video.zip"),
+                range = CaptureRange.LAST_FIVE,
+                cutoffElapsedMs = 400_000,
+                includeVideo = true,
+            ),
+        )
+
+        assertNull(preview.videoCoveredEndMs)
+        assertEquals(300_000, preview.videoShortfallMs)
+        assertTrue(preview.includeVideo)
+    }
+
+    // Regression for the "No complete log rows in this range" bug: CaptureRange.ALL preview
+    // reported logStartMs == null unconditionally, because rangeStartMs(ALL, …) returns
+    // Long.MIN_VALUE (meaning "no lower bound requested") and that sentinel used to be mapped
+    // straight to null for display — even when the index held real rows. Observed live with 1,613
+    // rows and range=All: the log half of the popover claimed no rows while the video half
+    // correctly reported coverage.
+    @Test
+    fun previewReportsRealLogCoverageForRangeAllEvenThoughItsLowerBoundIsUnbounded() {
+        val root = createTempDirectory("capture-preview-log-all").toFile()
+        val session = session(root)
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 10_000, 1),
+            RawRow("row-2\n", 20_000, 2),
+            RawRow("row-3\n", 30_000, 3),
+        ))
+
+        val preview = CaptureArchiveExporter().preview(
+            session,
+            CaptureExportRequest(destination = File(root, "not-published.zip"), range = CaptureRange.ALL, cutoffElapsedMs = 30_000),
+        )
+
+        assertEquals(10_000, preview.logStartMs)
+        assertEquals(30_000, preview.logEndMs)
+    }
+
+    // The flip side of the bug above: a range that requests a real, non-sentinel boundary (so the
+    // old null-mapping never triggered) but that genuinely contains no rows must still report
+    // logStartMs == null. Before this fix, the non-SELECTION branch never inspected the index at
+    // all, so this case fabricated a timestamp instead of reporting "no rows."
+    @Test
+    fun previewReportsNoLogCoverageWhenSinceSaveRangeIsGenuinelyEmpty() {
+        val root = createTempDirectory("capture-preview-log-empty").toFile()
+        val session = session(root).copy(logCheckpointMs = 30_000)
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 10_000, 1),
+            RawRow("row-2\n", 20_000, 2),
+            RawRow("row-3\n", 30_000, 3),
+        ))
+
+        val preview = CaptureArchiveExporter().preview(
+            session,
+            CaptureExportRequest(destination = File(root, "not-published.zip"), range = CaptureRange.SINCE_SAVE, cutoffElapsedMs = 30_000),
+        )
+
+        assertNull(preview.logStartMs)
+        assertNull(preview.logEndMs)
+    }
+
+    @Test
+    fun exportBeforeVideoStartsSucceedsWithLogOnlyArchiveAndNullMapping() {
+        val root = createTempDirectory("capture-export-before-video").toFile()
+        val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 5_000, elapsedMs = 40_000)
+        writeCaptureInput(session, listOf(
+            RawRow("row-before-1\n", 1_000, 1),
+            RawRow("row-before-2\n", 3_000, 2),
+        ))
+        val destination = File(root, "before-video.zip")
+        val exporter = CaptureArchiveExporter(CaptureVideoExporter { _, _, _, _ -> error("must not remux") })
+
+        val result = exporter.export(
+            session,
+            CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 3_000),
+        )
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+
+        assertEquals("Capture exported; video has no usable coverage for this range", result.message)
+        assertNull(imported.videoFile)
+        assertNull(imported.descriptor.video)
+        assertEquals(listOf(null, null), imported.timeline.rows.map { it.videoMs })
+    }
+
+    @Test
+    fun exportedVideoArchiveReopensWithRowsMappedOnlyInsideVideoCoverage() {
+        val root = createTempDirectory("capture-export-video-mapping").toFile()
+        val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 2_000, elapsedMs = 5_000)
+        writeCaptureInput(session, listOf(
+            RawRow("row-before-video\n", 1_000, 1),
+            RawRow("row-in-video-1\n", 3_000, 2),
+            RawRow("row-in-video-2\n", 5_000, 3),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val fakeVideo = CaptureVideoExporter { _, target, start, end ->
+            target.writeText("video")
+            CaptureVideoClip(start, end, end - start)
+        }
+        val destination = File(root, "video.zip")
+
+        CaptureArchiveExporter(fakeVideo).export(
+            session,
+            CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 5_000),
+        )
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+
+        assertTrue(imported.videoFile?.isFile == true)
+        assertEquals("video/screen.mkv", imported.descriptor.video?.path)
+        assertEquals(listOf(null, 1_000L, 3_000L), imported.timeline.rows.map { it.videoMs })
+    }
+
+    @Test
+    fun finalizedCaptureReopensWithRawVideoMappingAndUnmappedPreVideoRows() {
+        val root = createTempDirectory("capture-finalize-video-mapping").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 2_000,
+            elapsedMs = 5_000,
+        )
+        writeCaptureInput(session, listOf(
+            RawRow("row-before-video\n", 1_000, 1),
+            RawRow("row-in-video\n", 3_000, 2),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(7, 8, 9))
+
+        val imported = CaptureArchiveExporter().finalizeSessionInPlace(session)
+
+        assertEquals(session.videoFile, imported.videoFile)
+        assertEquals("mapping/log-video.jsonl", imported.descriptor.mapping.path)
+        assertEquals("video/screen.mkv", imported.descriptor.video?.path)
+        assertEquals(listOf(null, 1_000L), imported.timeline.rows.map { it.videoMs })
+    }
+
+    @Test
+    fun finalizeStoppedSessionOpensInPlaceAndKeepsRawVideo() {
+        val root = createTempDirectory("capture-finalize").toFile()
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 500,
+        )
+        writeCaptureInput(session, listOf(
+            RawRow("row-1\n", 1_000, 1),
+            RawRow("----- separator\n", 1_500, null),
+            RawRow("row-2\n", 2_000, 2),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(7, 8, 9))
+
+        val imported = CaptureArchiveExporter().finalizeSessionInPlace(session)
+
+        assertEquals(session.logFile, imported.logFile)
+        assertEquals(session.videoFile, imported.videoFile)
+        assertEquals("row-1\n----- separator\nrow-2\n", imported.logFile.readText())
+        assertEquals(listOf(500L, 1_500L), imported.timeline.rows.map { it.videoMs })
+        assertEquals(File(session.directory, CAPTURE_DESCRIPTOR_NAME), imported.source)
+        assertEquals(byteArrayOf(7, 8, 9).toList(), imported.videoFile?.readBytes()?.toList())
+        assertTrue(File(session.directory, "mapping/log-video.jsonl").isFile)
+        assertTrue(File(session.directory, CAPTURE_DESCRIPTOR_NAME).isFile)
+        assertTrue(root.listFiles().orEmpty().none { it.extension == "zip" })
+    }
+
+    @Test
+    fun finalizeRejectsActiveAndIncompleteSessionsWithoutPublishingDescriptor() {
+        val root = createTempDirectory("capture-finalize-invalid").toFile()
+        val exporter = CaptureArchiveExporter()
+        val active = session(root).copy(status = com.indagium.capture.CaptureStatus.RECORDING)
+        assertFailsWith<CaptureArchiveException> { exporter.finalizeSessionInPlace(active) }
+
+        val incomplete = session(root).copy(
+            id = "incomplete",
+            directory = File(root, "incomplete"),
+            status = com.indagium.capture.CaptureStatus.INTERRUPTED,
+        )
+        writeCaptureInput(incomplete, listOf(RawRow("row\n", 1_000, 1)))
+        incomplete.indexFile.appendText("{\"byteOffset\":0")
+        assertFailsWith<CaptureArchiveException> { exporter.finalizeSessionInPlace(incomplete) }
+        assertFalse(File(incomplete.directory, CAPTURE_DESCRIPTOR_NAME).exists())
+        assertFalse(File(incomplete.directory, "mapping/log-video.jsonl").exists())
     }
 
     @Test
@@ -108,7 +407,11 @@ class CaptureArchiveTest {
     @Test
     fun failurePublishesNothingAndDoesNotAdvanceCallerOwnedCheckpoints() {
         val root = createTempDirectory("capture-archive-failure").toFile()
-        val session = session(root, recordVideo = true).copy(logCheckpointMs = 12_000, videoCheckpointMs = 11_000)
+        val session = session(root, recordVideo = true).copy(
+            videoStartElapsedMs = 10_000,
+            logCheckpointMs = 12_000,
+            videoCheckpointMs = 11_000,
+        )
         writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 13_000, 1)))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1))

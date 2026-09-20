@@ -97,6 +97,70 @@ class CaptureAppRoundTripTest {
         }
     }
 
+    // Regression test for the "Save + open" bug: CaptureStrip.kt's export-result LaunchedEffect
+    // used to call state.openFile(file) directly on the just-exported ZIP, which parses the
+    // archive's raw bytes as a plain text log instead of opening it as a capture archive. The fix
+    // gates on CaptureArchiveReader.isCaptureArchive(file) and calls openCaptureFile for a true
+    // capture archive, falling back to openFile only for something that genuinely isn't one — this
+    // test exercises that exact gate against a real exported archive.
+    @Test
+    fun saveAndOpenGateRoutesARealExportedArchiveToTheCaptureOpener() = runBlocking {
+        val root = createTempDirectory("capture-save-and-open").toFile()
+        try {
+            val zip = exportFixture(root)
+            assertTrue(CaptureArchiveReader.isCaptureArchive(zip), "the exported ZIP must be recognized as a capture archive")
+
+            val app = AppState(autosaveFile = File(root, "autosave"), autoExportNotes = false)
+            try {
+                val id = if (CaptureArchiveReader.isCaptureArchive(zip)) {
+                    app.openCaptureFile(zip)
+                } else {
+                    checkNotNull(app.openFile(zip))
+                }
+                waitLoaded(app, id)
+                val tab = assertNotNull(app.tab(id))
+                assertEquals(FIXTURE_ROW_COUNT, tab.logData.size)
+                assertTrue(
+                    tab.logData.all { it.tag == "Tag" },
+                    "rows must be the parsed capture log (tag \"Tag\"), not raw zip bytes",
+                )
+                assertTrue(tab.attachedVideo != null, "openCaptureFile must attach the video; plain openFile never does")
+            } finally {
+                app.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    // Documents the bug itself: routing the same archive through the plain-text opener (what
+    // "Save + open" did before the fix) produces exactly the garbage the user reported — rows
+    // tagged "RAW" whose message is the zip's raw binary, starting with the "PK" local-file-header
+    // signature — and no attached video.
+    @Test
+    fun plainOpenFileOnACaptureArchiveProducesRawGarbageRowsNotTheParsedLog() = runBlocking {
+        val root = createTempDirectory("capture-plain-open-garbage").toFile()
+        try {
+            val zip = exportFixture(root)
+            val app = AppState(autosaveFile = File(root, "autosave"), autoExportNotes = false)
+            try {
+                val id = checkNotNull(app.openFile(zip))
+                waitLoaded(app, id)
+                val tab = assertNotNull(app.tab(id))
+                assertNull(tab.attachedVideo)
+                assertTrue(tab.logData.isNotEmpty())
+                assertTrue(
+                    tab.logData.any { it.tag == "RAW" && it.msg.contains("PK") },
+                    "plain openFile must not have parsed the real capture log inside the zip",
+                )
+            } finally {
+                app.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun alteredAssetsDisableMappingOnRestore() = runBlocking {
         val root = createTempDirectory("capture-tamper-restore").toFile()

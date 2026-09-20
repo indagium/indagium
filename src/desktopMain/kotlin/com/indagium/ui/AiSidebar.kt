@@ -166,6 +166,7 @@ internal fun RightSidebarPanel(
     onAiPanelFocusChanged: (Boolean) -> Unit,
     notesContent: @Composable () -> Unit,
     videoContent: (@Composable () -> Unit)? = null,
+    notesVisible: Boolean = state.annotationVisible,
 ) {
     // AiSidebarRuntime batches active-run changes through this revision flow. Observing it here is
     // important: RightSidebarPanel owns Notes, while AiSidebarPanel is a sibling and otherwise a
@@ -175,7 +176,7 @@ internal fun RightSidebarPanel(
     @Suppress("UNUSED_VARIABLE")
     val observedAiRevision = aiRevision
     val notesLocked = state.aiSessions.sessionFor(tab.id).activeRun != null
-    val notesOn = state.annotationVisible
+    val notesOn = notesVisible
     val aiOn = state.aiPanelVisible
     val videoOn = videoContent != null
     val density = LocalDensity.current

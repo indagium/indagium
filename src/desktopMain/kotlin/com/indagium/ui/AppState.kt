@@ -13,6 +13,10 @@ import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.ai.validateAiProviderProfile
+import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportPreview
+import com.indagium.capture.CaptureExportRequest
+import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
@@ -174,6 +178,8 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
+
 // Upper bound on AppState.canonicalPathCache. One entry per distinct source path ever resolved;
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
 // then simply stops growing (later paths still resolve, just uncached).
@@ -261,6 +267,36 @@ fun emptyWorkspaceTab() = LogTab(
     // not "not yet analyzed," and shouldn't show an "Analyzing…" hint that will never resolve.
     analysis = LogAnalysis(pending = false),
 )
+
+/**
+ * Attaches a finalized capture to the already-open streaming tab. This is intentionally a pure
+ * tab transformation so the stop/finalization path cannot accidentally reconstruct a tab and
+ * lose annotations, selection, filters, or the tab id.
+ */
+internal fun attachFinalizedCapture(
+    tab: LogTab,
+    imported: com.indagium.capture.ImportedCapture,
+    enableDoubleClickSeek: Boolean,
+): LogTab {
+    val attachment = imported.videoFile?.let { video ->
+        VideoAttachment(
+            source = VideoSource.LocalFile(video.absolutePath),
+            sourceLabel = "${imported.source.name}/${video.name}",
+            captureSourcePath = imported.source.absolutePath,
+            doubleClickSeekEnabled = enableDoubleClickSeek,
+        )
+    }
+    return tab.copy(
+        attachedVideo = attachment,
+        captureTimeline = imported.timeline.takeIf { attachment != null },
+        captureSessionId = null,
+        // Recorded independently of attachment (which is null whenever the session had no video)
+        // so a video-off capture can still be found by its session id after Stop — see the field's
+        // doc in Model.kt for why attachedVideo.captureSourcePath alone isn't enough.
+        captureSourceSessionId = imported.descriptor.sessionId,
+        tailing = false,
+    )
+}
 
 /** Transient state for the non-destructive R8/ProGuard retrace result dialog. */
 sealed interface RetraceDialogState {
@@ -685,6 +721,10 @@ internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 // it grows. TailCoordinator.appendTailedLines checks this on every batch instead — see its own
 // comment for why the flip is deliberately one-way, never turning back off.
 internal const val LARGE_FILE_MODE_ROWS = 500_000
+
+// Capture logs are flushed frequently enough for responsive rows while avoiding the heavier
+// whole-list filter pass on every half-second default tail tick.
+private const val CAPTURE_TAIL_POLL_INTERVAL_MS = 1_000L
 
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
@@ -1677,9 +1717,8 @@ class AppState(
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
 
     // Video panel (ui/VideoPanel.kt, Task B) — a single global visibility toggle mirroring
-    // filterVisible/annotationVisible above; the panel itself only ever renders when the ACTIVE
-    // tab also has attachedVideo != null (see BoundVideoPanel), so toggling this off/on has no
-    // visible effect on a tab with no video attached.
+    // filterVisible/annotationVisible above; live capture and launcher tabs use the same slot for
+    // their status card before an attached video exists.
     var videoPanelVisible by mutableStateOf(true)
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
@@ -1758,14 +1797,501 @@ class AppState(
     // each is started on ioScope.
     private val tailCoordinator = TailCoordinator(this, ioScope)
 
-    var captureWorkspaceOpen by mutableStateOf(false)
-    private val captureCoordinatorDelegate = lazy {
-        CaptureCoordinator(this, ioScope, File(autosaveFile.absoluteFile.parentFile, "captures"))
+    private val captureServiceDelegate = lazy {
+        CaptureService(this, ioScope, File(autosaveFile.absoluteFile.parentFile, "captures"))
     }
-    internal val captureCoordinator: CaptureCoordinator get() = captureCoordinatorDelegate.value
+    internal val captureService: CaptureService get() = captureServiceDelegate.value
+    private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+    private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
+    private val captureLaunchDrafts = mutableMapOf<String, com.indagium.capture.CaptureSettings>()
+
+    /** Observable guard covering tool validation, recovery, and process launch. */
+    internal var captureStartInProgress by mutableStateOf(false)
+        private set
+
+    /** Last asynchronous screenshot result shown by the active capture tab's strip. */
+    internal var captureScreenshotStatus by mutableStateOf<String?>(null)
+        private set
+    private val captureScreenshotCapabilities = mutableStateMapOf<String, CaptureScreenshotCapability>()
+
+    /** Per-tab stopped-capture lifecycle. Kept separate from [LogTab.captureSessionId] so a
+     * failed finalization can leave the raw log usable as an ordinary stopped tab. */
+    private val captureFinalizationStatusByTab = mutableStateMapOf<String, String>()
+    internal var captureExportBusy by mutableStateOf(false)
+        private set
+    internal var captureExportResult by mutableStateOf<CaptureExportResult?>(null)
+        private set
+    internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
+        private set
+    internal var captureExportError by mutableStateOf<String?>(null)
+        private set
+    private var captureExportJob: Job? = null
+    internal val liveCaptureTabId: String?
+        get() = synchronized(stateLock) { tabs.firstOrNull { it.captureSessionId != null }?.id }
+
+    /**
+     * Presentation-only access to the controller owned by a live capture tab. The controller
+     * remains private to AppState; exposing it here lets Compose collect its recorder snapshot
+     * without creating a second recorder or a VideoPlayerController.
+     */
+    internal fun captureControllerFor(tabId: String): TabCaptureController? =
+        synchronized(stateLock) { captureControllersByTab[tabId] }
+
+    internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
+
+    internal fun screenshotCapability(tabId: String): CaptureScreenshotCapability =
+        captureScreenshotCapabilities[tabId]
+            ?: CaptureScreenshotCapability(CaptureScreenshotAvailability.PENDING)
+
+    /** Starts the lazy per-session exec-out probe; repeated recompositions are harmless. */
+    internal fun ensureScreenshotCapability(tabId: String) {
+        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.PENDING) return
+        captureScreenshotCapabilities[tabId] = CaptureScreenshotCapability(CaptureScreenshotAvailability.PENDING)
+        val controller = captureControllerFor(tabId) ?: return
+        ioScope.launch {
+            val result = runCatching { controller.supportsScreenshots() }
+            captureScreenshotCapabilities[tabId] = result.fold(
+                onSuccess = { supported ->
+                    if (supported) CaptureScreenshotCapability(CaptureScreenshotAvailability.ENABLED)
+                    else CaptureScreenshotCapability(
+                        CaptureScreenshotAvailability.DISABLED,
+                        "This device does not support adb exec-out screenshots",
+                    )
+                },
+                onFailure = { failure ->
+                    CaptureScreenshotCapability(
+                        CaptureScreenshotAvailability.DISABLED,
+                        failure.message ?: "adb exec-out screenshot probe failed",
+                    )
+                },
+            )
+        }
+    }
+
+    /** Runs adb screencap away from the Compose thread and publishes a short-lived status line. */
+    internal fun screenshotCapture(tabId: String) {
+        val capability = screenshotCapability(tabId)
+        if (capability.availability != CaptureScreenshotAvailability.ENABLED) {
+            captureScreenshotStatus = capability.reason ?: "Screenshot capability is still being checked"
+            return
+        }
+        // The Screenshot button is only enabled while active (see screenshotButtonEnabled in
+        // CaptureStrip.kt), but recorder state and this lookup are not updated atomically, so a
+        // click that lands right as the capture stops can still reach here with no controller.
+        // This used to be a bare `?: return`: a user-triggered click that silently did nothing.
+        val controller = captureControllerFor(tabId) ?: run {
+            captureScreenshotStatus = "Screenshot failed: capture has already stopped"
+            return
+        }
+        captureScreenshotStatus = "Taking screenshot…"
+        ioScope.launch {
+            val result = runCatching { controller.screenshotCapture() }
+            captureScreenshotStatus = result.fold(
+                onSuccess = { screenshot ->
+                    val tab = tab(tabId)
+                    val videoFrame = screenshot.videoStartElapsedMs?.let { videoStart ->
+                        VideoFrameReference(
+                            source = VideoSource.LocalFile(screenshot.videoFile.absolutePath),
+                            sourceLabel = "capture.indagium.json/${screenshot.videoFile.name}",
+                            positionMs = (screenshot.elapsedMs - videoStart).coerceAtLeast(0L),
+                        )
+                    }
+                    val provenance = videoFrame?.provenanceLabel ?: "From ${tab?.filename ?: "capture"}"
+                    val blockId = addImageBlock(
+                        tabId = tabId,
+                        sourceBytes = screenshot.bytes,
+                        provenance = provenance,
+                        videoFrame = videoFrame,
+                    )
+                    if (blockId == null) {
+                        "Screenshot saved: ${screenshot.file.name} (could not add it to Notes)"
+                    } else {
+                        "Screenshot saved and added to Notes: ${screenshot.file.name}"
+                    }
+                },
+                onFailure = { "Screenshot failed: ${it.message ?: it::class.simpleName}" },
+            )
+            if (result.isFailure) {
+                captureScreenshotCapabilities[tabId] = CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    result.exceptionOrNull()?.message ?: "Screenshot capture failed",
+                )
+            }
+        }
+    }
+
+    /** Opens or reuses one auxiliary, non-recording scrcpy mirror window. */
+    internal fun openCaptureMirror(tabId: String) {
+        // Same reachable-but-silent case as screenshotCapture above: was a bare `?: return`.
+        val controller = captureControllerFor(tabId) ?: run {
+            captureService.reportError("Mirror could not open: capture has already stopped")
+            return
+        }
+        ioScope.launch {
+            val result = runCatching { controller.openMirror() }
+            result.onFailure { captureService.reportError("Mirror could not open: ${it.message}") }
+        }
+    }
+
+    /**
+     * Starts a snapshot export on the IO lane without stopping the live recorder.
+     *
+     * This was the worst of the capture regressions: `captureControllerFor(tabId) ?: return`, with
+     * no error and no feedback, was reachable from an ordinary button click any time the capture
+     * had already stopped (the controller is removed by stopCaptureTab's finally block) — the user
+     * would click Save/Save+open in the snapshot popover and nothing would happen. That specific
+     * path is now unreachable in the UI (a stopped tab's strip routes through saveRetainedCapture
+     * instead, see CaptureStoppedStrip in CaptureStrip.kt), but the same start/stop race described
+     * on screenshotCapture above still applies here, so this reports through captureExportError —
+     * the same field every other failure in this function already uses — rather than staying silent.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun exportCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+        val controller = captureControllerFor(tabId) ?: run {
+            captureExportError = "Capture export failed: capture has already stopped"
+            return
+        }
+        if (captureExportBusy) return
+        captureExportBusy = true
+        captureExportResult = null
+        captureExportError = null
+        captureExportJob = ioScope.launch {
+            try {
+                val result = runInterruptible { controller.export(request) }
+                captureExportResult = result
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                captureExportError = failure.message ?: failure::class.simpleName ?: "Capture export failed"
+            } finally {
+                captureExportBusy = false
+                captureExportJob = null
+            }
+        }
+    }
+
+    internal fun previewCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+        // Preview is not itself a direct button click (it runs off a LaunchedEffect while the
+        // snapshot popover is open), so unlike the other three lookups above this doesn't warrant
+        // captureExportError — but leaving a stale preview on screen from before the capture
+        // stopped would be actively misleading, so clear it instead of the previous silent no-op.
+        val controller = captureControllerFor(tabId) ?: run {
+            captureExportPreview = null
+            return
+        }
+        ioScope.launch {
+            captureExportPreview = runCatching { controller.preview(request) }.getOrNull()
+        }
+    }
+
+    /** Cancels only the export job; the per-tab recorder remains active. */
+    internal fun cancelCaptureSnapshot() {
+        captureExportJob?.cancel()
+    }
+
+    internal fun clearCaptureExportStatus() {
+        captureExportResult = null
+        captureExportPreview = null
+        captureExportError = null
+    }
 
     internal fun updateCaptureSessionCalibration(sourcePath: String, additionalOffsetMs: Long) {
-        captureCoordinator.applyCalibration(sourcePath, additionalOffsetMs)
+        captureService.applyCalibration(sourcePath, additionalOffsetMs)
+    }
+
+    /** Settings-only capture hooks; they intentionally do not open the legacy workspace. */
+    internal val captureToolStatus: String?
+        get() = captureService.toolStatus
+
+    internal val captureToolResolution: CaptureToolResolution?
+        get() = captureService.toolResolutionFor(settings.captureSettings)
+
+    internal fun browseCaptureAdb() = captureService.browseAdbFromSettings()
+
+    internal fun browseCaptureScrcpy() = captureService.browseScrcpyFromSettings()
+
+    internal fun recheckCaptureTools() = captureService.recheckToolsFromSettings()
+
+    internal fun openCaptureInstallGuidance() = captureService.openInstallGuidanceFromSettings()
+
+    internal fun openRetainedCapture(sessionId: String) {
+        ioScope.launch {
+            // Reachable from a click (the launcher's "Open" button on a retained session) whenever
+            // the session directory was removed on disk between the button rendering and the
+            // click — was a bare `?: return@launch`, part of item 5's silent-no-op audit.
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureService.reportError("This capture session is no longer on disk")
+                return@launch
+            }
+            val descriptor = File(session.directory, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME)
+            if (descriptor.isFile) openPath(descriptor) else openFile(session.logFile)
+        }
+    }
+
+    internal fun discardRetainedCapture(sessionId: String): Boolean {
+        val deleted = runCatching { captureService.discardRetainedSession(sessionId) }.getOrDefault(false)
+        if (deleted) captureService.updateSessions()
+        return deleted
+    }
+
+    internal fun saveRetainedCapture(sessionId: String) {
+        ioScope.launch {
+            // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
+            // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
+            // CaptureStrip.kt), not just the launcher's retained-sessions list.
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureExportError = "This capture session is no longer on disk"
+                return@launch
+            }
+            val directory = settings.defaultSaveDir?.let(::File) ?: session.directory.parentFile
+            val filename = com.indagium.capture.renderCaptureFilename(
+                session.settings.filenameTemplate,
+                session.device,
+                session.startedEpochMs,
+                com.indagium.capture.CaptureRange.ALL,
+                session.exportCounter,
+                session.settings.label,
+            )
+            captureExportError = null
+            captureExportResult = runCatching {
+                captureService.exportRetainedSession(sessionId, File(directory, filename))
+            }.getOrElse { failure ->
+                captureExportError = failure.message ?: "Retained capture export failed"
+                null
+            }
+        }
+    }
+
+    /** Focus the current live capture, or create the session-only New capture launcher tab. */
+    internal fun focusCaptureOrLauncher() {
+        synchronized(stateLock) {
+            tabs.firstOrNull { it.captureSessionId != null }?.let { setActiveSurfaceToTab(it.id); return }
+            tabs.firstOrNull { it.isCaptureLauncher }?.let { setActiveSurfaceToTab(it.id); return }
+            val launcherId = "capture-launcher-${UUID.randomUUID()}"
+            val launcher = mkTab(
+                id = launcherId,
+                filename = "New capture",
+                logData = emptyList(),
+                analysis = LogAnalysis(pending = false),
+                processNameMode = newTabProcessNameMode(),
+            ).copy(isCaptureLauncher = true)
+            tabs = tabs + launcher
+            captureLaunchDrafts[launcherId] = settings.captureSettings
+            setActiveSurfaceToTab(launcherId)
+        }
+    }
+
+    internal fun captureLaunchSettings(tabId: String): com.indagium.capture.CaptureSettings =
+        synchronized(stateLock) { captureLaunchDrafts[tabId] ?: settings.captureSettings }
+
+    internal fun updateCaptureLaunchSettings(
+        tabId: String,
+        transform: (com.indagium.capture.CaptureSettings) -> com.indagium.capture.CaptureSettings,
+    ) {
+        synchronized(stateLock) {
+            val current = captureLaunchDrafts[tabId] ?: settings.captureSettings
+            captureLaunchDrafts[tabId] = transform(current)
+        }
+    }
+
+    /**
+     * Starts one live capture and publishes its empty log tab before adb is launched. This method
+     * is synchronous because the recorder's startup callback is the ordering boundary; callers on
+     * the Compose thread should treat it as a short operation, while tests can assert the exact
+     * tab/tailer ordering without a race.
+     */
+    internal fun startCaptureTab(device: CaptureDevice): String? {
+        val existing = liveCaptureTabId
+        if (existing != null) {
+            activateTab(existing)
+            return existing
+        }
+        if (!device.available) {
+            captureService.reportError("Device ${device.serial} is not available (${device.state})")
+            return null
+        }
+        synchronized(stateLock) {
+            if (captureStartInProgress) {
+                captureService.reportError("A capture is already starting")
+                return null
+            }
+            captureStartInProgress = true
+        }
+        val settings = synchronized(stateLock) {
+            val launcher = tabs.firstOrNull { it.isCaptureLauncher && it.id == activeTabId }
+            launcher?.let { captureLaunchDrafts[it.id] } ?: this.settings.captureSettings
+        }
+        val controller = captureService.newController()
+        val tabId = "t${tabCounter.getAndIncrement()}"
+        synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+        ioScope.launch {
+            var published = false
+            try {
+                val tools = captureService.toolsForStart(settings)
+                controller.start(device, settings, tools) { session ->
+                    val liveTab = mkTab(
+                        id = tabId,
+                        filename = "Capture — ${device.model}",
+                        logData = emptyList(),
+                        analysis = LogAnalysis(pending = false),
+                        processNameMode = newTabProcessNameMode(),
+                    ).copy(
+                        sourcePath = session.logFile.absolutePath,
+                        tailing = true,
+                        captureSessionId = session.id,
+                        // Deliberately NOT settings.openNewFilesWithUnfiltered: that setting is
+                        // meant for a static file, where "Original" is a genuinely different view
+                        // from "Filtered". A streaming capture tab's Original pane just re-renders
+                        // the same growing feed as Filtered (no filter has been applied yet), so
+                        // honoring the setting would split the strip into two identical panes and
+                        // halve the visible rows for no benefit.
+                        showUnfiltered = false,
+                    )
+                    synchronized(stateLock) {
+                        check(tabs.none { it.captureSessionId != null }) { "A capture is already recording" }
+                        tabs = tabs + liveTab
+                        setActiveSurfaceToTab(tabId)
+                    }
+                    published = true
+                    // FileTailer captures this offset synchronously before its coroutine is scheduled.
+                    // The recorder has already opened an empty log file, so no adb line can precede it.
+                    startCaptureTailing(tabId)
+                }
+                captureService.updateSessions()
+                closeCaptureLauncherTabs()
+                monitorCaptureLifecycle(tabId, controller)
+            } catch (failure: java.io.IOException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } catch (failure: IllegalArgumentException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } catch (failure: IllegalStateException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } finally {
+                if (!published) synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+                captureStartInProgress = false
+                if (!published) controller.close()
+            }
+        }
+        return tabId
+    }
+
+    /** Watches unexpected recorder termination so a disconnected device is finalized automatically. */
+    private fun monitorCaptureLifecycle(tabId: String, controller: TabCaptureController) {
+        val monitor = ioScope.launch {
+            controller.snapshot.collect { snapshot ->
+                if (snapshot.state == com.indagium.capture.RecorderState.INTERRUPTED &&
+                    tab(tabId)?.captureSessionId != null
+                ) {
+                    stopCaptureTab(tabId)
+                    cancel()
+                }
+            }
+        }
+        synchronized(stateLock) {
+            if (captureFinalizationStatusByTab.containsKey(tabId) || tabs.none { it.id == tabId && it.captureSessionId != null }) {
+                monitor.cancel()
+            } else {
+                captureMonitorJobsByTab[tabId] = monitor
+            }
+        }
+    }
+
+    private fun captureStartFailure(
+        tabId: String,
+        controller: TabCaptureController,
+        published: Boolean,
+        failure: Throwable,
+    ): String? {
+        if (published) {
+            runCatching { tailCoordinator.cancelTailingFor(tabId) }
+            synchronized(stateLock) {
+                tabs = tabs.filterNot { it.id == tabId }
+                if (activeTabId == tabId) activeTabId = tabs.lastOrNull()?.id.orEmpty()
+                if (activeSurface is ActiveSurface.Log && (activeSurface as ActiveSurface.Log).tabId == tabId) {
+                    activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
+                }
+            }
+        }
+        runCatching { controller.close() }
+        synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+        captureService.reportError(failure.message ?: "Capture could not start")
+        return null
+    }
+
+    /** Stops, drains, and finalizes one live capture on IO, attaching it back to the same tab. */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun stopCaptureTab(tabId: String) {
+        val controller = synchronized(stateLock) {
+            if (captureFinalizationStatusByTab[tabId] == CAPTURE_FINALIZING_STATUS) return
+            captureControllersByTab[tabId]
+        } ?: return
+        // Captured before any mutation below, so a canceled or failed finalize still remembers
+        // which recorder session this tab came from. Without this, stopCaptureTab's failure paths
+        // cleared captureSessionId and left captureSourceSessionId unset, so a capture that failed
+        // to finalize (or whose finalize was canceled) had no way for the strip/export to find its
+        // session afterward — the raw session directory and logs/logcat.log survive independently
+        // of finalization, so export should too.
+        val sourceSessionId = tab(tabId)?.captureSessionId
+        captureFinalizationStatusByTab[tabId] = CAPTURE_FINALIZING_STATUS
+        ioScope.launch {
+            try {
+                // Draining is part of the capture's correctness contract: the durable mapping
+                // is row-ordinal based, so finalizing before the last bytes are appended silently
+                // loses the tail of log↔video coverage. If the drain itself fails, still stop the
+                // recorder in the finally path, but never publish an archive from an incomplete
+                // tab.
+                val drainFailure = runCatching { tailCoordinator.drainAndStopTailing(tabId) }.exceptionOrNull()
+                if (drainFailure != null) throw IllegalStateException(
+                    "Capture log drain failed: ${drainFailure.message ?: drainFailure::class.simpleName}",
+                    drainFailure,
+                )
+                val stopped = controller.stop()
+                    ?: error("Capture stopped without a session")
+                val imported = controller.finalizeStopped(stopped)
+                attachFinalizedCapture(tabId, imported)
+                captureFinalizationStatusByTab.remove(tabId)
+            } catch (cancelled: CancellationException) {
+                // A canceled stop must not leave the raw tab marked as recording. The recorder
+                // has already been asked to stop before finalization begins in normal operation;
+                // keep the raw log visible and report the incomplete finalization.
+                captureFinalizationStatusByTab[tabId] = "Finalization canceled"
+                upTab(tabId) { it.copy(captureSessionId = null, tailing = false, captureSourceSessionId = sourceSessionId) }
+                throw cancelled
+            } catch (failure: Throwable) {
+                val message = failure.message ?: failure::class.simpleName ?: "Capture finalization failed"
+                captureFinalizationStatusByTab[tabId] = "Finalization failed: $message"
+                captureService.reportError("Capture finalization failed: $message")
+                // The capture log itself remains a normal, stopped log even if descriptor or
+                // mapping publication fails. Do not hide it or replace the existing tab.
+                upTab(tabId) { it.copy(captureSessionId = null, tailing = false, captureSourceSessionId = sourceSessionId) }
+            } finally {
+                synchronized(stateLock) { captureMonitorJobsByTab.remove(tabId)?.cancel() }
+                synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+                controller.close()
+                captureService.updateSessions()
+            }
+        }
+    }
+
+    /** Applies a finalized capture to the existing streaming tab without reparsing/opening one. */
+    private fun attachFinalizedCapture(tabId: String, imported: com.indagium.capture.ImportedCapture) {
+        if (tab(tabId) == null) return
+        upTab(tabId) {
+            // This copy deliberately starts from the current tab rather than constructing a new
+            // parsed tab: tailing may have landed the final rows, and Notes/selection/filter state
+            // must survive the transition from recording to a durable capture attachment.
+            attachFinalizedCapture(it, imported, settings.enableDoubleClickVideoSeekOnLink)
+        }
+        if (tab(tabId)?.attachedVideo != null) videoPanelVisible = true
+    }
+
+    private fun closeCaptureLauncherTabs() {
+        val launchers = synchronized(stateLock) { tabs.filter { it.isCaptureLauncher }.map { it.id }.toSet() }
+        if (launchers.isNotEmpty()) closeTabsById(launchers, preferredActiveId = liveCaptureTabId)
+    }
+
+    private fun startCaptureTailing(tabId: String) {
+        tailCoordinator.startTailing(tabId, startOffset = 0L, pollIntervalMs = CAPTURE_TAIL_POLL_INTERVAL_MS)
     }
 
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
@@ -2018,7 +2544,8 @@ class AppState(
         aiSidebarRuntime.close()
         aiSessions.clear()
         controlServerManager.stopControlServer()
-        if (captureCoordinatorDelegate.isInitialized()) captureCoordinator.close()
+        stopAllLiveCaptures()
+        if (captureServiceDelegate.isInitialized()) captureService.close()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
@@ -2033,6 +2560,18 @@ class AppState(
         }
         AppLogger.close()
         AppLogger.setFailureReporter(null)
+    }
+
+    /** Stops recorder processes outside stateLock before the IO scope is cancelled. */
+    private fun stopAllLiveCaptures() {
+        val live = synchronized(stateLock) { captureControllersByTab.toList().also { captureControllersByTab.clear() } }
+        live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
+    }
+
+    private fun stopControllerNow(tabId: String, controller: TabCaptureController) {
+        runCatching { tailCoordinator.drainAndStopTailing(tabId) }
+        runCatching { controller.stop() }
+        runCatching { controller.close() }
     }
 
     // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
@@ -5545,6 +6084,16 @@ class AppState(
     // safe here since the monitor is reentrant.
     private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
         if (tabIds.isEmpty()) return
+        // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
+        // captured under stateLock, but stopped before entering the tab-removal lock below so a
+        // close action never performs process/file IO while stateLock is held.
+        val liveControllers = synchronized(stateLock) {
+            tabIds.mapNotNull { tabId -> captureControllersByTab[tabId]?.let { tabId to it } }
+        }
+        liveControllers.forEach { (tabId, controller) ->
+            synchronized(stateLock) { captureControllersByTab.remove(tabId) }
+            stopControllerNow(tabId, controller)
+        }
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
@@ -5552,12 +6101,15 @@ class AppState(
                 cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
+                captureMonitorJobsByTab.remove(tabId)?.cancel()
                 // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
                 // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
                 // above) and were never removed here — every closed capture tab leaked its entire
                 // log for the lifetime of the app.
                 captureIndexByTab.remove(tabId)
                 captureFollowFloorIndexByTab.remove(tabId)
+                captureLaunchDrafts.remove(tabId)
+                captureScreenshotCapabilities.remove(tabId)
                 videoFollowSuppressionByTab.remove(tabId)
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)
@@ -6009,7 +6561,6 @@ class AppState(
         val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
         if (existing != null) {
             setActiveSurfaceToTab(existing.id)
-            captureWorkspaceOpen = false
             return existing.id
         }
         val tabId = "t${tabCounter.getAndIncrement()}"
@@ -6047,7 +6598,6 @@ class AppState(
                     ensureActive()
                     tabs = tabs + captureTab
                     setActiveSurfaceToTab(tabId)
-                    captureWorkspaceOpen = false
                     if (video != null) videoPanelVisible = true
                 }
                 rememberRecentFile(file)

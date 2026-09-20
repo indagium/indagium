@@ -778,6 +778,20 @@ data class LogTab(
     // functions later and reflexively including every LogTab field, this one is the deliberate
     // exception, same as tidMap/manualProcessNamePicks/recoveredNoteRows above: do not add it there.
     val captureSessionId: String? = null,
+    // Session-only launcher marker. Appended after the capture-session field and deliberately
+    // omitted from AutosaveCodec so an empty New capture tab never reappears after relaunch.
+    val isCaptureLauncher: Boolean = false,
+    // Remembers which recorder session a STOPPED capture tab came from, so Export/Screenshot/
+    // Mirror can still find it after captureSessionId is cleared on Stop (AppState.
+    // attachFinalizedCapture). Unlike captureSessionId, this deliberately survives past Stop for
+    // the tab's whole lifetime — it is what lets the strip keep offering "Save ZIP"/"Open folder"
+    // on a finished capture instead of going silently unreachable. attachedVideo.captureSourcePath
+    // (set by the same function) was considered as a substitute so this field wouldn't be needed,
+    // but it is null whenever the session recorded no video — a video-off capture would then have
+    // no way to find its session at all — so this field exists instead. Session-only, same
+    // exception as captureSessionId immediately above: deliberately ABSENT from AutosaveCodec's
+    // tabToken()/tabShellFromToken()/persistedSnapshot(). Do not add it there.
+    val captureSourceSessionId: String? = null,
 )
 
 /**

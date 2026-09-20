@@ -18,6 +18,7 @@ import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
@@ -78,6 +79,7 @@ internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
+    Capture("Capture", Icons.Outlined.PhoneAndroid),
     Automation("Automation", Icons.Outlined.Bolt),
     AiProviders("AI providers", Icons.Outlined.Psychology),
     VoiceInput("Voice input", Icons.Outlined.Mic),
@@ -192,6 +194,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     ) {
                         when (selectedSection) {
                             SettingsSection.Appearance -> AppearanceSettingsSection(state)
+                            SettingsSection.Capture -> CaptureSettingsSection(state)
                             SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
                             SettingsSection.Issues -> IssuesSettingsSection(state)
                             SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
@@ -509,7 +512,10 @@ private fun AppearanceSettingsSection(state: AppState) {
             val pathText: @Composable () -> Unit = {
                 AppText(
                     fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
-                    color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
+                    color = tc.ts,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
             if (fullPath != null) {
@@ -532,7 +538,8 @@ private fun AppearanceSettingsSection(state: AppState) {
             AppButton("Browse", onClick = { state.pickSaveFolder() })
             if (fullPath != null) AppButton(
                 "Clear",
-                onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
+                onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } },
+            )
         }
     }
     if (isLinuxOs) {

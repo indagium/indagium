@@ -394,28 +394,54 @@ observed in the code and enforced by convention and review rather than by toolin
   done by adapter composables — `BoundFilterPanel` (`ui/FileView.kt:32`) and the inline binding at
   `ui/FileView.kt:188-231`. See [§11.4](#114-the-bound-adapter-pattern) for the trade-off this makes.
 
-### 6.2 Capture workspace boundary
+### 6.2 Capture boundary and tab integration
 
-`CaptureCoordinator` owns the UI-facing wiring for the implemented `capture` package. It resolves
-user-supplied host `adb` and optional `scrcpy`, lists device states, starts and stops one-device
-sessions, publishes a bounded preview, and sends export work off the Compose thread. The capture
-package owns process adapters, session recovery, raw log and index writing, screenshots, disk
-guards, ZIP range export, and the versioned `capture.indagium.json` codec. It has no Compose
-rendering, viewer state, AI, or terminal-oriented diagnostics dependency.
+`CaptureService` and `TabCaptureController` in `ui/CaptureCoordinator.kt` provide the UI-facing
+boundary for the `capture` package. The service resolves user-supplied host `adb` and optional
+`scrcpy`, discovers device states, recovers retained session directories, and exposes tool and
+diagnostic status. A controller belongs to exactly one live capture tab and owns that tab's recorder
+and archive-export lane. `AppState` enforces the one-live-capture invariant, publishes an empty
+streaming tab before launching `adb logcat`, and uses `TailCoordinator` to append parsed rows while
+the recorder writes the raw log.
+
+The toolbar's Capture action focuses the existing live tab or creates a session-only **New capture**
+launcher tab. The launcher lists devices, actionable tool errors, and non-recording retained
+sessions. Starting a device closes the launcher and activates a normal `LogTab`; filters, selection,
+folding, search, and Notes therefore operate on a live capture through the same viewer path as a
+file-backed log. `LogTab.captureSessionId` marks an active stream and `isCaptureLauncher` marks the
+ephemeral launcher. Both are intentionally excluded from autosave. A live tab renders a 46dp
+capture strip and may expose a status-only right-sidebar capture card; live video is never embedded
+in the Compose window. When mirroring is enabled, `scrcpy` owns its separate native window.
+
+The `capture` package owns process adapters, session metadata and recovery, raw log/index writing,
+screenshots, disk guards, ZIP range export, timing records, and the versioned
+`capture.indagium.json` codec. It has no Compose rendering, viewer state, AI, or diagnostics UI
+dependency. Capture Settings are part of the normal Settings dialog and apply immediately; they
+cover tool paths, adb buffer mode, video limits, naming, storage, and diagnostics.
 
 The descriptor is the stable hand-off between capture and review. Its versioned metadata points to
 `logs/logcat.log`, `mapping/log-video.jsonl`, and optional video/screenshots inside a portable ZIP;
 opening a ZIP or an extracted descriptor verifies the assets and auto-links the available log,
-mapping, and video artifacts. Export takes a frozen byte boundary, so saving live capture data does
-not restart the session. Mapping rows carry an estimated video position or an explicit gap, while a
-persisted millisecond offset supports manual calibration. Video export snapshots the growing MKV and
-selects a readable preceding keyframe when available.
+mapping, and video artifacts. A live Snapshot freezes the current log/index byte boundary and exports
+without stopping the recorder; it supports all history, a time range, since the last successful
+save, or a contiguous interval bounded by the first and last selected capture rows. Export runs on
+`ioScope`, and cancellation or failure leaves the recorder active. Video snapshots the growing MKV
+and chooses a readable preceding keyframe when available; descriptor coverage records the actual
+video end instead of implying that video spans the entire log range. Screenshots are stored in the
+session and added to Notes with video-frame provenance when available.
+
+Stop drains tailing and finalizes the descriptor/mapping in place on the same tab. The resulting
+attached video is then handled by the ordinary video player, so log rows and video can seek one
+another. If the application exits before Stop, the recorder marks its directory interrupted; the
+next launcher lists it for recovery. Live recorder/launcher markers are not restored as active
+state, while a finalized descriptor link is durable and reopens as a normal capture-backed tab.
 
 On macOS, Windows, and Linux (x86 or ARM), host `adb` and optional `scrcpy` are resolved from the
 normal platform installation. A Linux Flatpak launch uses `flatpak-spawn --host --watch-bus` for
 those host tools and requires only the `org.freedesktop.Flatpak` talk permission. Automated tests
-cover the capture process, archive, persistence, and mapping paths; live device and scrcpy testing
-across all supported platforms is unavailable in the current environment.
+cover process, archive, persistence, settings, selection bounds, cancellation, and mapping paths;
+they do not prove Compose layout fidelity, and live device/scrcpy verification across all supported
+platforms is unavailable in the current environment.
 
 ---
 
@@ -532,6 +558,9 @@ classDiagram
         +VideoAttachment attachedVideo
         +Boolean videoFollowLog
         +String noteTargetName
+        +CaptureTimeline captureTimeline
+        +String captureSessionId
+        +Boolean isCaptureLauncher
     }
 
     class LogEntry {
@@ -645,6 +674,19 @@ classDiagram
         +Int logId
     }
 
+    class CaptureTimeline {
+        +List~CaptureMappingRow~ rows
+        +String quality
+        +Long uncertaintyMs
+        +Long manualOffsetMs
+    }
+
+    class CaptureMappingRow {
+        +Int ordinal
+        +Long elapsedMs
+        +Long videoMs
+    }
+
     class TidMapState {
         +TidMapTarget target
         +Map~Int,Color~ colors
@@ -674,6 +716,8 @@ classDiagram
     AnnBlock <|-- LogRef
     AnnBlock <|-- Image
     VideoAttachment "1" o-- "0..1" VideoAnchor
+    LogTab "1" o-- "0..1" CaptureTimeline
+    CaptureTimeline "1" *-- "many" CaptureMappingRow
 ```
 
 **Notes on the model that are not obvious from the shape:**
@@ -690,9 +734,12 @@ classDiagram
 - **`AnnBlock.Image` overrides `equals`/`hashCode` to compare `bytes` by content**
   (`model/Model.kt:254-269`). With the default array-reference comparison, the debounced autosave in
   `ui/App.kt:102` would re-arm forever.
-- **Four fields are session-only** and deliberately excluded from persistence: `selected`, `tailing`,
-  `search`, `tidMap`, `videoFollowLog`, plus the derived `logData`, `rmap`, `analysis`,
-  `largeFileMode`. See [§13.4](#134-what-is-persisted-and-what-is-not).
+- **Session-only fields are deliberately excluded from persistence:** `selected`, `tailing`,
+  `search`, `tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and
+  `isCaptureLauncher`, plus the derived `logData`, `rmap`, `analysis`, and `largeFileMode`.
+  A live capture cannot resume after relaunch because `adb`/`scrcpy` processes are not persisted;
+  the raw capture directory is recovered as an interrupted retained session instead. See
+  [§13.4](#134-what-is-persisted-and-what-is-not).
 
 ### 8.2 The view model and settings
 
@@ -740,6 +787,7 @@ classDiagram
         +List~AiProviderProfile~ aiProviderProfiles
         +Int aiMaxToolRounds
         +VoiceInputSettings voiceInput
+        +CaptureSettings captureSettings
         +List~String~ sourceFolders
         +List~SourceLogConfiguration~ sourceLogConfigurations
         +List~CustomIssueRule~ customIssueRules
@@ -790,9 +838,28 @@ classDiagram
         +VoiceRecognitionEngine recognitionEngine
     }
 
+    class CaptureSettings {
+        +String adbPath
+        +String scrcpyPath
+        +List~String~ buffers
+        +CaptureBufferMode bufferMode
+        +Boolean includeBufferedLogs
+        +Boolean recordVideo
+        +Boolean mirror
+        +Boolean audio
+        +Int maxSize
+        +Int maxFps
+        +Int bitrateMbps
+        +Long sessionLimitBytes
+        +Long freeSpaceReserveBytes
+        +String filenameTemplate
+        +String label
+    }
+
     AppSettings "1" *-- "many" AiProviderProfile
     AppSettings "1" *-- "many" CustomIssueRule
     AppSettings "1" *-- "1" VoiceInputSettings
+    AppSettings "1" *-- "1" CaptureSettings
     AiProviderProfile --> AiProviderKind
     SavedFilter "many" --> "0..1" SavedFilterFolder : folderId
 ```
@@ -903,6 +970,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `FilterPanel.kt` | Left sidebar: levels, tags, message rules, highlighters, sequences, collapsed ranges, saved filters |
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
+| `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
+| `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | Session-only device launcher, live-tab capture chrome/snapshot/diagnostics, and immediate Capture Settings surface |
 | `AutosaveCodec.kt` / `AutosaveScheduler.kt` / `FilterCodec.kt` / `DesktopStorage.kt` | Persistence: encoding, scheduling, the saved-filter library format, path resolution |
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
@@ -943,6 +1012,9 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
+| `capture/CaptureRecorder.kt` | Per-session adb logcat/scrcpy process lifecycle, append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
+| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and log↔video timing/index mapping |
+| `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb/scrcpy resolution/validation and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
 | `singleinstance/SingleInstance.kt` | File lock plus loopback socket; forwards file arguments to the running instance |
@@ -1124,11 +1196,18 @@ lock-ordering constraint in the system, and it is what keeps a slow disk write f
 | `AutosaveScheduler` | `ui/AppState.kt:1290` | *When* an autosave write happens; not *what* is written |
 | `AnnotationManager` | `ui/AppState.kt:1295` | The annotation block model: add, update, move, reorder, remove |
 | `TailCoordinator` | `ui/AppState.kt:1306` | Per-tab `FileTailer` jobs and debounced re-analysis |
+| `CaptureService` + per-tab `TabCaptureController` | `ui/AppState.kt:1796-1801` | Tool/device discovery, retained-session recovery, one recorder/export lane for each live capture tab |
 | `AiSidebarRuntime` + `AiSessionRegistry` | `ui/AppState.kt:970-981` | AI runs, sessions, provider selection |
 
 Per-tab `VideoPlayerController` instances live in a `ConcurrentHashMap` (`ui/AppState.kt:1338`) with
 an injected factory. `VoiceInputController` is the exception — it is created in the composable
 (`ui/AiSidebar.kt:328-330`), not on `AppState`, because it is bound to the lifetime of the AI panel.
+
+Capture has a similar per-tab ownership rule, but the controller is explicit rather than cached by
+video-path: `captureControllersByTab` contains the recorder/export lane only while a session is live.
+`stopCaptureTab` drains and finalizes on `ioScope`, then removes the controller after attaching the
+durable descriptor to the same tab. Snapshot export and cancellation use that same lane, so an
+export cannot stop or replace the live recorder.
 
 ### 11.4 The `Bound*` adapter pattern
 
@@ -1347,6 +1426,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
+| `captures/` | Live capture session directories: raw log, append-only capture index, MKV, screenshots, session metadata, finalized descriptor/mapping | Session files and portable-capture source data; interrupted sessions are recoverable from the launcher |
 | `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
 
 #### 13.1.1 The pre-rename directory and the one-time migration
@@ -1430,7 +1510,12 @@ existing autosave — the worst case is a stale but valid file plus an orphaned 
 
 **Deliberately not persisted:** `logData` and `rmap` (re-parsed from the file), `analysis`
 (recomputed), `largeFileMode` (re-derived from the file size), `selected`, `tailing`, `search`,
-`tidMap`, `videoFollowLog` (session-only by product decision — `model/Model.kt:481,490,506,516`).
+`tidMap`, `videoFollowLog`, `captureTimeline`, `captureSessionId`, and `isCaptureLauncher`
+(session-only state — `model/Model.kt`). A live recorder is therefore never resumed from autosave;
+its session directory is recovered as interrupted capture data. After Stop, the same tab carries a
+durable `attachedVideo`/capture descriptor link, so the finalized capture can be restored normally.
+`AppSettings.captureSettings` is persisted in the keyed settings JSON and is applied immediately by
+the Capture section of Settings.
 
 ### 13.5 Restore is metadata-only
 
@@ -1639,6 +1724,12 @@ The dependency choice is documented in `build.gradle.kts:27-33`: FFmpeg natives 
 (no user install), decode every phone recording format including HEVC/`.mov`/WebM, and are
 license-clean (Apache wrapper over an LGPL FFmpeg build). VLCJ was rejected as GPLv3, JavaFX Media
 for missing HEVC/`.mov`, and GStreamer/libVLC-direct for requiring a per-OS runtime install.
+
+This player is used after a capture is stopped and finalized (or when an imported capture is opened).
+While a capture is live, `scrcpy` owns the mirror in its separate native window; the live capture
+card in Indagium reports status only and does not attempt to decode the growing MKV. Snapshot export
+remuxes a frozen portion of that growing file and records both requested and actual video coverage,
+including any keyframe-shortened start or end gap.
 
 ### 14.4 Voice
 
@@ -1996,6 +2087,10 @@ chosen by how much it should interrupt the user:
 | Reset app data failed | `resetAppDataError` | Inline in the confirm dialog |
 | Update check failed | `updateCheckStatus = Failed` | Text in Settings; **silent** for the automatic startup check |
 | Video decode failed | `VideoPlayerController.error`, `FailedVideoPlayerController` | Message in the video panel |
+| Capture tools/device unavailable | `CaptureService.toolStatus`, `devices`, `error` | Inline in the New capture launcher or Settings → Capture, with recheck/install guidance |
+| Live recorder/storage/video diagnostic | `RecorderSnapshot.diagnostics` | Capture strip's diagnostics drawer and status-only live capture card |
+| Snapshot export failed/cancelled | `captureExportError` / job cancellation | Snapshot popover; the live recorder remains active and no partial destination is published |
+| Stop/finalization failed | `captureFinalizationStatusByTab` | Same tab's finalization banner; raw log remains visible as a stopped ordinary log |
 | Load appears hung | `isLoading` + `loadingStatus` | `StuckLoadingDialog` after a delay, offering Cancel loading / Close all tabs / Clear cache / Keep waiting |
 
 The stuck-loading watchdog (`ui/App.kt:281-307`) deserves note: it is the escape hatch for the case
@@ -2261,6 +2356,7 @@ checker, then exercises real application logic with no UI, no disk of consequenc
 | Autosave scheduling, debouncing, and write ordering | `AutosaveSchedulerTest` |
 | Tailer offset capture, rotation, partial lines | `FileTailerTest` |
 | Capture process, session recovery, archive integrity, and video/log mapping | `capture/*Test`, `CaptureArchiveTest`, `CaptureAppRoundTripTest`, `CaptureVideoMappingTest` |
+| Capture settings, launcher/focus routing, selection bounds, and snapshot cancellation/failure preserving a live recorder | `CaptureSettingsUiTest` and capture state/archive tests |
 | Video frame-drop policy | `FrameDropPolicyTest` |
 | MCP and REST contract behaviour | `ControlServerTest`, `ControlServerMcpTest`, `IndagiumToolGatewayTest` |
 | Every AI provider's stream parsing | `AnthropicMessagesProviderTest`, `OpenAiCompatibleProviderTest`, `ClaudeCodeClientTest`, `CodexAppServerClientTest` |
@@ -2277,6 +2373,12 @@ Kover excludes `@Composable`-annotated code and the pure-rendering UI classes by
 honest exclusion rather than a coverage-number optimisation: those files are projections of
 `AppState` and cannot be meaningfully unit-tested without a Compose test harness the project has
 chosen not to adopt.
+
+Capture's unit tests intentionally stop at state, archive, and process seams. They cannot prove
+Compose layout fidelity, native `scrcpy` window behavior, or device authorization across the three
+desktop platforms. The idle launcher, recording strip/card, snapshot popover, and Settings → Capture
+states therefore require manual `./gradlew desktopRun` inspection with a real device; that manual
+verification is the weaker, environment-dependent acceptance point.
 
 ---
 
@@ -2472,7 +2574,10 @@ habit. **Mitigation:** an Apple Developer certificate in CI.
 | **Message rule** | An include or exclude rule matching a line's message or PID/TID, optionally scoped to a tag or package. |
 | **RAW** | The tag given to a line that matched none of the four logcat formats. Such lines are kept, never dropped. |
 | **Sequence** | A user-defined start (and optional end) pattern that folds a recurring region of the log into a collapsible group. |
-| **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, and all AI conversations. |
+| **Capture launcher** | Session-only New capture tab that discovers tools/devices and lists retained interrupted sessions before a live capture starts. |
+| **Capture strip** | The 46dp live-tab toolbar showing device, elapsed time, storage, video status, Stop, Screenshot, Snapshot, Settings, and diagnostics. |
+| **Capture snapshot** | A point-in-time ZIP export of a live session; it freezes the current byte boundary and does not stop the recorder. |
+| **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, capture timeline/session/launcher markers, and all AI conversations. |
 | **Splice fast path** | An optimisation that mutates a cached item list in place for a single stack-group expand/collapse instead of rebuilding it. |
 | **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format Indagium writes its own diagnostic log in. |
 | **TID map** | A gutter overlay colouring rows by thread id within a chosen process. |
@@ -2498,6 +2603,8 @@ Where to read about a given source file.
 | `ui/App.kt`, `FileView.kt`, `CompareView.kt` | [5](#5-high-level-component-architecture), [11.4](#114-the-bound-adapter-pattern) |
 | `ui/AutosaveCodec.kt`, `AutosaveScheduler.kt`, `DesktopStorage.kt` | [13](#13-persistence-architecture), [15.4](#154-autosave-and-session-restore), [22.4](#224-add-a-persisted-setting) |
 | `ui/ControlServerManager.kt`, `TailCoordinator.kt`, `AnnotationManager.kt` | [11.3](#113-delegation-to-coordinators) |
+| `ui/CaptureCoordinator.kt`, `CaptureLauncher.kt`, `CaptureStrip.kt`, `CaptureSettingsUi.kt` | [6.2](#62-capture-boundary-and-tab-integration), [9.3](#93-ui), [11.3](#113-delegation-to-coordinators), [17.2](#172-failure-surfaces) |
+| `capture/` | [6.2](#62-capture-boundary-and-tab-integration), [9.6](#96-source-cases-and-platform-packages), [13.1](#131-storage-layout), [21.2](#212-what-is-protected-by-dedicated-tests) |
 | `ui/Shortcuts.kt`, `Theme.kt` | [9.3](#93-ui), [22.5](#225-add-a-theme) |
 | `debug/ControlServer.kt`, `IndagiumToolGateway.kt`, `IndagiumToolOperations.kt` | [14.1](#141-control-server-mcp-and-rest), [15.3](#153-external-mcp-client-invoking-a-tool), [18.2](#182-control-server-exposure), [22.1](#221-add-an-mcp--automation-tool) |
 | `debug/Json.kt` | [R3](#r3--hand-rolled-json-that-does-not-report-malformed-input) |
