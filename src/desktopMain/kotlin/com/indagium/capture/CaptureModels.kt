@@ -78,7 +78,7 @@ data class CaptureSession(
 /** One complete raw line; separators have no parsed ordinal. Elapsed time uses a monotonic clock. */
 data class CaptureLogIndexRecord(val byteOffset: Long, val byteLength: Int, val elapsedMs: Long, val rowOrdinal: Int?)
 
-enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE }
+enum class CaptureRange { ALL, LAST_FIVE, LAST_TEN, CUSTOM, SINCE_SAVE, SELECTION }
 
 data class CaptureExportRequest(
     val destination: File,
@@ -86,6 +86,10 @@ data class CaptureExportRequest(
     val customMinutes: Int = 5,
     val includeVideo: Boolean = true,
     val cutoffElapsedMs: Long,
+    /** Inclusive source capture-row bounds for [CaptureRange.SELECTION]. */
+    val selectedFirstRowOrdinal: Int? = null,
+    val selectedLastRowOrdinal: Int? = null,
+    val overwriteExisting: Boolean = false,
 )
 
 data class CaptureExportResult(
@@ -94,6 +98,18 @@ data class CaptureExportResult(
     val videoCoveredEndMs: Long?,
     val videoActualStartMs: Long?,
     val message: String,
+)
+
+/** Read-only coverage and overwrite information shown before a live snapshot is saved. */
+data class CaptureExportPreview(
+    val logStartMs: Long?,
+    val logEndMs: Long?,
+    val videoCoveredEndMs: Long?,
+    val videoShortfallMs: Long?,
+    val selectedFirstRowOrdinal: Int?,
+    val selectedLastRowOrdinal: Int?,
+    val destinationExists: Boolean,
+    val includeVideo: Boolean,
 )
 
 /** Null video positions deliberately represent rows outside the readable recording. */

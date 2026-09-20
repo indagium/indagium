@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
@@ -16,7 +17,51 @@ import kotlin.test.assertTrue
 
 class CaptureRecorderTest {
     @Test
-    fun recordsRawBytesAndOneBasedDurableIndexBeforePublishingPreview() {
+    fun publishesStorageBeforeLaunchingAdb() {
+        val root = Files.createTempDirectory("capture-order-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        var callbackSession: CaptureSession? = null
+        try {
+            val started = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner)) { session ->
+                callbackSession = session
+                assertTrue(session.logFile.isFile)
+                assertEquals(0L, session.logFile.length())
+                // The callback is the ordering seam: adb has not been spawned yet.
+                assertTrue(runner.specs.isEmpty())
+            }
+            assertEquals(started.id, callbackSession?.id)
+            assertEquals(1, runner.specs.size)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun aSecondRecorderCannotLeaveTwoSessionsRecording() {
+        val root = Files.createTempDirectory("capture-single-live-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        runner.enqueue(StreamingFakeProcess())
+        val first = CaptureRecorder(root, runner)
+        val second = CaptureRecorder(root, runner)
+        try {
+            first.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            second.start(DEVICE.copy(serial = "SECOND"), testSettings(), CaptureTools(ADB, null, runner))
+            val statuses = second.listSessions().associateBy { it.device.serial }
+            assertEquals(CaptureStatus.INTERRUPTED, statuses.getValue(DEVICE.serial).status)
+            assertEquals(CaptureStatus.RECORDING, statuses.getValue("SECOND").status)
+        } finally {
+            second.close()
+            first.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun recordsRawBytesAndOneBasedDurableIndexWithoutRetainingPreviewRows() {
         val root = Files.createTempDirectory("capture-recorder-test").toFile()
         val runner = FakeCaptureRunner()
         val logcat = StreamingFakeProcess()
@@ -43,7 +88,10 @@ class CaptureRecorderTest {
                 records[0].getValue("byteLength").jsonPrimitive.long,
                 records[1].getValue("byteOffset").jsonPrimitive.long,
             )
-            assertEquals(listOf(1, 2), recorder.snapshot.value.preview.mapNotNull { it.rowOrdinal })
+            assertEquals(
+                listOf(1, 2),
+                records.mapNotNull { it["rowOrdinal"]?.jsonPrimitive?.intOrNull },
+            )
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -179,6 +227,39 @@ class CaptureRecorderTest {
             assertEquals(
                 listOf("adb", "-s", DEVICE.serial, "exec-out", "screencap", "-p"),
                 runner.specs.last().command,
+            )
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    // Regression test for the "screenshot saved (could not add it to Notes)" bug: `screencap`
+    // itself — not adb — writes a "[Warning] Multiple displays were found..." banner to stdout
+    // ahead of the PNG bytes on any device/emulator with more than one display. Confirmed against
+    // a real connected emulator: `adb exec-out screencap -p` returned that banner text followed by
+    // a valid PNG. Left in place, the banner corrupts the PNG signature, ImageIO can't decode it,
+    // and downscaleAndEncodeJpeg (built on ImageIO.read) returns null — the file on disk is
+    // "saved" (its bytes are whatever adb returned), but it is not a valid image and can never be
+    // attached to Notes.
+    @Test
+    fun screenshotStripsALeadingDeviceWarningBannerBeforeThePngSignature() {
+        val root = Files.createTempDirectory("capture-screenshot-banner-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3)
+        val banner = "[Warning] Multiple displays were found, but no display id was specified!\n".toByteArray()
+        runner.enqueue(CompletedFakeProcess(stdout = banner + png))
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            val screenshot = recorder.screenshotCapture()
+
+            assertTrue(png.contentEquals(screenshot.bytes), "the banner must be stripped from the in-memory bytes")
+            assertTrue(png.contentEquals(screenshot.file.readBytes()), "the banner must also be stripped from the file written to disk")
+            assertTrue(
+                recorder.snapshot.value.diagnostics.any { it.contains("stripped") },
+                "stripping a banner is unusual enough to surface as a diagnostic",
             )
         } finally {
             recorder.close()

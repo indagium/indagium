@@ -34,16 +34,9 @@ import kotlin.concurrent.thread
 
 enum class RecorderState { IDLE, RECORDING, STOPPING, STOPPED, INTERRUPTED }
 
-data class CapturePreviewLine(
-    val text: String,
-    val elapsedMs: Long,
-    val rowOrdinal: Int?,
-)
-
 data class RecorderSnapshot(
     val state: RecorderState = RecorderState.IDLE,
     val session: CaptureSession? = null,
-    val preview: List<CapturePreviewLine> = emptyList(),
     val diagnostics: List<String> = emptyList(),
     val logBytes: Long = 0,
     val indexedRows: Int = 0,
@@ -56,6 +49,19 @@ data class CaptureSessionBoundary(
     val logLength: Long,
     val indexLength: Long,
     val elapsedMs: Long,
+)
+
+/**
+ * A successful device screenshot plus the capture-clock metadata needed to make it a durable
+ * annotation frame. The existing [CaptureRecorder.screenshot] API still returns just [file] for
+ * callers that only need the persisted PNG; the richer seam is used by the live-tab UI.
+ */
+data class CaptureScreenshot(
+    val file: File,
+    val bytes: ByteArray,
+    val elapsedMs: Long,
+    val videoStartElapsedMs: Long?,
+    val videoFile: File,
 )
 
 fun interface CaptureClock {
@@ -86,7 +92,6 @@ class CaptureRecorder(
 ) : Closeable {
     private val lock = Any()
     private val active = AtomicBoolean(false)
-    private val preview = ArrayDeque<CapturePreviewLine>(MAX_PREVIEW_LINES)
     private val diagnostics = ArrayDeque<String>(MAX_DIAGNOSTICS)
     private val mutableSnapshot = MutableStateFlow(RecorderSnapshot())
     private val mutableSelectedSession = MutableStateFlow<CaptureSession?>(null)
@@ -103,6 +108,7 @@ class CaptureRecorder(
     private var startedMonotonicMs: Long = 0
     private var logProcess: RunningCaptureProcess? = null
     private var videoProcess: RunningCaptureProcess? = null
+    private var mirrorProcess: RunningCaptureProcess? = null
     private var logThread: Thread? = null
     private var videoThread: Thread? = null
     private var watchdogThread: Thread? = null
@@ -121,7 +127,18 @@ class CaptureRecorder(
     val snapshot: StateFlow<RecorderSnapshot> = mutableSnapshot.asStateFlow()
     val selectedSession: StateFlow<CaptureSession?> = mutableSelectedSession.asStateFlow()
 
-    fun start(device: CaptureDevice, settings: CaptureSettings, tools: CaptureTools): CaptureSession {
+    /**
+     * Starts a recorder. [beforeLogcatLaunch] is invoked after the session directory and both
+     * append-only streams have been opened, but before adb is spawned. The streaming-tab owner
+     * uses this narrow seam to publish the empty log tab and start its tailer at byte offset 0;
+     * without it, the first adb lines could land between tab-open and tailer-start and be lost.
+     */
+    fun start(
+        device: CaptureDevice,
+        settings: CaptureSettings,
+        tools: CaptureTools,
+        beforeLogcatLaunch: ((CaptureSession) -> Unit)? = null,
+    ): CaptureSession {
         synchronized(lock) {
             require(device.available) { deviceStateGuidance(device.state) ?: "Device is not available" }
             check(!active.get()) { "A capture session is already recording" }
@@ -138,7 +155,7 @@ class CaptureRecorder(
             startLatch = CountDownLatch(1)
         }
         return try {
-            startCapture(device, settings, tools)
+            startCapture(device, settings, tools, beforeLogcatLaunch)
         } finally {
             synchronized(lock) {
                 starting = false
@@ -152,7 +169,12 @@ class CaptureRecorder(
     // Keep startup phases together so cancellation can be checked between file creation,
     // adb launch, and optional video launch without exposing a half-started session.
     @Suppress("LongMethod", "CyclomaticComplexMethod", "ThrowsCount", "TooGenericExceptionCaught")
-    private fun startCapture(device: CaptureDevice, settings: CaptureSettings, tools: CaptureTools): CaptureSession {
+    private fun startCapture(
+        device: CaptureDevice,
+        settings: CaptureSettings,
+        tools: CaptureTools,
+        beforeLogcatLaunch: ((CaptureSession) -> Unit)?,
+    ): CaptureSession {
         recoverSessions()
         val startedEpochMs = epochMillis()
         val sessionId = sessionId(startedEpochMs)
@@ -188,7 +210,6 @@ class CaptureRecorder(
             if (startCancellationRequested) {
                 true
             } else {
-                preview.clear()
                 diagnostics.clear()
                 currentSession = session
                 currentTools = tools
@@ -229,6 +250,7 @@ class CaptureRecorder(
         }
 
         try {
+            beforeLogcatLaunch?.invoke(session)
             val logcatArguments = buildList {
                 add("logcat")
                 addAll(listOf("-v", "threadtime"))
@@ -324,7 +346,9 @@ class CaptureRecorder(
 
     fun stop(): CaptureSession? = stopInternal(CaptureStatus.STOPPED, null)
 
-    fun screenshot(): File {
+    fun screenshot(): File = screenshotCapture().file
+
+    fun screenshotCapture(): CaptureScreenshot {
         val (session, tools) = synchronized(lock) {
             check(active.get()) { "Screenshot requires an active capture session" }
             requireNotNull(currentSession) to requireNotNull(currentTools)
@@ -340,12 +364,69 @@ class CaptureRecorder(
             val detail = result.stderrText().trim().take(MAX_DIAGNOSTIC_CHARS)
             if (detail.isEmpty()) "Screenshot failed (exit ${result.exitCode})" else "Screenshot failed: $detail"
         }
+        // `screencap` itself (not adb) writes a "[Warning] Multiple displays were found..." banner
+        // to stdout ahead of the PNG bytes on devices/emulators with more than one display — it is
+        // not routed to stderr, so `exec-out` passes it straight through as part of the "binary"
+        // stream. Left in place, the leading text corrupts the PNG signature: ImageIO.read() (and
+        // downscaleAndEncodeJpeg, which is built on it) then fails to decode the image at all, so
+        // the screenshot silently never reaches Notes even though the raw bytes were captured fine.
+        val pngBytes = stripLeadingNonPngBytes(result.stdout)
+        checkNotNull(pngBytes) { "Screenshot did not contain PNG data" }
+        if (pngBytes.size != result.stdout.size) {
+            addDiagnostic(
+                "Screenshot: stripped ${result.stdout.size - pngBytes.size} byte(s) of device banner text " +
+                    "before the PNG signature",
+            )
+        }
         val destination = File(session.directory, "screenshots/screenshot-$elapsed.png")
         FileOutputStream(destination).use { output ->
-            output.write(result.stdout)
+            output.write(pngBytes)
             output.fd.sync()
         }
-        return destination
+        return CaptureScreenshot(
+            file = destination,
+            bytes = pngBytes,
+            elapsedMs = elapsed,
+            videoStartElapsedMs = session.videoStartElapsedMs,
+            videoFile = session.videoFile,
+        )
+    }
+
+    /** Performs the per-session functional screenshot capability probe lazily. */
+    fun supportsScreenshots(): Boolean {
+        val (session, tools) = synchronized(lock) {
+            check(active.get()) { "Screenshot support requires an active capture session" }
+            requireNotNull(currentSession) to requireNotNull(currentTools)
+        }
+        return tools.supportsScreenshots(session.device.serial)
+    }
+
+    /** Opens at most one auxiliary, visible, non-recording scrcpy process for this session. */
+    fun openMirror(): Boolean {
+        val (session, tools) = synchronized(lock) {
+            check(active.get()) { "Mirror requires an active capture session" }
+            requireNotNull(currentSession) to requireNotNull(currentTools)
+        }
+        synchronized(lock) {
+            if (mirrorProcess?.isAlive == true) return true
+            mirrorProcess = null
+        }
+        val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings))
+        val accepted = synchronized(lock) {
+            if (!active.get()) {
+                false
+            } else {
+                mirrorProcess = process
+                true
+            }
+        }
+        if (!accepted) {
+            process.terminate()
+            process.close()
+            return false
+        }
+        thread(name = "capture-mirror-${session.id}", isDaemon = true) { monitorMirror(process) }
+        return true
     }
 
     fun listSessions(): List<CaptureSession> {
@@ -429,12 +510,16 @@ class CaptureRecorder(
         try {
             process.inputStream.use { input ->
                 forEachRawLine(input) { raw ->
-                    if (!active.get()) return@forEachRawLine false
                     val elapsed = elapsedNow()
                     var storageFailure: String? = null
                     synchronized(lock) {
-                        if (!active.get()) return@synchronized
                         val session = currentSession ?: return@synchronized
+                        // Once stopInternal has claimed the stop, active is false but the
+                        // process may still have bytes buffered in its pipe. Keep consuming and
+                        // indexing those bytes until EOF; stopInternal joins this thread before
+                        // publishing the final session. This is the recorder-side half of the
+                        // mandatory tail drain and prevents a final adb line from disappearing.
+                        if (logOutput == null || indexOutput == null) return@synchronized
                         try {
                             enforceStorageLimitsLocked(session, elapsed, raw.size)
                             val offset = logBytes
@@ -446,9 +531,6 @@ class CaptureRecorder(
                             val indexBytes = (indexRecordJson(record) + "\n").toByteArray(Charsets.UTF_8)
                             val index = requireNotNull(indexOutput)
                             index.write(indexBytes)
-                            val text = raw.toString(Charsets.UTF_8).trimEnd('\r', '\n')
-                            if (preview.size == MAX_PREVIEW_LINES) preview.removeFirst()
-                            preview.addLast(CapturePreviewLine(text, elapsed, ordinal))
                         } catch (failure: IOException) {
                             storageFailure = failure.message ?: "Capture storage failed"
                         } catch (failure: RuntimeException) {
@@ -486,6 +568,16 @@ class CaptureRecorder(
         process.close()
     }
 
+    private fun monitorMirror(process: RunningCaptureProcess) {
+        drainDiagnostics(process.errorStream, "scrcpy mirror")
+        process.waitFor(Duration.ofDays(VIDEO_MONITOR_MAX_WAIT_DAYS))
+        synchronized(lock) {
+            if (mirrorProcess === process) mirrorProcess = null
+            if (active.get()) publishLocked(RecorderState.RECORDING, force = true)
+        }
+        process.close()
+    }
+
     private fun stopInternal(status: CaptureStatus, reason: String?): CaptureSession? {
         var ownsStop = false
         var processes = emptyList<RunningCaptureProcess>()
@@ -497,7 +589,7 @@ class CaptureRecorder(
                 ownsStop = true
                 reason?.let(::addDiagnosticLocked)
                 publishLocked(RecorderState.STOPPING, force = true)
-                processes = listOfNotNull(logProcess, videoProcess)
+                processes = listOfNotNull(logProcess, videoProcess, mirrorProcess)
             } else if (starting) {
                 startup = startLatch
             }
@@ -529,6 +621,7 @@ class CaptureRecorder(
                 indexFileOutput = null
                 logProcess = null
                 videoProcess = null
+                mirrorProcess = null
                 val old = currentSession ?: return null
                 val interruptionList = if (reason == null) {
                     old.interruptions
@@ -590,7 +683,6 @@ class CaptureRecorder(
         mutableSnapshot.value = RecorderSnapshot(
             state = state,
             session = sessionForUi,
-            preview = preview.toList(),
             diagnostics = diagnostics.toList(),
             logBytes = logBytes,
             indexedRows = rowOrdinal,
@@ -796,8 +888,29 @@ private val SESSION_ID_TIME: DateTimeFormatter = DateTimeFormatter
     .ofPattern("yyyyMMdd-HHmmss")
     .withZone(ZoneOffset.UTC)
 
+/** Standard 8-byte PNG file signature (`\x89PNG\r\n\x1a\n`). */
+private val PNG_SIGNATURE = byteArrayOf(
+    0x89.toByte(), 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+)
+
+/**
+ * Finds the PNG signature in [bytes] and returns the data from there on, dropping any prefix
+ * (see [CaptureRecorder.screenshotCapture]'s banner-stripping note above). Returns the original
+ * array unchanged when the signature is already at offset 0 (the common case), and null when no
+ * PNG signature is present anywhere in [bytes].
+ */
+private fun stripLeadingNonPngBytes(bytes: ByteArray): ByteArray? {
+    if (bytes.size < PNG_SIGNATURE.size) return null
+    outer@ for (start in 0..(bytes.size - PNG_SIGNATURE.size)) {
+        for (i in PNG_SIGNATURE.indices) {
+            if (bytes[start + i] != PNG_SIGNATURE[i]) continue@outer
+        }
+        return if (start == 0) bytes else bytes.copyOfRange(start, bytes.size)
+    }
+    return null
+}
+
 private const val SESSION_FILE = "session.json"
-private const val MAX_PREVIEW_LINES = 50_000
 private const val PREVIEW_PUBLISH_INTERVAL_MS = 250L
 private const val SPACE_CHECK_INTERVAL_MS = 1_000L
 private const val SESSION_METADATA_PERSIST_INTERVAL_MS = 5_000L

@@ -121,11 +121,13 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
-        // Only offered when the active tab actually has a video attached — toggling
-        // AppState.videoPanelVisible would otherwise have no visible effect (BoundVideoPanel
-        // renders nothing without an attachment), matching Compare's own `enabled = canCompare`
-        // convention of gating on real applicability rather than hiding the whole button.
-        if (state.tab(state.activeTabId)?.attachedVideo != null) {
+        // Capture sessions expose a status card before a video attachment exists; the same global
+        // toggle must therefore remain reachable for live and launcher tabs as well as imported
+        // captures.
+        val activeTabCanShowVideo = state.tab(state.activeTabId)?.let {
+            it.attachedVideo != null || it.captureSessionId != null || it.isCaptureLauncher
+        } == true
+        if (activeTabCanShowVideo) {
             ToolbarBtn(
                 "Video",
                 icon = Icons.Outlined.Movie,
@@ -160,10 +162,10 @@ internal fun TabBar(state: AppState) {
             icon = Icons.Outlined.PhoneAndroid,
             showLabel = showToolbarText,
             tooltip = "Capture Android logs and screen",
-            active = state.captureWorkspaceOpen,
+            active = state.liveCaptureTabId != null || state.activeTab()?.isCaptureLauncher == true,
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
-        ) { state.captureWorkspaceOpen = !state.captureWorkspaceOpen }
+        ) { state.focusCaptureOrLauncher() }
         ToolbarBtn(
             "Open",
             icon = Icons.Outlined.FolderOpen,

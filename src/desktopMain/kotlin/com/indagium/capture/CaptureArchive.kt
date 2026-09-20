@@ -107,13 +107,268 @@ class CaptureArchiveException(message: String, cause: Throwable? = null) : IOExc
 class CaptureArchiveExporter(
     private val videoExporter: CaptureVideoExporter = FfmpegCaptureVideoExporter(),
 ) {
+    /**
+     * Publishes the durable representation of a stopped capture beside its recorder output.
+     *
+     * This deliberately does not create a ZIP, remux the MKV, or copy any raw asset. The
+     * recorder's files are already the canonical extracted capture; finalization only derives
+     * the portable log-to-video mapping and descriptor, then re-opens that directory through the
+     * normal reader so callers receive exactly the same validation as imported archives.
+     */
     @Synchronized
-    @Suppress("CyclomaticComplexMethod")
+    @Suppress("ThrowsCount", "TooGenericExceptionCaught")
+    fun finalizeSessionInPlace(session: CaptureSession): ImportedCapture {
+        if (session.status == CaptureStatus.RECORDING) {
+            throw CaptureArchiveException("Cannot finalize an active capture session")
+        }
+        if (!session.directory.isDirectory) {
+            throw CaptureArchiveException("Capture session directory is missing: ${session.directory}")
+        }
+        requireRegularCaptureFile(session.logFile, "Capture log")
+        requireRegularCaptureFile(session.indexFile, "Capture index")
+        require(session.logFile.length() <= MAX_ARCHIVE_ENTRY_BYTES) {
+            "Capture log exceeds the size limit"
+        }
+        require(session.indexFile.length() <= MAX_MAPPING_BYTES) {
+            "Capture mapping exceeds the size limit"
+        }
+
+        val videoFile = session.videoFile.takeIf { it.isFile && it.length() > 0L }
+        if (session.settings.recordVideo && session.videoFile.exists() && !session.videoFile.isFile) {
+            throw CaptureArchiveException("Capture video is not a regular file: ${session.videoFile}")
+        }
+        if (videoFile != null) {
+            require(videoFile.length() <= MAX_VIDEO_BYTES) {
+                "Capture video exceeds the size limit"
+            }
+            require(session.videoStartElapsedMs != null) {
+                "Capture video has no start-time reference"
+            }
+        }
+
+        val input = validateFinalizationInput(session)
+        val staging = Files.createTempDirectory(session.directory.toPath(), ".finalize-").toFile()
+        val stagingSelection = File(staging, ".selected-index.jsonl")
+        val stagingMapping = File(staging, "mapping/log-video.jsonl")
+        val stagingDescriptor = File(staging, CAPTURE_DESCRIPTOR_NAME)
+        val mappingFile = File(session.directory, "mapping/log-video.jsonl")
+        val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
+        try {
+            stagingMapping.parentFile.mkdirs()
+            val selection = freezeSelection(
+                indexFile = session.indexFile,
+                frozenBytes = session.indexFile.length(),
+                frozenLogBytes = session.logFile.length(),
+                selectedStartMs = Long.MIN_VALUE,
+                selectedEndMs = Long.MAX_VALUE,
+                excludeStart = false,
+                destination = stagingSelection,
+            )
+            require(selection.recordCount >= input.indexRecordCount) {
+                "Capture index changed while finalizing"
+            }
+            writeMapping(
+                file = stagingMapping,
+                selectionIndex = stagingSelection,
+                session = session,
+                clip = null,
+                includeRawVideo = videoFile != null,
+            )
+            require(stagingMapping.length() <= MAX_MAPPING_BYTES) {
+                "Capture mapping exceeds the size limit"
+            }
+
+            val logAsset = asset("logs/logcat.log", session.logFile)
+            val mappingAsset = asset("mapping/log-video.jsonl", stagingMapping)
+            val videoAsset = videoFile?.let { asset("video/screen.mkv", it) }
+            val videoStart = session.videoStartElapsedMs
+            val videoActualStart = if (videoAsset != null && videoStart != null) {
+                videoStart - session.manualOffsetMs
+            } else {
+                null
+            }
+            val descriptor = CaptureArchiveDescriptor(
+                formatVersion = CAPTURE_ARCHIVE_VERSION,
+                sessionId = session.id,
+                device = CaptureArchiveDevice(
+                    session.device.serial,
+                    session.device.state,
+                    session.device.model,
+                    session.device.emulator,
+                ),
+                settings = session.settings.copy(adbPath = "", scrcpyPath = ""),
+                sessionStartedEpochMs = session.startedEpochMs,
+                exportedEpochMs = System.currentTimeMillis(),
+                range = CaptureRange.ALL,
+                coverage = CaptureArchiveCoverage(
+                    logStartMs = input.firstElapsedMs ?: 0L,
+                    logEndMs = input.lastElapsedMs ?: session.elapsedMs.coerceAtLeast(0L),
+                    videoRequestedStartMs = videoActualStart,
+                    videoActualStartMs = videoActualStart,
+                    videoEndMs = if (videoAsset != null) input.lastVideoElapsedMs else null,
+                ),
+                quality = "estimated",
+                uncertaintyMs = null,
+                manualOffsetMs = session.manualOffsetMs,
+                interruptions = session.interruptions,
+                log = logAsset,
+                mapping = mappingAsset,
+                video = videoAsset,
+                screenshots = emptyList(),
+            )
+            stagingDescriptor.writeText(descriptor.toJson(), Charsets.UTF_8)
+
+            publishReplacing(stagingMapping, mappingFile)
+            publishReplacing(stagingDescriptor, descriptorFile)
+
+            return CaptureArchiveReader.open(descriptorFile, session.directory)
+        } catch (failure: CaptureArchiveException) {
+            throw failure
+        } catch (failure: InterruptedException) {
+            throw failure
+        } catch (failure: Exception) {
+            throw CaptureArchiveException(
+                "Capture finalization failed: ${failure.message ?: failure::class.simpleName}",
+                failure,
+            )
+        } finally {
+            deleteTree(staging)
+        }
+    }
+
+    /**
+     * Computes the exact frozen range and current video coverage without publishing or changing
+     * the session. The temporary index spool is deleted before returning; callers can therefore
+     * use this as a preflight while the recorder keeps writing.
+     */
+    @Synchronized
+    fun preview(session: CaptureSession, request: CaptureExportRequest): CaptureExportPreview {
+        checkNotInterrupted()
+        require(request.customMinutes > 0) { "Custom capture range must be positive" }
+        require(session.logFile.isFile) { "Capture log is missing: ${session.logFile}" }
+        require(session.indexFile.isFile) { "Capture index is missing: ${session.indexFile}" }
+        val frozenLogBytes = session.logFile.length()
+        val frozenIndexBytes = session.indexFile.length()
+        // selectionBounds is ordinal-based and only set for CaptureRange.SELECTION — kept exactly
+        // as before, since it also drives the *video* range below (an explicit row selection's
+        // real timestamps are the intended video window, same as export() treats it).
+        val selectionBounds = if (request.range == CaptureRange.SELECTION) {
+            val first = requireNotNull(request.selectedFirstRowOrdinal) { "Selection export requires a first row" }
+            val last = requireNotNull(request.selectedLastRowOrdinal) { "Selection export requires a last row" }
+            require(first > 0 && first <= last) { "Selection export row bounds must be positive and ordered" }
+            findSelectionBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, first, last)
+        } else {
+            null
+        }
+        // logBounds is the *actual* first/last elapsedMs of index rows the export would include —
+        // null only when the range genuinely contains no rows. This used to be derived from
+        // rangeStartMs()'s *requested* lower bound instead of real data: rangeStartMs(ALL, …)
+        // returns Long.MIN_VALUE (no lower bound, not "empty"), and that sentinel was mapped
+        // straight to null for display, so CaptureRange.ALL showed "No complete log rows in this
+        // range" unconditionally — even with thousands of rows present — while a genuinely empty
+        // LAST_FIVE/CUSTOM/SINCE_SAVE range showed a fabricated, unverified timestamp instead of
+        // the same message. Scanning the index for real matches (as SELECTION already did via
+        // findSelectionBounds) fixes both directions. Deliberately NOT reused for the video range
+        // below — video coverage is independent of whether any *log* row matched.
+        val logBounds = selectionBounds ?: run {
+            val requestedStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.logCheckpointMs)
+            val excludeStart = request.range == CaptureRange.SINCE_SAVE && session.logCheckpointMs >= 0
+            scanElapsedBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, requestedStartMs, request.cutoffElapsedMs, excludeStart)
+        }
+        val videoRangeStartMs = selectionBounds?.firstElapsedMs
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.videoCheckpointMs)
+        val videoRangeEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
+        val includeVideo = session.settings.recordVideo && request.includeVideo
+        val videoCoverage = if (includeVideo) {
+            previewVideoCoverage(session, videoRangeStartMs, videoRangeEndMs)
+        } else {
+            null
+        }
+        return CaptureExportPreview(
+            logStartMs = logBounds?.firstElapsedMs,
+            logEndMs = logBounds?.lastElapsedMs,
+            videoCoveredEndMs = videoCoverage?.coveredEndMs,
+            videoShortfallMs = videoCoverage?.shortfallMs,
+            selectedFirstRowOrdinal = request.selectedFirstRowOrdinal,
+            selectedLastRowOrdinal = request.selectedLastRowOrdinal,
+            destinationExists = request.destination.absoluteFile.exists(),
+            includeVideo = includeVideo,
+        )
+    }
+
+    /**
+     * Uses the same growing-file snapshot and packet-window implementation as [export], but stages
+     * its result in an unreferenced temporary file. The session and destination are untouched, so
+     * this can safely run repeatedly while the recorder and its tailer remain active.
+     */
+    private fun previewVideoCoverage(
+        session: CaptureSession,
+        videoRangeStartMs: Long,
+        selectedEndMs: Long,
+    ): PreviewVideoCoverage? {
+        val requestedElapsedStart = videoRangeStartMs.takeUnless { it == Long.MIN_VALUE } ?: 0L
+        val expectedShortfall = (selectedEndMs - requestedElapsedStart).coerceAtLeast(0L)
+        val videoStartElapsed = session.videoStartElapsedMs ?: return PreviewVideoCoverage(
+            coveredEndMs = null,
+            shortfallMs = expectedShortfall,
+        )
+        val videoAvailableStart = maxOf(videoRangeStartMs, videoStartElapsed - session.manualOffsetMs)
+        val effectiveShortfall = (selectedEndMs - videoAvailableStart).coerceAtLeast(0L)
+        val source = session.videoFile
+        if (!source.isFile || source.length() <= 0L) {
+            return PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
+        }
+        val requestedSourceStart = if (videoRangeStartMs == Long.MIN_VALUE) {
+            0L
+        } else {
+            (videoRangeStartMs - videoStartElapsed + session.manualOffsetMs).coerceAtLeast(0L)
+        }
+        val requestedSourceEnd = (selectedEndMs - videoStartElapsed + session.manualOffsetMs)
+            .coerceAtLeast(requestedSourceStart)
+        if (requestedSourceEnd <= requestedSourceStart) {
+            return PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
+        }
+        val temporaryDestination = Files.createTempFile("capture-preview-video-", ".mkv").toFile()
+        return try {
+            checkNotInterrupted()
+            val clip = videoExporter.export(source, temporaryDestination, requestedSourceStart, requestedSourceEnd)
+            checkNotInterrupted()
+            val coveredEndMs = clip.coveredEndMs + videoStartElapsed - session.manualOffsetMs
+            PreviewVideoCoverage(
+                coveredEndMs = coveredEndMs,
+                shortfallMs = (selectedEndMs - coveredEndMs).coerceAtLeast(0L),
+            )
+        } catch (failure: InterruptedException) {
+            throw failure
+        } catch (_: Exception) {
+            // A growing source may not contain a complete packet/window yet. Preflight reports that
+            // gap and leaves the real export to surface the actionable exporter error on Save.
+            PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
+        } finally {
+            temporaryDestination.delete()
+        }
+    }
+
+    private data class PreviewVideoCoverage(val coveredEndMs: Long?, val shortfallMs: Long)
+
+    private fun isNoUsableVideoInterval(failure: Exception): Boolean {
+        if (failure is IllegalArgumentException) return true
+        val message = failure.message?.lowercase() ?: return false
+        return "no readable video" in message ||
+            "no readable keyframe" in message ||
+            "no complete video" in message ||
+            "no readable bytes" in message
+    }
+
+    @Synchronized
+    @Suppress("LongMethod", "CyclomaticComplexMethod", "TooGenericExceptionCaught")
     fun export(session: CaptureSession, request: CaptureExportRequest): CaptureExportResult {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
         val destination = request.destination.absoluteFile
-        require(!destination.exists()) { "Capture destination already exists: $destination" }
+        require(request.overwriteExisting || !destination.exists()) {
+            "Capture destination already exists: $destination"
+        }
         val parent = destination.parentFile ?: File(".").absoluteFile
         require(parent.mkdirs() || parent.isDirectory) { "Cannot create capture destination directory: $parent" }
         require(session.logFile.isFile) { "Capture log is missing: ${session.logFile}" }
@@ -123,15 +378,44 @@ class CaptureArchiveExporter(
         // are invisible, and a partial final index line is discarded while freezing selection.
         val frozenLogBytes = session.logFile.length()
         val frozenIndexBytes = session.indexFile.length()
-        val logStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.logCheckpointMs)
-        val videoRangeStartMs = rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.videoCheckpointMs)
-        val videoConfigured = session.settings.recordVideo && request.includeVideo
-        if (videoConfigured) {
-            require(session.videoStartElapsedMs != null) { "Capture video has no start-time reference" }
-            require(session.videoFile.isFile) { "Capture video is missing: ${session.videoFile}" }
+        val selectionBounds = if (request.range == CaptureRange.SELECTION) {
+            require(request.selectedFirstRowOrdinal != null && request.selectedLastRowOrdinal != null) {
+                "Selection export requires both row bounds"
+            }
+            val first = requireNotNull(request.selectedFirstRowOrdinal)
+            val last = requireNotNull(request.selectedLastRowOrdinal)
+            require(first > 0 && last > 0 && first <= last) {
+                "Selection export row bounds must be positive and ordered"
+            }
+            findSelectionBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, first, last)
+        } else {
+            null
         }
-        val includeVideo = videoConfigured
-        val snapshotScreenshots = snapshotScreenshots(session.directory, logStartMs, request.cutoffElapsedMs)
+        val logStartMs = selectionBounds?.firstElapsedMs
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.logCheckpointMs)
+        val selectedEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
+        val videoRangeStartMs = selectionBounds?.firstElapsedMs
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.videoCheckpointMs)
+        val videoConfigured = session.settings.recordVideo && request.includeVideo
+        val videoStartElapsed = session.videoStartElapsedMs
+        val requestedSourceStart = videoStartElapsed?.let {
+            if (videoRangeStartMs == Long.MIN_VALUE) {
+                0L
+            } else {
+                (videoRangeStartMs - it + session.manualOffsetMs).coerceAtLeast(0L)
+            }
+        }
+        val requestedSourceEnd = videoStartElapsed?.let {
+            (selectedEndMs - it + session.manualOffsetMs).coerceAtLeast(requestedSourceStart ?: 0L)
+        }
+        val includeVideo = videoConfigured &&
+            videoStartElapsed != null &&
+            session.videoFile.isFile &&
+            session.videoFile.length() > 0L &&
+            requestedSourceStart != null &&
+            requestedSourceEnd != null &&
+            requestedSourceEnd > requestedSourceStart
+        val snapshotScreenshots = snapshotScreenshots(session.directory, logStartMs, selectedEndMs)
         require(snapshotScreenshots.sumOf { it.length } <= MAX_SCREENSHOTS_BYTES) {
             "Capture screenshots exceed the combined size limit"
         }
@@ -144,8 +428,10 @@ class CaptureArchiveExporter(
                 frozenBytes = frozenIndexBytes,
                 frozenLogBytes = frozenLogBytes,
                 selectedStartMs = logStartMs,
-                selectedEndMs = request.cutoffElapsedMs,
+                selectedEndMs = selectedEndMs,
                 excludeStart = request.range == CaptureRange.SINCE_SAVE && session.logCheckpointMs >= 0,
+                selectedFirstRowOrdinal = request.selectedFirstRowOrdinal.takeIf { request.range == CaptureRange.SELECTION },
+                selectedLastRowOrdinal = request.selectedLastRowOrdinal.takeIf { request.range == CaptureRange.SELECTION },
                 destination = File(work, ".selected-index.jsonl"),
             )
             require(selection.recordCount > 0 || (request.range == CaptureRange.SINCE_SAVE && includeVideo)) {
@@ -162,24 +448,29 @@ class CaptureArchiveExporter(
             copySelectedLog(session.logFile, selection.indexFile, stagedLog)
 
             val stagedVideo = if (includeVideo) File(work, "video/screen.mkv").also { it.parentFile.mkdirs() } else null
-            val videoStartElapsed = session.videoStartElapsedMs
-            val clip = if (stagedVideo != null && videoStartElapsed != null) {
-                val requestedSourceStart = (videoRangeStartMs - videoStartElapsed + session.manualOffsetMs).coerceAtLeast(0)
-                val requestedSourceEnd = (request.cutoffElapsedMs - videoStartElapsed + session.manualOffsetMs)
-                    .coerceAtLeast(requestedSourceStart)
-                videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+            var videoUnavailableForRange = videoConfigured && !includeVideo
+            val clip = if (stagedVideo != null && requestedSourceStart != null && requestedSourceEnd != null) {
+                try {
+                    videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+                } catch (failure: Exception) {
+                    if (!isNoUsableVideoInterval(failure)) throw failure
+                    videoUnavailableForRange = true
+                    null
+                }
             } else {
                 null
             }
             checkNotInterrupted()
 
+            val videoAvailable = stagedVideo?.let { it.isFile && it.length() > 0L } == true
+            val effectiveClip = clip.takeIf { videoAvailable }
             val stagedMapping = File(work, "mapping/log-video.jsonl").also { it.parentFile.mkdirs() }
-            writeMapping(stagedMapping, selection.indexFile, session, clip)
+            writeMapping(stagedMapping, selection.indexFile, session, effectiveClip)
             val stagedScreenshots = stageScreenshots(snapshotScreenshots, work)
 
             val logAsset = asset("logs/logcat.log", stagedLog)
             val mappingAsset = asset("mapping/log-video.jsonl", stagedMapping)
-            val videoAsset = stagedVideo?.takeIf(File::isFile)?.let { asset("video/screen.mkv", it) }
+            val videoAsset = stagedVideo?.takeIf { videoAvailable }?.let { asset("video/screen.mkv", it) }
             val screenshotAssets = stagedScreenshots.map { (path, file) -> asset(path, file) }
             val descriptor = CaptureArchiveDescriptor(
                 formatVersion = CAPTURE_ARCHIVE_VERSION,
@@ -196,10 +487,10 @@ class CaptureArchiveExporter(
                 range = request.range,
                 coverage = CaptureArchiveCoverage(
                     logStartMs = selection.firstElapsedMs ?: request.cutoffElapsedMs,
-                    logEndMs = selection.lastElapsedMs ?: request.cutoffElapsedMs,
-                    videoRequestedStartMs = if (clip != null) videoRangeStartMs else null,
-                    videoActualStartMs = clip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
-                    videoEndMs = clip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                    logEndMs = selection.lastElapsedMs ?: selectedEndMs,
+                    videoRequestedStartMs = if (effectiveClip != null) videoRangeStartMs else null,
+                    videoActualStartMs = effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                    videoEndMs = effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
                 ),
                 quality = "estimated",
                 uncertaintyMs = null,
@@ -213,14 +504,19 @@ class CaptureArchiveExporter(
             File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
             writeZip(work, archiveTemp, descriptor)
             checkNotInterrupted()
-            publishWithoutOverwrite(archiveTemp, destination)
+            if (request.overwriteExisting) publishReplacing(archiveTemp, destination)
+            else publishWithoutOverwrite(archiveTemp, destination)
             published = true
             return CaptureExportResult(
                 file = destination,
-                logCoveredEndMs = selection.lastElapsedMs ?: request.cutoffElapsedMs,
+                logCoveredEndMs = selection.lastElapsedMs ?: selectedEndMs,
                 videoCoveredEndMs = descriptor.coverage.videoEndMs,
                 videoActualStartMs = descriptor.coverage.videoActualStartMs,
-                message = if (videoAsset != null) "Capture exported with video" else "Capture exported",
+                message = when {
+                    videoAsset != null -> "Capture exported with video"
+                    videoUnavailableForRange -> "Capture exported; video has no usable coverage for this range"
+                    else -> "Capture exported"
+                },
             )
         } finally {
             deleteTree(work)
@@ -423,10 +719,194 @@ private data class FrozenSelection(
     val lastElapsedMs: Long?,
 )
 
+private data class FinalizationInput(
+    val indexRecordCount: Long,
+    val firstElapsedMs: Long?,
+    val lastElapsedMs: Long?,
+    val lastVideoElapsedMs: Long?,
+)
+
+private fun requireRegularCaptureFile(file: File, label: String) {
+    if (!file.isFile || Files.isSymbolicLink(file.toPath())) {
+        throw CaptureArchiveException("$label is missing or is not a regular file: $file")
+    }
+}
+
+/** Validates the recorder's complete output before derived files are published. */
+@Suppress("ThrowsCount", "TooGenericExceptionCaught")
+private fun validateFinalizationInput(session: CaptureSession): FinalizationInput {
+    val logBytes = session.logFile.length()
+    val parsedLogCount = try {
+        session.logFile.inputStream().use { input ->
+            openLogTextReader(input).useLines { lines ->
+                lines.fold(0L) { count, line ->
+                    val trimmed = line.trim()
+                    if (trimmed.isNotEmpty() && !trimmed.startsWith("-----")) count + 1 else count
+                }
+            }
+        }
+    } catch (failure: Exception) {
+        throw CaptureArchiveException(
+            "Capture log could not be parsed during finalization: ${failure.message ?: failure::class.simpleName}",
+            failure,
+        )
+    }
+
+    var indexRecordCount = 0L
+    var nextOrdinal = 1
+    var firstElapsedMs: Long? = null
+    var lastElapsedMs: Long? = null
+    var lastVideoElapsedMs: Long? = null
+    var previous: CaptureLogIndexRecord? = null
+    val videoStart = session.videoStartElapsedMs
+    try {
+        session.indexFile.inputStream().use { base ->
+            val input = LimitedInputStream(BufferedInputStream(base), session.indexFile.length())
+            forEachCompleteLine(input, MAX_MAPPING_LINE_BYTES, rejectTrailingPartial = true) { line ->
+                val record = parseIndexRecord(line)
+                require(record.byteOffset >= 0 && record.byteLength >= 0) {
+                    "Capture index contains a negative byte range"
+                }
+                require(record.byteOffset <= logBytes - record.byteLength) {
+                    "Capture index points beyond the capture log boundary"
+                }
+                val prior = previous
+                require(prior == null || record.byteOffset >= prior.byteOffset + prior.byteLength) {
+                    "Capture index byte ranges are not ordered"
+                }
+                require(prior == null || record.elapsedMs >= prior.elapsedMs) {
+                    "Capture index times are not ordered"
+                }
+                previous = record
+                indexRecordCount++
+                record.rowOrdinal?.let { ordinal ->
+                    require(ordinal == nextOrdinal) {
+                        "Capture index row ordinals are not contiguous at $ordinal (expected $nextOrdinal)"
+                    }
+                    nextOrdinal++
+                    if (firstElapsedMs == null) firstElapsedMs = record.elapsedMs
+                    lastElapsedMs = record.elapsedMs
+                    if (videoStart != null && record.elapsedMs - videoStart + session.manualOffsetMs >= 0) {
+                        lastVideoElapsedMs = record.elapsedMs
+                    }
+                }
+            }
+        }
+    } catch (failure: CaptureArchiveException) {
+        throw failure
+    } catch (failure: Exception) {
+        throw CaptureArchiveException(
+            "Capture index could not be validated during finalization: ${failure.message ?: failure::class.simpleName}",
+            failure,
+        )
+    }
+    val ordinalCount = nextOrdinal - 1L
+    require(ordinalCount == parsedLogCount) {
+        "Capture mapping row count $ordinalCount does not match parsed log row count $parsedLogCount"
+    }
+    return FinalizationInput(indexRecordCount, firstElapsedMs, lastElapsedMs, lastVideoElapsedMs)
+}
+
+private data class SelectionBounds(
+    val firstElapsedMs: Long,
+    val lastElapsedMs: Long,
+)
+
+/** Resolves the temporal endpoints of a source-row selection before any archive staging starts. */
+private fun findSelectionBounds(
+    indexFile: File,
+    frozenBytes: Long,
+    frozenLogBytes: Long,
+    firstOrdinal: Int,
+    lastOrdinal: Int,
+): SelectionBounds {
+    var firstElapsedMs: Long? = null
+    var lastElapsedMs: Long? = null
+    var previous: CaptureLogIndexRecord? = null
+    indexFile.inputStream().use { base ->
+        val input = LimitedInputStream(BufferedInputStream(base), frozenBytes)
+        forEachCompleteLine(input, MAX_MAPPING_LINE_BYTES) { line ->
+            checkNotInterrupted()
+            val record = parseIndexRecord(line)
+            require(record.byteOffset >= 0 && record.byteLength >= 0) {
+                "Capture index contains a negative byte range"
+            }
+            require(record.byteOffset <= frozenLogBytes - record.byteLength) {
+                "Capture index points beyond the frozen log boundary"
+            }
+            val prior = previous
+            require(prior == null || record.byteOffset >= prior.byteOffset + prior.byteLength) {
+                "Capture index byte ranges are not ordered"
+            }
+            require(prior == null || record.elapsedMs >= prior.elapsedMs) {
+                "Capture index times are not ordered"
+            }
+            previous = record
+            when (record.rowOrdinal) {
+                firstOrdinal -> if (firstElapsedMs == null) firstElapsedMs = record.elapsedMs
+                lastOrdinal -> lastElapsedMs = record.elapsedMs
+            }
+        }
+    }
+    val first = requireNotNull(firstElapsedMs) { "The first selected capture row does not exist" }
+    val last = requireNotNull(lastElapsedMs) { "The last selected capture row does not exist" }
+    require(first <= last) { "Selected capture row times are not ordered" }
+    return SelectionBounds(first, last)
+}
+
+/**
+ * Read-only, elapsed-time equivalent of [findSelectionBounds]: scans the frozen index and returns
+ * the real first/last elapsedMs of rows inside [selectedStartMs, selectedEndMs], or null when
+ * nothing matches. This mirrors the elapsed-time filter [freezeSelection] applies when actually
+ * writing an export, but without staging any output — used by [CaptureArchiveExporter.preview] so
+ * "no rows in range" reflects the index, not merely the requested boundary (see the long comment
+ * at that call site for why the two differ).
+ */
+private fun scanElapsedBounds(
+    indexFile: File,
+    frozenBytes: Long,
+    frozenLogBytes: Long,
+    selectedStartMs: Long,
+    selectedEndMs: Long,
+    excludeStart: Boolean,
+): SelectionBounds? {
+    var firstElapsedMs: Long? = null
+    var lastElapsedMs: Long? = null
+    var previous: CaptureLogIndexRecord? = null
+    indexFile.inputStream().use { base ->
+        val input = LimitedInputStream(BufferedInputStream(base), frozenBytes)
+        forEachCompleteLine(input, MAX_MAPPING_LINE_BYTES) { line ->
+            checkNotInterrupted()
+            val record = parseIndexRecord(line)
+            require(record.byteOffset >= 0 && record.byteLength >= 0) {
+                "Capture index contains a negative byte range"
+            }
+            require(record.byteOffset <= frozenLogBytes - record.byteLength) {
+                "Capture index points beyond the frozen log boundary"
+            }
+            val prior = previous
+            require(prior == null || record.byteOffset >= prior.byteOffset + prior.byteLength) {
+                "Capture index byte ranges are not ordered"
+            }
+            require(prior == null || record.elapsedMs >= prior.elapsedMs) { "Capture index times are not ordered" }
+            previous = record
+            val afterStart = if (excludeStart) record.elapsedMs > selectedStartMs else record.elapsedMs >= selectedStartMs
+            if (afterStart && record.elapsedMs <= selectedEndMs) {
+                if (firstElapsedMs == null) firstElapsedMs = record.elapsedMs
+                lastElapsedMs = record.elapsedMs
+            }
+        }
+    }
+    val first = firstElapsedMs ?: return null
+    val last = lastElapsedMs ?: return null
+    return SelectionBounds(first, last)
+}
+
 /**
  * Spools only the selected frozen index rows to disk. A recording can have millions of index rows,
  * so retaining the whole session index in memory just to make an export is not acceptable.
  */
+@Suppress("CyclomaticComplexMethod")
 private fun freezeSelection(
     indexFile: File,
     frozenBytes: Long,
@@ -434,6 +914,8 @@ private fun freezeSelection(
     selectedStartMs: Long,
     selectedEndMs: Long,
     excludeStart: Boolean,
+    selectedFirstRowOrdinal: Int? = null,
+    selectedLastRowOrdinal: Int? = null,
     destination: File,
 ): FrozenSelection {
     var recordCount = 0L
@@ -443,6 +925,8 @@ private fun freezeSelection(
     var firstElapsedMs: Long? = null
     var lastElapsedMs: Long? = null
     var lastRecord: CaptureLogIndexRecord? = null
+    var selectionStarted = false
+    var selectionEnded = false
     destination.bufferedWriter(Charsets.UTF_8).use { output ->
         indexFile.inputStream().use { base ->
             val input = LimitedInputStream(BufferedInputStream(base), frozenBytes)
@@ -459,8 +943,30 @@ private fun freezeSelection(
                 }
                 require(previous == null || record.elapsedMs >= previous.elapsedMs) { "Capture index times are not ordered" }
                 lastRecord = record
-                val afterStart = if (excludeStart) record.elapsedMs > selectedStartMs else record.elapsedMs >= selectedStartMs
-                if (afterStart && record.elapsedMs <= selectedEndMs) {
+                val selectedByOrdinal = if (selectedFirstRowOrdinal != null && selectedLastRowOrdinal != null) {
+                    when {
+                        selectionEnded -> false
+                        record.rowOrdinal != null && record.rowOrdinal < selectedFirstRowOrdinal -> false
+                        record.rowOrdinal != null && record.rowOrdinal > selectedLastRowOrdinal -> {
+                            selectionEnded = selectionStarted
+                            false
+                        }
+                        record.rowOrdinal == selectedFirstRowOrdinal -> {
+                            selectionStarted = true
+                            true
+                        }
+                        record.rowOrdinal == selectedLastRowOrdinal -> {
+                            selectionStarted = true
+                            true
+                        }
+                        record.rowOrdinal == null -> selectionStarted
+                        else -> selectionStarted
+                    }
+                } else {
+                    val afterStart = if (excludeStart) record.elapsedMs > selectedStartMs else record.elapsedMs >= selectedStartMs
+                    afterStart && record.elapsedMs <= selectedEndMs
+                }
+                if (selectedByOrdinal) {
                     val encodedLineBytes = line.toByteArray(Charsets.UTF_8).size.toLong() + 1L
                     require(spooledIndexBytes <= MAX_MAPPING_BYTES - encodedLineBytes) {
                         "Selected capture mapping exceeds the size limit"
@@ -479,6 +985,9 @@ private fun freezeSelection(
                     spooledIndexBytes += encodedLineBytes
                     if (firstElapsedMs == null) firstElapsedMs = record.elapsedMs
                     lastElapsedMs = record.elapsedMs
+                    if (selectedFirstRowOrdinal != null && record.rowOrdinal == selectedLastRowOrdinal) {
+                        selectionEnded = true
+                    }
                 }
             }
         }
@@ -511,6 +1020,7 @@ private fun rangeStartMs(range: CaptureRange, cutoffMs: Long, customMinutes: Int
     CaptureRange.LAST_TEN -> cutoffMs - LAST_TEN_MINUTES * RANGE_MINUTES
     CaptureRange.CUSTOM -> cutoffMs - customMinutes.toLong() * RANGE_MINUTES
     CaptureRange.SINCE_SAVE -> if (checkpointMs >= 0) checkpointMs else Long.MIN_VALUE
+    CaptureRange.SELECTION -> error("Selection range requires explicit row bounds")
 }
 
 private fun copySelectedLog(source: File, selectionIndex: File, destination: File) {
@@ -538,6 +1048,7 @@ private fun writeMapping(
     selectionIndex: File,
     session: CaptureSession,
     clip: CaptureVideoClip?,
+    includeRawVideo: Boolean = false,
 ) {
     var ordinal = 0
     var bytesWritten = 0L
@@ -547,12 +1058,11 @@ private fun writeMapping(
             if (record.rowOrdinal == null) return@forEachSelectedRecord
             ordinal += 1
             val sourceVideoMs = videoStart?.let { record.elapsedMs - it + session.manualOffsetMs }
-            val exportedVideoMs = if (
-                clip != null && sourceVideoMs != null && sourceVideoMs in clip.actualStartMs..clip.coveredEndMs
-            ) {
-                sourceVideoMs - clip.actualStartMs
-            } else {
-                null
+            val exportedVideoMs = when {
+                clip != null && sourceVideoMs != null && sourceVideoMs in clip.actualStartMs..clip.coveredEndMs ->
+                    sourceVideoMs - clip.actualStartMs
+                includeRawVideo && sourceVideoMs != null && sourceVideoMs >= 0 -> sourceVideoMs
+                else -> null
             }
             val row = buildJsonObject {
                 put("ordinal", ordinal)
@@ -770,6 +1280,20 @@ private fun publishWithoutOverwrite(temp: File, destination: File) {
         Files.move(temp.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
     } catch (_: AtomicMoveNotSupportedException) {
         Files.move(temp.toPath(), destination.toPath())
+    }
+}
+
+private fun publishReplacing(temp: File, destination: File) {
+    destination.parentFile?.mkdirs()
+    try {
+        Files.move(
+            temp.toPath(),
+            destination.toPath(),
+            StandardCopyOption.ATOMIC_MOVE,
+            StandardCopyOption.REPLACE_EXISTING,
+        )
+    } catch (_: AtomicMoveNotSupportedException) {
+        Files.move(temp.toPath(), destination.toPath(), StandardCopyOption.REPLACE_EXISTING)
     }
 }
 

@@ -43,13 +43,28 @@ class CaptureTools(
 
     fun scrcpySpec(serial: String, settings: CaptureSettings, destination: File): CaptureProcessSpec {
         val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
-        val arguments = buildList {
-            addAll(listOf("--serial", serial, "--record=${destination.absolutePath}", "--record-format=mkv"))
-            add("--max-size=${settings.maxSize.coerceAtLeast(0)}")
-            add("--max-fps=${settings.maxFps.coerceAtLeast(1)}")
-            add("--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M")
-            add("--video-codec=h264")
+        val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
+            add("--record=${destination.absolutePath}")
+            add("--record-format=mkv")
             if (!settings.mirror) add("--no-window")
+        }
+        if (!settings.audio) arguments += "--no-audio"
+        return if (executable.runOnHost) {
+            CaptureProcessSpec(
+                listOf("flatpak-spawn", "--host", "--watch-bus", "--env=ADB=${adb.path}", executable.path) + arguments,
+            )
+        } else {
+            CaptureProcessSpec(executable.command(arguments), environment = mapOf("ADB" to adb.path))
+        }
+    }
+
+    /** Starts a visible, non-recording scrcpy window for an active capture. */
+    fun scrcpyMirrorSpec(serial: String, settings: CaptureSettings): CaptureProcessSpec {
+        val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
+        val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
+            // An auxiliary mirror is explicitly visible even when recording was configured with
+            // --no-window. It deliberately carries no --record flag, so it cannot overwrite or
+            // race the canonical session MKV.
             if (!settings.audio) add("--no-audio")
         }
         return if (executable.runOnHost) {
@@ -60,6 +75,14 @@ class CaptureTools(
             CaptureProcessSpec(executable.command(arguments), environment = mapOf("ADB" to adb.path))
         }
     }
+
+    private fun scrcpyVideoArguments(serial: String, settings: CaptureSettings): List<String> = listOf(
+        "--serial", serial,
+        "--max-size=${settings.maxSize.coerceAtLeast(0)}",
+        "--max-fps=${settings.maxFps.coerceAtLeast(1)}",
+        "--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M",
+        "--video-codec=h264",
+    )
 
     // Identity only: `adb version` exits 0 and prints "Android Debug Bridge ..." for every
     // platform-tools release we care about, so that's the whole check. This function used to also
