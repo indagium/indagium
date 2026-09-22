@@ -4,6 +4,9 @@ package com.indagium.capture.mirror
 
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureTools
+import org.bytedeco.javacv.FFmpegFrameGrabber
+import org.bytedeco.javacv.Frame
+import org.bytedeco.javacv.Java2DFrameConverter
 import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.EOFException
@@ -17,12 +20,9 @@ import java.net.Socket
 import java.net.SocketTimeoutException
 import java.time.Duration
 import java.util.ArrayDeque
-import java.util.concurrent.atomic.AtomicLong
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
-import org.bytedeco.javacv.FFmpegFrameGrabber
-import org.bytedeco.javacv.Frame
-import org.bytedeco.javacv.Java2DFrameConverter
 
 internal enum class EmbeddedMirrorState { DISCONNECTED, CONNECTING, LIVE, RECONNECTING, FAILED }
 
@@ -51,6 +51,11 @@ internal data class MirrorStreamOptions(
     val maxSize: Int = 1080,
     val maxFps: Int = 30,
     val bitrateMbps: Int = 8,
+    val audio: Boolean = false,
+    /** Server-side `video_codec_options=i-frame-interval:float=<n>` — a short keyframe interval
+     * keeps exact-start snapshot re-encodes cheap (see [com.indagium.capture.FfmpegCaptureVideoExporter])
+     * and bounds how much of a live recording a fresh mirror connection must wait to resync on. */
+    val keyFrameIntervalSeconds: Float = 2f,
 ) {
     init {
         require(maxSize >= 0)
@@ -69,7 +74,17 @@ internal data class MirrorStreamOptions(
 }
 
 internal interface EmbeddedMirrorConnection : Closeable {
+    /** Raw scrcpy v4.1 frame-meta video socket bytes — parse with [ScrcpyPacketReader], or wrap
+     * with [ScrcpyToAnnexBInputStream] for a plain decodable Annex-B stream (what [runSession] does
+     * for the mirror decoder). */
     val videoInput: InputStream
+
+    /** Raw scrcpy audio socket bytes, present only when [MirrorStreamOptions.audio] was requested.
+     * Its first 4 bytes are a [ScrcpyPacketReader.readHeader] result — a real codec id, or one of
+     * the two "disabled" sentinels signalling audio was unavailable on this device/Android version
+     * (never a transport failure — see [ScrcpyCodecIds]). */
+    val audioInput: InputStream?
+
     fun sendControl(bytes: ByteArray)
 }
 
@@ -80,6 +95,7 @@ internal fun interface EmbeddedMirrorTransport {
 internal fun interface H264Decoder : Closeable {
     /** Blocks until input EOF or a decoder error, delivering complete frames to [onFrame]. */
     fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit)
+
     override fun close() = Unit
 }
 
@@ -144,26 +160,35 @@ internal class EmbeddedMirrorRuntime(
     /** Starts asynchronously; [snapshot] is CONNECTING immediately and never blocks on ADB. */
     fun start(deviceSerial: String, options: MirrorStreamOptions = MirrorStreamOptions()) {
         require(deviceSerial.isNotBlank()) { "device serial cannot be blank" }
-        synchronized(lock) {
-            stopLocked()
+        val previousConnection = synchronized(lock) {
+            val previous = detachLocked()
             stopping = false
             val runId = generation.incrementAndGet()
             publishLocked(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
             worker = thread(name = "embedded-mirror-$deviceSerial", isDaemon = true) {
                 runSession(runId, deviceSerial, options)
             }
+            previous
         }
+        // Closing a real AdbScrcpyConnection runs `adb forward --remove`/`adb shell rm`
+        // synchronously and can take real wall-clock time; doing that while still holding [lock]
+        // would block every other caller of this runtime (snapshot(), send(), a concurrent
+        // stop()/start()) behind it for no reason — none of them need the old connection, only the
+        // fact that it's been detached. See stop() below for the same pattern.
+        runCatching { previousConnection?.close() }
     }
 
     fun stop() {
         val threadToJoin: Thread?
+        val previousConnection: EmbeddedMirrorConnection?
         synchronized(lock) {
             stopping = true
             generation.incrementAndGet()
             threadToJoin = worker
-            stopLocked()
+            previousConnection = detachLocked()
             publishLocked(EmbeddedMirrorSnapshot())
         }
+        runCatching { previousConnection?.close() }
         if (threadToJoin !== Thread.currentThread()) threadToJoin?.join(MIRROR_STOP_JOIN_MS)
     }
 
@@ -253,7 +278,7 @@ internal class EmbeddedMirrorRuntime(
                         ),
                     )
                 }
-                decoder.decode(requireNotNull(opened).videoInput) { frame ->
+                decoder.decode(ScrcpyToAnnexBInputStream(requireNotNull(opened).videoInput)) { frame ->
                     if (isCurrent(runId)) {
                         frameBuffer.offer(frame)
                         synchronized(lock) {
@@ -297,11 +322,17 @@ internal class EmbeddedMirrorRuntime(
         false
     }
 
-    private fun stopLocked() {
-        runCatching { connection?.close() }
+    /**
+     * Detaches the current connection/worker under [lock] without closing or joining either — the
+     * actual close (which can block on adb subprocess cleanup) happens after the lock is released;
+     * see the call sites in [start]/[stop].
+     */
+    private fun detachLocked(): EmbeddedMirrorConnection? {
+        val previous = connection
         connection = null
         worker?.interrupt()
         worker = null
+        return previous
     }
 
     private fun isCurrent(runId: Long): Boolean = synchronized(lock) { isCurrentLocked(runId) }
@@ -395,60 +426,82 @@ internal class AdbScrcpyTransport(
             }
             localPort = forwarded.stdoutText().trim().lineSequence().lastOrNull()?.toIntOrNull()
             checkNotNull(localPort) { "adb did not return a local tunnel port" }
+            val serverArguments = buildList {
+                add(asset.descriptor.version)
+                // We establish adb forward before launching the server. In forward mode the
+                // server accepts sockets in a fixed order: video, then audio (if requested), then
+                // control.
+                add("tunnel_forward=true")
+                add("control=true")
+                add("audio=${options.audio}")
+                add("video=true")
+                // Frame-meta protocol (verified against the pinned v4.1 server's
+                // device/Streamer.java / device/DesktopConnection.java): a 4-byte codec-id header
+                // per stream, then a 12-byte PTS+flags header before every packet (and periodic
+                // 12-byte session-meta records carrying width/height — see ScrcpyPacketReader's
+                // doc). This replaces raw_stream=true, which stripped that metadata and is unusable
+                // for muxing a durable recording (no PTS, no config/key-frame boundaries).
+                // ScrcpyPacketReader parses this directly for recording; ScrcpyToAnnexBInputStream
+                // re-flattens it back to a plain Annex-B stream for the mirror decoder, which never
+                // sees this change.
+                add("send_device_meta=false")
+                add("send_frame_meta=true")
+                add("send_stream_meta=true")
+                add("send_dummy_byte=false")
+                add("max_size=${options.maxSize}")
+                add("max_fps=${options.maxFps}")
+                // Server options parse this as an integer bit count; the host scrcpy CLI's
+                // human-friendly `8M` suffix is not accepted by com.genymobile.scrcpy.Server.
+                add("video_bit_rate=${options.serverVideoBitRateBitsPerSecond}")
+                // A short keyframe interval keeps exact-start snapshot re-encodes cheap and bounds
+                // how much of a live recording a fresh connection must wait to resync on — see
+                // MirrorStreamOptions.keyFrameIntervalSeconds's doc. "float" matches the type
+                // Android's KEY_I_FRAME_INTERVAL expects for this key.
+                add("video_codec_options=i-frame-interval:float=${options.keyFrameIntervalSeconds}")
+                if (options.audio) add("audio_codec=opus")
+            }
             server = runner.start(
                 tools.adbSpec(
                     deviceSerial,
-                    "shell",
-                    "CLASSPATH=$remoteAsset",
-                    "app_process",
-                    "/",
-                    "com.genymobile.scrcpy.Server",
-                    asset.descriptor.version,
-                    // We establish adb forward before launching the server. In forward mode the
-                    // server accepts the video socket first and the control socket second.
-                    "tunnel_forward=true",
-                    "control=true",
-                    "audio=false",
-                    "video=true",
-                    // raw_stream strips codec/session/frame metadata so JavaCV receives an ordinary
-                    // Annex-B H.264 stream; video and control still use separate sockets.
-                    "raw_stream=true",
-                    // A forward tunnel normally starts with a dummy byte. raw_stream currently
-                    // disables it too, but pin the option explicitly so a server upgrade cannot
-                    // leak that byte into the H.264 decoder.
-                    "send_dummy_byte=false",
-                    "max_size=${options.maxSize}",
-                    "max_fps=${options.maxFps}",
-                    // Server options parse this as an integer bit count; the host scrcpy CLI's
-                    // human-friendly `8M` suffix is not accepted by com.genymobile.scrcpy.Server.
-                    "video_bit_rate=${options.serverVideoBitRateBitsPerSecond}",
+                    listOf("shell", "CLASSPATH=$remoteAsset", "app_process", "/", "com.genymobile.scrcpy.Server") + serverArguments,
                 ),
             )
             awaitServerStartup(server)
             // adb forward can accept the host-side TCP connection before the device-side
-            // localabstract socket exists. Open video first, then control, retrying transient
-            // refusal/EOF until the bounded deadline. The first successful video socket is kept
-            // while the control socket catches up; tearing both down on failure lets the runtime
-            // perform a clean reconnect instead of leaking a half-pair.
-            val video = connectSocketUntilReady("video", localPort, ::prepareVideoSocket)
-            val control = try {
-                connectSocketUntilReady("control", localPort) { socket -> PreparedSocket(socket, socket.getInputStream()) }
+            // localabstract socket exists. Open video first, then audio (if requested), then
+            // control, retrying transient refusal/EOF until the bounded deadline. Sockets already
+            // opened are torn down on any later failure so the runtime can perform a clean
+            // reconnect instead of leaking a partial connection.
+            val opened = mutableListOf<Socket>()
+            try {
+                val video = connectSocketUntilReady("video", localPort, ::prepareVideoSocket)
+                opened += video.socket
+                val audio = if (options.audio) {
+                    connectSocketUntilReady("audio", localPort) { socket -> PreparedSocket(socket, socket.getInputStream()) }
+                        .also { opened += it.socket }
+                } else {
+                    null
+                }
+                val control = connectSocketUntilReady("control", localPort) { socket -> PreparedSocket(socket, socket.getInputStream()) }
+                opened += control.socket
+                localAsset.delete()
+                AdbScrcpyConnection(
+                    video.socket,
+                    video.input,
+                    audio?.socket,
+                    audio?.input,
+                    control.socket,
+                    requireNotNull(server),
+                    runner,
+                    tools,
+                    deviceSerial,
+                    localPort,
+                    remoteAsset,
+                )
             } catch (failure: Throwable) {
-                runCatching { video.socket.close() }
+                opened.forEach { socket -> runCatching { socket.close() } }
                 throw failure
             }
-            localAsset.delete()
-            AdbScrcpyConnection(
-                video.socket,
-                video.input,
-                control.socket,
-                requireNotNull(server),
-                runner,
-                tools,
-                deviceSerial,
-                localPort,
-                remoteAsset,
-            )
         } catch (failure: Throwable) {
             runCatching { server?.close() }
             localPort?.let { port ->
@@ -581,6 +634,8 @@ internal class MirrorTransportCancelled(message: String, cause: Throwable? = nul
 private class AdbScrcpyConnection(
     private val videoSocket: Socket,
     videoStream: InputStream,
+    private val audioSocket: Socket?,
+    audioStream: InputStream?,
     private val controlSocket: Socket,
     private val server: com.indagium.capture.RunningCaptureProcess,
     private val runner: CaptureProcessRunner,
@@ -591,6 +646,7 @@ private class AdbScrcpyConnection(
 ) : EmbeddedMirrorConnection {
     private val control: OutputStream = controlSocket.getOutputStream()
     override val videoInput: InputStream = videoStream
+    override val audioInput: InputStream? = audioStream
 
     override fun sendControl(bytes: ByteArray) = synchronized(control) {
         control.write(bytes)
@@ -599,6 +655,7 @@ private class AdbScrcpyConnection(
 
     override fun close() {
         runCatching { videoSocket.close() }
+        runCatching { audioSocket?.close() }
         runCatching { controlSocket.close() }
         runCatching { server.terminate() }
         runCatching { server.close() }

@@ -185,21 +185,26 @@ class CaptureRecorderTest {
         }
     }
 
-    @Test
+    @org.junit.Test(timeout = 20_000)
     fun videoFailureLeavesLogCaptureRunning() {
+        // Recording no longer spawns host scrcpy (CaptureRecorder now owns the device stream via
+        // EmbeddedDeviceSession/AdbScrcpyTransport — see that class's own unit tests for the
+        // packet-level protocol/muxer behaviour). This exercises the recorder-level contract the
+        // old host-scrcpy-launch-failure test used to cover: an embedded transport that can never
+        // connect must not stop or interrupt log capture, and must surface a diagnostic instead.
         val root = Files.createTempDirectory("capture-video-failure-test").toFile()
         val runner = FakeCaptureRunner()
         val logcat = StreamingFakeProcess()
         runner.enqueue(logcat)
-        // validateScrcpy() (B1b) now checks `scrcpy --version` only, not `--help`, so only one
-        // fake process is consumed before the actual scrcpy launch below.
-        runner.enqueue(CompletedFakeProcess("scrcpy 3.3.1\n"))
-        runner.enqueue(CompletedFakeProcess(stdout = byteArrayOf(), stderr = "encoder failed".toByteArray(), code = 1))
-        val tools = CaptureTools(ADB, CaptureExecutable("scrcpy"), runner)
-        val recorder = CaptureRecorder(root, runner)
+        val tools = CaptureTools(ADB, null, runner)
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            embeddedTransportFactory = { com.indagium.capture.mirror.EmbeddedMirrorTransport { _, _ -> error("embedded scrcpy server unavailable") } },
+        )
         try {
             recorder.start(DEVICE, testSettings(recordVideo = true), tools)
-            awaitCapture { recorder.snapshot.value.diagnostics.any { it.contains("Video recording ended") } }
+            awaitCapture { recorder.snapshot.value.diagnostics.any { it.contains("Embedded recording", ignoreCase = true) } }
             logcat.emit("still logging\n")
             awaitCapture { recorder.snapshot.value.indexedRows == 1 }
 
@@ -207,6 +212,148 @@ class CaptureRecorderTest {
             assertFalse(recorder.snapshot.value.videoRecording)
         } finally {
             recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun embeddedRecordingWritesVideoAndPersistsVideoStartElapsedMs() {
+        val root = Files.createTempDirectory("capture-embedded-video-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess()
+        runner.enqueue(logcat)
+        val fixture = CaptureRecorderTestH264Fixture.encode()
+        val videoBytes = java.io.ByteArrayOutputStream().also { out ->
+            java.io.DataOutputStream(out).apply {
+                writeInt(0x68_32_36_34) // ScrcpyCodecIds.H264
+                writeInt(0x80000000.toInt())
+                writeInt(64)
+                writeInt(64)
+                writeLong(1L shl 62)
+                writeInt(fixture.config.size)
+                write(fixture.config)
+                writeLong(0L or (1L shl 61))
+                writeInt(fixture.key.size)
+                write(fixture.key)
+            }
+        }.toByteArray()
+        val transport = com.indagium.capture.mirror.EmbeddedMirrorTransport { _, _ ->
+            object : com.indagium.capture.mirror.EmbeddedMirrorConnection {
+                override val videoInput: java.io.InputStream = java.io.ByteArrayInputStream(videoBytes)
+                override val audioInput: java.io.InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val recorder = CaptureRecorder(root, runner, embeddedTransportFactory = { transport })
+        try {
+            val started = recorder.start(DEVICE, testSettings(recordVideo = true), CaptureTools(ADB, null, runner))
+            awaitCapture { recorder.snapshot.value.videoRecording }
+            awaitCapture { (recorder.selectedSession.value?.videoStartElapsedMs ?: -1L) >= 0L }
+
+            assertTrue(started.videoFile.isFile)
+            assertTrue(started.videoFile.length() > 0L, "the embedded muxer must have written real bytes to session.videoFile")
+            assertNotNull(recorder.selectedSession.value?.videoStartElapsedMs)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    /**
+     * Regression test for a real lock-order deadlock caught during review: the embedded recording
+     * session's video-writing thread called `onVideoStartElapsedMs`/`elapsedMillis`
+     * (`CaptureRecorder.elapsedNow`, which took `CaptureRecorder`'s own lock) from *inside* the
+     * session's own lock, while `CaptureRecorder`'s watchdog thread separately called
+     * `EmbeddedDeviceSession.hasStartedVideo()` (which took the session's lock) from *inside*
+     * `CaptureRecorder`'s lock — two objects each waiting on the other's lock while holding their
+     * own. It reproduced as `EmbeddedMirrorAutostartTest` hanging for 68 minutes at 0% CPU with the
+     * watchdog thread and a video-writing thread deadlocked, and `detachDecoder()`/`AppState.close`
+     * blocked forever behind it.
+     *
+     * Uses a real (very short) watchdog interval — the watchdog's own publish cycle is one half of
+     * the deadlock — a continuously-flowing fake video stream to keep `writeVideoFrame` firing
+     * repeatedly, and `org.junit.Test`'s own `timeout` (not `kotlin.test.Test`, which has no such
+     * parameter) so a regression fails this test outright instead of hanging the whole suite the
+     * way the real bug did.
+     */
+    @org.junit.Test(timeout = 20_000)
+    fun recordingPacketsWatchdogPublishesAndCloseNeverDeadlockConcurrently() {
+        val root = Files.createTempDirectory("capture-deadlock-regression-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess()
+        runner.enqueue(logcat)
+        val fixture = CaptureRecorderTestH264Fixture.encode()
+        val videoBytes = java.io.ByteArrayOutputStream().also { out ->
+            java.io.DataOutputStream(out).apply {
+                writeInt(0x68_32_36_34) // ScrcpyCodecIds.H264
+                writeInt(0x80000000.toInt())
+                writeInt(64)
+                writeInt(64)
+                writeLong(1L shl 62)
+                writeInt(fixture.config.size)
+                write(fixture.config)
+            }
+        }.toByteArray()
+        // A video socket that keeps handing back fresh key-frame packets (same bytes repeated —
+        // this test only stresses the lock interaction, it never decodes anything) roughly every
+        // 2ms, so writeVideoFrame() keeps racing the watchdog's own publish cycle for the whole
+        // test instead of firing once and going quiet.
+        val continuousVideo = object : java.io.InputStream() {
+            private var buffered = java.io.ByteArrayInputStream(videoBytes)
+            private var index = 0
+
+            override fun read(): Int {
+                val single = ByteArray(1)
+                val count = read(single, 0, 1)
+                return if (count <= 0) -1 else single[0].toInt() and 0xff
+            }
+
+            override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+                var count = buffered.read(buffer, off, len)
+                while (count < 0) {
+                    Thread.sleep(2)
+                    val packet = java.io.ByteArrayOutputStream().also { out ->
+                        java.io.DataOutputStream(out).apply {
+                            writeLong((index * 33_000L) or (1L shl 61))
+                            writeInt(fixture.key.size)
+                            write(fixture.key)
+                        }
+                    }.toByteArray()
+                    index++
+                    buffered = java.io.ByteArrayInputStream(packet)
+                    count = buffered.read(buffer, off, len)
+                }
+                return count
+            }
+        }
+        val transport = com.indagium.capture.mirror.EmbeddedMirrorTransport { _, _ ->
+            object : com.indagium.capture.mirror.EmbeddedMirrorConnection {
+                override val videoInput: java.io.InputStream = continuousVideo
+                override val audioInput: java.io.InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            watchdogIntervalMs = 5L,
+            embeddedTransportFactory = { transport },
+        )
+        try {
+            val started = recorder.start(DEVICE, testSettings(recordVideo = true), CaptureTools(ADB, null, runner))
+            awaitCapture { recorder.snapshot.value.videoRecording }
+            // Let the watchdog and the video-writing thread race against each other for a while —
+            // long enough that the original bug reliably deadlocked within this window.
+            Thread.sleep(500)
+            assertTrue(started.videoFile.length() > 0L)
+        } finally {
+            recorder.close() // must return — this is what hung for 68 minutes before the fix
             root.deleteRecursively()
         }
     }
@@ -289,6 +436,41 @@ class CaptureRecorderTest {
             assertEquals(1, updated.exportCounter)
             assertEquals(-1, sessions.getValue(second.id).logCheckpointMs)
             assertEquals(second.id, recorder.selectedSession.value?.id)
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    // Regression test for the video checkpoint persistence bug: sessionJson() never wrote
+    // videoCheckpointMs (only the log-cursor-derived snapshotCheckpointMs), so
+    // updateSuccessfulExportCheckpoints' in-memory video cursor was silently forgotten on the next
+    // app restart even though CaptureArchiveExporter now depends on it surviving one (see
+    // CaptureModels.effectiveVideoCheckpointMs and the Since-last-save video range in
+    // CaptureArchive.kt). This proves both cursors round-trip through a fresh CaptureRecorder
+    // reading the same session directory back from disk, independently of each other.
+    @Test
+    fun videoCheckpointSurvivesAReloadIndependentlyOfTheLogCheckpoint() {
+        val root = Files.createTempDirectory("capture-video-checkpoint-persist-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val session = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            recorder.stop()
+            recorder.updateSuccessfulExportCheckpoints(session.id, logCheckpointMs = 5_000, videoCheckpointMs = 3_000)
+            // A video-less export afterwards must not move the video cursor, log-only ones do.
+            recorder.updateSuccessfulExportCheckpoints(session.id, logCheckpointMs = 7_000, videoCheckpointMs = null)
+
+            val reloaded = CaptureRecorder(root, runner)
+            try {
+                val restored = reloaded.listSessions().single { it.id == session.id }
+                assertEquals(7_000, restored.snapshotCheckpointMs)
+                assertEquals(3_000, restored.videoCheckpointMs)
+                assertEquals(3_000, restored.effectiveVideoCheckpointMs)
+            } finally {
+                reloaded.close()
+            }
         } finally {
             recorder.close()
             root.deleteRecursively()
@@ -457,5 +639,77 @@ class CaptureRecorderTest {
         val DEVICE = CaptureDevice("SERIAL", "device", "Pixel")
         val ADB = CaptureExecutable("adb")
         const val ONE_MIB = 1024L * 1024L
+    }
+}
+
+/** One real, tiny SPS/PPS + IDR NAL set (bundled libopenh264, same encoder
+ * [FfmpegCaptureVideoExporter] uses), so [CaptureRecorderTest]'s fake embedded transport feeds
+ * [StreamingMkvWriter] structurally valid extradata/H.264 the way [EmbeddedDeviceSessionTest]'s own
+ * fixture does — StreamingMkvWriter's `avformat_write_header` rejects hand-rolled placeholder bytes. */
+private object CaptureRecorderTestH264Fixture {
+    data class Fixture(val config: ByteArray, val key: ByteArray)
+
+    private val fixture: Fixture by lazy { encodeInternal() }
+
+    fun encode(): Fixture = fixture
+
+    @Suppress("MagicNumber", "CyclomaticComplexMethod")
+    private fun encodeInternal(): Fixture {
+        val width = 32
+        val height = 32
+        val raw = java.nio.file.Files.createTempFile("capture-recorder-h264-fixture-", ".h264").toFile().apply { deleteOnExit() }
+        val pixels = java.nio.ByteBuffer.allocate(width * height * 3)
+        val recorder = org.bytedeco.javacv.FFmpegFrameRecorder(raw, width, height, 0).apply {
+            format = "h264"
+            frameRate = 30.0
+            videoCodec = org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
+            videoCodecName = "libopenh264"
+            videoBitrate = 300_000
+            gopSize = 30
+        }
+        recorder.start()
+        try {
+            pixels.clear()
+            repeat(width * height) { pixels.put(60).put(60).put(60) }
+            pixels.flip()
+            recorder.timestamp = 0
+            recorder.recordImage(width, height, 8, 3, width * 3, org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24, pixels)
+        } finally {
+            recorder.stop()
+            recorder.release()
+        }
+        val bytes = raw.readBytes()
+        raw.delete()
+        val starts = mutableListOf<Int>()
+        var index = 0
+        while (index + 3 < bytes.size) {
+            val isFourByte = bytes[index] == 0.toByte() && bytes[index + 1] == 0.toByte() &&
+                bytes[index + 2] == 0.toByte() && index + 3 < bytes.size && bytes[index + 3] == 1.toByte()
+            val isThreeByte = !isFourByte && bytes[index] == 0.toByte() && bytes[index + 1] == 0.toByte() && bytes[index + 2] == 1.toByte()
+            if (isFourByte || isThreeByte) {
+                starts += index
+                index += if (isFourByte) 4 else 3
+            } else {
+                index++
+            }
+        }
+        val nalUnits = starts.indices.map { i ->
+            val from = starts[i]
+            val to = if (i + 1 < starts.size) starts[i + 1] else bytes.size
+            bytes.copyOfRange(from, to)
+        }
+        val configUnits = mutableListOf<ByteArray>()
+        var key: ByteArray? = null
+        for (nal in nalUnits) {
+            val start = if (nal.size >= 4 && nal[2] == 0.toByte() && nal[3] == 1.toByte()) 4 else 3
+            when (nal[start].toInt() and 0x1f) {
+                7, 8 -> configUnits += nal
+                5 -> if (key == null) key = nal
+            }
+        }
+        return Fixture(
+            config = configUnits.reduce { acc, more -> acc + more },
+            key = requireNotNull(key) { "fixture encode did not produce a key frame" },
+        )
     }
 }

@@ -17,10 +17,11 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
-import com.indagium.capture.mirror.EmbeddedMirrorState
+import com.indagium.capture.CaptureTools
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
@@ -132,6 +133,8 @@ import com.indagium.video.FailedVideoPlayerController
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.add
@@ -732,6 +735,16 @@ private const val CAPTURE_TAIL_POLL_INTERVAL_MS = 1_000L
 // while a capture is still running. The per-tab cancellation/generation guard means a new tick
 // replaces the old work instead of queueing a 250ms job storm.
 private const val CAPTURE_PREVIEW_DEBOUNCE_MS = 150L
+
+/** Bound for ensureEmbeddedMirror's awaitCaptureSession: how long to wait for the recorder to
+ * publish its session before treating "not ready yet" as a real failure. */
+private const val EMBEDDED_MIRROR_SESSION_WAIT_MS = 5_000L
+
+/** Bound for ensureEmbeddedMirror's awaitEmbeddedRecordingSession: how long to wait, once a
+ * recordVideo=true session is known, for CaptureRecorder to publish its embedded device session
+ * before giving up rather than silently opening a second embedded scrcpy server — see that
+ * function's doc for the race this closes. */
+private const val EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS = 10_000L
 
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
@@ -1809,9 +1822,29 @@ class AppState(
     }
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+
     /** Embedded mirror handles are presentation resources, separate from recorder ownership. */
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
+
+    /** Set when an ensureEmbeddedMirror(tabId, autoStart = true) call arrives while another call's
+     * create job for the same tab is already in flight — see ensureEmbeddedMirror's doc. */
+    private val embeddedMirrorPendingAutoStartByTab = mutableMapOf<String, Boolean>()
+
+    // Test seam for the embedded-mirror autostart race (ensureEmbeddedMirror): production deploys a
+    // real scrcpy server over adb (slow, needs a device). Tests substitute a factory they can gate
+    // with a latch to reproduce the exact race — a second ensureEmbeddedMirror call landing while
+    // the first's create job is still in flight — deterministically instead of by timing. A plain
+    // internal property rather than a constructor parameter: EmbeddedMirrorHandle is `internal`
+    // (the whole capture.mirror stack deliberately is), and AppState's own constructor is public,
+    // so a constructor parameter of this type would fail the "public declaration exposes internal
+    // type" check that a property setter of the same visibility does not.
+    internal var embeddedMirrorHandleFactory: (CaptureTools, File, com.indagium.capture.mirror.EmbeddedDeviceSession?) -> EmbeddedMirrorHandle =
+        EmbeddedMirrorHandle::create
+
+    /** Setup failures (tool resolution, asset deploy, handle creation) that happened before any
+     * [EmbeddedMirrorHandle] existed to carry a FAILED snapshot of its own — see ensureEmbeddedMirror. */
+    private val embeddedMirrorSetupErrorByTab = mutableStateMapOf<String, String>()
     private var embeddedMirrorVersion by mutableStateOf(0)
     private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
     private val captureLaunchDrafts = mutableMapOf<String, com.indagium.capture.CaptureSettings>()
@@ -1830,6 +1863,12 @@ class AppState(
     private val captureFinalizationStatusByTab = mutableStateMapOf<String, String>()
     internal var captureExportBusy by mutableStateOf(false)
         private set
+
+    /** Set while [exportCaptureSnapshot] is waiting for a still-recording MKV's muxer lag to catch
+     * up (see CaptureArchiveExporter.waitForVideoCoverage) so the popover's busy state doesn't look
+     * stuck; cleared alongside [captureExportBusy]. */
+    internal var captureExportBusyMessage by mutableStateOf<String?>(null)
+        private set
     internal var captureExportResult by mutableStateOf<CaptureExportResult?>(null)
         private set
     internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
@@ -1837,6 +1876,7 @@ class AppState(
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
     private var captureExportJob: Job? = null
+
     /** One cancellable, latest-only preview lane per live capture tab. */
     private val capturePreviewJobsByTab = mutableMapOf<String, Job>()
     private val capturePreviewGenerationByTab = mutableMapOf<String, Long>()
@@ -1850,6 +1890,13 @@ class AppState(
      */
     internal fun captureControllerFor(tabId: String): TabCaptureController? =
         synchronized(stateLock) { captureControllersByTab[tabId] }
+
+    /** Test seam: registers a controller for [tabId] without going through [startCaptureTab]'s real
+     * device/tool-resolution flow, so ensureEmbeddedMirror's race handling can be exercised directly
+     * against a [TabCaptureController] backed by fakes (see EmbeddedMirrorAutostartTest). */
+    internal fun registerCaptureControllerForTest(tabId: String, controller: TabCaptureController) {
+        synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+    }
 
     internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
 
@@ -1940,10 +1987,42 @@ class AppState(
         return synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
     }
 
+    /** A setup failure (tool resolution, asset deploy, handle creation) from before any
+     * [EmbeddedMirrorHandle] existed — the panel has no handle to read a FAILED snapshot from in
+     * that case, so this is its only way to learn setup failed at all. Cleared by the next attempt
+     * (whether it succeeds or fails again). */
+    internal fun embeddedMirrorSetupError(tabId: String): String? = embeddedMirrorSetupErrorByTab[tabId]
+
     /**
      * Creates/reuses the embedded runtime for a live capture. Tool resolution happens on the IO
      * lane; the log recorder is never stopped when mirror setup fails. Automatic start follows the
      * capture session's mirror setting, while the explicit Open/Connect action passes true here.
+     *
+     * Two calls commonly race: `CaptureCard`'s `LaunchedEffect` fires with `autoStart` following
+     * `session?.settings?.mirror` — which can still be null on its first composition — right around
+     * the same time [startCaptureTab] calls this itself with `autoStart = true` once the session is
+     * known. Previously, whichever call's create job started first "won": a second call landing
+     * while that job was still in flight just returned, silently dropping its own `autoStart` intent
+     * — the panel stayed on "Connect to show the device" forever even though a mirror was supposed
+     * to auto-start. [embeddedMirrorPendingAutoStartByTab] fixes that by having a late `autoStart`
+     * request record itself for the in-flight job to honour once it finishes creating the handle.
+     *
+     * The job used to fail outright with "capture session is not ready" if `controller
+     * .selectedSession.value` was still null at the moment this ran — a real race, since the
+     * recorder publishes that StateFlow slightly after `controller.start()` returns. It now waits
+     * (bounded) for the first non-null value instead of failing immediately.
+     *
+     * A second, narrower race lived here too: for a `recordVideo=true` session, `CaptureRecorder
+     * .startCapture` publishes `selectedSession` (so [awaitCaptureSession] above returns) well
+     * before it assigns its embedded device session — adb logcat still has to spawn in between (see
+     * `CaptureRecorder.startCapture`, `mutableSelectedSession.value = session` vs. `embeddedSession
+     * = newSession`). A single synchronous `controller.activeEmbeddedSession()` read landing in that
+     * window used to see null and silently fall back to opening a *second*, independent embedded
+     * scrcpy server for a capture that IS recording video — a real device-encoder resource, not just
+     * a wasted read. [awaitEmbeddedRecordingSession] closes that window by suspending (bounded, never
+     * blocking a thread) on `CaptureRecorder.embeddedSessionFlow` instead of taking one snapshot.
+     * `recordVideo=false` captures skip this wait entirely and always get the handle's own
+     * standalone runtime, same as before.
      */
     internal fun ensureEmbeddedMirror(tabId: String, autoStart: Boolean) {
         val controller = captureControllerFor(tabId) ?: return
@@ -1953,39 +2032,88 @@ class AppState(
             return
         }
         synchronized(stateLock) {
-            if (embeddedMirrorStartJobsByTab.containsKey(tabId)) return
+            if (embeddedMirrorStartJobsByTab.containsKey(tabId)) {
+                if (autoStart) embeddedMirrorPendingAutoStartByTab[tabId] = true
+                return
+            }
+            embeddedMirrorSetupErrorByTab.remove(tabId)
             embeddedMirrorStartJobsByTab[tabId] = ioScope.launch {
                 try {
-                    val session = controller.selectedSession.value
+                    val session = awaitCaptureSession(controller)
                         ?: error("capture session is not ready")
                     val tools = captureService.toolsForStart(session.settings)
-                    val handle = EmbeddedMirrorHandle.create(
-                        tools = tools,
-                        root = File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
-                    )
-                    synchronized(stateLock) {
-                        if (captureControllersByTab[tabId] !== controller) {
-                            handle.close()
-                            return@launch
-                        }
-                        embeddedMirrorsByTab[tabId] = handle
-                        embeddedMirrorVersion++
+                    // A capture that's actively recording video already owns one embedded scrcpy
+                    // session (CaptureRecorder/EmbeddedDeviceSession) — share it instead of opening
+                    // a second device encoder. Mirror-only captures (recordVideo=false) skip the wait
+                    // below entirely and always fall back to the handle's own standalone transport
+                    // (null here).
+                    val sharedDeviceSession = if (session.settings.recordVideo) {
+                        awaitEmbeddedRecordingSession(controller)
+                            ?: error(
+                                controller.snapshot.value.diagnostics.lastOrNull()
+                                    ?: "Video recording's embedded session did not start in time",
+                            )
+                    } else {
+                        null
                     }
-                    if (autoStart) startEmbeddedMirror(tabId, handle, controller)
+                    val handle = embeddedMirrorHandleFactory(
+                        tools,
+                        File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
+                        sharedDeviceSession,
+                    )
+                    val wantsAutoStart = synchronized(stateLock) {
+                        if (captureControllersByTab[tabId] !== controller) {
+                            null
+                        } else {
+                            embeddedMirrorsByTab[tabId] = handle
+                            embeddedMirrorVersion++
+                            autoStart || embeddedMirrorPendingAutoStartByTab.remove(tabId) == true
+                        }
+                    }
+                    if (wantsAutoStart == null) {
+                        handle.close()
+                    } else if (wantsAutoStart) {
+                        startEmbeddedMirror(tabId, handle, controller)
+                    }
                 } catch (failure: Throwable) {
-                    captureService.reportError("Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}")
+                    val message = "Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}"
+                    captureService.reportError(message)
+                    embeddedMirrorSetupErrorByTab[tabId] = message
+                    AppLogger.warn("embedded-mirror", message, failure)
                 } finally {
-                    synchronized(stateLock) { embeddedMirrorStartJobsByTab.remove(tabId) }
+                    synchronized(stateLock) {
+                        embeddedMirrorStartJobsByTab.remove(tabId)
+                        embeddedMirrorPendingAutoStartByTab.remove(tabId)
+                    }
                 }
             }
         }
     }
 
+    /** Bounded wait for the recorder to publish its session — see ensureEmbeddedMirror's doc. */
+    private suspend fun awaitCaptureSession(controller: TabCaptureController): CaptureSession? =
+        withTimeoutOrNull(EMBEDDED_MIRROR_SESSION_WAIT_MS) { controller.selectedSession.filterNotNull().first() }
+
+    /** Bounded wait for a recordVideo=true capture's embedded device session to appear — see
+     * ensureEmbeddedMirror's doc for the race this closes. Suspends rather than blocking a thread;
+     * a single missed read of [TabCaptureController.activeEmbeddedSession] used to race the window
+     * between `selectedSession` publication and the recorder actually creating its embedded session. */
+    private suspend fun awaitEmbeddedRecordingSession(
+        controller: TabCaptureController,
+    ): com.indagium.capture.mirror.EmbeddedDeviceSession? =
+        withTimeoutOrNull(EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS) {
+            controller.embeddedSessionFlow.filterNotNull().first()
+        }
+
     /** Explicit Open/Connect action; retained for the existing toolbar/strip call sites. */
     internal fun openCaptureMirror(tabId: String) = ensureEmbeddedMirror(tabId, autoStart = true)
 
+    /** Off the calling thread: [EmbeddedMirrorHandle.stop] can block on synchronous adb subprocess
+     * cleanup (see AdbScrcpyConnection.close), and this is called directly from a Compose
+     * Disconnect click handler — blocking there would freeze the UI for that cleanup's duration. */
     internal fun stopEmbeddedMirror(tabId: String) {
-        synchronized(stateLock) { embeddedMirrorsByTab[tabId] }?.stop()
+        val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
+        ioScope.launch { handle.stop() }
     }
 
     private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {
@@ -2030,12 +2158,15 @@ class AppState(
         }
         if (captureExportBusy) return
         captureExportBusy = true
+        captureExportBusyMessage = null
         captureExportResult = null
         captureExportPreview = null
         captureExportError = null
         captureExportJob = ioScope.launch {
             try {
-                val result = runInterruptible { controller.export(request) }
+                val result = runInterruptible {
+                    controller.export(request) { captureExportBusyMessage = "Waiting for the recording to catch up…" }
+                }
                 captureExportResult = result
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -2043,6 +2174,7 @@ class AppState(
                 captureExportError = failure.message ?: failure::class.simpleName ?: "Capture export failed"
             } finally {
                 captureExportBusy = false
+                captureExportBusyMessage = null
                 captureExportJob = null
             }
         }
@@ -2282,6 +2414,16 @@ class AppState(
                     // FileTailer captures this offset synchronously before its coroutine is scheduled.
                     // The recorder has already opened an empty log file, so no adb line can precede it.
                     startCaptureTailing(tabId)
+                    // CaptureCard — the only other place that calls ensureEmbeddedMirror — is a
+                    // child of the right sidebar and simply doesn't compose while videoPanelVisible
+                    // is false, so a mirror-enabled capture that starts with the panel hidden would
+                    // otherwise never auto-start its mirror and never surface a setup error either.
+                    // Showing the panel here doesn't touch non-capture tabs: this callback only
+                    // runs for a capture that is starting.
+                    if (settings.mirror) {
+                        videoPanelVisible = true
+                        ensureEmbeddedMirror(tabId, autoStart = true)
+                    }
                 }
                 captureService.updateSessions()
                 closeCaptureLauncherTabs()
@@ -6245,6 +6387,13 @@ class AppState(
             synchronized(stateLock) { captureControllersByTab.remove(tabId) }
             stopControllerNow(tabId, controller)
         }
+        // A handle can still be present here even after the liveMirrors pass above: a new one can
+        // register (the async create job in ensureEmbeddedMirror) in the window between that
+        // snapshot and this block. Collected under the lock and closed after releasing it, same as
+        // liveMirrors — EmbeddedMirrorHandle.close() can block on a shared session's decoder-thread
+        // join or a standalone connection's synchronous adb cleanup, and stateLock is taken by ~80
+        // other call sites across this class, so blocking IO/joins must never run while holding it.
+        val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
@@ -6254,7 +6403,7 @@ class AppState(
                 videoControllers.remove(tabId)?.close()
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
-                embeddedMirrorsByTab.remove(tabId)?.close()
+                embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
                 embeddedMirrorVersion++
                 // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
                 // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
@@ -6284,6 +6433,7 @@ class AppState(
             if (next.size < 2) compareMode = false
             tabs = next
         }
+        stragglerMirrors.forEach { mirror -> runCatching { mirror.close() } }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds

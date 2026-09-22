@@ -9,6 +9,7 @@ import org.bytedeco.ffmpeg.global.avcodec.AV_PKT_FLAG_KEY
 import org.bytedeco.ffmpeg.global.avcodec.av_packet_free
 import org.bytedeco.ffmpeg.global.avcodec.av_packet_rescale_ts
 import org.bytedeco.ffmpeg.global.avcodec.av_packet_unref
+import org.bytedeco.ffmpeg.global.avcodec.avcodec_find_encoder_by_name
 import org.bytedeco.ffmpeg.global.avcodec.avcodec_parameters_copy
 import org.bytedeco.ffmpeg.global.avformat.AVFMT_NOFILE
 import org.bytedeco.ffmpeg.global.avformat.AVIO_FLAG_WRITE
@@ -33,6 +34,9 @@ import org.bytedeco.ffmpeg.global.avutil.av_strerror
 import org.bytedeco.javacpp.BytePointer
 import org.bytedeco.javacpp.Pointer
 import org.bytedeco.javacpp.PointerPointer
+import org.bytedeco.javacv.FFmpegFrameGrabber
+import org.bytedeco.javacv.FFmpegFrameRecorder
+import org.bytedeco.javacv.Frame
 import java.io.File
 import java.io.IOException
 import java.io.InterruptedIOException
@@ -50,11 +54,45 @@ private const val FFMPEG_ERROR_BUFFER_BYTES = 256L
 private val NO_FORMAT_OPTIONS: PointerPointer<*>? = null
 
 /**
+ * How far a keyframe-aligned start may precede the requested start before it's worth paying for a
+ * decode/re-encode instead. Below this, [remux]'s ordinary keyframe-aligned clip is both cheaper
+ * and lossless (no re-encode generation loss), and the extra few hundred ms of leading video is a
+ * reasonable trade.
+ */
+private const val EXACT_START_TOLERANCE_MS = 500L
+
+/** How far after [reencodeFromRequestedStart]'s target keyframe a seek's landed frame may be and
+ * still be trusted — see [positionAtOrBeforeKeyframe]. Generous (well above ordinary decoder/
+ * timestamp rounding) since landing early is always safe; this only guards against landing late. */
+private const val SEEK_VERIFY_TOLERANCE_US = 200_000L
+
+/**
+ * H.264 encoders to try, in order, for [reencodeFromRequestedStart]. `libopenh264` is bytedeco's
+ * bundled non-GPL software encoder and is expected on every platform this app ships JavaCPP FFmpeg
+ * for; `libx264` covers a differently-built FFmpeg (e.g. a GPL build) that omits libopenh264;
+ * `h264_videotoolbox` is macOS's hardware encoder, tried last since the other two are portable.
+ * [avcodec_find_encoder_by_name] returns a null pointer (never a Kotlin `null`) for a name this
+ * FFmpeg build wasn't compiled with, so probing in order and taking the first real hit is enough —
+ * no platform-sniffing needed. Verified against the bundled ffmpeg 8.0.1-1.5.13 build this project
+ * pins (build.gradle.kts): libopenh264 and h264_videotoolbox are both present, libx264 is not.
+ */
+private val EXACT_START_ENCODER_CANDIDATES = listOf("libopenh264", "libx264", "h264_videotoolbox")
+private const val REENCODE_FALLBACK_FRAME_RATE = 30.0
+private const val REENCODE_FALLBACK_BITRATE = 8_000_000
+
+/**
  * Exports a playable interval from the immutable prefix of a scrcpy Matroska recording that exists
  * when [export] starts. The encoded packets are remuxed; the source is never sought, truncated, or
  * otherwise modified and no codec is required on the machine beyond the bundled JavaCPP FFmpeg.
  */
-class FfmpegCaptureVideoExporter : CaptureVideoExporter {
+class FfmpegCaptureVideoExporter(
+    // Test-only observability seam: [reencodeFromRequestedStart] reports whether it trusted its
+    // keyframe seek or fell back to decoding from the start of the snapshot, and how many frames it
+    // had to read before reaching the requested start. Production never sets this; tests use it to
+    // prove seeking (not a full linear decode of a long recording) is what positions the decoder —
+    // see FfmpegCaptureVideoExporterTest.
+    private val reencodeDiagnosticsHook: ((ReencodeDiagnostics) -> Unit)? = null,
+) : CaptureVideoExporter, CaptureVideoCoverageProbe {
     override fun export(
         source: File,
         destination: File,
@@ -69,23 +107,279 @@ class FfmpegCaptureVideoExporter : CaptureVideoExporter {
         val destinationParent = destination.absoluteFile.parentFile
             ?: throw IOException("Video destination has no parent: ${destination.absolutePath}")
         destinationParent.mkdirs()
-        val snapshot = Files.createTempFile(destinationParent.toPath(), ".capture-snapshot-", ".mkv").toFile()
         val staging = Files.createTempFile(destinationParent.toPath(), ".capture-export-", ".mkv").toFile()
         try {
-            copyCurrentPrefix(source, snapshot)
-            val window = scanWindow(snapshot, requestedStartMs, requestedEndMs)
-            remux(snapshot, staging, window)
+            // One shared snapshot for both the scan and the remux (unlike coverageEndMs(), which
+            // only ever needs the scan): scanWindow()'s window bounds must be valid against exactly
+            // the bytes remux() reads, and a single copy is also half the I/O of taking two.
+            val clip = withPrefixSnapshot(source) { snapshot ->
+                val window = scanWindow(snapshot, requestedStartMs, requestedEndMs)
+                val keyframeGapMs = requestedStartMs - window.actualStartUs / MILLIS_PER_SECOND
+                val exact = if (keyframeGapMs > EXACT_START_TOLERANCE_MS) {
+                    reencodeFromRequestedStart(
+                        snapshot,
+                        staging,
+                        requestedStartMs,
+                        window.actualStartUs,
+                        window.coveredEndUs,
+                        reencodeDiagnosticsHook,
+                    )
+                } else {
+                    null
+                }
+                if (exact != null) {
+                    exact
+                } else {
+                    remux(snapshot, staging, window)
+                    CaptureVideoClip(
+                        actualStartMs = window.actualStartUs / MILLIS_PER_SECOND,
+                        coveredEndMs = window.coveredEndUs / MILLIS_PER_SECOND,
+                        durationMs = (window.coveredEndUs - window.actualStartUs) / MILLIS_PER_SECOND,
+                    )
+                }
+            }
             replaceDestination(staging, destination)
-            return CaptureVideoClip(
-                actualStartMs = window.actualStartUs / MILLIS_PER_SECOND,
-                coveredEndMs = window.coveredEndUs / MILLIS_PER_SECOND,
-                durationMs = (window.coveredEndUs - window.actualStartUs) / MILLIS_PER_SECOND,
-            )
+            return clip
         } finally {
-            snapshot.delete()
             staging.delete()
         }
     }
+
+    /**
+     * See [CaptureVideoCoverageProbe]: a read-only scan of the *live* [source] — deliberately not
+     * [withPrefixSnapshot]'s copy-then-scan. [export]/[reencodeFromRequestedStart] need a frozen,
+     * byte-identical copy because [remux] does a second pass that must see exactly what [scanWindow]
+     * saw; this probe only ever reads, once, so there is nothing a second pass could disagree with.
+     * Copying was previously done here too, out of caution, but for a multi-GB growing recording
+     * that meant copying the whole file on every ~200ms poll while a snapshot popover is open — for
+     * an hour-long capture, gigabytes of I/O per Save, repeated on every preview tick. [inputLength]
+     * is sampled exactly once and passed straight to [readPackets], whose existing
+     * INVALIDDATA-at-physical-EOF tolerance already handles a cluster still being flushed past that
+     * point — the same tolerance [withPrefixSnapshot]'s copy exists to make *simpler* to reason
+     * about, not the only thing that makes a growing-file read safe.
+     */
+    override fun coverageEndMs(source: File, requestedStartMs: Long, requestedEndMs: Long): Long {
+        require(requestedStartMs >= 0L) { "Video coverage probe start must be non-negative" }
+        require(requestedEndMs > requestedStartMs) { "Video coverage probe end must be after its start" }
+        require(source.isFile) { "Capture video does not exist: ${source.absolutePath}" }
+        val inputLength = source.length()
+        require(inputLength > 0L) { "Capture video has no readable bytes: ${source.absolutePath}" }
+        val window = withInput(source) { input -> scanWindow(input, inputLength, requestedStartMs, requestedEndMs) }
+        return window.coveredEndUs / MILLIS_PER_SECOND
+    }
+}
+
+/**
+ * Snapshots the current readable prefix of a growing [source] into a scratch file in the system
+ * temp directory and runs [block] against it, deleting the scratch file afterwards.
+ */
+private fun <T> withPrefixSnapshot(source: File, block: (File) -> T): T {
+    val snapshot = Files.createTempFile(".capture-snapshot-", ".mkv").toFile()
+    try {
+        copyCurrentPrefix(source, snapshot)
+        return block(snapshot)
+    } finally {
+        snapshot.delete()
+    }
+}
+
+/**
+ * Attempts a frame-accurate clip start: decodes [snapshot] from its preceding keyframe and
+ * re-encodes only the video frames from [requestedStartMs] up to [coveredEndUs] (a bound already
+ * verified complete by [scanWindow] — reused as-is rather than re-derived, see the call site).
+ * Returns null — never throws for an ordinary "can't do this" reason — when no bundled H.264
+ * encoder is available, the source has no usable video, or nothing decodes in range; the caller
+ * falls back to [remux]'s always-correct keyframe-aligned clip in every such case. Every ordinary
+ * decode/encode failure (unsupported pixel format, an encoder that reports available but rejects
+ * this stream, a grabber/recorder exception, etc.) is deliberately swallowed for exactly that same
+ * fallback — [CaptureArchiveExporter.export]'s caller only ever sees the outcome (an exact-start
+ * clip or a keyframe-aligned one), never this internal decision. Only a genuine cancellation
+ * ([InterruptedIOException]) is not "ordinary" and propagates.
+ *
+ * Audio is intentionally dropped here (see [EXACT_START_ENCODER_CANDIDATES]'s neighbourhood): a
+ * snapshot's audio track doesn't need frame-exact alignment the way video does for
+ * [CaptureArchiveExporter]'s log-to-video row mapping, and re-encoding it in lockstep with video
+ * here would roughly double this function's failure surface for no correctness benefit.
+ */
+@Suppress("TooGenericExceptionCaught", "SwallowedException")
+private fun reencodeFromRequestedStart(
+    snapshot: File,
+    staging: File,
+    requestedStartMs: Long,
+    keyframeStartUs: Long,
+    coveredEndUs: Long,
+    onDiagnostics: ((ReencodeDiagnostics) -> Unit)?,
+): CaptureVideoClip? {
+    val encoder = EXACT_START_ENCODER_CANDIDATES.firstNotNullOfOrNull { name ->
+        val codec = avcodec_find_encoder_by_name(name)
+        if (codec != null && !codec.isNull) name to codec.id() else null
+    } ?: return null
+    return try {
+        reencodeWithEncoder(
+            snapshot,
+            staging,
+            requestedStartMs * MILLIS_PER_SECOND,
+            keyframeStartUs,
+            coveredEndUs,
+            encoder.first,
+            encoder.second,
+            onDiagnostics,
+        )
+    } catch (failure: InterruptedIOException) {
+        throw failure
+    } catch (failure: Exception) {
+        null
+    }
+}
+
+/** Test-only observability for [reencodeFromRequestedStart] — see [FfmpegCaptureVideoExporter]'s
+ * `reencodeDiagnosticsHook` constructor parameter. Public only because that constructor parameter
+ * (though itself `private`) is part of a public class's primary constructor signature. */
+data class ReencodeDiagnostics(val usedSeek: Boolean, val framesReadBeforeStart: Int)
+
+private fun reencodeWithEncoder(
+    snapshot: File,
+    staging: File,
+    requestedStartUs: Long,
+    keyframeStartUs: Long,
+    coveredEndUs: Long,
+    encoderName: String,
+    encoderId: Int,
+    onDiagnostics: ((ReencodeDiagnostics) -> Unit)?,
+): CaptureVideoClip? {
+    var grabber = FFmpegFrameGrabber(snapshot)
+    try {
+        grabber.start()
+        if (grabber.videoStream < 0 || grabber.imageWidth <= 0 || grabber.imageHeight <= 0) return null
+        val positioned = positionAtOrBeforeKeyframe(grabber, snapshot, keyframeStartUs)
+        grabber = positioned.grabber
+        var framesReadBeforeStart = 0
+        val start = FFmpegFrameRecorder(staging, grabber.imageWidth, grabber.imageHeight, 0).use { recorder ->
+            configureReencodeRecorder(recorder, grabber, encoderName, encoderId)
+            encodeFramesInRange(grabber, recorder, requestedStartUs, coveredEndUs, positioned.landedFrame) {
+                framesReadBeforeStart++
+            }
+        } ?: return null
+        onDiagnostics?.invoke(ReencodeDiagnostics(positioned.usedSeek, framesReadBeforeStart))
+        return CaptureVideoClip(
+            actualStartMs = start / MILLIS_PER_SECOND,
+            coveredEndMs = coveredEndUs / MILLIS_PER_SECOND,
+            durationMs = (coveredEndUs - start) / MILLIS_PER_SECOND,
+        )
+    } finally {
+        runCatching { grabber.stop() }
+        runCatching { grabber.release() }
+    }
+}
+
+private class PositionedGrabber(val grabber: FFmpegFrameGrabber, val usedSeek: Boolean, val landedFrame: Frame?)
+
+/**
+ * Positions [grabber] at or immediately before [keyframeStartUs] — already known, from
+ * [scanWindow]'s own packet-level scan, to be a real keyframe at or before the requested start — so
+ * the caller doesn't have to linearly software-decode every frame from the beginning of a
+ * potentially very long recording just to reach a point already found. Tries
+ * `FFmpegFrameGrabber.setTimestamp` (the cheap, single-seek path — not `setVideoTimestamp`, whose
+ * own frame-accurate refinement loop can itself decode many frames when the source's reported frame
+ * rate is unreliable, exactly the situation [encodeFramesInRange]'s doc describes) and verifies the
+ * result by grabbing one frame and checking it is actually a keyframe at or close to
+ * [keyframeStartUs], before trusting it.
+ *
+ * Verification matters because a live, still-growing scrcpy MKV snapshot has no Matroska Cues
+ * element (that's written into the trailer, which a growing recording doesn't have yet), so FFmpeg
+ * has to fall back to its own heuristic index-building when seeking such a file — behaviour this
+ * project doesn't control and hadn't previously exercised. On any failure (a thrown exception, or a
+ * frame that doesn't check out — wrong type, or landed after [keyframeStartUs] beyond a small
+ * tolerance), the original [grabber] is discarded and [snapshot] is reopened fresh, falling back to
+ * decoding from the very start — the exact, already-verified-correct behaviour this optimization
+ * replaces, just slower.
+ */
+private fun positionAtOrBeforeKeyframe(grabber: FFmpegFrameGrabber, snapshot: File, keyframeStartUs: Long): PositionedGrabber {
+    val landed = runCatching {
+        grabber.setTimestamp(keyframeStartUs)
+        grabber.grabImage()
+    }.getOrNull()
+    val verified = landed != null && landed.keyFrame && landed.timestamp <= keyframeStartUs + SEEK_VERIFY_TOLERANCE_US
+    if (verified) return PositionedGrabber(grabber, usedSeek = true, landedFrame = landed)
+    runCatching { grabber.stop() }
+    runCatching { grabber.release() }
+    val fresh = FFmpegFrameGrabber(snapshot)
+    fresh.start()
+    return PositionedGrabber(fresh, usedSeek = false, landedFrame = null)
+}
+
+/**
+ * Both `videoCodec` and `videoCodecName` must be set together: `FFmpegFrameRecorder` resolves the
+ * encoder from `videoCodec` (an AVCodecID) first when it isn't `AV_CODEC_ID_NONE`, and only
+ * consults `videoCodecName` to disambiguate which encoder implements that ID — `videoCodecName`
+ * alone (its default `videoCodec` left at `AV_CODEC_ID_MPEG4`, javacv's own class default) silently
+ * produced an MPEG-4 clip instead of the intended H.264 encoder during manual verification of this
+ * function.
+ */
+private fun configureReencodeRecorder(
+    recorder: FFmpegFrameRecorder,
+    grabber: FFmpegFrameGrabber,
+    encoderName: String,
+    encoderId: Int,
+) {
+    recorder.format = "matroska"
+    recorder.videoCodec = encoderId
+    recorder.videoCodecName = encoderName
+    recorder.frameRate = grabber.videoFrameRate.takeIf { it > 0.0 } ?: REENCODE_FALLBACK_FRAME_RATE
+    recorder.videoBitrate = REENCODE_FALLBACK_BITRATE
+    recorder.setDisplayRotation(grabber.displayRotation)
+}
+
+/**
+ * Encodes every frame with a timestamp in `[requestedStartUs, coveredEndUs)` and returns the first
+ * encoded frame's timestamp (microseconds), or null when nothing fell in range.
+ *
+ * `recorder.record(Frame)` does **not** read [org.bytedeco.javacv.Frame.timestamp] — verified
+ * against javacv 1.5.13's source: it forwards straight to `recordImage`, which stamps each frame by
+ * auto-incrementing the recorder's own internal frame counter at a fixed `1 / recorder.frameRate`
+ * spacing, entirely ignoring how far apart the *source* frames actually were. A real scrcpy
+ * recording's grabbed frame rate is unreliable in exactly the way that makes this bite hardest —
+ * verified manually against the connected emulator, where the source reported an ~1000 nominal
+ * rate (Matroska's container timebase, not a real fps), and the encoded clip ended up ~1ms of
+ * output per source frame: several real seconds of capture compressed into well under 100ms of
+ * playable video, while [CaptureVideoClip]'s own reported bounds (built from decode-side timestamps
+ * below, not the recorder's output) still claimed the correct multi-second span. `setTimestamp`
+ * (called once per frame, rebased so the clip's own first frame lands at 0) is what makes the
+ * recorder's output timeline match real elapsed time regardless of that nominal rate.
+ */
+private fun encodeFramesInRange(
+    grabber: FFmpegFrameGrabber,
+    recorder: FFmpegFrameRecorder,
+    requestedStartUs: Long,
+    coveredEndUs: Long,
+    // A frame [positionAtOrBeforeKeyframe] already grabbed while verifying its seek landed — fed
+    // into this loop first so that successful verification doesn't also discard the very frame it
+    // proved was usable.
+    pregrabbedFrame: Frame?,
+    onFrameReadBeforeStart: () -> Unit,
+): Long? {
+    var firstUs: Long? = null
+    var started = false
+    var pending = pregrabbedFrame
+    while (true) {
+        checkInterrupted()
+        val frame = pending ?: grabber.grabImage()
+        pending = null
+        if (frame == null || frame.timestamp >= coveredEndUs) break
+        if (frame.timestamp >= requestedStartUs) {
+            if (!started) {
+                recorder.start()
+                started = true
+            }
+            if (firstUs == null) firstUs = frame.timestamp
+            recorder.timestamp = frame.timestamp - firstUs
+            recorder.record(frame)
+        } else {
+            onFrameReadBeforeStart()
+        }
+    }
+    if (started) recorder.stop()
+    return firstUs
 }
 
 private data class ExportWindow(val actualStartUs: Long, val coveredEndUs: Long, val videoStreamIndex: Int)
@@ -117,50 +411,61 @@ private fun copyCurrentPrefix(source: File, snapshot: File) {
     }
 }
 
+/** Scans a static, already-copied snapshot file — used by [export]/[reencodeFromRequestedStart],
+ * where the bytes [remux] reads must be exactly the bytes this scan saw. */
 private fun scanWindow(snapshot: File, requestedStartMs: Long, requestedEndMs: Long): ExportWindow =
-    withInput(snapshot) { input ->
-        val videoStreamIndex = firstVideoStream(input)
-        val requestedStartUs = requestedStartMs * MILLIS_PER_SECOND
-        val requestedEndUs = requestedEndMs * MILLIS_PER_SECOND
-        var actualStartUs: Long? = null
-        var coveredEndUs = Long.MIN_VALUE
-        var readableVideoPackets = 0L
-        readPackets(input, snapshot.length()) { packet ->
-            if (packet.stream_index() != videoStreamIndex) return@readPackets
-            val stream = input.streams(videoStreamIndex)
-            val startUs = packetTimestampUs(packet, stream) ?: return@readPackets
-            val endUs = packetEndUs(packet, stream, startUs)
-            readableVideoPackets++
-            if ((packet.flags() and AV_PKT_FLAG_KEY) != 0) {
-                when {
-                    startUs <= requestedStartUs -> {
-                        // A later preceding keyframe supersedes any earlier candidate and its
-                        // coverage. Starting at an earlier keyframe would include unnecessary
-                        // video and can make the reported interval inconsistent with remuxing.
-                        actualStartUs = startUs
-                        coveredEndUs = Long.MIN_VALUE
-                    }
-                    actualStartUs == null && startUs < requestedEndUs -> {
-                        // Video may start after the session's monotonic zero (for example when
-                        // another stream starts first). Report the first usable video keyframe.
-                        actualStartUs = startUs
-                        coveredEndUs = Long.MIN_VALUE
-                    }
+    withInput(snapshot) { input -> scanWindow(input, snapshot.length(), requestedStartMs, requestedEndMs) }
+
+/**
+ * Core scan, parameterized by an explicit [inputLength] rather than re-reading `File.length()`
+ * internally: [coverageEndMs] calls this directly against the *live*, still-growing [source] file
+ * (see that function's doc for why), where the length must be sampled exactly once up front and
+ * reused for the whole scan — a second `File.length()` call partway through would race the writer.
+ */
+@Suppress("ThrowsCount")
+private fun scanWindow(input: AVFormatContext, inputLength: Long, requestedStartMs: Long, requestedEndMs: Long): ExportWindow {
+    val videoStreamIndex = firstVideoStream(input)
+    val requestedStartUs = requestedStartMs * MILLIS_PER_SECOND
+    val requestedEndUs = requestedEndMs * MILLIS_PER_SECOND
+    var actualStartUs: Long? = null
+    var coveredEndUs = Long.MIN_VALUE
+    var readableVideoPackets = 0L
+    readPackets(input, inputLength) { packet ->
+        if (packet.stream_index() != videoStreamIndex) return@readPackets
+        val stream = input.streams(videoStreamIndex)
+        val startUs = packetTimestampUs(packet, stream) ?: return@readPackets
+        val endUs = packetEndUs(packet, stream, startUs)
+        readableVideoPackets++
+        if ((packet.flags() and AV_PKT_FLAG_KEY) != 0) {
+            when {
+                startUs <= requestedStartUs -> {
+                    // A later preceding keyframe supersedes any earlier candidate and its
+                    // coverage. Starting at an earlier keyframe would include unnecessary
+                    // video and can make the reported interval inconsistent with remuxing.
+                    actualStartUs = startUs
+                    coveredEndUs = Long.MIN_VALUE
+                }
+                actualStartUs == null && startUs < requestedEndUs -> {
+                    // Video may start after the session's monotonic zero (for example when
+                    // another stream starts first). Report the first usable video keyframe.
+                    actualStartUs = startUs
+                    coveredEndUs = Long.MIN_VALUE
                 }
             }
-            val selectedStartUs = actualStartUs
-            if (selectedStartUs != null && startUs >= selectedStartUs && startUs < requestedEndUs && endUs <= requestedEndUs) {
-                coveredEndUs = maxOf(coveredEndUs, endUs)
-            }
         }
-        if (readableVideoPackets == 0L) throw IOException("Capture snapshot contains no readable video packets")
-        val actualStart = actualStartUs
-            ?: throw IOException("Capture snapshot has no readable keyframe in the requested interval")
-        if (coveredEndUs <= actualStart) {
-            throw IOException("Capture snapshot contains no complete video in the requested interval")
+        val selectedStartUs = actualStartUs
+        if (selectedStartUs != null && startUs >= selectedStartUs && startUs < requestedEndUs && endUs <= requestedEndUs) {
+            coveredEndUs = maxOf(coveredEndUs, endUs)
         }
-        ExportWindow(actualStart, coveredEndUs, videoStreamIndex)
     }
+    if (readableVideoPackets == 0L) throw IOException("Capture snapshot contains no readable video packets")
+    val actualStart = actualStartUs
+        ?: throw IOException("Capture snapshot has no readable keyframe in the requested interval")
+    if (coveredEndUs <= actualStart) {
+        throw IOException("Capture snapshot contains no complete video in the requested interval")
+    }
+    return ExportWindow(actualStart, coveredEndUs, videoStreamIndex)
+}
 
 private fun remux(snapshot: File, staging: File, window: ExportWindow) {
     withInput(snapshot) { input ->

@@ -41,28 +41,6 @@ class CaptureTools(
         return CaptureProcessSpec(adb.command(args))
     }
 
-    fun scrcpySpec(serial: String, settings: CaptureSettings, destination: File): CaptureProcessSpec {
-        val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
-        val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
-            add("--record=${destination.absolutePath}")
-            add("--record-format=mkv")
-            // Recording is always headless. The embedded mirror owns the in-app preview and must
-            // never race a second native scrcpy window or steal focus from the desktop UI.
-            add("--no-window")
-            // Headless recording must not require a host audio output device. Keep audio capture
-            // enabled when requested, while disabling only scrcpy's local playback path.
-            add("--no-audio-playback")
-        }
-        if (!settings.audio) arguments += "--no-audio"
-        return if (executable.runOnHost) {
-            CaptureProcessSpec(
-                listOf("flatpak-spawn", "--host", "--watch-bus", "--env=ADB=${adb.path}", executable.path) + arguments,
-            )
-        } else {
-            CaptureProcessSpec(executable.command(arguments), environment = mapOf("ADB" to adb.path))
-        }
-    }
-
     /** Starts a visible, non-recording scrcpy window for an active capture. */
     fun scrcpyMirrorSpec(serial: String, settings: CaptureSettings): CaptureProcessSpec {
         val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
@@ -87,6 +65,17 @@ class CaptureTools(
         "--max-fps=${settings.maxFps.coerceAtLeast(1)}",
         "--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M",
         "--video-codec=h264",
+        // Android's MediaCodec KEY_I_FRAME_INTERVAL is nominally seconds, but hardware/software
+        // encoders schedule it against their configured KEY_FRAME_RATE (commonly 60fps) rather than
+        // the real frame rate scrcpy delivers. On a mostly-static screen scrcpy repeats frames at a
+        // much lower real rate (observed ~10fps on the Android emulator's software encoder), so a
+        // "10s" interval measured in encoder-clock frames landed a keyframe every ~60s of wall time
+        // in practice — one keyframe for an entire recording. Since-last-save exports were therefore
+        // re-remuxed from the very start of the session every time (see CaptureArchiveExporter's
+        // checkpoint split). "float" here matches the type Android's software AVC encoder expects
+        // for this key; scrcpy's own --video-codec-options docs point at MediaFormat's
+        // KEY_I_FRAME_INTERVAL for the full key/type table.
+        "--video-codec-options=i-frame-interval:float=1",
     )
 
     // Identity only: `adb version` exits 0 and prints "Android Debug Bridge ..." for every

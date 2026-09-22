@@ -21,11 +21,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AddAPhoto
 import androidx.compose.material.icons.outlined.FolderOpen
-import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Stop
 import androidx.compose.material.icons.outlined.Tune
-import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -712,6 +710,11 @@ private fun CaptureSnapshotPopover(
                 )
                 AppButton("Confirm overwrite", { overwriteConfirmed = true; onReturnFocus() }, ButtonVariant.Secondary)
             }
+            if (state.captureExportBusy) {
+                state.captureExportBusyMessage?.let {
+                    AppText(it, color = colors.td, fontSize = 10.sp)
+                }
+            }
             state.captureExportError?.let { error ->
                 AppText("Snapshot failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
             }
@@ -847,6 +850,7 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
         SectionHeader("DEVICE")
         EmbeddedMirrorPanel(
             handle = mirror,
+            setupError = state.embeddedMirrorSetupError(tab.id),
             onConnect = { state.openCaptureMirror(tab.id) },
             onDisconnect = { state.stopEmbeddedMirror(tab.id) },
             modifier = Modifier.fillMaxWidth(),

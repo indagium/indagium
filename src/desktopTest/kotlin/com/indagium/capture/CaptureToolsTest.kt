@@ -1,6 +1,5 @@
 package com.indagium.capture
 
-import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -41,22 +40,22 @@ class CaptureToolsTest {
     }
 
     @Test
-    fun scrcpyUsesSelectedAdbAndSafeRecordingDefaults() {
+    fun mirrorSpecUsesSelectedAdbAndNeverCarriesARecordFlag() {
+        // Recording no longer spawns host scrcpy at all — CaptureRecorder now owns the device
+        // stream directly via the embedded scrcpy server (see EmbeddedDeviceSession). scrcpyMirrorSpec
+        // is the one remaining host-scrcpy launch: an explicitly visible, non-recording auxiliary
+        // window, which must never carry a --record flag (it must not be able to race or overwrite
+        // the canonical session MKV that EmbeddedDeviceSession/StreamingMkvWriter now own).
         val tools = CaptureTools(
             adb = CaptureExecutable("/sdk/platform-tools/adb"),
             scrcpy = CaptureExecutable("/usr/bin/scrcpy"),
             runner = FakeCaptureRunner(),
         )
-        val spec = tools.scrcpySpec(
-            serial = "ABC",
-            settings = CaptureSettings(recordVideo = true, audio = true),
-            destination = File("/tmp/session/screen.mkv"),
-        )
+        val spec = tools.scrcpyMirrorSpec(serial = "ABC", settings = CaptureSettings(recordVideo = true, audio = true))
 
         assertEquals("/sdk/platform-tools/adb", spec.environment["ADB"])
-        assertTrue(spec.command.containsAll(listOf("--serial", "ABC", "--record-format=mkv", "--video-codec=h264")))
-        assertTrue(spec.command.any { it.startsWith("--record=") })
-        assertFalse(spec.command.contains("--audio"))
+        assertTrue(spec.command.containsAll(listOf("--serial", "ABC", "--video-codec=h264")))
+        assertFalse(spec.command.any { it.startsWith("--record") })
         assertFalse(spec.command.contains("--no-audio"))
     }
 

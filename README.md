@@ -68,8 +68,10 @@ Capture is part of the normal tab workflow. Click **Capture** in the toolbar to 
 live capture, or to open a session-only **New capture** launcher when no capture is active. The
 launcher checks the installed `adb` and optional `scrcpy`, lists physical devices and emulators with
 their authorization/connection state, and shows retained interrupted sessions. Indagium does not
-bundle `adb`, `scrcpy`, or other host tools; install them through the platform's normal Android SDK
-and scrcpy setup. Only one live capture can run at a time.
+bundle host `adb`; install it through the platform's normal Android SDK setup. Video recording and
+the in-app embedded mirror stream the device over `adb` directly, using a bundled, checksum-pinned
+scrcpy *server* asset — a host `scrcpy` install is only needed for the separate, explicitly visible
+native mirror window (see below). Only one live capture can run at a time.
 
 Starting a device opens a normal streaming log tab. Its log can use the same filters, selection,
 folding, search, and Notes workflow as any other tab while `adb logcat` appends new rows. A 46dp

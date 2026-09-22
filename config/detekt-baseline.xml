@@ -3,13 +3,13 @@
   <ManuallySuppressedIssues></ManuallySuppressedIssues>
   <CurrentIssues>
     <ID>ComplexCondition:AppState.kt$AppState$tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()</ID>
+    <ID>ComplexCondition:CaptureStrip.kt$includeVideo &amp;&amp; session?.settings?.recordVideo == true &amp;&amp; (session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() &lt;= 0L)</ID>
     <ID>CyclomaticComplexMethod:AccountAgentRunner.kt$AccountAgentRunner$private suspend fun runCodex( run: AiRun, profile: AiProviderProfile, prompt: String, systemPrompt: String, workspace: Path, lease: ManagedMcpServerLease, )</ID>
     <ID>CyclomaticComplexMethod:App.kt$private fun handleGlobalKey( ev: KeyEvent, state: AppState, onFocusPanel: (KeyboardPanel) -&gt; Unit, onFocusFilterSearch: () -&gt; Unit, ): Boolean</ID>
-    <ID>CyclomaticComplexMethod:AppState.kt$AppState$fun followDiagnostics(tabId: String, videoMs: Long): FollowDiagnostics</ID>
-    <ID>CyclomaticComplexMethod:AppState.kt$AppState$private fun buildLogElapsedIndex(tab: LogTab): LogElapsedIndex</ID>
     <ID>CyclomaticComplexMethod:AutosaveCodec.kt$internal fun settingsFromToken(token: String): AppSettings?</ID>
     <ID>CyclomaticComplexMethod:ClaudeCodeClient.kt$ClaudeCodeClient$fun stream(request: ClaudeCodeRequest): Flow&lt;ClaudeCodeEvent&gt;</ID>
     <ID>CyclomaticComplexMethod:CodexAppServerClient.kt$CodexAppServerClient$private fun notification(method: String, params: JsonObject): CodexAppServerEvent?</ID>
+    <ID>CyclomaticComplexMethod:EmbeddedMirrorPanel.kt$private fun mirrorSurfaceModifier( handle: EmbeddedMirrorHandle?, frame: MirrorFrame?, focusRequester: FocusRequester, ): Modifier</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleNavKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, cursor: SelectionCursor, summary: ItemsSummary, onSelectRow: (Int) -&gt; Unit, ): Boolean</ID>
     <ID>CyclomaticComplexMethod:LogViewer.kt$private fun handleSelKey( ev: KeyEvent, items: List&lt;LogItem&gt;, tab: LogTab, lazyState: LazyListState, scope: CoroutineScope, scrollMargin: Int, onSelRowRange: (List&lt;Int&gt;) -&gt; Unit, cursor: SelectionCursor, summary: ItemsSummary, actions: SelKeyActions, ): Boolean</ID>
     <ID>DestructuringDeclarationWithTooManyEntries:AutosaveCodec.kt$val (kind, primaryPath, archiveEntry, displayName) = when (val videoSource = source) { is VideoSource.LocalFile -&gt; listOf("LOCAL", videoSource.path, "", "") is VideoSource.ArchiveEntry -&gt; listOf( "ARCHIVE", videoSource.archivePath, videoSource.entryPath, videoSource.displayName, ) }</ID>
@@ -17,8 +17,6 @@
     <ID>LargeClass:AppState.kt$AppState</ID>
     <ID>LargeClass:AppStateBehaviorTest.kt$AppStateBehaviorTest</ID>
     <ID>MagicNumber:AppState.kt$AppState$1024L</ID>
-    <ID>MagicNumber:AppState.kt$AppState$1_000L</ID>
-    <ID>MagicNumber:AppState.kt$AppState$60L</ID>
     <ID>MagicNumber:AutosaveCodec.kt$11</ID>
     <ID>MagicNumber:AutosaveCodec.kt$15</ID>
     <ID>MagicNumber:AutosaveCodec.kt$180</ID>
@@ -33,26 +31,40 @@
     <ID>MagicNumber:CodexAppServerClient.kt$CodexAppServerClient$32000</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$200</ID>
     <ID>MagicNumber:ControlServerMcpTest.kt$ControlServerMcpTest$299</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$111</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$19</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$21</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$22</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$66</ID>
+    <ID>MagicNumber:EmbeddedMirrorPanel.kt$67</ID>
+    <ID>MagicNumber:EmbeddedMirrorTest.kt$EmbeddedMirrorTest.BlockingAfterPayloadInputStream$0xff</ID>
     <ID>MagicNumber:ImageDownscale.kt$0.75f</ID>
     <ID>MagicNumber:VideoPanel.kt$180</ID>
     <ID>MagicNumber:VideoPanel.kt$270</ID>
     <ID>MagicNumber:VideoPanel.kt$360</ID>
     <ID>MagicNumber:VideoPanel.kt$90</ID>
+    <ID>MaxLineLength:EmbeddedMirrorPanel.kt$AppButton("Back", { handle?.send(MirrorControlCommand.Back()) }, ButtonVariant.Secondary, enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp)</ID>
+    <ID>MaxLineLength:EmbeddedMirrorPanel.kt$AppButton("Home", { handle?.sendAndroidKey(3) }, ButtonVariant.Secondary, enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp)</ID>
+    <ID>MaxLineLength:EmbeddedMirrorPanel.kt$AppButton("Power", { handle?.sendAndroidKey(26) }, ButtonVariant.Secondary, enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp)</ID>
     <ID>ReturnCount:AiSidebarRuntime.kt$AiSidebarRuntime$@Suppress("TooGenericExceptionCaught") fun start( tabId: String, profile: AiProviderProfile, apiKey: String, prompt: String, context: AiInvestigationContext = AiInvestigationContext(tabId), ): AiStartResult</ID>
     <ID>ReturnCount:IndagiumToolOperations.kt$IndagiumToolOperations$private fun addImageNoteRoute( tabId: String, imageBase64: String?, imagePath: String?, videoMs: Long?, caption: String, afterId: String?, ): Map&lt;String, Any?&gt;</ID>
     <ID>ReturnCount:IndagiumToolOperations.kt$IndagiumToolOperations$private fun getVideoFrameRoute(tabId: String, lineId: Int?, videoMs: Long?): Map&lt;String, Any?&gt;</ID>
+    <ID>ThrowsCount:EmbeddedMirrorRuntime.kt$AdbScrcpyTransport$private fun connectSocketUntilReady( role: String, localPort: Int, prepare: (Socket) -&gt; PreparedSocket, ): PreparedSocket</ID>
     <ID>ThrowsCount:UpdateChecker.kt$UpdateChecker$suspend fun downloadAsset( asset: ReleaseAsset, destination: File, onProgress: (bytesRead: Long, total: Long) -&gt; Unit = { _, _ -&gt; }, ): File</ID>
     <ID>TooGenericExceptionCaught:AccountAgentRunner.kt$AccountAgentRunner$error: Exception</ID>
     <ID>TooGenericExceptionCaught:AccountCliCheck.kt$error: Exception</ID>
     <ID>TooGenericExceptionCaught:AiToolExecutionCoordinator.kt$AiToolExecutionCoordinator$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:AppState.kt$AppState$failure: Throwable</ID>
     <ID>TooGenericExceptionCaught:BugReportZip.kt$t: Throwable</ID>
     <ID>TooGenericExceptionCaught:ClaudeCodeClient.kt$ClaudeCodeClient$error: Exception</ID>
     <ID>TooGenericExceptionCaught:CodexAppServerClient.kt$CodexAppServerClient$error: Throwable</ID>
     <ID>TooGenericExceptionCaught:ControlServer.kt$ControlServer$error: Exception</ID>
+    <ID>TooGenericExceptionCaught:EmbeddedMirrorTest.kt$EmbeddedMirrorTest$error: Throwable</ID>
     <ID>TooGenericExceptionCaught:ManagedMcpServerLease.kt$ManagedMcpServerLease.Companion$error: Exception</ID>
     <ID>TooGenericExceptionThrown:AppStateBehaviorTest.kt$AppStateBehaviorTest$throw RuntimeException("disk error")</ID>
     <ID>TooManyFunctions:AppState.kt$AppState</ID>
     <ID>TooManyFunctions:AppStateBehaviorTest.kt$AppStateBehaviorTest</ID>
+    <ID>UnusedParameter:AppState.kt$AppState$tabId: String</ID>
     <ID>UseCheckOrError:AccountAgentRunner.kt$AccountAgentRunner$throw IllegalStateException("Claude Code ended before the response completed.")</ID>
   </CurrentIssues>
 </SmellBaseline>

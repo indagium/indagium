@@ -52,6 +52,24 @@ private const val LAST_FIVE_MINUTES = 5L
 private const val LAST_TEN_MINUTES = 10L
 private const val MAX_SCREENSHOT_NAME_LENGTH = 80
 private const val MAX_CAPTURE_FILENAME_STEM_LENGTH = 180
+private const val DEFAULT_VIDEO_COVERAGE_WAIT_POLL_MS = 200L
+private const val VIDEO_COVERAGE_WAIT_POLL_MAX_MS = 1_000L
+private const val VIDEO_COVERAGE_WAIT_POLL_BACKOFF_MULTIPLIER = 2
+
+/** The real, production wait bound for [CaptureArchiveExporter]'s `videoCoverageWaitMs` — public so
+ * the one production call site (TabCaptureController) can opt into it explicitly; see that
+ * constructor parameter's doc for why the class itself defaults to disabled (0).
+ *
+ * Lowered from 8s: recording now writes `session.videoFile` directly via
+ * [com.indagium.capture.mirror.EmbeddedDeviceSession]/[StreamingMkvWriter] instead of relying on
+ * host `scrcpy --record`'s own Matroska muxer, which buffered clusters in memory badly enough that
+ * a snapshot could wait the full 8s and still see 0 bytes of new video. StreamingMkvWriter closes
+ * clusters every ~750ms (see its own doc), so a short bound is now enough to catch the ordinary
+ * "video packet already in flight" case without making Save feel slow when video genuinely isn't
+ * covering the request yet (e.g. recording just started, or the device stream reconnecting).
+ */
+const val DEFAULT_VIDEO_COVERAGE_WAIT_MS = 2_000L
+private const val NANOS_PER_MILLISECOND = 1_000_000L
 
 data class CaptureArchiveAsset(val path: String, val sizeBytes: Long, val sha256: String)
 
@@ -106,7 +124,36 @@ class CaptureArchiveException(message: String, cause: Throwable? = null) : IOExc
  */
 class CaptureArchiveExporter(
     private val videoExporter: CaptureVideoExporter = FfmpegCaptureVideoExporter(),
+    // Bounded wait, at real-export time only, for the growing MKV's muxer/AVIO buffering lag to
+    // catch up to the requested video end (see waitForVideoCoverage below). Deliberately OFF
+    // (0 = disabled, see waitForVideoCoverage's early return) by default: every capture fixture in
+    // this codebase's tests defaults CaptureSession.status to RECORDING (there was no prior reason
+    // for a fixture to care), so an on-by-default wait would silently make dozens of existing
+    // export tests poll for up to DEFAULT_VIDEO_COVERAGE_WAIT_MS against fakes that never satisfy
+    // it (e.g. one that intentionally throws to test failure handling). TabCaptureController, the
+    // one production call site, opts in explicitly with DEFAULT_VIDEO_COVERAGE_WAIT_MS.
+    private val videoCoverageWaitMs: Long = 0L,
+    private val videoCoverageWaitPollMs: Long = DEFAULT_VIDEO_COVERAGE_WAIT_POLL_MS,
 ) {
+    /**
+     * Cheap coverage-probe result cache keyed by source path+length so the popover's debounced
+     * preview polling doesn't even pay for a fresh scan when the growing MKV hasn't changed since
+     * the last tick. Read and written only from [probeCoverageEndMs], which is reached exclusively
+     * through [previewVideoCoverage] (called by [preview]) and [waitForVideoCoverage] (called by
+     * [export]) — both [preview] and [export] are themselves `@Synchronized`, i.e. both synchronize
+     * on this same instance's monitor before either can touch this field, so a plain `private var`
+     * is already safe here: there is no path to this field that isn't already serialized by one of
+     * those two entry points, and adding a second, separate lock would just be redundant.
+     */
+    private var coverageProbeCache: Pair<CoverageProbeKey, Long?>? = null
+
+    private data class CoverageProbeKey(
+        val sourcePath: String,
+        val sourceLength: Long,
+        val requestedStartMs: Long,
+        val requestedEndMs: Long,
+    )
+
     /**
      * Publishes the durable representation of a stopped capture beside its recorder output.
      *
@@ -276,8 +323,13 @@ class CaptureArchiveExporter(
             val excludeStart = request.range == CaptureRange.SINCE_SAVE && snapshotCheckpoint >= 0
             scanElapsedBounds(session.indexFile, frozenIndexBytes, frozenLogBytes, requestedStartMs, request.cutoffElapsedMs, excludeStart)
         }
+        // Deliberately session.effectiveVideoCheckpointMs, not the log's snapshotCheckpoint: video
+        // coverage lags the log (muxer/AVIO buffering — see FfmpegCaptureVideoExporter), so reusing
+        // the log cursor here either re-scanned from the recording's first keyframe every time
+        // (before the video cursor existed) or silently dropped whatever tail the previous export's
+        // lag left uncovered (a shared cursor advanced past real video coverage). See CaptureModels.
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.effectiveVideoCheckpointMs)
         val videoRangeEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
         val includeVideo = session.settings.recordVideo && request.includeVideo
         val videoCoverage = if (includeVideo) {
@@ -329,28 +381,92 @@ class CaptureArchiveExporter(
         if (requestedSourceEnd <= requestedSourceStart) {
             return PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
         }
-        val temporaryDestination = Files.createTempFile("capture-preview-video-", ".mkv").toFile()
-        return try {
-            checkNotInterrupted()
-            val clip = videoExporter.export(source, temporaryDestination, requestedSourceStart, requestedSourceEnd)
-            checkNotInterrupted()
-            val coveredEndMs = clip.coveredEndMs + videoStartElapsed - session.manualOffsetMs
+        checkNotInterrupted()
+        val coveredEndSourceMs = probeCoverageEndMs(source, requestedSourceStart, requestedSourceEnd)
+        checkNotInterrupted()
+        return if (coveredEndSourceMs == null) {
+            // A growing source may not contain a complete packet/window yet. Preflight reports that
+            // gap and leaves the real export to surface the actionable exporter error on Save.
+            PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
+        } else {
+            val coveredEndMs = coveredEndSourceMs + videoStartElapsed - session.manualOffsetMs
             PreviewVideoCoverage(
                 coveredEndMs = coveredEndMs,
                 shortfallMs = (selectedEndMs - coveredEndMs).coerceAtLeast(0L),
             )
-        } catch (failure: InterruptedException) {
-            throw failure
-        } catch (_: Exception) {
-            // A growing source may not contain a complete packet/window yet. Preflight reports that
-            // gap and leaves the real export to surface the actionable exporter error on Save.
-            PreviewVideoCoverage(coveredEndMs = null, shortfallMs = effectiveShortfall)
-        } finally {
-            temporaryDestination.delete()
         }
     }
 
+    /**
+     * Reports the covered end (source video PTS, ms) of [requestedStartMs]..[requestedEndMs] in the
+     * live [source], using [CaptureVideoCoverageProbe] when [videoExporter] implements it (the real
+     * [FfmpegCaptureVideoExporter] always does) and caching by (path, length, request) so a
+     * debounced poll against an unchanged file costs nothing. Falls back to the heavier
+     * export-and-discard path only for a [CaptureVideoExporter] that doesn't also implement the
+     * cheap probe (e.g. a minimal test fake) — no production code path takes that branch.
+     */
+    private fun probeCoverageEndMs(source: File, requestedStartMs: Long, requestedEndMs: Long): Long? {
+        val key = CoverageProbeKey(source.absolutePath, source.length(), requestedStartMs, requestedEndMs)
+        coverageProbeCache?.let { (cachedKey, cachedResult) -> if (cachedKey == key) return cachedResult }
+        val probe = videoExporter as? CaptureVideoCoverageProbe
+        val result = if (probe != null) {
+            runCatching { probe.coverageEndMs(source, requestedStartMs, requestedEndMs) }.getOrNull()
+        } else {
+            val temporaryDestination = Files.createTempFile("capture-preview-video-", ".mkv").toFile()
+            try {
+                runCatching { videoExporter.export(source, temporaryDestination, requestedStartMs, requestedEndMs).coveredEndMs }.getOrNull()
+            } finally {
+                temporaryDestination.delete()
+            }
+        }
+        coverageProbeCache = key to result
+        return result
+    }
+
     private data class PreviewVideoCoverage(val coveredEndMs: Long?, val shortfallMs: Long)
+
+    /**
+     * Polls, bounded by [videoCoverageWaitMs], for a live recording's growing MKV to cover up to
+     * [requestedEndMs] before [export] snapshots its prefix (see the call site's comment for why).
+     * Never throws for "still not covered" — a bound that expires just means [export] proceeds and
+     * reports whatever coverage genuinely exists, exactly as it did before this wait existed;
+     * [checkNotInterrupted] is what makes the wait itself cancellable, same as every other step.
+     */
+    private fun waitForVideoCoverage(
+        source: File,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+        onWaitingForVideo: (() -> Unit)?,
+    ) {
+        if (videoCoverageWaitMs <= 0L) return
+        val deadlineNanos = System.nanoTime() + videoCoverageWaitMs * NANOS_PER_MILLISECOND
+        var notified = false
+        // Backs off (doubling, capped) rather than polling at a flat interval for the whole wait:
+        // each poll is cheap now (probeCoverageEndMs scans the live file directly — see
+        // FfmpegCaptureVideoExporter.coverageEndMs — and the length-keyed cache skips the scan
+        // entirely when the file hasn't grown), but a session stalled for the full 8s bound would
+        // otherwise still pay for up to 40 of them.
+        var pollMs = videoCoverageWaitPollMs
+        while (true) {
+            checkNotInterrupted()
+            val coveredEndMs = probeCoverageEndMs(source, requestedStartMs, requestedEndMs)
+            if (coveredEndMs != null && coveredEndMs >= requestedEndMs) return
+            val remainingNanos = deadlineNanos - System.nanoTime()
+            if (remainingNanos <= 0L) return
+            if (!notified) {
+                notified = true
+                runCatching { onWaitingForVideo?.invoke() }
+            }
+            val sleepMs = minOf(pollMs, remainingNanos / NANOS_PER_MILLISECOND).coerceAtLeast(1L)
+            try {
+                Thread.sleep(sleepMs)
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+            pollMs = (pollMs * VIDEO_COVERAGE_WAIT_POLL_BACKOFF_MULTIPLIER).coerceAtMost(VIDEO_COVERAGE_WAIT_POLL_MAX_MS)
+        }
+    }
 
     private fun isNoUsableVideoInterval(failure: Exception): Boolean {
         if (failure is IllegalArgumentException) return true
@@ -361,9 +477,18 @@ class CaptureArchiveExporter(
             "no readable bytes" in message
     }
 
+    /**
+     * [onWaitingForVideo] fires at most once, only if [waitForVideoCoverage] actually starts
+     * polling (i.e. the requested end wasn't already covered) — the UI uses it to swap the export
+     * popover's generic busy message for one that explains the pause instead of looking stuck.
+     */
     @Synchronized
     @Suppress("LongMethod", "CyclomaticComplexMethod", "TooGenericExceptionCaught")
-    fun export(session: CaptureSession, request: CaptureExportRequest): CaptureExportResult {
+    fun export(
+        session: CaptureSession,
+        request: CaptureExportRequest,
+        onWaitingForVideo: (() -> Unit)? = null,
+    ): CaptureExportResult {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
         val snapshotCheckpoint = requireSnapshotCheckpoint(session, request)
@@ -396,8 +521,10 @@ class CaptureArchiveExporter(
         val logStartMs = selectionBounds?.firstElapsedMs
             ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
         val selectedEndMs = selectionBounds?.lastElapsedMs ?: request.cutoffElapsedMs
+        // See the matching comment in preview() above: the video range's Since-last-save start is
+        // its own cursor, not the log's.
         val videoRangeStartMs = selectionBounds?.firstElapsedMs
-            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, snapshotCheckpoint)
+            ?: rangeStartMs(request.range, request.cutoffElapsedMs, request.customMinutes, session.effectiveVideoCheckpointMs)
         val videoConfigured = session.settings.recordVideo && request.includeVideo
         val videoStartElapsed = session.videoStartElapsedMs
         val requestedSourceStart = videoStartElapsed?.let {
@@ -453,6 +580,15 @@ class CaptureArchiveExporter(
             var videoUnavailableForRange = videoConfigured && !includeVideo
             val clip = if (stagedVideo != null && requestedSourceStart != null && requestedSourceEnd != null) {
                 try {
+                    // A still-recording session's MKV lags the wall clock by several seconds (the
+                    // Matroska muxer only writes a cluster when it closes). Give it a bounded chance
+                    // to catch up to what was just requested before snapshotting the prefix — a
+                    // Since-last-save export taken right after Save otherwise routinely found no
+                    // complete video covering its own requested end. Never done for a stopped
+                    // session: its trailer is already written and it will never grow further.
+                    if (session.status == CaptureStatus.RECORDING) {
+                        waitForVideoCoverage(session.videoFile, requestedSourceStart, requestedSourceEnd, onWaitingForVideo)
+                    }
                     videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
                 } catch (failure: Exception) {
                     if (!isNoUsableVideoInterval(failure)) throw failure

@@ -1,10 +1,9 @@
 package com.indagium.capture.mirror
 
-import com.indagium.capture.CaptureExecutable
 import com.indagium.capture.CaptureCommandResult
+import com.indagium.capture.CaptureExecutable
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureProcessSpec
-import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.RunningCaptureProcess
 import java.io.ByteArrayInputStream
@@ -14,8 +13,8 @@ import java.net.ConnectException
 import java.net.Socket
 import java.time.Duration
 import java.util.ArrayDeque
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
@@ -130,7 +129,10 @@ class EmbeddedMirrorTest {
         val transport = EmbeddedMirrorTransport { _, _ ->
             object : EmbeddedMirrorConnection {
                 override val videoInput = ByteArrayInputStream(ByteArray(0))
+                override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) = Unit
+
                 override fun close() { closed = true }
             }
         }
@@ -158,6 +160,60 @@ class EmbeddedMirrorTest {
         }
     }
 
+    // Regression test for the "stop() blocks callers under its lock" bug: AdbScrcpyConnection.close()
+    // runs synchronous adb subprocess cleanup and can take real wall-clock time. stop() used to call
+    // connection.close() from inside its synchronized block, so a concurrent snapshot()/send() call
+    // (both also synchronized on the same lock) — and, in the app, a Compose click handler calling
+    // stop() straight from the UI thread — sat blocked behind that close for the whole duration.
+    @Test
+    fun stopDetachesUnderItsLockButClosesTheConnectionAfterReleasingIt() {
+        val closeStarted = CountDownLatch(1)
+        val releaseClose = CountDownLatch(1)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput = ByteArrayInputStream(ByteArray(0))
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() {
+                    closeStarted.countDown()
+                    releaseClose.await(2, TimeUnit.SECONDS)
+                }
+            }
+        }
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                // Block "forever" (bounded by the test's own timeouts) so the connection stays open
+                // until stop() detaches and closes it — the scenario under test.
+                Thread.sleep(5_000)
+            }
+        }
+        val runtime = EmbeddedMirrorRuntime(transport, decoder, maxReconnectAttempts = 0)
+        try {
+            runtime.start("serial")
+            await { runtime.snapshot().state == EmbeddedMirrorState.LIVE }
+
+            val stopper = thread(name = "mirror-stop-test") { runtime.stop() }
+            assertTrue(closeStarted.await(2, TimeUnit.SECONDS), "stop() must reach connection.close()")
+            // The lock must already be free at this point — a concurrent snapshot() must return
+            // immediately instead of blocking behind the still-running close() above.
+            val snapshotReturned = CountDownLatch(1)
+            thread(name = "mirror-snapshot-test") {
+                runtime.snapshot()
+                snapshotReturned.countDown()
+            }
+            assertTrue(snapshotReturned.await(500, TimeUnit.MILLISECONDS), "snapshot() must not block behind a slow close()")
+
+            releaseClose.countDown()
+            stopper.join(2_000)
+            assertFalse(stopper.isAlive)
+        } finally {
+            releaseClose.countDown()
+            runtime.close()
+        }
+    }
+
     @Test
     fun runtimeReopensTransportAfterStreamFailureWithBoundedAttempts() {
         val states = CopyOnWriteArrayList<EmbeddedMirrorState>()
@@ -166,7 +222,10 @@ class EmbeddedMirrorTest {
             opens++
             object : EmbeddedMirrorConnection {
                 override val videoInput = ByteArrayInputStream(ByteArray(0))
+                override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) = Unit
+
                 override fun close() = Unit
             }
         }
@@ -212,22 +271,6 @@ class EmbeddedMirrorTest {
         assertEquals("4.1", asset.descriptor.version)
         assertEquals(asset.descriptor.sha256, sha256(asset.bytes))
         assertTrue(asset.bytes.isNotEmpty())
-    }
-
-    @Test
-    fun recordingScrcpyCommandIsHeadlessRegardlessOfMirrorSetting() {
-        val runner = CaptureProcessRunner { error("not invoked") }
-        val tools = CaptureTools(CaptureExecutable("scrcpy"), CaptureExecutable("scrcpy"), runner)
-        listOf(true, false).forEach { mirror ->
-            val command = tools.scrcpySpec(
-                "serial",
-                CaptureSettings(recordVideo = true, mirror = mirror),
-                java.io.File("/tmp/screen.mkv"),
-            ).command
-            assertTrue(command.contains("--no-window"))
-            assertTrue(command.contains("--no-audio-playback"))
-            assertEquals(1, command.count { it == "--no-window" })
-        }
     }
 
     @Test
@@ -395,7 +438,9 @@ class EmbeddedMirrorTest {
         var closed = false
 
         override fun getInputStream(): InputStream = input
+
         override fun getOutputStream(): java.io.OutputStream = output
+
         override fun close() { closed = true }
     }
 
@@ -442,9 +487,13 @@ class EmbeddedMirrorTest {
                 override val inputStream = ByteArrayInputStream(ByteArray(0))
                 override val errorStream = ByteArrayInputStream(ByteArray(0))
                 override val isAlive = true
+
                 override fun waitFor(timeout: Duration): Boolean = true
+
                 override fun exitCode(): Int = 0
+
                 override fun terminate(grace: Duration) = Unit
+
                 override fun close() = Unit
             }
         }

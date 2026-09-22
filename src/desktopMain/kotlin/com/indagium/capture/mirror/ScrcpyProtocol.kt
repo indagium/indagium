@@ -53,7 +53,9 @@ internal class MirrorCoordinateMapper(
 }
 
 internal enum class MirrorTouchAction(val wireValue: Int) { DOWN(0), UP(1), MOVE(2), CANCEL(3) }
+
 internal enum class MirrorKeyAction(val wireValue: Int) { DOWN(0), UP(1) }
+
 internal enum class MirrorClipboardCopyKey(val wireValue: Int) { COPY(0), CUT(1), NONE(2) }
 
 internal sealed interface MirrorControlCommand {
@@ -84,14 +86,23 @@ internal sealed interface MirrorControlCommand {
     ) : MirrorControlCommand
 
     data class Text(val value: String) : MirrorControlCommand
+
     data class Clipboard(val value: String, val paste: Boolean = false, val sequence: Long = 0) : MirrorControlCommand
+
     data class GetClipboard(val copyKey: MirrorClipboardCopyKey = MirrorClipboardCopyKey.NONE) : MirrorControlCommand
+
     data class Back(val action: MirrorKeyAction = MirrorKeyAction.UP) : MirrorControlCommand
+
     data object ExpandNotifications : MirrorControlCommand
+
     data object ExpandSettings : MirrorControlCommand
+
     data object CollapsePanels : MirrorControlCommand
+
     data object SetDisplayPowerOn : MirrorControlCommand
+
     data object RotateDevice : MirrorControlCommand
+
     data object CollapseNotifications : MirrorControlCommand
 }
 
