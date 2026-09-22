@@ -65,15 +65,25 @@ data class CaptureSession(
     val status: CaptureStatus = CaptureStatus.RECORDING,
     val videoStartElapsedMs: Long? = null,
     /**
-     * The single cursor used by the Since last save range.  This supersedes the old, split
-     * log/video cursors.  The legacy fields below remain source-compatible for one release so
-     * callers/tests that construct an old session can still be read; persistence writes only this
-     * canonical value.
+     * The cursor used for the *log* half of the Since last save range: the elapsed-ms end of the
+     * log coverage from the last successful snapshot. Always advances on every successful export
+     * (video or not) to the export's log-covered end, so a log-only snapshot never repeats rows.
      */
     val snapshotCheckpointMs: Long = -1,
     @Deprecated("Use snapshotCheckpointMs")
     val logCheckpointMs: Long = -1,
-    @Deprecated("Use snapshotCheckpointMs")
+    /**
+     * The cursor used for the *video* half of the Since last save range: the elapsed-ms end of the
+     * video actually covered by the last successful export that included video. Deliberately a
+     * separate cursor from [snapshotCheckpointMs] — the growing scrcpy MKV's muxer/AVIO buffering
+     * lag means video coverage routinely falls behind the log at Save time (see
+     * FfmpegCaptureVideoExporter's wait-for-coverage step), and a shared cursor either re-exported
+     * the whole recording from its first keyframe every time (video checkpoint stuck at the far
+     * past) or silently dropped the untranscoded tail between saves (video checkpoint advanced past
+     * what was actually exported). Left at -1 (unset) when no export has ever included video, in
+     * which case the video range start falls back to [snapshotCheckpointMs] — see
+     * [effectiveVideoCheckpointMs].
+     */
     val videoCheckpointMs: Long = -1,
     val exportCounter: Int = 0,
     val interruptions: List<String> = emptyList(),
@@ -86,6 +96,17 @@ data class CaptureSession(
     /** Effective cursor, including sessions loaded from the legacy logCheckpointMs format. */
     val effectiveSnapshotCheckpointMs: Long
         get() = snapshotCheckpointMs.takeIf { it >= 0 } ?: logCheckpointMs
+
+    /**
+     * The elapsed-ms start of the *video* half of a Since last save export. `min()` rather than
+     * using [videoCheckpointMs] alone: video coverage can only ever lag the log (never lead it —
+     * see the field doc above), so in the steady state this simply evaluates to
+     * [videoCheckpointMs], picking up exactly the tail the previous export's muxer lag left behind.
+     * Falls back to the log cursor when no export has ever produced video, matching the pre-split
+     * behaviour instead of reaching back to the very start of the recording.
+     */
+    val effectiveVideoCheckpointMs: Long
+        get() = if (videoCheckpointMs >= 0) minOf(effectiveSnapshotCheckpointMs, videoCheckpointMs) else effectiveSnapshotCheckpointMs
 
     val hasSnapshotCheckpoint: Boolean get() = effectiveSnapshotCheckpointMs >= 0
 
@@ -146,4 +167,18 @@ data class CaptureVideoClip(val actualStartMs: Long, val coveredEndMs: Long, val
 fun interface CaptureVideoExporter {
     /** Snapshot a growing MKV and remux without modifying the source. Times are source video PTS. */
     fun export(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip
+}
+
+/**
+ * Cheap, read-only companion to [CaptureVideoExporter]: reports how far the requested interval is
+ * currently covered without writing any destination file. [CaptureArchiveExporter.preview] polls
+ * on a debounce while the popover is open and a live capture keeps growing its MKV; routing that
+ * through the full [CaptureVideoExporter.export] (copy the prefix, scan it, then remux and write a
+ * whole second MKV) did that write on every tick for no reason — nothing reads the written bytes,
+ * only [CaptureVideoClip.coveredEndMs]. Implementations still need to copy the current prefix
+ * before scanning it (the same live-file race [CaptureVideoExporter.export] avoids), so this saves
+ * the remux/write half of the work, not the read half.
+ */
+fun interface CaptureVideoCoverageProbe {
+    fun coverageEndMs(source: File, requestedStartMs: Long, requestedEndMs: Long): Long
 }

@@ -127,8 +127,12 @@ private fun CaptureToolsGroup(
             invalidMessage = "path does not point to a file",
             effectivePath = settings.adbPath.takeIf(String::isBlank)?.let { toolResolution?.adbPath },
         )
+        // Recording and the embedded (in-app) mirror both stream the device over adb directly —
+        // via a bundled scrcpy *server* jar pushed and run with `app_process`, not this host
+        // scrcpy executable — so neither needs this path configured at all. It's only read by the
+        // separate "Open scrcpy mirror" action, which opens a real, visible scrcpy window.
         CapturePathField(
-            label = "scrcpy path",
+            label = "scrcpy path (optional — native mirror window only)",
             value = settings.scrcpyPath,
             onValue = { update(settings.copy(scrcpyPath = it)) },
             onBrowse = state::browseCaptureScrcpy,
@@ -136,7 +140,8 @@ private fun CaptureToolsGroup(
             invalidMessage = "path does not point to a file",
             effectivePath = settings.scrcpyPath.takeIf(String::isBlank)?.let { toolResolution?.scrcpyPath },
             effectiveMessage = if (settings.scrcpyPath.isBlank() && toolResolution != null && toolResolution.scrcpyPath == null) {
-                "No scrcpy executable detected. Configure a path or install scrcpy."
+                "No scrcpy executable detected. Recording and the embedded mirror still work without it; " +
+                    "only the separate native \"Open scrcpy mirror\" window needs it installed."
             } else {
                 null
             },

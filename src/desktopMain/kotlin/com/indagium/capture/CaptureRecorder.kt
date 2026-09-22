@@ -1,5 +1,9 @@
 package com.indagium.capture
 
+import com.indagium.capture.mirror.AdbScrcpyTransport
+import com.indagium.capture.mirror.EmbeddedDeviceSession
+import com.indagium.capture.mirror.EmbeddedMirrorTransport
+import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -30,6 +34,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 
 enum class RecorderState { IDLE, RECORDING, STOPPING, STOPPED, INTERRUPTED }
@@ -80,7 +85,7 @@ fun interface CaptureDiskSpace {
     }
 }
 
-class CaptureRecorder(
+class CaptureRecorder internal constructor(
     private val sessionsRoot: File,
     private val runner: CaptureProcessRunner = ProcessBuilderCaptureRunner(),
     private val clock: CaptureClock = CaptureClock.SYSTEM,
@@ -89,6 +94,15 @@ class CaptureRecorder(
     private val watchdogIntervalMs: Long = PREVIEW_PUBLISH_INTERVAL_MS,
     private val spaceCheckIntervalMs: Long = SPACE_CHECK_INTERVAL_MS,
     private val metadataPersistIntervalMs: Long = SESSION_METADATA_PERSIST_INTERVAL_MS,
+    // Test seam: production builds a real AdbScrcpyTransport (embedded scrcpy server over adb);
+    // tests substitute a fake transport so the embedded recording path — including reconnects and
+    // PTS continuity — can be driven end to end without a device. See EmbeddedDeviceSession and its
+    // own unit tests for the packet-level behaviour this wires up; CaptureRecorderTest exercises the
+    // recorder-level lifecycle (start/stop, diagnostics, videoStartElapsedMs persistence) against a
+    // fake transport supplied here.
+    private val embeddedTransportFactory: (CaptureTools) -> EmbeddedMirrorTransport = { tools ->
+        AdbScrcpyTransport(tools = tools, runner = runner, localRoot = sessionsRoot)
+    },
 ) : Closeable {
     private val lock = Any()
     private val active = AtomicBoolean(false)
@@ -105,12 +119,23 @@ class CaptureRecorder(
     private var startCancellationRequested = false
     private var starterThread: Thread? = null
     private var startLatch = CountDownLatch(0)
-    private var startedMonotonicMs: Long = 0
+
+    // Deliberately lock-free (not guarded by [lock]) so elapsedNow() never needs to acquire it —
+    // see elapsedNow()'s own doc for why that matters: EmbeddedDeviceSession calls back into it
+    // (as its injected `elapsedMillis`) from inside ITS OWN lock, and CaptureRecorder's watchdog
+    // separately calls into EmbeddedDeviceSession while holding [lock] — two objects each calling
+    // into the other while holding their own lock is a textbook lock-order deadlock (caught by a
+    // hung EmbeddedMirrorAutostartTest run; see git history). Neither field needs [lock] for
+    // correctness: startedMonotonicMs is written once per capture start, and lastElapsedMs only
+    // ever needs to be monotonically non-decreasing, which AtomicLong.updateAndGet guarantees
+    // without any lock at all.
+    @Volatile private var startedMonotonicMs: Long = 0
+    private val lastElapsedMsAtomic = AtomicLong(0)
     private var logProcess: RunningCaptureProcess? = null
-    private var videoProcess: RunningCaptureProcess? = null
     private var mirrorProcess: RunningCaptureProcess? = null
+    private var embeddedSession: EmbeddedDeviceSession? = null
+    private val mutableEmbeddedSession = MutableStateFlow<EmbeddedDeviceSession?>(null)
     private var logThread: Thread? = null
-    private var videoThread: Thread? = null
     private var watchdogThread: Thread? = null
     private var logFileOutput: FileOutputStream? = null
     private var indexFileOutput: FileOutputStream? = null
@@ -118,7 +143,6 @@ class CaptureRecorder(
     private var indexOutput: BufferedOutputStream? = null
     private var logBytes: Long = 0
     private var rowOrdinal: Int = 0
-    private var lastElapsedMs: Long = 0
     private var lastPublishMs: Long = Long.MIN_VALUE
     private var lastSpaceCheckMs: Long = Long.MIN_VALUE
     private var lastMetadataPersistMs: Long = Long.MIN_VALUE
@@ -126,6 +150,11 @@ class CaptureRecorder(
 
     val snapshot: StateFlow<RecorderSnapshot> = mutableSnapshot.asStateFlow()
     val selectedSession: StateFlow<CaptureSession?> = mutableSelectedSession.asStateFlow()
+
+    /** Mirrors [activeEmbeddedSession] as a flow so a waiter (e.g. `AppState.ensureEmbeddedMirror`)
+     * can suspend until the embedded session appears instead of racing a single synchronous read —
+     * see that function's doc for the race this closes. */
+    internal val embeddedSessionFlow: StateFlow<EmbeddedDeviceSession?> = mutableEmbeddedSession.asStateFlow()
 
     /**
      * Starts a recorder. [beforeLogcatLaunch] is invoked after the session directory and both
@@ -214,7 +243,7 @@ class CaptureRecorder(
                 currentSession = session
                 currentTools = tools
                 startedMonotonicMs = clock.monotonicMillis()
-                lastElapsedMs = 0
+                lastElapsedMsAtomic.set(0)
                 logBytes = 0
                 rowOrdinal = 0
                 lastPublishMs = Long.MIN_VALUE
@@ -297,48 +326,50 @@ class CaptureRecorder(
         }
 
         if (settings.recordVideo) {
-            val scrcpyValidation = runCatching { tools.validateScrcpy() }.getOrElse { failure ->
-                CaptureToolValidation(
-                    available = false,
-                    message = "scrcpy validation failed: ${failure.message ?: failure::class.simpleName}",
-                )
-            }
             if (!active.get()) {
                 return synchronized(lock) { requireNotNull(currentSession) }
-            } else if (!scrcpyValidation.available) {
-                addDiagnostic(scrcpyValidation.message)
-            } else {
-                try {
-                    val videoStart = elapsedNow()
-                    session = synchronized(lock) {
-                        requireNotNull(currentSession).copy(videoStartElapsedMs = videoStart).also {
-                            currentSession = it
-                            mutableSelectedSession.value = it
-                            persistSession(it)
-                        }
+            }
+            try {
+                // The embedded scrcpy session owns the device stream directly (adb + the bundled
+                // server asset) and writes session.videoFile itself via StreamingMkvWriter — no
+                // host `scrcpy` binary involved. videoStartElapsedMs is set from
+                // onVideoStartElapsedMs, fired when the *first video packet* actually reaches the
+                // muxer (not when this method is called), so the log<->video mapping anchors on
+                // real captured video rather than on however long adb/the device took to start
+                // streaming.
+                val newSession = EmbeddedDeviceSession(
+                    transport = embeddedTransportFactory(tools),
+                    muxer = StreamingMkvWriter(session.videoFile),
+                    elapsedMillis = ::elapsedNow,
+                    onDiagnostic = ::addDiagnostic,
+                    onVideoStartElapsedMs = ::recordVideoStartElapsedMs,
+                )
+                var accepted = false
+                synchronized(lock) {
+                    if (active.get()) {
+                        embeddedSession = newSession
+                        mutableEmbeddedSession.value = newSession
+                        accepted = true
+                        publishLocked(RecorderState.RECORDING, force = true)
                     }
-                    val process = runner.start(tools.scrcpySpec(device.serial, settings, session.videoFile))
-                    var accepted = false
-                    synchronized(lock) {
-                        if (active.get()) {
-                            videoProcess = process
-                            accepted = true
-                            publishLocked(RecorderState.RECORDING, force = true)
-                        }
-                    }
-                    if (!accepted) {
-                        process.terminate()
-                        process.close()
-                        return synchronized(lock) { requireNotNull(currentSession) }
-                    }
-                    videoThread = thread(name = "capture-video-${session.id}", isDaemon = true) {
-                        monitorVideo(process)
-                    }
-                } catch (failure: IOException) {
-                    addDiagnostic("Video recording could not start: ${failure.message ?: failure::class.simpleName}")
-                } catch (failure: RuntimeException) {
-                    addDiagnostic("Video recording could not start: ${failure.message ?: failure::class.simpleName}")
                 }
+                if (!accepted) {
+                    newSession.close()
+                    return synchronized(lock) { requireNotNull(currentSession) }
+                }
+                newSession.start(
+                    device.serial,
+                    MirrorStreamOptions(
+                        maxSize = settings.maxSize,
+                        maxFps = settings.maxFps,
+                        bitrateMbps = settings.bitrateMbps,
+                        audio = settings.audio,
+                    ),
+                )
+            } catch (failure: IOException) {
+                addDiagnostic("Video recording could not start: ${failure.message ?: failure::class.simpleName}")
+            } catch (failure: RuntimeException) {
+                addDiagnostic("Video recording could not start: ${failure.message ?: failure::class.simpleName}")
             }
         }
         return synchronized(lock) { requireNotNull(currentSession) }
@@ -400,6 +431,14 @@ class CaptureRecorder(
         }
         return tools.supportsScreenshots(session.device.serial)
     }
+
+    /**
+     * The active embedded recording session, when video recording is on and currently running —
+     * used by the UI layer (`AppState.ensureEmbeddedMirror`) to attach a shared mirror decoder to
+     * the *same* device stream instead of opening a second embedded scrcpy server. Null whenever
+     * `recordVideo` is off, or between capture sessions.
+     */
+    internal fun activeEmbeddedSession(): EmbeddedDeviceSession? = synchronized(lock) { embeddedSession }
 
     /** Opens at most one auxiliary, visible, non-recording scrcpy process for this session. */
     fun openMirror(): Boolean {
@@ -471,20 +510,26 @@ class CaptureRecorder(
         return updateSession(sessionId) { it.copy(manualOffsetMs = offsetMs) }
     }
 
+    /**
+     * Advances the Since-last-save cursors after one successful export. The log cursor always
+     * advances to the export's log-covered end, whether or not that export included video — a
+     * failed/skipped video must never hold the log cursor back. The video cursor only advances when
+     * [videoCheckpointMs] is non-null, i.e. the export actually produced video; a video-less export
+     * (missing coverage, growing MKV not yet caught up, recordVideo off) leaves it exactly where it
+     * was, so the next Since-last-save export's video range still starts from the last point video
+     * was truly exported (see [CaptureSession.effectiveVideoCheckpointMs]).
+     */
     fun updateSuccessfulExportCheckpoints(
         sessionId: String,
         logCheckpointMs: Long,
         videoCheckpointMs: Long?,
     ): CaptureSession = updateSession(sessionId) { session ->
-        // A snapshot is one atomic archive, so logs and video must share one cursor.  The log
-        // coverage end is the durable cursor even when the video is unavailable; advancing from
-        // the video end would make a successful log-only snapshot repeat rows forever.
         val checkpoint = maxOf(session.effectiveSnapshotCheckpointMs, logCheckpointMs)
         session.copy(
             snapshotCheckpointMs = checkpoint,
-            // Keep the old constructor fields meaningful for source compatibility with callers
-            // compiled against the pre-canonical model. They are no longer persisted or used for
-            // range selection.
+            // Keep the old constructor field meaningful for source compatibility with callers
+            // compiled against the pre-canonical model. It is no longer persisted or used for range
+            // selection.
             logCheckpointMs = maxOf(session.logCheckpointMs, logCheckpointMs),
             videoCheckpointMs = videoCheckpointMs?.let { maxOf(session.videoCheckpointMs, it) } ?: session.videoCheckpointMs,
             exportCounter = session.exportCounter + 1,
@@ -561,19 +606,15 @@ class CaptureRecorder(
         }
     }
 
-    private fun monitorVideo(process: RunningCaptureProcess) {
-        drainDiagnostics(process.inputStream, "scrcpy")
-        drainDiagnostics(process.errorStream, "scrcpy")
-        process.waitFor(Duration.ofDays(VIDEO_MONITOR_MAX_WAIT_DAYS))
-        val code = process.exitCode()
+    /** [EmbeddedDeviceSession.onVideoStartElapsedMs]: fires once, from the recording pump thread,
+     * the first time a video packet actually reaches the muxer. */
+    private fun recordVideoStartElapsedMs(startElapsedMs: Long) {
         synchronized(lock) {
-            if (videoProcess === process) videoProcess = null
-            if (active.get()) {
-                addDiagnosticLocked("Video recording ended${code?.let { " (exit $it)" }.orEmpty()}; log capture continues.")
-                publishLocked(RecorderState.RECORDING, force = true)
-            }
+            val updated = (currentSession ?: return@synchronized).copy(videoStartElapsedMs = startElapsedMs)
+            currentSession = updated
+            if (mutableSelectedSession.value?.id == updated.id) mutableSelectedSession.value = updated
+            persistSession(updated)
         }
-        process.close()
     }
 
     private fun monitorMirror(process: RunningCaptureProcess) {
@@ -589,6 +630,7 @@ class CaptureRecorder(
     private fun stopInternal(status: CaptureStatus, reason: String?): CaptureSession? {
         var ownsStop = false
         var processes = emptyList<RunningCaptureProcess>()
+        var videoSession: EmbeddedDeviceSession? = null
         var startup: CountDownLatch? = null
         val calledFromStarter = synchronized(lock) { Thread.currentThread() === starterThread }
         val completion = synchronized(lock) {
@@ -597,7 +639,8 @@ class CaptureRecorder(
                 ownsStop = true
                 reason?.let(::addDiagnosticLocked)
                 publishLocked(RecorderState.STOPPING, force = true)
-                processes = listOfNotNull(logProcess, videoProcess, mirrorProcess)
+                processes = listOfNotNull(logProcess, mirrorProcess)
+                videoSession = embeddedSession
             } else if (starting) {
                 startup = startLatch
             }
@@ -615,8 +658,10 @@ class CaptureRecorder(
         processes.forEach { runCatching { it.terminate() } }
         val current = Thread.currentThread()
         if (logThread !== current) logThread?.join(PROCESS_JOIN_TIMEOUT_MS)
-        if (videoThread !== current) videoThread?.join(PROCESS_JOIN_TIMEOUT_MS)
         if (watchdogThread !== current) watchdogThread?.join(WATCHDOG_JOIN_TIMEOUT_MS)
+        // Finalize the MKV (stop the reconnect loop, write the trailer) before the session below is
+        // marked stopped/interrupted and handed to finalizeSessionInPlace — see EmbeddedDeviceSession.
+        runCatching { videoSession?.close() }
         try {
             synchronized(lock) {
                 runCatching { logOutput?.flush(); logFileOutput?.fd?.sync() }
@@ -628,8 +673,9 @@ class CaptureRecorder(
                 logFileOutput = null
                 indexFileOutput = null
                 logProcess = null
-                videoProcess = null
                 mirrorProcess = null
+                embeddedSession = null
+                mutableEmbeddedSession.value = null
                 val old = currentSession ?: return null
                 val interruptionList = if (reason == null) {
                     old.interruptions
@@ -694,7 +740,7 @@ class CaptureRecorder(
             diagnostics = diagnostics.toList(),
             logBytes = logBytes,
             indexedRows = rowOrdinal,
-            videoRecording = videoProcess?.isAlive == true,
+            videoRecording = embeddedSession?.hasStartedVideo() == true,
         )
     }
 
@@ -775,10 +821,14 @@ class CaptureRecorder(
         }
     }
 
-    private fun elapsedNow(): Long = synchronized(lock) {
+    // Deliberately does NOT synchronize on [lock] — see startedMonotonicMs's doc. This is called as
+    // EmbeddedDeviceSession's `elapsedMillis` from inside that session's own lock (its
+    // onVideoStartElapsedMs callback), so it must never itself try to acquire [lock] — the
+    // watchdog thread holds [lock] while calling back into the session (hasStartedVideo()), and two
+    // objects each waiting on the other's lock is a deadlock, not a slow path.
+    private fun elapsedNow(): Long {
         val observed = (clock.monotonicMillis() - startedMonotonicMs).coerceAtLeast(0)
-        lastElapsedMs = maxOf(lastElapsedMs, observed)
-        lastElapsedMs
+        return lastElapsedMsAtomic.updateAndGet { current -> maxOf(current, observed) }
     }
 
     private fun persistSession(session: CaptureSession) {
@@ -849,6 +899,12 @@ private fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("status", session.status.name)
     session.videoStartElapsedMs?.let { put("videoStartElapsedMs", it) }
     put("snapshotCheckpointMs", session.effectiveSnapshotCheckpointMs)
+    // Was never written before the video/log cursor split (only read, always defaulting to -1 on
+    // reload) even though updateSuccessfulExportCheckpoints already tracked it in memory — every
+    // restart silently forgot which video range had already been saved. Persisted verbatim (not
+    // through an "effective" accessor): -1 here means "no export has ever included video" and must
+    // stay distinguishable from "video coverage happens to end at the log checkpoint".
+    put("videoCheckpointMs", session.videoCheckpointMs)
     put("exportCounter", session.exportCounter)
     put("interruptions", buildJsonArray { session.interruptions.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
     put("manualOffsetMs", session.manualOffsetMs)

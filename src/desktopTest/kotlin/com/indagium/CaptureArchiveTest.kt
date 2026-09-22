@@ -10,6 +10,7 @@ import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureVideoClip
+import com.indagium.capture.CaptureVideoCoverageProbe
 import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.captureFilenameTemplateError
 import com.indagium.capture.captureSettingsFromJson
@@ -19,7 +20,9 @@ import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
+import kotlin.concurrent.thread
 import kotlin.io.path.createTempDirectory
+import kotlin.system.measureTimeMillis
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
@@ -467,6 +470,131 @@ class CaptureArchiveTest {
         assertEquals(listOf(2_000L), imported.timeline.rows.map { it.elapsedMs })
     }
 
+    // Regression test for the "video checkpoint split" fix: before it, Since-last-save always
+    // started the video range from the same cursor as the log range. That either re-remuxed the
+    // whole recording from its first keyframe on every save (when the cursor was never advanced
+    // past 0) or, once a shared cursor did advance, silently skipped whatever tail a lagging
+    // exporter genuinely failed to cover (the log cursor moved past video that was never actually
+    // exported). This exercises three consecutive snapshots where the first one's video export
+    // covers LESS than what was requested (simulating the growing MKV's muxer/AVIO lag) and proves
+    // snapshot 2 reaches back to recover exactly that gap instead of either point, and snapshot 3
+    // continues from exactly where snapshot 2 left off — no restart from 0, no dropped span.
+    @Test
+    fun sinceSaveVideoRangeRecoversAPriorSnapshotsShortfallAndThenContinuesWithoutGaps() {
+        val root = createTempDirectory("capture-archive-video-checkpoint-split").toFile()
+        val requests = mutableListOf<Pair<Long, Long>>()
+        var call = 0
+        val laggingThenExactVideo = CaptureVideoExporter { _, destination, start, end ->
+            call++
+            requests += start to end
+            destination.writeText("video-$call")
+            // First export under-covers by 500ms (simulating muxer lag); every later export covers
+            // exactly what was requested.
+            val coveredEnd = if (call == 1) end - 500 else end
+            CaptureVideoClip(actualStartMs = start, coveredEndMs = coveredEnd, durationMs = coveredEnd - start)
+        }
+        val base = session(root, recordVideo = true).copy(videoStartElapsedMs = 0)
+        writeCaptureInput(base, listOf(
+            RawRow("01-01 10:00:01.000  1  1 I Tag: a\n", 1_000, 1),
+            RawRow("01-01 10:00:02.000  1  1 I Tag: b\n", 2_000, 2),
+            RawRow("01-01 10:00:03.000  1  1 I Tag: c\n", 3_000, 3),
+            RawRow("01-01 10:00:04.000  1  1 I Tag: d\n", 4_000, 4),
+        ))
+        base.videoFile.parentFile.mkdirs()
+        base.videoFile.writeBytes(byteArrayOf(1))
+        val exporter = CaptureArchiveExporter(laggingThenExactVideo)
+
+        // Snapshot 1: ALL up to row b (elapsed 2000). Video under-covers: requested end 2000ms,
+        // actually covers only up to 1500ms.
+        val result1 = exporter.export(
+            base,
+            CaptureExportRequest(File(root, "s1.zip"), CaptureRange.ALL, cutoffElapsedMs = 2_000),
+        )
+        assertEquals(2_000, result1.logCoveredEndMs)
+        assertEquals(1_500, result1.videoCoveredEndMs)
+        val afterSnapshot1 = base.copy(
+            logCheckpointMs = result1.logCoveredEndMs,
+            videoCheckpointMs = requireNotNull(result1.videoCoveredEndMs),
+        )
+
+        // Snapshot 2: Since last save, up to row c (elapsed 3000). The video request must start at
+        // 1500 (where video genuinely left off), not 2000 (where the log cursor is) — recovering
+        // the 500ms snapshot 1's lag silently would otherwise have dropped forever.
+        val result2 = exporter.export(
+            afterSnapshot1,
+            CaptureExportRequest(File(root, "s2.zip"), CaptureRange.SINCE_SAVE, cutoffElapsedMs = 3_000),
+        )
+        assertEquals(1_500L to 3_000L, requests[1])
+        assertEquals(3_000, result2.videoCoveredEndMs, "a fully-covered export must reach the requested end")
+        val afterSnapshot2 = afterSnapshot1.copy(
+            logCheckpointMs = result2.logCoveredEndMs,
+            videoCheckpointMs = requireNotNull(result2.videoCoveredEndMs),
+        )
+
+        // Snapshot 3: Since last save, up to row d (elapsed 4000). Must continue exactly from 3000,
+        // never restarting from 0 the way a shared/stuck cursor used to.
+        val result3 = exporter.export(
+            afterSnapshot2,
+            CaptureExportRequest(File(root, "s3.zip"), CaptureRange.SINCE_SAVE, cutoffElapsedMs = 4_000),
+        )
+        assertEquals(3_000L to 4_000L, requests[2])
+        assertEquals(4_000, result3.videoCoveredEndMs)
+    }
+
+    // Regression coverage for waitForVideoCoverage (CaptureArchiveExporter): a still-recording
+    // session's MKV grows while the export is in flight, and the real exporter must keep re-probing
+    // as it grows (not just once) rather than giving up or racing ahead of the muxer. Growing the
+    // fixture's video file on a background thread also exercises probeCoverageEndMs's
+    // length-keyed cache doing the right thing: a poll against an unchanged length must not force a
+    // fresh probe, but a poll after the file has genuinely grown must.
+    @Test
+    fun waitForVideoCoverageRetriesUntilTheGrowingRecordingCatchesUpThenExports() {
+        val root = createTempDirectory("capture-archive-wait-coverage").toFile()
+        val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 0)
+        writeCaptureInput(session, listOf(RawRow("01-01 10:00:03.000  1  1 I Tag: c\n", 3_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        val fake = GrowthAwareCoverageFake(readyAtLength = 4L)
+        val exporter = CaptureArchiveExporter(fake, videoCoverageWaitMs = 3_000, videoCoverageWaitPollMs = 10)
+        val grower = thread(name = "wait-coverage-test-grower") {
+            repeat(3) {
+                Thread.sleep(30)
+                session.videoFile.appendBytes(byteArrayOf(1))
+            }
+        }
+        try {
+            val result = exporter.export(
+                session,
+                CaptureExportRequest(File(root, "wait.zip"), CaptureRange.ALL, cutoffElapsedMs = 3_000),
+            )
+            assertEquals(3_000, result.videoCoveredEndMs)
+            assertTrue(fake.probeCalls >= 2, "the wait must actually re-probe as the file grows, saw ${fake.probeCalls}")
+            assertEquals(1, fake.exportCalls, "the real export must still run exactly once after coverage arrives")
+        } finally {
+            grower.join(5_000)
+        }
+    }
+
+    // The wait must never hang the caller: a bound that expires still lets export() proceed with
+    // whatever coverage genuinely exists (here, none) rather than blocking indefinitely.
+    @Test
+    fun waitForVideoCoverageGivesUpAfterItsBoundAndExportsWhateverIsActuallyAvailable() {
+        val root = createTempDirectory("capture-archive-wait-timeout").toFile()
+        val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 0)
+        writeCaptureInput(session, listOf(RawRow("01-01 10:00:03.000  1  1 I Tag: c\n", 3_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        val fake = GrowthAwareCoverageFake(readyAtLength = 1_000)
+        val exporter = CaptureArchiveExporter(fake, videoCoverageWaitMs = 60, videoCoverageWaitPollMs = 10)
+
+        val elapsedMs = measureTimeMillis {
+            exporter.export(session, CaptureExportRequest(File(root, "timeout.zip"), CaptureRange.ALL, cutoffElapsedMs = 3_000))
+        }
+
+        assertTrue(elapsedMs < 2_000, "the wait must honour its configured bound (60ms), took ${elapsedMs}ms")
+        assertEquals(1, fake.exportCalls, "export must still proceed once the wait bound expires")
+    }
+
     @Test
     fun readerRejectsUnreferencedZipFilesBeforeExtractingThem() {
         val root = createTempDirectory("capture-archive-unreferenced").toFile()
@@ -559,4 +687,25 @@ class CaptureArchiveTest {
     }
 
     private data class RawRow(val text: String, val elapsedMs: Long, val ordinal: Int?)
+
+    /** A fake that reports coverage only once its backing file has grown to [readyAtLength] bytes,
+     * for exercising CaptureArchiveExporter's waitForVideoCoverage against a genuinely growing
+     * source instead of a static fixture. */
+    private class GrowthAwareCoverageFake(private val readyAtLength: Long) : CaptureVideoExporter, CaptureVideoCoverageProbe {
+        var probeCalls = 0
+            private set
+        var exportCalls = 0
+            private set
+
+        override fun coverageEndMs(source: File, requestedStartMs: Long, requestedEndMs: Long): Long {
+            probeCalls++
+            return if (source.length() >= readyAtLength) requestedEndMs else requestedStartMs
+        }
+
+        override fun export(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip {
+            exportCalls++
+            destination.writeText("video")
+            return CaptureVideoClip(requestedStartMs, requestedEndMs, requestedEndMs - requestedStartMs)
+        }
+    }
 }

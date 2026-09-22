@@ -165,8 +165,13 @@ internal class CaptureService(
         toolResolution.takeIf { resolvedSettings == settings }
 
     fun openInstallGuidanceFromSettings() {
-        val message = "Install Android SDK Platform-Tools and scrcpy for your OS, then Recheck tools. " +
-            "Enable USB debugging and accept the device authorization prompt."
+        // adb (Android SDK Platform-Tools) is required for everything: logcat, the embedded
+        // recording session and the in-app embedded mirror all stream the device over adb using a
+        // bundled scrcpy server asset, not a host scrcpy install. A host scrcpy executable is only
+        // needed for the separate "Open scrcpy mirror" native window.
+        val message = "Install Android SDK Platform-Tools, then Recheck tools. " +
+            "Enable USB debugging and accept the device authorization prompt. " +
+            "scrcpy is only needed for the separate native mirror window, not for recording."
         error = message
         runCatching { Desktop.getDesktop().browse(URI("https://github.com/Genymobile/scrcpy#get-the-app")) }
     }
@@ -232,9 +237,28 @@ internal class CaptureService(
 internal class TabCaptureController(
     root: File,
     videoExporter: CaptureVideoExporter = com.indagium.capture.FfmpegCaptureVideoExporter(),
+    // Test seam, same pattern as videoExporter above: production always spawns real adb/scrcpy
+    // subprocesses; tests substitute a fake runner (e.g. FakeCaptureRunner) so a capture session
+    // can be driven end-to-end (e.g. for the embedded-mirror autostart race) without a real device.
+    runner: com.indagium.capture.CaptureProcessRunner = com.indagium.capture.ProcessBuilderCaptureRunner(),
+    // Test seam mirroring CaptureRecorder's own: lets a test drive the embedded recording session
+    // (video/audio packets, reconnects) with a fake transport instead of a real device — used by
+    // the embedded-mirror *session sharing* tests, which need a recording actually producing video
+    // packets that a shared mirror decoder can attach to and observe.
+    embeddedTransportFactory: ((com.indagium.capture.CaptureTools) -> com.indagium.capture.mirror.EmbeddedMirrorTransport)? = null,
 ) : AutoCloseable {
-    private val recorder = CaptureRecorder(root)
-    private val archiveExporter = CaptureArchiveExporter(videoExporter)
+    private val recorder = if (embeddedTransportFactory != null) {
+        CaptureRecorder(root, runner, embeddedTransportFactory = embeddedTransportFactory)
+    } else {
+        CaptureRecorder(root, runner)
+    }
+
+    // Only the real, production exporter waits for the growing MKV's muxer lag (see
+    // CaptureArchiveExporter's videoCoverageWaitMs doc for why the class itself defaults it off).
+    private val archiveExporter = CaptureArchiveExporter(
+        videoExporter,
+        videoCoverageWaitMs = com.indagium.capture.DEFAULT_VIDEO_COVERAGE_WAIT_MS,
+    )
 
     val snapshot get() = recorder.snapshot
     val selectedSession get() = recorder.selectedSession
@@ -256,6 +280,13 @@ internal class TabCaptureController(
 
     fun openMirror(): Boolean = recorder.openMirror()
 
+    /** The recording's active embedded device session, if video recording is currently running —
+     * see [CaptureRecorder.activeEmbeddedSession]. */
+    fun activeEmbeddedSession(): com.indagium.capture.mirror.EmbeddedDeviceSession? = recorder.activeEmbeddedSession()
+
+    /** Flow mirror of [activeEmbeddedSession] — see [CaptureRecorder.embeddedSessionFlow]. */
+    val embeddedSessionFlow get() = recorder.embeddedSessionFlow
+
     /** Builds the durable descriptor/mapping beside the stopped recorder output. */
     fun finalizeStopped(session: CaptureSession): ImportedCapture = archiveExporter.finalizeSessionInPlace(session)
 
@@ -264,14 +295,14 @@ internal class TabCaptureController(
      * checkpoint advances only after the archive has been published successfully; exporter
      * failures and coroutine cancellation therefore cannot stop or mutate a live capture.
      */
-    fun export(request: CaptureExportRequest): CaptureExportResult {
+    fun export(request: CaptureExportRequest, onWaitingForVideo: (() -> Unit)? = null): CaptureExportResult {
         val session = requireNotNull(selectedSession.value) { "Capture has no session to export" }
         val boundary = recorder.snapshotForExport(session.id)
         // Save is a point-in-time operation: ignore the preview's stale cutoff and take a fresh
         // recorder boundary immediately before staging the archive. Selection bounds remain
         // ordinal-based; cutoff only bounds the non-selection ranges.
         val boundedRequest = request.copy(cutoffElapsedMs = boundary.elapsedMs)
-        val result = archiveExporter.export(boundary.session, boundedRequest)
+        val result = archiveExporter.export(boundary.session, boundedRequest, onWaitingForVideo)
         recorder.updateSuccessfulExportCheckpoints(
             sessionId = boundary.session.id,
             logCheckpointMs = result.logCoveredEndMs,

@@ -19,12 +19,15 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 private const val TEST_FRAME_RATE = 10.0
 private const val TEST_SAMPLE_RATE = 8_000
 private const val TEST_FRAME_COUNT = 40
 private const val TEST_SAMPLES_PER_FRAME = TEST_SAMPLE_RATE / TEST_FRAME_RATE.toInt()
+private const val TRAILER_STRIP_BYTES = 4_096
+private const val NEAR_KEYFRAME_FRAME_BUDGET = 300
 
 @Suppress("MagicNumber")
 class FfmpegCaptureVideoExporterTest {
@@ -122,6 +125,113 @@ class FfmpegCaptureVideoExporterTest {
         }
     }
 
+    // Regression test for the "exact-start clip" fix: a recording with sparse keyframes (here, one
+    // keyframe for the entire fixture — exactly the shape the review found on a real Android
+    // emulator, whose encoder produced one keyframe at pts 0 and none for ~20s afterwards) used to
+    // force every Since-last-save export to restart from that single keyframe, re-exporting
+    // whatever came before the actual request every time. Once the keyframe-to-request gap exceeds
+    // the 500ms tolerance, the exporter must decode from that keyframe and re-encode starting at
+    // (or within one frame of) the request instead.
+    @Test
+    fun exactStartReencodesWhenThePrecedingKeyframeIsFarBeforeTheRequest() {
+        val source = syntheticCapture(gopSize = TEST_FRAME_COUNT, sparseKeyframes = true)
+        val before = sha256(source)
+        val destination = tempFile("exact-start-clip", ".mkv")
+        val requestedStartMs = 2_000L
+        val requestedEndMs = 3_500L
+
+        val clip = FfmpegCaptureVideoExporter().export(source, destination, requestedStartMs, requestedEndMs)
+
+        assertEquals(requestedStartMs, clip.actualStartMs, "an exact-start clip should land on the very frame requested")
+        assertEquals(requestedEndMs, clip.coveredEndMs)
+        assertContentEquals(before, sha256(source), "export must never modify or restart the capture source")
+        FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            assertTrue(grabber.videoStream >= 0, "the re-encoded clip must still have a video stream")
+            assertEquals(
+                "h264", grabber.videoCodecName,
+                "the exact-start path must have actually re-encoded to one of its H.264 candidates, not stream-copied mpeg4",
+            )
+            var lastTimestamp = -1L
+            var frames = 0
+            while (true) {
+                val frame = grabber.grabImage() ?: break
+                lastTimestamp = frame.timestamp
+                frames++
+            }
+            // Regression coverage for a real bug this test previously missed: FFmpegFrameRecorder
+            // .record(Frame) ignores Frame.timestamp entirely (verified against javacv 1.5.13
+            // source) and auto-increments at 1/recorder.frameRate per call unless the recorder's
+            // own `timestamp` is set explicitly first — without that, a source whose grabbed frame
+            // rate doesn't reflect real spacing (an emulator/device recording routinely doesn't)
+            // gets its ~1.5s of requested video squashed into a few milliseconds of output, while
+            // the reported actualStartMs/coveredEndMs (built from decode-side timestamps, not the
+            // recorder's output) kept claiming the correct span — caught only by comparing the
+            // written file's own playback duration against the requested span, as this does.
+            assertTrue(frames > 1, "expected more than one frame in the requested 1.5s span, got $frames")
+            val playedMs = lastTimestamp / 1_000L
+            assertTrue(
+                playedMs in 1_000..1_600,
+                "the encoded clip's own timestamps must span close to the requested 1500ms, got ${playedMs}ms over $frames frame(s)",
+            )
+        }
+    }
+
+    // A gap within tolerance must still use the cheap, lossless keyframe-aligned remux — re-encoding
+    // is strictly a fallback for when that isn't good enough, not the default path.
+    @Test
+    fun exactStartLeavesAWithinToleranceGapToTheOrdinaryKeyframeRemux() {
+        val source = syntheticCapture(gopSize = TEST_FRAME_COUNT, sparseKeyframes = true)
+        val destination = tempFile("within-tolerance-clip", ".mkv")
+
+        val clip = FfmpegCaptureVideoExporter().export(source, destination, 400, 1_500)
+
+        assertEquals(0L, clip.actualStartMs, "a 400ms gap is within tolerance and should stay on the source's only keyframe")
+        FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            assertEquals("mpeg4", grabber.videoCodecName, "a within-tolerance clip must be the stream-copied original codec")
+        }
+    }
+
+    // Regression test for a real perf bug this review found: the exact-start path decoded every
+    // frame from position 0, which for a long recording (and the short keyframe interval this
+    // codebase now records with — see MirrorStreamOptions.keyFrameIntervalSeconds) means
+    // software-decoding a large fraction of an hour-long session's video on essentially every
+    // Since-last-save snapshot.
+    // `positionAtOrBeforeKeyframe` must seek near the target keyframe instead. Verified against a
+    // fixture with its trailer stripped off (no Matroska Cues/SeekHead) — a real growing scrcpy MKV
+    // snapshot never has a trailer either, only once the recording stops, so a fully-finalized
+    // synthetic fixture (with a seek index FFmpeg built in) wouldn't actually exercise the risk this
+    // review flagged: whether FFmpeg's seek is trustworthy on exactly this file shape at all.
+    @Test
+    fun exactStartSeeksNearTheKeyframeInsteadOfDecodingALongTrailerlessRecordingFromItsStart() {
+        val frameCount = 600
+        val gopSize = 100
+        val complete = syntheticCapture(gopSize = gopSize, sparseKeyframes = true, frameCount = frameCount)
+        val bytes = complete.readBytes()
+        val source = tempFile("long-trailerless-capture", ".mkv").apply {
+            writeBytes(bytes.copyOf(bytes.size - TRAILER_STRIP_BYTES))
+        }
+        val destination = tempFile("long-exact-start-clip", ".mkv")
+        var diagnostics: ReencodeDiagnostics? = null
+        val exporter = FfmpegCaptureVideoExporter(reencodeDiagnosticsHook = { diagnostics = it })
+
+        // 600 frames @ 10fps = 60s total; gopSize=100 puts keyframes at 0/10/20/30/40/50s. Request
+        // starting at 55s — well past the 500ms exact-start tolerance from the 50s keyframe, and
+        // deep enough into the file (frame 550 of 600) that decoding from 0 would be obvious in
+        // framesReadBeforeStart.
+        val clip = exporter.export(source, destination, 55_000, 58_000)
+
+        assertTrue(clip.actualStartMs in 54_900..55_100, "expected an exact start near 55000ms, got $clip")
+        val seen = assertNotNull(diagnostics, "the exact-start path must have run and reported diagnostics")
+        assertTrue(seen.usedSeek, "seeking must be tried and verified on a trailer-less snapshot, not silently skipped")
+        assertTrue(
+            seen.framesReadBeforeStart < NEAR_KEYFRAME_FRAME_BUDGET,
+            "seeking should land within about one gop of the target, not decode the whole recording " +
+                "from 0 (${seen.framesReadBeforeStart} frames read before reaching the requested start, of $frameCount total)",
+        )
+    }
+
     @Test
     fun rejectsARealAudioOnlyContainerAsHavingNoReadableVideo() {
         val source = syntheticAudioOnlyCapture()
@@ -150,7 +260,20 @@ class FfmpegCaptureVideoExporterTest {
         assertTrue(directory.listFiles().orEmpty().none { it.name.startsWith(".capture-") })
     }
 
-    private fun syntheticCapture(videoStartOffsetUs: Long = 0L): File {
+    private fun syntheticCapture(
+        videoStartOffsetUs: Long = 0L,
+        gopSize: Int = TEST_FRAME_RATE.toInt(),
+        // The default per-frame content (a large full-frame color swing every frame) makes
+        // FFmpeg's native mpeg4 encoder insert a scene-cut keyframe on essentially every frame
+        // regardless of gopSize — fine for the other fixtures below (they only need "keyframes
+        // roughly every gopSize frames", asserted with a permissive range), but it defeats a sparse-
+        // keyframe fixture outright: verified empirically that even gopSize == TEST_FRAME_COUNT
+        // still produced a keyframe on every single frame. Setting this disables scene-cut
+        // detection (sc_threshold) and uses a much gentler per-frame delta, matching a real mostly-
+        // static device screen and actually respecting gopSize as the sole keyframe interval.
+        sparseKeyframes: Boolean = false,
+        frameCount: Int = TEST_FRAME_COUNT,
+    ): File {
         val output = tempFile("synthetic-capture", ".mkv")
         val width = 64
         val height = 48
@@ -158,23 +281,31 @@ class FfmpegCaptureVideoExporterTest {
         val recorder = FFmpegFrameRecorder(output, width, height, 1).apply {
             format = "matroska"
             frameRate = TEST_FRAME_RATE
-            gopSize = TEST_FRAME_RATE.toInt()
+            this.gopSize = gopSize
             videoCodec = AV_CODEC_ID_MPEG4
             videoBitrate = 300_000
             sampleRate = TEST_SAMPLE_RATE
             audioCodec = AV_CODEC_ID_PCM_S16LE
             setDisplayRotation(90.0)
             setVideoMetadata("capture-test", "orientation-and-audio")
+            if (sparseKeyframes) setVideoOption("sc_threshold", "1000000000")
         }
         try {
             recorder.start()
             if (videoStartOffsetUs > 0L) recorder.timestamp = videoStartOffsetUs
-            repeat(TEST_FRAME_COUNT) { frameIndex ->
+            repeat(frameCount) { frameIndex ->
                 pixels.clear()
                 repeat(width * height) {
-                    pixels.put((frameIndex * 5 % 255).toByte())
-                    pixels.put((frameIndex * 11 % 255).toByte())
-                    pixels.put((frameIndex * 17 % 255).toByte())
+                    if (sparseKeyframes) {
+                        val shade = (frameIndex % 4).toByte()
+                        pixels.put(shade)
+                        pixels.put(shade)
+                        pixels.put(shade)
+                    } else {
+                        pixels.put((frameIndex * 5 % 255).toByte())
+                        pixels.put((frameIndex * 11 % 255).toByte())
+                        pixels.put((frameIndex * 17 % 255).toByte())
+                    }
                 }
                 pixels.flip()
                 recorder.recordImage(width, height, 8, 3, width * 3, AV_PIX_FMT_BGR24, pixels)

@@ -410,8 +410,48 @@ sessions. Starting a device closes the launcher and activates a normal `LogTab`;
 folding, search, and Notes therefore operate on a live capture through the same viewer path as a
 file-backed log. `LogTab.captureSessionId` marks an active stream and `isCaptureLauncher` marks the
 ephemeral launcher. Both are intentionally excluded from autosave. A live tab renders a 46dp
-capture strip and may expose a status-only right-sidebar capture card; live video is never embedded
-in the Compose window. When mirroring is enabled, `scrcpy` owns its separate native window.
+capture strip and, when mirroring is enabled, an embedded device mirror in the right-sidebar capture
+card (`ui/EmbeddedMirrorPanel.kt`, `capture/mirror/EmbeddedMirrorRuntime.kt`).
+
+**Recording no longer spawns host `scrcpy` at all.** `CaptureRecorder` owns the device video stream
+directly through `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the same bundled,
+checksum-pinned scrcpy *server* jar (v4.1) over `adb forward` that the embedded mirror uses, but
+speaks its frame-meta wire protocol (`send_frame_meta=true send_stream_meta=true
+send_device_meta=false` — deliberately not `raw_stream=true`, which strips the PTS/config/key-frame
+metadata a durable recording needs) rather than a raw byte stream. `capture/mirror/
+ScrcpyPacketReader.kt` parses that protocol (verified against the pinned server's own
+`device/Streamer.java`/`device/DesktopConnection.java` source, not against older scrcpy protocol
+docs — its bit layout differs: bit 63 is a periodic width/height "session-meta" marker, bit 62 is the
+config/non-media flag, bit 61 is key-frame); `capture/StreamingMkvWriter.kt` writes the parsed
+H.264 (+ optional Opus, when `CaptureSettings.audio` is set) packets straight into
+`session.videoFile` via the bundled FFmpeg's `avformat` API, using a short `cluster_time_limit`
+(~750ms) so the file stays readable by ffprobe/JavaCV within about a second of the last packet
+written — replacing host `scrcpy --record`'s own Matroska muxer, whose in-memory cluster buffering
+could leave the growing file **0 bytes behind for tens of seconds** on a quiet screen. A dropped
+device connection reconnects with a bounded retry, offsets the new connection's PTS to continue the
+output timeline (recording it as a "video gap Xs" interruption), and keeps the same MKV open; a
+resize/rotation's fresh SPS/PPS is merged in-band ahead of the next key frame rather than restarting
+the container. `EmbeddedDeviceSession.attachDecoder`/`detachDecoder` let a live mirror decoder
+subscribe to the same parsed packet stream without ever blocking the muxer — a stalled decoder is
+fed through a bounded queue (`capture/mirror/ScrcpyStreamAdapters.kt`'s `BoundedAnnexBFeed`) that
+drops packets until the next key frame instead of backing up the socket reader — but
+`EmbeddedMirrorRuntime`'s own connection (below) does **not** currently attach to it: recording and
+the in-app mirror each still open an independent embedded scrcpy session (a scoped-down piece of a
+larger "one session for both" redesign; see this file's git history/PR for what was left for a
+follow-up). The host `scrcpy` executable is now used only by the separate, explicitly visible
+native mirror window (`CaptureTools.scrcpyMirrorSpec`/`CaptureRecorder.openMirror`) — recording works
+with `adb` alone.
+
+The embedded mirror (`EmbeddedMirrorRuntime`) opens its own transport the same way, but re-flattens
+the frame-meta protocol back into a plain decodable Annex-B byte stream
+(`ScrcpyStreamAdapters.kt`'s `ScrcpyToAnnexBInputStream`) before handing it to the unchanged
+`JavaCvH264Decoder`, so it decodes into a Compose `ImageBitmap` exactly as before and a mirror
+failure still cannot affect log recording (`EmbeddedMirrorRuntime` owns only the transport/decoder,
+never the recorder). `AppState.ensureEmbeddedMirror` creates/starts it per tab, coalescing a race
+between the capture card's own `LaunchedEffect` and the tab-start callback so a late `autoStart`
+request is not dropped while a create job is already in flight; `EmbeddedMirrorHandle.stop()/close()`
+run on `ioScope`, not the Compose thread, because closing a real connection runs synchronous `adb
+forward --remove`/`adb shell rm` cleanup.
 
 The `capture` package owns process adapters, session metadata and recovery, raw log/index writing,
 screenshots, disk guards, ZIP range export, timing records, and the versioned
@@ -429,6 +469,27 @@ save, or a contiguous interval bounded by the first and last selected capture ro
 and chooses a readable preceding keyframe when available; descriptor coverage records the actual
 video end instead of implying that video spans the entire log range. Screenshots are stored in the
 session and added to Notes with video-frame provenance when available.
+
+Since-last-save keeps **two independent cursors** on `CaptureSession`, not one:
+`snapshotCheckpointMs` (log coverage end, always advances on any successful export) and
+`videoCheckpointMs` (video coverage end, advances only when that export actually produced video). The
+video range's start is `min(logCheckpoint, videoCheckpoint)` when a video checkpoint exists, so a
+snapshot whose video still lags the log (StreamingMkvWriter's Matroska muxer only flushes a cluster
+when it closes — bounded to roughly a second now, see above, but still not instant) is recovered by
+the next snapshot instead of silently dropped; both cursors round-trip through `session.json`
+(`CaptureRecorder.sessionJson`/`sessionFromJson`), which still accepts the pre-split file shape (no
+`videoCheckpointMs` key) for backward compatibility. `FfmpegCaptureVideoExporter` additionally
+re-encodes (rather than remuxing from a keyframe) when the preceding keyframe is more than 500ms
+before the requested start, using whichever bundled H.264 encoder is available at runtime
+(`libopenh264`, `libx264`, then `h264_videotoolbox`, probed in that order; falls back to the
+keyframe-aligned remux if none is available) so a since-save export starts at (or within one frame
+of) what was actually requested instead of always restarting from the recording's first keyframe.
+`CaptureArchiveExporter.export` also waits (bounded, `DEFAULT_VIDEO_COVERAGE_WAIT_MS` — 2s in
+production now that StreamingMkvWriter keeps the file close to real time, was 8s against host
+scrcpy's laggier muxer; 0/disabled by default so tests aren't affected) for a still-recording
+session's video to catch up to the requested end before snapshotting it, and its preview lane uses a
+cheap copy+scan probe (`CaptureVideoCoverageProbe`, cached by source file length) instead of a full
+copy+remux so the snapshot popover's debounced polling stays lightweight.
 
 Stop drains tailing and finalizes the descriptor/mapping in place on the same tab. The resulting
 attached video is then handled by the ordinary video player, so log rows and video can seek one
@@ -1012,9 +1073,11 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `source/SourceStructureParser.kt` | Declaration scanner for the read-only source-navigation tools |
 | `cases/CaseIndexer.kt` / `CaseSearch.kt` / `CaseIndexStore.kt` | Similarity index over previously written notes; idf-lite scoring with tag boost and stale-version penalty |
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
-| `capture/CaptureRecorder.kt` | Per-session adb logcat/scrcpy process lifecycle, append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
+| `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
+| `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
+| `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta protocol parser, the recording-side packet pump/reconnect/PTS-continuity owner, and the bounded decoder fan-out + mirror-side Annex-B re-flattening |
 | `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and log↔video timing/index mapping |
-| `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb/scrcpy resolution/validation and keyed capture-settings persistence |
+| `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
 | `singleinstance/SingleInstance.kt` | File lock plus loopback socket; forwards file arguments to the running instance |
@@ -1726,10 +1789,12 @@ license-clean (Apache wrapper over an LGPL FFmpeg build). VLCJ was rejected as G
 for missing HEVC/`.mov`, and GStreamer/libVLC-direct for requiring a per-OS runtime install.
 
 This player is used after a capture is stopped and finalized (or when an imported capture is opened).
-While a capture is live, `scrcpy` owns the mirror in its separate native window; the live capture
-card in Indagium reports status only and does not attempt to decode the growing MKV. Snapshot export
-remuxes a frozen portion of that growing file and records both requested and actual video coverage,
-including any keyframe-shortened start or end gap.
+While a capture is live, the right-sidebar capture card's embedded mirror (§6.2) decodes the
+device's live stream directly via a second, independent JavaCV/FFmpeg pipeline — it does not attempt
+to decode the growing recording MKV, and a mirror failure cannot stop or corrupt log/video recording.
+Snapshot export remuxes (or, when the gap to the requested start is large, decodes and re-encodes) a
+frozen portion of that growing file and records both requested and actual video coverage, including
+any keyframe-shortened start or end gap.
 
 ### 14.4 Voice
 
