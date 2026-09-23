@@ -778,8 +778,13 @@ data class LogTab(
     // functions later and reflexively including every LogTab field, this one is the deliberate
     // exception, same as tidMap/manualProcessNamePicks/recoveredNoteRows above: do not add it there.
     val captureSessionId: String? = null,
-    // Session-only launcher marker. Appended after the capture-session field and deliberately
-    // omitted from AutosaveCodec so an empty New capture tab never reappears after relaunch.
+    // Session-only marker for the home tab (ui/HomeScreen.kt), opened by the tab strip's `+`
+    // button or automatically by AppState.ensureHomeTab when nothing else is open. Doubles as the
+    // device-capture launcher's tab — the left half is "Open a log", the right half is
+    // ui/CaptureLauncher.kt's CaptureLauncherContent — so starting a capture from it still closes
+    // it via closeCaptureLauncherTabs(), same as the old standalone "New capture" tab. Appended
+    // after the capture-session field and deliberately omitted from AutosaveCodec so an empty home
+    // tab never reappears after relaunch — a fresh one opens on demand instead (ensureHomeTab).
     val isCaptureLauncher: Boolean = false,
     // Remembers which recorder session a STOPPED capture tab came from, so Export/Screenshot/
     // Mirror can still find it after captureSessionId is cleared on Stop (AppState.
@@ -989,6 +994,14 @@ enum class LinuxFilePickerMode(val label: String) {
     COMPATIBILITY_X11("Compatibility X11"),
 }
 
+/** How the home tab's Recent files section lays out its entries — grid of [RecentGridCard]s or a
+ *  flat list of [RecentListRow]s (see ui/HomeScreen.kt). Persisted so the choice survives restart;
+ *  JSON form only, same rule as the other settings-JSON-only fields in [AppSettings]. */
+enum class HomeRecentsLayout {
+    GRID,
+    LIST,
+}
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
@@ -1171,6 +1184,10 @@ data class AppSettings(
     // interval before ever prompting. JSON form ONLY, same rule as the field above.
     val lastSupportPromptAt: Long = 0L,
     val captureSettings: com.indagium.capture.CaptureSettings = com.indagium.capture.CaptureSettings(),
+    // Grid vs. list for the home tab's Recent files section (ui/HomeScreen.kt). JSON form ONLY,
+    // same rule as the other settings-JSON-only fields above — the frozen legacy positional
+    // settingsFromToken decoder must never gain a field.
+    val homeRecentsLayout: HomeRecentsLayout = HomeRecentsLayout.GRID,
 )
 
 enum class ThemePreset(val label: String) {

@@ -23,8 +23,8 @@ import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
-import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.mirror.MirrorStreamOptions
+import com.indagium.capture.mirrorStartRoute
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -1857,6 +1857,7 @@ class AppState(
     private val embeddedMirrorSetupErrorByTab = mutableStateMapOf<String, String>()
     private var embeddedMirrorVersion by mutableStateOf(0)
     private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
+
     // The launcher reads a per-tab draft during composition. This must be Compose-observable:
     // a plain mutableMap accepted clicks but did not invalidate CaptureLauncher, leaving a stale
     // unchecked checkbox on screen while Start capture used the hidden updated value.
@@ -2386,15 +2387,19 @@ class AppState(
         }
     }
 
-    /** Focus the current live capture, or create the session-only New capture launcher tab. */
-    internal fun focusCaptureOrLauncher() {
+    /**
+     * Focus the existing home tab, or create it. The home tab is the same tab as the device-capture
+     * launcher — [LogTab.isCaptureLauncher] doubles as the home-tab marker (see its KDoc) — so this
+     * always lands on the split "Open a log" / capture-launcher screen, never on a live capture
+     * (that used to redirect here; the `+` button must always open home, not jump away from it).
+     */
+    internal fun openHomeTab() {
         synchronized(stateLock) {
-            tabs.firstOrNull { it.captureSessionId != null }?.let { setActiveSurfaceToTab(it.id); return }
             tabs.firstOrNull { it.isCaptureLauncher }?.let { setActiveSurfaceToTab(it.id); return }
             val launcherId = "capture-launcher-${UUID.randomUUID()}"
             val launcher = mkTab(
                 id = launcherId,
-                filename = "New capture",
+                filename = "New tab",
                 logData = emptyList(),
                 analysis = LogAnalysis(pending = false),
                 processNameMode = newTabProcessNameMode(),
@@ -2403,6 +2408,21 @@ class AppState(
             captureLaunchDrafts[launcherId] = settings.captureSettings
             setActiveSurfaceToTab(launcherId)
         }
+    }
+
+    /**
+     * Auto-opens the home tab when there is nothing else to show: start-up with nothing restored,
+     * or the last tab/diagram just closed. A no-op while [isLoading] (a command-line file argument
+     * is still parsing — opening home under it would flash and then immediately close) or when any
+     * tab or diagram session already exists. Driven from App.kt's `LaunchedEffect`, deliberately
+     * NOT from `init` or `closeTabsById`: a bare `AppState()` must stay empty (hundreds of test
+     * assertions depend on it), and re-adding a tab from inside a close would fight [stateLock]
+     * (the close already holds it).
+     */
+    internal fun ensureHomeTab() {
+        if (isLoading) return
+        if (tabs.isNotEmpty() || seq3Sessions.sessions.isNotEmpty()) return
+        openHomeTab()
     }
 
     internal fun captureLaunchSettings(tabId: String): com.indagium.capture.CaptureSettings =
@@ -2740,7 +2760,10 @@ class AppState(
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
 
-    val canCompare: Boolean get() = tabs.size > 1
+    // Excludes the home tab (LogTab.isCaptureLauncher) — it is always present (see ensureHomeTab)
+    // and has no log content to compare, so a home tab plus exactly one real log must not enable
+    // Compare, and the home tab itself must never be selectable as a compare pane.
+    val canCompare: Boolean get() = tabs.count { !it.isCaptureLauncher } > 1
 
     // ── Transient UI ─────────────────────────────────────────────────
     // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
@@ -2767,6 +2790,11 @@ class AppState(
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
+
+    /** The home tab's Recent-files filter text (ui/HomeScreen.kt). Session-only by design (unlike
+     *  the grid/list layout choice in `AppSettings.homeRecentsLayout`, which is a standing
+     *  preference) — a leftover search string surviving a restart would be confusing, not helpful. */
+    var homeRecentFilter by mutableStateOf("")
 
     /** Persisted history of regex patterns committed from the horizontal filter bar's Regex mode
      *  (ui/FilterBar.kt) — see [rememberRegexPattern]'s own doc for the commit contract. Global
@@ -6913,7 +6941,10 @@ class AppState(
         autosaveNow()
     }
 
-    private fun pruneMissingRecentFiles() {
+    // internal (not private): ui/HomeScreen.kt's Recents section also calls this directly, on
+    // first composition, so files removed since the last prune disappear from the home tab too —
+    // not just from the toolbar's Recent files menu.
+    internal fun pruneMissingRecentFiles() {
         val next = recentFiles.filter { File(it).exists() }
         if (next == recentFiles) return
         recentFiles = next
@@ -8036,6 +8067,24 @@ class AppState(
 
     fun openNoteFileAsync(tabId: String, file: File) {
         ioScope.launch { openNoteFile(tabId, file) }
+    }
+
+    /** The home tab's "Open notes (.ann)" tile. Modelled on [openCaseNotesOnly]: opens the picked
+     *  notes file in a brand-new, log-less tab ([emptyWorkspaceTab] already renders correctly with
+     *  no rows) rather than on the home tab itself — the home tab never hosts notes, so a fresh id
+     *  is always minted here instead of reusing [tabId]. Returns the new tab's id (mainly for
+     *  tests); null only if the caller passes a directory or otherwise-unreadable path, which
+     *  [openNoteFileAsync] will simply fail on. */
+    fun openNoteFileInNewTab(file: File): String? {
+        if (!file.isFile) return null
+        val n = tabCounter.getAndIncrement()
+        val t = emptyWorkspaceTab().copy(id = "t$n", filename = file.nameWithoutExtension)
+        synchronized(stateLock) {
+            tabs = tabs + t
+            setActiveSurfaceToTab(t.id)
+        }
+        openNoteFileAsync(t.id, file)
+        return t.id
     }
 
     // Reopening a log used to hand the fresh tab a blank noteTargetName, re-arming upAnn's

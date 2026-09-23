@@ -25,7 +25,7 @@ class CaptureLauncherTest {
             autoExportNotes = false,
         )
         try {
-            app.focusCaptureOrLauncher()
+            app.openHomeTab()
             val launcherId = requireNotNull(app.activeTab()).id
             assertFalse(app.captureLaunchSettings(launcherId).recordVideo)
 

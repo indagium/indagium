@@ -190,7 +190,7 @@ internal fun FileView(
     fun visiblePanelFrs(): List<Pair<KeyboardPanel, FocusRequester>> = buildList {
         if (state.filterVisible) add(KeyboardPanel.FILTERS to filterFr)
         add(KeyboardPanel.LOG_VIEW to logViewerFr)
-        if (state.annotationVisible && !tab.isCaptureLauncher) add(KeyboardPanel.NOTES to annotationFr)
+        if (state.annotationVisible) add(KeyboardPanel.NOTES to annotationFr)
         if (state.aiPanelVisible) add(KeyboardPanel.AI to aiFr)
     }
 
@@ -220,7 +220,7 @@ internal fun FileView(
         // captureSourceSessionId keeps the strip mounted after a stop finishes and
         // captureFinalizationStatus clears — otherwise Save ZIP/Open folder vanished the instant
         // finalization succeeded, the exact moment a user is most likely to want to export.
-        if (tab.captureSessionId != null || tab.isCaptureLauncher ||
+        if (tab.captureSessionId != null ||
             state.captureFinalizationStatus(tab.id) != null || tab.captureSourceSessionId != null
         ) {
             CaptureStrip(
@@ -280,65 +280,61 @@ internal fun FileView(
                     onOpenFilterPanel = { state.updateFilterVisible(true) },
                 )
             }
-            if (tab.isCaptureLauncher) {
-                CaptureLauncher(state, Modifier.weight(1f).fillMaxSize())
-            } else {
-                LogViewer(
-                    tab = tab, modifier = Modifier.weight(1f),
-                    settings = state.settings,
-                    onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
-                    onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
-                    onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
-                    onToggleGroup = { state.toggleGroup(tab.id, it) },
-                    onClearFilter = { state.requestClearFilter(tab.id) },
-                    onExpandAll = { state.expandAll(tab.id) },
-                    onCollapseAll = { state.collapseAll(tab.id) },
-                    onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
-                    onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
-                    onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
-                    onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
-                    onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
-                    onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
-                    onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
-                    onExportTxt = { state.exportFilteredTxt(tab.id) },
-                    onExportCsv = { state.exportFilteredCsv(tab.id) },
-                    scrollStateStore = state.logViewerScrollStateStore,
-                    annotationNavigationRequest = state.pendingAnnotationNavigation,
-                    onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
-                    searchNavigationRequest = state.pendingSearchNavigation,
-                    onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
-                    onSelectAll = { state.selectAll(tab.id) },
-                    onClearSelection = { state.clearSelection(tab.id) },
-                    onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
-                    onCopyText = { text -> state.copyToClipboard(text) },
-                    onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
-                    onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
-                    onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
-                    navScrollMargin = state.settings.navScrollMargin,
-                    focusRequester = logViewerFr,
-                    onPanelFocusChanged = { focused ->
-                        if (focused) {
-                            focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
-                            state.searchFocusTabId = tab.id
-                        }
-                    },
-                    keyboardFocusVisible = state.keyboardFocusVisible,
-                    onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
-                    onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
-                    onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
-                    onSearchToggleCase = { state.toggleSearchCase(tab.id) },
-                    onSearchNext = { state.searchNext(tab.id) },
-                    onSearchPrev = { state.searchPrev(tab.id) },
-                    onSearchClose = { state.closeSearch(tab.id) },
-                    filterBar = filterBarModel,
-                    filterBarActions = filterBarActions,
-                    filterBarVisible = state.filterBarVisible,
-                    onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
-                )
-            }
+            LogViewer(
+                tab = tab, modifier = Modifier.weight(1f),
+                settings = state.settings,
+                onSelRow = { id, multi, range -> state.selRow(tab.id, id, multi, range) },
+                onSelRowRange = { ids -> state.setSelectedRows(tab.id, ids) },
+                onCtxMenu = { id, x, y, sel, panelSel -> state.ctx = CtxMenuState(tab.id, id, x, y, sel, panelSel) },
+                onToggleGroup = { state.toggleGroup(tab.id, it) },
+                onClearFilter = { state.requestClearFilter(tab.id) },
+                onExpandAll = { state.expandAll(tab.id) },
+                onCollapseAll = { state.collapseAll(tab.id) },
+                onToggleUnfiltered = { state.toggleUnfiltered(tab.id) },
+                onToggleTimeDelta = { state.toggleTimeDelta(tab.id) },
+                onOpenSearch = { if (tab.search.active) state.closeSearch(tab.id) else state.openSearch(tab.id) },
+                onToggleRowNumbers = { state.updateSettings { it.copy(showRowNumbers = !it.showRowNumbers) } },
+                onToggleMinimap = { state.updateSettings { it.copy(showMinimap = !it.showMinimap) } },
+                onSetProcessNameMode = { mode -> state.setProcessNameMode(tab.id, mode) },
+                onSetTidMapHighlight = { colorKey -> state.setTidMapHighlight(tab.id, colorKey) },
+                onExportTxt = { state.exportFilteredTxt(tab.id) },
+                onExportCsv = { state.exportFilteredCsv(tab.id) },
+                scrollStateStore = state.logViewerScrollStateStore,
+                annotationNavigationRequest = state.pendingAnnotationNavigation,
+                onConsumeAnnotationNavigation = { state.consumeAnnotationNavigation(it) },
+                searchNavigationRequest = state.pendingSearchNavigation,
+                onConsumeSearchNavigation = { state.consumeSearchNavigation(it) },
+                onSelectAll = { state.selectAll(tab.id) },
+                onClearSelection = { state.clearSelection(tab.id) },
+                onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
+                onCopyText = { text -> state.copyToClipboard(text) },
+                onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
+                onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },
+                onLogRowDoubleClickGestureExpired = { state.endVideoLogDoubleClickGesture(tab.id) },
+                navScrollMargin = state.settings.navScrollMargin,
+                focusRequester = logViewerFr,
+                onPanelFocusChanged = { focused ->
+                    if (focused) {
+                        focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == logViewerFr }
+                        state.searchFocusTabId = tab.id
+                    }
+                },
+                keyboardFocusVisible = state.keyboardFocusVisible,
+                onVisibleItems = { summary -> state.noteVisibleItems(tab.id, summary) },
+                onHoverPanelKey = { key -> state.hoveredLogPanelKey = key },
+                onSearchQueryChange = { query -> state.setSearchQuery(tab.id, query) },
+                onSearchToggleCase = { state.toggleSearchCase(tab.id) },
+                onSearchNext = { state.searchNext(tab.id) },
+                onSearchPrev = { state.searchPrev(tab.id) },
+                onSearchClose = { state.closeSearch(tab.id) },
+                filterBar = filterBarModel,
+                filterBarActions = filterBarActions,
+                filterBarVisible = state.filterBarVisible,
+                onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
+            )
             val liveStatusSidebarVisible = state.videoPanelVisible &&
-                (tab.attachedVideo != null || tab.captureSessionId != null || tab.isCaptureLauncher)
-            val notesVisibleForTab = state.annotationVisible && !tab.isCaptureLauncher
+                (tab.attachedVideo != null || tab.captureSessionId != null)
+            val notesVisibleForTab = state.annotationVisible
             if (notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible) {
                 HDivider { delta ->
                     state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
@@ -426,8 +422,6 @@ internal fun FileView(
                     },
                     videoContent = if (state.videoPanelVisible && tab.captureSessionId != null) {
                         { CaptureCard(state = state, tab = tab) }
-                    } else if (state.videoPanelVisible && tab.isCaptureLauncher) {
-                        { CaptureIdleCard(state) }
                     } else if (state.videoPanelVisible && tab.attachedVideo != null) {
                         { BoundVideoPanel(state = state, tab = tab, modifier = Modifier.fillMaxSize()) }
                     } else {

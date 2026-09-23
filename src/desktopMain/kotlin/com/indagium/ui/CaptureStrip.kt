@@ -181,10 +181,6 @@ internal fun CaptureStrip(
     onReturnFocus: () -> Unit,
 ) {
     if (tab.captureSessionId == null) {
-        if (tab.isCaptureLauncher) {
-            CaptureIdleStrip()
-            return
-        }
         state.captureFinalizationStatus(tab.id)?.let { status ->
             CaptureFinalizationBanner(status)
         }
@@ -391,30 +387,13 @@ private fun CaptureRecordingIndicator(elapsedMs: Long) {
     }
 }
 
-@Composable
-private fun CaptureIdleStrip() {
-    val colors = tc()
-    Row(
-        Modifier.fillMaxWidth().height(CAPTURE_STRIP_HEIGHT_DP.dp).background(colors.p2).padding(horizontal = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Box(Modifier.size(8.dp).background(colors.td, RoundedCornerShape(50)))
-        AppText("New capture", color = colors.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-        AppText(
-            "Select a device to begin; capture settings are available in Settings.",
-            color = colors.td, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
 /**
  * Chrome for a capture tab whose recording has stopped: no live controller/recorder exists any
  * more, so this reads the retained [CaptureSession] straight off disk (via [CaptureService],
  * already kept fresh by [AppState.stopCaptureTab]'s `updateSessions()` call) instead of collecting
  * a [RecorderSnapshot]. Save ZIP and Open folder deliberately reuse the exact same
  * [AppState.saveRetainedCapture] / [AppState.openRetainedCaptureFolder] calls the "Retained
- * sessions" list in [CaptureLauncher] already uses for a session with no open tab — the
+ * sessions" list in [CaptureLauncherContent] already uses for a session with no open tab — the
  * underlying export has never needed a live recorder (CaptureArchiveExporter.export takes a
  * CaptureSession, not a controller), only the previous wiring did.
  */
@@ -927,30 +906,5 @@ private fun CaptureCardValueRow(label: String, value: String) {
             value, color = colors.tx, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
             maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
         )
-    }
-}
-
-@Composable
-internal fun CaptureIdleCard(state: AppState) {
-    val colors = tc()
-    Column(
-        Modifier.fillMaxSize().background(colors.p).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        AppText("Capture", color = colors.tx, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        AppText(
-            "Choose an Android device in the capture tab. Global capture settings apply immediately; this draft is session-only.",
-            color = colors.td,
-            fontSize = 10.sp,
-            maxLines = 4,
-        )
-        state.captureService.toolStatus?.let { AppText(it, color = colors.ts, fontSize = 10.sp, fontFamily = FontFamily.Monospace) }
-        if (state.captureService.devices.isEmpty()) {
-            AppText("No devices discovered", color = colors.td, fontSize = 10.sp)
-        } else {
-            state.captureService.devices.forEach { device ->
-                AppText("${device.model} · ${device.state}", color = if (device.available) colors.ts else colors.td, fontSize = 10.sp)
-            }
-        }
     }
 }

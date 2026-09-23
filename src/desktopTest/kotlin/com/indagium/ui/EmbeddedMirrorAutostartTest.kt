@@ -10,6 +10,7 @@ import com.indagium.capture.FakeCaptureRunner
 import com.indagium.capture.StreamingFakeProcess
 import com.indagium.capture.mirror.EmbeddedMirrorConnection
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
+import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
 import com.indagium.capture.mirror.EmbeddedMirrorState
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.H264Decoder
