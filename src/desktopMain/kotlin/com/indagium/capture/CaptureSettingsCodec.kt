@@ -32,6 +32,7 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("includeBufferedLogs", settings.includeBufferedLogs)
     put("recordVideo", settings.recordVideo)
     put("mirror", settings.mirror)
+    put("mirrorMode", settings.effectiveMirrorMode.name)
     put("audio", settings.audio)
     put("maxSize", settings.maxSize)
     put("maxFps", settings.maxFps)
@@ -49,13 +50,14 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
     val version = root.optional("formatVersion", SETTINGS_FORMAT_VERSION, ::intValue)
     require(version == SETTINGS_FORMAT_VERSION) { "Unsupported capture settings version: $version" }
     val defaults = CaptureSettings()
+    val legacyMirror = root.optional("mirror", defaults.mirror, ::booleanValue)
     CaptureSettings(
         adbPath = root.optional("adbPath", defaults.adbPath, ::stringValue),
         scrcpyPath = root.optional("scrcpyPath", defaults.scrcpyPath, ::stringValue),
         buffers = root.optional("buffers", defaults.buffers, ::stringListValue),
         includeBufferedLogs = root.optional("includeBufferedLogs", defaults.includeBufferedLogs, ::booleanValue),
         recordVideo = root.optional("recordVideo", defaults.recordVideo, ::booleanValue),
-        mirror = root.optional("mirror", defaults.mirror, ::booleanValue),
+        mirror = legacyMirror,
         audio = root.optional("audio", defaults.audio, ::booleanValue),
         maxSize = root.optional("maxSize", defaults.maxSize, ::intValue).coerceIn(MIN_MAX_SIZE, MAX_MAX_SIZE),
         maxFps = root.optional("maxFps", defaults.maxFps, ::intValue).coerceIn(MIN_MAX_FPS, MAX_MAX_FPS),
@@ -72,6 +74,12 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         // of the user's preferences intact and just fall back this one field to DEFAULT, not
         // nuke everything. So both "absent" and "present but unrecognized" resolve to DEFAULT here.
         bufferMode = root.bufferModeOrDefault("bufferMode", defaults.bufferMode),
+        // `mirrorMode` was added after the original boolean setting. An absent mode means the
+        // exact old behavior: mirror=true opens the in-app mirror and false opens nothing.
+        mirrorMode = root.mirrorModeOrDefault(
+            key = "mirrorMode",
+            default = if (legacyMirror) CaptureMirrorMode.EMBEDDED else CaptureMirrorMode.DISABLED,
+        ),
     )
 }.getOrNull()
 
@@ -86,6 +94,11 @@ private fun <T> JsonObject.optional(key: String, default: T, parser: (JsonElemen
 private fun JsonObject.bufferModeOrDefault(key: String, default: CaptureBufferMode): CaptureBufferMode {
     val raw = stringValue(this[key] ?: return default) ?: return default
     return runCatching { CaptureBufferMode.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun JsonObject.mirrorModeOrDefault(key: String, default: CaptureMirrorMode): CaptureMirrorMode {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureMirrorMode.valueOf(raw) }.getOrDefault(default)
 }
 
 private fun stringValue(value: JsonElement): String? =

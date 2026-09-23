@@ -9,6 +9,8 @@ import java.awt.EventQueue
 import java.awt.GraphicsEnvironment
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.HierarchyEvent
+import java.awt.event.HierarchyListener
 import java.io.Closeable
 import javax.swing.SwingUtilities
 import kotlin.math.roundToInt
@@ -50,17 +52,26 @@ internal class EmbeddedMirrorMacSurface(
     private val native: MacVideoToolboxMirrorNative
     @Volatile private var closed = false
     private var lastNativeHierarchy: String? = null
+    private var attachedWindow: java.awt.Window? = null
     private var lastVisibleClip: MirrorClipFractions? = null
     private var lastVisibleClipSize: Pair<Float, Float>? = null
     private val resizeListener = object : ComponentAdapter() {
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
         override fun componentResized(event: ComponentEvent) = resize()
     }
+    private val hierarchyListener = HierarchyListener { event ->
+        if (event.changeFlags and (HierarchyEvent.PARENT_CHANGED.toLong() or HierarchyEvent.DISPLAYABILITY_CHANGED.toLong()) != 0L) {
+            // Wait for the new hierarchy notification, then attach only after the Canvas has a
+            // displayable peer in that Window. This is lifecycle-driven, not a timing delay.
+            EventQueue.invokeLater { attachAndResize() }
+        }
+    }
 
     init {
         check(!GraphicsEnvironment.isHeadless()) { "Metal mirror requires an AWT display; running headless" }
         native = MacVideoToolboxMirrorNative(canvas)
         canvas.addComponentListener(resizeListener)
+        canvas.addHierarchyListener(hierarchyListener)
     }
 
     fun decode(
@@ -91,7 +102,7 @@ internal class EmbeddedMirrorMacSurface(
     private fun attachAndResize() {
         if (closed || !canvas.isDisplayable) return
         val window = SwingUtilities.getWindowAncestor(canvas)
-        if (window != null) {
+        if (window != null && window !== attachedWindow) {
             val origin = SwingUtilities.convertPoint(canvas, 0, 0, window)
             val insets = window.insets
             runCatching {
@@ -99,6 +110,7 @@ internal class EmbeddedMirrorMacSurface(
                 // window insets once, as CPlatformComponent.setBounds does before setting the
                 // JAWT layer's initial frame.
                 val hierarchy = native.attachCanvas(origin.x, origin.y, insets.left, insets.top)
+                attachedWindow = window
                 if (!hierarchy.isNullOrBlank() && hierarchy != lastNativeHierarchy) {
                     lastNativeHierarchy = hierarchy
                     onDiagnostic("Metal mirror AppKit hierarchy $hierarchy")
@@ -130,7 +142,9 @@ internal class EmbeddedMirrorMacSurface(
     private fun closeOnEdt() {
         if (closed) return
         closed = true
+        attachedWindow = null
         canvas.removeComponentListener(resizeListener)
+        canvas.removeHierarchyListener(hierarchyListener)
         native.close()
     }
 

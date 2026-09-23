@@ -16,6 +16,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.withMirrorMode
 import com.indagium.capture.captureFilenameTemplateError
 import java.io.File
 
@@ -129,8 +132,8 @@ private fun CaptureToolsGroup(
         )
         // Recording and the embedded (in-app) mirror both stream the device over adb directly —
         // via a bundled scrcpy *server* jar pushed and run with `app_process`, not this host
-        // scrcpy executable — so neither needs this path configured at all. It's only read by the
-        // separate "Open scrcpy mirror" action, which opens a real, visible scrcpy window.
+        // scrcpy executable — so neither needs this path configured at all. It is only used when
+        // Device display is set to "scrcpy window" for a capture.
         CapturePathField(
             label = "scrcpy path (optional — native mirror window only)",
             value = settings.scrcpyPath,
@@ -140,8 +143,8 @@ private fun CaptureToolsGroup(
             invalidMessage = "path does not point to a file",
             effectivePath = settings.scrcpyPath.takeIf(String::isBlank)?.let { toolResolution?.scrcpyPath },
             effectiveMessage = if (settings.scrcpyPath.isBlank() && toolResolution != null && toolResolution.scrcpyPath == null) {
-                "No scrcpy executable detected. Recording and the embedded mirror still work without it; " +
-                    "only the separate native \"Open scrcpy mirror\" window needs it installed."
+                "No scrcpy executable detected. Recording and the in-app mirror still work without it; " +
+                    "choose a scrcpy window only after installing scrcpy."
             } else {
                 null
             },
@@ -213,9 +216,20 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
     CheckRow(settings.recordVideo, { update(settings.copy(recordVideo = !settings.recordVideo)) }) {
         AppText("Record video", fontSize = 11.sp)
     }
-    CheckRow(settings.mirror, { update(settings.copy(mirror = !settings.mirror)) }) {
-        AppText("Mirror device", fontSize = 11.sp)
-    }
+    AppText("Device display", color = tc().td, fontSize = 10.sp)
+    SegmentedControl(
+        options = listOf("In-app mirror", "scrcpy window", "Off"),
+        selectedIndices = setOf(
+            when (settings.effectiveMirrorMode) {
+                CaptureMirrorMode.EMBEDDED -> 0
+                CaptureMirrorMode.EXTERNAL -> 1
+                CaptureMirrorMode.DISABLED -> 2
+            },
+        ),
+        onToggle = { index -> update(settings.withMirrorMode(CaptureMirrorMode.entries[index])) },
+        modifier = Modifier.fillMaxWidth(),
+        fillWidth = true,
+    )
     CheckRow(settings.audio, { update(settings.copy(audio = !settings.audio)) }) {
         AppText("Capture audio", fontSize = 11.sp)
     }

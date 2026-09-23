@@ -31,6 +31,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
+import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.withMirrorMode
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
@@ -218,16 +221,29 @@ private fun CaptureBeforeStartRow(state: AppState, launcherTabId: String, draft:
                 }) { AppText("Record video", color = tc().tx, fontSize = 11.sp) }
             }
             Box(Modifier.weight(1f)) {
-                CheckRow(draft.mirror, {
-                    state.updateCaptureLaunchSettings(launcherTabId) { it.copy(mirror = !it.mirror) }
-                }) { AppText("Open scrcpy mirror", color = tc().tx, fontSize = 11.sp) }
-            }
-            Box(Modifier.weight(1f)) {
                 CheckRow(draft.includeBufferedLogs, {
                     state.updateCaptureLaunchSettings(launcherTabId) { it.copy(includeBufferedLogs = !it.includeBufferedLogs) }
                 }) { AppText("Include buffered logs", color = tc().tx, fontSize = 11.sp) }
             }
         }
+        AppText("Device display", color = tc().td, fontSize = 10.sp)
+        SegmentedControl(
+            options = listOf("In-app mirror", "scrcpy window", "Off"),
+            selectedIndices = setOf(
+                when (draft.effectiveMirrorMode) {
+                    CaptureMirrorMode.EMBEDDED -> 0
+                    CaptureMirrorMode.EXTERNAL -> 1
+                    CaptureMirrorMode.DISABLED -> 2
+                },
+            ),
+            onToggle = { index ->
+                state.updateCaptureLaunchSettings(launcherTabId) {
+                    it.withMirrorMode(CaptureMirrorMode.entries[index])
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            fillWidth = true,
+        )
         AppText("Buffer mode", color = tc().td, fontSize = 10.sp)
         SegmentedControl(
             options = listOf("Default", "All", "Custom"),

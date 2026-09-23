@@ -41,10 +41,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureExportRequest
+import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
+import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.renderCaptureFilename
 import com.indagium.model.LogTab
 import kotlinx.coroutines.delay
@@ -319,6 +321,17 @@ internal fun CaptureStrip(
                 )
             }
         }
+        state.captureService.error
+            ?.takeIf { it.startsWith("External scrcpy mirror could not open:") }
+            ?.let { error ->
+                AppText(
+                    error,
+                    color = DANGER_RED,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
+                )
+            }
         if (diagnosticsOpen) {
             CaptureDiagnosticsDrawer(
                 state = state,
@@ -835,8 +848,12 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     val snapshot = rememberCaptureSnapshot(state, tab)
     val colors = tc()
     val session = snapshot.session
-    LaunchedEffect(tab.id, session?.id, session?.settings?.mirror) {
-        state.ensureEmbeddedMirror(tab.id, autoStart = session?.settings?.mirror == true)
+    val mirrorMode = session?.settings?.effectiveMirrorMode ?: CaptureMirrorMode.DISABLED
+    var mirrorHeight by remember(tab.id) { mutableStateOf(MIRROR_DEFAULT_HEIGHT) }
+    LaunchedEffect(tab.id, session?.id, mirrorMode) {
+        if (mirrorMode == CaptureMirrorMode.EMBEDDED) {
+            state.ensureEmbeddedMirror(tab.id, autoStart = true)
+        }
     }
     val mirror = state.embeddedMirrorFor(tab.id)
     val deviceLabel = captureSessionDeviceLabel(session, tab.filename.removePrefix("Capture — "))
@@ -848,13 +865,34 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         SectionHeader("DEVICE")
-        EmbeddedMirrorPanel(
-            handle = mirror,
-            setupError = state.embeddedMirrorSetupError(tab.id),
-            onConnect = { state.openCaptureMirror(tab.id) },
-            onDisconnect = { state.stopEmbeddedMirror(tab.id) },
-            modifier = Modifier.fillMaxWidth(),
-        )
+        when (mirrorMode) {
+            CaptureMirrorMode.EMBEDDED -> if (!state.isEmbeddedMirrorDetached(tab.id)) {
+                EmbeddedMirrorPanel(
+                    handle = mirror,
+                    setupError = state.embeddedMirrorSetupError(tab.id),
+                    onConnect = { state.openCaptureMirror(tab.id) },
+                    onDisconnect = { state.stopEmbeddedMirror(tab.id) },
+                    onDetach = { state.detachEmbeddedMirror(tab.id) },
+                    sidebarSurfaceHeight = mirrorHeight,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                VDivider { delta ->
+                    mirrorHeight = (mirrorHeight.value + delta).dp.coerceIn(120.dp, MIRROR_SIDEBAR_MAX_HEIGHT)
+                }
+            } else {
+                AppText("Device mirror is open in its own window.", color = colors.td, fontSize = 10.sp)
+            }
+            CaptureMirrorMode.EXTERNAL -> {
+                AppText(
+                    "Device display is running in an external scrcpy window.",
+                    color = colors.td,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                )
+                AppButton("Open scrcpy window", { state.openExternalCaptureMirror(tab.id) }, ButtonVariant.Secondary)
+            }
+            CaptureMirrorMode.DISABLED -> AppText("Device display is off for this capture.", color = colors.td, fontSize = 10.sp)
+        }
         CaptureCardValueGrid(
             deviceLabel = deviceLabel,
             elapsedLabel = formatCaptureElapsed(sessionElapsed(snapshot)),
