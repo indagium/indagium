@@ -1847,7 +1847,10 @@ class AppState(
     private val embeddedMirrorSetupErrorByTab = mutableStateMapOf<String, String>()
     private var embeddedMirrorVersion by mutableStateOf(0)
     private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
-    private val captureLaunchDrafts = mutableMapOf<String, com.indagium.capture.CaptureSettings>()
+    // The launcher reads a per-tab draft during composition. This must be Compose-observable:
+    // a plain mutableMap accepted clicks but did not invalidate CaptureLauncher, leaving a stale
+    // unchecked checkbox on screen while Start capture used the hidden updated value.
+    private val captureLaunchDrafts = mutableStateMapOf<String, com.indagium.capture.CaptureSettings>()
 
     /** Observable guard covering tool validation, recovery, and process launch. */
     internal var captureStartInProgress by mutableStateOf(false)

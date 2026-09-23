@@ -126,6 +126,67 @@ val compileAppleSpeechNative by tasks.registering(Exec::class) {
     }
 }
 
+// Mirror-only macOS acceleration is a deliberately small JNI dylib: VideoToolbox decodes H.264
+// into CVPixelBuffers and Metal presents them in a JAWT SurfaceLayers-hosted CAMetalLayer. It is
+// generated during packaging just like the existing Apple Speech bridge, so a signed app contains
+// one reviewable, host-native binary and no JOGL/VLC/GStreamer runtime.
+val compileMacMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isMacHost }
+    val output = generatedNativeResourcesDir.get().file("native/macos/libindagium_mirror.dylib").asFile
+    inputs.file("native/macos/indagium_mirror.mm")
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "clang++", "-dynamiclib", "-std=c++17", "-fobjc-arc",
+            "-I$javaHome/include", "-I$javaHome/include/darwin",
+            "-L$javaHome/lib", "-ljawt",
+            "-framework", "Foundation", "-framework", "AppKit", "-framework", "QuartzCore",
+            "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "Metal",
+            "native/macos/indagium_mirror.mm", "-o", output.absolutePath,
+        )
+    }
+}
+
+// Focused host-native checks for the custom Annex-B parser and VideoToolbox session lifecycle.
+// These exercise the exact implementation compiled into the packaged dylib, including parameter
+// set reconfiguration and teardown, rather than a Kotlin model of that code.
+val macMirrorNativeTestExecutable = layout.buildDirectory.file("native-tests/indagium_mirror_native_test")
+val compileMacMirrorNativeTests by tasks.registering(Exec::class) {
+    onlyIf { isMacHost }
+    inputs.file("native/macos/indagium_mirror.mm")
+    inputs.file("native/macos/indagium_mirror_native_test.mm")
+    outputs.file(macMirrorNativeTestExecutable)
+    doFirst {
+        val output = macMirrorNativeTestExecutable.get().asFile
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "clang++", "-std=c++17", "-fobjc-arc", "-fblocks",
+            "-I$javaHome/include", "-I$javaHome/include/darwin",
+            "-L$javaHome/lib", "-L$javaHome/lib/server",
+            "-Wl,-rpath,$javaHome/lib", "-Wl,-rpath,$javaHome/lib/server", "-ljawt", "-ljvm",
+            "-framework", "Foundation", "-framework", "AppKit", "-framework", "QuartzCore",
+            "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo",
+            "-framework", "Metal",
+            "native/macos/indagium_mirror_native_test.mm", "-o", output.absolutePath,
+        )
+    }
+}
+
+tasks.register<Exec>("testMacMirrorNative") {
+    group = "verification"
+    description = "Runs focused macOS native mirror parser, VideoToolbox reconfiguration, and teardown checks."
+    onlyIf { isMacHost }
+    dependsOn(compileMacMirrorNativeTests)
+    commandLine(macMirrorNativeTestExecutable.get().asFile.absolutePath)
+}
+
 val generateBuildInfo by tasks.registering {
     inputs.property("appVersion", appVersion)
     inputs.property("appAuthor", appAuthor)
@@ -363,7 +424,10 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
-    if (isMacHost) dependsOn(compileAppleSpeechNative)
+    if (isMacHost) {
+        dependsOn(compileAppleSpeechNative)
+        dependsOn(compileMacMirrorNative)
+    }
 }
 
 // jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's

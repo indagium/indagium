@@ -60,6 +60,16 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
+    // On macOS the mirror uses a native CAMetalLayer inside SwingPanel. Compose Desktop 1.11.1
+    // otherwise places Swing interop above its Skia layer and keeps that layer opaque, which can
+    // cover a JAWT-backed video layer. The feature flag is read when Compose creates its mediator,
+    // so set the default before application{}; retain an explicit JVM property override for QA.
+    if (System.getProperty("os.name").contains("mac", ignoreCase = true) &&
+        System.getProperty("compose.interop.blending") == null
+    ) {
+        System.setProperty("compose.interop.blending", "true")
+    }
+
     // This debug-only setup does not touch disk. When both switches are present it installs an
     // explicit, empty directory beneath an approved temporary root so MCP verification cannot
     // restore or modify the user's normal autosave/Recent state. It must stay before migration
