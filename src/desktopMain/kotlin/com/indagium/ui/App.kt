@@ -211,6 +211,13 @@ fun App(
         LaunchedEffect(state) {
             state.startPendingRestoredTabLoads()
         }
+        // Auto-opens the home tab whenever there is nothing else to show: start-up with nothing
+        // restored, or the last tab/diagram just closed. Lives here, not inside AppState.init or
+        // closeTabsById, deliberately — see ensureHomeTab's own KDoc for why. isLoading gates a
+        // command-line file argument still being parsed, so home never flashes open underneath it.
+        LaunchedEffect(state.tabs.isEmpty(), state.seq3Sessions.sessions.isEmpty(), state.isLoading) {
+            state.ensureHomeTab()
+        }
         val dropTarget = remember(state, window) {
             object : DragAndDropTarget {
                 override fun onStarted(event: DragAndDropEvent) {
@@ -326,10 +333,13 @@ fun App(
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {
+                    // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
+                    // is nothing else to show, so this only ever paints for the one frame between
+                    // that condition becoming true and the LaunchedEffect below reacting to it —
+                    // an empty Box, not the old static text, since the text would otherwise flash
+                    // and immediately be replaced by the home tab.
                     state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
-                        }
+                        Box(Modifier.fillMaxSize())
 
                     // Keyed on the session id — matching the log path's key(activeTab.id) just
                     // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
@@ -337,6 +347,16 @@ fun App(
                     // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
                     activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
                         Seq3Workspace(state, activeSurface.sessionId)
+                    }
+                    // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
+                    // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
+                    // (step 7), this is the only place that still knows about the home tab at all.
+                    activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
+                        HomeScreen(
+                            state = state,
+                            tab = activeTab,
+                            onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                        )
                     }
                     state.compareMode -> CompareView(
                         state = state,

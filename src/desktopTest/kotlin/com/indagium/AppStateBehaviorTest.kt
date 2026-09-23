@@ -89,6 +89,7 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -105,6 +106,10 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AppStateBehaviorTest {
+    // Stays true even after AppState.ensureHomeTab was added (see the tests further down): that
+    // auto-open is driven from App.kt's own LaunchedEffect, deliberately NOT from AppState.init,
+    // precisely so a bare AppState() — the fixture hundreds of tests in this file build on — stays
+    // exactly this empty.
     @Test
     fun startsWithNoOpenTabs() {
         val state = AppState()
@@ -128,6 +133,102 @@ class AppStateBehaviorTest {
         assertEquals(null, state.activeTab())
         assertEquals("", state.activeTabId)
         assertEquals("", state.compareTabId)
+    }
+
+    // ── Home tab (ui/HomeScreen.kt) ─────────────────────────────────────
+
+    @Test
+    fun ensureHomeTabOpensWhenNothingIsOpen() {
+        val state = AppState()
+        assertTrue(state.tabs.isEmpty())
+
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertTrue(requireNotNull(state.activeTab()).isCaptureLauncher)
+    }
+
+    @Test
+    fun ensureHomeTabIsANoOpWithATabOpen() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertEquals("log", state.activeTab()?.id)
+    }
+
+    @Test
+    fun ensureHomeTabIsIdempotent() {
+        val state = AppState()
+
+        state.ensureHomeTab()
+        val firstHomeTabId = requireNotNull(state.activeTab()).id
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertEquals(firstHomeTabId, requireNotNull(state.activeTab()).id)
+    }
+
+    @Test
+    fun openHomeTabFocusesTheExistingHomeTabInsteadOfCreatingAnother() {
+        val state = AppState()
+
+        state.openHomeTab()
+        val firstHomeTabId = requireNotNull(state.activeTab()).id
+        state.tabs += mkTab("log", "test.log", emptyList())
+        state.activeTabId = "log"
+
+        state.openHomeTab()
+
+        assertEquals(2, state.tabs.size)
+        assertEquals(firstHomeTabId, state.activeTabId)
+    }
+
+    @Test
+    fun openNoteFileInNewTabCreatesLoglessTabAndLeavesHomeTabUntouched() {
+        val state = AppState(
+            autosaveFile = Files.createTempFile("home-tab-notes", ".json").toFile(),
+            autoExportNotes = false,
+        )
+        try {
+            state.openHomeTab()
+            val homeTabId = requireNotNull(state.activeTab()).id
+
+            val noteFile = Files.createTempFile("home-tab-note", ".ann").toFile()
+            val newTabId = requireNotNull(state.openNoteFileInNewTab(noteFile))
+
+            assertEquals(2, state.tabs.size)
+            val newTab = requireNotNull(state.tab(newTabId))
+            assertTrue(newTab.logData.isEmpty())
+            assertFalse(newTab.isCaptureLauncher)
+
+            val home = requireNotNull(state.tab(homeTabId))
+            assertTrue(home.isCaptureLauncher)
+        } finally {
+            state.close()
+        }
+    }
+
+    // canCompare's own doc explains why: an always-present home tab (see ensureHomeTab) has no log
+    // content to compare, so it must never itself count toward, or be selectable as, a compare pane.
+    @Test
+    fun homeTabDoesNotEnableCanCompare() {
+        val state = AppState()
+        state.openHomeTab()
+        val homeTabId = requireNotNull(state.activeTab()).id
+
+        assertFalse(state.canCompare)
+
+        state.tabs += mkTab("log", "test.log", emptyList())
+        assertFalse(state.canCompare, "one real log tab plus the ever-present home tab must not enable Compare")
+
+        state.tabs += mkTab("log2", "test2.log", emptyList())
+        assertTrue(state.canCompare)
+
+        assertTrue(requireNotNull(state.tab(homeTabId)).isCaptureLauncher)
     }
 
     @Test

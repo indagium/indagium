@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -31,28 +30,30 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
-import com.indagium.capture.CaptureMirrorMode
-import com.indagium.capture.effectiveMirrorMode
-import com.indagium.capture.withMirrorMode
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
 import com.indagium.capture.deviceStateGuidance
+import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.withMirrorMode
 import kotlinx.coroutines.delay
 
 private const val DEVICE_REFRESH_INTERVAL_MS = 3_000L
 private val CAPTURE_LAUNCH_BUFFER_NAMES = listOf("main", "system", "crash", "kernel", "events", "radio")
-private val CAPTURE_LAUNCHER_MAX_WIDTH = 640.dp
 
-/** Session-only empty state used by the Capture toolbar action: a centered, ~640dp-wide column
- * (Problem 6 of the restyle plan) rather than a form stretched edge to edge. Kept as its own
- * launcher tab, not folded into an in-place idle→recording transition — that decision is settled
- * separately from this styling pass. */
+/** The device-capture launcher's content, embeddable in any surface that already knows which tab
+ *  it belongs to. Split out of the old standalone `CaptureLauncher` composable so ui/HomeScreen.kt
+ *  can host it as the right half of the home tab, side by side with the "Open a log" zone, instead
+ *  of centered alone in its own tab — the launcher's tab (`launcherTabId`) IS the home tab (see
+ *  [LogTab.isCaptureLauncher]'s KDoc), so this takes that id as a parameter rather than re-deriving
+ *  it from `state.activeTab()`, which only worked when the launcher was the sole content of the
+ *  active tab. One `verticalScroll` here (not a max-width-clamped centered column): the caller
+ *  decides layout, this only decides content. */
 @Composable
-internal fun CaptureLauncher(state: AppState, modifier: Modifier = Modifier) {
+internal fun CaptureLauncherContent(state: AppState, launcherTabId: String, modifier: Modifier = Modifier) {
     val service = state.captureService
-    val launcherTabId = state.activeTab()?.takeIf { it.isCaptureLauncher }?.id
-    val draft = launcherTabId?.let(state::captureLaunchSettings)
+    val draft = state.captureLaunchSettings(launcherTabId)
     var discardId by remember { mutableStateOf<String?>(null) }
     // Local, presentation-only selection of which discovered device "Start capture" acts on — not
     // persisted, not part of AppState, and re-resolved against the live device list every
@@ -66,80 +67,84 @@ internal fun CaptureLauncher(state: AppState, modifier: Modifier = Modifier) {
             service.refreshDevices()
         }
     }
-    Box(modifier.fillMaxSize().verticalScroll(rememberScrollState()), contentAlignment = Alignment.TopCenter) {
-        Column(
-            Modifier.widthIn(max = CAPTURE_LAUNCHER_MAX_WIDTH).fillMaxWidth().padding(horizontal = 24.dp, vertical = 40.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
-                AppText(
-                    "Choose an Android device. The capture opens as a normal streaming log tab.",
-                    color = tc().td,
-                    fontSize = 12.sp,
-                )
-            }
-            service.toolStatus?.let { status ->
-                LauncherPanel("Capture tools") {
-                    AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                    service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AppButton("Recheck tools", { service.recheckToolsFromSettings() })
-                        AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
-                    }
-                }
-            }
-            LauncherPanel("Devices") {
-                if (service.devices.isEmpty()) {
-                    AppText("No devices discovered", color = tc().td)
-                    AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost)
-                } else {
-                    service.devices.forEach { device ->
-                        CaptureDeviceRow(
-                            device = device,
-                            selected = device.serial == selectedDevice?.serial,
-                            onSelect = { selectedSerial = device.serial },
-                        )
-                    }
-                }
-            }
-            if (launcherTabId != null && draft != null) {
-                CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
-            }
-            AppButton(
-                "Start capture",
-                { selectedDevice?.let { state.startCaptureTab(it) } },
-                ButtonVariant.Primary,
-                enabled = selectedDevice?.available == true && state.liveCaptureTabId == null && !state.captureStartInProgress,
-                modifier = Modifier.fillMaxWidth(),
+    Column(
+        modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 40.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
+            AppText(
+                "Choose an Android device. The capture opens as a normal streaming log tab.",
+                color = tc().td,
+                fontSize = 12.sp,
             )
-            LauncherPanel("Unfinished sessions") {
-                state.captureExportError?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
-                val retained = service.sessions.filter { it.status != CaptureStatus.RECORDING }
-                if (retained.isEmpty()) {
-                    AppText("No interrupted sessions", color = tc().td)
-                } else {
-                    retained.forEach { session ->
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                AppText("${session.device.model} · ${session.status}")
-                                AppText(session.directory.name, color = tc().td, fontSize = 10.sp)
+        }
+        service.toolStatus?.let { status ->
+            LauncherPanel("Capture tools") {
+                AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppButton("Recheck tools", { service.recheckToolsFromSettings() })
+                    AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+                }
+            }
+        }
+        LauncherPanel("Devices") {
+            if (service.devices.isEmpty()) {
+                AppText("No devices discovered", color = tc().td)
+                AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost)
+            } else {
+                service.devices.forEach { device ->
+                    CaptureDeviceRow(
+                        device = device,
+                        selected = device.serial == selectedDevice?.serial,
+                        onSelect = { selectedSerial = device.serial },
+                    )
+                }
+            }
+        }
+        CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
+        AppButton(
+            "Start capture",
+            { selectedDevice?.let { state.startCaptureTab(it) } },
+            ButtonVariant.Primary,
+            enabled = selectedDevice?.available == true && state.liveCaptureTabId == null && !state.captureStartInProgress,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        LauncherPanel("Unfinished sessions") {
+            state.captureExportError?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
+            val retained = service.sessions.filter { it.status != CaptureStatus.RECORDING }
+            if (retained.isEmpty()) {
+                AppText("No interrupted sessions", color = tc().td)
+            } else {
+                // Capped and scrollable: a user with 15+ retained sessions otherwise gets an
+                // unbounded panel that pushes the "Start capture" button and everything below it
+                // off-screen, crowding out the rest of the capture zone. ~44dp/row covers the
+                // two-line (12sp + 10sp) text column plus the 8dp gap to the next row.
+                BoundedScrollBox(rowLimit = 15, rowDp = 44) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        retained.forEach { session ->
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    AppText("${session.device.model} · ${session.status}")
+                                    AppText(session.directory.name, color = tc().td, fontSize = 10.sp)
+                                }
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    AppButton("Open", { state.openRetainedCapture(session.id) }, ButtonVariant.Secondary)
+                                    AppButton("Save ZIP", { state.saveRetainedCapture(session.id) }, ButtonVariant.Secondary)
+                                    AppButton("Open folder", { state.openRetainedCaptureFolder(session.id) }, ButtonVariant.Ghost)
+                                    AppButton("Discard", { discardId = session.id }, ButtonVariant.Ghost)
+                                }
                             }
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                AppButton("Open", { state.openRetainedCapture(session.id) }, ButtonVariant.Secondary)
-                                AppButton("Save ZIP", { state.saveRetainedCapture(session.id) }, ButtonVariant.Secondary)
-                                AppButton("Open folder", { state.openRetainedCaptureFolder(session.id) }, ButtonVariant.Ghost)
-                                AppButton("Discard", { discardId = session.id }, ButtonVariant.Ghost)
-                            }
-                        }
-                        if (discardId == session.id) {
-                            AppText("Discard this retained capture? The raw session directory will be removed.", color = DANGER_RED, fontSize = 10.sp)
-                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                AppButton("Confirm discard", {
-                                    state.discardRetainedCapture(session.id)
-                                    discardId = null
-                                }, ButtonVariant.Primary)
-                                AppButton("Cancel", { discardId = null }, ButtonVariant.Ghost)
+                            if (discardId == session.id) {
+                                AppText("Discard this retained capture? The raw session directory will be removed.", color = DANGER_RED, fontSize = 10.sp)
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    AppButton("Confirm discard", {
+                                        state.discardRetainedCapture(session.id)
+                                        discardId = null
+                                    }, ButtonVariant.Primary)
+                                    AppButton("Cancel", { discardId = null }, ButtonVariant.Ghost)
+                                }
                             }
                         }
                     }
