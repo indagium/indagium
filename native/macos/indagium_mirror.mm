@@ -28,6 +28,24 @@ struct LayerFrameSnapshot {
     bool samplePending = false;
 };
 
+// Resize notifications arrive on the AWT event-dispatch thread, while CAMetalLayer geometry must
+// be changed on AppKit's main queue. Keep their shared state independent from Mirror so a queued
+// AppKit block can safely outlive nativeClose without dereferencing a deleted Mirror.
+struct PendingGeometryUpdate {
+    std::mutex lock;
+    uint64_t generation = 0;
+    bool scheduled = false;
+    bool closed = false;
+    CGFloat width = 0.0;
+    CGFloat height = 0.0;
+    CGFloat pixelWidth = 0.0;
+    CGFloat pixelHeight = 0.0;
+    CGFloat clipLeft = 0.0;
+    CGFloat clipTop = 0.0;
+    CGFloat clipRight = 1.0;
+    CGFloat clipBottom = 1.0;
+};
+
 template <typename T> struct CfOwner {
     T value = nullptr;
     ~CfOwner() { if (value) CFRelease(value); }
@@ -51,6 +69,7 @@ struct Mirror {
     std::mutex lock;
     std::condition_variable decodeCompleted;
     std::shared_ptr<LayerFrameSnapshot> layerFrameSnapshot = std::make_shared<LayerFrameSnapshot>();
+    std::shared_ptr<PendingGeometryUpdate> pendingGeometry = std::make_shared<PendingGeometryUpdate>();
     bool renderScheduled = false;
     bool decodeInFlight = false;
     bool failed = false;
@@ -175,6 +194,54 @@ static void updateLayerClipMask(
     mask.path = path;
     CGPathRelease(path);
     layer.mask = mask;
+}
+
+static void schedulePendingGeometryUpdate(
+    const std::shared_ptr<PendingGeometryUpdate> &pending,
+    CAMetalLayer *layer,
+    CAShapeLayer *clipMask) {
+    if (!pending || !layer || !clipMask) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CGFloat width = 0.0, height = 0.0, pixelWidth = 0.0, pixelHeight = 0.0;
+        CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
+        uint64_t appliedGeneration = 0;
+        {
+            std::lock_guard<std::mutex> guard(pending->lock);
+            if (pending->closed) {
+                pending->scheduled = false;
+                return;
+            }
+            width = pending->width;
+            height = pending->height;
+            pixelWidth = pending->pixelWidth;
+            pixelHeight = pending->pixelHeight;
+            clipLeft = pending->clipLeft;
+            clipTop = pending->clipTop;
+            clipRight = pending->clipRight;
+            clipBottom = pending->clipBottom;
+            appliedGeneration = pending->generation;
+        }
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        updateDrawableGeometry(layer, width, height, pixelWidth, pixelHeight);
+        updateLayerClipMask(layer, clipMask, clipLeft, clipTop, clipRight, clipBottom);
+        [CATransaction commit];
+
+        bool needsAnotherPass = false;
+        {
+            std::lock_guard<std::mutex> guard(pending->lock);
+            if (pending->closed) {
+                pending->scheduled = false;
+            } else if (pending->generation == appliedGeneration) {
+                pending->scheduled = false;
+            } else {
+                // A resize landed after this main-queue pass sampled the state. Queue one more
+                // pass; all intervening resize events remain coalesced in the latest generation.
+                needsAnotherPass = true;
+            }
+        }
+        if (needsAnotherPass) schedulePendingGeometryUpdate(pending, layer, clipMask);
+    });
 }
 
 // JAWT's macOS SurfaceLayers implementation adds layers directly to an AppKit-hosted layer tree.
@@ -1154,12 +1221,14 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
     bool schedule = false;
     __strong CAMetalLayer *layer = nil;
     __strong CAShapeLayer *clipMask = nil;
+    std::shared_ptr<PendingGeometryUpdate> pending;
     CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
     {
         std::lock_guard<std::mutex> guard(mirror->lock);
         if (!mirror->closed && mirror->layer) {
             layer = mirror->layer;
             clipMask = mirror->clipMask;
+            pending = mirror->pendingGeometry;
             clipLeft = mirror->clipLeft;
             clipTop = mirror->clipTop;
             clipRight = mirror->clipRight;
@@ -1170,18 +1239,32 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
             }
         }
     }
-    if (layer) {
-        performOnAppKitMainThreadSync(^{
-            std::lock_guard<std::mutex> guard(mirror->lock);
-            if (!mirror->closed && mirror->layer == layer) {
-                [CATransaction begin];
-                [CATransaction setDisableActions:YES];
-                updateDrawableGeometry(layer, width, height, pixelWidth, pixelHeight);
-                updateLayerClipMask(layer, clipMask, clipLeft, clipTop, clipRight, clipBottom);
-                [CATransaction commit];
-                [CATransaction flush];
+    if (layer && clipMask && pending) {
+        bool shouldSchedule = false;
+        {
+            std::lock_guard<std::mutex> guard(pending->lock);
+            if (!pending->closed) {
+                pending->width = width;
+                pending->height = height;
+                pending->pixelWidth = pixelWidth;
+                pending->pixelHeight = pixelHeight;
+                pending->clipLeft = clipLeft;
+                pending->clipTop = clipTop;
+                pending->clipRight = clipRight;
+                pending->clipBottom = clipBottom;
+                ++pending->generation;
+                if (!pending->scheduled) {
+                    pending->scheduled = true;
+                    shouldSchedule = true;
+                }
             }
-        });
+        }
+        // Component resize notifications run on the AWT event-dispatch thread. Waiting for the
+        // AppKit main queue from that thread can deadlock while a detached window is being
+        // resized: AppKit is waiting for AWT to finish the resize that is itself waiting here.
+        // The latest geometry is coalesced above and applied asynchronously after the current
+        // resize transaction; no explicit transaction flush is needed during a live resize.
+        if (shouldSchedule) schedulePendingGeometryUpdate(pending, layer, clipMask);
     }
     if (schedule) renderLoop(mirror);
 }
@@ -1196,6 +1279,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
     const CGFloat normalizedBottom = std::clamp<CGFloat>(bottom, 0.0, 1.0);
     __strong CAMetalLayer *layer = nil;
     __strong CAShapeLayer *clipMask = nil;
+    std::shared_ptr<PendingGeometryUpdate> pending;
     {
         std::lock_guard<std::mutex> guard(mirror->lock);
         if (mirror->closed) return;
@@ -1205,14 +1289,27 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
         mirror->clipBottom = normalizedBottom;
         layer = mirror->layer;
         clipMask = mirror->clipMask;
+        pending = mirror->pendingGeometry;
+    }
+    bool shouldSchedule = false;
+    if (pending) {
+        std::lock_guard<std::mutex> guard(pending->lock);
+        if (!pending->closed) {
+            pending->clipLeft = normalizedLeft;
+            pending->clipTop = normalizedTop;
+            pending->clipRight = normalizedRight;
+            pending->clipBottom = normalizedBottom;
+            ++pending->generation;
+            // Before JAWT attaches the layer there is nowhere to post this update. Keep the
+            // latest clip here; nativeSetBounds will schedule it once the layer is available.
+            if (layer && clipMask && !pending->scheduled) {
+                pending->scheduled = true;
+                shouldSchedule = true;
+            }
+        }
     }
     if (!layer || !clipMask) return;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        updateLayerClipMask(layer, clipMask, normalizedLeft, normalizedTop, normalizedRight, normalizedBottom);
-        [CATransaction commit];
-    });
+    if (shouldSchedule) schedulePendingGeometryUpdate(pending, layer, clipMask);
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeReadMetrics(
@@ -1323,6 +1420,11 @@ static void shutdownMirror(Mirror *mirror) {
         mirror->decodeCompleted.notify_all();
         decoder = mirror->decoder;
         mirror->decoder = nullptr;
+    }
+    if (mirror->pendingGeometry) {
+        std::lock_guard<std::mutex> guard(mirror->pendingGeometry->lock);
+        mirror->pendingGeometry->closed = true;
+        ++mirror->pendingGeometry->generation;
     }
     if (decoder) {
         VTDecompressionSessionInvalidate(decoder);

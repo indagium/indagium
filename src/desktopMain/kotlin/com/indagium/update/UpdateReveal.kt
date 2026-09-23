@@ -31,3 +31,21 @@ fun revealInFileManager(file: File) {
         ProcessBuilder(revealInFileManagerCommand(file)).start()
     }
 }
+
+/**
+ * Opens [folder] itself in the platform file manager. This differs from
+ * [revealInFileManager], whose macOS and Windows implementations select a file in its parent.
+ */
+fun openFolderInFileManager(folder: File) {
+    ProcessBuilder(openFolderInFileManagerCommand(folder)).start()
+}
+
+/** Builds the native command that opens [folder] itself rather than selecting it. */
+fun openFolderInFileManagerCommand(folder: File, osName: String = System.getProperty("os.name").orEmpty()): List<String> {
+    val normalizedOsName = osName.lowercase()
+    return when {
+        normalizedOsName.contains("mac") -> listOf("open", folder.absolutePath)
+        normalizedOsName.contains("win") -> listOf("explorer", folder.absolutePath)
+        else -> listOf("xdg-open", folder.absolutePath)
+    }
+}
