@@ -362,6 +362,10 @@ fun App(
                 }
             }
 
+            // This belongs above FileView's active-tab key: a detached mirror owns the one native
+            // Canvas while the user moves through other tabs or hides the sidebar.
+            DetachedEmbeddedMirrorWindows(state)
+
             // ── Loading overlay ───────────────────────────────────────
             if (state.isLoading) {
                 Box(

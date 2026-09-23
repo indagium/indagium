@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -46,11 +47,15 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Window
+import androidx.compose.ui.window.rememberWindowState
 import java.awt.EventQueue
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.ProcessBuilderCaptureRunner
+import com.indagium.model.LogTab
 import com.indagium.debug.AppLogger
 import com.indagium.capture.mirror.AdbScrcpyTransport
 import com.indagium.capture.mirror.EmbeddedDeviceSession
@@ -79,6 +84,10 @@ import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+
+/** Only a live capture tab may keep its detached mirror window after navigation. */
+internal fun activeDetachedEmbeddedMirrorTabs(tabs: List<LogTab>, detachedTabIds: Set<String>): List<LogTab> =
+    tabs.filter { it.id in detachedTabIds && it.captureSessionId != null }
 
 /**
  * UI-owned adapter around either a standalone [EmbeddedMirrorRuntime] (its own embedded scrcpy
@@ -432,10 +441,11 @@ private fun MirrorFrame.toComposeBitmap(): androidx.compose.ui.graphics.ImageBit
         it.setRGB(0, 0, width, height, pixelsArgb, 0, width)
     }.toComposeImageBitmap()
 
-/** Cap for a portrait phone's mirror surface — without it, a 1080x2400 device rendered at the full
- * sidebar width would be roughly 2.2x that width tall. */
-private val MIRROR_MAX_HEIGHT = 420.dp
-private val MIRROR_DEFAULT_HEIGHT = 220.dp
+/** The initial portrait surface height keeps the capture card compact until the user drags it. */
+/** A tall portrait device can grow within the scrollable sidebar without artificial 420dp cap. */
+internal val MIRROR_SIDEBAR_MAX_HEIGHT = 900.dp
+internal val MIRROR_DEFAULT_HEIGHT = 420.dp
+private val MIRROR_MIN_HEIGHT = 120.dp
 
 private fun mirrorStateLabel(state: EmbeddedMirrorState, reconnectAttempt: Int): String = when (state) {
     EmbeddedMirrorState.DISCONNECTED -> "Disconnected"
@@ -452,6 +462,10 @@ internal fun EmbeddedMirrorPanel(
     onConnect: () -> Unit,
     onDisconnect: () -> Unit,
     modifier: Modifier = Modifier,
+    detached: Boolean = false,
+    onDetach: (() -> Unit)? = null,
+    onReturnToSidebar: (() -> Unit)? = null,
+    sidebarSurfaceHeight: androidx.compose.ui.unit.Dp? = null,
     // A setup failure (tool resolution, asset deploy, handle creation) from before any handle
     // existed — the runtime's own FAILED snapshot only exists once a handle does, so without this
     // the panel silently showed "Connect to show the device" (DISCONNECTED, no error) for a real
@@ -491,7 +505,7 @@ internal fun EmbeddedMirrorPanel(
     // pointerInput/onPreviewKeyEvent modifiers below. Keep the same mirror-control protocol by
     // translating AWT input at that boundary; all toolbar controls remain ordinary Compose UI.
     if (macSurface != null && frameWidth != null && frameHeight != null) {
-        val liveHandle = handle ?: return
+        val liveHandle = handle
         DisposableEffect(macSurface, liveHandle, frameWidth, frameHeight) {
             val canvas = macSurface.canvas
             val pointerId = 1L
@@ -563,6 +577,11 @@ internal fun EmbeddedMirrorPanel(
                     horizontalPadding = 6.dp,
                 )
             }
+            if (detached) {
+                onReturnToSidebar?.let { AppButton("Return", it, ButtonVariant.Ghost, horizontalPadding = 5.dp) }
+            } else if (onDetach != null) {
+                AppButton("Open window", onDetach, ButtonVariant.Ghost, horizontalPadding = 5.dp)
+            }
         }
         // BoxWithConstraints (not Modifier.aspectRatio directly) so a portrait phone's height is
         // computed explicitly and capped: aspectRatio() alone derives height from the full sidebar
@@ -571,11 +590,19 @@ internal fun EmbeddedMirrorPanel(
         // outer Center alignment below keeps it centered rather than stuck to one edge; the touch
         // mapper (mirrorSurfaceModifier) reads the box's real measured size via onSizeChanged, so it
         // stays correct for whatever size this computes, capped or not.
-        BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            val boxHeight = if (aspectRatio != null) {
-                (maxWidth / aspectRatio).coerceAtMost(MIRROR_MAX_HEIGHT)
+        BoxWithConstraints(
+            if (detached) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.Center,
+        ) {
+            val naturalHeight = if (aspectRatio != null) {
+                (maxWidth / aspectRatio).coerceAtMost(if (detached) maxHeight else MIRROR_SIDEBAR_MAX_HEIGHT)
             } else {
-                MIRROR_DEFAULT_HEIGHT
+                if (detached) maxHeight else MIRROR_DEFAULT_HEIGHT
+            }
+            val boxHeight = if (!detached && sidebarSurfaceHeight != null) {
+                sidebarSurfaceHeight.coerceAtMost(naturalHeight).coerceAtLeast(MIRROR_MIN_HEIGHT.coerceAtMost(naturalHeight))
+            } else {
+                naturalHeight
             }
             val boxWidth = if (aspectRatio != null) (boxHeight * aspectRatio).coerceAtMost(maxWidth) else maxWidth
             Box(
@@ -591,9 +618,12 @@ internal fun EmbeddedMirrorPanel(
                         ),
                     )
                     .onGloballyPositioned { coordinates ->
+                        val fullBounds = coordinates.boundsInWindow(clipBounds = false)
                         macSurface?.setVisibleClip(
-                            fullBounds = coordinates.boundsInWindow(clipBounds = false),
-                            clippedBounds = coordinates.boundsInWindow(clipBounds = true),
+                            fullBounds = fullBounds,
+                            // A detached AWT Canvas has no scroll viewport. Passing its full
+                            // bounds resets the native mask before the same layer is reparented.
+                            clippedBounds = if (detached) fullBounds else coordinates.boundsInWindow(clipBounds = true),
                         )
                     },
                 contentAlignment = Alignment.Center,
@@ -659,6 +689,40 @@ internal fun EmbeddedMirrorPanel(
         if (snapshot.droppedFrames > 0) {
             AppText("Dropped ${snapshot.droppedFrames} frame(s)", color = colors.td, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
         }
+    }
+}
+
+/**
+ * Detached windows live at App scope rather than inside FileView: FileView is keyed to the active
+ * tab, and disposing it during a tab switch must not dispose the sole SwingPanel hosting the
+ * running Metal Canvas. There is still exactly one [EmbeddedMirrorPanel] for a tab at a time.
+ */
+@Composable
+internal fun DetachedEmbeddedMirrorWindows(state: AppState) {
+    state.detachedEmbeddedMirrorTabs().forEach { tab ->
+        androidx.compose.runtime.key(tab.id) {
+            DetachedEmbeddedMirrorWindow(state, tab)
+        }
+    }
+}
+
+@Composable
+private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
+    Window(
+        onCloseRequest = { state.returnEmbeddedMirrorToSidebar(tab.id) },
+        title = "Device mirror — ${tab.filename.removePrefix("Capture — ")}",
+        state = rememberWindowState(size = DpSize(620.dp, 760.dp)),
+        resizable = true,
+    ) {
+        EmbeddedMirrorPanel(
+            handle = state.embeddedMirrorFor(tab.id),
+            setupError = state.embeddedMirrorSetupError(tab.id),
+            onConnect = { state.openCaptureMirror(tab.id) },
+            onDisconnect = { state.stopEmbeddedMirror(tab.id) },
+            detached = true,
+            onReturnToSidebar = { state.returnEmbeddedMirrorToSidebar(tab.id) },
+            modifier = Modifier.fillMaxSize().background(tc().p).padding(12.dp),
+        )
     }
 }
 

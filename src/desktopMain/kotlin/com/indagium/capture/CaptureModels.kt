@@ -17,6 +17,12 @@ private const val DEFAULT_FREE_SPACE_RESERVE_BYTES = BYTES_PER_GIBIBYTE
  */
 enum class CaptureBufferMode { DEFAULT, ALL, CUSTOM }
 
+/** Where a live device display is shown while capture is running. */
+enum class CaptureMirrorMode { EMBEDDED, EXTERNAL, DISABLED }
+
+/** Exactly one presentation action selected when a capture session starts. */
+enum class CaptureMirrorStartRoute { EMBEDDED, EXTERNAL, NONE }
+
 /** Capture preferences are persisted as keyed JSON, never in legacy positional settings. */
 data class CaptureSettings(
     val adbPath: String = "",
@@ -24,6 +30,11 @@ data class CaptureSettings(
     val buffers: List<String> = listOf("main", "system", "crash"),
     val includeBufferedLogs: Boolean = false,
     val recordVideo: Boolean = false,
+    /**
+     * Legacy enablement bit retained for old settings/session JSON. New callers select
+     * [mirrorMode]; [effectiveMirrorMode] keeps a legacy false value authoritative so settings
+     * written by older builds still disable every display route.
+     */
     val mirror: Boolean = true,
     val audio: Boolean = false,
     val maxSize: Int = 1080,
@@ -38,7 +49,23 @@ data class CaptureSettings(
     // class). `buffers` keeps its old shape/default untouched so persisted settings and archive
     // descriptors round-trip unchanged; this field only selects how `buffers` is interpreted.
     val bufferMode: CaptureBufferMode = CaptureBufferMode.DEFAULT,
+    val mirrorMode: CaptureMirrorMode = CaptureMirrorMode.EMBEDDED,
 )
+
+/** The active display choice after applying the pre-choice `mirror` compatibility switch. */
+val CaptureSettings.effectiveMirrorMode: CaptureMirrorMode
+    get() = if (mirror) mirrorMode else CaptureMirrorMode.DISABLED
+
+/** Keeps the legacy `mirror` bit and the current display choice in sync for UI edits. */
+fun CaptureSettings.withMirrorMode(mode: CaptureMirrorMode): CaptureSettings =
+    copy(mirror = mode != CaptureMirrorMode.DISABLED, mirrorMode = mode)
+
+/** Prevents a start path from accidentally opening both embedded and external scrcpy streams. */
+fun CaptureSettings.mirrorStartRoute(): CaptureMirrorStartRoute = when (effectiveMirrorMode) {
+    CaptureMirrorMode.EMBEDDED -> CaptureMirrorStartRoute.EMBEDDED
+    CaptureMirrorMode.EXTERNAL -> CaptureMirrorStartRoute.EXTERNAL
+    CaptureMirrorMode.DISABLED -> CaptureMirrorStartRoute.NONE
+}
 
 /** The `-b` arguments for this configuration. Empty for DEFAULT — passing no -b at all is what
  *  plain `adb logcat` does, and tracks whatever adb's own default is rather than re-encoding

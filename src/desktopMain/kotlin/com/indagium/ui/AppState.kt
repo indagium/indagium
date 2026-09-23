@@ -17,11 +17,13 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
@@ -1827,6 +1829,9 @@ class AppState(
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
 
+    /** Detached mirror windows are app-owned, so tab navigation cannot dispose a live surface. */
+    private val detachedEmbeddedMirrorTabs = mutableStateSetOf<String>()
+
     /** Set when an ensureEmbeddedMirror(tabId, autoStart = true) call arrives while another call's
      * create job for the same tab is already in flight — see ensureEmbeddedMirror's doc. */
     private val embeddedMirrorPendingAutoStartByTab = mutableMapOf<String, Boolean>()
@@ -1996,6 +2001,24 @@ class AppState(
      * (whether it succeeds or fails again). */
     internal fun embeddedMirrorSetupError(tabId: String): String? = embeddedMirrorSetupErrorByTab[tabId]
 
+    internal fun isEmbeddedMirrorDetached(tabId: String): Boolean = tabId in detachedEmbeddedMirrorTabs
+
+    internal fun detachEmbeddedMirror(tabId: String) {
+        if (captureControllerFor(tabId) != null) detachedEmbeddedMirrorTabs.add(tabId)
+    }
+
+    internal fun returnEmbeddedMirrorToSidebar(tabId: String, revealCaptureTab: Boolean = true) {
+        detachedEmbeddedMirrorTabs.remove(tabId)
+        if (revealCaptureTab && tabs.any { it.id == tabId && it.captureSessionId != null }) {
+            activateTab(tabId)
+            videoPanelVisible = true
+        }
+    }
+
+    /** Active capture tabs that currently own a separate in-app mirror window. */
+    internal fun detachedEmbeddedMirrorTabs(): List<LogTab> =
+        activeDetachedEmbeddedMirrorTabs(tabs, detachedEmbeddedMirrorTabs)
+
     /**
      * Creates/reuses the embedded runtime for a live capture. Tool resolution happens on the IO
      * lane; the log recorder is never stopped when mirror setup fails. Automatic start follows the
@@ -2111,6 +2134,20 @@ class AppState(
     /** Explicit Open/Connect action; retained for the existing toolbar/strip call sites. */
     internal fun openCaptureMirror(tabId: String) = ensureEmbeddedMirror(tabId, autoStart = true)
 
+    /** Reopens the auxiliary scrcpy process if the user closed its external window. */
+    internal fun openExternalCaptureMirror(tabId: String) {
+        val controller = captureControllerFor(tabId) ?: return
+        ioScope.launch {
+            runCatching { controller.openMirror() }
+                .onFailure { failure ->
+                    captureService.reportError(
+                        "External scrcpy mirror could not open: " +
+                            (failure.message ?: failure::class.simpleName),
+                    )
+                }
+        }
+    }
+
     /** Off the calling thread: [EmbeddedMirrorHandle.stop] can block on synchronous adb subprocess
      * cleanup (see AdbScrcpyConnection.close), and this is called directly from a Compose
      * Disconnect click handler — blocking there would freeze the UI for that cleanup's duration. */
@@ -2133,6 +2170,7 @@ class AppState(
     }
 
     private fun closeEmbeddedMirror(tabId: String) {
+        detachedEmbeddedMirrorTabs.remove(tabId)
         val handle = synchronized(stateLock) {
             embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
             embeddedMirrorsByTab.remove(tabId)?.also { embeddedMirrorVersion++ }
@@ -2423,9 +2461,23 @@ class AppState(
                     // otherwise never auto-start its mirror and never surface a setup error either.
                     // Showing the panel here doesn't touch non-capture tabs: this callback only
                     // runs for a capture that is starting.
-                    if (settings.mirror) {
-                        videoPanelVisible = true
-                        ensureEmbeddedMirror(tabId, autoStart = true)
+                    when (settings.mirrorStartRoute()) {
+                        CaptureMirrorStartRoute.EMBEDDED -> {
+                            videoPanelVisible = true
+                            ensureEmbeddedMirror(tabId, autoStart = true)
+                        }
+                        CaptureMirrorStartRoute.EXTERNAL -> {
+                            // The recorder owns this one auxiliary process and closes it with the
+                            // session. A launch failure must never tear down log/video capture.
+                            runCatching { controller.openMirror() }
+                                .onFailure { failure ->
+                                    captureService.reportError(
+                                        "External scrcpy mirror could not open: " +
+                                            (failure.message ?: failure::class.simpleName),
+                                    )
+                                }
+                        }
+                        CaptureMirrorStartRoute.NONE -> Unit
                     }
                 }
                 captureService.updateSessions()
@@ -2505,6 +2557,7 @@ class AppState(
         val sourceSessionId = tab(tabId)?.captureSessionId
         // Stop the presentation transport immediately; finalization may take time, and mirror
         // sockets must not outlive the recorder/tab that owns their device session.
+        returnEmbeddedMirrorToSidebar(tabId, revealCaptureTab = false)
         stopEmbeddedMirror(tabId)
         captureFinalizationStatusByTab[tabId] = CAPTURE_FINALIZING_STATUS
         ioScope.launch {
@@ -6383,6 +6436,7 @@ class AppState(
             synchronized(stateLock) {
                 embeddedMirrorsByTab.remove(tabId, mirror)
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                detachedEmbeddedMirrorTabs.remove(tabId)
                 embeddedMirrorVersion++
             }
         }
@@ -6407,6 +6461,7 @@ class AppState(
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
+                detachedEmbeddedMirrorTabs.remove(tabId)
                 embeddedMirrorVersion++
                 // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
                 // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex

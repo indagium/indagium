@@ -20,6 +20,50 @@ class CaptureSettingsCodecTest {
     }
 
     @Test
+    fun legacyMirrorBooleanMigratesToTheEquivalentDisplayMode() {
+        assertEquals(
+            CaptureMirrorMode.EMBEDDED,
+            assertNotNull(captureSettingsFromJson("""{"formatVersion":1,"mirror":true}""")).effectiveMirrorMode,
+        )
+        assertEquals(
+            CaptureMirrorMode.DISABLED,
+            assertNotNull(captureSettingsFromJson("""{"formatVersion":1,"mirror":false}""")).effectiveMirrorMode,
+        )
+    }
+
+    @Test
+    fun externalMirrorChoiceRoundTripsAndKeepsLegacyEnablementTrue() {
+        val decoded = assertNotNull(
+            captureSettingsFromJson(captureSettingsToJson(CaptureSettings().withMirrorMode(CaptureMirrorMode.EXTERNAL))),
+        )
+        assertEquals(CaptureMirrorMode.EXTERNAL, decoded.effectiveMirrorMode)
+        assertEquals(true, decoded.mirror)
+    }
+
+    @Test
+    fun captureStartSelectsExactlyOneMirrorRoute() {
+        assertEquals(CaptureMirrorStartRoute.EMBEDDED, CaptureSettings().mirrorStartRoute())
+        assertEquals(
+            CaptureMirrorStartRoute.EXTERNAL,
+            CaptureSettings().withMirrorMode(CaptureMirrorMode.EXTERNAL).mirrorStartRoute(),
+        )
+        assertEquals(
+            CaptureMirrorStartRoute.NONE,
+            CaptureSettings().withMirrorMode(CaptureMirrorMode.DISABLED).mirrorStartRoute(),
+        )
+        assertEquals(CaptureMirrorStartRoute.NONE, CaptureSettings(mirror = false).mirrorStartRoute())
+    }
+
+    @Test
+    fun unknownMirrorModeFallsBackToTheLegacyBooleanInsteadOfDiscardingOtherSettings() {
+        val decoded = assertNotNull(
+            captureSettingsFromJson("""{"formatVersion":1,"mirror":false,"mirrorMode":"FUTURE","maxFps":45}"""),
+        )
+        assertEquals(CaptureMirrorMode.DISABLED, decoded.effectiveMirrorMode)
+        assertEquals(45, decoded.maxFps)
+    }
+
+    @Test
     fun bufferModeRoundTrips() {
         CaptureBufferMode.entries.forEach { mode ->
             val settings = CaptureSettings(bufferMode = mode)
