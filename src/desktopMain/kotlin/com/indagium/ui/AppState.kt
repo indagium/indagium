@@ -56,6 +56,7 @@ import com.indagium.update.SponsorChecker
 import com.indagium.update.UpdateCheckResult
 import com.indagium.update.UpdateChecker
 import com.indagium.update.assetForCurrentOs
+import com.indagium.update.openFolderInFileManager
 import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
@@ -1439,6 +1440,10 @@ class AppState(
     // Reveal the completed update in the platform file manager. This callback is injectable so
     // download tests can record the requested file without opening Finder/Explorer.
     private val fileRevealer: (File) -> Unit = ::revealInFileManager,
+    // Capture-session folders are opened directly, while update files are selected in their
+    // parent folder. Keep the operations separate so the capture action does not accidentally
+    // route through the app's log-folder importer.
+    private val captureFolderOpener: (File) -> Unit = ::openFolderInFileManager,
     // Test seam for video/VideoPlayerController.kt: production wraps a real FFmpegFrameGrabber
     // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
     // so the mapping/persistence tests in this file's video section never touch real FFmpeg.
@@ -2358,6 +2363,26 @@ class AppState(
                 captureExportError = failure.message ?: "Retained capture export failed"
                 null
             }
+        }
+    }
+
+    /** Opens the retained capture's directory in Finder/Explorer/the desktop file manager. */
+    internal fun openRetainedCaptureFolder(sessionId: String) {
+        ioScope.launch {
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureService.reportError("This capture session is no longer on disk")
+                return@launch
+            }
+            if (!session.directory.isDirectory) {
+                captureService.reportError("Capture folder is no longer available: ${session.directory.absolutePath}")
+                return@launch
+            }
+            runCatching { captureFolderOpener(session.directory) }
+                .onFailure { failure ->
+                    captureService.reportError(
+                        "Could not open capture folder: ${failure.message ?: failure::class.simpleName}",
+                    )
+                }
         }
     }
 

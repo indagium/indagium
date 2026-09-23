@@ -413,10 +413,10 @@ private fun CaptureIdleStrip() {
  * more, so this reads the retained [CaptureSession] straight off disk (via [CaptureService],
  * already kept fresh by [AppState.stopCaptureTab]'s `updateSessions()` call) instead of collecting
  * a [RecorderSnapshot]. Save ZIP and Open folder deliberately reuse the exact same
- * [AppState.saveRetainedCapture] / [AppState.openFolder] calls the "Retained sessions" list in
- * [CaptureLauncher] already uses for a session with no open tab — the underlying export has never
- * needed a live recorder (CaptureArchiveExporter.export takes a CaptureSession, not a controller),
- * only the previous wiring did.
+ * [AppState.saveRetainedCapture] / [AppState.openRetainedCaptureFolder] calls the "Retained
+ * sessions" list in [CaptureLauncher] already uses for a session with no open tab — the
+ * underlying export has never needed a live recorder (CaptureArchiveExporter.export takes a
+ * CaptureSession, not a controller), only the previous wiring did.
  */
 @Composable
 private fun CaptureStoppedStrip(
@@ -466,7 +466,7 @@ private fun CaptureStoppedStrip(
                 enabled = session != null,
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                 onClick = {
-                    session?.directory?.let(state::openFolder)
+                    state.openRetainedCaptureFolder(sessionId)
                     onReturnFocus()
                 },
             )

@@ -128,7 +128,7 @@ internal fun CaptureLauncher(state: AppState, modifier: Modifier = Modifier) {
                             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                 AppButton("Open", { state.openRetainedCapture(session.id) }, ButtonVariant.Secondary)
                                 AppButton("Save ZIP", { state.saveRetainedCapture(session.id) }, ButtonVariant.Secondary)
-                                AppButton("Open folder", { state.openFolder(session.directory) }, ButtonVariant.Ghost)
+                                AppButton("Open folder", { state.openRetainedCaptureFolder(session.id) }, ButtonVariant.Ghost)
                                 AppButton("Discard", { discardId = session.id }, ButtonVariant.Ghost)
                             }
                         }

@@ -1,5 +1,6 @@
 package com.indagium
 
+import com.indagium.update.openFolderInFileManagerCommand
 import com.indagium.update.revealInFileManagerCommand
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -35,6 +36,16 @@ class UpdateRevealTest {
         assertEquals(
             listOf("xdg-open", parent.absolutePath),
             revealInFileManagerCommand(file, osName = "Linux"),
+        )
+    }
+
+    @Test
+    fun captureFolderCommandOpensTheFolderRatherThanSelectingIt() {
+        val folder = createTempDirectory("openlog-capture-folder-mac").toFile()
+
+        assertEquals(
+            listOf("open", folder.absolutePath),
+            openFolderInFileManagerCommand(folder, osName = "Mac OS X"),
         )
     }
 }
