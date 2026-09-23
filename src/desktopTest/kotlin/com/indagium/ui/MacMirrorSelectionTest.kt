@@ -59,6 +59,15 @@ class MacMirrorSelectionTest {
         assertFalse(MirrorClipFractions(0f, 0f, 0f, 0f).isVisible)
     }
 
+    @Test
+    fun nativeMirrorClipIsEmptyWhileAComposePopupCouldOverlapIt() {
+        val visible = MirrorClipFractions(0f, 0.2f, 1f, 0.8f)
+
+        assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(visible, overlayOccluded = true))
+        assertEquals(visible, effectiveMirrorClip(visible, overlayOccluded = false))
+        assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(null, overlayOccluded = false))
+    }
+
     private fun blockingRuntime(): EmbeddedMirrorRuntime = EmbeddedMirrorRuntime(
         transport = EmbeddedMirrorTransport { _, _ ->
             object : EmbeddedMirrorConnection {

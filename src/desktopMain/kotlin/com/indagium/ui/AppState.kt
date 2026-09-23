@@ -1834,6 +1834,9 @@ class AppState(
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
 
+    /** Popup visibility that must survive a native decoder/surface recreation for this tab. */
+    private val embeddedMirrorOverlayOccludedByTab = mutableMapOf<String, Boolean>()
+
     /** Detached mirror windows are app-owned, so tab navigation cannot dispose a live surface. */
     private val detachedEmbeddedMirrorTabs = mutableStateSetOf<String>()
 
@@ -2093,19 +2096,24 @@ class AppState(
                         File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
                         sharedDeviceSession,
                     )
-                    val wantsAutoStart = synchronized(stateLock) {
+                    val startRequest = synchronized(stateLock) {
                         if (captureControllersByTab[tabId] !== controller) {
                             null
                         } else {
                             embeddedMirrorsByTab[tabId] = handle
                             embeddedMirrorVersion++
-                            autoStart || embeddedMirrorPendingAutoStartByTab.remove(tabId) == true
+                            (autoStart || embeddedMirrorPendingAutoStartByTab.remove(tabId) == true) to
+                                (embeddedMirrorOverlayOccludedByTab[tabId] == true)
                         }
                     }
-                    if (wantsAutoStart == null) {
+                    if (startRequest == null) {
                         handle.close()
-                    } else if (wantsAutoStart) {
-                        startEmbeddedMirror(tabId, handle, controller)
+                    } else {
+                        val (wantsAutoStart, overlayOccluded) = startRequest
+                        handle.setOverlayOccluded(overlayOccluded)
+                        if (wantsAutoStart) {
+                            startEmbeddedMirror(tabId, handle, controller)
+                        }
                     }
                 } catch (failure: Throwable) {
                     val message = "Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}"
@@ -2160,6 +2168,20 @@ class AppState(
     internal fun stopEmbeddedMirror(tabId: String) {
         val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
         ioScope.launch { handle.stop() }
+    }
+
+    /**
+     * A Compose [Popup] cannot appear above the native JAWT/Metal layer in the same macOS
+     * window. The capture snapshot popup masks that surface for its lifetime and restores the
+     * already-computed viewport on dismissal.
+     */
+    internal fun setEmbeddedMirrorOverlayOccluded(tabId: String, occluded: Boolean) {
+        val handle = synchronized(stateLock) {
+            if (occluded) embeddedMirrorOverlayOccludedByTab[tabId] = true
+            else embeddedMirrorOverlayOccludedByTab.remove(tabId)
+            embeddedMirrorsByTab[tabId]
+        } ?: return
+        runCatching { handle.setOverlayOccluded(occluded) }
     }
 
     private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {
