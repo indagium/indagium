@@ -62,6 +62,7 @@ import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
 import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
 import com.indagium.capture.mirror.EmbeddedMirrorState
+import com.indagium.capture.mirror.DirectH264Decoder
 import com.indagium.capture.mirror.H264Decoder
 import com.indagium.capture.mirror.MacVideoToolboxMirrorDecoder
 import com.indagium.capture.mirror.JavaCvH264Decoder
@@ -161,9 +162,10 @@ internal class EmbeddedMirrorHandle private constructor(
          */
         fun create(tools: CaptureTools, root: File, sharedSession: EmbeddedDeviceSession? = null): EmbeddedMirrorHandle =
             if (sharedSession != null) {
-                // Recording video already owns the device session. Keep this path on the tested
-                // Compose decoder; only mirror-only captures are eligible for the VideoToolbox/Metal path.
-                createShared(sharedSession)
+                // Recording video already owns the device session. On macOS its packet pump can
+                // feed VideoToolbox/Metal directly too, without a second scrcpy encoder or the
+                // JavaCV -> BufferedImage -> Compose copy that made the shared path feel delayed.
+                if (shouldUseMacNativeMirror()) createSharedMacNativeOrCompose(sharedSession) else createShared(sharedSession)
             } else if (shouldUseMacNativeMirror()) {
                 createMacNativeOrCompose(tools, root)
             } else {
@@ -247,6 +249,36 @@ internal class EmbeddedMirrorHandle private constructor(
             val backend = MirrorBackend.SharedRecordingSession(session, decoder) { snapshot -> handle._snapshot.value = snapshot }
             handle = EmbeddedMirrorHandle(backend)
             return handle
+        }
+
+        private fun createSharedMacNativeOrCompose(session: EmbeddedDeviceSession): EmbeddedMirrorHandle {
+            var surface: EmbeddedMirrorMacSurface? = null
+            return try {
+                val surfaceFactory = {
+                    EmbeddedMirrorMacSurface(
+                        onDiagnostic = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
+                    )
+                }
+                surface = surfaceFactory()
+                lateinit var handle: EmbeddedMirrorHandle
+                val backend = MirrorBackend.SharedRecordingSession(
+                    session = session,
+                    decoder = JavaCvH264Decoder(),
+                    macSurface = requireNotNull(surface),
+                    directDecoderFactory = { activeSurface -> MacVideoToolboxMirrorDecoder(activeSurface) },
+                    macSurfaceFactory = surfaceFactory,
+                ) { snapshot -> handle._snapshot.value = snapshot }
+                handle = EmbeddedMirrorHandle(backend)
+                handle
+            } catch (failure: Throwable) {
+                runCatching { surface?.close() }
+                AppLogger.warn(
+                    "embedded-mirror",
+                    "VideoToolbox recording mirror unavailable; using Compose (${failure.message ?: failure::class.simpleName})",
+                    failure,
+                )
+                createShared(session)
+            }
         }
 
         /**
@@ -373,11 +405,15 @@ internal sealed interface MirrorBackend : Closeable {
     class SharedRecordingSession(
         private val session: EmbeddedDeviceSession,
         private val decoder: H264Decoder,
+        override var macSurface: EmbeddedMirrorMacSurface? = null,
+        private var directDecoderFactory: ((EmbeddedMirrorMacSurface) -> DirectH264Decoder)? = null,
+        private val macSurfaceFactory: (() -> EmbeddedMirrorMacSurface)? = null,
         private val onSnapshotChanged: (EmbeddedMirrorSnapshot) -> Unit,
     ) : MirrorBackend {
         private val lock = Any()
         private var connectionSnapshot = session.connectionSnapshot()
         private var lastFrame: MirrorFrame? = null
+        private var lastFrameInfo: com.indagium.capture.mirror.MirrorFrameInfo? = null
         private var attached = false
         private val connectionListener = session.addConnectionListener { snapshot ->
             val next = synchronized(lock) {
@@ -389,7 +425,7 @@ internal sealed interface MirrorBackend : Closeable {
 
         override fun snapshot(): EmbeddedMirrorSnapshot = synchronized(lock) { composeLocked() }
 
-        private fun composeLocked(): EmbeddedMirrorSnapshot = connectionSnapshot.copy(frame = lastFrame)
+        private fun composeLocked(): EmbeddedMirrorSnapshot = connectionSnapshot.copy(frame = lastFrame, frameInfo = lastFrameInfo)
 
         /** Ignores [serial] — the shared session's own connection state (already LIVE, well before
          * any decoder ever attaches) says nothing about whether a decoder is attached; only
@@ -401,21 +437,78 @@ internal sealed interface MirrorBackend : Closeable {
         override fun start(serial: String, options: MirrorStreamOptions) {
             if (synchronized(lock) { attached }) return
             synchronized(lock) { attached = true }
+            val direct = synchronized(lock) {
+                macSurface?.let { surface -> directDecoderFactory?.invoke(surface) }
+            }
+            if (direct != null) {
+                AppLogger.info("embedded-mirror", "mode=videotoolbox-metal status=connecting source=recording-session")
+                session.attachDirectDecoder(direct, onFrame = { frame ->
+                    val next = synchronized(lock) {
+                        lastFrame = null
+                        lastFrameInfo = frame
+                        composeLocked()
+                    }
+                    onSnapshotChanged(next)
+                }, onFailure = { failure ->
+                    switchToComposeFallback(failure)
+                })
+            } else {
+                attachComposeDecoder()
+            }
+        }
+
+        private fun attachComposeDecoder() {
             session.attachDecoder(decoder) { frame ->
                 val next = synchronized(lock) {
                     lastFrame = frame
+                    lastFrameInfo = null
                     composeLocked()
                 }
                 onSnapshotChanged(next)
             }
         }
 
+        /** Keeps the recorder's one device connection and switches only its local presentation. */
+        private fun switchToComposeFallback(failure: Throwable) {
+            val retiredSurface = synchronized(lock) {
+                if (!attached || directDecoderFactory == null) return
+                directDecoderFactory = null
+                lastFrameInfo = null
+                macSurface.also { macSurface = null }
+            }
+            // attachDecoder detaches and closes the failing direct decoder/feed first. Closing the
+            // Swing surface here is idempotent, and makes the next Compose snapshot remove it.
+            runCatching { retiredSurface?.close() }
+            AppLogger.warn(
+                "embedded-mirror",
+                "mode=videotoolbox-metal status=failed; switching shared recording mirror to Compose",
+                failure,
+            )
+            attachComposeDecoder()
+        }
+
         override fun stop() {
-            synchronized(lock) {
+            val shouldRecreateNativeSurface = synchronized(lock) {
                 attached = false
                 lastFrame = null
+                lastFrameInfo = null
+                directDecoderFactory != null && macSurface != null
             }
             session.detachDecoder()
+            // detachDecoder closes the per-attachment VideoToolbox decoder and its surface. A
+            // later Connect must get a new native handle; reusing the old one would retain the
+            // decoder's closed flag and leave the mirror permanently blank.
+            if (shouldRecreateNativeSurface) {
+                val previous = synchronized(lock) { macSurface.also { macSurface = null } }
+                runCatching { previous?.close() }
+                val replacement = runCatching { macSurfaceFactory?.invoke() }.getOrNull()
+                if (replacement == null) {
+                    synchronized(lock) { directDecoderFactory = null }
+                    AppLogger.warn("embedded-mirror", "VideoToolbox recording mirror could not be recreated; using Compose on the next connect")
+                } else {
+                    synchronized(lock) { macSurface = replacement }
+                }
+            }
         }
 
         override fun send(command: MirrorControlCommand): Boolean =
@@ -426,6 +519,8 @@ internal sealed interface MirrorBackend : Closeable {
         override fun close() {
             stop()
             connectionListener.close()
+            runCatching { macSurface?.close() }
+            macSurface = null
         }
     }
 }

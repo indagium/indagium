@@ -126,11 +126,64 @@ static void verifyViewportClipMaskCoordinates() {
     if (!CGRectEqualToRect(empty, CGRectZero)) fail("empty visible intersection did not hide all mirror pixels");
 }
 
+static void drainMainQueue() {
+    __block bool drained = false;
+    dispatch_async(dispatch_get_main_queue(), ^{ drained = true; });
+    while (!drained) {
+        [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.01]];
+    }
+}
+
+static void scheduleGeometryFromExpiredParameterScope(
+    std::weak_ptr<PendingGeometryUpdate> *weakPending,
+    CAMetalLayer *layer,
+    CAShapeLayer *mask) {
+    auto pending = std::make_shared<PendingGeometryUpdate>();
+    pending->width = 64;
+    pending->height = 48;
+    pending->pixelWidth = 128;
+    pending->pixelHeight = 96;
+    pending->generation = 1;
+    pending->scheduled = true;
+    *weakPending = pending;
+    // schedulePendingGeometryUpdate takes this shared_ptr by reference. The queued block must
+    // retain a value copy, because `pending` dies on return from this helper.
+    schedulePendingGeometryUpdate(pending, layer, mask);
+}
+
+static void verifyQueuedGeometryOwnsPendingState() {
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    std::weak_ptr<PendingGeometryUpdate> weakPending;
+    scheduleGeometryFromExpiredParameterScope(&weakPending, layer, mask);
+    if (weakPending.expired()) fail("queued geometry block did not retain its pending state");
+    drainMainQueue();
+    if (!CGSizeEqualToSize(layer.drawableSize, CGSizeMake(128, 96))) {
+        fail("queued geometry update did not apply after its parameter scope expired");
+    }
+
+    auto closedPending = std::make_shared<PendingGeometryUpdate>();
+    closedPending->width = 10;
+    closedPending->height = 10;
+    closedPending->pixelWidth = 10;
+    closedPending->pixelHeight = 10;
+    closedPending->scheduled = true;
+    schedulePendingGeometryUpdate(closedPending, layer, mask);
+    {
+        std::lock_guard<std::mutex> guard(closedPending->lock);
+        closedPending->closed = true;
+    }
+    drainMainQueue();
+    if (closedPending->scheduled) fail("closed pending geometry state stayed scheduled");
+}
+
 int main() {
     verifyMetalRenderPipeline();
     verifyLayerDetachWithoutJAWT();
     verifyJawtManagedLayerPlacement();
     verifyViewportClipMaskCoordinates();
+    verifyQueuedGeometryOwnsPendingState();
     const uint8_t annexB[] = {
         0x00, 0x00, 0x01, 0x67, 0x11,
         0x00, 0x00, 0x00, 0x01, 0x68, 0x22,

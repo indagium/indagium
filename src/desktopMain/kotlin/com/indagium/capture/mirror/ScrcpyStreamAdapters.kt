@@ -157,6 +157,7 @@ internal class BoundedScrcpyPacketFeed(
     private val maxBytes: Long = MAX_BYTES,
     private val packetLimit: Int = MAX_PACKETS,
     startPump: Boolean = true,
+    private val closeInputOnClose: Boolean = true,
 ) : Closeable {
     data class Packet(val ptsUs: Long, val config: Boolean, val keyFrame: Boolean, val data: ByteArray, val enqueuedNs: Long = System.nanoTime())
     private val lock = Object()
@@ -225,6 +226,17 @@ internal class BoundedScrcpyPacketFeed(
 
     /** Test seam for feeding controlled packets without starting the socket reader thread. */
     internal fun offerPacket(packet: Packet) = offer(packet)
+
+    /**
+     * Marks an externally-fed stream complete without closing its source input. Recording-session
+     * mirrors use this mode: their recorder owns the device socket across reconnects, while this
+     * feed only owns the bounded decoder queue.
+     */
+    internal fun finish() = synchronized(lock) {
+        eof = true
+        lock.notifyAll()
+        compose?.finish()
+    }
 
     internal fun diagnostics(): ScrcpyPacketFeedDiagnostics = synchronized(lock) {
         expire()
@@ -331,7 +343,7 @@ internal class BoundedScrcpyPacketFeed(
     override fun close() {
         synchronized(lock) { closed = true; clear(); lock.notifyAll() }
         compose?.close()
-        runCatching { rawInput.close() }
+        if (closeInputOnClose) runCatching { rawInput.close() }
         pump?.takeIf { it !== Thread.currentThread() }?.join(500)
     }
 

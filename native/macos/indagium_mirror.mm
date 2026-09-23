@@ -201,25 +201,31 @@ static void schedulePendingGeometryUpdate(
     CAMetalLayer *layer,
     CAShapeLayer *clipMask) {
     if (!pending || !layer || !clipMask) return;
+    // Blocks capture C++ reference variables as references. `pending` is a reference parameter,
+    // so using it directly from this asynchronous block leaves the block pointing at this stack
+    // slot after schedulePendingGeometryUpdate returns. Keep an owning value in the block instead:
+    // nativeClose may destroy Mirror before this runs, but PendingGeometryUpdate remains alive and
+    // its closed bit makes the queued work a harmless no-op.
+    const std::shared_ptr<PendingGeometryUpdate> retainedPending = pending;
     dispatch_async(dispatch_get_main_queue(), ^{
         CGFloat width = 0.0, height = 0.0, pixelWidth = 0.0, pixelHeight = 0.0;
         CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
         uint64_t appliedGeneration = 0;
         {
-            std::lock_guard<std::mutex> guard(pending->lock);
-            if (pending->closed) {
-                pending->scheduled = false;
+            std::lock_guard<std::mutex> guard(retainedPending->lock);
+            if (retainedPending->closed) {
+                retainedPending->scheduled = false;
                 return;
             }
-            width = pending->width;
-            height = pending->height;
-            pixelWidth = pending->pixelWidth;
-            pixelHeight = pending->pixelHeight;
-            clipLeft = pending->clipLeft;
-            clipTop = pending->clipTop;
-            clipRight = pending->clipRight;
-            clipBottom = pending->clipBottom;
-            appliedGeneration = pending->generation;
+            width = retainedPending->width;
+            height = retainedPending->height;
+            pixelWidth = retainedPending->pixelWidth;
+            pixelHeight = retainedPending->pixelHeight;
+            clipLeft = retainedPending->clipLeft;
+            clipTop = retainedPending->clipTop;
+            clipRight = retainedPending->clipRight;
+            clipBottom = retainedPending->clipBottom;
+            appliedGeneration = retainedPending->generation;
         }
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
@@ -229,18 +235,18 @@ static void schedulePendingGeometryUpdate(
 
         bool needsAnotherPass = false;
         {
-            std::lock_guard<std::mutex> guard(pending->lock);
-            if (pending->closed) {
-                pending->scheduled = false;
-            } else if (pending->generation == appliedGeneration) {
-                pending->scheduled = false;
+            std::lock_guard<std::mutex> guard(retainedPending->lock);
+            if (retainedPending->closed) {
+                retainedPending->scheduled = false;
+            } else if (retainedPending->generation == appliedGeneration) {
+                retainedPending->scheduled = false;
             } else {
                 // A resize landed after this main-queue pass sampled the state. Queue one more
                 // pass; all intervening resize events remain coalesced in the latest generation.
                 needsAnotherPass = true;
             }
         }
-        if (needsAnotherPass) schedulePendingGeometryUpdate(pending, layer, clipMask);
+        if (needsAnotherPass) schedulePendingGeometryUpdate(retainedPending, layer, clipMask);
     });
 }
 

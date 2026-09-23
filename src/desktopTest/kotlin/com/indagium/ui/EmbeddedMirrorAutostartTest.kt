@@ -151,7 +151,7 @@ class EmbeddedMirrorAutostartTest {
 
             awaitCondition(3_000) { app.embeddedMirrorFor(tabId) != null }
             val handle = requireNotNull(app.embeddedMirrorFor(tabId))
-            awaitCondition(5_000) { handle.snapshot.value.frame != null }
+            awaitCondition(5_000) { handle.snapshot.value.hasRenderableFrame() }
 
             assertEquals(
                 controller.activeEmbeddedSession(), passedSharedSession,
@@ -176,7 +176,11 @@ class EmbeddedMirrorAutostartTest {
         val root = createTempDirectory("embedded-mirror-disconnect").toFile()
         val runner = FakeCaptureRunner()
         runner.enqueue(StreamingFakeProcess())
-        val transport = EmbeddedMirrorTransport { _, _ -> fakeRecordingConnection() }
+        var transportOpenCalls = 0
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            transportOpenCalls++
+            fakeRecordingConnection()
+        }
         val controller = TabCaptureController(root, runner = runner, embeddedTransportFactory = { transport })
         val app = AppState(autosaveFile = Files.createTempFile("embedded-mirror-disconnect-autosave", "").toFile(), autoExportNotes = false)
         try {
@@ -190,7 +194,9 @@ class EmbeddedMirrorAutostartTest {
             awaitCondition(3_000) { controller.activeEmbeddedSession()?.hasStartedVideo() == true }
 
             app.ensureEmbeddedMirror(tabId, autoStart = true)
-            awaitCondition(3_000) { app.embeddedMirrorFor(tabId)?.snapshot?.value?.frame != null }
+            awaitCondition(3_000) { app.embeddedMirrorFor(tabId)?.snapshot?.value?.hasRenderableFrame() == true }
+            val handle = requireNotNull(app.embeddedMirrorFor(tabId))
+            val firstNativeSurface = handle.macSurface
 
             awaitCondition(3_000) { session.videoFile.length() > 0L }
             val sizeWhileMirrorLive = session.videoFile.length()
@@ -202,6 +208,17 @@ class EmbeddedMirrorAutostartTest {
                 controller.snapshot.value.videoRecording,
                 "recording must still be active after the mirror disconnects",
             )
+
+            // On macOS a disconnected VideoToolbox decoder is closed with its native surface.
+            // Reconnect must create a fresh surface/decoder rather than silently reusing the
+            // closed instance; a Compose fallback (macSurface == null) is already covered by the
+            // renderable-frame assertion above and below.
+            if (firstNativeSurface != null) {
+                awaitCondition(3_000) { handle.macSurface != null && handle.macSurface !== firstNativeSurface }
+                app.openCaptureMirror(tabId)
+                awaitCondition(5_000) { handle.snapshot.value.hasRenderableFrame() }
+                assertEquals(1, transportOpenCalls, "reconnecting the view must keep the recording's one device session")
+            }
         } finally {
             app.close()
             controller.close()
@@ -264,7 +281,7 @@ class EmbeddedMirrorAutostartTest {
 
             awaitCondition(5_000) { app.embeddedMirrorFor(tabId) != null }
             val handle = requireNotNull(app.embeddedMirrorFor(tabId))
-            awaitCondition(5_000) { handle.snapshot.value.frame != null }
+            awaitCondition(5_000) { handle.snapshot.value.hasRenderableFrame() }
 
             assertEquals(
                 controller.activeEmbeddedSession(), capturedSharedSession,
@@ -294,6 +311,8 @@ class EmbeddedMirrorAutostartTest {
             Thread.sleep(POLL_INTERVAL_MS)
         }
     }
+
+    private fun EmbeddedMirrorSnapshot.hasRenderableFrame(): Boolean = frame != null || frameInfo != null
 
     /** A fake embedded connection whose video socket keeps emitting real, tiny H.264 packets
      * (config once, then key/delta forever, lightly paced) until closed — enough for
