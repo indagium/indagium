@@ -126,6 +126,41 @@ class EmbeddedDeviceSessionTest {
     }
 
     @org.junit.Test(timeout = 20_000)
+    fun directMirrorDecoderReceivesRecorderPacketMetadataWithoutBlockingMkvWrites() {
+        val packets = (1..12).map { index ->
+            Packet(index * 33_000L, index == 1, if (index == 1) H264_FIXTURE.key else H264_FIXTURE.delta)
+        }
+        val transport = EmbeddedMirrorTransport { _, _ -> fakeConnection(videoStream(64, 64, H264_FIXTURE.config, packets)) }
+        val writtenPts = CopyOnWriteArrayList<Long>()
+        val received = CopyOnWriteArrayList<BoundedScrcpyPacketFeed.Packet>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            onVideoPacketWrittenHook = { pts, _ -> writtenPts += pts },
+        )
+        val directDecoder = DirectH264Decoder { feed, onFrame ->
+            while (true) {
+                val packet = feed.nextPacket() ?: return@DirectH264Decoder
+                received += packet
+                if (!packet.config) onFrame(MirrorFrameInfo(64, 64, packet.ptsUs))
+            }
+        }
+        try {
+            session.attachDirectDecoder(directDecoder, onFrame = { })
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue(timeoutMs = 5_000) { writtenPts.size >= packets.size }
+            awaitTrue(timeoutMs = 5_000) { received.any { !it.config && it.keyFrame } }
+
+            val keyPacket = requireNotNull(received.firstOrNull { !it.config && it.keyFrame })
+            assertEquals(packets.first().ptsUs, keyPacket.ptsUs, "direct decoder must receive source PTS unchanged")
+            assertTrue(received.any { it.config }, "direct decoder must receive SPS/PPS configuration")
+        } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
     fun audioDisabledHeaderIsDiagnosedAsVideoOnlyNotAFailure() {
         val video = videoStream(64, 64, H264_FIXTURE.config, listOf(Packet(0, true, H264_FIXTURE.key)))
         val audio = ByteArrayOutputStream().also { out -> DataOutputStream(out).writeInt(ScrcpyCodecIds.STREAM_DISABLED) }.toByteArray()

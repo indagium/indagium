@@ -5,6 +5,7 @@ package com.indagium.capture.mirror
 import com.indagium.capture.StreamingMkvWriter
 import java.io.Closeable
 import java.io.IOException
+import java.io.InputStream
 import java.time.Duration
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
@@ -88,9 +89,14 @@ internal class EmbeddedDeviceSession(
     private var audioResolved = false
     private var pendingAudioExtradata: ByteArray? = null
 
-    // Attached mirror decoder — independent of the recording/reconnect lifecycle above.
+    // Attached mirror decoder — independent of the recording/reconnect lifecycle above. Exactly
+    // one feed is live at a time. The packet-preserving branch keeps the recording's source PTS
+    // and access-unit boundaries for VideoToolbox/Metal, while the Annex-B branch remains the
+    // portable JavaCV/Compose fallback.
     private var decoderFeed: BoundedAnnexBFeed? = null
+    private var directDecoderFeed: BoundedScrcpyPacketFeed? = null
     private var decoderThread: Thread? = null
+    private var attachedDecoder: Closeable? = null
 
     fun start(deviceSerial: String, options: MirrorStreamOptions) {
         // Published before the worker thread is even created (not inside the same synchronized
@@ -179,6 +185,7 @@ internal class EmbeddedDeviceSession(
         val feed = BoundedAnnexBFeed()
         val replayConfig = synchronized(lock) {
             decoderFeed = feed
+            attachedDecoder = decoder
             lastConfigBytes
         }
         replayConfig?.let { feed.offer(it, config = true, keyFrame = false) }
@@ -193,17 +200,65 @@ internal class EmbeddedDeviceSession(
         }
     }
 
+    /**
+     * Attaches a direct native decoder to this recorder's existing packet pump. This keeps the
+     * recorder as the sole owner of the adb/scrcpy connection while avoiding JavaCV's pixel copy
+     * and Compose image conversion for the live mirror. The feed is bounded and drops stale
+     * packets until a key frame, so native presentation can never delay MKV writes.
+     */
+    fun attachDirectDecoder(
+        decoder: DirectH264Decoder,
+        onFrame: (MirrorFrameInfo) -> Unit,
+        onFailure: (Throwable) -> Unit = {},
+    ) {
+        detachDecoder()
+        val feed = BoundedScrcpyPacketFeed(
+            rawInput = InputStream.nullInputStream(),
+            startPump = false,
+            closeInputOnClose = false,
+        )
+        val replayConfig = synchronized(lock) {
+            directDecoderFeed = feed
+            attachedDecoder = decoder
+            lastConfigBytes
+        }
+        replayConfig?.let { bytes ->
+            feed.offerPacket(BoundedScrcpyPacketFeed.Packet(ptsUs = 0L, config = true, keyFrame = false, data = bytes))
+        }
+        decoderThread = thread(name = "embedded-recording-mirror-direct-decode", isDaemon = true) {
+            try {
+                decoder.decode(feed, onFrame)
+            } catch (failure: Throwable) {
+                // Closing the feed is the normal detach signal. Do not turn it into a fallback
+                // request after a user disconnects or capture shutdown has already removed it.
+                val stillAttached = synchronized(lock) { directDecoderFeed === feed }
+                if (stillAttached) {
+                    onDiagnostic("Attached native mirror decoder failed: ${failure.message ?: failure::class.simpleName}")
+                    onFailure(failure)
+                }
+            }
+        }
+    }
+
     fun detachDecoder() {
         val feed: BoundedAnnexBFeed?
+        val directFeed: BoundedScrcpyPacketFeed?
         val decodeThread: Thread?
+        val decoder: Closeable?
         synchronized(lock) {
             feed = decoderFeed
             decoderFeed = null
+            directFeed = directDecoderFeed
+            directDecoderFeed = null
             decodeThread = decoderThread
             decoderThread = null
+            decoder = attachedDecoder
+            attachedDecoder = null
         }
         runCatching { feed?.close() }
+        runCatching { directFeed?.close() }
         if (decodeThread !== Thread.currentThread()) runCatching { decodeThread?.join(STOP_JOIN_MS) }
+        runCatching { decoder?.close() }
     }
 
     override fun close() {
@@ -513,8 +568,16 @@ internal class EmbeddedDeviceSession(
     }
 
     private fun feedDecoder(event: ScrcpyStreamEvent.Packet) {
-        val feed = synchronized(lock) { decoderFeed } ?: return
-        feed.offer(event.data, config = event.config, keyFrame = event.keyFrame)
+        val (feed, directFeed) = synchronized(lock) { decoderFeed to directDecoderFeed }
+        feed?.offer(event.data, config = event.config, keyFrame = event.keyFrame)
+        directFeed?.offerPacket(
+            BoundedScrcpyPacketFeed.Packet(
+                ptsUs = event.ptsUs,
+                config = event.config,
+                keyFrame = event.keyFrame,
+                data = event.data,
+            ),
+        )
     }
 
     private fun sleepBeforeReconnect(runId: Long): Boolean = try {
