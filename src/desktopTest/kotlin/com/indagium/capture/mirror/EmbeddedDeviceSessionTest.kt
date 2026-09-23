@@ -17,8 +17,10 @@ import java.time.Duration
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -156,6 +158,49 @@ class EmbeddedDeviceSessionTest {
             assertEquals(packets.first().ptsUs, keyPacket.ptsUs, "direct decoder must receive source PTS unchanged")
             assertTrue(received.any { it.config }, "direct decoder must receive SPS/PPS configuration")
         } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 15_000)
+    fun anOldWorkerReleasedAfterRestartCannotCloseOrClearTheNewConnection() {
+        val first = NonClosingBlockingConnection()
+        val second = NonClosingBlockingConnection()
+        val opens = AtomicLong(0)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            when (opens.getAndIncrement()) {
+                0L -> first
+                1L -> second
+                else -> error("unexpected reconnect")
+            }
+        }
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+        )
+        try {
+            session.start("serial", MirrorStreamOptions())
+            assertTrue(first.readStarted.await(2, TimeUnit.SECONDS), "first worker did not enter its blocking read")
+
+            // close() intentionally does not release the first stream, so stop's bounded join
+            // returns while that old worker is still alive. Starting again then publishes a new
+            // currentConnection before the old worker is allowed to reach its finally block.
+            session.stop()
+            session.start("serial", MirrorStreamOptions())
+            assertTrue(second.readStarted.await(2, TimeUnit.SECONDS), "second worker did not enter its blocking read")
+
+            first.release.countDown()
+            assertFalse(
+                second.closed.await(1, TimeUnit.SECONDS),
+                "the old worker must not close the new run's connection from its finally block",
+            )
+            assertTrue(session.sendControl(byteArrayOf(1)), "the new connection must remain current after old-worker cleanup")
+            assertEquals(1L, second.controlCalls.get())
+            assertEquals(EmbeddedMirrorState.LIVE, session.connectionSnapshot().state)
+        } finally {
+            first.release.countDown()
+            second.release.countDown()
             session.close()
         }
     }
@@ -325,6 +370,36 @@ class EmbeddedDeviceSessionTest {
             payload.copyInto(buffer, off, offset, offset + count)
             offset += count
             return count
+        }
+    }
+
+    /** A transport that remains read-blocked after close(), simulating an uncooperative old adb socket. */
+    private class NonClosingBlockingConnection : EmbeddedMirrorConnection {
+        val release = CountDownLatch(1)
+        val readStarted = CountDownLatch(1)
+        val closed = CountDownLatch(1)
+        val controlCalls = AtomicLong(0)
+        override val videoInput: InputStream = object : InputStream() {
+            override fun read(): Int {
+                readStarted.countDown()
+                release.await()
+                return -1
+            }
+
+            override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+                readStarted.countDown()
+                release.await()
+                return -1
+            }
+        }
+        override val audioInput: InputStream? = null
+
+        override fun sendControl(bytes: ByteArray) {
+            controlCalls.incrementAndGet()
+        }
+
+        override fun close() {
+            closed.countDown()
         }
     }
 

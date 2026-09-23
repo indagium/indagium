@@ -53,13 +53,15 @@ internal class EmbeddedDeviceSession(
     // than at construction time (CaptureRecorder builds this session before any mirror UI exists to
     // listen), so the panel's Connect/Disconnect state reflects the recording session's own
     // reconnects even though nothing may be listening at all for most of a capture's lifetime.
-    private val connectionListeners = CopyOnWriteArrayList<(EmbeddedMirrorSnapshot) -> Unit>()
+    private val connectionListeners = CopyOnWriteArrayList<(EmbeddedMirrorSnapshot, Long) -> Unit>()
+    private var connectionSnapshotVersion = 0L
 
     /** Registers [listener] for every future connection-state change and immediately replays the
      * current one. The returned [Closeable] unregisters it. */
-    fun addConnectionListener(listener: (EmbeddedMirrorSnapshot) -> Unit): Closeable {
+    fun addConnectionListener(listener: (EmbeddedMirrorSnapshot, Long) -> Unit): Closeable {
         connectionListeners.add(listener)
-        runCatching { listener(connectionSnapshot()) }
+        val (snapshot, version) = synchronized(lock) { connectionSnapshotValue to connectionSnapshotVersion }
+        runCatching { listener(snapshot, version) }
         return Closeable { connectionListeners.remove(listener) }
     }
 
@@ -158,8 +160,26 @@ internal class EmbeddedDeviceSession(
      * lock-order deadlock this function's callers were once written to avoid only by accident.
      */
     private fun publishConnectionSnapshot(snapshot: EmbeddedMirrorSnapshot) {
-        synchronized(lock) { connectionSnapshotValue = snapshot }
-        connectionListeners.forEach { listener -> runCatching { listener(snapshot) } }
+        updateConnectionSnapshot(snapshot, runId = null)
+    }
+
+    /**
+     * Updates the visible connection state only while the worker that produced it is still this
+     * session's current run. The lock is released before listeners run, so they also receive a
+     * monotonic version and can reject a stale callback delivered after Stop's DISCONNECTED state.
+     */
+    private fun publishConnectionSnapshotIfCurrent(runId: Long, snapshot: EmbeddedMirrorSnapshot): Boolean =
+        updateConnectionSnapshot(snapshot, runId)
+
+    private fun updateConnectionSnapshot(snapshot: EmbeddedMirrorSnapshot, runId: Long?): Boolean {
+        val (listeners, version) = synchronized(lock) {
+            if (runId != null && (stopping || generation.get() != runId)) return false
+            connectionSnapshotValue = snapshot
+            connectionSnapshotVersion++
+            connectionListeners.toList() to connectionSnapshotVersion
+        }
+        listeners.forEach { listener -> runCatching { listener(snapshot, version) } }
+        return true
     }
 
     fun sendControl(bytes: ByteArray): Boolean {
@@ -189,7 +209,7 @@ internal class EmbeddedDeviceSession(
             lastConfigBytes
         }
         replayConfig?.let { feed.offer(it, config = true, keyFrame = false) }
-        decoderThread = thread(name = "embedded-recording-mirror-decode", isDaemon = true) {
+        val decodeThread = thread(name = "embedded-recording-mirror-decode", isDaemon = true, start = false) {
             try {
                 decoder.decode(feed.input) { frame -> onFrame(frame) }
             } catch (_: IOException) {
@@ -197,6 +217,19 @@ internal class EmbeddedDeviceSession(
             } catch (failure: Throwable) {
                 onDiagnostic("Attached mirror decoder failed: ${failure.message ?: failure::class.simpleName}")
             }
+        }
+        val startDecoder = synchronized(lock) {
+            if (decoderFeed === feed && attachedDecoder === decoder) {
+                decoderThread = decodeThread
+                decodeThread.start()
+                true
+            } else {
+                false
+            }
+        }
+        if (!startDecoder) {
+            runCatching { feed.close() }
+            runCatching { decoder.close() }
         }
     }
 
@@ -225,7 +258,7 @@ internal class EmbeddedDeviceSession(
         replayConfig?.let { bytes ->
             feed.offerPacket(BoundedScrcpyPacketFeed.Packet(ptsUs = 0L, config = true, keyFrame = false, data = bytes))
         }
-        decoderThread = thread(name = "embedded-recording-mirror-direct-decode", isDaemon = true) {
+        val decodeThread = thread(name = "embedded-recording-mirror-direct-decode", isDaemon = true, start = false) {
             try {
                 decoder.decode(feed, onFrame)
             } catch (failure: Throwable) {
@@ -237,6 +270,19 @@ internal class EmbeddedDeviceSession(
                     onFailure(failure)
                 }
             }
+        }
+        val startDecoder = synchronized(lock) {
+            if (directDecoderFeed === feed && attachedDecoder === decoder) {
+                decoderThread = decodeThread
+                decodeThread.start()
+                true
+            } else {
+                false
+            }
+        }
+        if (!startDecoder) {
+            runCatching { feed.close() }
+            runCatching { decoder.close() }
         }
     }
 
@@ -274,14 +320,33 @@ internal class EmbeddedDeviceSession(
                 if (!sleepBeforeReconnect(runId)) return
             }
             val gapStartElapsedMs = elapsedMillis()
+            var connection: EmbeddedMirrorConnection? = null
             try {
-                val connection = transport.open(serial, options)
+                val openedConnection = transport.open(serial, options)
                 if (!isCurrent(runId)) {
-                    runCatching { connection.close() }
+                    runCatching { openedConnection.close() }
                     return
                 }
-                synchronized(lock) { currentConnection = connection }
-                publishConnectionSnapshot(EmbeddedMirrorSnapshot(EmbeddedMirrorState.LIVE, deviceSerial = serial, reconnectAttempt = attempt))
+                val accepted = synchronized(lock) {
+                    if (!stopping && generation.get() == runId) {
+                        currentConnection = openedConnection
+                        true
+                    } else {
+                        false
+                    }
+                }
+                if (!accepted) {
+                    runCatching { openedConnection.close() }
+                    return
+                }
+                connection = openedConnection
+                if (!publishConnectionSnapshotIfCurrent(
+                        runId,
+                        EmbeddedMirrorSnapshot(EmbeddedMirrorState.LIVE, deviceSerial = serial, reconnectAttempt = attempt),
+                    )
+                ) {
+                    return
+                }
                 // Only a reconnect *after* the muxer already has real video is a genuine
                 // interruption worth offsetting/reporting: if the very first connection attempt(s)
                 // failed before ever reaching a keyframe, nothing was recorded yet, so there is no
@@ -312,7 +377,7 @@ internal class EmbeddedDeviceSession(
                 // joining it here would just wait out that same close on every reconnect.
                 if (options.audio) {
                     thread(name = "embedded-recording-audio-$serial", isDaemon = true) {
-                        runCatching { pumpAudioIfRequested(runId, connection, options) }
+                        runCatching { pumpAudioIfRequested(runId, openedConnection, options) }
                             .onFailure { failure ->
                                 if (isCurrent(runId)) {
                                     onDiagnostic("Embedded recording: audio pump failed (${failure.message}); continuing video-only.")
@@ -320,7 +385,7 @@ internal class EmbeddedDeviceSession(
                             }
                     }
                 }
-                pumpVideo(runId, connection, options.audio)
+                pumpVideo(runId, openedConnection, options.audio)
                 if (!isCurrent(runId)) return
                 // A clean EOF without stop() is a real drop — fall through and reconnect.
                 attempt++
@@ -329,16 +394,24 @@ internal class EmbeddedDeviceSession(
                 attempt++
                 val diagnostic = "Embedded recording transport failed: ${failure.message ?: failure::class.simpleName}"
                 onDiagnostic(diagnostic)
-                publishConnectionSnapshot(
+                publishConnectionSnapshotIfCurrent(
+                    runId,
                     EmbeddedMirrorSnapshot(EmbeddedMirrorState.RECONNECTING, deviceSerial = serial, reconnectAttempt = attempt, error = diagnostic),
                 )
             } finally {
-                synchronized(lock) { currentConnection?.let { runCatching { it.close() } }; currentConnection = null }
+                // A stop can time out waiting for a blocked old worker, then start a new run on
+                // this same session. That old worker must never clear or close the new run's
+                // connection when it eventually reaches finally.
+                val connectionToClose = synchronized(lock) {
+                    connection?.takeIf { currentConnection === it }?.also { currentConnection = null }
+                }
+                runCatching { connectionToClose?.close() }
             }
             if (attempt > maxReconnectAttempts) {
                 val diagnostic = "Embedded recording: giving up after $maxReconnectAttempts reconnect attempt(s); log capture continues."
                 onDiagnostic(diagnostic)
-                publishConnectionSnapshot(
+                publishConnectionSnapshotIfCurrent(
+                    runId,
                     EmbeddedMirrorSnapshot(EmbeddedMirrorState.FAILED, deviceSerial = serial, reconnectAttempt = attempt, error = diagnostic),
                 )
                 return

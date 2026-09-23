@@ -40,6 +40,10 @@ internal fun mirrorClipFractions(full: Rect, clipped: Rect): MirrorClipFractions
     }
 }
 
+/** The native layer must expose no pixels while a same-window Compose popup is present. */
+internal fun effectiveMirrorClip(visibleClip: MirrorClipFractions?, overlayOccluded: Boolean): MirrorClipFractions =
+    if (overlayOccluded || visibleClip == null) MirrorClipFractions(0f, 0f, 0f, 0f) else visibleClip
+
 /**
  * Heavyweight Canvas hosted by Compose SwingPanel. The native bridge attaches a CAMetalLayer to
  * this Canvas through macOS JAWT surface layers and presents on its own Metal queue. AWT only
@@ -55,6 +59,12 @@ internal class EmbeddedMirrorMacSurface(
     private var attachedWindow: java.awt.Window? = null
     private var lastVisibleClip: MirrorClipFractions? = null
     private var lastVisibleClipSize: Pair<Float, Float>? = null
+    /**
+     * Compose popups live above their anchor in Compose's scene, whereas the JAWT Metal layer is
+     * an AppKit sibling deliberately placed above that scene. Keep the native surface masked while
+     * such a popup is open so its controls are never painted through by the device image.
+     */
+    private var overlayOccluded = false
     private val resizeListener = object : ComponentAdapter() {
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
         override fun componentResized(event: ComponentEvent) = resize()
@@ -91,6 +101,18 @@ internal class EmbeddedMirrorMacSurface(
         if (clip == lastVisibleClip && size == lastVisibleClipSize) return
         lastVisibleClip = clip
         lastVisibleClipSize = size
+        applyVisibleClip()
+    }
+
+    /** Hides native pixels behind a Compose popup, then restores the current viewport mask. */
+    fun setOverlayOccluded(occluded: Boolean) {
+        if (closed || overlayOccluded == occluded) return
+        overlayOccluded = occluded
+        applyVisibleClip()
+    }
+
+    private fun applyVisibleClip() {
+        val clip = effectiveMirrorClip(lastVisibleClip, overlayOccluded)
         native.setClip(clip.left, clip.top, clip.right, clip.bottom)
     }
 
