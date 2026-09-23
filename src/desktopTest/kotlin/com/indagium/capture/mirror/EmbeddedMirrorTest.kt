@@ -8,7 +8,10 @@ import com.indagium.capture.CaptureTools
 import com.indagium.capture.RunningCaptureProcess
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.io.InputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.net.ConnectException
 import java.net.Socket
 import java.time.Duration
@@ -16,6 +19,7 @@ import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 import kotlin.test.Test
@@ -245,6 +249,141 @@ class EmbeddedMirrorTest {
             assertEquals(2, opens)
             assertTrue(states.contains(EmbeddedMirrorState.RECONNECTING))
         } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun stoppingBlockedNativePacketWaitDoesNotTriggerComposeFallback() {
+        val packetWaitStarted = CountDownLatch(1)
+        val fallbackCalls = AtomicInteger()
+        val nativeFailureCalls = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            val input = PipedInputStream(4 * 1024)
+            val output = PipedOutputStream(input)
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = input
+                override val audioInput: InputStream? = null
+                override fun sendControl(bytes: ByteArray) = Unit
+                override fun close() {
+                    runCatching { input.close() }
+                    runCatching { output.close() }
+                }
+            }
+        }
+        val directDecoder = DirectH264Decoder { feed, _ ->
+            packetWaitStarted.countDown()
+            feed.nextPacket()
+        }
+        val fallbackDecoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                fallbackCalls.incrementAndGet()
+                input.readBytes()
+            }
+        }
+        val runtime = EmbeddedMirrorRuntime(
+            transport = transport,
+            directDecoder = directDecoder,
+            onDirectFrame = {},
+            onDirectDecoderFailure = { nativeFailureCalls.incrementAndGet() },
+            directFallbackDecoder = fallbackDecoder,
+            maxReconnectAttempts = 0,
+        )
+        try {
+            runtime.start("serial")
+            assertTrue(packetWaitStarted.await(2, TimeUnit.SECONDS), "direct decoder did not wait for a video packet")
+            runtime.stop()
+            assertEquals(EmbeddedMirrorState.DISCONNECTED, runtime.snapshot().state)
+            assertEquals(0, fallbackCalls.get(), "stop cancellation must not start Compose fallback")
+            assertEquals(0, nativeFailureCalls.get(), "stop cancellation must not be reported as a native failure")
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun nativeFailureKeepsComposeFallbackAcrossTransportReconnects() {
+        val opens = AtomicInteger()
+        val nativeCalls = AtomicInteger()
+        val composeCalls = AtomicInteger()
+        val nativeFailures = AtomicInteger()
+        val decodedFrames = AtomicInteger()
+        val nativeFailed = CountDownLatch(1)
+        val composeStartedTwice = CountDownLatch(2)
+        val releaseKeyFrames = List(2) { CountDownLatch(1) }
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            val index = opens.getAndIncrement()
+            check(index in releaseKeyFrames.indices)
+            val input = PipedInputStream(4 * 1024)
+            val output = PipedOutputStream(input)
+            thread(isDaemon = true, name = "mirror-reconnect-test-writer-$index") {
+                runCatching {
+                    DataOutputStream(output).use { writer ->
+                        writer.writeInt(ScrcpyCodecIds.H264)
+                        writer.writeLong(1L shl 62)
+                        writer.writeInt(6)
+                        writer.write(byteArrayOf(0, 0, 0, 1, 0x67, 1))
+                        writer.flush()
+                        releaseKeyFrames[index].await(2, TimeUnit.SECONDS)
+                        writer.writeLong(1L shl 61)
+                        writer.writeInt(6)
+                        writer.write(byteArrayOf(0, 0, 0, 1, 0x65, 2))
+                    }
+                }
+            }
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = input
+                override val audioInput: InputStream? = null
+                override fun sendControl(bytes: ByteArray) = Unit
+                override fun close() {
+                    runCatching { input.close() }
+                    runCatching { output.close() }
+                }
+            }
+        }
+        val directDecoder = DirectH264Decoder { feed, _ ->
+            nativeCalls.incrementAndGet()
+            assertTrue(feed.nextPacket()?.config == true, "native path starts with SPS/PPS")
+            throw IllegalStateException("simulated native renderer failure")
+        }
+        val composeDecoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                composeCalls.incrementAndGet()
+                composeStartedTwice.countDown()
+                val bytes = input.readBytes()
+                if (bytes.any { it == 0x65.toByte() }) {
+                    decodedFrames.incrementAndGet()
+                    onFrame(frame(9))
+                }
+            }
+        }
+        val runtime = EmbeddedMirrorRuntime(
+            transport = transport,
+            directDecoder = directDecoder,
+            onDirectFrame = {},
+            onDirectDecoderFailure = {
+                nativeFailures.incrementAndGet()
+                nativeFailed.countDown()
+            },
+            directFallbackDecoder = composeDecoder,
+            maxReconnectAttempts = 1,
+            reconnectDelay = Duration.ZERO,
+        )
+        try {
+            runtime.start("serial")
+            assertTrue(nativeFailed.await(2, TimeUnit.SECONDS), "native failure triggers same-connection fallback")
+            releaseKeyFrames[0].countDown()
+            assertTrue(composeStartedTwice.await(2, TimeUnit.SECONDS), "reconnect also enters Compose directly")
+            releaseKeyFrames[1].countDown()
+            await { runtime.snapshot().state == EmbeddedMirrorState.FAILED }
+
+            assertEquals(2, opens.get(), "the stream reconnects once")
+            assertEquals(1, nativeCalls.get(), "the hidden native surface is not retried after fallback")
+            assertEquals(2, composeCalls.get(), "both the original socket and reconnect use Compose")
+            assertEquals(1, nativeFailures.get(), "native fallback is reported once")
+            assertEquals(2, decodedFrames.get(), "both same-socket GOPs reach the fallback decoder")
+        } finally {
+            releaseKeyFrames.forEach(CountDownLatch::countDown)
             runtime.close()
         }
     }

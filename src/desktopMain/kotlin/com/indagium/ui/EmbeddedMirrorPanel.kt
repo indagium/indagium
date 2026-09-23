@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,6 +29,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
@@ -38,20 +40,25 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.awt.EventQueue
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.ProcessBuilderCaptureRunner
+import com.indagium.debug.AppLogger
 import com.indagium.capture.mirror.AdbScrcpyTransport
 import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
 import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
 import com.indagium.capture.mirror.EmbeddedMirrorState
 import com.indagium.capture.mirror.H264Decoder
+import com.indagium.capture.mirror.MacVideoToolboxMirrorDecoder
 import com.indagium.capture.mirror.JavaCvH264Decoder
 import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorCoordinateMapper
@@ -64,9 +71,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
+import java.awt.event.KeyAdapter
+import java.awt.event.KeyEvent as AwtKeyEvent
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * UI-owned adapter around either a standalone [EmbeddedMirrorRuntime] (its own embedded scrcpy
@@ -81,6 +93,9 @@ internal class EmbeddedMirrorHandle private constructor(
 ) : Closeable {
     private val _snapshot = MutableStateFlow(backend.snapshot())
     val snapshot: StateFlow<EmbeddedMirrorSnapshot> = _snapshot
+
+    /** Non-null only for the macOS mirror-only VideoToolbox/Metal path. */
+    internal val macSurface: EmbeddedMirrorMacSurface? get() = backend.macSurface
 
     fun start(serial: String, options: MirrorStreamOptions) {
         // Idempotency is backend-specific: a standalone runtime's own connection state (device
@@ -137,20 +152,86 @@ internal class EmbeddedMirrorHandle private constructor(
          */
         fun create(tools: CaptureTools, root: File, sharedSession: EmbeddedDeviceSession? = null): EmbeddedMirrorHandle =
             if (sharedSession != null) {
+                // Recording video already owns the device session. Keep this path on the tested
+                // Compose decoder; only mirror-only captures are eligible for the VideoToolbox/Metal path.
                 createShared(sharedSession)
+            } else if (shouldUseMacNativeMirror()) {
+                createMacNativeOrCompose(tools, root)
             } else {
-                createAroundRuntime { listener ->
-                    EmbeddedMirrorRuntime(
-                        transport = AdbScrcpyTransport(
-                            tools = tools,
-                            runner = ProcessBuilderCaptureRunner(),
-                            localRoot = root,
-                        ),
-                        decoder = JavaCvH264Decoder(),
-                        listener = listener,
-                    )
-                }
+                createComposeStandalone(tools, root)
             }
+
+        private fun createComposeStandalone(tools: CaptureTools, root: File): EmbeddedMirrorHandle =
+            createAroundRuntime { listener -> createComposeRuntime(tools, root, listener) }
+
+        private fun createComposeRuntime(
+            tools: CaptureTools,
+            root: File,
+            listener: (EmbeddedMirrorSnapshot) -> Unit,
+        ): EmbeddedMirrorRuntime = EmbeddedMirrorRuntime(
+            transport = AdbScrcpyTransport(
+                tools = tools,
+                runner = ProcessBuilderCaptureRunner(),
+                localRoot = root,
+            ),
+            decoder = JavaCvH264Decoder(),
+            listener = listener,
+        )
+
+        private fun createMacNativeOrCompose(tools: CaptureTools, root: File): EmbeddedMirrorHandle {
+            var surface: EmbeddedMirrorMacSurface? = null
+            return try {
+                lateinit var backend: MirrorBackend.StandaloneRuntime
+                surface = EmbeddedMirrorMacSurface(
+                    onDiagnostic = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
+                )
+                val metalSurface = requireNotNull(surface)
+                lateinit var handle: EmbeddedMirrorHandle
+                val nativeFrameReported = AtomicBoolean(false)
+                val runtime = EmbeddedMirrorRuntime(
+                    transport = AdbScrcpyTransport(
+                        tools = tools,
+                        runner = ProcessBuilderCaptureRunner(),
+                        localRoot = root,
+                    ),
+                    directDecoder = MacVideoToolboxMirrorDecoder(metalSurface),
+                    onDirectFrame = { },
+                    directFallbackDecoder = JavaCvH264Decoder(),
+                    listener = { snapshot ->
+                        handle._snapshot.value = snapshot
+                        if (snapshot.frame != null) backend.hideMacSurface()
+                        // This is now emitted only for the initial frame / a size change, so it
+                        // realizes the AWT canvas without posting a repaint for every frame.
+                        snapshot.frameInfo?.let { frame ->
+                            if (nativeFrameReported.compareAndSet(false, true)) {
+                                AppLogger.info(
+                                    "embedded-mirror",
+                                    "mode=videotoolbox-metal status=active width=${frame.width} height=${frame.height}",
+                                )
+                            }
+                            metalSurface.requestDisplay()
+                        }
+                    },
+                    onDirectDecoderFailure = { failure ->
+                        AppLogger.warn("embedded-mirror", "mode=videotoolbox-metal status=failed; switching the existing connection to Compose at the next key frame", failure)
+                    },
+                )
+                backend = MirrorBackend.StandaloneRuntime(
+                    runtime = runtime,
+                    macSurface = metalSurface,
+                )
+                handle = EmbeddedMirrorHandle(backend)
+                handle
+            } catch (failure: Throwable) {
+                runCatching { surface?.close() }
+                AppLogger.warn(
+                    "embedded-mirror",
+                    "VideoToolbox mirror unavailable; using Compose fallback (${failure.message ?: failure::class.simpleName})",
+                    failure,
+                )
+                createComposeStandalone(tools, root)
+            }
+        }
 
         internal fun createShared(session: EmbeddedDeviceSession, decoder: H264Decoder = JavaCvH264Decoder()): EmbeddedMirrorHandle {
             lateinit var handle: EmbeddedMirrorHandle
@@ -179,9 +260,15 @@ internal class EmbeddedMirrorHandle private constructor(
     }
 }
 
+/** Platform gate deliberately kept independent from user preferences: this fast route is macOS-only. */
+internal fun shouldUseMacNativeMirror(osName: String = System.getProperty("os.name").orEmpty()): Boolean =
+    osName.contains("mac", ignoreCase = true)
+
 /** What [EmbeddedMirrorHandle] drives — either its own standalone transport, or a shared view onto
  * a live recording's device stream. See each implementation's doc. */
 internal sealed interface MirrorBackend : Closeable {
+    val macSurface: EmbeddedMirrorMacSurface? get() = null
+
     fun snapshot(): EmbeddedMirrorSnapshot
 
     fun start(serial: String, options: MirrorStreamOptions)
@@ -197,7 +284,15 @@ internal sealed interface MirrorBackend : Closeable {
 
     /** The pre-redesign path: opens its own embedded scrcpy server/device encoder. Used only when
      * the capture isn't recording video — see [EmbeddedMirrorHandle.create]'s doc. */
-    class StandaloneRuntime(private val runtime: EmbeddedMirrorRuntime) : MirrorBackend {
+    class StandaloneRuntime(
+        private var runtime: EmbeddedMirrorRuntime,
+        override var macSurface: EmbeddedMirrorMacSurface? = null,
+    ) : MirrorBackend {
+        private val lock = Any()
+        private var startedSerial: String? = null
+        private var startedOptions: MirrorStreamOptions? = null
+        private var switchedToCompose = false
+
         override fun snapshot(): EmbeddedMirrorSnapshot = runtime.snapshot()
 
         override fun isAlreadyStarted(serial: String): Boolean {
@@ -209,13 +304,48 @@ internal sealed interface MirrorBackend : Closeable {
             )
         }
 
-        override fun start(serial: String, options: MirrorStreamOptions) = runtime.start(serial, options)
+        override fun start(serial: String, options: MirrorStreamOptions) {
+            synchronized(lock) {
+                startedSerial = serial
+                startedOptions = options
+            }
+            if (macSurface != null) {
+                AppLogger.info(
+                    "embedded-mirror",
+                    "mode=videotoolbox-metal status=connecting max_size=${options.maxSize} " +
+                        "max_fps=${options.maxFps} bitrate_bps=${options.serverVideoBitRateBitsPerSecond} " +
+                        "keyframe_interval_s=${options.keyFrameIntervalSeconds} audio=${options.audio} " +
+                        "compose_interop_blending=${System.getProperty("compose.interop.blending")}",
+                )
+            }
+            runtime.start(serial, options)
+        }
 
         override fun stop() = runtime.stop()
 
         override fun send(command: MirrorControlCommand): Boolean = runtime.send(command)
 
-        override fun close() = runtime.close()
+        /** Compose has decoded a replacement frame from the existing connection. */
+        fun hideMacSurface() {
+            val retiredSurface = synchronized(lock) {
+                if (switchedToCompose) return
+                switchedToCompose = true
+                val previous = macSurface
+                macSurface = null
+                previous
+            }
+            // Native teardown detaches the JAWT CALayer; queue it on the EDT before SwingPanel
+            // disposal so that stale native pixels cannot remain above the Compose fallback.
+            if (retiredSurface != null) {
+                EventQueue.invokeLater { runCatching { retiredSurface.close() } }
+            }
+            AppLogger.warn("embedded-mirror", "mode=compose-fallback status=active connection=reused")
+        }
+
+        override fun close() {
+            runtime.close()
+            macSurface?.close()
+        }
     }
 
     /**
@@ -333,6 +463,8 @@ internal fun EmbeddedMirrorPanel(
     var clipboard by remember { mutableStateOf("") }
     val focusRequester = remember { FocusRequester() }
     val frame = snapshot.frame
+    val frameInfo = snapshot.frameInfo
+    val macSurface = handle?.macSurface
     // A pre-handle setup failure only makes sense to show while there's still no live/queued
     // connection attempt to report its own state instead.
     val effectiveError = snapshot.error ?: setupError?.takeIf { handle == null }
@@ -347,7 +479,68 @@ internal fun EmbeddedMirrorPanel(
     // that on every recomposition (dropped-frame count changing, a button's enabled state, etc.),
     // not just once per decoded frame.
     val bitmap = remember(frame) { frame?.toComposeBitmap() }
-    val aspectRatio = frame?.let { it.width.toFloat() / it.height.toFloat() }
+    val frameWidth = frame?.width ?: frameInfo?.width
+    val frameHeight = frame?.height ?: frameInfo?.height
+    val aspectRatio = if (frameWidth != null && frameHeight != null && frameHeight > 0) {
+        frameWidth.toFloat() / frameHeight.toFloat()
+    } else {
+        null
+    }
+
+    // SwingPanel is a heavyweight native surface, so its events do not bubble to Compose's
+    // pointerInput/onPreviewKeyEvent modifiers below. Keep the same mirror-control protocol by
+    // translating AWT input at that boundary; all toolbar controls remain ordinary Compose UI.
+    if (macSurface != null && frameWidth != null && frameHeight != null) {
+        val liveHandle = handle ?: return
+        DisposableEffect(macSurface, liveHandle, frameWidth, frameHeight) {
+            val canvas = macSurface.canvas
+            val pointerId = 1L
+            fun mapper(): MirrorCoordinateMapper? = canvas.width.takeIf { it > 0 }?.let { width ->
+                canvas.height.takeIf { it > 0 }?.let { height -> MirrorCoordinateMapper(width, height, frameWidth, frameHeight) }
+            }
+            val mouseListener = object : MouseAdapter() {
+                override fun mousePressed(event: MouseEvent) {
+                    canvas.requestFocusInWindow()
+                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.DOWN, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                }
+
+                override fun mouseDragged(event: MouseEvent) {
+                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.MOVE, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                }
+
+                override fun mouseReleased(event: MouseEvent) {
+                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.UP, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                }
+            }
+            val keyListener = object : KeyAdapter() {
+                override fun keyPressed(event: AwtKeyEvent) {
+                    if (event.isControlDown || event.isMetaDown || event.isAltDown) return
+                    val keycode = when (event.keyCode) {
+                        AwtKeyEvent.VK_ENTER -> 66
+                        AwtKeyEvent.VK_BACK_SPACE -> 67
+                        AwtKeyEvent.VK_LEFT -> 21
+                        AwtKeyEvent.VK_RIGHT -> 22
+                        AwtKeyEvent.VK_UP -> 19
+                        AwtKeyEvent.VK_DOWN -> 20
+                        AwtKeyEvent.VK_ESCAPE -> 111
+                        else -> null
+                    } ?: return
+                    if (liveHandle.send(MirrorControlCommand.Key(MirrorKeyAction.DOWN, keycode))) {
+                        liveHandle.send(MirrorControlCommand.Key(MirrorKeyAction.UP, keycode))
+                        event.consume()
+                    }
+                }
+            }
+            canvas.addMouseListener(mouseListener)
+            canvas.addMouseMotionListener(mouseListener)
+            canvas.addKeyListener(keyListener)
+            onDispose {
+                canvas.removeMouseListener(mouseListener)
+                canvas.removeMouseMotionListener(mouseListener)
+                canvas.removeKeyListener(keyListener)
+            }
+        }
+    }
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -392,13 +585,27 @@ internal fun EmbeddedMirrorPanel(
                     .then(
                         mirrorSurfaceModifier(
                             handle = handle,
-                            frame = frame,
+                            frameWidth = frameWidth,
+                            frameHeight = frameHeight,
                             focusRequester = focusRequester,
                         ),
-                    ),
+                    )
+                    .onGloballyPositioned { coordinates ->
+                        macSurface?.setVisibleClip(
+                            fullBounds = coordinates.boundsInWindow(clipBounds = false),
+                            clippedBounds = coordinates.boundsInWindow(clipBounds = true),
+                        )
+                    },
                 contentAlignment = Alignment.Center,
             ) {
-                if (bitmap != null) {
+                if (macSurface != null) {
+                    SwingPanel(
+                        background = Color.Transparent,
+                        factory = { macSurface.canvas },
+                        modifier = Modifier.fillMaxSize(),
+                        update = { macSurface.requestDisplay() },
+                    )
+                } else if (bitmap != null) {
                     Image(bitmap, "Device mirror", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 } else {
                     AppText(
@@ -461,7 +668,8 @@ private fun EmbeddedMirrorHandle.sendAndroidKey(keycode: Int): Boolean =
 
 private fun mirrorSurfaceModifier(
     handle: EmbeddedMirrorHandle?,
-    frame: MirrorFrame?,
+    frameWidth: Int?,
+    frameHeight: Int?,
     focusRequester: FocusRequester,
 ): Modifier {
     var size = IntSize.Zero
@@ -489,10 +697,10 @@ private fun mirrorSurfaceModifier(
                 false
             }
         }
-    if (handle == null || frame == null) return interaction
-    return interaction.pointerInput(handle, frame.width, frame.height, size) {
+    if (handle == null || frameWidth == null || frameHeight == null) return interaction
+    return interaction.pointerInput(handle, frameWidth, frameHeight, size) {
         if (size.width <= 0 || size.height <= 0) return@pointerInput
-        val mapper = MirrorCoordinateMapper(size.width, size.height, frame.width, frame.height)
+        val mapper = MirrorCoordinateMapper(size.width, size.height, frameWidth, frameHeight)
         awaitPointerEventScope {
             var pointer: PointerId? = null
             var downX = 0f
