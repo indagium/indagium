@@ -64,7 +64,9 @@ internal class EmbeddedMirrorMacSurface(
      * an AppKit sibling deliberately placed above that scene. Keep the native surface masked while
      * such a popup is open so its controls are never painted through by the device image.
      */
-    private var overlayOccluded = false
+    @Volatile private var overlayOccluded = false
+    val isOverlayOccluded: Boolean get() = overlayOccluded
+    @Volatile private var onOverlayOccluded: (() -> Unit)? = null
     private val resizeListener = object : ComponentAdapter() {
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
         override fun componentResized(event: ComponentEvent) = resize()
@@ -109,6 +111,27 @@ internal class EmbeddedMirrorMacSurface(
         if (closed || overlayOccluded == occluded) return
         overlayOccluded = occluded
         applyVisibleClip()
+        // SwingPanel hosts a heavyweight AWT child. Masking its Metal pixels alone leaves that
+        // child in the native hit-test tree, so clicks on Compose popup controls can still arrive
+        // as mirror touches. Hide and disable the child for the overlay lifetime, then show and
+        // reattach it to the current peer/window after dismissal. Decoding and Metal state stay
+        // alive while the view is hidden.
+        val updateInputSurface = {
+            if (!closed && overlayOccluded == occluded) {
+                if (occluded) onOverlayOccluded?.invoke()
+                canvas.isEnabled = !occluded
+                canvas.isFocusable = !occluded
+                if (occluded) attachedWindow = null
+                canvas.isVisible = !occluded
+                if (!occluded) attachAndResize()
+            }
+        }
+        if (EventQueue.isDispatchThread()) updateInputSurface() else EventQueue.invokeLater(updateInputSurface)
+    }
+
+    /** Installs the mirror input owner's cleanup for a touch interrupted by an overlay. */
+    fun setOverlayOcclusionListener(listener: (() -> Unit)?) {
+        onOverlayOccluded = listener
     }
 
     private fun applyVisibleClip() {
@@ -122,7 +145,7 @@ internal class EmbeddedMirrorMacSurface(
     }
 
     private fun attachAndResize() {
-        if (closed || !canvas.isDisplayable) return
+        if (closed || overlayOccluded || !canvas.isDisplayable) return
         val window = SwingUtilities.getWindowAncestor(canvas)
         if (window != null && window !== attachedWindow) {
             val origin = SwingUtilities.convertPoint(canvas, 0, 0, window)

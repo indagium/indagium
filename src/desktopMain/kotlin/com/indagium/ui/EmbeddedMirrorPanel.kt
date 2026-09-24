@@ -682,25 +682,65 @@ internal fun EmbeddedMirrorPanel(
         DisposableEffect(macSurface, liveHandle, frameWidth, frameHeight) {
             val canvas = macSurface.canvas
             val pointerId = 1L
+            var activeTouch = false
+            var lastTouchX = 0f
+            var lastTouchY = 0f
             fun mapper(): MirrorCoordinateMapper? = canvas.width.takeIf { it > 0 }?.let { width ->
                 canvas.height.takeIf { it > 0 }?.let { height -> MirrorCoordinateMapper(width, height, frameWidth, frameHeight) }
             }
+            fun cancelActiveTouchOnEdt() {
+                if (!activeTouch) return
+                mapper()?.let {
+                    liveHandle.sendTouch(it, MirrorTouchAction.CANCEL, pointerId, lastTouchX, lastTouchY)
+                }
+                activeTouch = false
+            }
+            fun cancelActiveTouch() {
+                // Mouse callbacks and the mutable touch state belong to AWT's event thread.
+                // Compose can dispose this effect from another dispatcher, so serialize cleanup
+                // before it reads or changes the active pointer state.
+                if (EventQueue.isDispatchThread()) cancelActiveTouchOnEdt()
+                else EventQueue.invokeLater(::cancelActiveTouchOnEdt)
+            }
+            macSurface.setOverlayOcclusionListener(::cancelActiveTouch)
             val mouseListener = object : MouseAdapter() {
                 override fun mousePressed(event: MouseEvent) {
+                    if (macSurface.isOverlayOccluded) return
                     canvas.requestFocusInWindow()
-                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.DOWN, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                    val x = event.x.toFloat()
+                    val y = event.y.toFloat()
+                    lastTouchX = x
+                    lastTouchY = y
+                    activeTouch = mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.DOWN, pointerId, x, y) } == true
                 }
 
                 override fun mouseDragged(event: MouseEvent) {
-                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.MOVE, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                    if (macSurface.isOverlayOccluded) return
+                    if (!activeTouch) return
+                    lastTouchX = event.x.toFloat()
+                    lastTouchY = event.y.toFloat()
+                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.MOVE, pointerId, lastTouchX, lastTouchY) }
                 }
 
                 override fun mouseReleased(event: MouseEvent) {
-                    mapper()?.let { liveHandle.sendTouch(it, MirrorTouchAction.UP, pointerId, event.x.toFloat(), event.y.toFloat()) }
+                    if (!activeTouch) return
+                    lastTouchX = event.x.toFloat()
+                    lastTouchY = event.y.toFloat()
+                    mapper()?.let {
+                        liveHandle.sendTouch(
+                            it,
+                            if (macSurface.isOverlayOccluded) MirrorTouchAction.CANCEL else MirrorTouchAction.UP,
+                            pointerId,
+                            lastTouchX,
+                            lastTouchY,
+                        )
+                    }
+                    activeTouch = false
                 }
             }
             val keyListener = object : KeyAdapter() {
                 override fun keyPressed(event: AwtKeyEvent) {
+                    if (macSurface.isOverlayOccluded) return
                     if (event.isControlDown || event.isMetaDown || event.isAltDown) return
                     val keycode = when (event.keyCode) {
                         AwtKeyEvent.VK_ENTER -> 66
@@ -722,6 +762,8 @@ internal fun EmbeddedMirrorPanel(
             canvas.addMouseMotionListener(mouseListener)
             canvas.addKeyListener(keyListener)
             onDispose {
+                cancelActiveTouch()
+                macSurface.setOverlayOcclusionListener(null)
                 canvas.removeMouseListener(mouseListener)
                 canvas.removeMouseMotionListener(mouseListener)
                 canvas.removeKeyListener(keyListener)
@@ -887,15 +929,20 @@ private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
         state = rememberWindowState(size = DpSize(620.dp, 760.dp)),
         resizable = true,
     ) {
-        EmbeddedMirrorPanel(
-            handle = state.embeddedMirrorFor(tab.id),
-            setupError = state.embeddedMirrorSetupError(tab.id),
-            onConnect = { state.openCaptureMirror(tab.id) },
-            onDisconnect = { state.stopEmbeddedMirror(tab.id) },
-            detached = true,
-            onReturnToSidebar = { state.returnEmbeddedMirrorToSidebar(tab.id) },
-            modifier = Modifier.fillMaxSize().background(tc().p).padding(12.dp),
-        )
+        androidx.compose.runtime.CompositionLocalProvider(
+            LocalMirrorOverlayAppState provides state,
+            LocalMirrorOverlayTabId provides tab.id,
+        ) {
+            EmbeddedMirrorPanel(
+                handle = state.embeddedMirrorFor(tab.id),
+                setupError = state.embeddedMirrorSetupError(tab.id),
+                onConnect = { state.openCaptureMirror(tab.id) },
+                onDisconnect = { state.stopEmbeddedMirror(tab.id) },
+                detached = true,
+                onReturnToSidebar = { state.returnEmbeddedMirrorToSidebar(tab.id) },
+                modifier = Modifier.fillMaxSize().background(tc().p).padding(12.dp),
+            )
+        }
     }
 }
 
