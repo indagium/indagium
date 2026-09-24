@@ -11,6 +11,8 @@ import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
+import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
 import java.io.Closeable
 import java.util.Collections
 import java.util.IdentityHashMap
@@ -49,8 +51,17 @@ internal fun effectiveMirrorClip(
     visibleClip: MirrorClipFractions?,
     overlayOccluded: Boolean,
     hostMounted: Boolean = true,
+    keepPixelsUnderOverlay: Boolean = true,
 ): MirrorClipFractions =
-    if (!hostMounted || overlayOccluded || visibleClip == null) MirrorClipFractions(0f, 0f, 0f, 0f) else visibleClip
+    if (!hostMounted || (overlayOccluded && !keepPixelsUnderOverlay) || visibleClip == null) {
+        MirrorClipFractions(0f, 0f, 0f, 0f)
+    } else {
+        visibleClip
+    }
+
+/** The picture stays live behind overlays, while clicks there belong to Compose controls. */
+internal fun mirrorCanvasAcceptsDeviceInput(hostMounted: Boolean, overlayOccluded: Boolean): Boolean =
+    hostMounted && !overlayOccluded
 
 /** Tracks overlapping Compose hosts during an inline-to-detached window handoff. */
 internal class MirrorSurfaceHostOwners {
@@ -72,6 +83,9 @@ internal class EmbeddedMirrorMacSurface(
     private val onDiagnostic: (String) -> Unit = {},
 ) : Closeable {
     val canvas = Canvas()
+    /** Experimental Core Animation underlay ordering for same-window Compose overlays. */
+    internal val overlayLayerExperimentEnabled =
+        System.getProperty("indagium.mirror.overlay-experiment").toBoolean()
     private val native: MacVideoToolboxMirrorNative
     @Volatile private var closed = false
     private var lastNativeHierarchy: String? = null
@@ -81,9 +95,9 @@ internal class EmbeddedMirrorMacSurface(
     private val hostOwners = MirrorSurfaceHostOwners()
     @Volatile private var hostMounted = false
     /**
-     * Compose popups live above their anchor in Compose's scene, whereas the JAWT Metal layer is
-     * an AppKit sibling deliberately placed above that scene. Keep the native surface masked while
-     * such a popup is open so its controls are never painted through by the device image.
+     * The default layer order is above Compose and must be masked while a popup is open. The
+     * opt-in experiment puts the layer below its Core Animation siblings and forwards input back
+     * through SwingPanel's Compose interop group.
      */
     @Volatile private var overlayOccluded = false
     val isOverlayOccluded: Boolean get() = overlayOccluded
@@ -112,7 +126,7 @@ internal class EmbeddedMirrorMacSurface(
 
     init {
         check(!GraphicsEnvironment.isHeadless()) { "Metal mirror requires an AWT display; running headless" }
-        native = MacVideoToolboxMirrorNative(canvas)
+        native = MacVideoToolboxMirrorNative(canvas, overlayLayerExperimentEnabled)
         canvas.addComponentListener(resizeListener)
         canvas.addHierarchyListener(hierarchyListener)
     }
@@ -148,7 +162,7 @@ internal class EmbeddedMirrorMacSurface(
         updateCanvasAvailability()
     }
 
-    /** Hides native pixels behind a Compose popup, then restores the current viewport mask. */
+    /** Applies the requested overlay mode; the experiment leaves native pixels visible underneath. */
     fun setOverlayOccluded(occluded: Boolean) {
         if (closed || overlayOccluded == occluded) return
         overlayOccluded = occluded
@@ -158,22 +172,68 @@ internal class EmbeddedMirrorMacSurface(
         updateCanvasAvailability()
     }
 
+    /**
+     * A heavyweight Canvas can be the AppKit/AWT mouse target even when Compose draws a popup
+     * above it. Compose Desktop registers its blending input bridge on SwingPanel's parent group,
+     * so retarget overlay clicks there. The mirror's own mouse listener checks [isOverlayOccluded]
+     * first and will not send those gestures to the device.
+     */
+    fun forwardOverlayMouseEvent(event: MouseEvent) {
+        if (!overlayLayerExperimentEnabled || !overlayOccluded || closed || !EventQueue.isDispatchThread()) return
+        val interopGroup = canvas.parent ?: return
+        val forwarded = SwingUtilities.convertMouseEvent(canvas, event, interopGroup)
+        interopGroup.dispatchEvent(forwarded)
+        event.consume()
+    }
+
+    /** ComposeSceneMediator listens for wheel events on SwingPanel's root container. */
+    fun forwardOverlayMouseWheelEvent(event: MouseWheelEvent) {
+        if (!overlayLayerExperimentEnabled || !overlayOccluded || closed || !EventQueue.isDispatchThread()) return
+        val interopGroup = canvas.parent ?: return
+        val target = interopGroup.parent ?: interopGroup
+        val point = SwingUtilities.convertPoint(canvas, event.point, target)
+        target.dispatchEvent(
+            MouseWheelEvent(
+                target,
+                event.id,
+                event.`when`,
+                event.modifiersEx,
+                point.x,
+                point.y,
+                event.clickCount,
+                event.isPopupTrigger,
+                event.scrollType,
+                event.scrollAmount,
+                event.wheelRotation,
+            ),
+        )
+        event.consume()
+    }
+
     /** Installs the mirror input owner's cleanup for a touch interrupted by an overlay. */
     fun setOverlayOcclusionListener(listener: (() -> Unit)?) {
         onOverlayOccluded = listener
     }
 
     private fun applyVisibleClip() {
-        val clip = effectiveMirrorClip(lastVisibleClip, overlayOccluded, hostMounted)
+        val clip = effectiveMirrorClip(
+            visibleClip = lastVisibleClip,
+            overlayOccluded = overlayOccluded,
+            hostMounted = hostMounted,
+            keepPixelsUnderOverlay = overlayLayerExperimentEnabled,
+        )
         native.setClip(clip.left, clip.top, clip.right, clip.bottom)
     }
 
     private fun updateCanvasAvailability() {
-        val shouldShow = hostMounted && !overlayOccluded
+        val shouldShow = hostMounted && (!overlayOccluded || overlayLayerExperimentEnabled)
+        val acceptsInput = mirrorCanvasAcceptsDeviceInput(hostMounted, overlayOccluded)
         val update = {
-            if (!closed && shouldShow == (hostMounted && !overlayOccluded)) {
+            val currentShouldShow = hostMounted && (!overlayOccluded || overlayLayerExperimentEnabled)
+            if (!closed && shouldShow == currentShouldShow && acceptsInput == mirrorCanvasAcceptsDeviceInput(hostMounted, overlayOccluded)) {
                 canvas.isEnabled = shouldShow
-                canvas.isFocusable = shouldShow
+                canvas.isFocusable = acceptsInput
+                if (!acceptsInput && canvas.isFocusOwner) canvas.transferFocus()
                 canvas.isVisible = shouldShow
                 if (shouldShow) attachAndResize() else detachNativeSurface()
             }
@@ -188,7 +248,7 @@ internal class EmbeddedMirrorMacSurface(
 
     private fun attachAndResize() {
         if (closed) return
-        if (!hostMounted || overlayOccluded || !canvas.isDisplayable || !canvas.isShowing) {
+        if (!hostMounted || (overlayOccluded && !overlayLayerExperimentEnabled) || !canvas.isDisplayable || !canvas.isShowing) {
             detachNativeSurface()
             return
         }
@@ -204,7 +264,10 @@ internal class EmbeddedMirrorMacSurface(
                 attachedWindow = window
                 if (!hierarchy.isNullOrBlank() && hierarchy != lastNativeHierarchy) {
                     lastNativeHierarchy = hierarchy
-                    onDiagnostic("Metal mirror AppKit hierarchy $hierarchy")
+                    onDiagnostic(
+                        "Metal mirror AppKit hierarchy $hierarchy " +
+                            "overlay_layer_experiment=$overlayLayerExperimentEnabled",
+                    )
                 }
             }.onFailure { onDiagnostic("Metal mirror attach failed: ${it.message ?: it::class.simpleName}") }
         }

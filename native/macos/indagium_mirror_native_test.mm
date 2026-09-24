@@ -142,6 +142,21 @@ static void verifyViewportClipMaskCoordinates() {
     if (!CGRectEqualToRect(empty, CGRectZero)) fail("empty visible intersection did not hide all mirror pixels");
 }
 
+static void verifyMirrorLayerOrderForComposeOverlays() {
+    if (mirrorLayerZPosition(true, false, true, 0.0, 12.0) != -1.0) {
+        fail("overlay experiment did not place the mirror below sibling layers");
+    }
+    if (mirrorLayerZPosition(true, false, true, -2.0, 12.0) != -3.0) {
+        fail("overlay experiment did not account for negative sibling depths");
+    }
+    if (mirrorLayerZPosition(false, false, true, 0.0, 12.0) != 13.0) {
+        fail("fallback mode no longer keeps the mirror above its siblings");
+    }
+    if (mirrorLayerZPosition(true, true, true, 0.0, 12.0) != 1000.0) {
+        fail("native test pattern stopped being topmost");
+    }
+}
+
 static void drainMainQueue() {
     __block bool drained = false;
     dispatch_async(dispatch_get_main_queue(), ^{ drained = true; });
@@ -205,6 +220,7 @@ int main() {
     verifyStaleQueuedDetachCannotRemoveAReattachedLayer();
     verifyJawtManagedLayerPlacement();
     verifyViewportClipMaskCoordinates();
+    verifyMirrorLayerOrderForComposeOverlays();
     verifyQueuedGeometryOwnsPendingState();
     const uint8_t annexB[] = {
         0x00, 0x00, 0x01, 0x67, 0x11,

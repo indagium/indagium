@@ -9,14 +9,17 @@ import kotlin.concurrent.read
 import kotlin.concurrent.write
 
 /** Small Kotlin facade around the packaged macOS VideoToolbox/Metal/JAWT implementation. */
-internal class MacVideoToolboxMirrorNative(private val canvas: Canvas) : AutoCloseable {
+internal class MacVideoToolboxMirrorNative(
+    private val canvas: Canvas,
+    private val overlayLayerExperimentEnabled: Boolean,
+) : AutoCloseable {
     private val lifecycle = ReentrantReadWriteLock()
     private var handle: Long
 
     init {
         check(isMac()) { "VideoToolbox mirror is available only on macOS" }
         check(load()) { loadFailure ?: "Bundled VideoToolbox mirror library is unavailable" }
-        handle = nativeCreate(canvas)
+        handle = nativeCreate(canvas, overlayLayerExperimentEnabled)
         check(handle != 0L) { "Could not create VideoToolbox mirror surface" }
     }
 
@@ -112,7 +115,7 @@ internal class MacVideoToolboxMirrorNative(private val canvas: Canvas) : AutoClo
             }
         }
 
-        @JvmStatic private external fun nativeCreate(canvas: Canvas): Long
+        @JvmStatic private external fun nativeCreate(canvas: Canvas, overlayLayerExperimentEnabled: Boolean): Long
         @JvmStatic private external fun nativeDecode(
             handle: Long,
             bytes: ByteArray,

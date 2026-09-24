@@ -60,14 +60,14 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
-    // On macOS the mirror uses a native CAMetalLayer inside SwingPanel. Compose Desktop 1.11.1
-    // otherwise places Swing interop above its Skia layer and keeps that layer opaque, which can
-    // cover a JAWT-backed video layer. The feature flag is read when Compose creates its mediator,
-    // so set the default before application{}; retain an explicit JVM property override for QA.
-    if (System.getProperty("os.name").contains("mac", ignoreCase = true) &&
-        System.getProperty("compose.interop.blending") == null
-    ) {
-        System.setProperty("compose.interop.blending", "true")
+    // The macOS mirror is a native CAMetalLayer hosted by SwingPanel. Keep Compose's documented
+    // interop blending switch enabled where supported. Compose Desktop 1.11.1's Metal order
+    // workaround still keeps interop above ComposeWindow content; the native-layer underlay
+    // experiment is separately opt-in via -Dindagium.mirror.overlay-experiment=true.
+    if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
+        if (System.getProperty("compose.interop.blending") == null) {
+            System.setProperty("compose.interop.blending", "true")
+        }
     }
 
     // This debug-only setup does not touch disk. When both switches are present it installs an
