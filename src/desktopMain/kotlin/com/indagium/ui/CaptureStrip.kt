@@ -588,10 +588,12 @@ private fun CaptureSnapshotPopover(
         }
     }
     val session = snapshot.session
+    val recordVideoConfigured = session?.settings?.recordVideo
+    val canIncludeVideo = recordVideoConfigured == true
     val selection = remember(tab.id, tab.selected, tab.logData) { selectedCaptureOrdinals(tab) }
     var rangeChoice by remember(tab.id) { mutableStateOf(SnapshotRangeChoice.ALL) }
     var customMinutesText by remember(tab.id) { mutableStateOf("5") }
-    var includeVideo by remember(tab.id) { mutableStateOf(session?.settings?.recordVideo == true) }
+    var includeVideo by remember(tab.id, recordVideoConfigured) { mutableStateOf(canIncludeVideo) }
     var overwriteConfirmed by remember(tab.id) { mutableStateOf(false) }
     var saveAndOpen by remember(tab.id) { mutableStateOf(false) }
     val customMinutes = customMinutesText.toIntOrNull()?.coerceAtLeast(1) ?: 0
@@ -730,13 +732,21 @@ private fun CaptureSnapshotPopover(
             CheckRow(
                 includeVideo,
                 {
-                    if (session?.settings?.recordVideo == true) includeVideo = !includeVideo
+                    if (canIncludeVideo) includeVideo = !includeVideo
                     onReturnFocus()
                 },
+                enabled = canIncludeVideo,
             ) {
-                AppText("Include video", color = if (session?.settings?.recordVideo == true) colors.ts else colors.td, fontSize = 11.sp)
+                AppText("Include video", color = if (canIncludeVideo) colors.ts else colors.td, fontSize = 11.sp)
             }
-            if (includeVideo && session?.settings?.recordVideo == true &&
+            if (recordVideoConfigured == false) {
+                AppText(
+                    "Video recording was disabled for this capture. This archive will contain logs only.",
+                    color = colors.td,
+                    fontSize = 10.sp,
+                )
+            }
+            if (includeVideo && canIncludeVideo &&
                 (session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() <= 0L)
             ) {
                 AppText(

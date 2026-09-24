@@ -72,6 +72,28 @@ class MacMirrorSelectionTest {
     }
 
     @Test
+    fun nativeMirrorClipIsEmptyWhenItsComposeHostLeavesTheWindow() {
+        val visible = MirrorClipFractions(0f, 0f, 1f, 1f)
+
+        assertEquals(
+            MirrorClipFractions(0f, 0f, 0f, 0f),
+            effectiveMirrorClip(visible, overlayOccluded = false, hostMounted = false),
+        )
+    }
+
+    @Test
+    fun inlineToDetachedHostHandoffKeepsTheSurfaceMountedUntilTheLastOwnerLeaves() {
+        val owners = MirrorSurfaceHostOwners()
+        val inlineHost = Any()
+        val detachedHost = Any()
+
+        assertTrue(owners.setMounted(inlineHost, mounted = true))
+        assertTrue(owners.setMounted(detachedHost, mounted = true))
+        assertTrue(owners.setMounted(inlineHost, mounted = false))
+        assertFalse(owners.setMounted(detachedHost, mounted = false))
+    }
+
+    @Test
     fun captureSnapshotPopupStaysBelowAndRightAlignedWhenThereIsRoom() {
         val provider = CaptureSnapshotPopupPositionProvider(marginPx = 8, gapPx = 8, placeAbove = false)
 

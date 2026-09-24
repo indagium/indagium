@@ -1000,6 +1000,7 @@ fun CheckRow(
     checked: Boolean, onToggle: () -> Unit,
     accentColor: Color = LocalTheme.current.ac,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
@@ -1007,10 +1008,11 @@ fun CheckRow(
     // handler after padding so the complete visual row toggles, not only the checkbox/text bounds.
     DisableSelection {
         Row(
-            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).clickable(onClick = onToggle),
+            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                .then(if (enabled) Modifier.clickable(onClick = onToggle) else Modifier),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Checkbox(checked = checked, onCheckedChange = { onToggle() },
+            Checkbox(checked = checked, onCheckedChange = if (enabled) ({ onToggle() }) else null, enabled = enabled,
                 colors = CheckboxDefaults.colors(checkedColor = accentColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
                 modifier = Modifier.size(16.dp))
             content()

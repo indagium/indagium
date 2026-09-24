@@ -652,6 +652,17 @@ internal fun EmbeddedMirrorPanel(
     val frame = snapshot.frame
     val frameInfo = snapshot.frameInfo
     val macSurface = handle?.macSurface
+    val macOverlayOccluded by remember(macSurface) {
+        macSurface?.overlayOccludedState ?: MutableStateFlow(false)
+    }.collectAsState()
+    val macSurfaceHostToken = remember(macSurface) { Any() }
+    // The Metal layer is an AppKit sibling of Compose's scene. Its owner is this panel's actual
+    // SwingPanel host, so navigation out of a capture tab detaches the layer while leaving the
+    // recorder, packet pump, and decoder alive. Detached mirror windows keep their own host mounted.
+    DisposableEffect(macSurface) {
+        macSurface?.setHostMounted(macSurfaceHostToken, true)
+        onDispose { macSurface?.setHostMounted(macSurfaceHostToken, false) }
+    }
     // A pre-handle setup failure only makes sense to show while there's still no live/queued
     // connection attempt to report its own state instead.
     val effectiveError = snapshot.error ?: setupError?.takeIf { handle == null }
@@ -844,12 +855,23 @@ internal fun EmbeddedMirrorPanel(
                 contentAlignment = Alignment.Center,
             ) {
                 if (macSurface != null) {
-                    SwingPanel(
-                        background = Color.Transparent,
-                        factory = { macSurface.canvas },
-                        modifier = Modifier.fillMaxSize(),
-                        update = { macSurface.requestDisplay() },
-                    )
+                    if (macOverlayOccluded) {
+                        Column(
+                            Modifier.fillMaxSize().background(Color.Black, RoundedCornerShape(8.dp)).padding(12.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            AppText("Device mirror is hidden while this panel is open", color = colors.ts, fontSize = 10.sp)
+                            AppText("Capture and streaming continue.", color = colors.td, fontSize = 9.sp)
+                        }
+                    } else {
+                        SwingPanel(
+                            background = Color.Transparent,
+                            factory = { macSurface.canvas },
+                            modifier = Modifier.fillMaxSize(),
+                            update = { macSurface.requestDisplay() },
+                        )
+                    }
                 } else if (bitmap != null) {
                     Image(bitmap, "Device mirror", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                 } else {
