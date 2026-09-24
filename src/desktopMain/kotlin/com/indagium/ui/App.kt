@@ -45,9 +45,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
 import com.indagium.source.SourceCodeView
@@ -64,6 +62,23 @@ import kotlin.math.roundToInt
 
 /** The popup is bounded visually, but every retained path stays reachable by scrolling. */
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
+
+/** Root-owned overlays can cover the embedded mirror's elevated native layer. */
+internal fun appHasNativeMirrorOccludingOverlay(state: AppState): Boolean =
+    state.isLoading || state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
+        state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingNoteOverwrite != null ||
+        state.pendingLogRelink != null || state.pendingClearFilterTabId != null ||
+        state.pendingTagPrefixConflict != null || state.pendingDiagramNotice != null ||
+        state.pendingDeleteFilterId != null || state.pendingDeleteSavedFilterFolderId != null ||
+        state.pendingFilterRename != null || state.filterExportDialogOpen || state.pendingImportReview != null ||
+        state.importError != null || state.pendingZipPicker != null || state.pendingFolderPicker != null ||
+        state.pendingSplitPrompt != null || state.mergeTabsDialogOpen || state.recentNotesMenuOpen ||
+        (state.recentMenuOpen && state.recentFiles.isNotEmpty()) || state.retraceDialogState != null ||
+        state.openError != null || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
+        state.supportDialogOpen || state.updateDialogVisible || state.sourceCodeView != null ||
+        state.cacheClearConfirmOpen || state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen ||
+        state.caseLibraryTabId != null || state.customCommandEditorTarget != null ||
+        state.sourceFolderInfoEditorTarget != null
 
 /**
  * Files dropped by Linux file managers are not consistently exposed through AWT's
@@ -170,8 +185,14 @@ fun App(
         LocalDensity provides scaledDensity,
         LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
         LocalTextContextMenu provides IndagiumTextContextMenu,
+        LocalMirrorOverlayAppState provides state,
     ) {
         val tc = tc()
+        val nativeMirrorOccluded = appHasNativeMirrorOccludingOverlay(state)
+        DisposableEffect(state, nativeMirrorOccluded) {
+            state.setEmbeddedMirrorGlobalOverlayOccluded("app-root-overlays", nativeMirrorOccluded)
+            onDispose { state.setEmbeddedMirrorGlobalOverlayOccluded("app-root-overlays", false) }
+        }
         // PERF-4: keyed on each tab's persistedSnapshot() (id/filename/sourcePath/filter/
         // annotations/showAnnMd/showUnfiltered/expanded/manualBlocks/archiveCandidate — exactly
         // what tabToken() serializes), not on state.tabs itself. state.tabs changes identity on

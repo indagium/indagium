@@ -1834,8 +1834,11 @@ class AppState(
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
 
-    /** Popup visibility that must survive a native decoder/surface recreation for this tab. */
-    private val embeddedMirrorOverlayOccludedByTab = mutableMapOf<String, Boolean>()
+    /** Tab-local overlay sources that must survive native decoder/surface recreation. */
+    private val embeddedMirrorOverlaySourcesByTab = mutableMapOf<String, MutableSet<String>>()
+
+    /** App-window overlays that cover the native layer, keyed so overlapping overlays compose. */
+    private val embeddedMirrorGlobalOverlaySources = mutableSetOf<String>()
 
     /** Detached mirror windows are app-owned, so tab navigation cannot dispose a live surface. */
     private val detachedEmbeddedMirrorTabs = mutableStateSetOf<String>()
@@ -2014,10 +2017,12 @@ class AppState(
 
     internal fun detachEmbeddedMirror(tabId: String) {
         if (captureControllerFor(tabId) != null) detachedEmbeddedMirrorTabs.add(tabId)
+        applyEmbeddedMirrorOverlayState(tabId)
     }
 
     internal fun returnEmbeddedMirrorToSidebar(tabId: String, revealCaptureTab: Boolean = true) {
         detachedEmbeddedMirrorTabs.remove(tabId)
+        applyEmbeddedMirrorOverlayState(tabId)
         if (revealCaptureTab && tabs.any { it.id == tabId && it.captureSessionId != null }) {
             activateTab(tabId)
             videoPanelVisible = true
@@ -2103,7 +2108,7 @@ class AppState(
                             embeddedMirrorsByTab[tabId] = handle
                             embeddedMirrorVersion++
                             (autoStart || embeddedMirrorPendingAutoStartByTab.remove(tabId) == true) to
-                                (embeddedMirrorOverlayOccludedByTab[tabId] == true)
+                                embeddedMirrorIsOverlayOccluded(tabId)
                         }
                     }
                     if (startRequest == null) {
@@ -2176,12 +2181,44 @@ class AppState(
      * already-computed viewport on dismissal.
      */
     internal fun setEmbeddedMirrorOverlayOccluded(tabId: String, occluded: Boolean) {
-        val handle = synchronized(stateLock) {
-            if (occluded) embeddedMirrorOverlayOccludedByTab[tabId] = true
-            else embeddedMirrorOverlayOccludedByTab.remove(tabId)
-            embeddedMirrorsByTab[tabId]
-        } ?: return
-        runCatching { handle.setOverlayOccluded(occluded) }
+        setEmbeddedMirrorOverlayOcclusionSource(tabId, "capture-snapshot-popover", occluded)
+    }
+
+    internal fun setEmbeddedMirrorOverlayOcclusionSource(tabId: String, source: String, occluded: Boolean) {
+        synchronized(stateLock) {
+            val sources = embeddedMirrorOverlaySourcesByTab.getOrPut(tabId) { mutableSetOf() }
+            if (occluded) sources.add(source) else sources.remove(source)
+            if (sources.isEmpty()) embeddedMirrorOverlaySourcesByTab.remove(tabId)
+        }
+        applyEmbeddedMirrorOverlayState(tabId)
+    }
+
+    /**
+     * Registers an app-window overlay such as a modal dialog or the Recent Files menu. Sources
+     * are keyed because two overlays can be open at once; dismissing one must not reveal the
+     * heavyweight Metal layer through the other. Detached mirrors live in their own window and
+     * are excluded from app-window occlusion.
+     */
+    internal fun setEmbeddedMirrorGlobalOverlayOccluded(source: String, occluded: Boolean) {
+        val tabIds = synchronized(stateLock) {
+            if (occluded) embeddedMirrorGlobalOverlaySources.add(source)
+            else embeddedMirrorGlobalOverlaySources.remove(source)
+            embeddedMirrorsByTab.keys.toList()
+        }
+        tabIds.forEach(::applyEmbeddedMirrorOverlayState)
+    }
+
+    private fun embeddedMirrorIsOverlayOccluded(tabId: String): Boolean {
+        val hasTabOverlay = embeddedMirrorOverlaySourcesByTab[tabId]?.isNotEmpty() == true
+        return if (tabId in detachedEmbeddedMirrorTabs) hasTabOverlay
+        else hasTabOverlay || embeddedMirrorGlobalOverlaySources.isNotEmpty()
+    }
+
+    private fun applyEmbeddedMirrorOverlayState(tabId: String) {
+        val pair = synchronized(stateLock) {
+            (embeddedMirrorsByTab[tabId] ?: return) to embeddedMirrorIsOverlayOccluded(tabId)
+        }
+        runCatching { pair.first.setOverlayOccluded(pair.second) }
     }
 
     private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {

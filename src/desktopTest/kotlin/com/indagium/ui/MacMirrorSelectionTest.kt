@@ -1,6 +1,9 @@
 package com.indagium.ui
 
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import com.indagium.capture.mirror.EmbeddedMirrorConnection
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
 import com.indagium.capture.mirror.EmbeddedMirrorState
@@ -66,6 +69,59 @@ class MacMirrorSelectionTest {
         assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(visible, overlayOccluded = true))
         assertEquals(visible, effectiveMirrorClip(visible, overlayOccluded = false))
         assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(null, overlayOccluded = false))
+    }
+
+    @Test
+    fun captureSnapshotPopupStaysBelowAndRightAlignedWhenThereIsRoom() {
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = 8, gapPx = 8, placeAbove = false)
+
+        val position = provider.calculatePosition(
+            anchorBounds = IntRect(700, 100, 800, 140),
+            windowSize = IntSize(1_000, 1_000),
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, 600),
+        )
+
+        assertEquals(320, position.x)
+        assertEquals(148, position.y)
+    }
+
+    @Test
+    fun captureSnapshotPopupCanFlipAboveWithoutCoveringItsTrigger() {
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = 8, gapPx = 8, placeAbove = true)
+
+        val position = provider.calculatePosition(
+            anchorBounds = IntRect(700, 800, 800, 840),
+            windowSize = IntSize(1_000, 1_000),
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, 600),
+        )
+
+        assertEquals(320, position.x)
+        assertEquals(192, position.y)
+        assertTrue(position.y + 600 <= 800 - 8)
+    }
+
+    @Test
+    fun captureSnapshotPopupFitsAboveTriggerInShortWindow() {
+        val margin = 8
+        val gap = 8
+        val anchor = IntRect(600, 80, 700, 100)
+        val window = IntSize(900, 170)
+        val popupHeight = 62
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = margin, gapPx = gap, placeAbove = true)
+
+        val position = provider.calculatePosition(
+            anchorBounds = anchor,
+            windowSize = window,
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, popupHeight),
+        )
+
+        assertEquals(220, position.x)
+        assertEquals(margin + 2, position.y)
+        assertTrue(position.y + popupHeight <= anchor.top - gap)
+        assertTrue(position.y + popupHeight <= window.height - margin)
     }
 
     private fun blockingRuntime(): EmbeddedMirrorRuntime = EmbeddedMirrorRuntime(

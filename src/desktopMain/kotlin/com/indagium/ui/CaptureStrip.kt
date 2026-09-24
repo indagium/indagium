@@ -33,12 +33,21 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureMirrorMode
@@ -58,6 +67,7 @@ internal const val CAPTURE_STRIP_HEIGHT_DP = 46
 // Fits the snapshot dialog's three DialogActionButtons (132dp each, from Dialogs.kt) plus its own
 // 20dp side padding and the 8dp gaps the centered action row uses between them.
 private val CAPTURE_SNAPSHOT_POPOVER_WIDTH = 480.dp
+private val CAPTURE_SNAPSHOT_POPOVER_MAX_HEIGHT = 680.dp
 private const val CAPTURE_DIAGNOSTICS_ROW_LIMIT = 6
 private const val CAPTURE_PREVIEW_REFRESH_INTERVAL_MS = 1_000L
 private const val CAPTURE_BYTES_PER_KIB = 1024L
@@ -66,6 +76,38 @@ private const val CAPTURE_BYTES_PER_GIB = CAPTURE_BYTES_PER_MIB * 1024L
 private const val CAPTURE_MILLIS_PER_SECOND = 1_000L
 private const val CAPTURE_SECONDS_PER_MINUTE = 60L
 private const val CAPTURE_SECONDS_PER_HOUR = 3_600L
+
+/** Right-aligns the panel to its trigger, keeps a gap, and flips above only when needed. */
+internal class CaptureSnapshotPopupPositionProvider(
+    private val marginPx: Int,
+    private val gapPx: Int,
+    private val placeAbove: Boolean,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val min = marginPx.coerceAtLeast(0)
+        val maxX = (windowSize.width - popupContentSize.width - min).coerceAtLeast(min)
+        val requestedX = if (layoutDirection == LayoutDirection.Ltr) {
+            anchorBounds.right - popupContentSize.width
+        } else {
+            anchorBounds.left
+        }
+        val x = requestedX.coerceIn(min, maxX)
+
+        val maxY = (windowSize.height - popupContentSize.height - min).coerceAtLeast(min)
+        val requestedY = if (placeAbove) {
+            anchorBounds.top - popupContentSize.height - gapPx
+        } else {
+            anchorBounds.bottom + gapPx
+        }
+        val y = requestedY.coerceIn(min, maxY)
+        return IntOffset(x, y)
+    }
+}
 
 /** Pure display formatting kept separate from the Compose surface for focused regression tests. */
 internal fun formatCaptureElapsed(elapsedMs: Long): String {
@@ -205,6 +247,13 @@ internal fun CaptureStrip(
     val colors = tc()
     val (deviceModel, deviceSerial) = captureSessionDeviceParts(session, tab.filename.removePrefix("Capture — "))
     var snapshotOpen by remember(tab.id) { mutableStateOf(false) }
+    var snapshotTriggerBounds by remember(tab.id) { mutableStateOf<Rect?>(null) }
+    fun dismissSnapshotPopover() {
+        if (state.captureExportBusy) state.cancelCaptureSnapshot()
+        snapshotOpen = false
+        state.clearCaptureExportStatus()
+        onReturnFocus()
+    }
     val storageLabel = session?.let {
         "${formatCaptureBytes(snapshot.logBytes)} / ${formatCaptureBytes(it.settings.sessionLimitBytes)}"
     } ?: formatCaptureBytes(snapshot.logBytes)
@@ -266,17 +315,21 @@ internal fun CaptureStrip(
                     onReturnFocus()
                 },
             )
-            Box {
+            Box(Modifier.onGloballyPositioned { snapshotTriggerBounds = it.boundsInWindow() }) {
                 ToolbarBtn(
                     label = "Save snapshot",
                     icon = Icons.Outlined.Save,
                     active = true,
                     tooltip = "Export a capture snapshot",
-                    enabled = active && !state.captureExportBusy,
+                    enabled = active && (snapshotOpen || !state.captureExportBusy),
                     contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                     onClick = {
-                        snapshotOpen = true
-                        state.clearCaptureExportStatus()
+                        if (snapshotOpen) {
+                            dismissSnapshotPopover()
+                        } else {
+                            snapshotOpen = true
+                            state.clearCaptureExportStatus()
+                        }
                     },
                 )
                 if (snapshotOpen) {
@@ -284,12 +337,8 @@ internal fun CaptureStrip(
                         state = state,
                         tab = tab,
                         snapshot = snapshot,
-                        onDismiss = {
-                            if (state.captureExportBusy) state.cancelCaptureSnapshot()
-                            snapshotOpen = false
-                            state.clearCaptureExportStatus()
-                            onReturnFocus()
-                        },
+                        triggerBounds = snapshotTriggerBounds,
+                        onDismiss = ::dismissSnapshotPopover,
                         onReturnFocus = onReturnFocus,
                     )
                 }
@@ -497,10 +546,33 @@ private fun CaptureSnapshotPopover(
     state: AppState,
     tab: LogTab,
     snapshot: RecorderSnapshot,
+    triggerBounds: Rect?,
     onDismiss: () -> Unit,
     onReturnFocus: () -> Unit,
 ) {
     val colors = tc()
+    val density = LocalDensity.current
+    val hostWindowSize = LocalWindowInfo.current.containerSize
+    val hostWidth = with(density) { hostWindowSize.width.toDp() }
+    val popupWidth = CAPTURE_SNAPSHOT_POPOVER_WIDTH.coerceAtMost((hostWidth - 16.dp).coerceAtLeast(1.dp))
+    val marginPx = with(density) { 8.dp.roundToPx() }
+    val gapPx = with(density) { 8.dp.roundToPx() }
+    val belowSpacePx = triggerBounds?.let {
+        (hostWindowSize.height - it.bottom.toInt() - marginPx - gapPx - 2).coerceAtLeast(1)
+    } ?: (hostWindowSize.height - 2 * marginPx).coerceAtLeast(1)
+    val aboveSpacePx = triggerBounds?.let {
+        (it.top.toInt() - marginPx - gapPx - 2).coerceAtLeast(1)
+    } ?: 0
+    val placeAbove = aboveSpacePx > belowSpacePx
+    val availableHeightPx = if (placeAbove) aboveSpacePx else belowSpacePx
+    val popupHeight = with(density) { availableHeightPx.toDp() }
+        .coerceAtMost(CAPTURE_SNAPSHOT_POPOVER_MAX_HEIGHT)
+    val popupPositionProvider = remember(density, placeAbove) {
+        with(density) {
+            CaptureSnapshotPopupPositionProvider(marginPx = marginPx, gapPx = gapPx, placeAbove = placeAbove)
+        }
+    }
+    val bodyScroll = rememberScrollState()
     val mirrorDetached = state.isEmbeddedMirrorDetached(tab.id)
     // On macOS the live VideoToolbox renderer is a native JAWT layer and therefore sits over
     // Compose Popup content in the same window. Scope the mask to this popup's composition so it
@@ -578,17 +650,16 @@ private fun CaptureSnapshotPopover(
         }
     }
 
-    // Dialog chrome matches the app's other dialogs (see SplitPromptDialog in Dialogs.kt, the
-    // reference this was copied from): rounded 8dp corners, 20dp padding, 12dp section rhythm, a
-    // 14sp SemiBold title, 10sp SemiBold section labels, and DialogActionButton for the terminal
-    // action row instead of a plain AppButton row. Width is sized to fit that row's three
-    // DialogActionButtons (132dp each) plus the dialog's own side padding.
+    // Keep a fixed viewport and pin the action row so live preview/error changes cannot move the
+    // popup or push its buttons below the screen. The provider places it below and right-aligned
+    // with the trigger, flipping above only when the window has no room below.
     Popup(
+        popupPositionProvider = popupPositionProvider,
         onDismissRequest = onDismiss,
         properties = PopupProperties(focusable = true),
     ) {
         Column(
-            Modifier.width(CAPTURE_SNAPSHOT_POPOVER_WIDTH)
+            Modifier.width(popupWidth).height(popupHeight)
                 .background(colors.p, RoundedCornerShape(8.dp))
                 .border(1.dp, colors.br, RoundedCornerShape(8.dp))
                 .padding(20.dp),
@@ -602,6 +673,10 @@ private fun CaptureSnapshotPopover(
                     onReturnFocus()
                 })
             }
+            Column(
+                Modifier.weight(1f).verticalScroll(bodyScroll),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppText("Range", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                 // Range is mutually exclusive (exactly one of All/Last N minutes/Since last
@@ -736,6 +811,7 @@ private fun CaptureSnapshotPopover(
                     )
                 }
             }
+            }
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
@@ -745,12 +821,10 @@ private fun CaptureSnapshotPopover(
                     DialogActionButton("Cancel export", active = true, danger = true) {
                         state.cancelCaptureSnapshot()
                         onDismiss()
-                        onReturnFocus()
                     }
                 } else {
                     DialogActionButton("Cancel", active = false) {
                         onDismiss()
-                        onReturnFocus()
                     }
                     // "Save ZIP" is the primary action (active = true, the accent-filled style);
                     // "Save + open" is the secondary variant of the same action, matching
