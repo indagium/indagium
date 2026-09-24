@@ -12,7 +12,11 @@ import java.awt.event.ComponentEvent
 import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
 import java.io.Closeable
+import java.util.Collections
+import java.util.IdentityHashMap
 import javax.swing.SwingUtilities
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
 /** Visible portion of the native mirror, expressed as fractions of its full Compose bounds. */
@@ -41,8 +45,23 @@ internal fun mirrorClipFractions(full: Rect, clipped: Rect): MirrorClipFractions
 }
 
 /** The native layer must expose no pixels while a same-window Compose popup is present. */
-internal fun effectiveMirrorClip(visibleClip: MirrorClipFractions?, overlayOccluded: Boolean): MirrorClipFractions =
-    if (overlayOccluded || visibleClip == null) MirrorClipFractions(0f, 0f, 0f, 0f) else visibleClip
+internal fun effectiveMirrorClip(
+    visibleClip: MirrorClipFractions?,
+    overlayOccluded: Boolean,
+    hostMounted: Boolean = true,
+): MirrorClipFractions =
+    if (!hostMounted || overlayOccluded || visibleClip == null) MirrorClipFractions(0f, 0f, 0f, 0f) else visibleClip
+
+/** Tracks overlapping Compose hosts during an inline-to-detached window handoff. */
+internal class MirrorSurfaceHostOwners {
+    private val owners = Collections.newSetFromMap(IdentityHashMap<Any, Boolean>())
+
+    @Synchronized
+    fun setMounted(owner: Any, mounted: Boolean): Boolean {
+        if (mounted) owners.add(owner) else owners.remove(owner)
+        return owners.isNotEmpty()
+    }
+}
 
 /**
  * Heavyweight Canvas hosted by Compose SwingPanel. The native bridge attaches a CAMetalLayer to
@@ -59,6 +78,8 @@ internal class EmbeddedMirrorMacSurface(
     private var attachedWindow: java.awt.Window? = null
     private var lastVisibleClip: MirrorClipFractions? = null
     private var lastVisibleClipSize: Pair<Float, Float>? = null
+    private val hostOwners = MirrorSurfaceHostOwners()
+    @Volatile private var hostMounted = false
     /**
      * Compose popups live above their anchor in Compose's scene, whereas the JAWT Metal layer is
      * an AppKit sibling deliberately placed above that scene. Keep the native surface masked while
@@ -66,16 +87,26 @@ internal class EmbeddedMirrorMacSurface(
      */
     @Volatile private var overlayOccluded = false
     val isOverlayOccluded: Boolean get() = overlayOccluded
+    private val _overlayOccludedState = MutableStateFlow(false)
+    val overlayOccludedState: StateFlow<Boolean> = _overlayOccludedState
     @Volatile private var onOverlayOccluded: (() -> Unit)? = null
     private val resizeListener = object : ComponentAdapter() {
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
+        override fun componentHidden(event: ComponentEvent) { detachNativeSurface() }
         override fun componentResized(event: ComponentEvent) = resize()
     }
     private val hierarchyListener = HierarchyListener { event ->
-        if (event.changeFlags and (HierarchyEvent.PARENT_CHANGED.toLong() or HierarchyEvent.DISPLAYABILITY_CHANGED.toLong()) != 0L) {
+        if (event.changeFlags and (
+                HierarchyEvent.PARENT_CHANGED.toLong() or
+                    HierarchyEvent.DISPLAYABILITY_CHANGED.toLong() or
+                    HierarchyEvent.SHOWING_CHANGED.toLong()
+                ) != 0L
+        ) {
             // Wait for the new hierarchy notification, then attach only after the Canvas has a
             // displayable peer in that Window. This is lifecycle-driven, not a timing delay.
-            EventQueue.invokeLater { attachAndResize() }
+            EventQueue.invokeLater {
+                if (canvas.isShowing) attachAndResize() else detachNativeSurface()
+            }
         }
     }
 
@@ -106,27 +137,25 @@ internal class EmbeddedMirrorMacSurface(
         applyVisibleClip()
     }
 
+    /** Tracks the Compose host that owns this single Canvas. Decoding stays active when unmounted. */
+    fun setHostMounted(owner: Any, mounted: Boolean) {
+        if (closed) return
+        val hasHost = hostOwners.setMounted(owner, mounted)
+        if (hostMounted == hasHost) return
+        hostMounted = hasHost
+        applyVisibleClip()
+        if (!hasHost) onOverlayOccluded?.invoke()
+        updateCanvasAvailability()
+    }
+
     /** Hides native pixels behind a Compose popup, then restores the current viewport mask. */
     fun setOverlayOccluded(occluded: Boolean) {
         if (closed || overlayOccluded == occluded) return
         overlayOccluded = occluded
+        _overlayOccludedState.value = occluded
         applyVisibleClip()
-        // SwingPanel hosts a heavyweight AWT child. Masking its Metal pixels alone leaves that
-        // child in the native hit-test tree, so clicks on Compose popup controls can still arrive
-        // as mirror touches. Hide and disable the child for the overlay lifetime, then show and
-        // reattach it to the current peer/window after dismissal. Decoding and Metal state stay
-        // alive while the view is hidden.
-        val updateInputSurface = {
-            if (!closed && overlayOccluded == occluded) {
-                if (occluded) onOverlayOccluded?.invoke()
-                canvas.isEnabled = !occluded
-                canvas.isFocusable = !occluded
-                if (occluded) attachedWindow = null
-                canvas.isVisible = !occluded
-                if (!occluded) attachAndResize()
-            }
-        }
-        if (EventQueue.isDispatchThread()) updateInputSurface() else EventQueue.invokeLater(updateInputSurface)
+        if (occluded) onOverlayOccluded?.invoke()
+        updateCanvasAvailability()
     }
 
     /** Installs the mirror input owner's cleanup for a touch interrupted by an overlay. */
@@ -135,8 +164,21 @@ internal class EmbeddedMirrorMacSurface(
     }
 
     private fun applyVisibleClip() {
-        val clip = effectiveMirrorClip(lastVisibleClip, overlayOccluded)
+        val clip = effectiveMirrorClip(lastVisibleClip, overlayOccluded, hostMounted)
         native.setClip(clip.left, clip.top, clip.right, clip.bottom)
+    }
+
+    private fun updateCanvasAvailability() {
+        val shouldShow = hostMounted && !overlayOccluded
+        val update = {
+            if (!closed && shouldShow == (hostMounted && !overlayOccluded)) {
+                canvas.isEnabled = shouldShow
+                canvas.isFocusable = shouldShow
+                canvas.isVisible = shouldShow
+                if (shouldShow) attachAndResize() else detachNativeSurface()
+            }
+        }
+        if (EventQueue.isDispatchThread()) update() else EventQueue.invokeLater(update)
     }
 
     /** JAWT surface attachment is tied to Swing's component lifecycle and always runs on the EDT. */
@@ -145,7 +187,11 @@ internal class EmbeddedMirrorMacSurface(
     }
 
     private fun attachAndResize() {
-        if (closed || overlayOccluded || !canvas.isDisplayable) return
+        if (closed) return
+        if (!hostMounted || overlayOccluded || !canvas.isDisplayable || !canvas.isShowing) {
+            detachNativeSurface()
+            return
+        }
         val window = SwingUtilities.getWindowAncestor(canvas)
         if (window != null && window !== attachedWindow) {
             val origin = SwingUtilities.convertPoint(canvas, 0, 0, window)
@@ -163,6 +209,14 @@ internal class EmbeddedMirrorMacSurface(
             }.onFailure { onDiagnostic("Metal mirror attach failed: ${it.message ?: it::class.simpleName}") }
         }
         resize()
+    }
+
+    /** Remove only the AppKit presentation layer; the decoder and last decoded surface stay live. */
+    private fun detachNativeSurface() {
+        if (closed) return
+        attachedWindow = null
+        runCatching { native.detachCanvas() }
+            .onFailure { onDiagnostic("Metal mirror detach failed: ${it.message ?: it::class.simpleName}") }
     }
 
     private fun resize() {

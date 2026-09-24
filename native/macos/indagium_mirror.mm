@@ -28,6 +28,14 @@ struct LayerFrameSnapshot {
     bool samplePending = false;
 };
 
+// AWT hierarchy events must not wait synchronously for AppKit to detach a layer. Generation
+// numbers let the main-queue detach become a no-op when a newer host has already attached it.
+struct LayerAttachmentState {
+    std::mutex lock;
+    uint64_t generation = 0;
+    bool closed = false;
+};
+
 // Resize notifications arrive on the AWT event-dispatch thread, while CAMetalLayer geometry must
 // be changed on AppKit's main queue. Keep their shared state independent from Mirror so a queued
 // AppKit block can safely outlive nativeClose without dereferencing a deleted Mirror.
@@ -69,6 +77,7 @@ struct Mirror {
     std::mutex lock;
     std::condition_variable decodeCompleted;
     std::shared_ptr<LayerFrameSnapshot> layerFrameSnapshot = std::make_shared<LayerFrameSnapshot>();
+    std::shared_ptr<LayerAttachmentState> layerAttachment = std::make_shared<LayerAttachmentState>();
     std::shared_ptr<PendingGeometryUpdate> pendingGeometry = std::make_shared<PendingGeometryUpdate>();
     bool renderScheduled = false;
     bool decodeInFlight = false;
@@ -272,6 +281,42 @@ static void detachLayerFromTree(CAMetalLayer *layer) {
         __strong CAMetalLayer *retainedLayer = layer;
         dispatch_async(dispatch_get_main_queue(), ^{ [retainedLayer removeFromSuperlayer]; });
     }
+}
+
+static uint64_t nextLayerAttachmentGeneration(const std::shared_ptr<LayerAttachmentState> &state) {
+    if (!state) return 0;
+    std::lock_guard<std::mutex> guard(state->lock);
+    if (state->closed) return 0;
+    return ++state->generation;
+}
+
+static bool isCurrentLayerAttachmentGeneration(
+    const std::shared_ptr<LayerAttachmentState> &state,
+    uint64_t generation) {
+    if (!state || generation == 0) return false;
+    std::lock_guard<std::mutex> guard(state->lock);
+    return !state->closed && state->generation == generation;
+}
+
+static void detachLayerFromTreeWhenCurrent(
+    CAMetalLayer *layer,
+    const std::shared_ptr<LayerAttachmentState> &state,
+    uint64_t generation) {
+    if (!layer || !state || generation == 0) return;
+    __strong CAMetalLayer *retainedLayer = layer;
+    const std::shared_ptr<LayerAttachmentState> retainedState = state;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (isCurrentLayerAttachmentGeneration(retainedState, generation)) {
+            [retainedLayer removeFromSuperlayer];
+        }
+    });
+}
+
+static void closeLayerAttachmentState(const std::shared_ptr<LayerAttachmentState> &state) {
+    if (!state) return;
+    std::lock_guard<std::mutex> guard(state->lock);
+    state->closed = true;
+    ++state->generation;
 }
 
 static void sampleDrawableGrid(
@@ -855,6 +900,27 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoTool
     return (jlong)mirror;
 }
 
+extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeDetach(
+    JNIEnv *, jclass, jlong handle) {
+    Mirror *mirror = (Mirror *)handle;
+    if (!mirror) return;
+    CAMetalLayer *layer = nil;
+    std::shared_ptr<LayerAttachmentState> attachmentState;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        if (mirror->closed) return;
+        layer = mirror->layer;
+        attachmentState = mirror->layerAttachment;
+    }
+    // A tab-owned SwingPanel can leave the main window while its recorder and decoder remain
+    // alive. Remove our retained overlay layer directly instead of asking JAWT for a peer that
+    // may already have been disposed; nativeAttach will reparent it when the panel is shown again.
+    // The generation check lets hierarchy teardown return immediately and prevents a delayed
+    // AppKit removal from detaching a layer that was already reattached to a newer host.
+    const uint64_t generation = nextLayerAttachmentGeneration(attachmentState);
+    detachLayerFromTreeWhenCurrent(layer, attachmentState, generation);
+}
+
 extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeAttach(
     JNIEnv *env, jclass, jlong handle, jint windowX, jint windowY, jint insetLeft, jint insetTop) {
     Mirror *mirror = (Mirror *)handle;
@@ -930,7 +996,13 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
     // holding a peer lock across the EDT -> main-thread hop, which could deadlock a resize/close.
     awt.FreeDrawingSurface(surface);
     if (platformLayers) {
+        const auto attachmentState = mirror->layerAttachment;
+        const uint64_t attachmentGeneration = nextLayerAttachmentGeneration(attachmentState);
         performOnAppKitMainThreadSync(^{
+                    if (!isCurrentLayerAttachmentGeneration(attachmentState, attachmentGeneration)) {
+                        attachResult = 6;
+                        return;
+                    }
                     {
                         std::lock_guard<std::mutex> guard(mirror->lock);
                         if (!mirror->closed) {
@@ -1456,6 +1528,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
         mirror->decodeCompleted.notify_all();
         layer = mirror->layer;
     }
+    closeLayerAttachmentState(mirror->layerAttachment);
     // Compose can dispose the Canvas peer before it calls close. Never ask JAWT for a new drawing
     // surface here; that dereferences the invalid peer. The CAMetalLayer is ours, so detach the
     // retained layer directly on AppKit's main queue without touching the dead peer.

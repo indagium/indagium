@@ -79,6 +79,22 @@ static void verifyLayerDetachWithoutJAWT() {
     if (child.superlayer != nil) fail("native close helper did not detach the retained layer without JAWT");
 }
 
+static void verifyStaleQueuedDetachCannotRemoveAReattachedLayer() {
+    auto state = std::make_shared<LayerAttachmentState>();
+    const uint64_t detachGeneration = nextLayerAttachmentGeneration(state);
+    const uint64_t attachGeneration = nextLayerAttachmentGeneration(state);
+    if (isCurrentLayerAttachmentGeneration(state, detachGeneration)) {
+        fail("a queued detach stayed current after a newer host attach");
+    }
+    if (!isCurrentLayerAttachmentGeneration(state, attachGeneration)) {
+        fail("the latest host attachment generation was not retained");
+    }
+    closeLayerAttachmentState(state);
+    if (isCurrentLayerAttachmentGeneration(state, attachGeneration)) {
+        fail("a queued detach remained current after native close");
+    }
+}
+
 static void verifyJawtManagedLayerPlacement() {
     CALayer *firstWindow = [CALayer layer];
     CALayer *secondWindow = [CALayer layer];
@@ -179,8 +195,14 @@ static void verifyQueuedGeometryOwnsPendingState() {
 }
 
 int main() {
-    verifyMetalRenderPipeline();
+    const bool metalAvailable = MTLCreateSystemDefaultDevice() != nil;
+    if (metalAvailable) {
+        verifyMetalRenderPipeline();
+    } else {
+        std::cout << "skipping Metal shader test: no Metal device is available" << std::endl;
+    }
     verifyLayerDetachWithoutJAWT();
+    verifyStaleQueuedDetachCannotRemoveAReattachedLayer();
     verifyJawtManagedLayerPlacement();
     verifyViewportClipMaskCoordinates();
     verifyQueuedGeometryOwnsPendingState();
@@ -192,6 +214,11 @@ int main() {
     const auto units = parseAnnexB(annexB, sizeof(annexB));
     if (units.size() != 3 || units[0].type != 7 || units[1].type != 8 || units[2].type != 5) {
         fail("Annex-B parser did not preserve mixed three/four-byte start codes");
+    }
+
+    if (!metalAvailable) {
+        std::cout << "native mirror layer lifecycle and parser checks passed; VideoToolbox checks skipped without Metal" << std::endl;
+        return 0;
     }
 
     Mirror mirror{};

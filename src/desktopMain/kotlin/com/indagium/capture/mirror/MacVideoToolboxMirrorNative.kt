@@ -66,6 +66,11 @@ internal class MacVideoToolboxMirrorNative(private val canvas: Canvas) : AutoClo
         if (handle != 0L) nativeAttach(handle, windowX, windowY, insetLeft, insetTop) else null
     }
 
+    /** Removes the retained Metal layer from its AppKit window without stopping VideoToolbox. */
+    fun detachCanvas() = lifecycle.read {
+        if (handle != 0L) nativeDetach(handle)
+    }
+
     fun setClip(left: Float, top: Float, right: Float, bottom: Float) = lifecycle.read {
         if (handle != 0L) nativeSetClip(handle, left, top, right, bottom)
     }
@@ -119,6 +124,7 @@ internal class MacVideoToolboxMirrorNative(private val canvas: Canvas) : AutoClo
         ): Long
         @JvmStatic private external fun nativeSetBounds(handle: Long, width: Int, height: Int, pixelWidth: Int, pixelHeight: Int)
         @JvmStatic private external fun nativeAttach(handle: Long, windowX: Int, windowY: Int, insetLeft: Int, insetTop: Int): String?
+        @JvmStatic private external fun nativeDetach(handle: Long)
         @JvmStatic private external fun nativeSetClip(handle: Long, left: Float, top: Float, right: Float, bottom: Float)
         @JvmStatic private external fun nativeReadMetrics(handle: Long): LongArray?
         @JvmStatic private external fun nativeClose(handle: Long)
