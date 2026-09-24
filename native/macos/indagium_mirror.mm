@@ -84,6 +84,7 @@ struct Mirror {
     bool failed = false;
     bool closed = false;
     bool testPattern = false;
+    bool overlayLayerExperiment = false;
     int failureCode = 0;
     OSStatus failureStatus = noErr;
     int width = 0;
@@ -354,6 +355,18 @@ static void sampleDrawableGrid(
     }
 }
 
+static CGFloat mirrorLayerZPosition(
+    bool overlayLayerExperiment,
+    bool testPattern,
+    bool hasOtherSibling,
+    CGFloat siblingMinZ,
+    CGFloat siblingMaxZ) {
+    if (testPattern) return 1000.0;
+    if (overlayLayerExperiment) return hasOtherSibling ? siblingMinZ - 1.0 : -1.0;
+    const CGFloat aboveSiblingsZ = hasOtherSibling ? siblingMaxZ + 1.0 : 1.0;
+    return std::max(aboveSiblingsZ, 1.0);
+}
+
 static CGRect initialLayerFrame(
     CGFloat windowHeight,
     CGFloat topLevelX,
@@ -512,6 +525,24 @@ static NSString *describeAppKitViewHierarchy(CALayer *windowLayer, CAMetalLayer 
             metalLayer.zPosition,
             presentationLayer ? NSStringFromClass([presentationLayer class]) : @"nil",
             presentationLayer.superlayer ? NSStringFromClass([presentationLayer.superlayer class]) : @"nil"];
+        CALayer *parentLayer = metalLayer.superlayer;
+        if (parentLayer.sublayers.count > 0) {
+            [description appendString:@" metal_siblings={"];
+            for (NSUInteger index = 0; index < parentLayer.sublayers.count; ++index) {
+                CALayer *sibling = parentLayer.sublayers[index];
+                id siblingDelegate = sibling.delegate;
+                [description appendFormat:@"%s%lu:%@ z=%.3f frame=%@ hidden=%d opacity=%.2f delegate=%@",
+                    index == 0 ? "" : ",",
+                    (unsigned long)index,
+                    NSStringFromClass([sibling class]),
+                    sibling.zPosition,
+                    NSStringFromRect(sibling.frame),
+                    sibling.hidden,
+                    sibling.opacity,
+                    siblingDelegate ? NSStringFromClass([siblingDelegate class]) : @"nil"];
+            }
+            [description appendString:@"}"];
+        }
     }
     return description;
 }
@@ -880,9 +911,11 @@ static id<MTLRenderPipelineState> createRenderPipeline(id<MTLDevice> device) {
     return [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
 }
 
-extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeCreate(JNIEnv *env, jclass, jobject canvas) {
+extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeCreate(
+    JNIEnv *env, jclass, jobject canvas, jboolean overlayLayerExperiment) {
     Mirror *mirror = new Mirror{};
     mirror->canvas = env->NewGlobalRef(canvas);
+    mirror->overlayLayerExperiment = overlayLayerExperiment == JNI_TRUE;
     mirror->device = MTLCreateSystemDefaultDevice();
     if (!mirror->device) { env->DeleteGlobalRef(mirror->canvas); delete mirror; return 0; }
     mirror->commands = [mirror->device newCommandQueue];
@@ -1011,7 +1044,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                                 mirror->layer.device = mirror->device;
                                 mirror->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                                 mirror->layer.opaque = YES;
-                                mirror->layer.zPosition = 1.0;
+                                // The experiment starts behind siblings; attach will refine this
+                                // against the actual parent layer's sibling depths.
+                                mirror->layer.zPosition = mirror->overlayLayerExperiment ? -1.0 : 1.0;
                                 mirror->layer.framebufferOnly = NO;
                                 mirror->layer.presentsWithTransaction = NO;
                             }
@@ -1070,6 +1105,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                     NSArray<CALayer *> *siblings = parentLayer.sublayers;
                     if (siblings) {
                         layerSiblingCount = (int64_t)siblings.count;
+                        CGFloat siblingMinZ = 0.0;
                         CGFloat siblingMaxZ = 0.0;
                         bool hasOtherSibling = false;
                         for (NSUInteger index = 0; index < siblings.count; ++index) {
@@ -1077,12 +1113,24 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                             if (sibling == layer) {
                                 layerSiblingIndex = (int64_t)index;
                             } else {
-                                siblingMaxZ = hasOtherSibling ? std::max(siblingMaxZ, sibling.zPosition) : sibling.zPosition;
+                                if (hasOtherSibling) {
+                                    siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
+                                    siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
+                                } else {
+                                    siblingMinZ = siblingMaxZ = sibling.zPosition;
+                                }
                                 hasOtherSibling = true;
                             }
                         }
-                        const CGFloat aboveSiblingsZ = hasOtherSibling ? siblingMaxZ + 1.0 : 1.0;
-                        layer.zPosition = std::max(aboveSiblingsZ, mirror->testPattern ? 1000.0 : 1.0);
+                        // Experimental mode leaves the live layer at natural depth so Compose
+                        // content can paint over it. Retain the prior above-siblings placement by
+                        // default, and keep the test pattern topmost for native diagnostics.
+                        layer.zPosition = mirrorLayerZPosition(
+                            mirror->overlayLayerExperiment,
+                            mirror->testPattern,
+                            hasOtherSibling,
+                            siblingMinZ,
+                            siblingMaxZ);
                         layerSiblingMaxZMilli = hasOtherSibling ? (int64_t)(siblingMaxZ * 1000.0) : 0;
                     }
                     hasSuperlayer = layer.superlayer != nil;

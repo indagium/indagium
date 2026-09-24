@@ -81,6 +81,7 @@ import java.awt.event.KeyAdapter
 import java.awt.event.KeyEvent as AwtKeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelListener
 import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.File
@@ -716,7 +717,10 @@ internal fun EmbeddedMirrorPanel(
             macSurface.setOverlayOcclusionListener(::cancelActiveTouch)
             val mouseListener = object : MouseAdapter() {
                 override fun mousePressed(event: MouseEvent) {
-                    if (macSurface.isOverlayOccluded) return
+                    if (macSurface.isOverlayOccluded) {
+                        macSurface.forwardOverlayMouseEvent(event)
+                        return
+                    }
                     canvas.requestFocusInWindow()
                     val x = event.x.toFloat()
                     val y = event.y.toFloat()
@@ -726,7 +730,10 @@ internal fun EmbeddedMirrorPanel(
                 }
 
                 override fun mouseDragged(event: MouseEvent) {
-                    if (macSurface.isOverlayOccluded) return
+                    if (macSurface.isOverlayOccluded) {
+                        macSurface.forwardOverlayMouseEvent(event)
+                        return
+                    }
                     if (!activeTouch) return
                     lastTouchX = event.x.toFloat()
                     lastTouchY = event.y.toFloat()
@@ -734,19 +741,29 @@ internal fun EmbeddedMirrorPanel(
                 }
 
                 override fun mouseReleased(event: MouseEvent) {
+                    if (macSurface.isOverlayOccluded) {
+                        macSurface.forwardOverlayMouseEvent(event)
+                        return
+                    }
                     if (!activeTouch) return
                     lastTouchX = event.x.toFloat()
                     lastTouchY = event.y.toFloat()
                     mapper()?.let {
-                        liveHandle.sendTouch(
-                            it,
-                            if (macSurface.isOverlayOccluded) MirrorTouchAction.CANCEL else MirrorTouchAction.UP,
-                            pointerId,
-                            lastTouchX,
-                            lastTouchY,
-                        )
+                        liveHandle.sendTouch(it, MirrorTouchAction.UP, pointerId, lastTouchX, lastTouchY)
                     }
                     activeTouch = false
+                }
+
+                override fun mouseMoved(event: MouseEvent) {
+                    if (macSurface.isOverlayOccluded) macSurface.forwardOverlayMouseEvent(event)
+                }
+
+                override fun mouseEntered(event: MouseEvent) {
+                    if (macSurface.isOverlayOccluded) macSurface.forwardOverlayMouseEvent(event)
+                }
+
+                override fun mouseExited(event: MouseEvent) {
+                    if (macSurface.isOverlayOccluded) macSurface.forwardOverlayMouseEvent(event)
                 }
             }
             val keyListener = object : KeyAdapter() {
@@ -769,14 +786,19 @@ internal fun EmbeddedMirrorPanel(
                     }
                 }
             }
+            val mouseWheelListener = MouseWheelListener { event ->
+                if (macSurface.isOverlayOccluded) macSurface.forwardOverlayMouseWheelEvent(event)
+            }
             canvas.addMouseListener(mouseListener)
             canvas.addMouseMotionListener(mouseListener)
+            canvas.addMouseWheelListener(mouseWheelListener)
             canvas.addKeyListener(keyListener)
             onDispose {
                 cancelActiveTouch()
                 macSurface.setOverlayOcclusionListener(null)
                 canvas.removeMouseListener(mouseListener)
                 canvas.removeMouseMotionListener(mouseListener)
+                canvas.removeMouseWheelListener(mouseWheelListener)
                 canvas.removeKeyListener(keyListener)
             }
         }
@@ -855,7 +877,7 @@ internal fun EmbeddedMirrorPanel(
                 contentAlignment = Alignment.Center,
             ) {
                 if (macSurface != null) {
-                    if (macOverlayOccluded) {
+                    if (macOverlayOccluded && !macSurface.overlayLayerExperimentEnabled) {
                         Column(
                             Modifier.fillMaxSize().background(Color.Black, RoundedCornerShape(8.dp)).padding(12.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
