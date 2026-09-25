@@ -28,6 +28,7 @@ private const val TEST_FRAME_COUNT = 40
 private const val TEST_SAMPLES_PER_FRAME = TEST_SAMPLE_RATE / TEST_FRAME_RATE.toInt()
 private const val TRAILER_STRIP_BYTES = 4_096
 private const val NEAR_KEYFRAME_FRAME_BUDGET = 300
+private const val MP4_FASTSTART_SCAN_BYTES = 4_096
 
 @Suppress("MagicNumber")
 class FfmpegCaptureVideoExporterTest {
@@ -232,6 +233,36 @@ class FfmpegCaptureVideoExporterTest {
         )
     }
 
+    // Archive v3 / MP4 export: the container is chosen from the DESTINATION file's own extension
+    // (see isMp4Destination/muxFormatFor) — no new CaptureVideoExporter parameter, so this is
+    // exercised the same way every other test here drives a container choice, just with a ".mp4"
+    // destination instead of ".mkv". Uses a VIDEO-ONLY fixture: CaptureArchive.kt's export() never
+    // actually requests an MP4 destination when the session recorded audio (see its own doc for the
+    // scoped-down fallback), so an audio track is deliberately out of scope for this exporter test.
+    @Test
+    fun exportsAPlayableFaststartMp4AndPreservesDuration() {
+        val source = syntheticVideoOnlyCapture()
+        val destination = tempFile("mp4-clip", ".mp4")
+
+        val clip = FfmpegCaptureVideoExporter().export(source, destination, 500, 3_000)
+
+        assertEquals(clip.coveredEndMs - clip.actualStartMs, clip.durationMs)
+        FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            assertTrue(grabber.videoStream >= 0, "mp4 export should retain a video stream")
+            assertTrue(grabber.grabImage() != null, "mp4 export should decode a real video frame")
+        }
+        // +faststart must relocate the moov atom near the front of the file instead of leaving it
+        // at the very end, so playback/streaming can start before the whole file is available —
+        // the whole reason this project chose Matroska for LIVE recording (see this exporter's own
+        // module doc) in the first place. A finished export is static, so this is free to fix here.
+        val head = destination.inputStream().use { it.readNBytes(MP4_FASTSTART_SCAN_BYTES) }
+        assertTrue(
+            String(head, Charsets.ISO_8859_1).contains("moov"),
+            "moov atom should be relocated near the front of the file by +faststart",
+        )
+    }
+
     @Test
     fun rejectsARealAudioOnlyContainerAsHavingNoReadableVideo() {
         val source = syntheticAudioOnlyCapture()
@@ -314,6 +345,40 @@ class FfmpegCaptureVideoExporterTest {
                     (sin(position * 2.0 * Math.PI * 440.0 / TEST_SAMPLE_RATE) * Short.MAX_VALUE / 8).toInt().toShort()
                 }
                 recorder.recordSamples(TEST_SAMPLE_RATE, 1, ShortBuffer.wrap(samples))
+            }
+            recorder.stop()
+        } finally {
+            runCatching { recorder.release() }
+        }
+        return output
+    }
+
+    /** Same shape as [syntheticCapture]'s default (dense, near-every-frame keyframes — see that
+     *  function's own comment) but with no audio track at all, for the MP4 export test: production
+     *  never requests an MP4 destination when the session recorded audio, so an MP4-container test
+     *  fixture never needs one either. */
+    private fun syntheticVideoOnlyCapture(): File {
+        val output = tempFile("synthetic-video-only-capture", ".mkv")
+        val width = 64
+        val height = 48
+        val pixels = ByteBuffer.allocate(width * height * 3)
+        val recorder = FFmpegFrameRecorder(output, width, height, 0).apply {
+            format = "matroska"
+            frameRate = TEST_FRAME_RATE
+            videoCodec = AV_CODEC_ID_MPEG4
+            videoBitrate = 300_000
+        }
+        try {
+            recorder.start()
+            repeat(TEST_FRAME_COUNT) { frameIndex ->
+                pixels.clear()
+                repeat(width * height) {
+                    pixels.put((frameIndex * 5 % 255).toByte())
+                    pixels.put((frameIndex * 11 % 255).toByte())
+                    pixels.put((frameIndex * 17 % 255).toByte())
+                }
+                pixels.flip()
+                recorder.recordImage(width, height, 8, 3, width * 3, AV_PIX_FMT_BGR24, pixels)
             }
             recorder.stop()
         } finally {

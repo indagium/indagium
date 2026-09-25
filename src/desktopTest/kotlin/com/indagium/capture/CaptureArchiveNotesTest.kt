@@ -2,6 +2,8 @@ package com.indagium.capture
 
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.VideoFrameReference
+import com.indagium.model.VideoSource
 import com.indagium.utils.parseLogcat
 import java.io.File
 import java.util.zip.ZipEntry
@@ -184,12 +186,139 @@ class CaptureArchiveNotesTest {
         )
 
         ZipFile(destination).use { zip ->
-            assertTrue(zip.entries().asSequence().none { it.name == "notes/capture.ann" })
+            assertTrue(zip.entries().asSequence().none { it.name == "notes.ann" })
         }
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
         assertNull(imported.notes)
         assertNull(imported.descriptor.notes)
         assertTrue(imported.descriptor.markers.isEmpty())
+    }
+
+    // Bug fix regression (marker screenshot doesn't seek to the right video position): the plan's
+    // own worked example — a marker screenshot at elapsed 40s, video starting at 2s (so its LIVE,
+    // source-video-relative position is 38s), exported as a "last 5 min"-style clip whose video
+    // actually starts at SOURCE 10s — must reopen seeking to 28s (38 - 10), not 38s and not the
+    // session's raw video file.
+    @Test
+    fun exportRewritesLiveVideoFrameToPortableArchiveSourceAndImportRepointsItToTheActualVideo() {
+        val root = createTempDirectory("capture-notes-video-frame").toFile()
+        val session = CaptureSession(
+            id = "session-frame",
+            directory = File(root, "session"),
+            device = CaptureDevice("serial", "device", "Pixel"),
+            settings = CaptureSettings(recordVideo = true, freeSpaceReserveBytes = 0),
+            startedEpochMs = 1_700_000_000_000,
+            elapsedMs = 60_000,
+            videoStartElapsedMs = 2_000L,
+        )
+        session.logFile.parentFile.mkdirs()
+        session.indexFile.parentFile.mkdirs()
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val logBytes = "01-01 10:00:40.000  1  1 I Tag: row\n".toByteArray()
+        session.logFile.writeBytes(logBytes)
+        session.indexFile.writeText(
+            "{\"byteOffset\":0,\"byteLength\":${logBytes.size},\"elapsedMs\":40000,\"rowOrdinal\":1}\n",
+        )
+
+        val liveFrame = VideoFrameReference(
+            source = VideoSource.LocalFile(session.videoFile.absolutePath),
+            sourceLabel = "capture.indagium.json/${session.videoFile.name}",
+            // elapsedMs(40s) - videoStartElapsedMs(2s) + manualOffsetMs(0) = 38s of SOURCE video.
+            positionMs = 38_000L,
+        )
+        val notes = Annotations(
+            blocks = listOf(
+                AnnBlock.Image(
+                    "img1", caption = "", provenance = liveFrame.provenanceLabel,
+                    format = "png", bytes = byteArrayOf(9), videoFrame = liveFrame,
+                ),
+            ),
+        )
+        val destination = File(root, "frame.zip")
+        val exporter = CaptureArchiveExporter(
+            CaptureVideoExporter { _, target, _, _ ->
+                target.writeText("clip")
+                CaptureVideoClip(actualStartMs = 10_000L, coveredEndMs = 50_000L, durationMs = 40_000L)
+            },
+        )
+        exporter.export(
+            session,
+            CaptureExportRequest(destination = destination, range = CaptureRange.ALL, cutoffElapsedMs = 60_000L),
+            notes = notes,
+        )
+
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        val exportedImage = (requireNotNull(imported.notes).blocks.single()) as AnnBlock.Image
+        val exportedFrame = requireNotNull(exportedImage.videoFrame)
+        assertEquals(28_000L, exportedFrame.positionMs, "38s of source video minus the clip's own 10s start")
+        val portableSource = exportedFrame.source as VideoSource.ArchiveEntry
+        assertEquals("", portableSource.archivePath, "export-time source is a portable, archive-relative marker")
+        assertEquals(imported.descriptor.video!!.path, portableSource.entryPath)
+
+        // Import side: AppState re-points the portable marker at whatever this reopen's own
+        // attached video actually resolves to — here, a durable ArchiveEntry for the reopened zip.
+        val actualSource = VideoSource.ArchiveEntry(destination.absolutePath, imported.descriptor.video!!.path, "screen")
+        val repointed = repointPortableVideoFrames(requireNotNull(imported.notes), actualSource)
+        val repointedFrame = requireNotNull((repointed.blocks.single() as AnnBlock.Image).videoFrame)
+        assertEquals(actualSource, repointedFrame.source)
+        assertEquals(28_000L, repointedFrame.positionMs)
+    }
+
+    // A frame whose live position falls outside what this export actually covered (or no video was
+    // exported at all) must be DETACHED, not shipped with a stale/wrong position — see
+    // CaptureArchive.kt's rewriteExportedVideoFrames doc.
+    @Test
+    fun exportDropsAVideoFrameThatFallsOutsideTheExportedClip() {
+        val root = createTempDirectory("capture-notes-video-frame-outside").toFile()
+        val session = CaptureSession(
+            id = "session-frame-outside",
+            directory = File(root, "session"),
+            device = CaptureDevice("serial", "device", "Pixel"),
+            settings = CaptureSettings(recordVideo = true, freeSpaceReserveBytes = 0),
+            startedEpochMs = 1_700_000_000_000,
+            elapsedMs = 60_000,
+            videoStartElapsedMs = 2_000L,
+        )
+        session.logFile.parentFile.mkdirs()
+        session.indexFile.parentFile.mkdirs()
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        val logBytes = "01-01 10:00:05.000  1  1 I Tag: row\n".toByteArray()
+        session.logFile.writeBytes(logBytes)
+        session.indexFile.writeText(
+            "{\"byteOffset\":0,\"byteLength\":${logBytes.size},\"elapsedMs\":5000,\"rowOrdinal\":1}\n",
+        )
+        // Live position 3s of source video — before the clip's own 10s start, so entirely outside it.
+        val liveFrame = VideoFrameReference(
+            source = VideoSource.LocalFile(session.videoFile.absolutePath),
+            sourceLabel = "capture.indagium.json/${session.videoFile.name}",
+            positionMs = 3_000L,
+        )
+        val notes = Annotations(
+            blocks = listOf(
+                AnnBlock.Image(
+                    "img1", caption = "", provenance = liveFrame.provenanceLabel,
+                    format = "png", bytes = byteArrayOf(9), videoFrame = liveFrame,
+                ),
+            ),
+        )
+        val destination = File(root, "outside.zip")
+        val exporter = CaptureArchiveExporter(
+            CaptureVideoExporter { _, target, _, _ ->
+                target.writeText("clip")
+                CaptureVideoClip(actualStartMs = 10_000L, coveredEndMs = 50_000L, durationMs = 40_000L)
+            },
+        )
+        exporter.export(
+            session,
+            CaptureExportRequest(destination = destination, range = CaptureRange.ALL, cutoffElapsedMs = 60_000L),
+            notes = notes,
+        )
+
+        val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
+        val exportedImage = (requireNotNull(imported.notes).blocks.single()) as AnnBlock.Image
+        assertNull(exportedImage.videoFrame, "a frame outside the exported clip must be detached, not left pointing at the wrong moment")
     }
 
     /** Rewrites only [CAPTURE_DESCRIPTOR_NAME]'s bytes, copying every other entry unchanged — same

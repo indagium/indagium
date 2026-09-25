@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureVideoContainer
 import com.indagium.capture.captureFilenameTemplateError
 import java.io.File
 
@@ -199,6 +200,25 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
     CaptureNumericField("Bitrate Mbps", settings.bitrateMbps.toString(), MIN_CAPTURE_BITRATE_MBPS..MAX_CAPTURE_BITRATE_MBPS) {
         update(settings.copy(bitrateMbps = it))
     }
+    AppText("Saved video format", color = tc().td, fontSize = 10.sp)
+    SegmentedControl(
+        options = listOf("MP4", "MKV"),
+        selectedIndices = setOf(CaptureVideoContainer.entries.indexOf(settings.videoContainer)),
+        onToggle = { index -> update(settings.copy(videoContainer = CaptureVideoContainer.entries[index])) },
+        modifier = Modifier.fillMaxWidth(),
+        fillWidth = true,
+    )
+    // Recording itself always stays Matroska (crash-safe while it's still growing — see
+    // FfmpegCaptureVideoExporter's own module doc); this only picks the container Save
+    // snapshot/Save ZIP remux into. MP4 plays natively in more places (QuickTime, phones, browsers)
+    // but audio capture isn't supported there yet, hence the second sentence.
+    AppText(
+        "Applies to Save snapshot / Save ZIP, not the live recording. MP4 opens more widely; " +
+            "capturing with audio still exports as MKV.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = 3,
+    )
 }
 
 @Composable

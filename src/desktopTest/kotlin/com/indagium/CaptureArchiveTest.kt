@@ -17,6 +17,7 @@ import com.indagium.capture.captureSettingsFromJson
 import com.indagium.capture.captureSettingsToJson
 import com.indagium.capture.renderCaptureFilename
 import java.io.File
+import java.security.MessageDigest
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
@@ -58,16 +59,20 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertEquals(rows.last().text, imported.logFile.readText())
-        assertEquals(1, imported.timeline.rows.size)
-        assertEquals(1, imported.timeline.rows.single().ordinal)
-        assertEquals(300_000, imported.timeline.rows.single().videoMs)
-        assertEquals(100, imported.timeline.manualOffsetMs)
+        // Archive v3: one sync anchor instead of a per-row mapping — the sole kept row (ordinal 1)
+        // is the only candidate, and its predicted video position matches what the old row-by-row
+        // mapping used to compute for it.
+        assertEquals(1, imported.syncAnchor?.row)
+        assertEquals(300_000L, imported.syncAnchor?.videoMs)
+        assertNull(imported.timeline)
+        assertEquals(100L, imported.descriptor.manualOffsetMs)
         assertEquals(destination, imported.source)
         assertTrue(imported.videoFile?.isFile == true)
-        assertEquals("logs/logcat.log", imported.descriptor.log.path)
-        assertEquals("mapping/log-video.jsonl", imported.descriptor.mapping.path)
-        assertEquals("video/screen.mkv", imported.descriptor.video?.path)
-        assertFalse(imported.descriptor.settings.adbPath.isNotEmpty())
+        assertEquals("logcat.log", imported.descriptor.log.path)
+        assertNull(imported.descriptor.mapping)
+        // Archive v3 defaults the exported container to MP4 (CaptureVideoContainer.MP4) — see
+        // CaptureModels.kt.
+        assertEquals("screen.mp4", imported.descriptor.video?.path)
     }
 
     @Test
@@ -112,7 +117,14 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertEquals("row-2\n----- separator inside\nrow-3\n", imported.logFile.readText())
-        assertEquals(listOf(2_000L, 3_000L), imported.timeline.rows.map { it.elapsedMs })
+        // These rows have no parseable log timestamp ("row-2"/"row-3" are not logcat-formatted), so
+        // there is nothing to estimate a sync anchor from — the descriptor's own logStartMs/logEndMs
+        // (derived straight from the selection's real elapsedMs bounds, not from row content) is what
+        // still proves the temporal bounds this test's name is about.
+        assertNull(imported.syncAnchor)
+        assertNull(imported.timeline)
+        assertEquals(2_000L, imported.descriptor.logStartMs)
+        assertEquals(3_000L, imported.descriptor.logEndMs)
         assertEquals(CaptureRange.SELECTION, imported.descriptor.range)
         assertEquals(2_000L, requestedStart)
         assertEquals(3_000L, requestedEnd)
@@ -264,7 +276,7 @@ class CaptureArchiveTest {
     }
 
     @Test
-    fun exportBeforeVideoStartsSucceedsWithLogOnlyArchiveAndNullMapping() {
+    fun exportBeforeVideoStartsSucceedsWithLogOnlyArchiveAndNoSyncAnchor() {
         val root = createTempDirectory("capture-export-before-video").toFile()
         val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 5_000, elapsedMs = 40_000)
         writeCaptureInput(session, listOf(
@@ -283,17 +295,23 @@ class CaptureArchiveTest {
         assertEquals("Capture exported; video has no usable coverage for this range", result.message)
         assertNull(imported.videoFile)
         assertNull(imported.descriptor.video)
-        assertEquals(listOf(null, null), imported.timeline.rows.map { it.videoMs })
+        assertNull(imported.syncAnchor)
+        assertNull(imported.timeline)
     }
 
+    // Archive v3: the anchor estimator must prefer a row whose PREDICTED video position actually
+    // falls inside the video's coverage over an earlier ordinal that would predict a negative
+    // position (a log row captured before recording started). Each row's ts is set so its
+    // millis-of-day tracks its host elapsedMs 1:1 (a constant, zero-jitter transport latency),
+    // matching how the OLD per-row mapping used to compute each row's own videoMs directly.
     @Test
-    fun exportedVideoArchiveReopensWithRowsMappedOnlyInsideVideoCoverage() {
+    fun exportedVideoArchiveReopensWithASyncAnchorPreferringARowInsideVideoCoverage() {
         val root = createTempDirectory("capture-export-video-mapping").toFile()
         val session = session(root, recordVideo = true).copy(videoStartElapsedMs = 2_000, elapsedMs = 5_000)
         writeCaptureInput(session, listOf(
-            RawRow("row-before-video\n", 1_000, 1),
-            RawRow("row-in-video-1\n", 3_000, 2),
-            RawRow("row-in-video-2\n", 5_000, 3),
+            RawRow("01-01 10:00:01.000  1  1 I Tag: row-before-video\n", 1_000, 1),
+            RawRow("01-01 10:00:03.000  1  1 I Tag: row-in-video-1\n", 3_000, 2),
+            RawRow("01-01 10:00:05.000  1  1 I Tag: row-in-video-2\n", 5_000, 3),
         ))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
@@ -310,12 +328,17 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertTrue(imported.videoFile?.isFile == true)
-        assertEquals("video/screen.mkv", imported.descriptor.video?.path)
-        assertEquals(listOf(null, 1_000L, 3_000L), imported.timeline.rows.map { it.videoMs })
+        assertEquals("screen.mp4", imported.descriptor.video?.path)
+        // Row 1 ("row-before-video") predicts a negative video position and is skipped; row 2 is
+        // the first row whose predicted position actually lands inside the video (matches exactly
+        // what the old mapping computed for that same row: videoMs = 1_000).
+        assertEquals(2, imported.syncAnchor?.row)
+        assertEquals(1_000L, imported.syncAnchor?.videoMs)
+        assertNull(imported.timeline)
     }
 
     @Test
-    fun finalizedCaptureReopensWithRawVideoMappingAndUnmappedPreVideoRows() {
+    fun finalizedCaptureReopensWithASyncAnchorAndNoMappingFile() {
         val root = createTempDirectory("capture-finalize-video-mapping").toFile()
         val session = session(root, recordVideo = true).copy(
             status = com.indagium.capture.CaptureStatus.STOPPED,
@@ -323,8 +346,8 @@ class CaptureArchiveTest {
             elapsedMs = 5_000,
         )
         writeCaptureInput(session, listOf(
-            RawRow("row-before-video\n", 1_000, 1),
-            RawRow("row-in-video\n", 3_000, 2),
+            RawRow("01-01 10:00:01.000  1  1 I Tag: row-before-video\n", 1_000, 1),
+            RawRow("01-01 10:00:03.000  1  1 I Tag: row-in-video\n", 3_000, 2),
         ))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(7, 8, 9))
@@ -332,9 +355,14 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveExporter().finalizeSessionInPlace(session)
 
         assertEquals(session.videoFile, imported.videoFile)
-        assertEquals("mapping/log-video.jsonl", imported.descriptor.mapping.path)
+        assertNull(imported.descriptor.mapping)
         assertEquals("video/screen.mkv", imported.descriptor.video?.path)
-        assertEquals(listOf(null, 1_000L), imported.timeline.rows.map { it.videoMs })
+        assertNull(imported.timeline)
+        // Same reasoning as exportedVideoArchiveReopensWithASyncAnchorPreferringARowInsideVideoCoverage:
+        // row 1 predicts a negative video position (raw/unremuxed video, so there is no clip upper
+        // bound — only the lower 0 bound applies) and is skipped in favor of row 2.
+        assertEquals(2, imported.syncAnchor?.row)
+        assertEquals(1_000L, imported.syncAnchor?.videoMs)
     }
 
     @Test
@@ -345,9 +373,9 @@ class CaptureArchiveTest {
             videoStartElapsedMs = 500,
         )
         writeCaptureInput(session, listOf(
-            RawRow("row-1\n", 1_000, 1),
+            RawRow("01-01 10:00:00.000  1  1 I Tag: row-1\n", 1_000, 1),
             RawRow("----- separator\n", 1_500, null),
-            RawRow("row-2\n", 2_000, 2),
+            RawRow("01-01 10:00:01.000  1  1 I Tag: row-2\n", 2_000, 2),
         ))
         session.videoFile.parentFile.mkdirs()
         session.videoFile.writeBytes(byteArrayOf(7, 8, 9))
@@ -356,11 +384,18 @@ class CaptureArchiveTest {
 
         assertEquals(session.logFile, imported.logFile)
         assertEquals(session.videoFile, imported.videoFile)
-        assertEquals("row-1\n----- separator\nrow-2\n", imported.logFile.readText())
-        assertEquals(listOf(500L, 1_500L), imported.timeline.rows.map { it.videoMs })
+        assertEquals(
+            "01-01 10:00:00.000  1  1 I Tag: row-1\n----- separator\n01-01 10:00:01.000  1  1 I Tag: row-2\n",
+            imported.logFile.readText(),
+        )
+        // Archive v3: no row-by-row mapping file any more (requirement 4) — a single sync anchor
+        // replaces it. Row 1 is the first (and here, only viable) candidate.
+        assertEquals(1, imported.syncAnchor?.row)
+        assertEquals(500L, imported.syncAnchor?.videoMs)
+        assertNull(imported.timeline)
         assertEquals(File(session.directory, CAPTURE_DESCRIPTOR_NAME), imported.source)
         assertEquals(byteArrayOf(7, 8, 9).toList(), imported.videoFile?.readBytes()?.toList())
-        assertTrue(File(session.directory, "mapping/log-video.jsonl").isFile)
+        assertFalse(File(session.directory, "mapping/log-video.jsonl").exists())
         assertTrue(File(session.directory, CAPTURE_DESCRIPTOR_NAME).isFile)
         assertTrue(root.listFiles().orEmpty().none { it.extension == "zip" })
     }
@@ -390,7 +425,7 @@ class CaptureArchiveTest {
         val original = exportLogOnly(root)
         val tampered = File(root, "tampered.zip")
         rewriteZip(original, tampered) { name, bytes ->
-            if (name == "logs/logcat.log") bytes.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() } else bytes
+            if (name == "logcat.log") bytes.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() } else bytes
         }
 
         assertFails { CaptureArchiveReader.open(tampered, File(root, "cache")) }
@@ -414,10 +449,11 @@ class CaptureArchiveTest {
         val future = File(root, "future.zip")
         rewriteZip(original, future) { name, bytes ->
             if (name == CAPTURE_DESCRIPTOR_NAME) {
-                // CAPTURE_ARCHIVE_VERSION is 2 as of Phase 4 (snapshot archive + import) — parseDescriptor
-                // accepts 1..CAPTURE_ARCHIVE_VERSION, so "future" here must be one past whatever that is.
+                // v3 writes "version", not the old "formatVersion" key (still read for a v1/v2
+                // archive) — parseDescriptor accepts 1..CAPTURE_ARCHIVE_VERSION, so "future" here
+                // must be one past whatever that is.
                 bytes.toString(Charsets.UTF_8)
-                    .replace("\"formatVersion\":${com.indagium.capture.CAPTURE_ARCHIVE_VERSION}", "\"formatVersion\":99")
+                    .replace("\"version\":${com.indagium.capture.CAPTURE_ARCHIVE_VERSION}", "\"version\":99")
                     .toByteArray()
             } else {
                 bytes
@@ -471,7 +507,11 @@ class CaptureArchiveTest {
         val imported = CaptureArchiveReader.open(destination, File(root, "cache"))
 
         assertEquals("01-01 10:00:01.000  1  1 I Tag: new\n", imported.logFile.readText())
-        assertEquals(listOf(2_000L), imported.timeline.rows.map { it.elapsedMs })
+        assertEquals(2_000L, imported.descriptor.logStartMs)
+        assertEquals(2_000L, imported.descriptor.logEndMs)
+        // No video in this session, so there is nothing to anchor.
+        assertNull(imported.syncAnchor)
+        assertNull(imported.timeline)
     }
 
     // Regression test for the "video checkpoint split" fix: before it, Since-last-save always
@@ -626,6 +666,122 @@ class CaptureArchiveTest {
         assertEquals(null, captureFilenameTemplateError("{serial}_{counter}.zip"))
         assertEquals("emulator_5554_3.zip", renderCaptureFilename("{serial}_{counter}.zip", device, 0, CaptureRange.ALL, 3))
     }
+
+    // Archive v3: the flat layout an export actually produces on disk, and every entry name is on
+    // openZip's allowlist — including captured_with_indagium.txt, which carries no descriptor asset
+    // entry of its own (see CaptureArchive.kt's scanZipEntries/writeZip).
+    @Test
+    fun v3ExportProducesTheFlatLayoutIncludingTheCapturedWithIndagiumBlurb() {
+        val root = createTempDirectory("capture-archive-v3-layout").toFile()
+        val zip = exportLogOnly(root)
+
+        val names = ZipFile(zip).use { it.entries().asSequence().map { entry -> entry.name }.toSet() }
+
+        // Archive v3: no more row-by-row mapping file (log-video-sync.jsonl) — the log<->video
+        // sync is a single anchor inside the descriptor's own "sync" key instead.
+        assertEquals(
+            setOf(CAPTURE_DESCRIPTOR_NAME, "captured_with_indagium.txt", "logcat.log"),
+            names,
+        )
+        val blurb = ZipFile(zip).use { zipFile ->
+            zipFile.getInputStream(zipFile.getEntry("captured_with_indagium.txt")).readBytes().toString(Charsets.UTF_8)
+        }
+        assertTrue(blurb.contains("Indagium"))
+        assertTrue(blurb.contains("indagium.com"))
+
+        // The descriptor itself carries "version": 3 (not the old "formatVersion" key) and a flat
+        // sha256 map instead of one {path,sizeBytes,sha256} object per asset.
+        val descriptorJson = ZipFile(zip).use { zipFile ->
+            zipFile.getInputStream(zipFile.getEntry(CAPTURE_DESCRIPTOR_NAME)).readBytes().toString(Charsets.UTF_8)
+        }
+        assertTrue(descriptorJson.contains("\"version\":3"))
+        assertTrue(descriptorJson.contains("\"sha256\""))
+
+        val imported = CaptureArchiveReader.open(zip, File(root, "cache"))
+        assertEquals(3, imported.descriptor.formatVersion)
+        assertEquals("logcat.log", imported.descriptor.log.path)
+        assertNull(imported.descriptor.mapping)
+        assertNull(imported.syncAnchor, "exportLogOnly has no video, so there is nothing to anchor")
+        assertNull(imported.timeline)
+    }
+
+    // Archive v3: the reader keeps parsing the old nested logs/video/mapping layout and
+    // {path,sizeBytes,sha256}-per-asset descriptor shape a pre-v3 build wrote — see
+    // CaptureArchive.kt's parseDescriptorLegacy. v1 never had notes/markers keys at all.
+    @Test
+    fun v1LegacyNestedLayoutStillOpensWithNoNotes() {
+        val root = createTempDirectory("capture-archive-v1-legacy").toFile()
+        val logBytes = "01-01 10:00:00.000  1  1 I Tag: legacy row\n".toByteArray()
+        val mappingBytes = "{\"ordinal\":1,\"elapsedMs\":1000,\"videoMs\":null}\n".toByteArray()
+        val descriptorJson = """
+            {"format":"indagium-capture","formatVersion":1,"sessionId":"legacy-v1-session",
+             "device":{"serial":"serial","state":"device","model":"Pixel","emulator":false},
+             "settings":{"formatVersion":1},
+             "sessionStartedEpochMs":1700000000000,"exportedEpochMs":1700000001000,"range":"ALL",
+             "coverage":{"logStartMs":1000,"logEndMs":1000,"videoRequestedStartMs":null,"videoActualStartMs":null,"videoEndMs":null},
+             "mappingMetadata":{"quality":"estimated","uncertaintyMs":null,"manualOffsetMs":0},
+             "interruptions":[],
+             "log":{"path":"logs/logcat.log","sizeBytes":${logBytes.size},"sha256":"${sha256Hex(logBytes)}"},
+             "mapping":{"path":"mapping/log-video.jsonl","sizeBytes":${mappingBytes.size},"sha256":"${sha256Hex(mappingBytes)}"},
+             "video":null,"screenshots":[]}
+        """.trimIndent()
+        val zip = File(root, "legacy-v1.zip")
+        ZipOutputStream(zip.outputStream()).use { out ->
+            out.putNextEntry(ZipEntry(CAPTURE_DESCRIPTOR_NAME)); out.write(descriptorJson.toByteArray()); out.closeEntry()
+            out.putNextEntry(ZipEntry("logs/logcat.log")); out.write(logBytes); out.closeEntry()
+            out.putNextEntry(ZipEntry("mapping/log-video.jsonl")); out.write(mappingBytes); out.closeEntry()
+        }
+
+        val imported = CaptureArchiveReader.open(zip, File(root, "cache"))
+        assertEquals(1, imported.descriptor.formatVersion)
+        assertEquals("legacy-v1-session", imported.descriptor.sessionId)
+        assertEquals("logs/logcat.log", imported.descriptor.log.path)
+        assertEquals(1, requireNotNull(imported.timeline).rows.size)
+        assertNull(imported.syncAnchor)
+        assertNull(imported.videoFile)
+        assertNull(imported.descriptor.notes)
+        assertTrue(imported.descriptor.markers.isEmpty())
+    }
+
+    // v2 (Phase 4: snapshot archive + import) added the OPTIONAL notes/markers keys to the same
+    // nested v1 layout, still under the old per-asset-object shape (not v3's bare path + sha256 map).
+    @Test
+    fun v2LegacyNestedLayoutStillOpensWithNotesAndMarkers() {
+        val root = createTempDirectory("capture-archive-v2-legacy").toFile()
+        val logBytes = "01-01 10:00:00.000  1  1 I Tag: legacy row\n".toByteArray()
+        val mappingBytes = "{\"ordinal\":1,\"elapsedMs\":1000,\"videoMs\":null}\n".toByteArray()
+        val notesBytes = "n1|Plain legacy note".toByteArray()
+        val descriptorJson = """
+            {"format":"indagium-capture","formatVersion":2,"sessionId":"legacy-v2-session",
+             "device":{"serial":"serial","state":"device","model":"Pixel","emulator":false},
+             "settings":{"formatVersion":1},
+             "sessionStartedEpochMs":1700000000000,"exportedEpochMs":1700000001000,"range":"ALL",
+             "coverage":{"logStartMs":1000,"logEndMs":1000,"videoRequestedStartMs":null,"videoActualStartMs":null,"videoEndMs":null},
+             "mappingMetadata":{"quality":"estimated","uncertaintyMs":null,"manualOffsetMs":0},
+             "interruptions":[],
+             "log":{"path":"logs/logcat.log","sizeBytes":${logBytes.size},"sha256":"${sha256Hex(logBytes)}"},
+             "mapping":{"path":"mapping/log-video.jsonl","sizeBytes":${mappingBytes.size},"sha256":"${sha256Hex(mappingBytes)}"},
+             "video":null,"screenshots":[],
+             "notes":{"path":"notes/capture.ann","sizeBytes":${notesBytes.size},"sha256":"${sha256Hex(notesBytes)}"},
+             "markers":[{"noteBlockId":"n1","firstOrdinal":1,"lastOrdinal":1}]}
+        """.trimIndent()
+        val zip = File(root, "legacy-v2.zip")
+        ZipOutputStream(zip.outputStream()).use { out ->
+            out.putNextEntry(ZipEntry(CAPTURE_DESCRIPTOR_NAME)); out.write(descriptorJson.toByteArray()); out.closeEntry()
+            out.putNextEntry(ZipEntry("logs/logcat.log")); out.write(logBytes); out.closeEntry()
+            out.putNextEntry(ZipEntry("mapping/log-video.jsonl")); out.write(mappingBytes); out.closeEntry()
+            out.putNextEntry(ZipEntry("notes/capture.ann")); out.write(notesBytes); out.closeEntry()
+        }
+
+        val imported = CaptureArchiveReader.open(zip, File(root, "cache"))
+        assertEquals(2, imported.descriptor.formatVersion)
+        assertEquals(1, imported.descriptor.markers.size)
+        assertEquals("n1", imported.descriptor.markers.single().noteBlockId)
+        assertNull(imported.videoFile)
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun exportLogOnly(root: File): File {
         val session = session(root)

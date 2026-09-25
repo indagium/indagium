@@ -1,18 +1,25 @@
 package com.indagium
 
 import com.indagium.capture.*
+import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
 import com.indagium.ui.AppState
+import com.indagium.ui.mkTab
 import com.indagium.ui.settingsFromJson
 import com.indagium.ui.settingsJson
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import java.io.File
 import java.util.zip.ZipFile
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -83,7 +90,12 @@ class CaptureAppRoundTripTest {
                     restored.startPendingRestoredTabLoads()
                     waitLoaded(restored, id)
                     val reopened = assertNotNull(restored.tab(id))
-                    assertNotNull(reopened.captureTimeline)
+                    // Archive v3: no CaptureTimeline to rehydrate — the calibrated VideoAnchor set
+                    // above is small enough to already be part of the restored tab token (see
+                    // AutosaveCodec's anchorVideoMs/anchorLogId fields), and AppState.restoreCaptureLink
+                    // must not clobber it with the archive's own (uncalibrated) estimate.
+                    assertNull(reopened.captureTimeline)
+                    assertNotNull(reopened.attachedVideo?.anchor)
                     assertEquals(
                         CALIBRATED_VIDEO_MS,
                         restored.logIdToVideoMs(reopened, reopened.logData[SECOND_ROW_INDEX].id),
@@ -179,12 +191,115 @@ class CaptureAppRoundTripTest {
                 restored.startPendingRestoredTabLoads()
                 withTimeout(WAIT_TIMEOUT_MS) { while (restored.isLoadInFlight(id)) delay(POLL_INTERVAL_MS) }
                 assertNull(restored.tab(id)?.captureTimeline)
+                // Archive v3 tabs have no CaptureTimeline to begin with, so the assertion above
+                // alone would be vacuous here — the real regression check for v3 is that a failed
+                // reopen also disables double-click seek (AppState.restoreCaptureLink's catch path),
+                // not that it silently keeps trusting a link it could no longer verify.
+                assertFalse(restored.isVideoDoubleClickSeekEnabled(id))
             } finally {
                 restored.close()
             }
         } finally {
             root.deleteRecursively()
         }
+    }
+
+    // Regression test for Save ZIP silently dropping markers: CaptureStoppedStrip's "Save ZIP"
+    // button (AppState.saveRetainedCapture) used to call CaptureService.exportRetainedSession with
+    // no notes at all — only the live snapshot path (exportCaptureSnapshot) passed
+    // tab.annotations.preparedForSave(tab). This exercises the retained path end to end: a stopped
+    // session on disk plus an open tab carrying a marker note, exported via saveRetainedCapture(...,
+    // tabId), then reopened — the marker note and its re-anchored LogRef must both survive.
+    @Test
+    fun saveRetainedCaptureIncludesTabNotesAndReopenedArchiveHasMarkers() = runBlocking {
+        val root = createTempDirectory("capture-retained-notes").toFile()
+        try {
+            val sessionId = "session-notes"
+            val session = CaptureSession(
+                id = sessionId,
+                directory = File(root, "captures/$sessionId"),
+                device = CaptureDevice("emulator-5554", "device"),
+                settings = CaptureSettings(recordVideo = false, freeSpaceReserveBytes = NO_FREE_SPACE_RESERVE_BYTES),
+                startedEpochMs = FIXTURE_EPOCH_MS,
+                elapsedMs = FIXTURE_ROW_COUNT * ROW_INTERVAL_MS,
+                status = CaptureStatus.STOPPED,
+            )
+            session.logFile.parentFile.mkdirs()
+            session.indexFile.parentFile.mkdirs()
+            var offset = 0L
+            session.logFile.outputStream().use { log ->
+                session.indexFile.bufferedWriter().use { index ->
+                    for (i in FIRST_ROW_ORDINAL..FIXTURE_ROW_COUNT) {
+                        val bytes = "09-19 12:00:00.000  100  101 I Tag: row $i\n".toByteArray()
+                        log.write(bytes)
+                        index.appendLine(
+                            "{\"byteOffset\":$offset,\"byteLength\":${bytes.size}," +
+                                "\"elapsedMs\":${i * ROW_INTERVAL_MS},\"rowOrdinal\":$i}",
+                        )
+                        offset += bytes.size
+                    }
+                }
+            }
+            writeRetainedSessionMetadata(session)
+
+            val app = AppState(autosaveFile = File(root, "autosave"), autoExportNotes = false)
+            try {
+                val marker = CaptureMarker(
+                    id = "m1", elapsedMs = (SECOND_ROW_INDEX + 1) * ROW_INTERVAL_MS, firstOrdinal = SECOND_ROW_INDEX + 1,
+                    lastOrdinal = SECOND_ROW_INDEX + 1, videoMs = null, label = "Marker 1",
+                    preMs = 0L, postMs = 0L, screenshotPath = null,
+                )
+                val notes = Annotations(
+                    blocks = listOf(
+                        AnnBlock.Note("n1", markerHeader(marker) + "\n" + markerHeadingLine(1, marker.label) + "\n"),
+                        AnnBlock.LogRef("r1", logIds = listOf(SECOND_ROW_INDEX + 1), caption = ""),
+                    ),
+                )
+                val tab = mkTab("t1", "Capture — session-notes", emptyList())
+                    .copy(captureSourceSessionId = sessionId, annotations = notes)
+                app.tabs = listOf(tab)
+
+                app.saveRetainedCapture(sessionId, "t1")
+                withTimeout(WAIT_TIMEOUT_MS) {
+                    while (app.captureExportResult == null && app.captureExportError == null) delay(POLL_INTERVAL_MS)
+                }
+                assertNull(app.captureExportError)
+                val exported = assertNotNull(app.captureExportResult).file
+
+                val reopenId = app.openCaptureFile(exported)
+                waitLoaded(app, reopenId)
+                val reopened = assertNotNull(app.tab(reopenId))
+                val byId = reopened.annotations.blocks.associateBy { it.id }
+                assertTrue("n1" in byId, "marker note must survive the retained Save ZIP -> reopen round trip")
+                assertTrue("r1" in byId, "the marker's log reference must be re-anchored, not dropped")
+                assertEquals(listOf(SECOND_ROW_INDEX + 1), (byId.getValue("r1") as AnnBlock.LogRef).logIds)
+            } finally {
+                app.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    /** Mirrors CaptureRecorder's own private `sessionJson` format closely enough for
+     *  CaptureService.retainedSession (via CaptureRecorder.listSessions/readSession) to recognize
+     *  this as a retained session without spinning up a real adb/scrcpy recording. */
+    private fun writeRetainedSessionMetadata(session: CaptureSession) {
+        val json = buildJsonObject {
+            put("formatVersion", 1)
+            put("id", session.id)
+            put("device", buildJsonObject {
+                put("serial", session.device.serial)
+                put("state", session.device.state)
+                put("model", session.device.model)
+                put("emulator", session.device.emulator)
+            })
+            put("settings", Json.parseToJsonElement(captureSettingsToJson(session.settings)))
+            put("startedEpochMs", session.startedEpochMs)
+            put("elapsedMs", session.elapsedMs)
+            put("status", session.status.name)
+        }.toString()
+        File(session.directory, "session.json").also { it.parentFile.mkdirs() }.writeText(json)
     }
 
     private suspend fun waitLoaded(app: AppState, id: String) {
@@ -211,8 +326,13 @@ class CaptureAppRoundTripTest {
         session.logFile.outputStream().use { log ->
             session.indexFile.bufferedWriter().use { index ->
                 for (i in FIRST_ROW_ORDINAL..FIXTURE_ROW_COUNT) {
-                    // Repeated device timestamps demonstrate that the portable index is authoritative.
-                    val bytes = "09-19 12:00:00.000  100  101 I Tag: row $i\n".toByteArray()
+                    // Archive v3 (single sync anchor, no per-row mapping file): every row's video
+                    // position is now derived from this ts via slope-1 arithmetic (see
+                    // Model.kt's VideoAnchor doc), so each row needs its OWN, distinct device
+                    // timestamp — one second apart, matching ROW_INTERVAL_MS's own host-elapsedMs
+                    // spacing (a zero-jitter fixture) — rather than the repeated timestamp the old
+                    // per-row-mapping-file archive could get away with.
+                    val bytes = "09-19 12:00:0${i - 1}.000  100  101 I Tag: row $i\n".toByteArray()
                     log.write(bytes)
                     index.appendLine(
                         "{\"byteOffset\":$offset,\"byteLength\":${bytes.size}," +
