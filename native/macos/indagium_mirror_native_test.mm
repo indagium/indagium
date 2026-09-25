@@ -164,6 +164,17 @@ static CAMetalLayer *makeSibling(CGFloat zPosition, BOOL opaque) {
     return sibling;
 }
 
+static void verifyMirrorLayersHaveNoImplicitAnimations() {
+    CAMetalLayer *layer = [CAMetalLayer layer];
+    disableImplicitAnimations(layer);
+    // NSNull in the actions dictionary is what stops the implicit animation search for that key.
+    for (NSString *key in @[@"position", @"bounds", @"frame", @"contents", @"zPosition", @"mask", @"path"]) {
+        if (layer.actions[key] != [NSNull null] || [layer actionForKey:key]) {
+            fail("mirror layer must not animate implicitly (it trails window resizes otherwise)");
+        }
+    }
+}
+
 static void verifyUnderlayStatusPredicates() {
     CALayer *parent = [CALayer layer];
     CAMetalLayer *ours = [CAMetalLayer layer];
@@ -284,6 +295,7 @@ int main() {
     verifyViewportClipMaskCoordinates();
     verifyMirrorLayerOrderForComposeOverlays();
     verifyUnderlayStatusPredicates();
+    verifyMirrorLayersHaveNoImplicitAnimations();
     verifyQueuedGeometryOwnsPendingState();
     const uint8_t annexB[] = {
         0x00, 0x00, 0x01, 0x67, 0x11,
