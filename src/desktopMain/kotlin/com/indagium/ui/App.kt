@@ -161,7 +161,13 @@ internal fun raiseWindowForIncomingDrag(window: java.awt.Window?) {
 
 @Composable
 fun App(
-    state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
+    state: AppState = remember {
+        AppState(
+            restoreOnCreate = true,
+            filterBackupsDir = DesktopStorage.filterBackupsDir(),
+            platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
+        )
+    },
     onLicenseDeclined: () -> Unit = {},
     onResetAppData: () -> Unit = {},
     // Null in tests (no real AWT window there) and unused on macOS/Windows — see

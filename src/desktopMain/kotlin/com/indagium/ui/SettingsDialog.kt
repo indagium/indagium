@@ -479,66 +479,50 @@ private fun AppearanceSettingsSection(state: AppState) {
             )
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        TooltipArea(
-            tooltip = {
-                Box(
-                    Modifier
-                        .background(tc.p2, RoundedCornerShape(4.dp))
-                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    AppText(
-                        "Auto-saved notes are written here when this folder exists. Clear temporary data keeps this folder.",
-                        color = tc.tx,
-                        fontSize = 11.sp,
-                        maxLines = 2,
-                    )
-                }
-            },
-        ) {
-            AppText(
-                "Default save folder",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            val fullPath = state.settings.defaultSaveDir
-            val pathText: @Composable () -> Unit = {
-                AppText(
-                    fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
-                    color = tc.ts,
-                    fontSize = 11.sp,
-                    fontFamily = MONO,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (fullPath != null) {
-                TooltipArea(
-                    tooltip = {
-                        Box(
-                            Modifier
-                                .background(tc.p2, RoundedCornerShape(4.dp))
-                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { pathText() }
-            } else {
-                Box(Modifier.weight(1f)) { pathText() }
-            }
-            AppButton("Browse", onClick = { state.pickSaveFolder() })
-            if (fullPath != null) AppButton(
-                "Clear",
-                onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } },
-            )
-        }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        SaveFolderRow(
+            label = "Default save folder",
+            tooltip = "Parent folder every other save location below defaults under when it isn't " +
+                "set on its own. Defaults to your Documents folder.",
+            explicitValue = state.settings.saveRootDir,
+            effectivePath = state.effectiveSaveRootDir.absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ROOT) },
+        )
+        SaveFolderRow(
+            label = "Analysis artifacts folder",
+            tooltip = "Where analysis notes, filtered exports and split logs are saved. Auto-saved " +
+                "notes are written here, created on first save.",
+            explicitValue = state.settings.defaultSaveDir,
+            effectivePath = state.effectiveAnalysisDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ANALYSIS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ANALYSIS) },
+        )
+        SaveFolderRow(
+            label = "Capture sessions folder",
+            tooltip = "Where new device captures are recorded. A change applies from the next " +
+                "Start; sessions already recorded stay exactly where they are.",
+            explicitValue = state.settings.captureSessionsDir,
+            effectivePath = state.effectiveCaptureSessionsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SESSIONS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SESSIONS) },
+        )
+        SaveFolderRow(
+            label = "Snapshots folder",
+            tooltip = "Destination for \"Save snapshot\" while a capture is recording.",
+            explicitValue = state.settings.captureSnapshotsDir,
+            effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SNAPSHOTS) },
+        )
+        SaveFolderRow(
+            label = "Saved captures folder (Save ZIP)",
+            tooltip = "Destination for \"Save ZIP\" on a stopped or retained capture.",
+            explicitValue = state.settings.captureZipDir,
+            effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
+        )
     }
     if (isLinuxOs) {
         CompactSettingWithTooltip(
@@ -632,6 +616,69 @@ private fun AppearanceSettingsSection(state: AppState) {
     }
     state.autosaveError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+    }
+}
+
+/**
+ * One row of the five-folder Save folders group (AppearanceSettingsSection above): a labeled
+ * tooltip, the effective path (dimmer with a "(default)" suffix when nothing is explicitly set —
+ * [explicitValue] is null), a Browse button, and a Reset button that only shows once the folder
+ * has actually been set to something other than its computed default.
+ */
+@Composable
+private fun SaveFolderRow(
+    label: String,
+    tooltip: String,
+    explicitValue: String?,
+    effectivePath: String,
+    onBrowse: () -> Unit,
+    onReset: () -> Unit,
+) {
+    val tc = tc()
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(tooltip, color = tc.tx, fontSize = 11.sp, maxLines = 3)
+                }
+            },
+        ) {
+            AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val displayText = truncatePathForDisplay(effectivePath).let {
+                if (explicitValue != null) it else "$it  (default)"
+            }
+            val pathText: @Composable () -> Unit = {
+                AppText(
+                    displayText,
+                    color = if (explicitValue != null) tc.ts else tc.td,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier
+                            .background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(effectivePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) { pathText() }
+            AppButton("Browse", onClick = onBrowse)
+            if (explicitValue != null) AppButton("Reset", onClick = onReset)
+        }
     }
 }
 
