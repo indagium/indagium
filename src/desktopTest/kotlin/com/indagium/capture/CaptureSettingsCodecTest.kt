@@ -119,6 +119,26 @@ class CaptureSettingsCodecTest {
         }
     }
 
+    // Archive v3 / MP4 export: videoContainer round-trips like bufferMode above, and an unrecognized
+    // value (a settings file written by a newer build) falls back to the default instead of failing
+    // the whole decode — same "absent or unknown both mean default" contract as bufferMode/mirrorMode.
+    @Test
+    fun videoContainerRoundTrips() {
+        CaptureVideoContainer.entries.forEach { container ->
+            val settings = CaptureSettings(videoContainer = container)
+            val decoded = assertNotNull(captureSettingsFromJson(captureSettingsToJson(settings)))
+            assertEquals(container, decoded.videoContainer)
+        }
+    }
+
+    @Test
+    fun unknownVideoContainerFallsBackToTheDefaultWithoutDiscardingOtherSettings() {
+        val json = """{"formatVersion":1,"videoContainer":"SOMETHING_NEW","maxFps":45}"""
+        val decoded = assertNotNull(captureSettingsFromJson(json))
+        assertEquals(CaptureVideoContainer.MP4, decoded.videoContainer)
+        assertEquals(45, decoded.maxFps)
+    }
+
     @Test
     fun logcatBufferArgsForEachMode() {
         assertEquals(emptyList(), CaptureSettings(bufferMode = CaptureBufferMode.DEFAULT).logcatBufferArgs())

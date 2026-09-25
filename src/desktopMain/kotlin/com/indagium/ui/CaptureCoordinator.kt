@@ -142,7 +142,7 @@ internal class CaptureService(
     fun discardRetainedSession(sessionId: String): Boolean =
         CaptureRecorder(root).use { it.deleteSession(sessionId) }
 
-    fun exportRetainedSession(sessionId: String, destination: File): CaptureExportResult {
+    fun exportRetainedSession(sessionId: String, destination: File, notes: Annotations? = null): CaptureExportResult {
         val session = requireNotNull(retainedSession(sessionId)) { "Capture session not found: $sessionId" }
         return CaptureArchiveExporter().export(
             session,
@@ -152,6 +152,7 @@ internal class CaptureService(
                 includeVideo = session.settings.recordVideo,
                 cutoffElapsedMs = session.elapsedMs,
             ),
+            notes = notes,
         )
     }
 

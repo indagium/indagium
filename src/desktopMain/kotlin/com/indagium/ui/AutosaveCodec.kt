@@ -1441,7 +1441,13 @@ private fun String.videoFrameFromToken(): VideoFrameReference? = runCatching {
     val source = when (p.getOrNull(2)) {
         "LOCAL" -> p.getOrNull(3)?.takeIf { it.isNotBlank() }?.let(VideoSource::LocalFile)
         "ARCHIVE" -> {
-            val archivePath = p.getOrNull(3)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+            // archivePath alone may legitimately be BLANK: CaptureArchive.kt's
+            // rewriteExportedVideoFrames stamps a marker screenshot with a portable
+            // `VideoSource.ArchiveEntry("", entryPath, displayName)` — empty archivePath meaning
+            // "this same archive" — which AppState.repointPortableVideoFrames only re-points at a
+            // real archive/local path once the tab reopens. entryPath must still be non-blank: a
+            // frame with no asset name at all is unrecoverable either way.
+            val archivePath = p.getOrNull(3) ?: return@runCatching null
             val entryPath = p.getOrNull(4)?.takeIf { it.isNotBlank() } ?: return@runCatching null
             VideoSource.ArchiveEntry(
                 archivePath = archivePath,

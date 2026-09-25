@@ -47,6 +47,7 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("markerPostMs", settings.markerPostMs)
     put("markerScreenshot", settings.markerScreenshot)
     put("markerNotesInSnapshot", settings.markerNotesInSnapshot)
+    put("videoContainer", settings.videoContainer.name)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -92,6 +93,11 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         markerPostMs = root.optional("markerPostMs", defaults.markerPostMs, ::longValue).coerceIn(0, MAX_MARKER_WINDOW_MS),
         markerScreenshot = root.optional("markerScreenshot", defaults.markerScreenshot, ::booleanValue),
         markerNotesInSnapshot = root.optional("markerNotesInSnapshot", defaults.markerNotesInSnapshot, ::booleanValue),
+        // Archive v3 / MP4 export, appended last matching CaptureSettings' own field order. Same
+        // "absent or unrecognized both fall back to the default" treatment as bufferMode/mirrorMode
+        // above — a settings file written by a newer build with a container this build doesn't know
+        // must not fail the whole decode.
+        videoContainer = root.videoContainerOrDefault("videoContainer", defaults.videoContainer),
     )
 }.getOrNull()
 
@@ -111,6 +117,11 @@ private fun JsonObject.bufferModeOrDefault(key: String, default: CaptureBufferMo
 private fun JsonObject.mirrorModeOrDefault(key: String, default: CaptureMirrorMode): CaptureMirrorMode {
     val raw = stringValue(this[key] ?: return default) ?: return default
     return runCatching { CaptureMirrorMode.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun JsonObject.videoContainerOrDefault(key: String, default: CaptureVideoContainer): CaptureVideoContainer {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureVideoContainer.valueOf(raw) }.getOrDefault(default)
 }
 
 private fun stringValue(value: JsonElement): String? =

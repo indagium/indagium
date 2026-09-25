@@ -1,12 +1,16 @@
 package com.indagium.capture
 
+import com.indagium.generated.BuildInfo
 import com.indagium.model.AnnBlock
 import com.indagium.model.Annotations
+import com.indagium.model.VideoSource
 import com.indagium.ui.annotationsFromToken
 import com.indagium.ui.annotationsToken
 import com.indagium.utils.MAX_ARCHIVE_ENTRIES_SCANNED
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.openLogTextReader
+import com.indagium.utils.parseLogcat
+import com.indagium.utils.unrollLogTimeline
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -41,13 +45,21 @@ import java.util.zip.ZipOutputStream
 
 const val CAPTURE_DESCRIPTOR_NAME = "capture.indagium.json"
 
-// Phase 4 (snapshot archive + import) bumped this 1 -> 2 for the new optional `notes`/`markers`
-// descriptor fields below. An old build still can't read a v2 archive either way — its own
-// openZip() rejects notes/capture.ann as an entry unreferenced by the descriptor it knows how to
-// parse — so this bump exists purely to turn that confusing "unreferenced file" failure into an
-// honest "unsupported/newer archive version" one. parseDescriptor accepts 1..CAPTURE_ARCHIVE_VERSION
-// (not an exact match) because both fields are optional on read: a v1 archive simply has neither.
-const val CAPTURE_ARCHIVE_VERSION = 2
+/** v3's flat layout replaces the old `notes/capture.ann`; the boilerplate line naming both is kept
+ *  here (rather than inlined at every call site) since [captureWithIndagiumBlurb] and the allowlist
+ *  in [validateEntriesAndFindDescriptor] must always agree on the exact filename. */
+const val CAPTURED_WITH_INDAGIUM_NAME = "captured_with_indagium.txt"
+
+// v3 (archive v3: flat layout) bumped this 2 -> 3 for the flattened directory layout (no more
+// logs/, video/, mapping/, notes/ subfolders — see this file's own module doc) and the simplified
+// descriptor shape (drops the full settings dump, quality/uncertainty, requested-vs-actual video
+// starts, and per-asset sizeBytes in favor of one sha256 map). parseDescriptor still reads v1's
+// nested logs/video/mapping/notes/capture.ann layout and v2's optional notes/markers keys — see
+// its own doc for exactly which reads stay conditional on `version`. Bumping this on every
+// backward-incompatible WRITER change (not on every new optional field) is what makes an old build
+// fail with an honest "unsupported/newer archive version" instead of a confusing "unreferenced
+// file" error.
+const val CAPTURE_ARCHIVE_VERSION = 3
 
 private const val MAX_DESCRIPTOR_BYTES = 1024 * 1024L
 private const val MAX_MAPPING_BYTES = MAX_ARCHIVE_ENTRY_BYTES
@@ -87,6 +99,9 @@ private const val VIDEO_COVERAGE_WAIT_POLL_BACKOFF_MULTIPLIER = 2
 const val DEFAULT_VIDEO_COVERAGE_WAIT_MS = 2_000L
 private const val NANOS_PER_MILLISECOND = 1_000_000L
 
+/** [sizeBytes]/[sha256] are always populated in memory (computed from the staged file at export
+ *  time, or from the zip entry + sha256 map at import time) even though v3's own JSON no longer
+ *  writes a per-asset size — see [CaptureArchiveDescriptor.toJson]/[parseDescriptor]. */
 data class CaptureArchiveAsset(val path: String, val sizeBytes: Long, val sha256: String)
 
 data class CaptureArchiveDevice(
@@ -96,42 +111,56 @@ data class CaptureArchiveDevice(
     val emulator: Boolean,
 )
 
-data class CaptureArchiveCoverage(
-    val logStartMs: Long,
-    val logEndMs: Long,
-    val videoRequestedStartMs: Long?,
-    val videoActualStartMs: Long?,
-    val videoEndMs: Long?,
-)
-
+/**
+ * v3 (archive v3: flat and simpler): the JSON descriptor's own shape shrank a lot, but this
+ * in-memory type stays close to its v1/v2 predecessor — [parseDescriptor] fills every field the
+ * same way regardless of which version it read, so nothing downstream needs to branch on
+ * [formatVersion]. Dropped entirely relative to v1/v2 (per the archive-v3 plan): the full
+ * [CaptureSettings] dump (nothing outside this file ever read `descriptor.settings` back), `quality`/
+ * `uncertaintyMs` (same — only ever fed straight into [CaptureTimeline], which is happy to default
+ * them), and the coverage object's `videoRequestedStartMs` (display-only, never read back either).
+ * [app] is the writer's own version string ("Indagium 1.8.6"); empty for a v1/v2 archive, which
+ * never recorded one.
+ */
 data class CaptureArchiveDescriptor(
     val formatVersion: Int,
+    val app: String,
     val sessionId: String,
     val device: CaptureArchiveDevice,
-    val settings: CaptureSettings,
     val sessionStartedEpochMs: Long,
     val exportedEpochMs: Long,
     val range: CaptureRange,
-    val coverage: CaptureArchiveCoverage,
-    val quality: String,
-    val uncertaintyMs: Long?,
     val manualOffsetMs: Long,
     val interruptions: List<String>,
     val log: CaptureArchiveAsset,
-    val mapping: CaptureArchiveAsset,
+    val logStartMs: Long,
+    val logEndMs: Long,
+    // Non-null only for a v1/v2 archive's row-by-row mapping file. v3 replaced the whole mapping
+    // file with a single sync anchor instead — see [syncAnchor] and
+    // com.indagium.capture.estimateCaptureSyncAnchor.
+    val mapping: CaptureArchiveAsset?,
     val video: CaptureArchiveAsset?,
+    val videoStartMs: Long?,
+    val videoEndMs: Long?,
     val screenshots: List<CaptureArchiveAsset>,
-    // Appended last (Phase 4: snapshot archive + import), per this file's own field-ordering
-    // convention. Both optional on read (parseDescriptor), so a v1 archive — which has neither key
-    // at all — still opens: null/empty is exactly what "this session had no Mark issue notes, or
-    // markerNotesInSnapshot was off" already means for a v2 archive built the same way.
+    // Both optional on read (parseDescriptor), so a v1 archive — which has neither key at all —
+    // still opens: null/empty is exactly what "this session had no Mark issue notes, or
+    // markerNotesInSnapshot was off" already means for a v2/v3 archive built the same way.
     val notes: CaptureArchiveAsset?,
     val markers: List<CaptureArchiveMarker>,
+    // v3 only, appended last per this class's own convention (see CaptureSettings's comment on the
+    // same pattern): the single log-row <-> video-position pin this export's writer estimated in
+    // place of the old per-row mapping file — see estimateCaptureSyncAnchor. Null for a v1/v2
+    // archive (which instead has a non-null [mapping]), and also null for a v3 archive exported/
+    // finalized with no video, or with no row that had both a parseable log timestamp and a known
+    // video position.
+    val syncAnchor: CaptureSyncAnchor? = null,
 )
 
 /**
- * One marker's EXPORT-LOCAL ordinal window — the numbering `writeMapping` assigns this export's own
- * rows and the reopened tab's own LogParser reproduces 1:1 (see CaptureMarkerCodec's doc on why
+ * One marker's EXPORT-LOCAL ordinal window — the numbering `forEachSelectedRecord` assigns this
+ * export's own rows (one increment per row that carries a `rowOrdinal`) and the reopened tab's own
+ * LogParser reproduces 1:1 (see CaptureMarkerCodec's doc on why
  * "ordinal" always means that), already clipped to whatever this export actually kept. A marker
  * whose window shares no row with the export is simply absent from [CaptureArchiveDescriptor.markers]
  * — see [clipMarkersForExport] (export side) and [reanchorImportedCaptureNotes] (import side, which
@@ -146,17 +175,25 @@ data class CaptureArchiveMarker(
 data class ImportedCapture(
     val logFile: File,
     val videoFile: File?,
-    val timeline: CaptureTimeline,
+    // Non-null only for a v1/v2 archive's row-by-row mapping. v3 exposes [syncAnchor] instead — see
+    // CaptureArchiveDescriptor.mapping/syncAnchor for which one a given formatVersion populates.
+    val timeline: CaptureTimeline?,
     val descriptor: CaptureArchiveDescriptor,
     /** The archive, descriptor, or extracted directory supplied by the caller. */
     val source: File,
-    // Appended last (Phase 4). The RAW notes decoded straight from notes/capture.ann — still numbered
-    // against the ORIGINAL capture session, not this archive's own freshly parsed log. Callers that
+    // Appended last (Phase 4). The RAW notes decoded straight from the notes asset (`notes.ann` in
+    // v3, `notes/capture.ann` in v1/v2) — still numbered against the ORIGINAL capture session, not
+    // this archive's own freshly parsed log. Callers that
     // actually open the log (AppState.openCaptureFile has the only production `logData`) must run
     // this through [reanchorImportedCaptureNotes] before showing it; capture does not do that itself
     // here because it has no parsed log to re-anchor against, only the raw log FILE. Null for a v1
     // archive, or when the exporting session had markerNotesInSnapshot off.
     val notes: Annotations? = null,
+    // v3 only, appended last per this class's own convention above. AppState turns this straight
+    // into a plain VideoAnchor(videoMs, logData[row-1].id) — see AppState.openCaptureFile/
+    // restoreCaptureLink/attachFinalizedCapture — rather than rehydrating a CaptureTimeline. Null
+    // for v1/v2 (which populate [timeline] instead) and for a v3 archive with no usable estimate.
+    val syncAnchor: CaptureSyncAnchor? = null,
 )
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -239,12 +276,9 @@ class CaptureArchiveExporter(
         val input = validateFinalizationInput(session)
         val staging = Files.createTempDirectory(session.directory.toPath(), ".finalize-").toFile()
         val stagingSelection = File(staging, ".selected-index.jsonl")
-        val stagingMapping = File(staging, "mapping/log-video.jsonl")
         val stagingDescriptor = File(staging, CAPTURE_DESCRIPTOR_NAME)
-        val mappingFile = File(session.directory, "mapping/log-video.jsonl")
         val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
         try {
-            stagingMapping.parentFile.mkdirs()
             val selection = freezeSelection(
                 indexFile = session.indexFile,
                 frozenBytes = session.indexFile.length(),
@@ -257,19 +291,19 @@ class CaptureArchiveExporter(
             require(selection.recordCount >= input.indexRecordCount) {
                 "Capture index changed while finalizing"
             }
-            writeMapping(
-                file = stagingMapping,
+            // Archive v3: no row-by-row mapping file is published any more (see this file's module
+            // doc and estimateCaptureSyncAnchor) — a stopped/finalized-in-place session references
+            // the raw, unremuxed MKV, so there is no clip to bound the anchor's video coverage
+            // (includeRawVideo=true, clip=null, same as the old writeMapping call this replaces).
+            val syncAnchor = computeCaptureSyncAnchor(
+                logFile = session.logFile,
                 selectionIndex = stagingSelection,
                 session = session,
                 clip = null,
                 includeRawVideo = videoFile != null,
             )
-            require(stagingMapping.length() <= MAX_MAPPING_BYTES) {
-                "Capture mapping exceeds the size limit"
-            }
 
             val logAsset = asset("logs/logcat.log", session.logFile)
-            val mappingAsset = asset("mapping/log-video.jsonl", stagingMapping)
             val videoAsset = videoFile?.let { asset("video/screen.mkv", it) }
             val videoStart = session.videoStartElapsedMs
             val videoActualStart = if (videoAsset != null && videoStart != null) {
@@ -279,6 +313,7 @@ class CaptureArchiveExporter(
             }
             val descriptor = CaptureArchiveDescriptor(
                 formatVersion = CAPTURE_ARCHIVE_VERSION,
+                app = "Indagium ${BuildInfo.APP_VERSION}",
                 sessionId = session.id,
                 device = CaptureArchiveDevice(
                     session.device.serial,
@@ -286,34 +321,28 @@ class CaptureArchiveExporter(
                     session.device.model,
                     session.device.emulator,
                 ),
-                settings = session.settings.copy(adbPath = "", scrcpyPath = ""),
                 sessionStartedEpochMs = session.startedEpochMs,
                 exportedEpochMs = System.currentTimeMillis(),
                 range = CaptureRange.ALL,
-                coverage = CaptureArchiveCoverage(
-                    logStartMs = input.firstElapsedMs ?: 0L,
-                    logEndMs = input.lastElapsedMs ?: session.elapsedMs.coerceAtLeast(0L),
-                    videoRequestedStartMs = videoActualStart,
-                    videoActualStartMs = videoActualStart,
-                    videoEndMs = if (videoAsset != null) input.lastVideoElapsedMs else null,
-                ),
-                quality = "estimated",
-                uncertaintyMs = null,
                 manualOffsetMs = session.manualOffsetMs,
                 interruptions = session.interruptions,
                 log = logAsset,
-                mapping = mappingAsset,
+                logStartMs = input.firstElapsedMs ?: 0L,
+                logEndMs = input.lastElapsedMs ?: session.elapsedMs.coerceAtLeast(0L),
+                mapping = null,
                 video = videoAsset,
+                videoStartMs = videoActualStart,
+                videoEndMs = if (videoAsset != null) input.lastVideoElapsedMs else null,
                 screenshots = emptyList(),
                 // finalizeSessionInPlace publishes the recorder's own directory in place, never a
                 // snapshot .zip — there's no "notes as of this snapshot" concept here, only the live
                 // tab's own (unexported) Notes, which stay exactly where they already are.
                 notes = null,
                 markers = emptyList(),
+                syncAnchor = syncAnchor,
             )
             stagingDescriptor.writeText(descriptor.toJson(), Charsets.UTF_8)
 
-            publishReplacing(stagingMapping, mappingFile)
             publishReplacing(stagingDescriptor, descriptorFile)
 
             return CaptureArchiveReader.open(descriptorFile, session.directory)
@@ -631,10 +660,24 @@ class CaptureArchiveExporter(
                 videoBytes = if (includeVideo) session.videoFile.length() else 0,
                 screenshotsBytes = snapshotScreenshots.sumOf { it.length },
             )
-            val stagedLog = File(work, "logs/logcat.log").also { it.parentFile.mkdirs() }
+            val stagedLog = File(work, "logcat.log")
             copySelectedLog(session.logFile, selection.indexFile, stagedLog)
 
-            val stagedVideo = if (includeVideo) File(work, "video/screen.mkv").also { it.parentFile.mkdirs() } else null
+            // Archive v3 / MP4 export: the container is chosen per export from the session's own
+            // settings, not fixed at "mkv" — see CaptureModels.kt's CaptureVideoContainer. Audio
+            // transcoding to AAC (so an MP4's audio track plays in QuickTime) isn't implemented;
+            // when audio was recorded this falls back to MKV for the file instead of shipping an
+            // MP4 whose audio track many players can't decode — see FfmpegCaptureVideoExporter's
+            // own module doc for the detail and the plan this is a scoped-down version of.
+            val requestedContainer = session.settings.videoContainer
+            val container = if (requestedContainer == CaptureVideoContainer.MP4 && session.settings.audio) {
+                CaptureVideoContainer.MKV
+            } else {
+                requestedContainer
+            }
+            val containerFellBackForAudio = container != requestedContainer
+            val videoEntryName = "screen.${container.extension}"
+            val stagedVideo = if (includeVideo) File(work, videoEntryName) else null
             var videoUnavailableForRange = videoConfigured && !includeVideo
             val clip = if (stagedVideo != null && requestedSourceStart != null && requestedSourceEnd != null) {
                 try {
@@ -660,17 +703,23 @@ class CaptureArchiveExporter(
 
             val videoAvailable = stagedVideo?.let { it.isFile && it.length() > 0L } == true
             val effectiveClip = clip.takeIf { videoAvailable }
-            val stagedMapping = File(work, "mapping/log-video.jsonl").also { it.parentFile.mkdirs() }
-            writeMapping(stagedMapping, selection.indexFile, session, effectiveClip)
+            // Archive v3: no row-by-row mapping file — a single sync anchor replaces it (see this
+            // file's module doc and estimateCaptureSyncAnchor). Computed from the just-staged log
+            // (stagedLog), so the ordinals this scans agree exactly with the ones LogParser assigns
+            // when the shipped archive's own logcat.log is reopened.
+            val syncAnchor = computeCaptureSyncAnchor(stagedLog, selection.indexFile, session, effectiveClip)
             val stagedScreenshots = stageScreenshots(snapshotScreenshots, work)
-            val (notesAsset, markerAssets) = stageNotes(work, session.settings, notes, selection.indexFile)
+            val (notesAsset, markerAssets) = stageNotes(
+                work, session, notes, selection.indexFile, effectiveClip, videoEntryName.takeIf { videoAvailable },
+            )
+            writeCapturedWithIndagiumBlurb(work)
 
-            val logAsset = asset("logs/logcat.log", stagedLog)
-            val mappingAsset = asset("mapping/log-video.jsonl", stagedMapping)
-            val videoAsset = stagedVideo?.takeIf { videoAvailable }?.let { asset("video/screen.mkv", it) }
+            val logAsset = asset("logcat.log", stagedLog)
+            val videoAsset = stagedVideo?.takeIf { videoAvailable }?.let { asset(videoEntryName, it) }
             val screenshotAssets = stagedScreenshots.map { (path, file) -> asset(path, file) }
             val descriptor = CaptureArchiveDescriptor(
                 formatVersion = CAPTURE_ARCHIVE_VERSION,
+                app = "Indagium ${BuildInfo.APP_VERSION}",
                 sessionId = session.id,
                 device = CaptureArchiveDevice(
                     session.device.serial,
@@ -678,27 +727,22 @@ class CaptureArchiveExporter(
                     session.device.model,
                     session.device.emulator,
                 ),
-                settings = session.settings.copy(adbPath = "", scrcpyPath = ""),
                 sessionStartedEpochMs = session.startedEpochMs,
                 exportedEpochMs = System.currentTimeMillis(),
                 range = request.range,
-                coverage = CaptureArchiveCoverage(
-                    logStartMs = selection.firstElapsedMs ?: request.cutoffElapsedMs,
-                    logEndMs = selection.lastElapsedMs ?: selectedEndMs,
-                    videoRequestedStartMs = if (effectiveClip != null) videoRangeStartMs else null,
-                    videoActualStartMs = effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
-                    videoEndMs = effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
-                ),
-                quality = "estimated",
-                uncertaintyMs = null,
                 manualOffsetMs = session.manualOffsetMs,
                 interruptions = session.interruptions,
                 log = logAsset,
-                mapping = mappingAsset,
+                logStartMs = selection.firstElapsedMs ?: request.cutoffElapsedMs,
+                logEndMs = selection.lastElapsedMs ?: selectedEndMs,
+                mapping = null,
                 video = videoAsset,
+                videoStartMs = effectiveClip?.actualStartMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
+                videoEndMs = effectiveClip?.coveredEndMs?.plus(videoStartElapsed ?: 0)?.minus(session.manualOffsetMs),
                 screenshots = screenshotAssets,
                 notes = notesAsset,
                 markers = markerAssets,
+                syncAnchor = syncAnchor,
             )
             File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
             writeZip(work, archiveTemp, descriptor)
@@ -709,12 +753,19 @@ class CaptureArchiveExporter(
             return CaptureExportResult(
                 file = destination,
                 logCoveredEndMs = selection.lastElapsedMs ?: selectedEndMs,
-                videoCoveredEndMs = descriptor.coverage.videoEndMs,
-                videoActualStartMs = descriptor.coverage.videoActualStartMs,
-                message = when {
-                    videoAsset != null -> "Capture exported with video"
-                    videoUnavailableForRange -> "Capture exported; video has no usable coverage for this range"
-                    else -> "Capture exported"
+                videoCoveredEndMs = descriptor.videoEndMs,
+                videoActualStartMs = descriptor.videoStartMs,
+                message = buildString {
+                    append(
+                        when {
+                            videoAsset != null -> "Capture exported with video"
+                            videoUnavailableForRange -> "Capture exported; video has no usable coverage for this range"
+                            else -> "Capture exported"
+                        },
+                    )
+                    if (videoAsset != null && containerFellBackForAudio) {
+                        append(" (used .mkv: audio export to .mp4 is not supported)")
+                    }
                 },
             )
         } finally {
@@ -755,15 +806,16 @@ object CaptureArchiveReader {
         try {
             val descriptor: CaptureArchiveDescriptor
             ZipFile.builder().setFile(source).get().use { zip ->
-                val descriptorEntry = validateEntriesAndFindDescriptor(zip)
-                    ?: throw CaptureArchiveException("Capture descriptor is missing")
+                val scan = scanZipEntries(zip)
+                val descriptorEntry = scan.descriptorEntry ?: throw CaptureArchiveException("Capture descriptor is missing")
                 require(!descriptorEntry.isDirectory) { "Capture descriptor is not a file" }
                 val descriptorText = zip.getInputStream(descriptorEntry).use { readBoundedText(it, MAX_DESCRIPTOR_BYTES) }
                 descriptor = parseDescriptor(descriptorText)
-                require(descriptor.screenshots.sumOf { it.sizeBytes } <= MAX_SCREENSHOTS_BYTES) {
+                val screenshotsBytes = descriptor.screenshots.sumOf { scan.entrySizes[it.path] ?: 0L }
+                require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
                     "Capture screenshots exceed the combined size limit"
                 }
-                requireExtractionSpace(cacheDirectory, descriptor)
+                requireExtractionSpace(cacheDirectory, scan.entrySizes.values.fold(0L, ::saturatingAdd))
                 val remainingAssets = descriptor.assets().associateBy { it.path }.toMutableMap()
                 val entries = zip.entries
                 var entryCount = 0
@@ -773,12 +825,14 @@ object CaptureArchiveReader {
                     require(entryCount <= MAX_ARCHIVE_ENTRIES_SCANNED) { "Capture archive has too many entries" }
                     if (entry.isDirectory) continue
                     val name = normalizedEntryName(entry.name)
-                    if (name == CAPTURE_DESCRIPTOR_NAME) continue
+                    if (name == CAPTURE_DESCRIPTOR_NAME || name == CAPTURED_WITH_INDAGIUM_NAME) continue
                     val asset = remainingAssets.remove(name)
                         ?: throw CaptureArchiveException("Capture archive contains an unreferenced file: $name")
                     val limit = assetLimit(descriptor, asset)
-                    require(asset.sizeBytes in 0..limit) { "Capture asset exceeds its size limit: ${asset.path}" }
-                    if (entry.size >= 0) require(entry.size == asset.sizeBytes) { "Capture asset size mismatch: ${asset.path}" }
+                    // A size the zip's own central directory declares is a cheap fail-fast bound;
+                    // [extractVerified] re-enforces the same limit while actually streaming, which is
+                    // what an inconsistent/lying declared size can't get past.
+                    if (entry.size >= 0) require(entry.size <= limit) { "Capture asset exceeds its size limit: ${asset.path}" }
                     val target = resolveSafe(output, asset.path)
                     target.parentFile?.mkdirs()
                     zip.getInputStream(entry).use { input -> extractVerified(input, target, asset, limit) }
@@ -799,35 +853,47 @@ object CaptureArchiveReader {
         require(descriptorFile.isFile) { "Capture descriptor is missing: $descriptorFile" }
         require(!Files.isSymbolicLink(descriptorFile.toPath())) { "Capture descriptor cannot be a symbolic link" }
         val descriptor = parseDescriptor(readSmallFile(descriptorFile))
-        require(descriptor.screenshots.sumOf { it.sizeBytes } <= MAX_SCREENSHOTS_BYTES) {
-            "Capture screenshots exceed the combined size limit"
-        }
+        var screenshotsBytes = 0L
         descriptor.assets().forEach { asset ->
-            require(asset.sizeBytes <= assetLimit(descriptor, asset)) {
-                "Capture asset exceeds its size limit: ${asset.path}"
-            }
             val target = resolveSafe(root, asset.path)
             require(!hasSymbolicLink(root, target)) { "Capture asset uses a symbolic link: ${asset.path}" }
             require(target.isFile) { "Capture asset is missing: ${asset.path}" }
-            require(target.length() == asset.sizeBytes) { "Capture asset size mismatch: ${asset.path}" }
+            require(target.length() <= assetLimit(descriptor, asset)) {
+                "Capture asset exceeds its size limit: ${asset.path}"
+            }
+            if (asset in descriptor.screenshots) screenshotsBytes = saturatingAdd(screenshotsBytes, target.length())
             require(sha256(target) == asset.sha256) { "Capture asset checksum mismatch: ${asset.path}" }
+        }
+        require(screenshotsBytes <= MAX_SCREENSHOTS_BYTES) {
+            "Capture screenshots exceed the combined size limit"
         }
         return validateImported(root, descriptor, source)
     }
 
     private fun validateImported(root: File, descriptor: CaptureArchiveDescriptor, source: File): ImportedCapture {
         val logFile = resolveSafe(root, descriptor.log.path)
-        val mappingFile = resolveSafe(root, descriptor.mapping.path)
         val videoFile = descriptor.video?.let { resolveSafe(root, it.path) }
-        val rows = readMapping(mappingFile)
         val parsedLogCount = logFile.inputStream().use { input ->
             openLogTextReader(input).useLines { lines -> lines.count { line ->
                 val trimmed = line.trim()
                 trimmed.isNotEmpty() && !trimmed.startsWith("-----")
             } }
         }
-        require(rows.size == parsedLogCount) {
-            "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
+        // v1/v2: a full row-by-row mapping file to validate and rehydrate into a CaptureTimeline.
+        // v3: no mapping file at all — descriptor.mapping is null (see its own doc) and there is
+        // nothing here to read; AppState instead turns descriptor.syncAnchor into a plain
+        // VideoAnchor once it has parsed the log itself.
+        val timeline = descriptor.mapping?.let { mappingAsset ->
+            val rows = readMapping(resolveSafe(root, mappingAsset.path))
+            require(rows.size == parsedLogCount) {
+                "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
+            }
+            CaptureTimeline(rows, manualOffsetMs = descriptor.manualOffsetMs)
+        }
+        descriptor.syncAnchor?.let { anchor ->
+            require(anchor.row in 1..parsedLogCount) {
+                "Capture sync anchor row ${anchor.row} is outside the parsed log ($parsedLogCount rows)"
+            }
         }
         // Decoded but NOT re-anchored here — see ImportedCapture.notes' own doc for why that's the
         // caller's job (it needs the actually-parsed `List<LogEntry>`, which this layer never builds).
@@ -839,10 +905,11 @@ object CaptureArchiveReader {
         return ImportedCapture(
             logFile = logFile,
             videoFile = videoFile,
-            timeline = CaptureTimeline(rows, descriptor.quality, descriptor.uncertaintyMs, descriptor.manualOffsetMs),
+            timeline = timeline,
             descriptor = descriptor,
             source = source,
             notes = notes,
+            syncAnchor = descriptor.syncAnchor,
         )
     }
 }
@@ -868,8 +935,20 @@ private fun findDescriptorEntry(zip: ZipFile): org.apache.commons.compress.archi
     return descriptor
 }
 
-private fun validateEntriesAndFindDescriptor(zip: ZipFile): org.apache.commons.compress.archivers.zip.ZipArchiveEntry? {
+private data class ZipEntryScan(
+    val descriptorEntry: org.apache.commons.compress.archivers.zip.ZipArchiveEntry?,
+    // Every non-directory, non-descriptor, non-blurb entry's OWN declared uncompressed size, keyed
+    // by its normalized name (ZipFile — random-access mode, unlike a streaming ZipInputStream —
+    // always knows this from the central directory without reading entry bytes). Used for
+    // [requireExtractionSpace]'s preflight and the screenshots-combined limit instead of any
+    // per-asset declared size, which v3's own JSON no longer carries — see [CaptureArchiveAsset]'s
+    // own doc.
+    val entrySizes: Map<String, Long>,
+)
+
+private fun scanZipEntries(zip: ZipFile): ZipEntryScan {
     val names = HashSet<String>()
+    val entrySizes = HashMap<String, Long>()
     val entries = zip.entries
     var entryCount = 0
     var descriptor: org.apache.commons.compress.archivers.zip.ZipArchiveEntry? = null
@@ -882,10 +961,14 @@ private fun validateEntriesAndFindDescriptor(zip: ZipFile): org.apache.commons.c
         require(!entry.isUnixSymlink) { "Capture archive contains a symbolic link: $name" }
         if (!entry.isDirectory) {
             require(names.add(name)) { "Capture archive contains duplicate entry: $name" }
-            if (name == CAPTURE_DESCRIPTOR_NAME) descriptor = entry
+            when (name) {
+                CAPTURE_DESCRIPTOR_NAME -> descriptor = entry
+                CAPTURED_WITH_INDAGIUM_NAME -> Unit
+                else -> entrySizes[name] = entry.size.coerceAtLeast(0L)
+            }
         }
     }
-    return descriptor
+    return ZipEntryScan(descriptor, entrySizes)
 }
 
 private data class FrozenScreenshot(val source: File, val length: Long, val path: String)
@@ -919,40 +1002,102 @@ private fun stageScreenshots(screenshots: List<FrozenScreenshot>, work: File): L
 private val SCREENSHOT_NAME = Regex("screenshot-(\\d+)\\.[A-Za-z0-9]{1,8}")
 
 /**
- * Writes `notes/capture.ann` (gated on [CaptureSettings.markerNotesInSnapshot]) and computes each
- * marker's clipped [CaptureArchiveMarker] alongside it. Deliberately does NOT rewrite [notes]'
- * blocks before serializing it — the shipped notes.ann keeps every marker's Note/Image/LogRef
- * exactly as the live tab had them (ORIGINAL, session-wide ordinals and all), and it's [markers]
- * (this function's second return value) that carries the export-local translation. Import-side
- * reconciliation — dropping an out-of-range marker's jump, clipping a partially-covered one, and
- * clearing stale sourceEntries — all happens once, at re-open time, in
+ * Writes `notes.ann` (gated on [CaptureSettings.markerNotesInSnapshot]) and computes each marker's
+ * clipped [CaptureArchiveMarker] alongside it. Deliberately does NOT rewrite the ordinal numbering
+ * on [notes]' blocks before serializing them — the shipped notes.ann keeps every marker's
+ * Note/LogRef exactly as the live tab had them (ORIGINAL, session-wide ordinals and all), and it's
+ * [markers] (this function's second return value) that carries the export-local translation. Import-
+ * side reconciliation — dropping an out-of-range marker's jump, clipping a partially-covered one,
+ * and clearing stale sourceEntries — all happens once, at re-open time, in
  * [reanchorImportedCaptureNotes]; duplicating that logic here (to also produce "clean" shipped
  * bytes) would just be two places for the same rule to drift apart.
+ *
+ * [AnnBlock.Image] video frames ARE rewritten here, though — see [rewriteExportedVideoFrames].
+ * [clip] is the effective clip this export actually staged ([export]'s own `effectiveClip`, null
+ * when no video was included), and [videoEntryName] is that clip's archive entry name (e.g.
+ * `"screen.mp4"`), also null when no video was included.
  */
 private fun stageNotes(
     work: File,
-    settings: CaptureSettings,
+    session: CaptureSession,
     notes: Annotations?,
     selectionIndexFile: File,
+    clip: CaptureVideoClip?,
+    videoEntryName: String?,
 ): Pair<CaptureArchiveAsset?, List<CaptureArchiveMarker>> {
-    if (!settings.markerNotesInSnapshot || notes == null) return null to emptyList()
+    if (!session.settings.markerNotesInSnapshot || notes == null) return null to emptyList()
     val markers = notes.blocks.filterIsInstance<AnnBlock.Note>()
         .mapNotNull { note -> parseMarkerHeader(note.text)?.copy(noteBlockId = note.id) }
     val clipped = clipMarkersForExport(markers, selectionIndexFile)
-    val target = File(work, "notes/capture.ann").also { it.parentFile.mkdirs() }
-    target.writeText(notes.annotationsToken(), Charsets.UTF_8)
-    return asset("notes/capture.ann", target) to clipped
+    val rewritten = rewriteExportedVideoFrames(notes, session, clip, videoEntryName)
+    val target = File(work, "notes.ann")
+    target.writeText(rewritten.annotationsToken(), Charsets.UTF_8)
+    return asset("notes.ann", target) to clipped
 }
 
 /**
- * Computes each marker's EXPORT-LOCAL ordinal bounds — the numbering [writeMapping] assigns this
- * export's own rows, which the reopened tab's own LogParser reproduces 1:1 (see CaptureMarkerCodec's
- * doc on why "ordinal" always means that) — by intersecting the marker's ORIGINAL, session-wide
- * [CaptureMarker.firstOrdinal]/[CaptureMarker.lastOrdinal] window against exactly the rows this
- * export kept. A marker with no intersection at all is simply absent from the result. [selectionIndexFile]
- * must be the SAME frozen, already-filtered index [writeMapping] reads for this same export — this
- * scans it with the identical local-ordinal counter (one increment per row that carries a
- * `rowOrdinal`) so the two can never disagree about what row N of the exported log is.
+ * Bug fix: a marker screenshot's [com.indagium.model.VideoFrameReference] used to keep pointing at
+ * the SESSION's own raw recording (`VideoSource.LocalFile(session.videoFile.absolutePath)`) at a
+ * SOURCE-VIDEO-relative position (see AppState.attachMarkerScreenshot/screenshotCapture). After
+ * Save + reopen, the tab's attached video is instead this export's own CLIP, starting at [clip]'s
+ * `actualStartMs`, and identified by a durable [VideoSource.ArchiveEntry] rather than that same raw
+ * file path — so [AppState.navigateToVideoFrame]'s exact-source-identity check always rejected the
+ * old frame, and even a looser check would have seeked to the wrong offset (never shifted by the
+ * clip's own start).
+ *
+ * Every [AnnBlock.Image] whose frame is from THIS session's own video is rewritten here to a
+ * PORTABLE marker — `VideoSource.ArchiveEntry("", videoEntryName, videoEntryName)`, empty
+ * `archivePath` meaning "this same archive" — with [VideoFrameReference.positionMs] rebased to be
+ * relative to the clip's own start. [AppState.repointPortableVideoFrames] (called from
+ * `openCaptureFile`/`offerCaptureNotesReimportIfNeeded` at import time) re-points that portable
+ * marker at whatever source the reopened tab's attached video actually resolves to (an
+ * `ArchiveEntry(zipPath, …)` for a `.zip`, or a `LocalFile` for an extracted directory). A frame
+ * that falls outside what was actually exported — or no video was exported at all — is DETACHED
+ * (kept as a plain image, `videoFrame = null`) instead of shipped with a stale or out-of-range
+ * position: a missing seek link is a much smaller surprise than one that silently lands on the
+ * wrong moment.
+ */
+private fun rewriteExportedVideoFrames(
+    notes: Annotations,
+    session: CaptureSession,
+    clip: CaptureVideoClip?,
+    videoEntryName: String?,
+): Annotations {
+    val sessionVideoSource = VideoSource.LocalFile(session.videoFile.absolutePath)
+    var changed = false
+    val rewrittenBlocks = notes.blocks.map { block ->
+        if (block !is AnnBlock.Image) return@map block
+        val frame = block.videoFrame ?: return@map block
+        if (frame.source != sessionVideoSource) return@map block
+        changed = true
+        val inClip = clip != null && frame.positionMs in clip.actualStartMs..clip.coveredEndMs
+        if (videoEntryName == null || clip == null || !inClip) {
+            block.copy(
+                videoFrame = null,
+                provenance = "${frame.sourceLabel} (video not included in this export)",
+            )
+        } else {
+            val rewrittenFrame = frame.copy(
+                source = VideoSource.ArchiveEntry(archivePath = "", entryPath = videoEntryName, displayName = videoEntryName),
+                sourceLabel = "$CAPTURE_DESCRIPTOR_NAME/$videoEntryName",
+                positionMs = frame.positionMs - clip.actualStartMs,
+            )
+            block.copy(videoFrame = rewrittenFrame, provenance = rewrittenFrame.provenanceLabel)
+        }
+    }
+    return if (changed) notes.copy(blocks = rewrittenBlocks) else notes
+}
+
+/**
+ * Computes each marker's EXPORT-LOCAL ordinal bounds — the numbering [forEachSelectedRecord] assigns
+ * this export's own rows, which the reopened tab's own LogParser reproduces 1:1 (see
+ * CaptureMarkerCodec's doc on why "ordinal" always means that) — by intersecting the marker's
+ * ORIGINAL, session-wide [CaptureMarker.firstOrdinal]/[CaptureMarker.lastOrdinal] window against
+ * exactly the rows this export kept. A marker with no intersection at all is simply absent from the
+ * result. [selectionIndexFile] must be the SAME frozen, already-filtered index [computeCaptureSyncAnchor]
+ * reads for this same export — this scans it with the identical local-ordinal counter (one
+ * increment per row that carries a `rowOrdinal`) so the two can never disagree about what row N of
+ * the exported log is.
  */
 private fun clipMarkersForExport(markers: List<CaptureMarker>, selectionIndexFile: File): List<CaptureArchiveMarker> {
     val ranged = markers.filter { it.noteBlockId != null && it.firstOrdinal != null && it.lastOrdinal != null }
@@ -1318,39 +1463,48 @@ private fun copySelectedLog(source: File, selectionIndex: File, destination: Fil
     }
 }
 
-private fun writeMapping(
-    file: File,
+/**
+ * Archive v3's replacement for the old per-row `writeMapping` writer: reduces the same per-row
+ * (elapsedMs, video position) evidence that function used to serialize wholesale into ONE sync
+ * anchor (see [estimateCaptureSyncAnchor] and this file's own module doc).
+ *
+ * [logFile] is reopened and reparsed with [parseLogcat] rather than threading `ts` values through
+ * [selectionIndex] (which only ever carried the host's own `elapsedMs`, never the row's own
+ * device-embedded timestamp) — this guarantees the "log time" fed into the offset estimate is
+ * produced by the EXACT SAME code path ([parseLogcat] + [unrollLogTimeline]) that AppState runs
+ * over this same file at import time to build a manual anchor's elapsed timeline, so the two can
+ * never disagree. For [export], [logFile] is the just-staged, already-selected `logcat.log`
+ * (ordinals 1..N in export-local numbering); for [finalizeSessionInPlace], it is the session's own
+ * full, never-restaged log (finalization keeps every row, so export-local ordinal == session
+ * ordinal there). [selectionIndex] must be the SAME frozen, already-filtered index the caller used
+ * to stage/select that same log — see [clipMarkersForExport]'s own doc for why this ordinal
+ * counter (one increment per row that carries a `rowOrdinal`) must stay in lockstep with the one
+ * LogParser reproduces when the shipped log is reopened.
+ */
+private fun computeCaptureSyncAnchor(
+    logFile: File,
     selectionIndex: File,
     session: CaptureSession,
     clip: CaptureVideoClip?,
     includeRawVideo: Boolean = false,
-) {
+): CaptureSyncAnchor? {
+    val logTimeByOrdinal = unrollLogTimeline(parseLogcat(logFile)).byId
     var ordinal = 0
-    var bytesWritten = 0L
     val videoStart = session.videoStartElapsedMs
-    file.bufferedWriter(Charsets.UTF_8).use { writer ->
-        forEachSelectedRecord(selectionIndex) { record ->
-            if (record.rowOrdinal == null) return@forEachSelectedRecord
-            ordinal += 1
-            val sourceVideoMs = videoStart?.let { record.elapsedMs - it + session.manualOffsetMs }
-            val exportedVideoMs = when {
-                clip != null && sourceVideoMs != null && sourceVideoMs in clip.actualStartMs..clip.coveredEndMs ->
-                    sourceVideoMs - clip.actualStartMs
-                includeRawVideo && sourceVideoMs != null && sourceVideoMs >= 0 -> sourceVideoMs
-                else -> null
-            }
-            val row = buildJsonObject {
-                put("ordinal", ordinal)
-                put("elapsedMs", record.elapsedMs)
-                if (exportedVideoMs != null) put("videoMs", exportedVideoMs) else put("videoMs", JsonNull)
-            }.toString()
-            val rowBytes = row.toByteArray(Charsets.UTF_8).size.toLong() + 1L
-            require(bytesWritten <= MAX_MAPPING_BYTES - rowBytes) { "Capture mapping exceeds the size limit" }
-            writer.append(row)
-            writer.newLine()
-            bytesWritten += rowBytes
+    val samples = ArrayList<CaptureSyncSample>()
+    forEachSelectedRecord(selectionIndex) { record ->
+        if (record.rowOrdinal == null) return@forEachSelectedRecord
+        ordinal += 1
+        val sourceVideoMs = videoStart?.let { record.elapsedMs - it + session.manualOffsetMs }
+        val exportedVideoMs = when {
+            clip != null && sourceVideoMs != null && sourceVideoMs in clip.actualStartMs..clip.coveredEndMs ->
+                sourceVideoMs - clip.actualStartMs
+            includeRawVideo && sourceVideoMs != null && sourceVideoMs >= 0 -> sourceVideoMs
+            else -> null
         }
+        samples += CaptureSyncSample(ordinal, logTimeByOrdinal[ordinal], exportedVideoMs)
     }
+    return estimateCaptureSyncAnchor(samples, videoDurationMs = clip?.durationMs)
 }
 
 private fun readMapping(file: File): List<CaptureMappingRow> {
@@ -1375,129 +1529,102 @@ private fun readMapping(file: File): List<CaptureMappingRow> {
     return rows
 }
 
+/**
+ * v3's own flat, simplified shape (see this file's module doc and the archive-v3 plan): a plain
+ * `sessionId`/`app`/`device`/`range`/`interruptions` header, one object per asset carrying just its
+ * archive-relative `file` name plus the timing that asset needs (`log`/`video`), `notes` as a bare
+ * path string (or null), `markers` as `{"note", "rows":[first,last]}`, `screenshots` as bare path
+ * strings, and one flat `sha256` map keyed by path — replacing the old one-`sizeBytes`-and-`sha256`-
+ * per-asset objects. [CaptureArchiveAsset.sizeBytes] is not recoverable from this shape alone, so
+ * [parseDescriptorV3] leaves every asset's `sizeBytes` at -1 (unused by anything downstream — see
+ * that field's own doc).
+ *
+ * `sync` replaced its old `{"file","offsetMs"}` mapping-file pointer with the single anchor
+ * [estimateCaptureSyncAnchor] computes: `{"row","videoMs"}`, or `null` when this export has no
+ * video or no row an offset could be estimated from (see [CaptureArchiveDescriptor.syncAnchor]'s
+ * own doc). `manualOffsetMs` moved out to its own top-level `offsetMs` key since it is no longer
+ * part of the same object as a "sync" pointer.
+ */
 private fun CaptureArchiveDescriptor.toJson(): String = buildJsonObject {
     put("format", "indagium-capture")
-    put("formatVersion", formatVersion)
+    put("version", formatVersion)
+    put("app", app)
     put("sessionId", sessionId)
     put("device", buildJsonObject {
+        put("model", device.model)
         put("serial", device.serial)
         put("state", device.state)
-        put("model", device.model)
         put("emulator", device.emulator)
     })
-    put("settings", Json.parseToJsonElement(captureSettingsToJson(settings)))
-    put("sessionStartedEpochMs", sessionStartedEpochMs)
-    put("exportedEpochMs", exportedEpochMs)
+    put("startedAt", isoInstant(sessionStartedEpochMs))
+    put("exportedAt", isoInstant(exportedEpochMs))
     put("range", range.name)
-    put("coverage", buildJsonObject {
-        put("logStartMs", coverage.logStartMs)
-        put("logEndMs", coverage.logEndMs)
-        nullableLong("videoRequestedStartMs", coverage.videoRequestedStartMs)
-        nullableLong("videoActualStartMs", coverage.videoActualStartMs)
-        nullableLong("videoEndMs", coverage.videoEndMs)
+    put("log", buildJsonObject {
+        put("file", log.path)
+        put("startMs", logStartMs)
+        put("endMs", logEndMs)
     })
-    put("mappingMetadata", buildJsonObject {
-        put("quality", quality)
-        nullableLong("uncertaintyMs", uncertaintyMs)
-        put("manualOffsetMs", manualOffsetMs)
-    })
+    if (video != null) {
+        put("video", buildJsonObject {
+            put("file", video.path)
+            nullableLong("startMs", videoStartMs)
+            nullableLong("endMs", videoEndMs)
+        })
+    } else {
+        put("video", JsonNull)
+    }
+    if (syncAnchor != null) {
+        put("sync", buildJsonObject {
+            put("row", syncAnchor.row)
+            put("videoMs", syncAnchor.videoMs)
+        })
+    } else {
+        put("sync", JsonNull)
+    }
+    put("offsetMs", manualOffsetMs)
+    if (notes != null) put("notes", notes.path) else put("notes", JsonNull)
+    put(
+        "markers",
+        buildJsonArray {
+            markers.forEach { marker ->
+                add(
+                    buildJsonObject {
+                        put("note", marker.noteBlockId)
+                        put("rows", buildJsonArray { add(marker.firstOrdinal); add(marker.lastOrdinal) })
+                    },
+                )
+            }
+        },
+    )
+    put("screenshots", buildJsonArray { screenshots.forEach { add(it.path) } })
     put("interruptions", buildJsonArray { interruptions.forEach { add(it) } })
-    put("log", log.toJson())
-    put("mapping", mapping.toJson())
-    if (video != null) put("video", video.toJson()) else put("video", JsonNull)
-    put("screenshots", buildJsonArray { screenshots.forEach { add(it.toJson()) } })
-    // Phase 4 — both OPTIONAL keys on read (parseDescriptor): a v1 archive has neither at all.
-    if (notes != null) put("notes", notes.toJson()) else put("notes", JsonNull)
-    put("markers", buildJsonArray { markers.forEach { add(it.toJson()) } })
+    put("sha256", buildJsonObject { assets().forEach { put(it.path, it.sha256) } })
 }.toString()
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.nullableLong(name: String, value: Long?) {
     if (value == null) put(name, JsonNull) else put(name, value)
 }
 
-private fun CaptureArchiveAsset.toJson(): JsonObject = buildJsonObject {
-    put("path", path)
-    put("sizeBytes", sizeBytes)
-    put("sha256", sha256)
-}
+private fun isoInstant(epochMs: Long): String = DateTimeFormatter.ISO_INSTANT.format(Instant.ofEpochMilli(epochMs))
 
-private fun CaptureArchiveMarker.toJson(): JsonObject = buildJsonObject {
-    put("noteBlockId", noteBlockId)
-    put("firstOrdinal", firstOrdinal)
-    put("lastOrdinal", lastOrdinal)
-}
+private fun parseIsoInstant(text: String): Long = Instant.parse(text).toEpochMilli()
 
+/** Top-level entry: reads the descriptor's version, then dispatches to the v3 or legacy (v1/v2)
+ *  shape — see [CaptureArchiveDescriptor]'s own doc for what each version writes/omits. */
 @Suppress("TooGenericExceptionCaught")
 private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
     try {
         val root = Json.parseToJsonElement(raw).jsonObject
         require(root.string("format") == "indagium-capture") { "Not an Indagium capture descriptor" }
-        val version = root.int("formatVersion") ?: error("Capture descriptor is missing formatVersion")
+        // v3 renamed the version key "formatVersion" -> "version"; both are read so a v1/v2
+        // archive (which only ever wrote "formatVersion") still opens.
+        val version = root.int("version") ?: root.int("formatVersion")
+            ?: error("Capture descriptor is missing its format version")
         // 1..CAPTURE_ARCHIVE_VERSION, not an exact match — see CAPTURE_ARCHIVE_VERSION's own doc
-        // comment for why a v1 archive (missing the notes/markers keys entirely) still opens here.
+        // comment for why an older archive (missing keys a later version added) still opens here.
         require(version in 1..CAPTURE_ARCHIVE_VERSION) { "Unsupported capture archive version: $version" }
-        val device = root.requiredObject("device")
-        val settingsElement = root["settings"] ?: error("Capture descriptor is missing settings")
-        val settings = captureSettingsFromJson(settingsElement.toString()) ?: error("Capture settings are invalid")
-        val coverage = root.requiredObject("coverage")
-        val metadata = root.requiredObject("mappingMetadata")
-        val descriptor = CaptureArchiveDescriptor(
-            formatVersion = version,
-            sessionId = root.requiredString("sessionId"),
-            device = CaptureArchiveDevice(
-                serial = device.requiredString("serial"),
-                state = device.string("state") ?: "device",
-                model = device.requiredString("model"),
-                emulator = device.boolean("emulator") ?: false,
-            ),
-            settings = settings,
-            sessionStartedEpochMs = root.requiredLong("sessionStartedEpochMs"),
-            exportedEpochMs = root.requiredLong("exportedEpochMs"),
-            range = root.requiredString("range").let { CaptureRange.valueOf(it) },
-            coverage = CaptureArchiveCoverage(
-                logStartMs = coverage.requiredLong("logStartMs"),
-                logEndMs = coverage.requiredLong("logEndMs"),
-                videoRequestedStartMs = coverage.nullableLong("videoRequestedStartMs"),
-                videoActualStartMs = coverage.nullableLong("videoActualStartMs"),
-                videoEndMs = coverage.nullableLong("videoEndMs"),
-            ),
-            quality = metadata.string("quality") ?: "estimated",
-            uncertaintyMs = metadata.nullableLong("uncertaintyMs"),
-            manualOffsetMs = metadata.long("manualOffsetMs") ?: 0,
-            interruptions = root.stringList("interruptions") ?: emptyList(),
-            log = root.requiredObject("log").toAsset(),
-            mapping = root.requiredObject("mapping").toAsset(),
-            video = (root["video"] as? JsonObject)?.toAsset(),
-            screenshots = (root["screenshots"] as? JsonArray)?.map { it.jsonObject.toAsset() } ?: emptyList(),
-            // Phase 4 — both keys OPTIONAL: absent (a v1 archive, or a v2 one exported with
-            // markerNotesInSnapshot off) means null/empty, exactly like `video` above.
-            notes = (root["notes"] as? JsonObject)?.toAsset(),
-            markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toMarker() } ?: emptyList(),
-        )
-        require(descriptor.sessionId.isNotBlank()) { "Capture session id is blank" }
-        require(descriptor.coverage.logEndMs >= descriptor.coverage.logStartMs) { "Capture log coverage is invalid" }
-        descriptor.assets().forEach { asset ->
-            require(isSafeRelativePath(asset.path)) { "Unsafe capture asset path: ${asset.path}" }
-            require(asset.sizeBytes >= 0) { "Capture asset has a negative size: ${asset.path}" }
-            require(asset.sha256.matches(Regex("[0-9a-f]{64}"))) { "Capture asset has an invalid SHA-256: ${asset.path}" }
-        }
-        require(descriptor.assets().map { it.path }.distinct().size == descriptor.assets().size) {
-            "Capture descriptor repeats an asset path"
-        }
-        require(descriptor.assets().none { it.path == CAPTURE_DESCRIPTOR_NAME }) {
-            "Capture descriptor cannot also be an asset"
-        }
-        descriptor.markers.forEach { marker ->
-            require(marker.firstOrdinal in 1..marker.lastOrdinal) {
-                "Capture marker has an invalid ordinal range: ${marker.noteBlockId}"
-            }
-        }
-        require(descriptor.markers.map { it.noteBlockId }.distinct().size == descriptor.markers.size) {
-            "Capture descriptor repeats a marker note id"
-        }
-        require(descriptor.notes != null || descriptor.markers.isEmpty()) {
-            "Capture descriptor has markers but no notes asset"
-        }
+        val descriptor = if (version >= 3) parseDescriptorV3(root, version) else parseDescriptorLegacy(root, version)
+        validateParsedDescriptor(descriptor)
         return descriptor
     } catch (e: CaptureArchiveException) {
         throw e
@@ -1506,22 +1633,163 @@ private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
     }
 }
 
-private fun JsonObject.toAsset(): CaptureArchiveAsset = CaptureArchiveAsset(
+private fun parseDescriptorV3(root: JsonObject, version: Int): CaptureArchiveDescriptor {
+    val device = root.requiredObject("device")
+    val log = root.requiredObject("log")
+    val videoObj = root["video"] as? JsonObject
+    // The current writer's "sync" is either the {"row","videoMs"} anchor object or null (no video /
+    // no estimate) — never required. An in-progress v3 build on this same branch could still have
+    // written the older {"file","offsetMs"} mapping-file pointer; tolerated by simply reading no
+    // anchor from it rather than trying to resurrect a mapping file that no longer ships (see this
+    // class's own doc — nothing outside this machine has ever seen that shape).
+    val sync = root["sync"] as? JsonObject
+    val syncAnchor = sync?.let { obj ->
+        val row = obj.int("row")
+        val videoMs = obj.long("videoMs")
+        if (row != null && videoMs != null) CaptureSyncAnchor(row = row, videoMs = videoMs) else null
+    }
+    val sha256 = root["sha256"] as? JsonObject ?: JsonObject(emptyMap())
+
+    fun assetFor(path: String) = CaptureArchiveAsset(
+        path = path,
+        sizeBytes = -1L,
+        sha256 = sha256.string(path) ?: error("Capture descriptor is missing a sha256 entry for $path"),
+    )
+    return CaptureArchiveDescriptor(
+        formatVersion = version,
+        app = root.string("app") ?: "",
+        sessionId = root.requiredString("sessionId"),
+        device = CaptureArchiveDevice(
+            serial = device.requiredString("serial"),
+            state = device.string("state") ?: "device",
+            model = device.requiredString("model"),
+            emulator = device.boolean("emulator") ?: false,
+        ),
+        sessionStartedEpochMs = root.string("startedAt")?.let(::parseIsoInstant) ?: root.requiredLong("sessionStartedEpochMs"),
+        exportedEpochMs = root.string("exportedAt")?.let(::parseIsoInstant) ?: root.requiredLong("exportedEpochMs"),
+        range = root.requiredString("range").let { CaptureRange.valueOf(it) },
+        // Prefers the current top-level "offsetMs"; falls back to the old sync-nested one so an
+        // in-progress v3 build's descriptor still round-trips its manual offset.
+        manualOffsetMs = root.long("offsetMs") ?: sync?.long("offsetMs") ?: 0,
+        interruptions = root.stringList("interruptions") ?: emptyList(),
+        log = assetFor(log.requiredString("file")),
+        logStartMs = log.requiredLong("startMs"),
+        logEndMs = log.requiredLong("endMs"),
+        mapping = null,
+        video = videoObj?.let { assetFor(it.requiredString("file")) },
+        videoStartMs = videoObj?.nullableLong("startMs"),
+        videoEndMs = videoObj?.nullableLong("endMs"),
+        screenshots = (root["screenshots"] as? JsonArray)?.map { assetFor((it as JsonPrimitive).content) } ?: emptyList(),
+        notes = root.string("notes")?.let(::assetFor),
+        markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toMarkerV3() } ?: emptyList(),
+        syncAnchor = syncAnchor,
+    )
+}
+
+private fun JsonObject.toMarkerV3(): CaptureArchiveMarker {
+    val rows = this["rows"] as? JsonArray ?: error("Capture marker is missing rows")
+    require(rows.size == 2) { "Capture marker rows must have exactly two elements" }
+
+    fun ordinal(index: Int) = (rows[index] as? JsonPrimitive)?.content?.toIntOrNull()
+        ?: error("Capture marker has an invalid row")
+    return CaptureArchiveMarker(noteBlockId = requiredString("note"), firstOrdinal = ordinal(0), lastOrdinal = ordinal(1))
+}
+
+/** v1/v2's nested `coverage`/`mappingMetadata` shape, with a per-asset `{path,sizeBytes,sha256}`
+ *  object everywhere v3 uses a bare path string. The full `settings` dump both versions wrote is
+ *  parsed by neither this function nor anything downstream — nothing ever read `descriptor.settings`
+ *  back (see [CaptureArchiveDescriptor]'s own doc), so it's simply skipped. */
+private fun parseDescriptorLegacy(root: JsonObject, version: Int): CaptureArchiveDescriptor {
+    val device = root.requiredObject("device")
+    val coverage = root.requiredObject("coverage")
+    val metadata = root.requiredObject("mappingMetadata")
+    return CaptureArchiveDescriptor(
+        formatVersion = version,
+        app = "",
+        sessionId = root.requiredString("sessionId"),
+        device = CaptureArchiveDevice(
+            serial = device.requiredString("serial"),
+            state = device.string("state") ?: "device",
+            model = device.requiredString("model"),
+            emulator = device.boolean("emulator") ?: false,
+        ),
+        sessionStartedEpochMs = root.requiredLong("sessionStartedEpochMs"),
+        exportedEpochMs = root.requiredLong("exportedEpochMs"),
+        range = root.requiredString("range").let { CaptureRange.valueOf(it) },
+        manualOffsetMs = metadata.long("manualOffsetMs") ?: 0,
+        interruptions = root.stringList("interruptions") ?: emptyList(),
+        log = root.requiredObject("log").toLegacyAsset(),
+        logStartMs = coverage.requiredLong("logStartMs"),
+        logEndMs = coverage.requiredLong("logEndMs"),
+        mapping = root.requiredObject("mapping").toLegacyAsset(),
+        video = (root["video"] as? JsonObject)?.toLegacyAsset(),
+        videoStartMs = coverage.nullableLong("videoActualStartMs"),
+        videoEndMs = coverage.nullableLong("videoEndMs"),
+        screenshots = (root["screenshots"] as? JsonArray)?.map { it.jsonObject.toLegacyAsset() } ?: emptyList(),
+        // Phase 4 — both keys OPTIONAL: absent (a v1 archive, or a v2 one exported with
+        // markerNotesInSnapshot off) means null/empty, exactly like `video` above.
+        notes = (root["notes"] as? JsonObject)?.toLegacyAsset(),
+        markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toLegacyMarker() } ?: emptyList(),
+    )
+}
+
+private fun JsonObject.toLegacyAsset(): CaptureArchiveAsset = CaptureArchiveAsset(
     path = requiredString("path"),
     sizeBytes = requiredLong("sizeBytes"),
     sha256 = requiredString("sha256"),
 )
 
-private fun JsonObject.toMarker(): CaptureArchiveMarker = CaptureArchiveMarker(
+private fun JsonObject.toLegacyMarker(): CaptureArchiveMarker = CaptureArchiveMarker(
     noteBlockId = requiredString("noteBlockId"),
     firstOrdinal = int("firstOrdinal") ?: error("Capture marker is missing firstOrdinal"),
     lastOrdinal = int("lastOrdinal") ?: error("Capture marker is missing lastOrdinal"),
 )
 
+private fun validateParsedDescriptor(descriptor: CaptureArchiveDescriptor) {
+    require(descriptor.sessionId.isNotBlank()) { "Capture session id is blank" }
+    require(descriptor.logEndMs >= descriptor.logStartMs) { "Capture log coverage is invalid" }
+    descriptor.assets().forEach { asset ->
+        require(isSafeRelativePath(asset.path)) { "Unsafe capture asset path: ${asset.path}" }
+        require(asset.sha256.matches(Regex("[0-9a-f]{64}"))) { "Capture asset has an invalid SHA-256: ${asset.path}" }
+    }
+    require(descriptor.assets().map { it.path }.distinct().size == descriptor.assets().size) {
+        "Capture descriptor repeats an asset path"
+    }
+    require(descriptor.assets().none { it.path == CAPTURE_DESCRIPTOR_NAME }) {
+        "Capture descriptor cannot also be an asset"
+    }
+    descriptor.markers.forEach { marker ->
+        require(marker.firstOrdinal in 1..marker.lastOrdinal) {
+            "Capture marker has an invalid ordinal range: ${marker.noteBlockId}"
+        }
+    }
+    require(descriptor.markers.map { it.noteBlockId }.distinct().size == descriptor.markers.size) {
+        "Capture descriptor repeats a marker note id"
+    }
+    require(descriptor.notes != null || descriptor.markers.isEmpty()) {
+        "Capture descriptor has markers but no notes asset"
+    }
+    // v3 replaced the mapping file with syncAnchor — the two are mutually exclusive by construction
+    // (parseDescriptorV3 never sets mapping, parseDescriptorLegacy never sets syncAnchor), and this
+    // keeps that invariant checked rather than merely assumed.
+    require((descriptor.mapping == null) == (descriptor.formatVersion >= 3)) {
+        "Capture descriptor mapping presence does not match its format version"
+    }
+    require(descriptor.syncAnchor == null || descriptor.video != null) {
+        "Capture descriptor has a sync anchor but no video"
+    }
+    require(descriptor.syncAnchor == null || descriptor.syncAnchor.row >= 1) {
+        "Capture sync anchor has an invalid row"
+    }
+    require(descriptor.syncAnchor == null || descriptor.syncAnchor.videoMs >= 0) {
+        "Capture sync anchor has a negative video position"
+    }
+}
+
 private fun CaptureArchiveDescriptor.assets(): List<CaptureArchiveAsset> =
     buildList {
         add(log)
-        add(mapping)
+        mapping?.let(::add)
         video?.let(::add)
         addAll(screenshots)
         notes?.let(::add)
@@ -1561,7 +1829,7 @@ private fun sha256(file: File): String {
 
 private fun writeZip(work: File, destination: File, descriptor: CaptureArchiveDescriptor) {
     ZipOutputStream(BufferedOutputStream(destination.outputStream())).use { zip ->
-        val paths = listOf(CAPTURE_DESCRIPTOR_NAME) + descriptor.assets().map { it.path }
+        val paths = listOf(CAPTURE_DESCRIPTOR_NAME, CAPTURED_WITH_INDAGIUM_NAME) + descriptor.assets().map { it.path }
         paths.forEach { path ->
             checkNotInterrupted()
             val source = resolveSafe(work, path)
@@ -1570,6 +1838,18 @@ private fun writeZip(work: File, destination: File, descriptor: CaptureArchiveDe
             zip.closeEntry()
         }
     }
+}
+
+/** `captured_with_indagium.txt` — a plain-text hint for anyone who opens the .zip outside Indagium
+ *  (e.g. a bug tracker's inline zip preview). Not a tracked/hashed asset (see [scanZipEntries] and
+ *  [CaptureArchiveDescriptor.assets] — it's deliberately absent from both), just a fixed courtesy
+ *  file every export writes and [scanZipEntries]/`openZip` allow through unreferenced. */
+private fun writeCapturedWithIndagiumBlurb(work: File) {
+    File(work, CAPTURED_WITH_INDAGIUM_NAME).writeText(
+        "Captured with Indagium ${BuildInfo.APP_VERSION} — https://indagium.com\n" +
+            "Open this .zip in Indagium to see the synced log, video and markers together.\n",
+        Charsets.UTF_8,
+    )
 }
 
 private fun preflight(destination: File, reserveBytes: Long, logBytes: Long, videoBytes: Long, screenshotsBytes: Long) {
@@ -1614,12 +1894,14 @@ private fun extractVerified(input: InputStream, target: File, asset: CaptureArch
             val read = input.read(buffer)
             if (read < 0) break
             count += read
-            require(count <= limit && count <= asset.sizeBytes) { "Capture asset exceeds its declared size: ${asset.path}" }
+            require(count <= limit) { "Capture asset exceeds its size limit: ${asset.path}" }
             output.write(buffer, 0, read)
             digest.update(buffer, 0, read)
         }
     }
-    require(count == asset.sizeBytes) { "Capture asset size mismatch: ${asset.path}" }
+    // No exact-size cross-check any more — v3's own JSON carries no per-asset declared size (see
+    // CaptureArchiveAsset's own doc), only a limit and a SHA-256, and the hash below is a strictly
+    // stronger integrity guarantee than a size match ever was on its own.
     val actual = digest.digest().joinToString("") { "%02x".format(it) }
     require(actual == asset.sha256) { "Capture asset checksum mismatch: ${asset.path}" }
 }
@@ -1632,13 +1914,9 @@ private fun assetLimit(descriptor: CaptureArchiveDescriptor, asset: CaptureArchi
     else -> MAX_SCREENSHOT_BYTES
 }
 
-private fun requireExtractionSpace(cacheDirectory: File, descriptor: CaptureArchiveDescriptor) {
-    val required = descriptor.assets().fold(0L) { total, asset ->
-        require(asset.sizeBytes <= Long.MAX_VALUE - total) { "Capture assets exceed the supported size" }
-        total + asset.sizeBytes
-    }
-    require(cacheDirectory.usableSpace >= required) {
-        "Not enough free space to import capture (need $required bytes, have ${cacheDirectory.usableSpace} bytes)"
+private fun requireExtractionSpace(cacheDirectory: File, requiredBytes: Long) {
+    require(cacheDirectory.usableSpace >= requiredBytes) {
+        "Not enough free space to import capture (need $requiredBytes bytes, have ${cacheDirectory.usableSpace} bytes)"
     }
 }
 

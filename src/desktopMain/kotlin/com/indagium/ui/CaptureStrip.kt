@@ -773,7 +773,7 @@ private fun CaptureStoppedStrip(
                 modifier = Modifier.height(30.dp),
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                 onClick = {
-                    state.saveRetainedCapture(sessionId)
+                    state.saveRetainedCapture(sessionId, tab.id)
                     onReturnFocus()
                 },
             )

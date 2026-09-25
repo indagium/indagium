@@ -21,6 +21,13 @@ enum class CaptureBufferMode { DEFAULT, ALL, CUSTOM }
 /** Where a live device display is shown while capture is running. */
 enum class CaptureMirrorMode { EMBEDDED, EXTERNAL, DISABLED }
 
+/**
+ * The container an exported/saved video is remuxed into (recording itself always stays MKV — see
+ * StreamingMkvWriter's own doc for why). [extension] is also the archive's video entry name stem
+ * ("screen.$extension") — see CaptureArchive.kt's export().
+ */
+enum class CaptureVideoContainer(val extension: String) { MP4("mp4"), MKV("mkv") }
+
 /** Exactly one presentation action selected when a capture session starts. */
 enum class CaptureMirrorStartRoute { EMBEDDED, EXTERNAL, NONE }
 
@@ -63,6 +70,11 @@ data class CaptureSettings(
     val markerPostMs: Long = DEFAULT_MARKER_WINDOW_MS,
     val markerScreenshot: Boolean = true,
     val markerNotesInSnapshot: Boolean = true,
+    // Archive v3 / MP4 export, appended last per this class's own convention comment above. Only
+    // the EXPORTED video's container (Save snapshot / Save ZIP remux) — the live recording always
+    // stays MKV regardless of this setting. See CaptureArchive.kt's export() and
+    // FfmpegCaptureVideoExporter for where this is actually consumed.
+    val videoContainer: CaptureVideoContainer = CaptureVideoContainer.MP4,
 )
 
 /** The active display choice after applying the pre-choice `mirror` compatibility switch. */

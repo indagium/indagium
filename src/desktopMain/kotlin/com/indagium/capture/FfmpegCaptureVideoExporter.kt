@@ -30,6 +30,8 @@ import org.bytedeco.ffmpeg.global.avutil.AVERROR_INVALIDDATA
 import org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_VIDEO
 import org.bytedeco.ffmpeg.global.avutil.AV_NOPTS_VALUE
 import org.bytedeco.ffmpeg.global.avutil.av_dict_copy
+import org.bytedeco.ffmpeg.global.avutil.av_dict_free
+import org.bytedeco.ffmpeg.global.avutil.av_dict_set
 import org.bytedeco.ffmpeg.global.avutil.av_strerror
 import org.bytedeco.javacpp.BytePointer
 import org.bytedeco.javacpp.Pointer
@@ -104,10 +106,17 @@ class FfmpegCaptureVideoExporter(
         require(source.isFile) { "Capture video does not exist: ${source.absolutePath}" }
         require(source.canonicalFile != destination.canonicalFile) { "Video destination must differ from its capture source" }
 
+        // MP4 export (archive v3): the container is chosen by the DESTINATION's own extension —
+        // CaptureArchive.kt's export() picks "screen.mp4" or "screen.mkv" per the session's
+        // CaptureSettings.videoContainer — rather than a new exporter parameter, so every existing
+        // `CaptureVideoExporter { source, destination, start, end -> ... }` test fake (this codebase
+        // has dozens) keeps compiling unchanged. See [muxFormatFor]'s own doc for what each format
+        // means for the two write paths below.
+        val mp4 = isMp4Destination(destination)
         val destinationParent = destination.absoluteFile.parentFile
             ?: throw IOException("Video destination has no parent: ${destination.absolutePath}")
         destinationParent.mkdirs()
-        val staging = Files.createTempFile(destinationParent.toPath(), ".capture-export-", ".mkv").toFile()
+        val staging = Files.createTempFile(destinationParent.toPath(), ".capture-export-", if (mp4) ".mp4" else ".mkv").toFile()
         try {
             // One shared snapshot for both the scan and the remux (unlike coverageEndMs(), which
             // only ever needs the scan): scanWindow()'s window bounds must be valid against exactly
@@ -122,6 +131,7 @@ class FfmpegCaptureVideoExporter(
                         requestedStartMs,
                         window.actualStartUs,
                         window.coveredEndUs,
+                        mp4,
                         reencodeDiagnosticsHook,
                     )
                 } else {
@@ -130,7 +140,7 @@ class FfmpegCaptureVideoExporter(
                 if (exact != null) {
                     exact
                 } else {
-                    remux(snapshot, staging, window)
+                    remux(snapshot, staging, window, mp4)
                     CaptureVideoClip(
                         actualStartMs = window.actualStartUs / MILLIS_PER_SECOND,
                         coveredEndMs = window.coveredEndUs / MILLIS_PER_SECOND,
@@ -201,13 +211,14 @@ private fun <T> withPrefixSnapshot(source: File, block: (File) -> T): T {
  * [CaptureArchiveExporter]'s log-to-video row mapping, and re-encoding it in lockstep with video
  * here would roughly double this function's failure surface for no correctness benefit.
  */
-@Suppress("TooGenericExceptionCaught", "SwallowedException")
+@Suppress("TooGenericExceptionCaught", "SwallowedException", "LongParameterList")
 private fun reencodeFromRequestedStart(
     snapshot: File,
     staging: File,
     requestedStartMs: Long,
     keyframeStartUs: Long,
     coveredEndUs: Long,
+    mp4: Boolean,
     onDiagnostics: ((ReencodeDiagnostics) -> Unit)?,
 ): CaptureVideoClip? {
     val encoder = EXACT_START_ENCODER_CANDIDATES.firstNotNullOfOrNull { name ->
@@ -223,6 +234,7 @@ private fun reencodeFromRequestedStart(
             coveredEndUs,
             encoder.first,
             encoder.second,
+            mp4,
             onDiagnostics,
         )
     } catch (failure: InterruptedIOException) {
@@ -237,6 +249,7 @@ private fun reencodeFromRequestedStart(
  * (though itself `private`) is part of a public class's primary constructor signature. */
 data class ReencodeDiagnostics(val usedSeek: Boolean, val framesReadBeforeStart: Int)
 
+@Suppress("LongParameterList")
 private fun reencodeWithEncoder(
     snapshot: File,
     staging: File,
@@ -245,6 +258,7 @@ private fun reencodeWithEncoder(
     coveredEndUs: Long,
     encoderName: String,
     encoderId: Int,
+    mp4: Boolean,
     onDiagnostics: ((ReencodeDiagnostics) -> Unit)?,
 ): CaptureVideoClip? {
     var grabber = FFmpegFrameGrabber(snapshot)
@@ -255,7 +269,7 @@ private fun reencodeWithEncoder(
         grabber = positioned.grabber
         var framesReadBeforeStart = 0
         val start = FFmpegFrameRecorder(staging, grabber.imageWidth, grabber.imageHeight, 0).use { recorder ->
-            configureReencodeRecorder(recorder, grabber, encoderName, encoderId)
+            configureReencodeRecorder(recorder, grabber, encoderName, encoderId, mp4)
             encodeFramesInRange(grabber, recorder, requestedStartUs, coveredEndUs, positioned.landedFrame) {
                 framesReadBeforeStart++
             }
@@ -321,14 +335,32 @@ private fun configureReencodeRecorder(
     grabber: FFmpegFrameGrabber,
     encoderName: String,
     encoderId: Int,
+    mp4: Boolean,
 ) {
-    recorder.format = "matroska"
+    recorder.format = muxFormatFor(mp4)
     recorder.videoCodec = encoderId
     recorder.videoCodecName = encoderName
     recorder.frameRate = grabber.videoFrameRate.takeIf { it > 0.0 } ?: REENCODE_FALLBACK_FRAME_RATE
     recorder.videoBitrate = REENCODE_FALLBACK_BITRATE
     recorder.setDisplayRotation(grabber.displayRotation)
+    // MP4 export (archive v3): without +faststart the moov atom (the file's index) lands at the
+    // very END of the file, so nothing can start playback until the whole download/copy finishes —
+    // exactly the "unreadable until the trailer is written" property that keeps live recording on
+    // Matroska in the first place (see this file's own module doc). A finished export is a
+    // completed, static file either way, so paying to relocate moov to the front here costs nothing
+    // the live recorder couldn't already afford, and makes the exported file genuinely streamable.
+    if (mp4) recorder.setOption("movflags", "faststart")
 }
+
+/** The container FORMAT NAME FFmpeg's muxer registry expects — distinct from [CaptureVideoContainer]
+ *  (a settings-facing enum in CaptureModels.kt) and from the archive/destination FILE EXTENSION
+ *  ("mp4"/"mkv"): here it's "matroska", not "mkv". [isMp4Destination] is what actually decides `mp4`
+ *  for both this and [remux] — inferred from the destination FILE's own extension, not a new
+ *  exporter parameter, so [CaptureVideoExporter]'s single-abstract-method contract (and every
+ *  existing SAM-lambda test fake built against it) is untouched. */
+private fun muxFormatFor(mp4: Boolean): String = if (mp4) "mp4" else "matroska"
+
+private fun isMp4Destination(destination: File): Boolean = destination.extension.equals("mp4", ignoreCase = true)
 
 /**
  * Encodes every frame with a timestamp in `[requestedStartUs, coveredEndUs)` and returns the first
@@ -467,19 +499,20 @@ private fun scanWindow(input: AVFormatContext, inputLength: Long, requestedStart
     return ExportWindow(actualStart, coveredEndUs, videoStreamIndex)
 }
 
-private fun remux(snapshot: File, staging: File, window: ExportWindow) {
+private fun remux(snapshot: File, staging: File, window: ExportWindow, mp4: Boolean) {
     withInput(snapshot) { input ->
         val outputPointer = PointerPointer<Pointer>(1)
         outputPointer.put(null as Pointer?)
         var output: AVFormatContext? = null
         var outputOpened = false
         var headerWritten = false
+        var headerOptions: AVDictionary? = null
         try {
-            BytePointer("matroska").use { formatName ->
+            BytePointer(muxFormatFor(mp4)).use { formatName ->
                 BytePointer(staging.absolutePath).use { destinationName ->
                     ffmpegCheck(
                         avformat_alloc_output_context2(outputPointer, null, formatName, destinationName),
-                        "allocate Matroska output",
+                        "allocate ${muxFormatFor(mp4)} output",
                     )
                 }
             }
@@ -492,7 +525,14 @@ private fun remux(snapshot: File, staging: File, window: ExportWindow) {
                 outputOpened = true
             }
             copyMetadata(input.metadata(), "copy container metadata") { context.metadata(it) }
-            ffmpegCheck(avformat_write_header(context, NO_FORMAT_OPTIONS), "write export header")
+            // MP4 export (archive v3): +faststart moves the moov atom to the front of the file — see
+            // configureReencodeRecorder's matching comment for why that's worth doing on every
+            // export (this is the exact-start reencode path's raw-AVFormatContext sibling; both
+            // write paths need it, not just one).
+            if (mp4) {
+                headerOptions = AVDictionary(null).also { av_dict_set(it, "movflags", "faststart", 0) }
+            }
+            ffmpegCheck(avformat_write_header(context, headerOptions), "write export header")
             headerWritten = true
 
             readPackets(input, snapshot.length()) { packet ->
@@ -517,6 +557,7 @@ private fun remux(snapshot: File, staging: File, window: ExportWindow) {
             if (headerWritten && context != null) runCatching { av_write_trailer(context) }
             if (outputOpened && context != null) closeOutputIo(context)
             if (context != null && !context.isNull) avformat_free_context(context)
+            headerOptions?.let { if (!it.isNull) av_dict_free(it) }
             outputPointer.close()
         }
     }

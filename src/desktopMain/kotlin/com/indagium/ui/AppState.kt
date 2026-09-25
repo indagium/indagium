@@ -313,12 +313,23 @@ internal fun attachFinalizedCapture(
     imported: com.indagium.capture.ImportedCapture,
     enableDoubleClickSeek: Boolean,
 ): LogTab {
+    // Archive v3 (no per-row mapping file): finalizeSessionInPlace ships a single sync anchor
+    // instead of a CaptureTimeline — see ImportedCapture.syncAnchor's own doc. Resolved against
+    // THIS tab's own already-tailed logData (never imported.logFile — the whole point of this
+    // function is reusing the live tab's rows instead of reparsing) since finalization keeps every
+    // session row, so its export-local ordinal is exactly the tab's own row order. A row that
+    // cannot be resolved (e.g. a test fixture with no logData at all) simply leaves the attachment
+    // unanchored rather than failing the whole attach.
+    val anchor = imported.syncAnchor?.let { syncAnchor ->
+        tab.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
+    }
     val attachment = imported.videoFile?.let { video ->
         VideoAttachment(
             source = VideoSource.LocalFile(video.absolutePath),
             sourceLabel = "${imported.source.name}/${video.name}",
             captureSourcePath = imported.source.absolutePath,
             doubleClickSeekEnabled = enableDoubleClickSeek,
+            anchor = anchor,
         )
     }
     return tab.copy(
@@ -2038,11 +2049,16 @@ class AppState(
             captureScreenshotStatus = result.fold(
                 onSuccess = { screenshot ->
                     val tab = tab(tabId)
+                    // manualOffsetMs matches every other session-elapsed -> video-position
+                    // conversion (see CaptureArchive.kt's writeMapping/finalizeSessionInPlace) —
+                    // omitting it here used to leave a fresh screenshot's frame link off by
+                    // whatever calibration offset the session had accumulated.
+                    val manualOffsetMs = controller.selectedSession.value?.manualOffsetMs ?: 0L
                     val videoFrame = screenshot.videoStartElapsedMs?.let { videoStart ->
                         VideoFrameReference(
                             source = VideoSource.LocalFile(screenshot.videoFile.absolutePath),
                             sourceLabel = "capture.indagium.json/${screenshot.videoFile.name}",
-                            positionMs = (screenshot.elapsedMs - videoStart).coerceAtLeast(0L),
+                            positionMs = (screenshot.elapsedMs - videoStart + manualOffsetMs).coerceAtLeast(0L),
                         )
                     }
                     val provenance = videoFrame?.provenanceLabel ?: "From ${tab?.filename ?: "capture"}"
@@ -2181,11 +2197,13 @@ class AppState(
         if (!context.settings.markerScreenshot) return context.noteId
         if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.ENABLED) return context.noteId
         val shot = runCatching { controller.screenshotCapture() }.getOrNull() ?: return context.noteId
+        // manualOffsetMs matches every other session-elapsed -> video-position conversion — see
+        // the matching comment on screenshotCapture()'s own videoFrame above.
         val videoFrame = shot.videoStartElapsedMs?.let { start ->
             VideoFrameReference(
                 source = VideoSource.LocalFile(shot.videoFile.absolutePath),
                 sourceLabel = "capture.indagium.json/${shot.videoFile.name}",
-                positionMs = (shot.elapsedMs - start).coerceAtLeast(0L),
+                positionMs = (shot.elapsedMs - start + context.session.manualOffsetMs).coerceAtLeast(0L),
             )
         }
         val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
@@ -2732,7 +2750,13 @@ class AppState(
         return deleted
     }
 
-    internal fun saveRetainedCapture(sessionId: String) {
+    // tabId is the open tab (if any) backing this retained session — CaptureStoppedStrip always
+    // has one (its own tab), the launcher's "Retained sessions" list generally doesn't (a session
+    // with no open tab). When present, its CURRENT notes are exported exactly like the live
+    // snapshot path (exportCaptureSnapshot) does via preparedForSave, fixing markers silently
+    // missing from a stopped capture's "Save ZIP" — see this function's own bug-fix history.
+    internal fun saveRetainedCapture(sessionId: String, tabId: String? = null) {
+        val preparedNotes = tabId?.let { id -> tab(id)?.let { t -> t.annotations.preparedForSave(t) } }
         ioScope.launch {
             // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
             // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
@@ -2752,7 +2776,7 @@ class AppState(
             )
             captureExportError = null
             captureExportResult = runCatching {
-                captureService.exportRetainedSession(sessionId, File(directory, filename))
+                captureService.exportRetainedSession(sessionId, File(directory, filename), notes = preparedNotes)
             }.getOrElse { failure ->
                 captureExportError = failure.message ?: "Retained capture export failed"
                 null
@@ -7396,16 +7420,20 @@ class AppState(
                 val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
                 val logData = parseLogcat(imported.logFile)
                 ensureActive()
-                // Phase 4: imported.notes is still numbered against the ORIGINAL capture session
-                // (LogEntry.ids don't restart at 1 for a filtered/time-windowed export) — re-anchor
-                // against the log this coroutine just parsed before it becomes this tab's Annotations.
-                val importedNotes = imported.notes?.let { notes ->
-                    com.indagium.capture.reanchorImportedCaptureNotes(notes, imported.descriptor.markers, logData)
-                }
                 val sourcePath = if (file.name == "capture.indagium.json") {
                     imported.logFile.absolutePath
                 } else {
                     "${file.absolutePath}!${imported.descriptor.log.path}"
+                }
+                // Archive v3 (no per-row mapping file): imported.syncAnchor carries the single
+                // log-row <-> video-position pin the export estimated (see
+                // com.indagium.capture.estimateCaptureSyncAnchor) — turned into an ordinary
+                // VideoAnchor here, against the log this coroutine just parsed, so it's synced
+                // exactly the way a manual link is (AppState.logIdToVideoMs/videoMsToNearestLogId
+                // fall back to that arithmetic whenever captureTimeline is null). v1/v2 archives
+                // have no syncAnchor and instead populate imported.timeline below.
+                val syncAnchor = imported.syncAnchor?.let { anchor ->
+                    logData.getOrNull(anchor.row - 1)?.id?.let { logId -> VideoAnchor(anchor.videoMs, logId) }
                 }
                 val video = imported.videoFile?.let { localVideo ->
                     val videoSource = if (file.name == "capture.indagium.json") {
@@ -7418,7 +7446,19 @@ class AppState(
                         sourceLabel = "${file.name}/${localVideo.name}",
                         captureSourcePath = file.absolutePath,
                         doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                        anchor = syncAnchor,
                     )
+                }
+                // Phase 4: imported.notes is still numbered against the ORIGINAL capture session
+                // (LogEntry.ids don't restart at 1 for a filtered/time-windowed export) — re-anchor
+                // against the log this coroutine just parsed before it becomes this tab's Annotations.
+                // repointPortableVideoFrames then re-points every marker screenshot's export-time
+                // portable video source (CaptureArchive.kt's rewriteExportedVideoFrames) at THIS
+                // tab's own actual attached-video source — computed just above — so Notes clicks seek
+                // it instead of failing navigateToVideoFrame's exact-source-identity check.
+                val importedNotes = imported.notes?.let { notes ->
+                    val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(notes, imported.descriptor.markers, logData)
+                    com.indagium.capture.repointPortableVideoFrames(reanchored, video?.source)
                 }
                 var captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
                     analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
@@ -7459,14 +7499,16 @@ class AppState(
 
     /**
      * Phase 4 (snapshot archive + import): the `existing != null` branch above just switches to the
-     * already-open tab without rereading the archive at all — cheap, and correct for the overwhelming
-     * majority of reopens, which carry no notes to lose. The ONE case that's worth the reparse:
+     * already-open tab without rereading the archive at all. Two cases are worth the reparse: when
      * [existing] already has its OWN notes (built up live via Mark issue, or typed by hand) and the
-     * archive on disk might have been re-exported since with more/updated markers. Reopening it fully
-     * here (off the UI thread) just to check is only paid when there's something to actually protect.
+     * archive on disk might have been re-exported since with more/updated markers — offer a merge —
+     * and when [existing] has NO notes at all yet, so the archive's own markers (e.g. from a Save ZIP
+     * whose export notes the earlier `existing != null` short-circuit never reads) can be applied
+     * straight away with no prompt. Reopening the archive fully here (off the UI thread) is paid on
+     * every reopen rather than only when something is already known to be protected — cheap next to
+     * silently losing markers, since a v3 archive's log/mapping/notes assets are all still small.
      */
     private fun offerCaptureNotesReimportIfNeeded(existing: LogTab, file: File) {
-        if (existing.annotations.blocks.isEmpty()) return
         ioScope.launch {
             val imported = runCatching {
                 com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
@@ -7477,14 +7519,19 @@ class AppState(
                 imported.descriptor.markers,
                 existing.logData,
             )
-            if (reanchored.blocks.isEmpty()) return@launch
+            // existing.attachedVideo?.source is the ALREADY-open tab's own actual video identity —
+            // re-point any export-time portable marker screenshot at it, same as openCaptureFile's
+            // brand-new-tab path does against the freshly built attachment. See
+            // com.indagium.capture.repointPortableVideoFrames's own doc.
+            val repointed = com.indagium.capture.repointPortableVideoFrames(reanchored, existing.attachedVideo?.source)
+            if (repointed.blocks.isEmpty()) return@launch
             // Re-read the tab's CURRENT annotations, not the [existing] snapshot captured before this
             // suspended — it may have gained its first note while this was reopening the archive.
             val current = tab(existing.id) ?: return@launch
             if (current.annotations.blocks.isEmpty()) {
-                upAnn(existing.id) { t -> t.copy(annotations = reanchored) }
+                upAnn(existing.id) { t -> t.copy(annotations = repointed) }
             } else {
-                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, reanchored, file.name)
+                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, repointed, file.name)
             }
         }
     }
@@ -7499,7 +7546,22 @@ class AppState(
             // The restored source could have been replaced separately from its descriptor.
             require(parseLogcat(imported.logFile) == loaded.logData) { "Restored logs no longer match the capture" }
             upTab(tabId) { current ->
-                if (current.attachedVideo?.captureSourcePath == path) current.copy(captureTimeline = imported.timeline) else current
+                val currentVideo = current.attachedVideo
+                if (currentVideo?.captureSourcePath != path) return@upTab current
+                // Archive v3 (no per-row mapping file): unlike a v1/v2 CaptureTimeline — too large
+                // to persist, so it must be rehydrated from the reopened archive on every restore —
+                // a v3 VideoAnchor is small enough that it's already part of the restored tab token
+                // (see AutosaveCodec's anchorVideoMs/anchorLogId fields) and may since have been
+                // manually recalibrated (AppState.setVideoAnchor). Only fall back to the archive's
+                // own estimated anchor when nothing was restored at all, so a restart never silently
+                // discards a manual re-link.
+                val anchor = currentVideo.anchor ?: imported.syncAnchor?.let { syncAnchor ->
+                    current.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
+                }
+                current.copy(
+                    captureTimeline = imported.timeline,
+                    attachedVideo = currentVideo.copy(anchor = anchor),
+                )
             }
         } catch (error: Exception) {
             upTab(tabId) { current -> current.copy(captureTimeline = null,
