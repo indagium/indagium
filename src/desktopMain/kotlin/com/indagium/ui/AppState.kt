@@ -3189,6 +3189,12 @@ class AppState(
      *  preference) — a leftover search string surviving a restart would be confusing, not helpful. */
     var homeRecentFilter by mutableStateOf("")
 
+    /** The home tab's Recent-files filter-pill row (Type/Modified/Size/Sort — ui/HomeScreen.kt's
+     *  [RecentFilters]). Session-only for the same reason as [homeRecentFilter] just above: a
+     *  filter pill left non-default from a previous session shouldn't silently hide files on the
+     *  next launch. */
+    internal var homeRecentFilters by mutableStateOf(RecentFilters())
+
     /** Persisted history of regex patterns committed from the horizontal filter bar's Regex mode
      *  (ui/FilterBar.kt) — see [rememberRegexPattern]'s own doc for the commit contract. Global
      *  across tabs (not per-tab), same reasoning as [recentFiles] above: a pattern used to hunt for

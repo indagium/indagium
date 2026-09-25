@@ -44,4 +44,28 @@ class CaptureLauncherTest {
             app.close()
         }
     }
+
+    @Test
+    fun toggleCaptureBufferAddsUncheckedAndRemovesChecked() {
+        val defaults = listOf("main", "system", "crash")
+
+        // Add: an unticked buffer is appended once, not removed (item 5's bug).
+        assertEquals(listOf("main", "system", "crash", "kernel"), toggleCaptureBuffer(defaults, "kernel"))
+        // Remove: a ticked buffer is removed, not re-added.
+        assertEquals(listOf("main", "crash"), toggleCaptureBuffer(defaults, "system"))
+        // No duplicates: toggling twice returns to the original list.
+        val added = toggleCaptureBuffer(defaults, "radio")
+        assertEquals(defaults, toggleCaptureBuffer(added, "radio"))
+        // Order preserved for both directions.
+        assertEquals(listOf("system", "crash"), toggleCaptureBuffer(defaults, "main"))
+    }
+
+    @Test
+    fun requiresTypedDeleteConfirmationOnlyWhenAllOfAtLeastTwoAreSelected() {
+        assertFalse(requiresTypedDeleteConfirmation(selectedCount = 1, totalCount = 1))
+        assertFalse(requiresTypedDeleteConfirmation(selectedCount = 1, totalCount = 3))
+        assertFalse(requiresTypedDeleteConfirmation(selectedCount = 2, totalCount = 3))
+        assertTrue(requiresTypedDeleteConfirmation(selectedCount = 3, totalCount = 3))
+        assertFalse(requiresTypedDeleteConfirmation(selectedCount = 0, totalCount = 0))
+    }
 }
