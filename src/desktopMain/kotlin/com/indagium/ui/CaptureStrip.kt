@@ -901,7 +901,7 @@ private fun CaptureSnapshotPopover(
     var basename by remember(tab.id, defaultFilename) {
         mutableStateOf(defaultFilename.removeSuffix(".zip"))
     }
-    val destinationDirectory = state.settings.defaultSaveDir?.let(::File) ?: File(".")
+    val destinationDirectory = state.effectiveCaptureSnapshotsDir()
     val filename = captureArchiveName(basename)
     val destination = filename?.let { File(destinationDirectory, it) } ?: File(destinationDirectory, "capture.zip")
     val sinceSaveEnabled = captureSinceSaveEnabled(session)
@@ -1053,7 +1053,7 @@ private fun CaptureSnapshotPopover(
                     )
                     AppButton(
                         "Choose folder…",
-                        { state.pickSaveFolder(); onReturnFocus() },
+                        { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS); onReturnFocus() },
                         ButtonVariant.Secondary,
                         enabled = !state.captureExportBusy,
                     )

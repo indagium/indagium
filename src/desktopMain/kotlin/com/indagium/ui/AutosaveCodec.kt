@@ -648,6 +648,11 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
     put("lastSupportPromptAt", lastSupportPromptAt)
     put("homeRecentsLayout", homeRecentsLayout.name)
+    saveRootDir?.let { put("saveRootDir", it) }
+    captureSessionsDir?.let { put("captureSessionsDir", it) }
+    captureSnapshotsDir?.let { put("captureSnapshotsDir", it) }
+    captureZipDir?.let { put("captureZipDir", it) }
+    lastSaveDialogDir?.let { put("lastSaveDialogDir", it) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -953,6 +958,11 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         homeRecentsLayout = o.stringOrNull("homeRecentsLayout")
             ?.let { raw -> runCatching { HomeRecentsLayout.valueOf(raw) }.getOrNull() }
             ?: HomeRecentsLayout.GRID,
+        saveRootDir = o.stringOrNull("saveRootDir"),
+        captureSessionsDir = o.stringOrNull("captureSessionsDir"),
+        captureSnapshotsDir = o.stringOrNull("captureSnapshotsDir"),
+        captureZipDir = o.stringOrNull("captureZipDir"),
+        lastSaveDialogDir = o.stringOrNull("lastSaveDialogDir"),
     )
 }.getOrNull()
 

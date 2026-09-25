@@ -391,6 +391,14 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
+// The five save folders in Settings → General → Storage (see AppState.pickSaveFolder/
+// resetSaveFolder and SettingsDialog.kt's SaveFolderRow). ANALYSIS is what used to be the app's
+// only "Default save folder" — the label moved to ROOT when that folder became the shared parent
+// the other four default under (see AppSettings.saveRootDir's own doc), but the settings key
+// (defaultSaveDir) and this enum's historical default-parameter position on pickSaveFolder() both
+// stayed put so no existing caller needed to change.
+internal enum class SaveFolderKind { ROOT, ANALYSIS, SESSIONS, SNAPSHOTS, ZIP }
+
 // One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
 // [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
 // tried in order. Platform launchers that need discovery rather than a fixed command (Linux desktop
@@ -1427,6 +1435,16 @@ class AppState(
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val customCommandsDir: File = DesktopStorage.customCommandsDir(),
     private val filterBackupsDir: File? = null,
+    // The real ~/Documents/Indagium default for AppSettings.saveRootDir's effective folders
+    // (analysis/captures/snapshots/saved-captures — see effectiveSaveRootOrNull below). Null in
+    // the class, same as filterBackupsDir above: production (App.kt) is the only caller that wires
+    // the real DesktopStorage.defaultSaveRootDir() in, so a bare test construction — or one that
+    // only overrides autosaveFile/notesDir the way hundreds of existing tests already do — can
+    // never resolve a save folder to a real ~/Documents path. Every effective-folder function below
+    // falls back to exactly the directory it used before this setting existed (notesDir, the
+    // legacy capture root, ".", or a capture session's own parent) when this stays null, so no
+    // pre-existing test needs to change just because this feature was added.
+    private val platformDefaultSaveRootDir: File? = null,
     private val autoExportNotes: Boolean = true,
     // Test seam for the S-03 archive extraction budget (openZipEntry): production uses the real
     // 500MB default so tests can exercise the ArchiveBudgetExceededException/showOpenError path
@@ -1884,8 +1902,13 @@ class AppState(
     // each is started on ioScope.
     private val tailCoordinator = TailCoordinator(this, ioScope)
 
+    // Where captures lived before save folders became configurable (Application Support/Indagium/
+    // captures) — still scanned by CaptureService alongside the new, configurable sessions folder
+    // so a session recorded before a user ever touched this setting stays listed and deletable.
+    private val legacyCaptureSessionsRoot: File get() = File(autosaveFile.absoluteFile.parentFile, "captures")
+
     private val captureServiceDelegate = lazy {
-        CaptureService(this, ioScope, File(autosaveFile.absoluteFile.parentFile, "captures"))
+        CaptureService(this, ioScope, legacyCaptureSessionsRoot, ::effectiveCaptureSessionsDir)
     }
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
@@ -2765,7 +2788,7 @@ class AppState(
                 captureExportError = "This capture session is no longer on disk"
                 return@launch
             }
-            val directory = settings.defaultSaveDir?.let(::File) ?: session.directory.parentFile
+            val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
             val filename = com.indagium.capture.renderCaptureFilename(
                 session.settings.filenameTemplate,
                 session.device,
@@ -7925,6 +7948,10 @@ class AppState(
         )
     }
 
+    // Deliberately NOT lastSaveDialogDir/effectiveAnalysisDir: a split's natural destination is
+    // beside the source it's splitting, not wherever the last unrelated Save dialog happened to
+    // write. An explicit AppSettings.defaultSaveDir still wins when set, matching every other
+    // reader of that field.
     fun defaultSplitDestination(source: SplitSource): File =
         settings.defaultSaveDir?.let(::File) ?: source.sourceFile.parentFile ?: File(".")
 
@@ -7943,7 +7970,9 @@ class AppState(
     ) {
         val pending = pendingSplitPrompt ?: return
         pendingSplitPrompt = null
-        settings = settings.copy(defaultSaveDir = destinationDir.absolutePath)
+        // Remembers where the user last split TO without silently changing the configured
+        // "Analysis artifacts folder" — see AppSettings.lastSaveDialogDir's own doc.
+        settings = settings.copy(lastSaveDialogDir = destinationDir.absolutePath)
         beginLoading("Splitting logs...")
         ioScope.launch {
             try {
@@ -8199,13 +8228,12 @@ class AppState(
      * single-file save picker. The workspace deliberately renders the bytes before calling this,
      * so Download PNG and Copy PNG image share the exact same theme/layout/branding output rather
      * than maintaining two subtly different raster paths. The last chosen directory is persisted
-     * as the normal `defaultSaveDir` used by the other analysis exports.
+     * as `lastSaveDialogDir`, like every other Save dialog — see [AppSettings.lastSaveDialogDir].
      */
     fun downloadSeq3Png(bytes: ByteArray, title: String) {
-        val initialDir = initialDirectoryForPicker(settings.defaultSaveDir?.let(::File))
-        val target = pickSaveFile("Save Sequence Diagram PNG", seq3PngFileName(title), initialDir) ?: return
+        val target = pickSaveFile("Save Sequence Diagram PNG", seq3PngFileName(title), initialSaveDialogDir()) ?: return
         val parent = target.parentFile ?: return
-        updateSettings { it.copy(defaultSaveDir = parent.absolutePath) }
+        updateSettings { it.copy(lastSaveDialogDir = parent.absolutePath) }
         ioScope.launch {
             runCatching { target.writeBytes(bytes) }.fold(
                 onSuccess = { AppLogger.info("export", "Saved sequence diagram PNG to ${target.absolutePath}") },
@@ -8391,19 +8419,20 @@ class AppState(
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
             file = analysisNoteMarkdownName(t.filename, t.sourcePath)
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         // Pin only when this manual save actually landed where auto-export writes too (which,
-        // right after the defaultSaveDir update above, is virtually always the case) — otherwise a
-        // manual save to a differently-named file in that same directory (e.g. "foo_analysis_2.md")
-        // would be shadowed by the very next keystroke's auto-export writing the plain
-        // "foo_analysis.md" right back over it. Uses upTab, not upAnn: this manual save is already
-        // in flight, so pinning here must not itself trigger a second, redundant auto-export.
+        // starting from the effective analysis folder above, is virtually always the case unless
+        // the user browsed elsewhere) — otherwise a manual save to a differently-named file in that
+        // same directory (e.g. "foo_analysis_2.md") would be shadowed by the very next keystroke's
+        // auto-export writing the plain "foo_analysis.md" right back over it. Uses upTab, not
+        // upAnn: this manual save is already in flight, so pinning here must not itself trigger a
+        // second, redundant auto-export.
         if (File(dir).absolutePath == activeNotesDir().absolutePath) {
             upTab(tabId) { it.copy(noteTargetName = saved.name) }
         }
@@ -8439,8 +8468,8 @@ class AppState(
             parsed.exportMode == com.indagium.diagram3.DiagramExportMode.IMAGE
         }
         if (images.isEmpty() && imageDiagramCount == 0) return
-        val dir = pickDirectory("Export Frames", settings.defaultSaveDir?.let(::File)) ?: return
-        settings = settings.copy(defaultSaveDir = dir.absolutePath)
+        val dir = pickDirectory("Export Frames", initialSaveDialogDir()) ?: return
+        settings = settings.copy(lastSaveDialogDir = dir.absolutePath)
         val framesDir = File(dir, "${t.filename.substringBeforeLast('.')}_frames")
         ioScope.launch {
             runCatching {
@@ -8466,12 +8495,12 @@ class AppState(
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
             file = t.filename.substringBeforeLast('.') + "_filtered.txt"
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
             runCatching { exportFilteredToFile(t, saved, csv = false, settings = settings) }.fold(
@@ -8485,12 +8514,12 @@ class AppState(
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
             file = t.filename.substringBeforeLast('.') + "_filtered.csv"
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
             runCatching { exportFilteredToFile(t, saved, csv = true, settings = settings) }.fold(
@@ -8681,12 +8710,69 @@ class AppState(
         upTab(tabId) { it.copy(annotations = Annotations(), noteTargetName = newName, recoveredNoteRows = emptyMap()) }
     }
 
-    private fun userNotesDir(): File? {
-        val configuredDir = settings.defaultSaveDir?.let(::File) ?: return null
-        return configuredDir.takeIf { it.exists() && it.isDirectory }
-    }
+    // ── Save folders (Settings → General → Storage) ─────────────────────────────────
+    // Pure path resolution for the five folders in AppSettings — see that data class's own doc
+    // comments for what each field means. Nothing here creates a directory; every write site
+    // below calls .mkdirs() itself right before it writes, so a folder that's never been written
+    // to stays absent on disk regardless of how many times these are read.
+    private fun effectiveSaveRootOrNull(): File? = settings.saveRootDir?.let(::File) ?: platformDefaultSaveRootDir
 
-    private fun activeNotesDir(): File = userNotesDir() ?: notesDir
+    /** Display-only: the root every unset child folder below resolves under, always non-null —
+     *  unlike [effectiveSaveRootOrNull], this reflects the real platform default even when
+     *  [platformDefaultSaveRootDir] wasn't injected, since showing a path in Settings never
+     *  touches disk. Actual writes always go through [effectiveSaveRootOrNull] instead. */
+    internal val effectiveSaveRootDir: File get() = effectiveSaveRootOrNull() ?: DesktopStorage.defaultSaveRootDir()
+
+    /** Where analysis notes/exports are written — see [activeNotesDir]. An explicit, existing
+     *  [AppSettings.defaultSaveDir] always wins (a configured-but-currently-missing folder falls
+     *  through instead of being silently created); next is `<save root>/analysis`, created on
+     *  first write; with neither configured, the legacy internal [notesDir]. */
+    private fun effectiveAnalysisDir(): File =
+        settings.defaultSaveDir?.let(::File)?.takeIf { it.exists() && it.isDirectory }
+            ?: effectiveSaveRootOrNull()?.let { File(it, "analysis") }
+            ?: notesDir
+
+    /** Display-only counterpart of [effectiveAnalysisDir]: reflects the configured path exactly as
+     *  set (no existence gate — Settings should show what the user typed, not a defensive
+     *  fallback) and always resolves under [effectiveSaveRootDir] rather than [notesDir]. */
+    internal fun effectiveAnalysisDirForDisplay(): File =
+        settings.defaultSaveDir?.let(::File) ?: File(effectiveSaveRootDir, "analysis")
+
+    /** Where new capture sessions are recorded, read fresh at Start time — see
+     *  [CaptureService.newController]. Falls back to [legacyCaptureSessionsRoot] (the old
+     *  location, still scanned for existing sessions) when nothing is configured. */
+    internal fun effectiveCaptureSessionsDir(): File =
+        settings.captureSessionsDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "captures") }
+            ?: legacyCaptureSessionsRoot
+
+    /** "Save snapshot" destination while a capture is recording (CaptureSnapshotPopover). */
+    internal fun effectiveCaptureSnapshotsDir(): File =
+        settings.captureSnapshotsDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "snapshots") }
+            ?: File(".")
+
+    /** "Save ZIP" destination for a stopped/retained capture. [fallback] is the old
+     *  default (the capture session's own parent directory) used only when nothing here or in
+     *  [AppSettings.saveRootDir] is configured. */
+    internal fun effectiveCaptureZipDir(fallback: File): File =
+        settings.captureZipDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "saved-captures") }
+            ?: fallback
+
+    /** Display-only counterpart of [effectiveCaptureZipDir] for Settings, where there is no
+     *  specific session to fall back to — falls back to `<save root>/saved-captures` instead. */
+    internal fun effectiveCaptureZipDirForDisplay(): File =
+        effectiveCaptureZipDir(fallback = File(effectiveSaveRootDir, "saved-captures"))
+
+    /** Where a Save/Export dialog starts: the last place ANY such dialog actually saved to, or the
+     *  effective analysis folder the first time — deliberately never [AppSettings.defaultSaveDir]
+     *  directly, so a one-off Save destination never gets confused with it. See
+     *  [AppSettings.lastSaveDialogDir]'s own doc. */
+    internal fun initialSaveDialogDir(): File? =
+        initialDirectoryForPicker(settings.lastSaveDialogDir?.let(::File) ?: effectiveAnalysisDir())
+
+    private fun activeNotesDir(): File = effectiveAnalysisDir()
 
     // internal (not private): the caseSearch instance below (com.indagium.cases) and
     // IndagiumToolOperations' identical one reuse this exact directory set for
@@ -8695,7 +8781,7 @@ class AppState(
     // in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
     internal fun noteLookupDirs(): List<File> {
         return listOfNotNull(
-            userNotesDir(),
+            effectiveAnalysisDir(),
             notesDir,
             DesktopStorage.legacyNotesDir(),
         ).distinctBy { it.absolutePath }
@@ -9143,11 +9229,12 @@ class AppState(
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
         val dlg = FileDialog(null as Frame?, "Export Case Note", FileDialog.SAVE).apply {
             file = File(preview.id).name.ifBlank { "case_note.md" }
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
+        settings = settings.copy(lastSaveDialogDir = dir)
         val target = File(dir, path)
         ioScope.launch {
             runCatching {
@@ -9755,9 +9842,39 @@ class AppState(
         committed?.let { autoExportAnnotations(it) }
     }
 
-    fun pickSaveFolder() {
-        val chosen = pickDirectory("Choose Save Folder", settings.defaultSaveDir?.let(::File)) ?: return
-        updateSettings { it.copy(defaultSaveDir = chosen.absolutePath) }
+    /** Browse for one of the five save folders in Settings → General → Storage. Defaults to
+     *  [SaveFolderKind.ANALYSIS], the historical no-arg behavior ("Default save folder" before it
+     *  was renamed — see [SaveFolderKind]'s own doc), so every existing call site kept working
+     *  unchanged; only the CaptureSnapshotPopover's "Choose folder…" needs its own kind. */
+    internal fun pickSaveFolder(kind: SaveFolderKind = SaveFolderKind.ANALYSIS) {
+        val chosen = pickDirectory("Choose Save Folder", explicitSaveFolder(kind)?.let(::File)) ?: return
+        setSaveFolder(kind, chosen.absolutePath)
+    }
+
+    /** Clears one of the five save folders back to its computed default. Only shown in Settings
+     *  when that folder is explicitly set — see SettingsDialog's SaveFolderRow. */
+    internal fun resetSaveFolder(kind: SaveFolderKind) {
+        setSaveFolder(kind, null)
+    }
+
+    private fun explicitSaveFolder(kind: SaveFolderKind): String? = when (kind) {
+        SaveFolderKind.ROOT -> settings.saveRootDir
+        SaveFolderKind.ANALYSIS -> settings.defaultSaveDir
+        SaveFolderKind.SESSIONS -> settings.captureSessionsDir
+        SaveFolderKind.SNAPSHOTS -> settings.captureSnapshotsDir
+        SaveFolderKind.ZIP -> settings.captureZipDir
+    }
+
+    private fun setSaveFolder(kind: SaveFolderKind, value: String?) {
+        updateSettings {
+            when (kind) {
+                SaveFolderKind.ROOT -> it.copy(saveRootDir = value)
+                SaveFolderKind.ANALYSIS -> it.copy(defaultSaveDir = value)
+                SaveFolderKind.SESSIONS -> it.copy(captureSessionsDir = value)
+                SaveFolderKind.SNAPSHOTS -> it.copy(captureSnapshotsDir = value)
+                SaveFolderKind.ZIP -> it.copy(captureZipDir = value)
+            }
+        }
     }
 
     fun pickSourceFolder() {

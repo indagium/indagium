@@ -4021,6 +4021,34 @@ class AppStateBehaviorTest {
         assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
     }
 
+    // Section 3 (save folders): a user who never configured "Analysis artifacts folder" no longer
+    // falls back to the internal notes dir once a save root exists — notes land in <root>/analysis
+    // instead, created on first write. platformDefaultSaveRootDir is what stands in for
+    // ~/Documents/Indagium here; a bare AppState()/one that only overrides notesDir (like every
+    // test above) never resolves a save root at all and keeps the exact old fallback — see
+    // AppState.effectiveAnalysisDir's own doc.
+    @Test
+    fun autoExportUsesRootAnalysisFolderWhenARootIsConfiguredButNoAnalysisFolderIsSet() {
+        val dir = createTempDirectory("openlog-root-analysis-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val saveRoot = File(dir, "my-save-root")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir, platformDefaultSaveRootDir = saveRoot)
+        state.tabs =
+            listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        val analysisDir = File(saveRoot, "analysis")
+        waitUntil {
+            File(analysisDir, "sample_analysis.md").exists() &&
+                File(analysisDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
+        }
+
+        assertTrue(File(analysisDir, "sample_analysis.ann").exists())
+        assertTrue(!notesDir.exists() || notesDir.listFiles().orEmpty().isEmpty())
+        assertEquals(listOf(File(analysisDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
     @Test
     fun autoExportCanBeDisabledForPrivateLogs() {
         val dir = createTempDirectory("openlog-private").toFile()
@@ -4241,6 +4269,33 @@ class AppStateBehaviorTest {
             File(outputDir, "large_part_1.log").readText() + File(outputDir, "large_part_2.log").readText(),
         )
         assertTrue(state.tabs.none { it.sourcePath == source.absolutePath })
+    }
+
+    // Section 3 (save folders): confirmSplitPrompt used to write its chosen directory straight
+    // into defaultSaveDir, which would silently repoint the configured "Analysis artifacts
+    // folder" the moment a user split a log to some unrelated destination. It now remembers only
+    // lastSaveDialogDir, leaving an explicitly configured analysis folder untouched.
+    @Test
+    fun confirmingSplitRemembersLastSaveDialogDirWithoutTouchingTheConfiguredAnalysisFolder() {
+        val dir = createTempDirectory("openlog-split-no-default-save-dir").toFile()
+        val source = File(dir, "large.log").apply { writeText("one\nvery long line two\nthree\nfour\n") }
+        val configuredAnalysisDir = File(dir, "bug_analysis").apply { mkdirs() }
+        val outputDir = File(dir, "out")
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.settings = state.settings.copy(defaultSaveDir = configuredAnalysisDir.absolutePath)
+        state.requestSplitForFile(source)
+        val sourceId = state.pendingSplitPrompt!!.sources.single().id
+
+        state.confirmSplitPrompt(
+            modes = mapOf(sourceId to SplitMode.SPLIT),
+            destinationDir = outputDir,
+            postfix = "part",
+            partCounts = mapOf(sourceId to 2),
+        )
+
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(configuredAnalysisDir.absolutePath, state.settings.defaultSaveDir)
+        assertEquals(outputDir.absolutePath, state.settings.lastSaveDialogDir)
     }
 
     @Test

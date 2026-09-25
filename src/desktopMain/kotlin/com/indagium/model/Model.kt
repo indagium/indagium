@@ -1008,6 +1008,9 @@ data class AppSettings(
     /** Scales the entire Compose interface relative to the platform's density and font scale. */
     val interfaceScalePercent: Int = DEFAULT_INTERFACE_SCALE_PERCENT,
     val fontMono: Boolean = true,
+    // UI label "Analysis artifacts folder" — the key is kept exactly as-is so a user who already
+    // configured this (e.g. "…/bug_analysis") keeps that folder unchanged. Effective path is this
+    // when set, else <saveRootDir>/analysis — see ui/AppState.effectiveAnalysisDir.
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
     val filterListRows: Int = 5,
@@ -1188,6 +1191,29 @@ data class AppSettings(
     // same rule as the other settings-JSON-only fields above — the frozen legacy positional
     // settingsFromToken decoder must never gain a field.
     val homeRecentsLayout: HomeRecentsLayout = HomeRecentsLayout.GRID,
+    // ── Save folders (Settings → General → Storage) ────────────────────────────────
+    // The parent every folder below defaults under when its own field is unset. Null means "use
+    // the platform default" (~/Documents/Indagium — see ui/DesktopStorage.defaultSaveRootDir),
+    // never a bare "" so an empty text field can't be mistaken for "configured". JSON form ONLY,
+    // same rule as the other settings-JSON-only fields above.
+    val saveRootDir: String? = null,
+    // Where new capture sessions are recorded (CaptureService.newController, read at Start time —
+    // a change here only takes effect on the next Start). Defaults to <saveRootDir>/captures.
+    // Sessions already recorded under the previous location stay listed and deletable regardless.
+    // JSON form ONLY.
+    val captureSessionsDir: String? = null,
+    // "Save snapshot" destination while a capture is recording (CaptureSnapshotPopover). Defaults
+    // to <saveRootDir>/snapshots. JSON form ONLY.
+    val captureSnapshotsDir: String? = null,
+    // "Save ZIP" destination for a stopped/retained capture (AppState.saveRetainedCapture).
+    // Defaults to <saveRootDir>/saved-captures. JSON form ONLY.
+    val captureZipDir: String? = null,
+    // Last directory a Save/Export dialog actually wrote to (saveAnalysis, exportAnnotationFrames,
+    // exportFilteredTxt/Csv, exportCasePreview, downloadSeq3Png, the split prompt…) — what those
+    // dialogs open to next time. Kept separate from [defaultSaveDir] so picking a one-off
+    // destination in a Save dialog never silently overwrites the configured "Analysis artifacts
+    // folder" setting. JSON form ONLY.
+    val lastSaveDialogDir: String? = null,
 )
 
 enum class ThemePreset(val label: String) {

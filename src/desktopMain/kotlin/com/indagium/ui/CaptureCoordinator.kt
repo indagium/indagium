@@ -40,13 +40,28 @@ internal data class CaptureToolResolution(
  * App-wide capture facilities. The service resolves tools, discovers devices and recovers the
  * session directory; it deliberately owns no recorder. A recorder belongs to one live tab via
  * [TabCaptureController], which keeps a stopped tab's state isolated from the next capture.
+ *
+ * Sessions live under two roots: [legacyRoot] (fixed — Application Support/Indagium/captures,
+ * where every capture was recorded before save folders became configurable) and whatever
+ * [sessionsRoot] resolves to right now (AppSettings.captureSessionsDir, or
+ * AppSettings.saveRootDir/captures, or [legacyRoot] again when neither is set — see
+ * AppState.effectiveCaptureSessionsDir). Listing/recovery/delete always scan both so a session
+ * recorded before a user ever touched this setting stays visible and deletable; only
+ * [newController] — called once, right as a capture starts — reads [sessionsRoot] fresh, so a
+ * folder change takes effect from the next Start rather than moving anything already recording.
  */
 @Suppress("TooGenericExceptionCaught")
 internal class CaptureService(
     private val app: AppState,
     private val scope: CoroutineScope,
-    private val root: File,
+    private val legacyRoot: File,
+    private val sessionsRoot: () -> File,
 ) : AutoCloseable {
+    // Both roots when they differ, the one root when a fresh AppState resolves them to the same
+    // place (e.g. no save folder ever configured — see AppState.effectiveCaptureSessionsDir's own
+    // fallback to legacyRoot).
+    private fun roots(): List<File> = listOf(legacyRoot, sessionsRoot()).distinctBy { it.absolutePath }
+
     private val resolver = CaptureToolResolver()
     private val discoveryLock = Mutex()
     private var tools: CaptureTools? = null
@@ -122,16 +137,25 @@ internal class CaptureService(
         return found
     }
 
+    // CaptureRecorder.listSessions() unconditionally mkdirs() the root it's given — fine for a
+    // root that's already in use, but scanning a root that has never held a session would create
+    // it right here, at recovery/listing time, purely from opening the home tab or Settings. Since
+    // configurable save folders promise that a save folder is only ever created on first
+    // real write, every recovery/listing call filters to roots that already exist first.
+    private fun existingRoots(): List<File> = roots().filter(File::isDirectory)
+
     fun recoverSessions(): List<CaptureSession> {
         // Recovery is a filesystem concern. The service does not retain this short-lived helper;
-        // live recorders remain owned exclusively by their TabCaptureController.
-        val recovered = CaptureRecorder(root).use { it.recoverSessions() }
+        // live recorders remain owned exclusively by their TabCaptureController. Each root recovers
+        // independently — an INTERRUPTED session under one root must not stop the other root's
+        // sessions from being read.
+        val recovered = mergeCaptureSessions(existingRoots().map { CaptureRecorder(it).use { r -> r.recoverSessions() } })
         sessions = recovered
         return recovered
     }
 
     fun listSessions(): List<CaptureSession> {
-        val listed = CaptureRecorder(root).use { it.listSessions() }
+        val listed = mergeCaptureSessions(existingRoots().map { CaptureRecorder(it).use { r -> r.listSessions() } })
         sessions = listed
         return listed
     }
@@ -139,8 +163,13 @@ internal class CaptureService(
     fun retainedSession(sessionId: String): CaptureSession? =
         listSessions().firstOrNull { it.id == sessionId }
 
-    fun discardRetainedSession(sessionId: String): Boolean =
-        CaptureRecorder(root).use { it.deleteSession(sessionId) }
+    // Addressed by the session's own directory (its parent is the root that actually contains it,
+    // whichever of the two [roots] that turned out to be) rather than blindly trying [sessionsRoot]
+    // — a legacy-root session must stay deletable even after the sessions folder setting changes.
+    fun discardRetainedSession(sessionId: String): Boolean {
+        val session = retainedSession(sessionId) ?: return false
+        return CaptureRecorder(session.directory.parentFile).use { it.deleteSession(sessionId) }
+    }
 
     fun exportRetainedSession(sessionId: String, destination: File, notes: Annotations? = null): CaptureExportResult {
         val session = requireNotNull(retainedSession(sessionId)) { "Capture session not found: $sessionId" }
@@ -156,7 +185,10 @@ internal class CaptureService(
         )
     }
 
-    fun newController(): TabCaptureController = TabCaptureController(root)
+    // The one place that reads [sessionsRoot] for anything other than listing/recovery — called
+    // once, synchronously, right as Start is pressed (AppState.startCaptureTab), so a folder
+    // changed in Settings mid-recording never moves a session already in progress.
+    fun newController(): TabCaptureController = TabCaptureController(sessionsRoot())
 
     fun browseAdbFromSettings() = browseTool(adb = true)
 
@@ -191,10 +223,10 @@ internal class CaptureService(
         scope.launch {
             try {
                 runInterruptible {
-                    val imported = CaptureArchiveReader.open(File(sourcePath), File(root, "calibration-cache"))
+                    val imported = CaptureArchiveReader.open(File(sourcePath), File(sessionsRoot(), "calibration-cache"))
                     val session = listSessions().firstOrNull { it.id == imported.descriptor.sessionId }
                         ?: return@runInterruptible
-                    CaptureRecorder(root).use { recorder ->
+                    CaptureRecorder(session.directory.parentFile).use { recorder ->
                         recorder.setManualOffset(session.id, imported.descriptor.manualOffsetMs + additionalOffsetMs)
                     }
                     updateSessions()
@@ -358,6 +390,18 @@ internal class TabCaptureController(
  */
 internal fun toolStatusLine(validation: CaptureToolValidation): String =
     if (validation.available) validation.version ?: validation.message else validation.message
+
+/**
+ * Combines the listings CaptureService.listSessions/recoverSessions read from each capture root
+ * (the legacy Application Support root and whatever the configurable sessions folder currently
+ * resolves to) into the single list the launcher/strip show. A session id can only ever appear
+ * under one root in practice (each root's directory names are its own session ids), but a plain
+ * concat could still double-list one if a root were ever scanned twice — distinctBy is cheap
+ * insurance for that, not an expected case. Pure and root-agnostic on purpose so it's testable
+ * without touching disk.
+ */
+internal fun mergeCaptureSessions(perRootListings: List<List<CaptureSession>>): List<CaptureSession> =
+    perRootListings.flatten().distinctBy(CaptureSession::id).sortedByDescending(CaptureSession::startedEpochMs)
 
 internal enum class CaptureScreenshotAvailability { PENDING, ENABLED, DISABLED }
 
