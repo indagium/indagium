@@ -27,19 +27,19 @@ class CaptureLauncherTest {
         try {
             app.openHomeTab()
             val launcherId = requireNotNull(app.activeTab()).id
-            assertFalse(app.captureLaunchSettings(launcherId).recordVideo)
+            assertTrue(app.captureLaunchSettings(launcherId).recordVideo) // on by default
 
             var writes = 0
             val observer = Snapshot.registerGlobalWriteObserver { writes++ }
             try {
-                app.updateCaptureLaunchSettings(launcherId) { it.copy(recordVideo = true) }
+                app.updateCaptureLaunchSettings(launcherId) { it.copy(recordVideo = false) }
                 Snapshot.sendApplyNotifications()
             } finally {
                 observer.dispose()
             }
 
             assertTrue(writes > 0, "launcher drafts must invalidate CaptureLauncher after a toggle")
-            assertTrue(app.captureLaunchSettings(launcherId).recordVideo)
+            assertFalse(app.captureLaunchSettings(launcherId).recordVideo)
         } finally {
             app.close()
         }
