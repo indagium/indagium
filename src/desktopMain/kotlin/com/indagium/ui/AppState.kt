@@ -1667,6 +1667,19 @@ class AppState(
         }
     }
 
+    /** Reveals one note block in the Notes panel — the same "jump to this note" channel AI
+     * evidence cards use ([navigateAiEvidence]'s `AiEvidence.Note` branch above, which this
+     * mirrors exactly), reused by the capture marker list's double-click-to-reveal (see
+     * CaptureMarkerRow in CaptureStrip.kt) since a marker's note id is known without needing an
+     * AiEvidence value of its own. */
+    internal fun revealNoteBlock(tabId: String, blockId: String) {
+        val tab = tab(tabId) ?: return
+        if (tab.annotations.blocks.none { it.id == blockId }) return
+        activateTab(tabId)
+        updateAnnotationVisible(true)
+        aiEvidenceNoteTarget = AiEvidence.Note(tabId, blockId)
+    }
+
     fun addAiProviderProfile(): AiProviderProfile {
         val profiles = normalizeAiProviderProfiles(settings.aiProviderProfiles)
         val profile = (profiles.firstOrNull { it.selected } ?: profiles.first()).copy(

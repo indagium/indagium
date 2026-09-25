@@ -1,14 +1,25 @@
+@file:OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
+import androidx.compose.ui.unit.DpOffset
+import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -17,6 +28,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.outlined.CloseFullscreen
+import androidx.compose.material.icons.outlined.ContentPaste
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
@@ -26,10 +45,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -45,7 +69,9 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
@@ -639,16 +665,29 @@ internal fun EmbeddedMirrorPanel(
     detached: Boolean = false,
     onDetach: (() -> Unit)? = null,
     onReturnToSidebar: (() -> Unit)? = null,
-    sidebarSurfaceHeight: androidx.compose.ui.unit.Dp? = null,
+    sidebarSurfaceHeight: Dp? = null,
+    /** Size the surface from the height this panel is given rather than [sidebarSurfaceHeight] —
+     *  see the `flexible` comment at the BoxWithConstraints below. Implied by [detached]. */
+    fillAvailableHeight: Boolean = false,
     // A setup failure (tool resolution, asset deploy, handle creation) from before any handle
     // existed — the runtime's own FAILED snapshot only exists once a handle does, so without this
     // the panel silently showed "Connect to show the device" (DISCONNECTED, no error) for a real
     // failure the app already knew about (see AppState.embeddedMirrorSetupError's doc).
     setupError: String? = null,
+    // False when the caller (CaptureCard) renders EmbeddedMirrorClipboardFooter itself, further
+    // down its own Column, past the marker list — see CaptureCard's doc. The detached window has
+    // no marker list, so it leaves this at its default and lets the panel render its own footer.
+    clipboardFooter: Boolean = true,
+    // Hoisted so the control bar's Paste and an externally-rendered clipboard footer (CaptureCard)
+    // agree on the same text; a panel that renders its own footer (clipboardFooter=true, the
+    // detached window) is free to omit this and get a private MirrorClipboardState instead.
+    clipboardState: MirrorClipboardState? = null,
 ) {
     val colors = tc()
     val snapshot by (handle?.snapshot ?: remember { MutableStateFlow(EmbeddedMirrorSnapshot()) }).collectAsState()
-    var clipboard by remember { mutableStateOf("") }
+    // A panel that renders its own footer (clipboardFooter=true, no external state passed in)
+    // still needs somewhere to hold the field's text — falls back to a private remembered instance.
+    val ownClipboardState = clipboardState ?: remember { MirrorClipboardState() }
     val focusRequester = remember { FocusRequester() }
     val frame = snapshot.frame
     val frameInfo = snapshot.frameInfo
@@ -804,150 +843,391 @@ internal fun EmbeddedMirrorPanel(
         }
     }
 
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(7.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            AppText("Embedded mirror", color = colors.tx, fontSize = 11.sp)
-            Spacer(Modifier.weight(1f))
-            AppText(
-                mirrorStateLabel(displayedState, snapshot.reconnectAttempt), color = when (displayedState) {
-                    EmbeddedMirrorState.LIVE -> colors.ok
-                    EmbeddedMirrorState.FAILED -> DANGER_RED
-                    else -> colors.ts
-                }, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
-            )
-            if (displayedState == EmbeddedMirrorState.LIVE || displayedState == EmbeddedMirrorState.RECONNECTING) {
-                AppButton("Disconnect", onDisconnect, ButtonVariant.Ghost, horizontalPadding = 5.dp)
-            } else {
-                AppButton(
-                    if (displayedState == EmbeddedMirrorState.FAILED) "Retry" else "Connect",
-                    onConnect,
-                    ButtonVariant.Secondary,
-                    horizontalPadding = 6.dp,
-                )
-            }
-            if (detached) {
-                onReturnToSidebar?.let { AppButton("Return", it, ButtonVariant.Ghost, horizontalPadding = 5.dp) }
-            } else if (onDetach != null) {
-                AppButton("Open window", onDetach, ButtonVariant.Ghost, horizontalPadding = 5.dp)
-            }
-        }
-        // BoxWithConstraints (not Modifier.aspectRatio directly) so a portrait phone's height is
-        // computed explicitly and capped: aspectRatio() alone derives height from the full sidebar
-        // width, which for a 1080x2400 phone made the surface ~2.2x the sidebar's width tall. The
-        // computed box width can end up narrower than the sidebar for a capped portrait frame — the
-        // outer Center alignment below keeps it centered rather than stuck to one edge; the touch
-        // mapper (mirrorSurfaceModifier) reads the box's real measured size via onSizeChanged, so it
-        // stays correct for whatever size this computes, capped or not.
-        BoxWithConstraints(
-            if (detached) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center,
+    val live = snapshot.state == EmbeddedMirrorState.LIVE
+    // No header row: the state word, Connect/Retry, Disconnect and detach/return all live in the
+    // control bar under the surface (a 32dp "DEVICE · Live · ↗ · ⋯" header cost the picture height
+    // for four small controls, and its tooltips opened over — i.e. under — the native layer).
+    Column(modifier) {
+        Column(
+            Modifier.weight(1f).fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
-            val naturalHeight = if (aspectRatio != null) {
-                (maxWidth / aspectRatio).coerceAtMost(if (detached) maxHeight else MIRROR_SIDEBAR_MAX_HEIGHT)
-            } else {
-                if (detached) maxHeight else MIRROR_DEFAULT_HEIGHT
-            }
-            val boxHeight = if (!detached && sidebarSurfaceHeight != null) {
-                sidebarSurfaceHeight.coerceAtMost(naturalHeight).coerceAtLeast(MIRROR_MIN_HEIGHT.coerceAtMost(naturalHeight))
-            } else {
-                naturalHeight
-            }
-            val boxWidth = if (aspectRatio != null) (boxHeight * aspectRatio).coerceAtMost(maxWidth) else maxWidth
-            Box(
-                Modifier.width(boxWidth).height(boxHeight)
-                    .background(Color.Black, RoundedCornerShape(8.dp))
-                    .border(1.dp, colors.br, RoundedCornerShape(8.dp))
-                    .then(
-                        mirrorSurfaceModifier(
-                            handle = handle,
-                            frameWidth = frameWidth,
-                            frameHeight = frameHeight,
-                            focusRequester = focusRequester,
-                        ),
-                    )
-                    .onGloballyPositioned { coordinates ->
-                        val fullBounds = coordinates.boundsInWindow(clipBounds = false)
-                        macSurface?.setVisibleClip(
-                            fullBounds = fullBounds,
-                            // A detached AWT Canvas has no scroll viewport. Passing its full
-                            // bounds resets the native mask before the same layer is reparented.
-                            clippedBounds = if (detached) fullBounds else coordinates.boundsInWindow(clipBounds = true),
-                        )
-                    },
-                contentAlignment = Alignment.Center,
+            // BoxWithConstraints (not Modifier.aspectRatio directly) so a portrait phone's height is
+            // computed explicitly and capped: aspectRatio() alone derives height from the full sidebar
+            // width, which for a 1080x2400 phone made the surface ~2.2x the sidebar's width tall. The
+            // computed box width can end up narrower than the sidebar for a capped portrait frame — the
+            // outer Center alignment below keeps it centered rather than stuck to one edge; the touch
+            // mapper (mirrorSurfaceModifier) reads the box's real measured size via onSizeChanged, so it
+            // stays correct for whatever size this computes, capped or not.
+            // `flexible` = size the surface from the height this panel was actually given, instead of
+            // a caller-supplied number. The detached window has always worked this way; the sidebar
+            // now does too (see CaptureCard), because a fixed height there could not know how much of
+            // the slot the header/control bar/markers/footer below already consumed — and since
+            // boxWidth is derived from boxHeight * aspectRatio, guessing the height too low collapses
+            // a portrait phone to a thumbnail a few tens of dp wide rather than merely making it
+            // shorter. The attached control bar below the surface (item 2 of the restyle) eats into
+            // that same flexible allocation, so its height is subtracted up front, not added after —
+            // otherwise surface + bar together would overflow whatever space `weight(1f)` handed us.
+            val flexible = detached || fillAvailableHeight
+            BoxWithConstraints(
+                if (flexible) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth(),
             ) {
-                if (macSurface != null) {
-                    if (macOverlayOccluded && !macSurface.overlayLayerExperimentEnabled) {
-                        Column(
-                            Modifier.fillMaxSize().background(Color.Black, RoundedCornerShape(8.dp)).padding(12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                        ) {
-                            AppText("Device mirror is hidden while this panel is open", color = colors.ts, fontSize = 10.sp)
-                            AppText("Capture and streaming continue.", color = colors.td, fontSize = 9.sp)
-                        }
-                    } else {
-                        SwingPanel(
-                            background = Color.Transparent,
-                            factory = { macSurface.canvas },
-                            modifier = Modifier.fillMaxSize(),
-                            update = { macSurface.requestDisplay() },
-                        )
-                    }
-                } else if (bitmap != null) {
-                    Image(bitmap, "Device mirror", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                val availableSurfaceHeight = if (flexible) (maxHeight - MIRROR_CONTROL_BAR_HEIGHT).coerceAtLeast(0.dp) else maxHeight
+                val naturalHeight = if (aspectRatio != null) {
+                    (maxWidth / aspectRatio).coerceAtMost(if (flexible) availableSurfaceHeight else MIRROR_SIDEBAR_MAX_HEIGHT)
                 } else {
-                    AppText(
-                        effectiveError ?: if (displayedState == EmbeddedMirrorState.DISCONNECTED) {
-                            "Connect to show the device"
-                        } else {
-                            "Waiting for the first frame…"
-                        },
-                        color = if (effectiveError != null) DANGER_RED else colors.td,
-                        fontSize = 10.sp,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
+                    if (flexible) availableSurfaceHeight else MIRROR_DEFAULT_HEIGHT
+                }
+                val boxHeight = if (!flexible && sidebarSurfaceHeight != null) {
+                    sidebarSurfaceHeight.coerceAtMost(naturalHeight).coerceAtLeast(MIRROR_MIN_HEIGHT.coerceAtMost(naturalHeight))
+                } else {
+                    naturalHeight
+                }
+                val boxWidth = if (aspectRatio != null) (boxHeight * aspectRatio).coerceAtMost(maxWidth) else maxWidth
+                // The black frame always spans the full width and letterboxes the surface inside
+                // it, so the control bar below can span the same width even when a capped portrait
+                // picture is narrower than the panel. No border: the native layer draws above
+                // Compose, so it covered the border's top edge but not the sides — the picture sat
+                // 1dp higher than the black bars beside it, and the bottom edge left a pale seam
+                // between the frame and the bar.
+                Column(Modifier.align(Alignment.Center).width(maxWidth)) {
+                    Box(
+                        Modifier.fillMaxWidth().height(boxHeight)
+                            .background(Color.Black, MIRROR_SURFACE_TOP_CORNERS),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(
+                            Modifier.width(boxWidth).height(boxHeight)
+                                .then(
+                                    mirrorSurfaceModifier(
+                                        handle = handle,
+                                        frameWidth = frameWidth,
+                                        frameHeight = frameHeight,
+                                        focusRequester = focusRequester,
+                                    ),
+                                )
+                                .onGloballyPositioned { coordinates ->
+                                    val fullBounds = coordinates.boundsInWindow(clipBounds = false)
+                                    macSurface?.setVisibleClip(
+                                        fullBounds = fullBounds,
+                                        // A detached AWT Canvas has no scroll viewport. Passing its full
+                                        // bounds resets the native mask before the same layer is reparented.
+                                        clippedBounds = if (detached) fullBounds else coordinates.boundsInWindow(clipBounds = true),
+                                    )
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (macSurface != null) {
+                                if (macOverlayOccluded && !macSurface.overlayLayerExperimentEnabled) {
+                                    Column(
+                                        Modifier.fillMaxSize().background(Color.Black, MIRROR_SURFACE_TOP_CORNERS).padding(12.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        verticalArrangement = Arrangement.Center,
+                                    ) {
+                                        AppText("Device mirror is hidden while this panel is open", color = colors.ts, fontSize = 10.sp)
+                                        AppText("Capture and streaming continue.", color = colors.td, fontSize = 9.sp)
+                                    }
+                                } else {
+                                    SwingPanel(
+                                        background = Color.Transparent,
+                                        factory = { macSurface.canvas },
+                                        modifier = Modifier.fillMaxSize(),
+                                        update = { macSurface.requestDisplay() },
+                                    )
+                                }
+                            } else if (bitmap != null) {
+                                Image(bitmap, "Device mirror", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
+                            } else {
+                                AppText(
+                                    effectiveError ?: if (displayedState == EmbeddedMirrorState.DISCONNECTED) {
+                                        "Connect to show the device"
+                                    } else {
+                                        "Waiting for the first frame…"
+                                    },
+                                    color = if (effectiveError != null) DANGER_RED else colors.td,
+                                    fontSize = 10.sp,
+                                    maxLines = 3,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                    MirrorControlBar(
+                        handle = handle,
+                        live = live,
+                        clipboardState = ownClipboardState,
+                        displayedState = displayedState,
+                        reconnectAttempt = snapshot.reconnectAttempt,
+                        onConnect = onConnect,
+                        onDisconnect = onDisconnect,
+                        detached = detached,
+                        onDetach = onDetach,
+                        onReturnToSidebar = onReturnToSidebar,
                     )
                 }
             }
+            if (snapshot.droppedFrames > 0) {
+                AppText("Dropped ${snapshot.droppedFrames} frame(s)", color = colors.td, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+            }
+            if (clipboardFooter) {
+                EmbeddedMirrorClipboardFooter(handle = handle, clipboardState = ownClipboardState)
+            }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            AppButton(
-                "Back", { handle?.send(MirrorControlCommand.Back()) }, ButtonVariant.Secondary,
-                enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp,
-            )
-            AppButton(
-                "Home", { handle?.sendAndroidKey(3) }, ButtonVariant.Secondary,
-                enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp,
-            )
-            AppButton(
-                "Power", { handle?.sendAndroidKey(26) }, ButtonVariant.Secondary,
-                enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp,
-            )
+    }
+}
+
+private val DEVICE_HEADER_HEIGHT = 32.dp
+
+private val MIRROR_CONTROL_BAR_HEIGHT = 30.dp
+private val MIRROR_CONTROL_BAR_BG = Color(0xFF0D1117)
+private val MIRROR_CONTROL_BAR_TINT = Color(0xFFE6EDF3)
+private val MIRROR_STATUS_LIVE = Color(0xFF3FB950)
+private val MIRROR_STATUS_PENDING = Color(0xFFD29922)
+private val MIRROR_BAR_ICON_GAP = 8.dp
+
+/** Below the button, never at the cursor: over the surface a tooltip would render under the
+ * native layer on macOS. */
+private val MIRROR_BAR_TOOLTIP_PLACEMENT = TooltipPlacement.ComponentRect(
+    anchor = Alignment.BottomCenter,
+    alignment = Alignment.BottomCenter,
+    offset = DpOffset(0.dp, 4.dp),
+)
+private val MIRROR_SURFACE_TOP_CORNERS = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
+private val MIRROR_BAR_BOTTOM_CORNERS = RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp)
+
+/** Hoisted clipboard-field text, shared between the mirror's own control-bar Paste action (see
+ * [MirrorControlBar]) and a clipboard footer rendered either by this file
+ * ([EmbeddedMirrorClipboardFooter], used directly by the detached window) or externally by
+ * CaptureCard (past the marker list — see that function's own doc for why the footer had to be
+ * hoisted out of [EmbeddedMirrorPanel] instead of staying self-contained). */
+internal class MirrorClipboardState {
+    var text by mutableStateOf("")
+}
+
+/** Draws a single [color] line along one edge only, unlike [Modifier.border] which always draws
+ * all four — used for the DEVICE header's full-bleed bottom rule and the clipboard footer's top
+ * rule (TabBar.kt's active-tab underline uses the same drawBehind+drawRect technique). */
+private fun Modifier.edgeBorder(color: Color, strokeWidth: Dp = 1.dp, top: Boolean): Modifier = drawBehind {
+    val stroke = strokeWidth.toPx()
+    val y = if (top) 0f else size.height - stroke
+    drawRect(color = color, topLeft = Offset(0f, y), size = Size(size.width, stroke))
+}
+
+/** Full-bleed 32dp card header: a title on the left (SectionHeader's own title style) and
+ * caller-supplied trailing content on the right, with a bottom rule instead of the surrounding
+ * card's own padding — full-bleed so the rule spans the card's entire width. Only CaptureCard's
+ * EXTERNAL/DISABLED/detached branches use it: an embedded, attached mirror has no header, its
+ * controls live in [MirrorControlBar] so the picture gets the height. */
+@Composable
+internal fun DeviceHeaderRow(
+    title: String?,
+    modifier: Modifier = Modifier,
+    trailing: @Composable RowScope.() -> Unit = {},
+) {
+    val colors = tc()
+    Row(
+        modifier.fillMaxWidth().height(DEVICE_HEADER_HEIGHT).edgeBorder(colors.br, top = false).padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (title != null) {
+            AppText(title, color = colors.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalAlignment = Alignment.CenterVertically) {
-            InlineField(
-                value = clipboard,
-                onValue = { clipboard = it },
-                placeholder = "Clipboard text",
-                modifier = Modifier.weight(1f),
-                fontSize = 10.sp,
-            )
-            AppButton(
-                "Send", { handle?.send(MirrorControlCommand.Clipboard(clipboard)) },
-                ButtonVariant.Secondary, enabled = snapshot.state == EmbeddedMirrorState.LIVE && clipboard.isNotEmpty(), horizontalPadding = 6.dp,
-            )
-            AppButton(
-                "Paste", {
-                    val text = clipboard.ifEmpty { clipboardString().orEmpty() }
-                    if (text.isNotEmpty()) handle?.send(MirrorControlCommand.Clipboard(text, paste = true))
-                },
-                ButtonVariant.Secondary, enabled = snapshot.state == EmbeddedMirrorState.LIVE, horizontalPadding = 6.dp,
-            )
+        Spacer(Modifier.weight(1f))
+        trailing()
+    }
+}
+
+/** Small borderless text link — Connect/Retry in the header and Send in the clipboard footer share
+ * this styling (accent + SemiBold when enabled, muted when not) instead of each being its own
+ * one-off Box. */
+@Composable
+private fun MirrorTextLink(text: String, enabled: Boolean, onClick: () -> Unit) {
+    val colors = tc()
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .background(if (hovered && enabled) colors.hv else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 4.dp, vertical = 2.dp),
+    ) {
+        AppText(
+            text,
+            color = if (enabled) colors.ac else colors.td,
+            fontSize = 11.sp,
+            fontWeight = if (enabled) FontWeight.SemiBold else FontWeight.Normal,
+        )
+    }
+}
+
+/** The mirror's only chrome: one dark bar joined to the bottom of the surface frame.
+ *
+ * Left: a status dot (its tooltip carries the old state word — Live / Reconnecting (n)… / Failed)
+ * and, when the mirror is not LIVE/RECONNECTING, the Connect/Retry link. Centre: Back, Home, Power
+ * and Paste. Right: detach/return and, when LIVE/RECONNECTING, Disconnect. These are exactly the
+ * controls, conditions and handlers of the former header row + button row; only placement changed.
+ *
+ * It is laid out below the surface, never overlaid on it: the macOS Metal layer draws above
+ * Compose, so anything overlaid would be hidden. For the same reason every tooltip here is placed
+ * below its button — the default cursor placement can open over the surface and render under it. */
+@Composable
+private fun MirrorControlBar(
+    handle: EmbeddedMirrorHandle?,
+    live: Boolean,
+    clipboardState: MirrorClipboardState,
+    displayedState: EmbeddedMirrorState,
+    reconnectAttempt: Int,
+    onConnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    detached: Boolean,
+    onDetach: (() -> Unit)?,
+    onReturnToSidebar: (() -> Unit)?,
+) {
+    val connected = displayedState == EmbeddedMirrorState.LIVE || displayedState == EmbeddedMirrorState.RECONNECTING
+    Box(
+        Modifier.fillMaxWidth().height(MIRROR_CONTROL_BAR_HEIGHT)
+            .background(MIRROR_CONTROL_BAR_BG, MIRROR_BAR_BOTTOM_CORNERS)
+            .padding(horizontal = 8.dp),
+    ) {
+        Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
+            MirrorStatusDot(displayedState, reconnectAttempt)
+            if (!connected) {
+                Spacer(Modifier.width(4.dp))
+                MirrorBarTextLink(if (displayedState == EmbeddedMirrorState.FAILED) "Retry" else "Connect", onConnect)
+            }
         }
-        if (snapshot.droppedFrames > 0) {
-            AppText("Dropped ${snapshot.droppedFrames} frame(s)", color = colors.td, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+        Row(
+            Modifier.align(Alignment.Center),
+            horizontalArrangement = Arrangement.spacedBy(MIRROR_BAR_ICON_GAP),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            MirrorControlBarButton(Icons.AutoMirrored.Outlined.ArrowBack, "Back", live) {
+                handle?.send(MirrorControlCommand.Back())
+            }
+            MirrorControlBarButton(Icons.Outlined.Home, "Home", live) { handle?.sendAndroidKey(3) }
+            MirrorControlBarButton(Icons.Outlined.PowerSettingsNew, "Power", live) { handle?.sendAndroidKey(26) }
+            MirrorBarDivider()
+            MirrorControlBarButton(Icons.Outlined.ContentPaste, "Paste clipboard to device", live) {
+                val text = clipboardState.text.ifEmpty { clipboardString().orEmpty() }
+                if (text.isNotEmpty()) handle?.send(MirrorControlCommand.Clipboard(text, paste = true))
+            }
         }
+        Row(
+            Modifier.align(Alignment.CenterEnd),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (detached) {
+                onReturnToSidebar?.let {
+                    MirrorControlBarButton(Icons.Outlined.CloseFullscreen, "Return the mirror to the sidebar", true, it)
+                }
+            } else if (onDetach != null) {
+                MirrorControlBarButton(Icons.AutoMirrored.Outlined.OpenInNew, "Open the mirror in its own window", true, onDetach)
+            }
+            if (connected) {
+                MirrorControlBarButton(Icons.Outlined.LinkOff, "Disconnect the mirror", true, onDisconnect)
+            }
+        }
+    }
+}
+
+/** Light status dot replacing the header's state word; the word itself moves into the tooltip. */
+@Composable
+private fun MirrorStatusDot(state: EmbeddedMirrorState, reconnectAttempt: Int) {
+    val color = when (state) {
+        EmbeddedMirrorState.LIVE -> MIRROR_STATUS_LIVE
+        EmbeddedMirrorState.CONNECTING, EmbeddedMirrorState.RECONNECTING -> MIRROR_STATUS_PENDING
+        EmbeddedMirrorState.FAILED -> DANGER_RED
+        EmbeddedMirrorState.DISCONNECTED -> MIRROR_CONTROL_BAR_TINT.copy(alpha = .35f)
+    }
+    TooltipArea(tooltip = { ToolbarTooltip(mirrorStateLabel(state, reconnectAttempt)) }, tooltipPlacement = MIRROR_BAR_TOOLTIP_PLACEMENT) {
+        Box(Modifier.size(22.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(8.dp).background(color, RoundedCornerShape(50)))
+        }
+    }
+}
+
+@Composable
+private fun MirrorBarDivider() {
+    Box(Modifier.width(1.dp).height(15.dp).background(MIRROR_CONTROL_BAR_TINT.copy(alpha = .25f)))
+}
+
+/** Connect/Retry on the dark bar: the one action that matters while the mirror is down, so it
+ * stays a word rather than an icon. */
+@Composable
+private fun MirrorBarTextLink(text: String, onClick: () -> Unit) {
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        Modifier
+            .background(if (hovered) MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f) else Color.Transparent, CORNER_MD)
+            .clip(CORNER_MD)
+            .clickable(onClick = onClick)
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .padding(horizontal = 5.dp, vertical = 2.dp),
+    ) {
+        AppText(text, color = MIRROR_CONTROL_BAR_TINT, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun MirrorControlBarButton(icon: ImageVector, tooltip: String, enabled: Boolean, onClick: () -> Unit) {
+    var hovered by remember { mutableStateOf(false) }
+    val tint = if (enabled) MIRROR_CONTROL_BAR_TINT else MIRROR_CONTROL_BAR_TINT.copy(alpha = .35f)
+    TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, tooltipPlacement = MIRROR_BAR_TOOLTIP_PLACEMENT) {
+        Box(
+            Modifier.size(22.dp)
+                .background(if (hovered && enabled) MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f) else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(icon, contentDescription = tooltip, tint = tint, modifier = Modifier.size(16.dp))
+        }
+    }
+}
+
+/** Clipboard field + Send, pinned at the bottom of whichever container renders it: the detached
+ * window renders this itself (it has no marker list to sit above), while CaptureCard renders it
+ * externally after the marker list, passing the same hoisted [clipboardState] the sidebar's mirror
+ * panel also gave its [MirrorControlBar] — so the field, Send and Paste all agree on one text.
+ * Collects [handle]'s own snapshot rather than taking a `live` flag from the caller: CaptureCard
+ * has no other reason to collect the *mirror's* StateFlow (as opposed to the recorder's), and this
+ * keeps "is the mirror LIVE" answered in exactly one place, the same
+ * `snapshot.state == EmbeddedMirrorState.LIVE` condition the original inline Send/Paste row used. */
+@Composable
+internal fun EmbeddedMirrorClipboardFooter(
+    handle: EmbeddedMirrorHandle?,
+    clipboardState: MirrorClipboardState,
+    // Applied inside the top rule so the rule stays full-bleed: CaptureCard renders this outside
+    // any padded column and needs the card's own 12dp inset here; the detached window's panel
+    // already pads its content column, so it only needs the gap below the rule.
+    contentPadding: PaddingValues = PaddingValues(top = 10.dp),
+) {
+    val colors = tc()
+    val snapshot by (handle?.snapshot ?: remember { MutableStateFlow(EmbeddedMirrorSnapshot()) }).collectAsState()
+    val live = snapshot.state == EmbeddedMirrorState.LIVE
+    Row(
+        Modifier.fillMaxWidth().edgeBorder(colors.br, top = true).padding(contentPadding),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        InlineField(
+            value = clipboardState.text,
+            onValue = { clipboardState.text = it },
+            placeholder = "Clipboard text",
+            modifier = Modifier.weight(1f),
+            fontSize = 10.sp,
+        )
+        MirrorTextLink(
+            text = "Send",
+            enabled = live && clipboardState.text.isNotEmpty(),
+            onClick = { handle?.send(MirrorControlCommand.Clipboard(clipboardState.text)) },
+        )
     }
 }
 
@@ -984,7 +1264,10 @@ private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
                 onDisconnect = { state.stopEmbeddedMirror(tab.id) },
                 detached = true,
                 onReturnToSidebar = { state.returnEmbeddedMirrorToSidebar(tab.id) },
-                modifier = Modifier.fillMaxSize().background(tc().p).padding(12.dp),
+                // The header row is full-bleed (see DeviceHeaderRow's doc); the panel's own inner
+                // content Column applies the 12dp inset below it, so this outer modifier must not
+                // pad the header too.
+                modifier = Modifier.fillMaxSize().background(tc().p),
             )
         }
     }
