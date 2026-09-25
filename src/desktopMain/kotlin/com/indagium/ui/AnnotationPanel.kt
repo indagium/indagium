@@ -3304,7 +3304,7 @@ private fun ImageBlockView(
 // Pure decode of a stored image block's bytes into something Compose can draw. Returns null
 // (rendered as a placeholder above) rather than throwing on a corrupt/unsupported blob — an
 // image block should never crash the panel it's part of. internal (not private): CaptureStrip.kt's
-// CaptureMarkerList (restyle plan Phase 3) reuses this exact decode for a marker's screenshot
+// CaptureMarkerRow reuses this exact decode for a marker's screenshot
 // thumbnail rather than duplicating it.
 internal fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
     runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()

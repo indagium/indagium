@@ -7,6 +7,14 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.foundation.TooltipPlacement
@@ -17,7 +25,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -675,19 +682,12 @@ internal fun EmbeddedMirrorPanel(
     // the panel silently showed "Connect to show the device" (DISCONNECTED, no error) for a real
     // failure the app already knew about (see AppState.embeddedMirrorSetupError's doc).
     setupError: String? = null,
-    // False when the caller (CaptureCard) renders EmbeddedMirrorClipboardFooter itself, further
-    // down its own Column, past the marker list — see CaptureCard's doc. The detached window has
-    // no marker list, so it leaves this at its default and lets the panel render its own footer.
-    clipboardFooter: Boolean = true,
-    // Hoisted so the control bar's Paste and an externally-rendered clipboard footer (CaptureCard)
-    // agree on the same text; a panel that renders its own footer (clipboardFooter=true, the
-    // detached window) is free to omit this and get a private MirrorClipboardState instead.
+    // Passed by CaptureCard, remembered per tab, so the typed text and the open/closed text row
+    // survive the panel leaving and re-entering composition; the detached window uses its own.
     clipboardState: MirrorClipboardState? = null,
 ) {
     val colors = tc()
     val snapshot by (handle?.snapshot ?: remember { MutableStateFlow(EmbeddedMirrorSnapshot()) }).collectAsState()
-    // A panel that renders its own footer (clipboardFooter=true, no external state passed in)
-    // still needs somewhere to hold the field's text — falls back to a private remembered instance.
     val ownClipboardState = clipboardState ?: remember { MirrorClipboardState() }
     val focusRequester = remember { FocusRequester() }
     val frame = snapshot.frame
@@ -879,7 +879,9 @@ internal fun EmbeddedMirrorPanel(
             BoxWithConstraints(
                 if (flexible) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth(),
             ) {
-                val availableSurfaceHeight = if (flexible) (maxHeight - MIRROR_CONTROL_BAR_HEIGHT).coerceAtLeast(0.dp) else maxHeight
+                // The bar, and the text row under it while open, share the flexible allocation.
+                val chromeHeight = MIRROR_CONTROL_BAR_HEIGHT + if (ownClipboardState.expanded) MIRROR_TEXT_ROW_HEIGHT else 0.dp
+                val availableSurfaceHeight = if (flexible) (maxHeight - chromeHeight).coerceAtLeast(0.dp) else maxHeight
                 val naturalHeight = if (aspectRatio != null) {
                     (maxWidth / aspectRatio).coerceAtMost(if (flexible) availableSurfaceHeight else MIRROR_SIDEBAR_MAX_HEIGHT)
                 } else {
@@ -972,13 +974,13 @@ internal fun EmbeddedMirrorPanel(
                         onDetach = onDetach,
                         onReturnToSidebar = onReturnToSidebar,
                     )
+                    if (ownClipboardState.expanded) {
+                        MirrorTextRow(handle = handle, live = live, clipboardState = ownClipboardState)
+                    }
                 }
             }
             if (snapshot.droppedFrames > 0) {
                 AppText("Dropped ${snapshot.droppedFrames} frame(s)", color = colors.td, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-            }
-            if (clipboardFooter) {
-                EmbeddedMirrorClipboardFooter(handle = handle, clipboardState = ownClipboardState)
             }
         }
     }
@@ -992,6 +994,7 @@ private val DEVICE_HEADER_HEIGHT = 32.dp
  * reaches it if no ancestor forces an offscreen layer (alpha, graphicsLayer, shadow). */
 private val MirrorUnderlayHole = Modifier.drawBehind { drawRect(Color.Black, blendMode = BlendMode.Clear) }
 private val MIRROR_CONTROL_BAR_HEIGHT = 30.dp
+internal val MIRROR_TEXT_ROW_HEIGHT = 38.dp
 private val MIRROR_CONTROL_BAR_BG = Color(0xFF0D1117)
 private val MIRROR_CONTROL_BAR_TINT = Color(0xFFE6EDF3)
 private val MIRROR_STATUS_LIVE = Color(0xFF3FB950)
@@ -1008,13 +1011,11 @@ private val MIRROR_BAR_TOOLTIP_PLACEMENT = TooltipPlacement.ComponentRect(
 private val MIRROR_SURFACE_TOP_CORNERS = RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp)
 private val MIRROR_BAR_BOTTOM_CORNERS = RoundedCornerShape(bottomStart = 8.dp, bottomEnd = 8.dp)
 
-/** Hoisted clipboard-field text, shared between the mirror's own control-bar Paste action (see
- * [MirrorControlBar]) and a clipboard footer rendered either by this file
- * ([EmbeddedMirrorClipboardFooter], used directly by the detached window) or externally by
- * CaptureCard (past the marker list — see that function's own doc for why the footer had to be
- * hoisted out of [EmbeddedMirrorPanel] instead of staying self-contained). */
+/** Text typed for the device, shared by the bar's Paste (which falls back to the system
+ * clipboard when this is empty) and the text row, plus whether that row is open. */
 internal class MirrorClipboardState {
     var text by mutableStateOf("")
+    var expanded by mutableStateOf(false)
 }
 
 /** Draws a single [color] line along one edge only, unlike [Modifier.border] which always draws
@@ -1050,37 +1051,13 @@ internal fun DeviceHeaderRow(
     }
 }
 
-/** Small borderless text link — Connect/Retry in the header and Send in the clipboard footer share
- * this styling (accent + SemiBold when enabled, muted when not) instead of each being its own
- * one-off Box. */
-@Composable
-private fun MirrorTextLink(text: String, enabled: Boolean, onClick: () -> Unit) {
-    val colors = tc()
-    var hovered by remember { mutableStateOf(false) }
-    Box(
-        Modifier
-            .background(if (hovered && enabled) colors.hv else Color.Transparent, CORNER_MD)
-            .clip(CORNER_MD)
-            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
-            .onPointerEvent(PointerEventType.Enter) { hovered = true }
-            .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 4.dp, vertical = 2.dp),
-    ) {
-        AppText(
-            text,
-            color = if (enabled) colors.ac else colors.td,
-            fontSize = 11.sp,
-            fontWeight = if (enabled) FontWeight.SemiBold else FontWeight.Normal,
-        )
-    }
-}
-
 /** The mirror's only chrome: one dark bar joined to the bottom of the surface frame.
  *
  * Left: a status dot (its tooltip carries the old state word — Live / Reconnecting (n)… / Failed)
  * and, when the mirror is not LIVE/RECONNECTING, the Connect/Retry link. Centre: Back, Home, Power
- * and Paste. Right: detach/return and, when LIVE/RECONNECTING, Disconnect. These are exactly the
- * controls, conditions and handlers of the former header row + button row; only placement changed.
+ * and Paste. Right: the text-row toggle ([MirrorTextRow] opens under the bar), detach/return and,
+ * when LIVE/RECONNECTING, Disconnect. These are the controls, conditions and handlers of the former
+ * header row, button row and clipboard footer; only placement changed.
  *
  * It is laid out below the surface, never overlaid on it: the macOS Metal layer draws above
  * Compose, so anything overlaid would be hidden. For the same reason every tooltip here is placed
@@ -1101,7 +1078,8 @@ private fun MirrorControlBar(
     val connected = displayedState == EmbeddedMirrorState.LIVE || displayedState == EmbeddedMirrorState.RECONNECTING
     Box(
         Modifier.fillMaxWidth().height(MIRROR_CONTROL_BAR_HEIGHT)
-            .background(MIRROR_CONTROL_BAR_BG, MIRROR_BAR_BOTTOM_CORNERS)
+            // Square bottom while the text row is open, so the row reads as the bar's continuation.
+            .background(MIRROR_CONTROL_BAR_BG, if (clipboardState.expanded) RectangleShape else MIRROR_BAR_BOTTOM_CORNERS)
             .padding(horizontal = 8.dp),
     ) {
         Row(Modifier.align(Alignment.CenterStart), verticalAlignment = Alignment.CenterVertically) {
@@ -1132,15 +1110,21 @@ private fun MirrorControlBar(
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            MirrorControlBarButton(
+                Icons.Outlined.Keyboard,
+                if (clipboardState.expanded) "Hide the text row" else "Type text to send to the device",
+                enabled = true,
+                active = clipboardState.expanded,
+            ) { clipboardState.expanded = !clipboardState.expanded }
             if (detached) {
                 onReturnToSidebar?.let {
-                    MirrorControlBarButton(Icons.Outlined.CloseFullscreen, "Return the mirror to the sidebar", true, it)
+                    MirrorControlBarButton(Icons.Outlined.CloseFullscreen, "Return the mirror to the sidebar", true, onClick = it)
                 }
             } else if (onDetach != null) {
-                MirrorControlBarButton(Icons.AutoMirrored.Outlined.OpenInNew, "Open the mirror in its own window", true, onDetach)
+                MirrorControlBarButton(Icons.AutoMirrored.Outlined.OpenInNew, "Open the mirror in its own window", true, onClick = onDetach)
             }
             if (connected) {
-                MirrorControlBarButton(Icons.Outlined.LinkOff, "Disconnect the mirror", true, onDisconnect)
+                MirrorControlBarButton(Icons.Outlined.LinkOff, "Disconnect the mirror", true, onClick = onDisconnect)
             }
         }
     }
@@ -1170,29 +1154,47 @@ private fun MirrorBarDivider() {
 /** Connect/Retry on the dark bar: the one action that matters while the mirror is down, so it
  * stays a word rather than an icon. */
 @Composable
-private fun MirrorBarTextLink(text: String, onClick: () -> Unit) {
+private fun MirrorBarTextLink(text: String, onClick: () -> Unit, enabled: Boolean = true) {
     var hovered by remember { mutableStateOf(false) }
     Box(
         Modifier
-            .background(if (hovered) MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f) else Color.Transparent, CORNER_MD)
+            .background(if (hovered && enabled) MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f) else Color.Transparent, CORNER_MD)
             .clip(CORNER_MD)
-            .clickable(onClick = onClick)
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
             .padding(horizontal = 5.dp, vertical = 2.dp),
     ) {
-        AppText(text, color = MIRROR_CONTROL_BAR_TINT, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        AppText(
+            text,
+            color = if (enabled) MIRROR_CONTROL_BAR_TINT else MIRROR_CONTROL_BAR_TINT.copy(alpha = .35f),
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
 @Composable
-private fun MirrorControlBarButton(icon: ImageVector, tooltip: String, enabled: Boolean, onClick: () -> Unit) {
+private fun MirrorControlBarButton(
+    icon: ImageVector,
+    tooltip: String,
+    enabled: Boolean,
+    active: Boolean = false,
+    onClick: () -> Unit,
+) {
     var hovered by remember { mutableStateOf(false) }
     val tint = if (enabled) MIRROR_CONTROL_BAR_TINT else MIRROR_CONTROL_BAR_TINT.copy(alpha = .35f)
     TooltipArea(tooltip = { ToolbarTooltip(tooltip) }, tooltipPlacement = MIRROR_BAR_TOOLTIP_PLACEMENT) {
         Box(
             Modifier.size(22.dp)
-                .background(if (hovered && enabled) MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f) else Color.Transparent, CORNER_MD)
+                .background(
+                    when {
+                        active -> MIRROR_CONTROL_BAR_TINT.copy(alpha = .18f)
+                        hovered && enabled -> MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f)
+                        else -> Color.Transparent
+                    },
+                    CORNER_MD,
+                )
                 .clip(CORNER_MD)
                 .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
@@ -1204,43 +1206,43 @@ private fun MirrorControlBarButton(icon: ImageVector, tooltip: String, enabled: 
     }
 }
 
-/** Clipboard field + Send, pinned at the bottom of whichever container renders it: the detached
- * window renders this itself (it has no marker list to sit above), while CaptureCard renders it
- * externally after the marker list, passing the same hoisted [clipboardState] the sidebar's mirror
- * panel also gave its [MirrorControlBar] — so the field, Send and Paste all agree on one text.
- * Collects [handle]'s own snapshot rather than taking a `live` flag from the caller: CaptureCard
- * has no other reason to collect the *mirror's* StateFlow (as opposed to the recorder's), and this
- * keeps "is the mirror LIVE" answered in exactly one place, the same
- * `snapshot.state == EmbeddedMirrorState.LIVE` condition the original inline Send/Paste row used. */
+/** The bar's expandable second row: a text field and Send, in the bar's own dark style, opened by
+ * the bar's keyboard button. Send (or Enter) sets the device clipboard to the typed text, exactly
+ * what the old footer's Send did, and is live under the same condition. */
 @Composable
-internal fun EmbeddedMirrorClipboardFooter(
-    handle: EmbeddedMirrorHandle?,
-    clipboardState: MirrorClipboardState,
-    // Applied inside the top rule so the rule stays full-bleed: CaptureCard renders this outside
-    // any padded column and needs the card's own 12dp inset here; the detached window's panel
-    // already pads its content column, so it only needs the gap below the rule.
-    contentPadding: PaddingValues = PaddingValues(top = 10.dp),
-) {
-    val colors = tc()
-    val snapshot by (handle?.snapshot ?: remember { MutableStateFlow(EmbeddedMirrorSnapshot()) }).collectAsState()
-    val live = snapshot.state == EmbeddedMirrorState.LIVE
+private fun MirrorTextRow(handle: EmbeddedMirrorHandle?, live: Boolean, clipboardState: MirrorClipboardState) {
+    val canSend = live && clipboardState.text.isNotEmpty()
+    val send = { if (canSend) handle?.send(MirrorControlCommand.Clipboard(clipboardState.text)) }
     Row(
-        Modifier.fillMaxWidth().edgeBorder(colors.br, top = true).padding(contentPadding),
+        Modifier.fillMaxWidth().height(MIRROR_TEXT_ROW_HEIGHT)
+            .background(MIRROR_CONTROL_BAR_BG, MIRROR_BAR_BOTTOM_CORNERS)
+            .drawBehind {
+                // Hairline between the bar and this row.
+                drawRect(MIRROR_CONTROL_BAR_TINT.copy(alpha = .12f), size = Size(size.width, 1.dp.toPx()))
+            }
+            .padding(horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        InlineField(
+        BasicTextField(
             value = clipboardState.text,
-            onValue = { clipboardState.text = it },
-            placeholder = "Clipboard text",
-            modifier = Modifier.weight(1f),
-            fontSize = 10.sp,
+            onValueChange = { clipboardState.text = it },
+            singleLine = true,
+            textStyle = TextStyle(color = MIRROR_CONTROL_BAR_TINT, fontSize = 11.sp),
+            cursorBrush = SolidColor(MIRROR_CONTROL_BAR_TINT),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { send() }),
+            modifier = Modifier.weight(1f)
+                .background(MIRROR_CONTROL_BAR_TINT.copy(alpha = .08f), CORNER_MD)
+                .padding(horizontal = 8.dp, vertical = 5.dp),
+            decorationBox = { inner ->
+                if (clipboardState.text.isEmpty()) {
+                    AppText("Text to send to the device", color = MIRROR_CONTROL_BAR_TINT.copy(alpha = .45f), fontSize = 11.sp)
+                }
+                inner()
+            },
         )
-        MirrorTextLink(
-            text = "Send",
-            enabled = live && clipboardState.text.isNotEmpty(),
-            onClick = { handle?.send(MirrorControlCommand.Clipboard(clipboardState.text)) },
-        )
+        MirrorBarTextLink("Send", enabled = canSend, onClick = { send() })
     }
 }
 

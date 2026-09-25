@@ -48,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -57,6 +58,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -64,6 +66,8 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -72,6 +76,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
@@ -166,6 +171,23 @@ internal fun captureStoppedSummary(tab: LogTab, logBytes: Long): String {
     val markers = tab.annotations.blocks.count { it is AnnBlock.Note && parseMarkerHeader(it.text) != null }
     val rows = "${tab.logData.size} rows · ${formatCaptureBytes(logBytes)}"
     return if (markers > 0) "$markers marker${if (markers == 1) "" else "s"} · $rows" else rows
+}
+
+internal fun captureLogCoverageLine(preview: CaptureExportPreview?): String = when {
+    preview == null -> "Log …"
+    preview.logStartMs == null -> "No complete log rows in this range"
+    else -> "Log ${formatCaptureElapsed(preview.logStartMs)}–${formatCaptureElapsed(preview.logEndMs ?: preview.logStartMs)}"
+}
+
+internal fun captureVideoCoverageLine(preview: CaptureExportPreview?): String {
+    val shortfall = preview?.videoShortfallMs
+    return when {
+        preview == null -> "Video …"
+        shortfall == null || shortfall <= 0L -> "Video covers the whole range."
+        preview.videoCoveredEndMs != null ->
+            "Video coverage ends at ${formatCaptureElapsed(preview.videoCoveredEndMs)}; shortfall ${formatCaptureElapsed(shortfall)}."
+        else -> "Video coverage unavailable; shortfall ${formatCaptureElapsed(shortfall)}."
+    }
 }
 
 internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
@@ -1020,23 +1042,23 @@ private fun CaptureSnapshotPopover(
             if (rangeChoice == SnapshotRangeChoice.SELECTION && selection != null) {
                 AppText("Rows ${selection.first}–${selection.last}; separators between those rows are included.", color = colors.td, fontSize = 10.sp)
             }
-            state.captureExportPreview?.let { preview ->
-                val logCoverage = preview.logStartMs?.let { start ->
-                    "Log ${formatCaptureElapsed(start)}–${formatCaptureElapsed(preview.logEndMs ?: start)}"
-                } ?: "No complete log rows in this range"
-                AppText(logCoverage, color = colors.ts, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
-                if (preview.includeVideo && preview.videoShortfallMs != null && preview.videoShortfallMs > 0L) {
-                    AppText(
-                        if (preview.videoCoveredEndMs != null) {
-                            "Video coverage ends at ${formatCaptureElapsed(preview.videoCoveredEndMs)}; " +
-                                "shortfall ${formatCaptureElapsed(preview.videoShortfallMs)}."
-                        } else {
-                            "Video coverage unavailable; shortfall ${formatCaptureElapsed(preview.videoShortfallMs)}."
-                        },
-                        color = colors.ts,
-                        fontSize = 10.sp,
-                    )
-                }
+            // Coverage lines are always laid out (placeholder until the async preview lands), so the
+            // content-sized popover doesn't grow right after opening; the video line exists exactly
+            // when video is included, whatever its outcome.
+            val preview = state.captureExportPreview
+            AppText(
+                captureLogCoverageLine(preview),
+                color = if (preview == null) colors.td else colors.ts,
+                fontSize = 10.sp,
+                fontFamily = FontFamily.Monospace,
+            )
+            if (includeVideo) {
+                AppText(
+                    captureVideoCoverageLine(preview),
+                    color = if (preview == null) colors.td else colors.ts,
+                    fontSize = 10.sp,
+                    maxLines = 2,
+                )
             }
             if (destination.exists() && !overwriteConfirmed) {
                 AppText(
@@ -1170,11 +1192,8 @@ private fun CaptureDiagnosticsDrawer(
  * bar, because every dp of a header came out of the picture. The other branches (external, off,
  * detached) have no picture to protect and keep a full-bleed [DeviceHeaderRow]. Then the mirror
  * surface + its attached control bar (still `weight(1f)`, see the `flexible` doc in
- * EmbeddedMirrorPanel.kt for why that must not change); a bounded/scrollable marker list; and a
- * clipboard footer pinned to the card's bottom edge, hoisted out of EmbeddedMirrorPanel via
- * [clipboardFooter]/[MirrorClipboardState] so it can sit below the markers instead of immediately
- * under the mirror (Paste itself lives in the surface's own control bar, which still reads the
- * same hoisted [MirrorClipboardState]). */
+ * EmbeddedMirrorPanel.kt for why that must not change), whose bar also opens the text-to-device
+ * row; then a bounded/scrollable marker list. */
 @Composable
 internal fun CaptureCard(state: AppState, tab: LogTab) {
     if (tab.captureSessionId == null) return
@@ -1197,13 +1216,12 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     // reads as "Notes is drawn on top of the video". Laying it out as a plain Column instead lets
     // the surface take exactly the space left over, with no guess about how much the rows below it
     // need. Resizing is the sidebar's own video/notes divider, one level up.
-    Column(Modifier.fillMaxSize().background(colors.p)) {
-        when (mirrorMode) {
-            CaptureMirrorMode.EMBEDDED -> if (!detached) {
-                // weight(1f): the surface gets the slot's leftover height after the header, the
-                // marker list and the footer. The old in-card VDivider is gone with it — it set a
-                // height this Column no longer honours, and the sidebar's own video/notes divider
-                // is the control that actually makes this panel taller.
+    // The live mirror goes through MirrorAboveMarkersLayout so opening the bar's text row pushes
+    // the markers down instead of shrinking the picture.
+    if (mirrorMode == CaptureMirrorMode.EMBEDDED && !detached) {
+        MirrorAboveMarkersLayout(
+            extraMirrorHeight = if (clipboardState.expanded) MIRROR_TEXT_ROW_HEIGHT else 0.dp,
+            mirror = {
                 EmbeddedMirrorPanel(
                     handle = mirror,
                     setupError = state.embeddedMirrorSetupError(tab.id),
@@ -1211,11 +1229,19 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
                     onDisconnect = { state.stopEmbeddedMirror(tab.id) },
                     onDetach = { state.detachEmbeddedMirror(tab.id) },
                     fillAvailableHeight = true,
-                    clipboardFooter = false,
                     clipboardState = clipboardState,
-                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    modifier = Modifier.fillMaxSize(),
                 )
-            } else {
+            },
+            below = { Column { CaptureMarkerSection(state, tab) } },
+            modifier = Modifier.fillMaxSize().background(colors.p).clipToBounds(),
+        )
+        return
+    }
+    Column(Modifier.fillMaxSize().background(colors.p)) {
+        when (mirrorMode) {
+            // Embedded but detached — the attached case returned above.
+            CaptureMirrorMode.EMBEDDED -> {
                 DeviceHeaderRow("DEVICE")
                 Box(
                     Modifier.fillMaxWidth().padding(12.dp).height(76.dp)
@@ -1249,21 +1275,40 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
                 }
             }
         }
-        // Bounded + scrollable: markers accumulate over a long capture, and an unbounded list
-        // would eat the weight(1f) the surface above depends on, shrinking the mirror as you work.
-        Column(
-            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
-                .heightIn(max = MARKER_LIST_MAX_HEIGHT).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            CaptureMarkerList(state, tab)
+        CaptureMarkerSection(state, tab)
+    }
+}
+
+/**
+ * The mirror panel above the marker section, in a fixed-height card. The mirror gets what the
+ * markers leave (as a weighted Column would) plus [extraMirrorHeight] — the bar's text row while it
+ * is open. The panel takes that row's height back out before sizing the picture, so the picture
+ * stays put and the row pushes the markers down; whatever then passes the card's bottom edge is
+ * clipped by the caller. Needs a bounded height, which the sidebar slot always is.
+ */
+@Composable
+private fun MirrorAboveMarkersLayout(
+    extraMirrorHeight: Dp,
+    mirror: @Composable () -> Unit,
+    below: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Layout(contents = listOf(mirror, below), modifier = modifier) { (mirrorMeasurables, belowMeasurables), constraints ->
+        val width = constraints.maxWidth
+        val height = if (constraints.hasBoundedHeight) constraints.maxHeight else MIRROR_DEFAULT_HEIGHT.roundToPx()
+        val belowPlaceables = belowMeasurables.map {
+            it.measure(Constraints(minWidth = width, maxWidth = width, maxHeight = height))
         }
-        if (mirrorMode == CaptureMirrorMode.EMBEDDED && !detached) {
-            EmbeddedMirrorClipboardFooter(
-                handle = mirror,
-                clipboardState = clipboardState,
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-            )
+        val slot = (height - belowPlaceables.sumOf { it.height }).coerceAtLeast(0)
+        val mirrorHeight = slot + extraMirrorHeight.roundToPx()
+        val mirrorPlaceables = mirrorMeasurables.map { it.measure(Constraints.fixed(width, mirrorHeight)) }
+        layout(width, height) {
+            mirrorPlaceables.forEach { it.placeRelative(0, 0) }
+            var y = mirrorHeight
+            belowPlaceables.forEach {
+                it.placeRelative(0, y)
+                y += it.height
+            }
         }
     }
 }
@@ -1275,16 +1320,21 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
  * `tab.annotations.blocks` (capture/CaptureMarkerCodec.kt, mirroring `diagram3/Seq3Codec`'s
  * approach for diagrams) — nothing about a marker is stored anywhere else, so this is the only
  * place that needs to know the on-disk shape. Memoised on the block list's own identity so a
- * completely unrelated annotation edit (e.g. typing in the prefix) doesn't re-walk every block. */
+ * completely unrelated annotation edit (e.g. typing in the prefix) doesn't re-walk every block.
+ *
+ * The header collapses the list (per tab, for this session); the collapsed list's height goes to
+ * the mirror above. The header and the short-lived Undo row sit outside the scroll area so they
+ * stay put, and an Undo stays reachable while the list is collapsed. */
 @Composable
-private fun CaptureMarkerList(state: AppState, tab: LogTab) {
+private fun CaptureMarkerSection(state: AppState, tab: LogTab) {
     val colors = tc()
     val entries = remember(tab.id, tab.annotations.blocks) { deriveMarkerEntries(tab.annotations.blocks) }
-    SectionHeader("MARKERS · ${entries.size}")
+    var expanded by remember(tab.id) { mutableStateOf(true) }
+    SectionHeader("MARKERS · ${entries.size}", expanded = expanded, onToggle = { expanded = !expanded })
     val undo = state.markerUndoByTab[tab.id]
     if (undo != null) {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp).padding(bottom = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -1292,11 +1342,20 @@ private fun CaptureMarkerList(state: AppState, tab: LogTab) {
             AppButton("Undo", { state.undoMarkIssue(tab.id) }, ButtonVariant.Secondary)
         }
     }
-    if (entries.isEmpty()) {
-        AppText("No markers yet", color = colors.td, fontSize = 11.sp)
-        return
+    if (!expanded) return
+    // Bounded + scrollable: markers accumulate over a long capture, and an unbounded list would eat
+    // the weight(1f) the surface above depends on, shrinking the mirror as you work.
+    Column(
+        Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
+            .heightIn(max = MARKER_LIST_MAX_HEIGHT).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (entries.isEmpty()) {
+            AppText("No markers yet", color = colors.td, fontSize = 11.sp)
+        } else {
+            entries.forEachIndexed { index, entry -> CaptureMarkerRow(state, tab, entry, highlighted = index == entries.lastIndex) }
+        }
     }
-    entries.forEachIndexed { index, entry -> CaptureMarkerRow(state, tab, entry, highlighted = index == entries.lastIndex) }
 }
 
 private val CAPTURE_MARKER_ROW_CORNER = RoundedCornerShape(7.dp)
