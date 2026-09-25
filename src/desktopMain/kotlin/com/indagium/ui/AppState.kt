@@ -2127,9 +2127,12 @@ class AppState(
         }
         val session = boundary.session
         val settings = session.settings
+        // Highest existing number + 1, not the count: after a marker in the middle is deleted the
+        // count would hand out a number (id "mN", heading "Marker N") that is still in use.
         val ordinal = tab(tabId)?.annotations?.blocks.orEmpty()
             .filterIsInstance<AnnBlock.Note>()
-            .count { parseMarkerHeader(it.text) != null } + 1
+            .mapNotNull { parseMarkerHeader(it.text)?.id?.removePrefix("m")?.toIntOrNull() }
+            .maxOrNull().let { (it ?: 0) + 1 }
         val videoStart = session.videoStartElapsedMs
         val videoMs = videoStart?.let { start ->
             (boundary.elapsedMs - start + session.manualOffsetMs).takeIf { it >= 0L }
@@ -2185,7 +2188,15 @@ class AppState(
             )
         }
         val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
+        if (!markerNoteExists(tabId, context.noteId)) {
+            // Deleted while the screenshot was being taken: don't attach it to whatever is now last.
+            runCatching { shot.file.delete() }
+            return context.noteId
+        }
         val blockId = addImageBlock(tabId, shot.bytes, provenance, afterId = context.noteId, videoFrame = videoFrame) ?: return context.noteId
+        // The header's path so far is only a hint; record the file the recorder actually wrote, so
+        // deleting the marker can remove it and later snapshots stop shipping it.
+        updateMarkerHeader(tabId, context.noteId) { it.copy(screenshotPath = "screenshots/${shot.file.name}") }
         val undo = markerUndoByTab[tabId]
         if (undo?.noteId == context.noteId) {
             markerUndoByTab[tabId] = undo.copy(imageBlockId = blockId, screenshotFile = shot.file)
@@ -2233,6 +2244,8 @@ class AppState(
             actualEndMs,
         ) ?: return
         val tabNow = tab(tabId) ?: return
+        // Deleted during the trailing wait: its LogRef would otherwise be appended at the end.
+        if (!markerNoteExists(tabId, context.noteId)) return
         val missing = fullRange.filterNot { it in tabNow.rmap }.toSet()
         val sourceEntries = if (missing.isEmpty()) {
             null
@@ -2261,18 +2274,57 @@ class AppState(
      * every marker that survived a snapshot round-trip.
      */
     private fun rewriteMarkerHeaderRows(tabId: String, context: MarkerPressContext, fullRange: IntRange) {
-        val completed = context.marker.copy(firstOrdinal = fullRange.first, lastOrdinal = fullRange.last)
-        if (completed.firstOrdinal == context.marker.firstOrdinal && completed.lastOrdinal == context.marker.lastOrdinal) return
+        updateMarkerHeader(tabId, context.noteId) { it.copy(firstOrdinal = fullRange.first, lastOrdinal = fullRange.last) }
+    }
+
+    /** Rewrites one marker Note's header line from its CURRENT header, so the separate updates
+     *  (screenshot path, collected rows) never overwrite each other with a stale copy. The rest of
+     *  the note — which the user may already have typed under — is kept as is. */
+    private fun updateMarkerHeader(tabId: String, noteId: String, transform: (CaptureMarker) -> CaptureMarker) {
         upAnn(tabId) { t ->
             val blocks = t.annotations.blocks.map { block ->
-                // Re-read the live text rather than rebuilding it: the note is an ordinary Note the
-                // user may already have typed under, so only its header line is replaced.
-                if (block !is AnnBlock.Note || block.id != context.noteId) return@map block
+                if (block !is AnnBlock.Note || block.id != noteId) return@map block
+                val current = parseMarkerHeader(block.text) ?: return@map block
+                val updated = transform(current)
+                if (updated == current) return@map block
                 val body = block.text.substringAfter("\n", missingDelimiterValue = "")
-                block.copy(text = markerHeader(completed) + "\n" + body)
+                block.copy(text = markerHeader(updated) + "\n" + body)
             }
             t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
+    }
+
+    private fun markerNoteExists(tabId: String, noteId: String): Boolean =
+        tab(tabId)?.annotations?.blocks?.any { it.id == noteId } == true
+
+    /**
+     * Deletes one marker: its Note plus the screenshot and log excerpt written with it (see
+     * [markerOwnedBlockIds]), and the screenshot file in the capture session when the session is
+     * still on disk — otherwise every later snapshot would keep shipping it. Cancels a pending
+     * Undo for the same marker; a screenshot or log excerpt still being collected for it is
+     * dropped when it arrives ([attachMarkerScreenshot], [finishMarkerWindow]).
+     */
+    internal fun deleteMarker(tabId: String, noteId: String) {
+        val blocks = tab(tabId)?.annotations?.blocks ?: return
+        val note = blocks.firstOrNull { it.id == noteId } as? AnnBlock.Note ?: return
+        val shot = parseMarkerHeader(note.text)?.screenshotPath
+        if (markerUndoByTab[tabId]?.noteId == noteId) {
+            markerUndoByTab.remove(tabId)
+            markerUndoJobsByTab.remove(tabId)?.cancel()
+        }
+        markerOwnedBlockIds(blocks, noteId).forEach { removeBlock(tabId, it) }
+        shot?.let { markerScreenshotFile(tabId, it) }?.let { file -> runCatching { file.delete() } }
+    }
+
+    /** The session file a marker header's `shot` path names, only when it resolves to a direct
+     *  child of that capture session's `screenshots` folder. */
+    private fun markerScreenshotFile(tabId: String, relativePath: String): File? {
+        val tab = tab(tabId) ?: return null
+        val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
+        val directory = captureService.sessions.firstOrNull { it.id == sessionId }?.directory ?: return null
+        val screenshots = File(directory, "screenshots").canonicalFile
+        val file = File(directory, relativePath).canonicalFile
+        return file.takeIf { it.parentFile == screenshots && it.isFile }
     }
 
     /** Current UI bridge for a live tab. Reading the version makes map publication observable. */

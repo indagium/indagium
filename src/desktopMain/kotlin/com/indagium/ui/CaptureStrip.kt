@@ -7,6 +7,7 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.TooltipArea
+import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -14,6 +15,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -27,11 +29,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AddAPhoto
+import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Save
@@ -45,6 +49,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,6 +66,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontFamily
@@ -235,8 +241,19 @@ private fun CaptureVideoPill(snapshot: RecorderSnapshot, onClick: () -> Unit) {
     }
 }
 
-/** Ceiling on the marker list inside CaptureCard so it never starves the mirror above it. */
-private val MARKER_LIST_MAX_HEIGHT = 150.dp
+/** SectionHeader's fixed row height — the part of the marker section that is always visible. */
+private val SECTION_HEADER_HEIGHT = 32.dp
+
+/** Initial height of the open marker list (about two rows); the divider above it changes it. */
+private val MARKER_LIST_RESERVED_HEIGHT = 90.dp
+
+private val MIN_MARKER_LIST_HEIGHT = 40.dp
+
+/** The divider can't squeeze the picture below this. */
+private val MIN_MIRROR_HEIGHT = 120.dp
+
+/** VDivider's hit area height. */
+private val DIVIDER_HEIGHT = 10.dp
 
 private val CAPTURE_STORAGE_METER_TRACK_WIDTH = 84.dp
 private val CAPTURE_STORAGE_METER_TRACK_HEIGHT = 5.dp
@@ -1208,6 +1225,17 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     }
     val mirror = state.embeddedMirrorFor(tab.id)
     val clipboardState = remember(tab.id) { MirrorClipboardState() }
+    // Collapsed by default: the list is something you open when you want it, the picture is not.
+    var markersExpanded by remember(tab.id) { mutableStateOf(false) }
+    val toggleMarkers = { markersExpanded = !markersExpanded }
+    // Height of the open marker list, set by dragging the divider above it; the picture gets the rest.
+    var markerListHeight by remember(tab.id) { mutableStateOf(MARKER_LIST_RESERVED_HEIGHT) }
+    var cardHeight by remember(tab.id) { mutableStateOf(0.dp) }
+    // What the list actually has right now. A width-limited picture leaves spare height, so the
+    // list can already be taller than markerListHeight; dragging starts from this, not from the
+    // stored value, or the first part of every drag would do nothing.
+    var markerListSpace by remember(tab.id) { mutableStateOf(0.dp) }
+    val density = LocalDensity.current
     val detached = state.isEmbeddedMirrorDetached(tab.id)
     // This card fills RightSidebarPanel's video slot, which is a *weighted* share of the sidebar
     // (videoSplit, default 0.42) — a fixed height, not a free-growing column. It therefore must NOT
@@ -1221,6 +1249,7 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     if (mirrorMode == CaptureMirrorMode.EMBEDDED && !detached) {
         MirrorAboveMarkersLayout(
             extraMirrorHeight = if (clipboardState.expanded) MIRROR_TEXT_ROW_HEIGHT else 0.dp,
+            belowReserve = SECTION_HEADER_HEIGHT + if (markersExpanded) DIVIDER_HEIGHT + markerListHeight else 0.dp,
             mirror = {
                 EmbeddedMirrorPanel(
                     handle = mirror,
@@ -1230,11 +1259,26 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
                     onDetach = { state.detachEmbeddedMirror(tab.id) },
                     fillAvailableHeight = true,
                     clipboardState = clipboardState,
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxWidth(),
                 )
             },
-            below = { Column { CaptureMarkerSection(state, tab) } },
-            modifier = Modifier.fillMaxSize().background(colors.p).clipToBounds(),
+            below = {
+                Column {
+                    if (markersExpanded) {
+                        VDivider { dy ->
+                            // Up (negative dy) grows the list. Keep MIN_MIRROR_HEIGHT for the picture.
+                            val maxList = (cardHeight - SECTION_HEADER_HEIGHT - DIVIDER_HEIGHT - MIN_MIRROR_HEIGHT)
+                                .coerceAtLeast(MIN_MARKER_LIST_HEIGHT)
+                            val current = maxOf(markerListHeight, markerListSpace)
+                            markerListHeight = (current - dy.dp).coerceIn(MIN_MARKER_LIST_HEIGHT, maxList)
+                        }
+                    }
+                    CaptureMarkerSection(state, tab, markersExpanded, toggleMarkers)
+                }
+            },
+            onBelowSpace = { px -> markerListSpace = with(density) { px.toDp() } - SECTION_HEADER_HEIGHT - DIVIDER_HEIGHT },
+            modifier = Modifier.fillMaxSize().background(colors.p).clipToBounds()
+                .onSizeChanged { cardHeight = with(density) { it.height.toDp() } },
         )
         return
     }
@@ -1275,34 +1319,45 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
                 }
             }
         }
-        CaptureMarkerSection(state, tab)
+        CaptureMarkerSection(state, tab, markersExpanded, toggleMarkers)
     }
 }
 
 /**
- * The mirror panel above the marker section, in a fixed-height card. The mirror gets what the
- * markers leave (as a weighted Column would) plus [extraMirrorHeight] — the bar's text row while it
- * is open. The panel takes that row's height back out before sizing the picture, so the picture
- * stays put and the row pushes the markers down; whatever then passes the card's bottom edge is
- * clipped by the caller. Needs a bounded height, which the sidebar slot always is.
+ * The mirror panel above the marker section, in a fixed-height card, with the picture taking
+ * priority. The markers always get [belowReserve] (their header, plus a couple of rows while the
+ * list is open); the mirror may use everything else, and is measured at its natural height within
+ * that. The markers then get whatever is left and scroll inside it. So adding markers never resizes
+ * the picture — only opening or closing the list, or the card itself changing size, does.
+ *
+ * [extraMirrorHeight] is the bar's text row while it is open: the panel takes that row back out
+ * before sizing the picture, so the row pushes the markers down rather than shrinking the picture,
+ * and whatever then passes the card's bottom edge is clipped by the caller. Needs a bounded height,
+ * which the sidebar slot always is.
  */
 @Composable
 private fun MirrorAboveMarkersLayout(
     extraMirrorHeight: Dp,
+    belowReserve: Dp,
     mirror: @Composable () -> Unit,
     below: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    onBelowSpace: (Int) -> Unit = {},
 ) {
     Layout(contents = listOf(mirror, below), modifier = modifier) { (mirrorMeasurables, belowMeasurables), constraints ->
         val width = constraints.maxWidth
         val height = if (constraints.hasBoundedHeight) constraints.maxHeight else MIRROR_DEFAULT_HEIGHT.roundToPx()
-        val belowPlaceables = belowMeasurables.map {
-            it.measure(Constraints(minWidth = width, maxWidth = width, maxHeight = height))
+        val mirrorMax = (height - belowReserve.roundToPx()).coerceAtLeast(0) + extraMirrorHeight.roundToPx()
+        val mirrorPlaceables = mirrorMeasurables.map {
+            it.measure(Constraints(minWidth = width, maxWidth = width, maxHeight = mirrorMax))
         }
-        val slot = (height - belowPlaceables.sumOf { it.height }).coerceAtLeast(0)
-        val mirrorHeight = slot + extraMirrorHeight.roundToPx()
-        val mirrorPlaceables = mirrorMeasurables.map { it.measure(Constraints.fixed(width, mirrorHeight)) }
+        val mirrorHeight = mirrorPlaceables.maxOfOrNull { it.height } ?: 0
+        val belowMax = (height - mirrorHeight).coerceAtLeast(0)
+        val belowPlaceables = belowMeasurables.map {
+            it.measure(Constraints(minWidth = width, maxWidth = width, maxHeight = belowMax))
+        }
         layout(width, height) {
+            onBelowSpace(belowMax)
             mirrorPlaceables.forEach { it.placeRelative(0, 0) }
             var y = mirrorHeight
             belowPlaceables.forEach {
@@ -1322,15 +1377,16 @@ private fun MirrorAboveMarkersLayout(
  * place that needs to know the on-disk shape. Memoised on the block list's own identity so a
  * completely unrelated annotation edit (e.g. typing in the prefix) doesn't re-walk every block.
  *
- * The header collapses the list (per tab, for this session); the collapsed list's height goes to
- * the mirror above. The header and the short-lived Undo row sit outside the scroll area so they
- * stay put, and an Undo stays reachable while the list is collapsed. */
+ * The header collapses the list; the caller owns that state because it also decides how much room
+ * the list gets (see MirrorAboveMarkersLayout). The header and the short-lived Undo row sit outside
+ * the scroll area so they stay put, and an Undo stays reachable while the list is collapsed. The
+ * list takes whatever height is left, scrolls, and follows a newly added marker to the bottom. */
 @Composable
-private fun CaptureMarkerSection(state: AppState, tab: LogTab) {
+private fun ColumnScope.CaptureMarkerSection(state: AppState, tab: LogTab, expanded: Boolean, onToggle: () -> Unit) {
     val colors = tc()
     val entries = remember(tab.id, tab.annotations.blocks) { deriveMarkerEntries(tab.annotations.blocks) }
-    var expanded by remember(tab.id) { mutableStateOf(true) }
-    SectionHeader("MARKERS · ${entries.size}", expanded = expanded, onToggle = { expanded = !expanded })
+    var pendingDelete by remember(tab.id) { mutableStateOf<MarkerListEntry?>(null) }
+    SectionHeader("MARKERS · ${entries.size}", expanded = expanded, onToggle = onToggle)
     val undo = state.markerUndoByTab[tab.id]
     if (undo != null) {
         Row(
@@ -1342,18 +1398,72 @@ private fun CaptureMarkerSection(state: AppState, tab: LogTab) {
             AppButton("Undo", { state.undoMarkIssue(tab.id) }, ButtonVariant.Secondary)
         }
     }
+    pendingDelete?.let { entry ->
+        ConfirmDeleteMarkerDialog(
+            entry = entry,
+            onConfirm = {
+                entry.marker.noteBlockId?.let { state.deleteMarker(tab.id, it) }
+                pendingDelete = null
+            },
+            onDismiss = { pendingDelete = null },
+        )
+    }
     if (!expanded) return
-    // Bounded + scrollable: markers accumulate over a long capture, and an unbounded list would eat
-    // the weight(1f) the surface above depends on, shrinking the mirror as you work.
-    Column(
-        Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp)
-            .heightIn(max = MARKER_LIST_MAX_HEIGHT).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        if (entries.isEmpty()) {
-            AppText("No markers yet", color = colors.td, fontSize = 11.sp)
-        } else {
-            entries.forEachIndexed { index, entry -> CaptureMarkerRow(state, tab, entry, highlighted = index == entries.lastIndex) }
+    val scroll = rememberScrollState()
+    LaunchedEffect(entries.size) {
+        withFrameNanos { } // let the new row lay out so maxValue includes it
+        scroll.animateScrollTo(scroll.maxValue)
+    }
+    Box(Modifier.fillMaxWidth().weight(1f, fill = false).padding(bottom = 10.dp)) {
+        Column(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 14.dp).verticalScroll(scroll),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (entries.isEmpty()) {
+                AppText("No markers yet", color = colors.td, fontSize = 11.sp)
+            } else {
+                entries.forEachIndexed { index, entry ->
+                    CaptureMarkerRow(state, tab, entry, highlighted = index == entries.lastIndex, onDelete = { pendingDelete = entry })
+                }
+            }
+        }
+        // Only when the list overflows (an always-on track would read as a disabled control) — and
+        // then this Box is already at its full height, so fillMaxHeight matches the visible list.
+        if (scroll.maxValue > 0) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(scroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(end = 2.dp),
+                style = appScrollbarStyle(colors),
+            )
+        }
+    }
+}
+
+/** Asks before deleting: a marker is evidence, and its note may already hold typed analysis. */
+@Composable
+private fun ConfirmDeleteMarkerDialog(entry: MarkerListEntry, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    val colors = tc()
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.width(360.dp).background(colors.p, RoundedCornerShape(8.dp))
+                .border(1.dp, colors.br, RoundedCornerShape(8.dp)).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Delete marker?", color = colors.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                "\"${entry.marker.label}\" at ${formatCaptureElapsed(entry.marker.elapsedMs.coerceAtLeast(0L))} — " +
+                    "its note, screenshot and log excerpt are removed from Notes, including anything typed in that note.",
+                color = colors.td,
+                fontSize = 11.sp,
+                maxLines = 4,
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            ) {
+                DialogActionButton("Cancel", active = false, onClick = onDismiss)
+                DialogActionButton("Delete", active = true, danger = true, onClick = onConfirm)
+            }
         }
     }
 }
@@ -1371,7 +1481,7 @@ private val CAPTURE_MARKER_THUMB_HEIGHT = 20.dp
  * cards use ([AppState.revealNoteBlock]/`aiEvidenceNoteTarget`), since that works off the note
  * block id alone and needs no LogRef. [highlighted] marks the newest marker (last in note order). */
 @Composable
-private fun CaptureMarkerRow(state: AppState, tab: LogTab, entry: MarkerListEntry, highlighted: Boolean) {
+private fun CaptureMarkerRow(state: AppState, tab: LogTab, entry: MarkerListEntry, highlighted: Boolean, onDelete: () -> Unit) {
     val colors = tc()
     val logRef = entry.logRef
     val borderColor = if (highlighted) DANGER_RED.copy(alpha = .35f) else colors.br
@@ -1417,6 +1527,31 @@ private fun CaptureMarkerRow(state: AppState, tab: LogTab, entry: MarkerListEntr
                 )
             }
         }
+        MarkerDeleteButton(onDelete)
+    }
+}
+
+@Composable
+private fun MarkerDeleteButton(onClick: () -> Unit) {
+    val colors = tc()
+    var hovered by remember { mutableStateOf(false) }
+    TooltipArea(tooltip = { ToolbarTooltip("Delete marker") }) {
+        Box(
+            Modifier.size(22.dp)
+                .background(if (hovered) colors.hv else Color.Transparent, CORNER_MD)
+                .clip(CORNER_MD)
+                .clickable(onClick = onClick)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false },
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                Icons.Outlined.DeleteOutline,
+                contentDescription = "Delete marker",
+                tint = if (hovered) DANGER_RED else colors.td,
+                modifier = Modifier.size(15.dp),
+            )
+        }
     }
 }
 
@@ -1428,6 +1563,20 @@ private data class MarkerListEntry(
     val screenshot: AnnBlock.Image?,
     val logRef: AnnBlock.LogRef?,
 )
+
+/** The blocks a marker owns: its Note, then the first Image and first LogRef before the next Note —
+ * the same grouping [deriveMarkerEntries] shows as one row, so deleting a row removes exactly what
+ * the row displayed. */
+internal fun markerOwnedBlockIds(blocks: List<AnnBlock>, noteId: String): List<String> {
+    val start = blocks.indexOfFirst { it.id == noteId }
+    if (start < 0) return emptyList()
+    val following = blocks.drop(start + 1).takeWhile { it !is AnnBlock.Note }
+    return listOfNotNull(
+        noteId,
+        following.firstOrNull { it is AnnBlock.Image }?.id,
+        following.firstOrNull { it is AnnBlock.LogRef }?.id,
+    )
+}
 
 private fun deriveMarkerEntries(blocks: List<AnnBlock>): List<MarkerListEntry> {
     val entries = mutableListOf<MarkerListEntry>()
