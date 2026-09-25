@@ -30,7 +30,9 @@ data class CaptureSettings(
     val scrcpyPath: String = "",
     val buffers: List<String> = listOf("main", "system", "crash"),
     val includeBufferedLogs: Boolean = false,
-    val recordVideo: Boolean = false,
+    // On by default: a capture is most useful with the screen recording beside the log. Stored
+    // settings keep whatever the user chose; only settings that never saved this key pick it up.
+    val recordVideo: Boolean = true,
     /**
      * Legacy enablement bit retained for old settings/session JSON. New callers select
      * [mirrorMode]; [effectiveMirrorMode] keeps a legacy false value authoritative so settings
