@@ -1,5 +1,9 @@
 package com.indagium.capture
 
+import com.indagium.model.AnnBlock
+import com.indagium.model.Annotations
+import com.indagium.ui.annotationsFromToken
+import com.indagium.ui.annotationsToken
 import com.indagium.utils.MAX_ARCHIVE_ENTRIES_SCANNED
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
 import com.indagium.utils.openLogTextReader
@@ -36,7 +40,14 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
 const val CAPTURE_DESCRIPTOR_NAME = "capture.indagium.json"
-const val CAPTURE_ARCHIVE_VERSION = 1
+
+// Phase 4 (snapshot archive + import) bumped this 1 -> 2 for the new optional `notes`/`markers`
+// descriptor fields below. An old build still can't read a v2 archive either way — its own
+// openZip() rejects notes/capture.ann as an entry unreferenced by the descriptor it knows how to
+// parse — so this bump exists purely to turn that confusing "unreferenced file" failure into an
+// honest "unsupported/newer archive version" one. parseDescriptor accepts 1..CAPTURE_ARCHIVE_VERSION
+// (not an exact match) because both fields are optional on read: a v1 archive simply has neither.
+const val CAPTURE_ARCHIVE_VERSION = 2
 
 private const val MAX_DESCRIPTOR_BYTES = 1024 * 1024L
 private const val MAX_MAPPING_BYTES = MAX_ARCHIVE_ENTRY_BYTES
@@ -44,6 +55,11 @@ private const val MAX_MAPPING_ROWS = 10_000_000
 private const val MAX_MAPPING_LINE_BYTES = 64 * 1024
 private const val MAX_SCREENSHOT_BYTES = 100 * 1024 * 1024L
 private const val MAX_SCREENSHOTS_BYTES = 500 * 1024 * 1024L
+
+// A .ann token embeds its own image blocks' bytes inline (see AutosaveCodec.kt's annotationsToken),
+// so it can legitimately be large — bounded at the same order as the log itself rather than at
+// MAX_MAPPING_BYTES's much smaller scale.
+private const val MAX_NOTES_BYTES = MAX_ARCHIVE_ENTRY_BYTES
 private const val MAX_VIDEO_BYTES = 20L * 1024L * 1024L * 1024L
 private const val COPY_BUFFER_BYTES = 128 * 1024
 private const val PREFLIGHT_OVERHEAD_BYTES = 16L * 1024L * 1024L
@@ -105,6 +121,26 @@ data class CaptureArchiveDescriptor(
     val mapping: CaptureArchiveAsset,
     val video: CaptureArchiveAsset?,
     val screenshots: List<CaptureArchiveAsset>,
+    // Appended last (Phase 4: snapshot archive + import), per this file's own field-ordering
+    // convention. Both optional on read (parseDescriptor), so a v1 archive — which has neither key
+    // at all — still opens: null/empty is exactly what "this session had no Mark issue notes, or
+    // markerNotesInSnapshot was off" already means for a v2 archive built the same way.
+    val notes: CaptureArchiveAsset?,
+    val markers: List<CaptureArchiveMarker>,
+)
+
+/**
+ * One marker's EXPORT-LOCAL ordinal window — the numbering `writeMapping` assigns this export's own
+ * rows and the reopened tab's own LogParser reproduces 1:1 (see CaptureMarkerCodec's doc on why
+ * "ordinal" always means that), already clipped to whatever this export actually kept. A marker
+ * whose window shares no row with the export is simply absent from [CaptureArchiveDescriptor.markers]
+ * — see [clipMarkersForExport] (export side) and [reanchorImportedCaptureNotes] (import side, which
+ * treats the absence as "drop this marker's jump, keep its note and screenshot").
+ */
+data class CaptureArchiveMarker(
+    val noteBlockId: String,
+    val firstOrdinal: Int,
+    val lastOrdinal: Int,
 )
 
 data class ImportedCapture(
@@ -114,6 +150,13 @@ data class ImportedCapture(
     val descriptor: CaptureArchiveDescriptor,
     /** The archive, descriptor, or extracted directory supplied by the caller. */
     val source: File,
+    // Appended last (Phase 4). The RAW notes decoded straight from notes/capture.ann — still numbered
+    // against the ORIGINAL capture session, not this archive's own freshly parsed log. Callers that
+    // actually open the log (AppState.openCaptureFile has the only production `logData`) must run
+    // this through [reanchorImportedCaptureNotes] before showing it; capture does not do that itself
+    // here because it has no parsed log to re-anchor against, only the raw log FILE. Null for a v1
+    // archive, or when the exporting session had markerNotesInSnapshot off.
+    val notes: Annotations? = null,
 )
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -262,6 +305,11 @@ class CaptureArchiveExporter(
                 mapping = mappingAsset,
                 video = videoAsset,
                 screenshots = emptyList(),
+                // finalizeSessionInPlace publishes the recorder's own directory in place, never a
+                // snapshot .zip — there's no "notes as of this snapshot" concept here, only the live
+                // tab's own (unexported) Notes, which stay exactly where they already are.
+                notes = null,
+                markers = emptyList(),
             )
             stagingDescriptor.writeText(descriptor.toJson(), Charsets.UTF_8)
 
@@ -488,6 +536,16 @@ class CaptureArchiveExporter(
         session: CaptureSession,
         request: CaptureExportRequest,
         onWaitingForVideo: (() -> Unit)? = null,
+        // Phase 4 (snapshot archive + import), appended last: the exporting tab's live Notes. capture
+        // must not reach into UI state itself (no AppState/LogTab reference here — see this class's
+        // own package in CLAUDE.md's table), so the caller (AppState.exportCaptureSnapshot /
+        // CaptureCoordinator.TabCaptureController.export) hands over the plain Annotations value,
+        // already run through AppState's own private preparedForSave(tab) so sourceEntries/
+        // appVersion/fingerprint are populated exactly like an ordinary .ann sidecar. Null for every
+        // call site with no live tab to save from (e.g. CaptureService.exportRetainedSession, which
+        // exports a retained session that may not correspond to any open tab) or when the tab
+        // currently has no notes.
+        notes: Annotations? = null,
     ): CaptureExportResult {
         checkNotInterrupted()
         require(request.customMinutes > 0) { "Custom capture range must be positive" }
@@ -605,6 +663,7 @@ class CaptureArchiveExporter(
             val stagedMapping = File(work, "mapping/log-video.jsonl").also { it.parentFile.mkdirs() }
             writeMapping(stagedMapping, selection.indexFile, session, effectiveClip)
             val stagedScreenshots = stageScreenshots(snapshotScreenshots, work)
+            val (notesAsset, markerAssets) = stageNotes(work, session.settings, notes, selection.indexFile)
 
             val logAsset = asset("logs/logcat.log", stagedLog)
             val mappingAsset = asset("mapping/log-video.jsonl", stagedMapping)
@@ -638,6 +697,8 @@ class CaptureArchiveExporter(
                 mapping = mappingAsset,
                 video = videoAsset,
                 screenshots = screenshotAssets,
+                notes = notesAsset,
+                markers = markerAssets,
             )
             File(work, CAPTURE_DESCRIPTOR_NAME).writeText(descriptor.toJson(), Charsets.UTF_8)
             writeZip(work, archiveTemp, descriptor)
@@ -768,12 +829,20 @@ object CaptureArchiveReader {
         require(rows.size == parsedLogCount) {
             "Capture mapping row count ${rows.size} does not match parsed log row count $parsedLogCount"
         }
+        // Decoded but NOT re-anchored here — see ImportedCapture.notes' own doc for why that's the
+        // caller's job (it needs the actually-parsed `List<LogEntry>`, which this layer never builds).
+        // A malformed/corrupt notes.ann degrades to "no notes" rather than failing the whole import;
+        // the log/video/mapping this function exists to validate are unaffected either way.
+        val notes = descriptor.notes?.let { asset ->
+            runCatching { resolveSafe(root, asset.path).readText(Charsets.UTF_8).annotationsFromToken() }.getOrNull()
+        }
         return ImportedCapture(
             logFile = logFile,
             videoFile = videoFile,
             timeline = CaptureTimeline(rows, descriptor.quality, descriptor.uncertaintyMs, descriptor.manualOffsetMs),
             descriptor = descriptor,
             source = source,
+            notes = notes,
         )
     }
 }
@@ -848,6 +917,63 @@ private fun stageScreenshots(screenshots: List<FrozenScreenshot>, work: File): L
 }
 
 private val SCREENSHOT_NAME = Regex("screenshot-(\\d+)\\.[A-Za-z0-9]{1,8}")
+
+/**
+ * Writes `notes/capture.ann` (gated on [CaptureSettings.markerNotesInSnapshot]) and computes each
+ * marker's clipped [CaptureArchiveMarker] alongside it. Deliberately does NOT rewrite [notes]'
+ * blocks before serializing it — the shipped notes.ann keeps every marker's Note/Image/LogRef
+ * exactly as the live tab had them (ORIGINAL, session-wide ordinals and all), and it's [markers]
+ * (this function's second return value) that carries the export-local translation. Import-side
+ * reconciliation — dropping an out-of-range marker's jump, clipping a partially-covered one, and
+ * clearing stale sourceEntries — all happens once, at re-open time, in
+ * [reanchorImportedCaptureNotes]; duplicating that logic here (to also produce "clean" shipped
+ * bytes) would just be two places for the same rule to drift apart.
+ */
+private fun stageNotes(
+    work: File,
+    settings: CaptureSettings,
+    notes: Annotations?,
+    selectionIndexFile: File,
+): Pair<CaptureArchiveAsset?, List<CaptureArchiveMarker>> {
+    if (!settings.markerNotesInSnapshot || notes == null) return null to emptyList()
+    val markers = notes.blocks.filterIsInstance<AnnBlock.Note>()
+        .mapNotNull { note -> parseMarkerHeader(note.text)?.copy(noteBlockId = note.id) }
+    val clipped = clipMarkersForExport(markers, selectionIndexFile)
+    val target = File(work, "notes/capture.ann").also { it.parentFile.mkdirs() }
+    target.writeText(notes.annotationsToken(), Charsets.UTF_8)
+    return asset("notes/capture.ann", target) to clipped
+}
+
+/**
+ * Computes each marker's EXPORT-LOCAL ordinal bounds — the numbering [writeMapping] assigns this
+ * export's own rows, which the reopened tab's own LogParser reproduces 1:1 (see CaptureMarkerCodec's
+ * doc on why "ordinal" always means that) — by intersecting the marker's ORIGINAL, session-wide
+ * [CaptureMarker.firstOrdinal]/[CaptureMarker.lastOrdinal] window against exactly the rows this
+ * export kept. A marker with no intersection at all is simply absent from the result. [selectionIndexFile]
+ * must be the SAME frozen, already-filtered index [writeMapping] reads for this same export — this
+ * scans it with the identical local-ordinal counter (one increment per row that carries a
+ * `rowOrdinal`) so the two can never disagree about what row N of the exported log is.
+ */
+private fun clipMarkersForExport(markers: List<CaptureMarker>, selectionIndexFile: File): List<CaptureArchiveMarker> {
+    val ranged = markers.filter { it.noteBlockId != null && it.firstOrdinal != null && it.lastOrdinal != null }
+    if (ranged.isEmpty()) return emptyList()
+    val clip = HashMap<String, IntRange>()
+    var localOrdinal = 0
+    forEachSelectedRecord(selectionIndexFile) { record ->
+        val original = record.rowOrdinal ?: return@forEachSelectedRecord
+        localOrdinal += 1
+        ranged.forEach { marker ->
+            val first = requireNotNull(marker.firstOrdinal)
+            val last = requireNotNull(marker.lastOrdinal)
+            if (original in first..last) {
+                val noteId = requireNotNull(marker.noteBlockId)
+                val prior = clip[noteId]
+                clip[noteId] = minOf(prior?.first ?: localOrdinal, localOrdinal)..maxOf(prior?.last ?: localOrdinal, localOrdinal)
+            }
+        }
+    }
+    return clip.map { (noteId, range) -> CaptureArchiveMarker(noteId, range.first, range.last) }
+}
 
 private data class FrozenSelection(
     val indexFile: File,
@@ -1141,7 +1267,10 @@ private fun forEachSelectedRecord(indexFile: File, block: (CaptureLogIndexRecord
     }
 }
 
-private fun parseIndexRecord(line: String): CaptureLogIndexRecord {
+// internal, not private: capture/CaptureMarkerWindow.kt's ordinalRangeForElapsedWindow and
+// captureLogEntriesForOrdinals reuse this exact parser for the "Mark issue" window scan, per the
+// restyle plan's Phase 3 — see that file's own header for why a second parser was not written.
+internal fun parseIndexRecord(line: String): CaptureLogIndexRecord {
     val root = Json.parseToJsonElement(line).jsonObject
     val offset = root.long("byteOffset") ?: error("Capture index row is missing byteOffset")
     val length = root.int("byteLength") ?: error("Capture index row is missing byteLength")
@@ -1277,6 +1406,9 @@ private fun CaptureArchiveDescriptor.toJson(): String = buildJsonObject {
     put("mapping", mapping.toJson())
     if (video != null) put("video", video.toJson()) else put("video", JsonNull)
     put("screenshots", buildJsonArray { screenshots.forEach { add(it.toJson()) } })
+    // Phase 4 — both OPTIONAL keys on read (parseDescriptor): a v1 archive has neither at all.
+    if (notes != null) put("notes", notes.toJson()) else put("notes", JsonNull)
+    put("markers", buildJsonArray { markers.forEach { add(it.toJson()) } })
 }.toString()
 
 private fun kotlinx.serialization.json.JsonObjectBuilder.nullableLong(name: String, value: Long?) {
@@ -1289,13 +1421,21 @@ private fun CaptureArchiveAsset.toJson(): JsonObject = buildJsonObject {
     put("sha256", sha256)
 }
 
+private fun CaptureArchiveMarker.toJson(): JsonObject = buildJsonObject {
+    put("noteBlockId", noteBlockId)
+    put("firstOrdinal", firstOrdinal)
+    put("lastOrdinal", lastOrdinal)
+}
+
 @Suppress("TooGenericExceptionCaught")
 private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
     try {
         val root = Json.parseToJsonElement(raw).jsonObject
         require(root.string("format") == "indagium-capture") { "Not an Indagium capture descriptor" }
         val version = root.int("formatVersion") ?: error("Capture descriptor is missing formatVersion")
-        require(version == CAPTURE_ARCHIVE_VERSION) { "Unsupported capture archive version: $version" }
+        // 1..CAPTURE_ARCHIVE_VERSION, not an exact match — see CAPTURE_ARCHIVE_VERSION's own doc
+        // comment for why a v1 archive (missing the notes/markers keys entirely) still opens here.
+        require(version in 1..CAPTURE_ARCHIVE_VERSION) { "Unsupported capture archive version: $version" }
         val device = root.requiredObject("device")
         val settingsElement = root["settings"] ?: error("Capture descriptor is missing settings")
         val settings = captureSettingsFromJson(settingsElement.toString()) ?: error("Capture settings are invalid")
@@ -1329,6 +1469,10 @@ private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
             mapping = root.requiredObject("mapping").toAsset(),
             video = (root["video"] as? JsonObject)?.toAsset(),
             screenshots = (root["screenshots"] as? JsonArray)?.map { it.jsonObject.toAsset() } ?: emptyList(),
+            // Phase 4 — both keys OPTIONAL: absent (a v1 archive, or a v2 one exported with
+            // markerNotesInSnapshot off) means null/empty, exactly like `video` above.
+            notes = (root["notes"] as? JsonObject)?.toAsset(),
+            markers = (root["markers"] as? JsonArray)?.map { it.jsonObject.toMarker() } ?: emptyList(),
         )
         require(descriptor.sessionId.isNotBlank()) { "Capture session id is blank" }
         require(descriptor.coverage.logEndMs >= descriptor.coverage.logStartMs) { "Capture log coverage is invalid" }
@@ -1342,6 +1486,17 @@ private fun parseDescriptor(raw: String): CaptureArchiveDescriptor {
         }
         require(descriptor.assets().none { it.path == CAPTURE_DESCRIPTOR_NAME }) {
             "Capture descriptor cannot also be an asset"
+        }
+        descriptor.markers.forEach { marker ->
+            require(marker.firstOrdinal in 1..marker.lastOrdinal) {
+                "Capture marker has an invalid ordinal range: ${marker.noteBlockId}"
+            }
+        }
+        require(descriptor.markers.map { it.noteBlockId }.distinct().size == descriptor.markers.size) {
+            "Capture descriptor repeats a marker note id"
+        }
+        require(descriptor.notes != null || descriptor.markers.isEmpty()) {
+            "Capture descriptor has markers but no notes asset"
         }
         return descriptor
     } catch (e: CaptureArchiveException) {
@@ -1357,12 +1512,19 @@ private fun JsonObject.toAsset(): CaptureArchiveAsset = CaptureArchiveAsset(
     sha256 = requiredString("sha256"),
 )
 
+private fun JsonObject.toMarker(): CaptureArchiveMarker = CaptureArchiveMarker(
+    noteBlockId = requiredString("noteBlockId"),
+    firstOrdinal = int("firstOrdinal") ?: error("Capture marker is missing firstOrdinal"),
+    lastOrdinal = int("lastOrdinal") ?: error("Capture marker is missing lastOrdinal"),
+)
+
 private fun CaptureArchiveDescriptor.assets(): List<CaptureArchiveAsset> =
     buildList {
         add(log)
         add(mapping)
         video?.let(::add)
         addAll(screenshots)
+        notes?.let(::add)
     }
 
 private fun JsonObject.requiredObject(key: String): JsonObject = this[key] as? JsonObject
@@ -1466,6 +1628,7 @@ private fun assetLimit(descriptor: CaptureArchiveDescriptor, asset: CaptureArchi
     descriptor.log -> MAX_ARCHIVE_ENTRY_BYTES
     descriptor.mapping -> MAX_MAPPING_BYTES
     descriptor.video -> MAX_VIDEO_BYTES
+    descriptor.notes -> MAX_NOTES_BYTES
     else -> MAX_SCREENSHOT_BYTES
 }
 

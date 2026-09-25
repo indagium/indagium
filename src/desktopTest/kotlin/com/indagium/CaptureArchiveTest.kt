@@ -414,7 +414,11 @@ class CaptureArchiveTest {
         val future = File(root, "future.zip")
         rewriteZip(original, future) { name, bytes ->
             if (name == CAPTURE_DESCRIPTOR_NAME) {
-                bytes.toString(Charsets.UTF_8).replace("\"formatVersion\":1", "\"formatVersion\":99").toByteArray()
+                // CAPTURE_ARCHIVE_VERSION is 2 as of Phase 4 (snapshot archive + import) — parseDescriptor
+                // accepts 1..CAPTURE_ARCHIVE_VERSION, so "future" here must be one past whatever that is.
+                bytes.toString(Charsets.UTF_8)
+                    .replace("\"formatVersion\":${com.indagium.capture.CAPTURE_ARCHIVE_VERSION}", "\"formatVersion\":99")
+                    .toByteArray()
             } else {
                 bytes
             }

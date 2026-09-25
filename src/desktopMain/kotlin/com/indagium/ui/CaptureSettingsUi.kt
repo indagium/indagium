@@ -29,6 +29,9 @@ internal const val MIN_CAPTURE_FPS = 1
 internal const val MAX_CAPTURE_FPS = 240
 internal const val MIN_CAPTURE_BITRATE_MBPS = 1
 internal const val MAX_CAPTURE_BITRATE_MBPS = 500
+internal const val MIN_MARKER_WINDOW_SECONDS = 0
+internal const val MAX_MARKER_WINDOW_SECONDS = 120
+private const val CAPTURE_MARKER_MS_PER_SECOND = 1_000L
 
 /** Returns the settings fields that would prevent starting a capture. */
 internal fun invalidCaptureSettings(settings: CaptureSettings): Set<String> = buildSet {
@@ -41,6 +44,9 @@ internal fun invalidCaptureSettings(settings: CaptureSettings): Set<String> = bu
     if (settings.freeSpaceReserveBytes < 0L) add("freeSpaceReserve")
     if (captureFilenameTemplateError(settings.filenameTemplate) != null) add("filenameTemplate")
     if (settings.bufferMode == CaptureBufferMode.CUSTOM && settings.buffers.isEmpty()) add("buffers")
+    val markerWindowRangeMs = MIN_MARKER_WINDOW_SECONDS * CAPTURE_MARKER_MS_PER_SECOND..MAX_MARKER_WINDOW_SECONDS * CAPTURE_MARKER_MS_PER_SECOND
+    if (settings.markerPreMs !in markerWindowRangeMs) add("markerPreMs")
+    if (settings.markerPostMs !in markerWindowRangeMs) add("markerPostMs")
 }
 
 /** Pure presentation rule shared by the settings UI and its focused tests. */
@@ -89,6 +95,12 @@ internal fun CaptureSettingsSection(state: AppState) {
             first = { CaptureStorageGroup(settings, update) },
             second = { CaptureSnapshotFilesGroup(settings, update) },
         )
+
+        // Sixth group. Unlike the two rows above, this one has no natural partner to pair with, so
+        // it renders full width like the Tools group at the top — same CaptureGroupLabel idiom,
+        // just not inside a CapturePairedGroupRow.
+        Divider()
+        CaptureMarkerGroup(settings, update)
     }
 }
 
@@ -272,6 +284,44 @@ private fun CaptureSnapshotFilesGroup(settings: CaptureSettings, update: (Captur
         color = tc.td,
         fontSize = 10.sp,
     )
+}
+
+@Composable
+private fun CaptureMarkerGroup(settings: CaptureSettings, update: (CaptureSettings) -> Unit) {
+    val tc = tc()
+    CaptureGroupLabel("Mark issue")
+    AppText(
+        "The Mark issue button on the capture strip drops a note with the log window around the " +
+            "press and, if enabled, a screenshot.",
+        color = tc.td,
+        fontSize = 10.sp,
+        maxLines = 3,
+    )
+    Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        CaptureMarkerWindowField("Before, seconds", settings.markerPreMs) { update(settings.copy(markerPreMs = it)) }
+        CaptureMarkerWindowField("After, seconds", settings.markerPostMs) { update(settings.copy(markerPostMs = it)) }
+    }
+    CheckRow(settings.markerScreenshot, { update(settings.copy(markerScreenshot = !settings.markerScreenshot)) }) {
+        AppText("Take a screenshot on Mark issue", fontSize = 11.sp)
+    }
+    CheckRow(settings.markerNotesInSnapshot, { update(settings.copy(markerNotesInSnapshot = !settings.markerNotesInSnapshot)) }) {
+        AppText("Include markers in saved snapshots", fontSize = 11.sp)
+    }
+    // markerNotesInSnapshot has no reader yet — Phase 4 (snapshot archive export/import) is the
+    // consumer and isn't implemented in this phase. The setting and this row exist now so that
+    // phase only has to add the export-time gate, not another settings round-trip.
+    AppText(
+        "Snapshot export does not use this setting yet.",
+        color = tc.td,
+        fontSize = 10.sp,
+    )
+}
+
+@Composable
+private fun CaptureMarkerWindowField(label: String, valueMs: Long, onValue: (Long) -> Unit) {
+    CaptureNumericField(label, (valueMs / CAPTURE_MARKER_MS_PER_SECOND).toString(), MIN_MARKER_WINDOW_SECONDS..MAX_MARKER_WINDOW_SECONDS) {
+        onValue(it * CAPTURE_MARKER_MS_PER_SECOND)
+    }
 }
 
 /** Label + inline text field + optional Browse, the same shape as AppearanceSettingsSection's

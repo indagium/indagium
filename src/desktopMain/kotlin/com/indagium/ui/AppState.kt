@@ -17,14 +17,20 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.captureLogEntriesForOrdinals
+import com.indagium.capture.markerHeader
+import com.indagium.capture.markerHeadingLine
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
+import com.indagium.capture.ordinalRangeForElapsedWindow
+import com.indagium.capture.parseMarkerHeader
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -148,6 +154,7 @@ import java.awt.datatransfer.StringSelection
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -187,6 +194,26 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
 internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
+
+// Mark issue (restyle plan Phase 3). No customization per the plan's scope decision (one fixed
+// button, no skins/labels), so every marker gets this same heading text.
+private const val MARKER_DEFAULT_LABEL = "Issue detected here"
+
+// How long a fresh marker stays undoable (AppState.markerUndoByTab / undoMarkIssue).
+private const val MARKER_UNDO_WINDOW_MS = 10_000L
+private const val MARKER_MS_PER_SECOND = 1_000.0
+
+/** Everything [AppState.attachMarkerScreenshot]/[AppState.finishMarkerWindow] need that
+ *  [AppState.beginMarkerNote] already resolved — the press-time [session]/[settings] snapshot
+ *  (never re-read from the live recorder mid-window, so every step of one press agrees on what
+ *  "markerPreMs"/"markerPostMs" meant), the marker itself, and its display [ordinal]. */
+private data class MarkerPressContext(
+    val noteId: String,
+    val ordinal: Int,
+    val marker: CaptureMarker,
+    val session: CaptureSession,
+    val settings: com.indagium.capture.CaptureSettings,
+)
 
 // Upper bound on AppState.canonicalPathCache. One entry per distinct source path ever resolved;
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
@@ -851,6 +878,15 @@ internal fun tagPrefixConflictsOnCheckingTag(tag: String, pkgPrefixes: Set<Strin
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
+
+// Phase 4 (snapshot archive + import): AppState.openCaptureFile's `existing != null` branch found
+// this archive already open as [tabId] and, since that tab already has its own notes, reopened the
+// archive to check whether ITS notes (already re-anchored to [tabId]'s own logData — see
+// reanchorImportedCaptureNotes) are worth offering rather than silently discarding. A brand-new tab
+// (the far more common path through openCaptureFile) never has existing notes to protect, so it
+// never reaches this — see AppState.resolveCaptureNotesImport / dismissCaptureNotesImport for the
+// three ways this can resolve.
+data class PendingCaptureNotesImport(val tabId: String, val incoming: Annotations, val archiveName: String)
 
 data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
 
@@ -1873,10 +1909,23 @@ class AppState(
     internal var captureStartInProgress by mutableStateOf(false)
         private set
 
-    /** Last asynchronous screenshot result shown by the active capture tab's strip. */
+    /** Last asynchronous screenshot result shown by the active capture tab's strip. Also reused by
+     * [markIssue] — see CaptureStrip.kt's status-row comment: Screenshot and Mark issue share the
+     * one truncating feedback line under the strip. */
     internal var captureScreenshotStatus by mutableStateOf<String?>(null)
         private set
     private val captureScreenshotCapabilities = mutableStateMapOf<String, CaptureScreenshotCapability>()
+
+    /** One undoable "Mark issue" press per tab, live for [MARKER_UNDO_WINDOW_MS]. A second press
+     * on the same tab before the first undo window closes replaces the entry — only the most
+     * recent marker is undoable, matching the singular "Undo" affordance a snackbar-style control
+     * offers; the earlier marker is simply left in Notes like any committed edit. */
+    internal val markerUndoByTab = mutableStateMapOf<String, MarkerUndoState>()
+    // Concurrent, not a plain map: beginMarkerNote/the expiry coroutine touch this from ioScope
+    // while undoMarkIssue removes from the UI thread, so two presses racing a click would
+    // otherwise corrupt a HashMap. markerUndoByTab needs no such guard — a snapshot state map is
+    // already safe to write from any thread.
+    private val markerUndoJobsByTab = ConcurrentHashMap<String, Job>()
 
     /** Per-tab stopped-capture lifecycle. Kept separate from [LogTab.captureSessionId] so a
      * failed finalization can leave the raw log usable as an ordinary stopped tab. */
@@ -1896,6 +1945,11 @@ class AppState(
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
     private var captureExportJob: Job? = null
+
+    /** See [PendingCaptureNotesImport]'s own doc — set only by openCaptureFile's `existing != null`
+     *  branch, never by a fresh-tab open. */
+    internal var pendingCaptureNotesImport by mutableStateOf<PendingCaptureNotesImport?>(null)
+        private set
 
     /** One cancellable, latest-only preview lane per live capture tab. */
     private val capturePreviewJobsByTab = mutableMapOf<String, Job>()
@@ -1998,6 +2052,213 @@ class AppState(
                     result.exceptionOrNull()?.message ?: "Screenshot capture failed",
                 )
             }
+        }
+    }
+
+    /**
+     * "Mark issue" press (restyle plan Phase 3): writes an ordinary Note immediately (an
+     * `indagium:marker` header plus a heading — see capture/CaptureMarkerCodec.kt) covering the log
+     * window already on disk before the press, attaches a screenshot when the setting allows it,
+     * then waits `markerPostMs` and appends a trailing LogRef once that window has actually
+     * elapsed. Reuses [screenshotCapture]'s own guard shape immediately above — a press that loses
+     * its race with Stop is a status message on the shared strip status line
+     * ([captureScreenshotStatus]), never a silent no-op or a thrown exception.
+     */
+    internal fun markIssue(tabId: String) {
+        val controller = captureControllerFor(tabId) ?: run {
+            captureScreenshotStatus = "Mark issue failed: capture has already stopped"
+            return
+        }
+        ioScope.launch {
+            val context = beginMarkerNote(tabId, controller) ?: return@launch
+            val afterId = attachMarkerScreenshot(tabId, controller, context)
+            finishMarkerWindow(tabId, context, afterId)
+        }
+    }
+
+    /** Removes the blocks (and screenshot file, if any) a still-undoable Mark issue press added —
+     * see [MarkerUndoState]'s own doc for exactly what that covers. A no-op once the 10s window has
+     * closed (the entry is gone) or after the user has already undone it once. */
+    internal fun undoMarkIssue(tabId: String) {
+        val undo = markerUndoByTab.remove(tabId) ?: return
+        markerUndoJobsByTab.remove(tabId)?.cancel()
+        removeBlock(tabId, undo.noteId)
+        undo.imageBlockId?.let { removeBlock(tabId, it) }
+        undo.logRefId?.let { removeBlock(tabId, it) }
+        undo.screenshotFile?.let { runCatching { it.delete() } }
+    }
+
+    /** Resolves [pendingCaptureNotesImport] per the user's Append/Replace/Skip choice. A no-op if
+     *  the prompt already closed (e.g. the tab was closed while it was open). */
+    internal fun resolveCaptureNotesImport(action: com.indagium.capture.CaptureNotesImportAction) {
+        val pending = pendingCaptureNotesImport ?: return
+        pendingCaptureNotesImport = null
+        if (action == com.indagium.capture.CaptureNotesImportAction.SKIP) return
+        upAnn(pending.tabId) { t ->
+            t.copy(annotations = com.indagium.capture.mergeCaptureNotesImport(t.annotations, pending.incoming, action))
+        }
+    }
+
+    internal fun dismissCaptureNotesImport() {
+        pendingCaptureNotesImport = null
+    }
+
+    /** Step 1: resolve the press-time capture-clock boundary, compute the leading (already-on-disk)
+     *  half of the window, and commit the Note. Returns null (having already set
+     *  [captureScreenshotStatus]) when the boundary can't be read — e.g. the controller lost its
+     *  session between the guard in [markIssue] and this coroutine actually running. */
+    private fun beginMarkerNote(tabId: String, controller: TabCaptureController): MarkerPressContext? {
+        val boundary = runCatching { controller.snapshotForExport() }.getOrElse {
+            captureScreenshotStatus = "Mark issue failed: ${it.message ?: it::class.simpleName}"
+            return null
+        }
+        val session = boundary.session
+        val settings = session.settings
+        val ordinal = tab(tabId)?.annotations?.blocks.orEmpty()
+            .filterIsInstance<AnnBlock.Note>()
+            .count { parseMarkerHeader(it.text) != null } + 1
+        val videoStart = session.videoStartElapsedMs
+        val videoMs = videoStart?.let { start ->
+            (boundary.elapsedMs - start + session.manualOffsetMs).takeIf { it >= 0L }
+        }
+        // The leading half [t-preMs, t] is already flushed (boundary.indexLength is exactly the
+        // bound this scan must not read past), so it's resolved synchronously here rather than
+        // waiting for the trailing rescan finishMarkerWindow does after markerPostMs.
+        val leadingRange = ordinalRangeForElapsedWindow(
+            session.indexFile,
+            boundary.indexLength,
+            (boundary.elapsedMs - settings.markerPreMs).coerceAtLeast(0L),
+            boundary.elapsedMs,
+        )
+        val marker = CaptureMarker(
+            id = "m$ordinal",
+            elapsedMs = boundary.elapsedMs,
+            firstOrdinal = leadingRange?.first,
+            lastOrdinal = leadingRange?.last,
+            videoMs = videoMs,
+            label = MARKER_DEFAULT_LABEL,
+            preMs = settings.markerPreMs,
+            postMs = settings.markerPostMs,
+            screenshotPath = if (settings.markerScreenshot) "screenshots/marker-$ordinal.png" else null,
+        )
+        val noteId = "n${System.nanoTime()}"
+        upAnn(tabId) { t ->
+            val text = markerHeader(marker) + "\n" + markerHeadingLine(ordinal, marker.label) + "\n"
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + AnnBlock.Note(noteId, text)))
+        }
+        markerUndoJobsByTab.remove(tabId)?.cancel()
+        markerUndoByTab[tabId] = MarkerUndoState(noteId = noteId)
+        markerUndoJobsByTab[tabId] = ioScope.launch {
+            delay(MARKER_UNDO_WINDOW_MS)
+            if (markerUndoByTab[tabId]?.noteId == noteId) markerUndoByTab.remove(tabId)
+        }
+        return MarkerPressContext(noteId = noteId, ordinal = ordinal, marker = marker, session = session, settings = settings)
+    }
+
+    /** Step 2: attaches a screenshot when the setting allows it AND the device actually supports
+     *  one — unlike [screenshotCapture]'s own button, an unsupported/pending capability here just
+     *  means the marker has no screenshot, not a failed press: the Note and its log window are
+     *  worth keeping either way. Returns the block id the trailing LogRef should insert after —
+     *  the screenshot's if one was added, otherwise the Note's own id. */
+    private suspend fun attachMarkerScreenshot(tabId: String, controller: TabCaptureController, context: MarkerPressContext): String {
+        if (!context.settings.markerScreenshot) return context.noteId
+        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.ENABLED) return context.noteId
+        val shot = runCatching { controller.screenshotCapture() }.getOrNull() ?: return context.noteId
+        val videoFrame = shot.videoStartElapsedMs?.let { start ->
+            VideoFrameReference(
+                source = VideoSource.LocalFile(shot.videoFile.absolutePath),
+                sourceLabel = "capture.indagium.json/${shot.videoFile.name}",
+                positionMs = (shot.elapsedMs - start).coerceAtLeast(0L),
+            )
+        }
+        val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
+        val blockId = addImageBlock(tabId, shot.bytes, provenance, afterId = context.noteId, videoFrame = videoFrame) ?: return context.noteId
+        val undo = markerUndoByTab[tabId]
+        if (undo?.noteId == context.noteId) {
+            markerUndoByTab[tabId] = undo.copy(imageBlockId = blockId, screenshotFile = shot.file)
+        }
+        return blockId
+    }
+
+    /** Step 3: waits out `markerPostMs`, rescans for the full [t-preMs, t+postMs] window against
+     *  whatever is flushed by then, and appends the LogRef under [afterId]. If the capture stopped
+     *  partway through the wait, the window is clipped to what was actually recorded and a status
+     *  line reports the shortfall — the same "keep what was collected" rule [captureScreenshotStatus]
+     *  already uses for a failed screenshot. */
+    private suspend fun finishMarkerWindow(tabId: String, context: MarkerPressContext, afterId: String) {
+        delay(context.settings.markerPostMs)
+        val liveController = captureControllerFor(tabId)
+        val liveBoundary = liveController?.let { runCatching { it.snapshotForExport() }.getOrNull() }
+        val indexFile: File
+        val logFile: File
+        val indexBytes: Long
+        val actualEndMs: Long
+        if (liveBoundary != null) {
+            indexFile = liveBoundary.session.indexFile
+            logFile = liveBoundary.session.logFile
+            indexBytes = liveBoundary.indexLength
+            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, liveBoundary.elapsedMs)
+        } else {
+            // The controller is gone (Stop won the race) — the session's own files are already
+            // fully flushed by stopCaptureTab's finalization, so read them directly.
+            val stopped = captureService.sessions.firstOrNull { it.id == context.session.id } ?: context.session
+            indexFile = stopped.indexFile
+            logFile = stopped.logFile
+            indexBytes = stopped.indexFile.length()
+            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, stopped.elapsedMs)
+        }
+        val requestedEndMs = context.marker.elapsedMs + context.settings.markerPostMs
+        if (actualEndMs < requestedEndMs) {
+            val collectedSeconds = (actualEndMs - context.marker.elapsedMs).coerceAtLeast(0L) / MARKER_MS_PER_SECOND
+            val requestedSeconds = context.settings.markerPostMs / MARKER_MS_PER_SECOND
+            captureScreenshotStatus = "+%.1f s of %.0f s — capture ended".format(Locale.US, collectedSeconds, requestedSeconds)
+        }
+        val fullRange = ordinalRangeForElapsedWindow(
+            indexFile,
+            indexBytes,
+            (context.marker.elapsedMs - context.settings.markerPreMs).coerceAtLeast(0L),
+            actualEndMs,
+        ) ?: return
+        val tabNow = tab(tabId) ?: return
+        val missing = fullRange.filterNot { it in tabNow.rmap }.toSet()
+        val sourceEntries = if (missing.isEmpty()) {
+            null
+        } else {
+            // Tail lag: the live tab hasn't caught up to some rows the recorder already flushed.
+            // Read those straight from the capture log by byte offset and merge with what the tab
+            // already has, so the LogRef shows the whole window regardless of tailing progress.
+            (fullRange.mapNotNull { tabNow.rmap[it] } + captureLogEntriesForOrdinals(indexFile, indexBytes, logFile, missing))
+                .sortedBy { it.id }
+        }
+        val logRefId = addLogRefBlock(tabId, fullRange.toList(), caption = "", afterId = afterId, sourceEntries = sourceEntries)
+        if (logRefId != null) {
+            val undo = markerUndoByTab[tabId]
+            if (undo?.noteId == context.noteId) markerUndoByTab[tabId] = undo.copy(logRefId = logRefId)
+        }
+        rewriteMarkerHeaderRows(tabId, context, fullRange)
+    }
+
+    /**
+     * Re-stamps the marker Note's header with the window that was ACTUALLY collected. Until this
+     * runs the header carries only the leading half ([beginMarkerNote] writes it before the
+     * trailing window exists), which is fine for the live UI — [CaptureMarkerRow] navigates via the
+     * neighbouring LogRef, not the header — but the header is the durable record: Phase 4 rebuilds
+     * `logIds` from its `rows` on import, because a LogRef's own ids are parser ids that restart at
+     * 1 per file. Leaving the leading-only range here would silently drop the `+postMs` half of
+     * every marker that survived a snapshot round-trip.
+     */
+    private fun rewriteMarkerHeaderRows(tabId: String, context: MarkerPressContext, fullRange: IntRange) {
+        val completed = context.marker.copy(firstOrdinal = fullRange.first, lastOrdinal = fullRange.last)
+        if (completed.firstOrdinal == context.marker.firstOrdinal && completed.lastOrdinal == context.marker.lastOrdinal) return
+        upAnn(tabId) { t ->
+            val blocks = t.annotations.blocks.map { block ->
+                // Re-read the live text rather than rebuilding it: the note is an ordinary Note the
+                // user may already have typed under, so only its header line is replaced.
+                if (block !is AnnBlock.Note || block.id != context.noteId) return@map block
+                val body = block.text.substringAfter("\n", missingDelimiterValue = "")
+                block.copy(text = markerHeader(completed) + "\n" + body)
+            }
+            t.copy(annotations = t.annotations.copy(blocks = blocks))
         }
     }
 
@@ -2268,10 +2529,18 @@ class AppState(
         captureExportResult = null
         captureExportPreview = null
         captureExportError = null
+        // Captured once, at click time, from the tab's CURRENT notes — same "one fixed snapshot of
+        // the request" treatment `request` itself already gets. preparedForSave resolves LogRef
+        // sourceEntries against this tab's own live rmap, exactly like an ordinary .ann sidecar save.
+        val preparedNotes = tab(tabId)?.let { t -> t.annotations.preparedForSave(t) }
         captureExportJob = ioScope.launch {
             try {
                 val result = runInterruptible {
-                    controller.export(request) { captureExportBusyMessage = "Waiting for the recording to catch up…" }
+                    controller.export(
+                        request,
+                        onWaitingForVideo = { captureExportBusyMessage = "Waiting for the recording to catch up…" },
+                        notes = preparedNotes,
+                    )
                 }
                 captureExportResult = result
             } catch (cancelled: CancellationException) {
@@ -5988,8 +6257,13 @@ class AppState(
     fun addNoteBlock(tabId: String, text: String, afterId: String? = null): String? =
         annotationManager.addNoteBlock(tabId, text, afterId)
 
-    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? =
-        annotationManager.addLogRefBlock(tabId, logIds, caption)
+    fun addLogRefBlock(
+        tabId: String,
+        logIds: List<Int>,
+        caption: String = "",
+        afterId: String? = null,
+        sourceEntries: List<LogEntry>? = null,
+    ): String? = annotationManager.addLogRefBlock(tabId, logIds, caption, afterId, sourceEntries)
 
     fun addImageBlock(
         tabId: String,
@@ -7040,6 +7314,7 @@ class AppState(
         val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
         if (existing != null) {
             setActiveSurfaceToTab(existing.id)
+            offerCaptureNotesReimportIfNeeded(existing, file)
             return existing.id
         }
         val tabId = "t${tabCounter.getAndIncrement()}"
@@ -7050,6 +7325,12 @@ class AppState(
                 val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
                 val logData = parseLogcat(imported.logFile)
                 ensureActive()
+                // Phase 4: imported.notes is still numbered against the ORIGINAL capture session
+                // (LogEntry.ids don't restart at 1 for a filtered/time-windowed export) — re-anchor
+                // against the log this coroutine just parsed before it becomes this tab's Annotations.
+                val importedNotes = imported.notes?.let { notes ->
+                    com.indagium.capture.reanchorImportedCaptureNotes(notes, imported.descriptor.markers, logData)
+                }
                 val sourcePath = if (file.name == "capture.indagium.json") {
                     imported.logFile.absolutePath
                 } else {
@@ -7068,11 +7349,15 @@ class AppState(
                         doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
                     )
                 }
-                val captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
+                var captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
                     analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
                     .copy(sourcePath = sourcePath, attachedVideo = video, captureTimeline = imported.timeline,
                         largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
                         showUnfiltered = settings.openNewFilesWithUnfiltered)
+                // A brand-new tab never has existing notes to protect (see
+                // offerCaptureNotesReimportIfNeeded's doc for the one case that does), so this always
+                // applies directly — no Append/Replace/Skip prompt on this path, ever.
+                if (importedNotes != null) captureTab = captureTab.copy(annotations = importedNotes)
                 synchronized(stateLock) {
                     ensureActive()
                     tabs = tabs + captureTab
@@ -7099,6 +7384,38 @@ class AppState(
         activeLoads[tabId] = ActiveLoad(job)
         job.start()
         return tabId
+    }
+
+    /**
+     * Phase 4 (snapshot archive + import): the `existing != null` branch above just switches to the
+     * already-open tab without rereading the archive at all — cheap, and correct for the overwhelming
+     * majority of reopens, which carry no notes to lose. The ONE case that's worth the reparse:
+     * [existing] already has its OWN notes (built up live via Mark issue, or typed by hand) and the
+     * archive on disk might have been re-exported since with more/updated markers. Reopening it fully
+     * here (off the UI thread) just to check is only paid when there's something to actually protect.
+     */
+    private fun offerCaptureNotesReimportIfNeeded(existing: LogTab, file: File) {
+        if (existing.annotations.blocks.isEmpty()) return
+        ioScope.launch {
+            val imported = runCatching {
+                com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
+            }.getOrNull() ?: return@launch
+            val notes = imported.notes ?: return@launch
+            val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(
+                notes,
+                imported.descriptor.markers,
+                existing.logData,
+            )
+            if (reanchored.blocks.isEmpty()) return@launch
+            // Re-read the tab's CURRENT annotations, not the [existing] snapshot captured before this
+            // suspended — it may have gained its first note while this was reopening the archive.
+            val current = tab(existing.id) ?: return@launch
+            if (current.annotations.blocks.isEmpty()) {
+                upAnn(existing.id) { t -> t.copy(annotations = reanchored) }
+            } else {
+                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, reanchored, file.name)
+            }
+        }
     }
 
     @Suppress("TooGenericExceptionCaught")

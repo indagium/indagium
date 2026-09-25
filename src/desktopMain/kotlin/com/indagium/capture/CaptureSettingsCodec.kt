@@ -22,6 +22,7 @@ private const val MIN_MAX_FPS = 1
 private const val MAX_MAX_FPS = 240
 private const val MIN_BITRATE_MBPS = 1
 private const val MAX_BITRATE_MBPS = 500
+private const val MAX_MARKER_WINDOW_MS = 120_000L
 
 /** Keyed, versioned persistence for capture preferences embedded in app settings. */
 fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
@@ -42,6 +43,10 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("filenameTemplate", settings.filenameTemplate)
     put("label", settings.label)
     put("bufferMode", settings.bufferMode.name)
+    put("markerPreMs", settings.markerPreMs)
+    put("markerPostMs", settings.markerPostMs)
+    put("markerScreenshot", settings.markerScreenshot)
+    put("markerNotesInSnapshot", settings.markerNotesInSnapshot)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -80,6 +85,13 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
             key = "mirrorMode",
             default = if (legacyMirror) CaptureMirrorMode.EMBEDDED else CaptureMirrorMode.DISABLED,
         ),
+        // Mark issue (restyle plan Phase 3), appended last matching CaptureSettings' own field
+        // order. Absent on any settings JSON written before this feature existed, which decodes to
+        // this class's defaults — 5s/5s windows, screenshot+snapshot inclusion both on.
+        markerPreMs = root.optional("markerPreMs", defaults.markerPreMs, ::longValue).coerceIn(0, MAX_MARKER_WINDOW_MS),
+        markerPostMs = root.optional("markerPostMs", defaults.markerPostMs, ::longValue).coerceIn(0, MAX_MARKER_WINDOW_MS),
+        markerScreenshot = root.optional("markerScreenshot", defaults.markerScreenshot, ::booleanValue),
+        markerNotesInSnapshot = root.optional("markerNotesInSnapshot", defaults.markerNotesInSnapshot, ::booleanValue),
     )
 }.getOrNull()
 
