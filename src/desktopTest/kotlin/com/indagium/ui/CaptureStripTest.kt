@@ -4,6 +4,7 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.RecorderSnapshot
+import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
@@ -87,5 +88,23 @@ class CaptureStripTest {
 
         assertEquals(2..5, selectedCaptureOrdinals(tab))
         assertNull(selectedCaptureOrdinals(tab.copy(selected = setOf(999))))
+    }
+
+    @Test
+    fun deletingAMarkerTakesItsOwnScreenshotAndExcerptOnly() {
+        val blocks = listOf(
+            AnnBlock.Note("n1", "marker 1"),
+            AnnBlock.Image("i1", caption = "", provenance = "", format = "png", bytes = ByteArray(0)),
+            AnnBlock.Image("i1b", caption = "", provenance = "", format = "png", bytes = ByteArray(0)),
+            AnnBlock.LogRef("r1", logIds = listOf(1), caption = ""),
+            AnnBlock.Note("n2", "marker 2, still collecting"),
+            AnnBlock.Note("n3", "plain note"),
+            AnnBlock.LogRef("r3", logIds = listOf(2), caption = ""),
+        )
+        // Only the first Image/LogRef before the next Note — exactly what the row displays.
+        assertEquals(listOf("n1", "i1", "r1"), markerOwnedBlockIds(blocks, "n1"))
+        // Its excerpt hasn't arrived yet: the next note's blocks are never swept in.
+        assertEquals(listOf("n2"), markerOwnedBlockIds(blocks, "n2"))
+        assertTrue(markerOwnedBlockIds(blocks, "missing").isEmpty())
     }
 }

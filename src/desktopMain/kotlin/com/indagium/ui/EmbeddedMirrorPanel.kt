@@ -856,7 +856,10 @@ internal fun EmbeddedMirrorPanel(
     // for four small controls, and its tooltips opened over — i.e. under — the native layer).
     Column(modifier) {
         Column(
-            Modifier.weight(1f).fillMaxWidth().padding(12.dp),
+            // fill = detached: the detached window centres the picture in all of its space, while in
+            // the sidebar the panel reports its natural height so CaptureCard can hand the rest of
+            // the card to the markers (MirrorAboveMarkersLayout).
+            Modifier.weight(1f, fill = detached).fillMaxWidth().padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(7.dp),
         ) {
             // BoxWithConstraints (not Modifier.aspectRatio directly) so a portrait phone's height is
@@ -877,7 +880,7 @@ internal fun EmbeddedMirrorPanel(
             // otherwise surface + bar together would overflow whatever space `weight(1f)` handed us.
             val flexible = detached || fillAvailableHeight
             BoxWithConstraints(
-                if (flexible) Modifier.fillMaxWidth().weight(1f) else Modifier.fillMaxWidth(),
+                if (flexible) Modifier.fillMaxWidth().weight(1f, fill = detached) else Modifier.fillMaxWidth(),
             ) {
                 // The bar, and the text row under it while open, share the flexible allocation.
                 val chromeHeight = MIRROR_CONTROL_BAR_HEIGHT + if (ownClipboardState.expanded) MIRROR_TEXT_ROW_HEIGHT else 0.dp
