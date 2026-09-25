@@ -312,6 +312,31 @@ internal class EmbeddedDeviceSession(
         runCatching { muxer.finish() }
     }
 
+    /** Opens the transport and registers it as [currentConnection] if the run is still current,
+     * closing it and returning null instead when superseded either before or while committing.
+     * Split out of [runSession] to keep it under detekt's return-count threshold; behaviour is
+     * unchanged — same two supersede checks, same order. */
+    private fun openAndAcceptConnection(runId: Long, serial: String, options: MirrorStreamOptions): EmbeddedMirrorConnection? {
+        val openedConnection = transport.open(serial, options)
+        if (!isCurrent(runId)) {
+            runCatching { openedConnection.close() }
+            return null
+        }
+        val accepted = synchronized(lock) {
+            if (!stopping && generation.get() == runId) {
+                currentConnection = openedConnection
+                true
+            } else {
+                false
+            }
+        }
+        if (!accepted) {
+            runCatching { openedConnection.close() }
+            return null
+        }
+        return openedConnection
+    }
+
     private fun runSession(runId: Long, serial: String, options: MirrorStreamOptions) {
         var attempt = 0
         while (isCurrent(runId)) {
@@ -322,23 +347,7 @@ internal class EmbeddedDeviceSession(
             val gapStartElapsedMs = elapsedMillis()
             var connection: EmbeddedMirrorConnection? = null
             try {
-                val openedConnection = transport.open(serial, options)
-                if (!isCurrent(runId)) {
-                    runCatching { openedConnection.close() }
-                    return
-                }
-                val accepted = synchronized(lock) {
-                    if (!stopping && generation.get() == runId) {
-                        currentConnection = openedConnection
-                        true
-                    } else {
-                        false
-                    }
-                }
-                if (!accepted) {
-                    runCatching { openedConnection.close() }
-                    return
-                }
+                val openedConnection = openAndAcceptConnection(runId, serial, options) ?: return
                 connection = openedConnection
                 if (!publishConnectionSnapshotIfCurrent(
                         runId,

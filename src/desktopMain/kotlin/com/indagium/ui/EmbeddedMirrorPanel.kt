@@ -7,16 +7,6 @@ package com.indagium.ui
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.TooltipArea
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.outlined.Keyboard
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.unit.DpOffset
-import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.foundation.TooltipPlacement
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -35,12 +25,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.CloseFullscreen
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.Keyboard
+import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
@@ -52,6 +47,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
@@ -60,10 +56,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.awt.SwingPanel
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.isAltPressed
 import androidx.compose.ui.input.key.isCtrlPressed
@@ -76,30 +74,30 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
-import java.awt.EventQueue
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.ProcessBuilderCaptureRunner
-import com.indagium.model.LogTab
-import com.indagium.debug.AppLogger
 import com.indagium.capture.mirror.AdbScrcpyTransport
+import com.indagium.capture.mirror.DirectH264Decoder
 import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
 import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
 import com.indagium.capture.mirror.EmbeddedMirrorState
-import com.indagium.capture.mirror.DirectH264Decoder
 import com.indagium.capture.mirror.H264Decoder
-import com.indagium.capture.mirror.MacVideoToolboxMirrorDecoder
 import com.indagium.capture.mirror.JavaCvH264Decoder
+import com.indagium.capture.mirror.MacVideoToolboxMirrorDecoder
 import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorCoordinateMapper
 import com.indagium.capture.mirror.MirrorFrame
@@ -107,12 +105,14 @@ import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.capture.mirror.ScrcpyControlEncoder
+import com.indagium.debug.AppLogger
+import com.indagium.model.LogTab
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import java.awt.EventQueue
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
 import java.awt.event.KeyAdapter
-import java.awt.event.KeyEvent as AwtKeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelListener
@@ -120,6 +120,7 @@ import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import java.awt.event.KeyEvent as AwtKeyEvent
 
 /** Only a live capture tab may keep its detached mirror window after navigation. */
 internal fun activeDetachedEmbeddedMirrorTabs(tabs: List<LogTab>, detachedTabIds: Set<String>): List<LogTab> =
@@ -227,6 +228,10 @@ internal class EmbeddedMirrorHandle private constructor(
             listener = listener,
         )
 
+        // Native VideoToolbox/Metal surface setup can fail in many unrelated ways (missing
+        // dylib, JAWT attach failure, ...); any of them must fall back to the Compose decoder
+        // rather than crash, so catching Throwable here is intentional.
+        @Suppress("TooGenericExceptionCaught")
         private fun createMacNativeOrCompose(tools: CaptureTools, root: File): EmbeddedMirrorHandle {
             var surface: EmbeddedMirrorMacSurface? = null
             return try {
@@ -262,7 +267,11 @@ internal class EmbeddedMirrorHandle private constructor(
                         }
                     },
                     onDirectDecoderFailure = { failure ->
-                        AppLogger.warn("embedded-mirror", "mode=videotoolbox-metal status=failed; switching the existing connection to Compose at the next key frame", failure)
+                        AppLogger.warn(
+                            "embedded-mirror",
+                            "mode=videotoolbox-metal status=failed; switching the existing connection to Compose at the next key frame",
+                            failure,
+                        )
                     },
                 )
                 backend = MirrorBackend.StandaloneRuntime(
@@ -289,6 +298,9 @@ internal class EmbeddedMirrorHandle private constructor(
             return handle
         }
 
+        // Same rationale as createMacNativeOrCompose above: native surface setup failing here
+        // must fall back to the Compose-decoded shared path rather than crash.
+        @Suppress("TooGenericExceptionCaught")
         private fun createSharedMacNativeOrCompose(session: EmbeddedDeviceSession): EmbeddedMirrorHandle {
             var surface: EmbeddedMirrorMacSurface? = null
             return try {
@@ -457,6 +469,7 @@ internal sealed interface MirrorBackend : Closeable {
         private val onSnapshotChanged: (EmbeddedMirrorSnapshot) -> Unit,
     ) : MirrorBackend {
         private val lock = Any()
+
         // Serializes start/stop/fallback transitions without holding [lock] while a session call
         // can join a decoder worker or invoke native teardown callbacks. The state lock remains
         // for short snapshot updates made by those callbacks.
@@ -498,7 +511,12 @@ internal sealed interface MirrorBackend : Closeable {
         override fun isAlreadyStarted(serial: String): Boolean = synchronized(lock) { attached }
 
         /** [serial]/[options] are ignored — the shared session is already connected under its own
-         * recording options; this only attaches a decoder, at most once. */
+         * recording options; this only attaches a decoder, at most once.
+         *
+         * Native decoder construction/attach can fail in many unrelated ways; both catches inside
+         * must fall back to the Compose decoder rather than leave the mirror stuck, so catching
+         * Throwable is intentional (see the inline comments at each catch site). */
+        @Suppress("TooGenericExceptionCaught")
         override fun start(serial: String, options: MirrorStreamOptions) {
             synchronized(lifecycleLock) {
                 if (synchronized(lock) { attached }) return
@@ -649,9 +667,10 @@ private fun MirrorFrame.toComposeBitmap(): androidx.compose.ui.graphics.ImageBit
         it.setRGB(0, 0, width, height, pixelsArgb, 0, width)
     }.toComposeImageBitmap()
 
-/** The initial portrait surface height keeps the capture card compact until the user drags it. */
 /** A tall portrait device can grow within the scrollable sidebar without artificial 420dp cap. */
 internal val MIRROR_SIDEBAR_MAX_HEIGHT = 900.dp
+
+/** The initial portrait surface height keeps the capture card compact until the user drags it. */
 internal val MIRROR_DEFAULT_HEIGHT = 420.dp
 private val MIRROR_MIN_HEIGHT = 120.dp
 
@@ -740,9 +759,11 @@ internal fun EmbeddedMirrorPanel(
             var activeTouch = false
             var lastTouchX = 0f
             var lastTouchY = 0f
+
             fun mapper(): MirrorCoordinateMapper? = canvas.width.takeIf { it > 0 }?.let { width ->
                 canvas.height.takeIf { it > 0 }?.let { height -> MirrorCoordinateMapper(width, height, frameWidth, frameHeight) }
             }
+
             fun cancelActiveTouchOnEdt() {
                 if (!activeTouch) return
                 mapper()?.let {
@@ -750,6 +771,7 @@ internal fun EmbeddedMirrorPanel(
                 }
                 activeTouch = false
             }
+
             fun cancelActiveTouch() {
                 // Mouse callbacks and the mutable touch state belong to AWT's event thread.
                 // Compose can dispose this effect from another dispatcher, so serialize cleanup
@@ -1306,56 +1328,68 @@ private fun mirrorSurfaceModifier(
         .focusRequester(focusRequester)
         .focusable()
         .onSizeChanged { size = it }
-        .onPreviewKeyEvent { event ->
-            if (event.type != KeyEventType.KeyDown || event.isCtrlPressed || event.isMetaPressed || event.isAltPressed) return@onPreviewKeyEvent false
-            val live = handle ?: return@onPreviewKeyEvent false
-            val keycode = when (event.key) {
-                Key.Enter -> 66
-                Key.Backspace -> 67
-                Key.DirectionLeft -> 21
-                Key.DirectionRight -> 22
-                Key.DirectionUp -> 19
-                Key.DirectionDown -> 20
-                Key.Escape -> 111
-                else -> null
-            } ?: return@onPreviewKeyEvent false
-            if (live.send(MirrorControlCommand.Key(MirrorKeyAction.DOWN, keycode))) {
-                live.send(MirrorControlCommand.Key(MirrorKeyAction.UP, keycode))
-                true
-            } else {
-                false
-            }
-        }
+        .onPreviewKeyEvent { event -> handleMirrorKeyEvent(handle, event) }
     if (handle == null || frameWidth == null || frameHeight == null) return interaction
     return interaction.pointerInput(handle, frameWidth, frameHeight, size) {
         if (size.width <= 0 || size.height <= 0) return@pointerInput
         val mapper = MirrorCoordinateMapper(size.width, size.height, frameWidth, frameHeight)
-        awaitPointerEventScope {
-            var pointer: PointerId? = null
-            var downX = 0f
-            var downY = 0f
-            try {
-                while (true) {
-                    val event = awaitPointerEvent()
-                    if (pointer == null) {
-                        val down = event.changes.firstOrNull { it.changedToDown() } ?: continue
-                        pointer = down.id
-                        downX = down.position.x
-                        downY = down.position.y
-                        handle.sendTouch(mapper, MirrorTouchAction.DOWN, down.id.value, downX, downY)
-                    } else {
-                        val change = event.changes.firstOrNull { it.id == pointer } ?: continue
-                        if (change.pressed && event.type == PointerEventType.Move) {
-                            handle.sendTouch(mapper, MirrorTouchAction.MOVE, change.id.value, change.position.x, change.position.y)
-                        } else if (!change.pressed) {
-                            handle.sendTouch(mapper, MirrorTouchAction.UP, change.id.value, change.position.x, change.position.y)
-                            pointer = null
-                        }
+        trackMirrorTouchGestures(handle, mapper)
+    }
+}
+
+/** Maps a keydown to the Android keycode scrcpy expects and forwards a DOWN+UP pair. Split out
+ * of [mirrorSurfaceModifier] to keep it under detekt's cyclomatic-complexity threshold; same
+ * modifier guard and keycode table as before. */
+private fun handleMirrorKeyEvent(handle: EmbeddedMirrorHandle?, event: KeyEvent): Boolean {
+    if (event.type != KeyEventType.KeyDown || event.isCtrlPressed || event.isMetaPressed || event.isAltPressed) return false
+    val live = handle ?: return false
+    val keycode = when (event.key) {
+        Key.Enter -> 66
+        Key.Backspace -> 67
+        Key.DirectionLeft -> 21
+        Key.DirectionRight -> 22
+        Key.DirectionUp -> 19
+        Key.DirectionDown -> 20
+        Key.Escape -> 111
+        else -> null
+    } ?: return false
+    return if (live.send(MirrorControlCommand.Key(MirrorKeyAction.DOWN, keycode))) {
+        live.send(MirrorControlCommand.Key(MirrorKeyAction.UP, keycode))
+        true
+    } else {
+        false
+    }
+}
+
+/** Pumps raw pointer events into scrcpy touch commands for the lifetime of the enclosing
+ * pointerInput block. Split out of [mirrorSurfaceModifier] to keep it under detekt's cyclomatic-
+ * complexity threshold; same DOWN/MOVE/UP/CANCEL sequencing as before. */
+private suspend fun PointerInputScope.trackMirrorTouchGestures(handle: EmbeddedMirrorHandle, mapper: MirrorCoordinateMapper) {
+    awaitPointerEventScope {
+        var pointer: PointerId? = null
+        var downX = 0f
+        var downY = 0f
+        try {
+            while (true) {
+                val event = awaitPointerEvent()
+                if (pointer == null) {
+                    val down = event.changes.firstOrNull { it.changedToDown() } ?: continue
+                    pointer = down.id
+                    downX = down.position.x
+                    downY = down.position.y
+                    handle.sendTouch(mapper, MirrorTouchAction.DOWN, down.id.value, downX, downY)
+                } else {
+                    val change = event.changes.firstOrNull { it.id == pointer } ?: continue
+                    if (change.pressed && event.type == PointerEventType.Move) {
+                        handle.sendTouch(mapper, MirrorTouchAction.MOVE, change.id.value, change.position.x, change.position.y)
+                    } else if (!change.pressed) {
+                        handle.sendTouch(mapper, MirrorTouchAction.UP, change.id.value, change.position.x, change.position.y)
+                        pointer = null
                     }
                 }
-            } finally {
-                pointer?.let { handle.sendTouch(mapper, MirrorTouchAction.CANCEL, it.value, downX, downY) }
             }
+        } finally {
+            pointer?.let { handle.sendTouch(mapper, MirrorTouchAction.CANCEL, it.value, downX, downY) }
         }
     }
 }

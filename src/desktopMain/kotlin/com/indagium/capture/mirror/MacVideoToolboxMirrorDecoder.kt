@@ -62,55 +62,55 @@ internal class MacVideoToolboxMirrorDecoder(
             if (reportNowNs - lastReportNs >= REPORT_INTERVAL_NS) {
                 val queueMetrics = input.diagnostics()
                 val nativeMetrics = surface.takeNativeMetrics()
-                val decodeCount = nativeMetrics.getOrElse(0) { 0 }
-                val decodeTotalNs = nativeMetrics.getOrElse(1) { 0 }
-                val decodeMaxNs = nativeMetrics.getOrElse(2) { 0 }
-                val presentCount = nativeMetrics.getOrElse(3) { 0 }
-                val presentTotalNs = nativeMetrics.getOrElse(4) { 0 }
-                val presentMaxNs = nativeMetrics.getOrElse(5) { 0 }
-                val renderErrors = nativeMetrics.getOrElse(6) { 0 }
-                val presentP95Ns = nativeMetrics.getOrElse(7) { 0 }
-                val decodedImages = nativeMetrics.getOrElse(8) { 0 }
-                val attachAttempts = nativeMetrics.getOrElse(9) { 0 }
-                val attachSuccesses = nativeMetrics.getOrElse(10) { 0 }
-                val attachFailures = nativeMetrics.getOrElse(11) { 0 }
-                val drawableMisses = nativeMetrics.getOrElse(12) { 0 }
-                val attachResult = nativeMetrics.getOrElse(13) { 0 }
-                val attachWidth = nativeMetrics.getOrElse(14) { 0 }
-                val attachHeight = nativeMetrics.getOrElse(15) { 0 }
-                val decodedPixelFormat = nativeMetrics.getOrElse(16) { 0 }
-                val decodedSampleMin = nativeMetrics.getOrElse(17) { -1 }
-                val decodedSampleMax = nativeMetrics.getOrElse(18) { -1 }
-                val hasLayerSuperlayer = nativeMetrics.getOrElse(19) { 0 }
-                val hasWindowLayer = nativeMetrics.getOrElse(20) { 0 }
-                val layerHidden = nativeMetrics.getOrElse(21) { 0 }
-                val layerOpacity = nativeMetrics.getOrElse(22) { 0 }
-                val testPatternEnabled = nativeMetrics.getOrElse(23) { 0 }
-                val layerDescendsFromWindow = nativeMetrics.getOrElse(24) { 0 }
-                val parentHidden = nativeMetrics.getOrElse(25) { 0 }
-                val parentOpacity = nativeMetrics.getOrElse(26) { 0 }
-                val layerZ = nativeMetrics.getOrElse(27) { 0 }
-                val layerSiblingIndex = nativeMetrics.getOrElse(28) { -1 }
-                val layerSiblingCount = nativeMetrics.getOrElse(29) { 0 }
-                val layerFrameWidth = nativeMetrics.getOrElse(30) { 0 }
-                val layerFrameHeight = nativeMetrics.getOrElse(31) { 0 }
-                val parentFrameWidth = nativeMetrics.getOrElse(32) { 0 }
-                val parentFrameHeight = nativeMetrics.getOrElse(33) { 0 }
-                val drawableReadbackStatus = nativeMetrics.getOrElse(34) { 0 }
-                val drawablePixelMin = nativeMetrics.getOrElse(35) { -1 }
-                val drawablePixelMax = nativeMetrics.getOrElse(36) { -1 }
-                val layerFrameX = nativeMetrics.getOrElse(37) { 0 }
-                val layerFrameY = nativeMetrics.getOrElse(38) { 0 }
-                val componentBoundsX = nativeMetrics.getOrElse(39) { 0 }
-                val componentBoundsY = nativeMetrics.getOrElse(40) { 0 }
-                val canvasWindowX = nativeMetrics.getOrElse(41) { 0 }
-                val canvasWindowY = nativeMetrics.getOrElse(42) { 0 }
-                val drawableNonBlackSamples = nativeMetrics.getOrElse(43) { -1 }
-                val siblingMaxZ = nativeMetrics.getOrElse(44) { 0 }
-                val drawableAlphaMin = nativeMetrics.getOrElse(45) { -1 }
-                val drawableAlphaMax = nativeMetrics.getOrElse(46) { -1 }
-                val decodedAlphaMin = nativeMetrics.getOrElse(47) { -1 }
-                val decodedAlphaMax = nativeMetrics.getOrElse(48) { -1 }
+                val decodeCount = nativeMetrics.getOrElse(MetricIndex.DECODE_COUNT) { 0 }
+                val decodeTotalNs = nativeMetrics.getOrElse(MetricIndex.DECODE_TOTAL_NS) { 0 }
+                val decodeMaxNs = nativeMetrics.getOrElse(MetricIndex.DECODE_MAX_NS) { 0 }
+                val presentCount = nativeMetrics.getOrElse(MetricIndex.PRESENT_COUNT) { 0 }
+                val presentTotalNs = nativeMetrics.getOrElse(MetricIndex.PRESENT_TOTAL_NS) { 0 }
+                val presentMaxNs = nativeMetrics.getOrElse(MetricIndex.PRESENT_MAX_NS) { 0 }
+                val renderErrors = nativeMetrics.getOrElse(MetricIndex.RENDER_ERRORS) { 0 }
+                val presentP95Ns = nativeMetrics.getOrElse(MetricIndex.PRESENT_P95_NS) { 0 }
+                val decodedImages = nativeMetrics.getOrElse(MetricIndex.DECODED_IMAGE_COUNT) { 0 }
+                val attachAttempts = nativeMetrics.getOrElse(MetricIndex.ATTACH_ATTEMPTS) { 0 }
+                val attachSuccesses = nativeMetrics.getOrElse(MetricIndex.ATTACH_SUCCESSES) { 0 }
+                val attachFailures = nativeMetrics.getOrElse(MetricIndex.ATTACH_FAILURES) { 0 }
+                val drawableMisses = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_MISSES) { 0 }
+                val attachResult = nativeMetrics.getOrElse(MetricIndex.LAST_ATTACH_RESULT) { 0 }
+                val attachWidth = nativeMetrics.getOrElse(MetricIndex.LAST_ATTACH_WIDTH) { 0 }
+                val attachHeight = nativeMetrics.getOrElse(MetricIndex.LAST_ATTACH_HEIGHT) { 0 }
+                val decodedPixelFormat = nativeMetrics.getOrElse(MetricIndex.DECODED_PIXEL_FORMAT) { 0 }
+                val decodedSampleMin = nativeMetrics.getOrElse(MetricIndex.DECODED_SAMPLE_MIN) { -1 }
+                val decodedSampleMax = nativeMetrics.getOrElse(MetricIndex.DECODED_SAMPLE_MAX) { -1 }
+                val hasLayerSuperlayer = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_HAS_SUPERLAYER) { 0 }
+                val hasWindowLayer = nativeMetrics.getOrElse(MetricIndex.LAST_WINDOW_LAYER_AVAILABLE) { 0 }
+                val layerHidden = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_HIDDEN) { 0 }
+                val layerOpacity = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_OPACITY_MILLI) { 0 }
+                val testPatternEnabled = nativeMetrics.getOrElse(MetricIndex.TEST_PATTERN) { 0 }
+                val layerDescendsFromWindow = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_DESCENDS_FROM_WINDOW) { 0 }
+                val parentHidden = nativeMetrics.getOrElse(MetricIndex.LAST_PARENT_HIDDEN) { 0 }
+                val parentOpacity = nativeMetrics.getOrElse(MetricIndex.LAST_PARENT_OPACITY_MILLI) { 0 }
+                val layerZ = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_Z_MILLI) { 0 }
+                val layerSiblingIndex = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_SIBLING_INDEX) { -1 }
+                val layerSiblingCount = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_SIBLING_COUNT) { 0 }
+                val layerFrameWidth = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_FRAME_WIDTH) { 0 }
+                val layerFrameHeight = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_FRAME_HEIGHT) { 0 }
+                val parentFrameWidth = nativeMetrics.getOrElse(MetricIndex.LAST_PARENT_FRAME_WIDTH) { 0 }
+                val parentFrameHeight = nativeMetrics.getOrElse(MetricIndex.LAST_PARENT_FRAME_HEIGHT) { 0 }
+                val drawableReadbackStatus = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_READBACK_STATUS) { 0 }
+                val drawablePixelMin = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_PIXEL_MIN) { -1 }
+                val drawablePixelMax = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_PIXEL_MAX) { -1 }
+                val layerFrameX = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_FRAME_X) { 0 }
+                val layerFrameY = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_FRAME_Y) { 0 }
+                val componentBoundsX = nativeMetrics.getOrElse(MetricIndex.LAST_COMPONENT_BOUNDS_X) { 0 }
+                val componentBoundsY = nativeMetrics.getOrElse(MetricIndex.LAST_COMPONENT_BOUNDS_Y) { 0 }
+                val canvasWindowX = nativeMetrics.getOrElse(MetricIndex.LAST_CANVAS_WINDOW_X) { 0 }
+                val canvasWindowY = nativeMetrics.getOrElse(MetricIndex.LAST_CANVAS_WINDOW_Y) { 0 }
+                val drawableNonBlackSamples = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_NON_BLACK_GRID_SAMPLES) { -1 }
+                val siblingMaxZ = nativeMetrics.getOrElse(MetricIndex.LAST_LAYER_SIBLING_MAX_Z_MILLI) { 0 }
+                val drawableAlphaMin = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_ALPHA_MIN) { -1 }
+                val drawableAlphaMax = nativeMetrics.getOrElse(MetricIndex.DRAWABLE_ALPHA_MAX) { -1 }
+                val decodedAlphaMin = nativeMetrics.getOrElse(MetricIndex.DECODED_ALPHA_MIN) { -1 }
+                val decodedAlphaMax = nativeMetrics.getOrElse(MetricIndex.DECODED_ALPHA_MAX) { -1 }
                 surface.reportPerformance(
                     "Metal mirror perf packets=${queueWaitSamples.size} " +
                         "queue_wait_p95_ms=${percentileMs(queueWaitSamples)} " +
@@ -160,7 +160,7 @@ internal class MacVideoToolboxMirrorDecoder(
     private fun percentileMs(samples: List<Long>): String {
         if (samples.isEmpty()) return "0.00"
         val sorted = samples.sorted()
-        val index = ((sorted.size * 95 + 99) / 100 - 1).coerceIn(0, sorted.lastIndex)
+        val index = ((sorted.size * P95_PERCENT + P95_ROUNDING_OFFSET) / 100 - 1).coerceIn(0, sorted.lastIndex)
         return toMs(sorted[index])
     }
 
@@ -173,5 +173,64 @@ internal class MacVideoToolboxMirrorDecoder(
         const val REPORT_INTERVAL_NS = 5_000_000_000L
         const val MAX_REPORT_SAMPLES = 300
         const val NANOS_PER_MILLISECOND = 1_000_000.0
+        const val P95_PERCENT = 95
+        const val P95_ROUNDING_OFFSET = 99
+    }
+
+    /**
+     * Index layout of the [MacVideoToolboxMirrorNative.nativeReadMetrics] `LongArray`. Names match
+     * the native-side field names in `native/macos/indagium_mirror.mm`'s `nativeReadMetrics`
+     * (`values[0]` through `values[48]`) so the two sides stay easy to cross-check.
+     */
+    private object MetricIndex {
+        const val DECODE_COUNT = 0
+        const val DECODE_TOTAL_NS = 1
+        const val DECODE_MAX_NS = 2
+        const val PRESENT_COUNT = 3
+        const val PRESENT_TOTAL_NS = 4
+        const val PRESENT_MAX_NS = 5
+        const val RENDER_ERRORS = 6
+        const val PRESENT_P95_NS = 7
+        const val DECODED_IMAGE_COUNT = 8
+        const val ATTACH_ATTEMPTS = 9
+        const val ATTACH_SUCCESSES = 10
+        const val ATTACH_FAILURES = 11
+        const val DRAWABLE_MISSES = 12
+        const val LAST_ATTACH_RESULT = 13
+        const val LAST_ATTACH_WIDTH = 14
+        const val LAST_ATTACH_HEIGHT = 15
+        const val DECODED_PIXEL_FORMAT = 16
+        const val DECODED_SAMPLE_MIN = 17
+        const val DECODED_SAMPLE_MAX = 18
+        const val LAST_LAYER_HAS_SUPERLAYER = 19
+        const val LAST_WINDOW_LAYER_AVAILABLE = 20
+        const val LAST_LAYER_HIDDEN = 21
+        const val LAST_LAYER_OPACITY_MILLI = 22
+        const val TEST_PATTERN = 23
+        const val LAST_LAYER_DESCENDS_FROM_WINDOW = 24
+        const val LAST_PARENT_HIDDEN = 25
+        const val LAST_PARENT_OPACITY_MILLI = 26
+        const val LAST_LAYER_Z_MILLI = 27
+        const val LAST_LAYER_SIBLING_INDEX = 28
+        const val LAST_LAYER_SIBLING_COUNT = 29
+        const val LAST_LAYER_FRAME_WIDTH = 30
+        const val LAST_LAYER_FRAME_HEIGHT = 31
+        const val LAST_PARENT_FRAME_WIDTH = 32
+        const val LAST_PARENT_FRAME_HEIGHT = 33
+        const val DRAWABLE_READBACK_STATUS = 34
+        const val DRAWABLE_PIXEL_MIN = 35
+        const val DRAWABLE_PIXEL_MAX = 36
+        const val LAST_LAYER_FRAME_X = 37
+        const val LAST_LAYER_FRAME_Y = 38
+        const val LAST_COMPONENT_BOUNDS_X = 39
+        const val LAST_COMPONENT_BOUNDS_Y = 40
+        const val LAST_CANVAS_WINDOW_X = 41
+        const val LAST_CANVAS_WINDOW_Y = 42
+        const val DRAWABLE_NON_BLACK_GRID_SAMPLES = 43
+        const val LAST_LAYER_SIBLING_MAX_Z_MILLI = 44
+        const val DRAWABLE_ALPHA_MIN = 45
+        const val DRAWABLE_ALPHA_MAX = 46
+        const val DECODED_ALPHA_MIN = 47
+        const val DECODED_ALPHA_MAX = 48
     }
 }

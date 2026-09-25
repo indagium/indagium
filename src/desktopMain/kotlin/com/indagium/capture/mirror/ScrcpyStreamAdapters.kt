@@ -98,7 +98,7 @@ internal class BoundedScrcpyAnnexBFeed(
     private val pump = thread(name = "scrcpy-mirror-packet-feed", isDaemon = true) {
         try {
             val reader = ScrcpyPacketReader(rawInput)
-            when (val header = reader.readHeader()) {
+            when (reader.readHeader()) {
                 is ScrcpyStreamHeader.Codec -> Unit
                 ScrcpyStreamHeader.Disabled -> throw IOException("scrcpy video stream is disabled")
                 ScrcpyStreamHeader.Error -> throw ScrcpyStreamErrorException("scrcpy reported a server configuration error")
@@ -160,6 +160,7 @@ internal class BoundedScrcpyPacketFeed(
     private val closeInputOnClose: Boolean = true,
 ) : Closeable {
     data class Packet(val ptsUs: Long, val config: Boolean, val keyFrame: Boolean, val data: ByteArray, val enqueuedNs: Long = System.nanoTime())
+
     private val lock = Object()
     private val queue = ArrayDeque<Packet>()
     private var queuedBytes = 0L
@@ -169,31 +170,35 @@ internal class BoundedScrcpyPacketFeed(
     private var closed = false
     private var eof = false
     private var compose: BoundedAnnexBFeed? = null
+
     @Volatile var droppedPackets = 0L
         private set
+
     init {
         require(maxAgeNs >= 0)
         require(maxBytes > 0)
         require(packetLimit > 0)
     }
 
-    private val pump: Thread? = if (startPump) thread(name = "scrcpy-mirror-packet-reader", isDaemon = true) {
-        try {
-            val reader = ScrcpyPacketReader(rawInput)
-            when (reader.readHeader()) {
-                is ScrcpyStreamHeader.Codec -> Unit
-                else -> throw IOException("scrcpy video stream is unavailable")
-            }
-            while (true) {
-                val event = reader.readNext() ?: break
-                if (event is ScrcpyStreamEvent.Packet) {
-                    offer(Packet(event.ptsUs, event.config, event.keyFrame, event.data, nanoTime()))
+    private val pump: Thread? = if (startPump) {
+        thread(name = "scrcpy-mirror-packet-reader", isDaemon = true) {
+            try {
+                val reader = ScrcpyPacketReader(rawInput)
+                when (reader.readHeader()) {
+                    is ScrcpyStreamHeader.Codec -> Unit
+                    else -> throw IOException("scrcpy video stream is unavailable")
                 }
+                while (true) {
+                    val event = reader.readNext() ?: break
+                    if (event is ScrcpyStreamEvent.Packet) {
+                        offer(Packet(event.ptsUs, event.config, event.keyFrame, event.data, nanoTime()))
+                    }
+                }
+            } catch (_: IOException) {
+            } finally {
+                val activeCompose = synchronized(lock) { eof = true; lock.notifyAll(); compose }
+                activeCompose?.finish()
             }
-        } catch (_: IOException) {
-        } finally {
-            val activeCompose = synchronized(lock) { eof = true; lock.notifyAll(); compose }
-            activeCompose?.finish()
         }
     } else {
         null
@@ -302,8 +307,11 @@ internal class BoundedScrcpyPacketFeed(
             }
             resync = true
             droppedPackets++
-        } else add(packet)
+        } else {
+            add(packet)
+        }
     }
+
     private fun fits(packet: Packet) =
         queuedVideoPacketCount() < packetLimit &&
             packet.data.size <= maxBytes &&
@@ -320,8 +328,11 @@ internal class BoundedScrcpyPacketFeed(
         ?.size
         ?.toLong()
         ?: 0L
+
     private fun add(packet: Packet) { queue.addLast(packet); queuedBytes += packet.data.size; lock.notifyAll() }
+
     private fun clear() { droppedPackets += queue.size; queue.clear(); queuedBytes = 0L }
+
     private fun expire() {
         val cutoff = nanoTime() - maxAgeNs
         var stale = false
@@ -340,6 +351,7 @@ internal class BoundedScrcpyPacketFeed(
             resync = true
         }
     }
+
     override fun close() {
         synchronized(lock) { closed = true; clear(); lock.notifyAll() }
         compose?.close()
@@ -386,6 +398,7 @@ internal class BoundedAnnexBFeed(
     val input: PipedInputStream = PipedInputStream(pipeOut, PIPE_BUFFER_BYTES)
 
     @Volatile private var closed = false
+
     @Volatile private var finished = false
 
     // Starts true, not false: a decoder normally attaches to an already-running recording (the
@@ -395,6 +408,7 @@ internal class BoundedAnnexBFeed(
     // fails ("no frame!"); starting latched exactly as if the initial queue had already overflowed
     // makes attach-mid-stream behave the same as any other resync: wait for the next key frame.
     @Volatile private var droppedSinceKeyframe = true
+
     @Volatile private var latestConfig: ByteArray? = null
 
     @Volatile var droppedPackets: Long = 0
@@ -405,7 +419,9 @@ internal class BoundedAnnexBFeed(
             while (true) {
                 val chunk = synchronized(lock) {
                     while (queue.isEmpty() && !closed && !finished) lock.wait()
-                    if (closed || (finished && queue.isEmpty())) null else {
+                    if (closed || (finished && queue.isEmpty())) {
+                        null
+                    } else {
                         queue.removeFirst().also { queuedBytes -= it.data.size.toLong() }
                     }
                 } ?: break

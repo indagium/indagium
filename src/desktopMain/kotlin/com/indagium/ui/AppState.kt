@@ -1934,6 +1934,7 @@ class AppState(
      * recent marker is undoable, matching the singular "Undo" affordance a snackbar-style control
      * offers; the earlier marker is simply left in Notes like any committed edit. */
     internal val markerUndoByTab = mutableStateMapOf<String, MarkerUndoState>()
+
     // Concurrent, not a plain map: beginMarkerNote/the expiry coroutine touch this from ioScope
     // while undoMarkIssue removes from the UI thread, so two presses racing a click would
     // otherwise corrupt a HashMap. markerUndoByTab needs no such guard — a snapshot state map is

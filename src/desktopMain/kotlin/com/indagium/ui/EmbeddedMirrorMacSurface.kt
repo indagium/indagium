@@ -2,10 +2,13 @@
 
 package com.indagium.ui
 
-import com.indagium.capture.mirror.MacVideoToolboxMirrorNative
-import com.indagium.capture.mirror.MirrorCanvasOrigin
 import androidx.compose.ui.awt.ComposeWindow
 import androidx.compose.ui.geometry.Rect
+import com.indagium.capture.mirror.MacVideoToolboxMirrorNative
+import com.indagium.capture.mirror.MirrorCanvasOrigin
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import org.jetbrains.skiko.GraphicsApi
 import java.awt.Canvas
 import java.awt.EventQueue
 import java.awt.GraphicsEnvironment
@@ -14,17 +17,14 @@ import java.awt.event.ComponentEvent
 import java.awt.event.HierarchyBoundsListener
 import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
-import java.awt.event.KeyEvent as AwtKeyEvent
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
 import java.io.Closeable
 import java.util.Collections
 import java.util.IdentityHashMap
 import javax.swing.SwingUtilities
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
-import org.jetbrains.skiko.GraphicsApi
+import java.awt.event.KeyEvent as AwtKeyEvent
 
 /** Visible portion of the native mirror, expressed as fractions of its full Compose bounds. */
 internal data class MirrorClipFractions(
@@ -121,6 +121,7 @@ internal class EmbeddedMirrorMacSurface(
     private val diagnosticSink: (String) -> Unit = {},
 ) : Closeable {
     val canvas = Canvas()
+
     /** Core Animation underlay ordering (the mirror layer sits below Compose's own Metal layer,
      * which paints a transparent hole over it) for same-window Compose overlays. Default true; a
      * developer bisect switch (`-Dindagium.mirror.underlay=false`), not a user-facing setting — a
@@ -146,13 +147,16 @@ internal class EmbeddedMirrorMacSurface(
         if (stderrDiagnosticsEnabled) System.err.println("[embedded-mirror] $message")
     }
     private val native: MacVideoToolboxMirrorNative
+
     @Volatile private var closed = false
     private var lastNativeHierarchy: String? = null
     private var attachedWindow: java.awt.Window? = null
     private var lastVisibleClip: MirrorClipFractions? = null
     private var lastVisibleClipSize: Pair<Float, Float>? = null
     private val hostOwners = MirrorSurfaceHostOwners()
+
     @Volatile private var hostMounted = false
+
     /**
      * While [underlayActive], the layer sits below Compose's own siblings and forwards input back
      * through SwingPanel's Compose interop group instead of being masked. The legacy fallback (not
@@ -163,10 +167,13 @@ internal class EmbeddedMirrorMacSurface(
     val isOverlayOccluded: Boolean get() = overlayOccluded
     private val _overlayOccludedState = MutableStateFlow(false)
     val overlayOccludedState: StateFlow<Boolean> = _overlayOccludedState
+
     @Volatile private var onOverlayOccluded: (() -> Unit)? = null
     private val resizeListener = object : ComponentAdapter() {
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
+
         override fun componentHidden(event: ComponentEvent) { detachNativeSurface("canvas hidden") }
+
         override fun componentResized(event: ComponentEvent) = resize()
 
         override fun componentMoved(event: ComponentEvent) = resize()
@@ -188,7 +195,7 @@ internal class EmbeddedMirrorMacSurface(
                 HierarchyEvent.PARENT_CHANGED.toLong() or
                     HierarchyEvent.DISPLAYABILITY_CHANGED.toLong() or
                     HierarchyEvent.SHOWING_CHANGED.toLong()
-                ) != 0L
+            ) != 0L
         ) {
             // Wait for the new hierarchy notification, then attach only after the Canvas has a
             // displayable peer in that Window. This is lifecycle-driven, not a timing delay.

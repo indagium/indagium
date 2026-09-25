@@ -63,13 +63,17 @@ internal class MacVideoToolboxMirrorNative(
      * the same terms [attachCanvas] takes; when present the native side re-asserts the layer frame
      * from it rather than relying on JAWT alone (see PendingGeometryUpdate.hasOrigin). */
     fun setBounds(width: Int, height: Int, pixelWidth: Int, pixelHeight: Int, origin: MirrorCanvasOrigin? = null) = lifecycle.read {
-        if (handle != 0L && width > 0 && height > 0 && pixelWidth > 0 && pixelHeight > 0) {
+        if (canSetBounds(width, height, pixelWidth, pixelHeight)) {
             nativeSetBounds(
                 handle, width, height, pixelWidth, pixelHeight,
                 origin != null, origin?.windowX ?: 0, origin?.windowY ?: 0, origin?.insetLeft ?: 0, origin?.insetTop ?: 0,
             )
         }
     }
+
+    /** True when [handle] is live and every bounds value is a usable (positive) size. */
+    private fun canSetBounds(width: Int, height: Int, pixelWidth: Int, pixelHeight: Int): Boolean =
+        handle != 0L && width > 0 && height > 0 && pixelWidth > 0 && pixelHeight > 0
 
     fun attachCanvas(windowX: Int, windowY: Int, insetLeft: Int, insetTop: Int): String? = lifecycle.read {
         if (handle != 0L) nativeAttach(handle, windowX, windowY, insetLeft, insetTop) else null
@@ -99,7 +103,7 @@ internal class MacVideoToolboxMirrorNative(
     }
 
     fun readMetrics(): LongArray = lifecycle.read {
-        if (handle == 0L) LongArray(49) else nativeReadMetrics(handle) ?: LongArray(49)
+        if (handle == 0L) LongArray(METRICS_ARRAY_SIZE) else nativeReadMetrics(handle) ?: LongArray(METRICS_ARRAY_SIZE)
     }
 
     override fun close() {
@@ -111,6 +115,9 @@ internal class MacVideoToolboxMirrorNative(
     }
 
     companion object {
+        /** Length of the `LongArray` `nativeReadMetrics` returns — see its `values[49]{}` in
+         * `native/macos/indagium_mirror.mm`. */
+        private const val METRICS_ARRAY_SIZE = 49
         private const val RESOURCE_PATH = "/native/macos/libindagium_mirror.dylib"
         private var loaded = false
         private var loadFailure: String? = null
@@ -136,6 +143,7 @@ internal class MacVideoToolboxMirrorNative(
         }
 
         @JvmStatic private external fun nativeCreate(canvas: Canvas, underlayRequested: Boolean): Long
+
         @JvmStatic private external fun nativeDecode(
             handle: Long,
             bytes: ByteArray,
@@ -145,6 +153,7 @@ internal class MacVideoToolboxMirrorNative(
             keyFrame: Boolean,
             ingressNs: Long,
         ): Long
+
         @JvmStatic private external fun nativeSetBounds(
             handle: Long,
             width: Int,
@@ -157,8 +166,11 @@ internal class MacVideoToolboxMirrorNative(
             insetLeft: Int,
             insetTop: Int,
         )
+
         @JvmStatic private external fun nativeAttach(handle: Long, windowX: Int, windowY: Int, insetLeft: Int, insetTop: Int): String?
+
         @JvmStatic private external fun nativeDetach(handle: Long)
+
         @JvmStatic private external fun nativeLayerAttached(handle: Long): Boolean
 
         @JvmStatic private external fun nativeUnderlayStatus(handle: Long): Long
@@ -166,7 +178,9 @@ internal class MacVideoToolboxMirrorNative(
         @JvmStatic private external fun nativeSetUnderlayOrdering(handle: Long, underlayOrdering: Boolean)
 
         @JvmStatic private external fun nativeSetClip(handle: Long, left: Float, top: Float, right: Float, bottom: Float)
+
         @JvmStatic private external fun nativeReadMetrics(handle: Long): LongArray?
+
         @JvmStatic private external fun nativeClose(handle: Long)
     }
 }

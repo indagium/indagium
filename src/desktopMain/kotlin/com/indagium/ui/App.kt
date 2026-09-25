@@ -63,22 +63,36 @@ import kotlin.math.roundToInt
 /** The popup is bounded visually, but every retained path stays reachable by scrolling. */
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
 
+// Grouped out of appHasNativeMirrorOccludingOverlay to keep it under detekt's cyclomatic-
+// complexity threshold; the grouping is cosmetic only — every flag below still contributes to
+// the same OR chain, evaluated in the same order group-by-group.
+private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
+    state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
+        state.pendingZipPicker != null || state.pendingFolderPicker != null ||
+        state.sourceCodeView != null || state.caseLibraryTabId != null ||
+        state.customCommandEditorTarget != null || state.sourceFolderInfoEditorTarget != null ||
+        state.recentNotesMenuOpen || (state.recentMenuOpen && state.recentFiles.isNotEmpty())
+
+private fun appHasOpenFilterDialog(state: AppState): Boolean =
+    state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingClearFilterTabId != null ||
+        state.pendingTagPrefixConflict != null || state.pendingDeleteFilterId != null ||
+        state.pendingDeleteSavedFilterFolderId != null || state.pendingFilterRename != null ||
+        state.filterExportDialogOpen || state.mergeTabsDialogOpen || state.pendingSplitPrompt != null
+
+private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
+    state.pendingNoteOverwrite != null || state.pendingLogRelink != null || state.pendingDiagramNotice != null ||
+        state.pendingImportReview != null || state.importError != null || state.openError != null ||
+        state.retraceDialogState != null
+
+private fun appHasOpenAppLevelDialog(state: AppState): Boolean =
+    state.isLoading || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
+        state.supportDialogOpen || state.updateDialogVisible || state.cacheClearConfirmOpen ||
+        state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen
+
 /** Root-owned overlays can cover the embedded mirror's elevated native layer. */
 internal fun appHasNativeMirrorOccludingOverlay(state: AppState): Boolean =
-    state.isLoading || state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
-        state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingNoteOverwrite != null ||
-        state.pendingLogRelink != null || state.pendingClearFilterTabId != null ||
-        state.pendingTagPrefixConflict != null || state.pendingDiagramNotice != null ||
-        state.pendingDeleteFilterId != null || state.pendingDeleteSavedFilterFolderId != null ||
-        state.pendingFilterRename != null || state.filterExportDialogOpen || state.pendingImportReview != null ||
-        state.importError != null || state.pendingZipPicker != null || state.pendingFolderPicker != null ||
-        state.pendingSplitPrompt != null || state.mergeTabsDialogOpen || state.recentNotesMenuOpen ||
-        (state.recentMenuOpen && state.recentFiles.isNotEmpty()) || state.retraceDialogState != null ||
-        state.openError != null || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
-        state.supportDialogOpen || state.updateDialogVisible || state.sourceCodeView != null ||
-        state.cacheClearConfirmOpen || state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen ||
-        state.caseLibraryTabId != null || state.customCommandEditorTarget != null ||
-        state.sourceFolderInfoEditorTarget != null
+    appHasOpenContextMenuOrPicker(state) || appHasOpenFilterDialog(state) ||
+        appHasOpenLogOrNoteDialog(state) || appHasOpenAppLevelDialog(state)
 
 /**
  * Files dropped by Linux file managers are not consistently exposed through AWT's

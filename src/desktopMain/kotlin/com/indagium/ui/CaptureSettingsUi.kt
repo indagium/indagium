@@ -15,11 +15,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
-import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.CaptureSettings
+import com.indagium.capture.captureFilenameTemplateError
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.withMirrorMode
-import com.indagium.capture.captureFilenameTemplateError
 import java.io.File
 
 internal const val CAPTURE_GIB = 1024L * 1024L * 1024L

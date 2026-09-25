@@ -51,14 +51,7 @@ fun main(args: Array<String>) {
     // and either falls through or exits. So the migration's invariant — nothing creates the new
     // app-data dir before it runs — still holds; a headless launch simply migrates on the next
     // real (non-headless) launch instead.
-    if (GraphicsEnvironment.isHeadless()) {
-        System.err.println(
-            "Indagium needs a graphical display (X11 or XWayland) and none was found. " +
-                "If you're on a remote/VNC/xrdp/x2go session or ran this over ssh, set DISPLAY " +
-                "before launching, e.g.: DISPLAY=:0 indagium",
-        )
-        exitProcess(1)
-    }
+    failFastIfHeadless()
 
     // The macOS mirror is a native CAMetalLayer hosted by SwingPanel. Compose's documented interop
     // blending switch is now load-bearing, not merely an experiment: the mirror's default underlay
@@ -66,11 +59,7 @@ fun main(args: Array<String>) {
     // true) relies on it to make Compose's own layer non-opaque so a punched hole can reveal the
     // native layer beneath. Without it — or under -Dindagium.mirror.underlay=false — the automatic
     // fallback keeps the pre-underlay above-siblings behavior instead.
-    if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
-        if (System.getProperty("compose.interop.blending") == null) {
-            System.setProperty("compose.interop.blending", "true")
-        }
-    }
+    configureMacInteropBlendingIfNeeded()
 
     // This debug-only setup does not touch disk. When both switches are present it installs an
     // explicit, empty directory beneath an approved temporary root so MCP verification cannot
@@ -105,31 +94,14 @@ fun main(args: Array<String>) {
     // build.gradle.kts); if that's missing the set fails and behavior just stays as before.
     // The value must match the StartupWMClass that CI writes into the .deb's .desktop entry
     // (.github/workflows/build.yml), which is how GNOME maps the window back to the launcher.
-    if (System.getProperty("os.name").orEmpty().lowercase().contains("linux")) {
-        runCatching {
-            Toolkit.getDefaultToolkit()
-            val toolkitClass = Class.forName("sun.awt.X11.XToolkit")
-            val field = toolkitClass.getDeclaredField("awtAppClassName")
-            field.isAccessible = true
-            field.set(null, "Indagium")
-        }
-    }
+    applyLinuxWmClassOverrideIfNeeded()
 
     // Set the macOS Dock icon when running unpackaged (IDE / gradlew desktopRun) — and ONLY
     // then: jpackage-launched apps define jpackage.app-path, and for those the bundle's .icns
     // must stay the single source of truth. Overriding the Dock icon at runtime in packaged
     // builds meant a stale bundled PNG could silently replace the (correct) .icns artwork.
     val isPackaged = System.getProperty("jpackage.app-path") != null
-    if (!isPackaged) runCatching {
-        if (Taskbar.isTaskbarSupported()) {
-            val taskbar = Taskbar.getTaskbar()
-            if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {
-                val url = Thread.currentThread().contextClassLoader
-                    .getResource(platformIconResourceName())
-                if (url != null) taskbar.iconImage = Toolkit.getDefaultToolkit().getImage(url)
-            }
-        }
-    }
+    configureMacDockIconIfNeeded(isPackaged)
 
     // INDAGIUM_DEBUG_INPUT=1 diagnostic: prints every AWT mouse event's id/button/modifiersEx.
     // Exists to answer one open question empirically — which Java button number(s) X11 delivers
@@ -139,16 +111,7 @@ fun main(args: Array<String>) {
     // horizontally, and read off `button` — that's the constant to set in
     // ui/LinuxHorizontalScroll.kt's HSCROLL_BUTTONS. Left OS-unconditional (not Linux-gated) since
     // it's opt-in via env var and harmless noise anywhere else.
-    if (debugInputEnabled()) {
-        Toolkit.getDefaultToolkit().addAWTEventListener(
-            { event ->
-                if (event is MouseEvent) {
-                    println("[INDAGIUM_DEBUG_INPUT] id=${event.id} button=${event.button} modifiersEx=${event.modifiersEx}")
-                }
-            },
-            AWTEvent.MOUSE_EVENT_MASK,
-        )
-    }
+    installDebugInputListenerIfEnabled()
 
     // Non-null on Linux/Windows: either this process is primary (boundPort != null, real socket
     // bound) or a failed forward degraded it to boundPort == null (still runs normally, just
@@ -262,6 +225,75 @@ fun main(args: Array<String>) {
                 window = window,
             )
         }
+    }
+}
+
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold — see the call
+// site's comment in main() for why this must run before anything else touches AWT.
+private fun failFastIfHeadless() {
+    if (GraphicsEnvironment.isHeadless()) {
+        System.err.println(
+            "Indagium needs a graphical display (X11 or XWayland) and none was found. " +
+                "If you're on a remote/VNC/xrdp/x2go session or ran this over ssh, set DISPLAY " +
+                "before launching, e.g.: DISPLAY=:0 indagium",
+        )
+        exitProcess(1)
+    }
+}
+
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold — see the call
+// site's comment in main() for why this switch is load-bearing for the macOS mirror.
+private fun configureMacInteropBlendingIfNeeded() {
+    if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
+        if (System.getProperty("compose.interop.blending") == null) {
+            System.setProperty("compose.interop.blending", "true")
+        }
+    }
+}
+
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold — see the call
+// site's comment in main() for why WM_CLASS needs this reflection-based override on Linux.
+private fun applyLinuxWmClassOverrideIfNeeded() {
+    if (System.getProperty("os.name").orEmpty().lowercase().contains("linux")) {
+        runCatching {
+            Toolkit.getDefaultToolkit()
+            val toolkitClass = Class.forName("sun.awt.X11.XToolkit")
+            val field = toolkitClass.getDeclaredField("awtAppClassName")
+            field.isAccessible = true
+            field.set(null, "Indagium")
+        }
+    }
+}
+
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold — see the call
+// site's comment in main() for why this is skipped for packaged builds.
+private fun configureMacDockIconIfNeeded(isPackaged: Boolean) {
+    if (!isPackaged) {
+        runCatching {
+            if (Taskbar.isTaskbarSupported()) {
+                val taskbar = Taskbar.getTaskbar()
+                if (taskbar.isSupported(Taskbar.Feature.ICON_IMAGE)) {
+                    val url = Thread.currentThread().contextClassLoader
+                        .getResource(platformIconResourceName())
+                    if (url != null) taskbar.iconImage = Toolkit.getDefaultToolkit().getImage(url)
+                }
+            }
+        }
+    }
+}
+
+// Split out from main() to keep it under detekt's cyclomatic-complexity threshold — see the call
+// site's comment in main() for what this diagnostic listener is for.
+private fun installDebugInputListenerIfEnabled() {
+    if (debugInputEnabled()) {
+        Toolkit.getDefaultToolkit().addAWTEventListener(
+            { event ->
+                if (event is MouseEvent) {
+                    println("[INDAGIUM_DEBUG_INPUT] id=${event.id} button=${event.button} modifiersEx=${event.modifiersEx}")
+                }
+            },
+            AWTEvent.MOUSE_EVENT_MASK,
+        )
     }
 }
 

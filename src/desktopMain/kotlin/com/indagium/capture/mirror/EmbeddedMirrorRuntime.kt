@@ -27,6 +27,10 @@ import kotlin.concurrent.thread
 
 internal enum class EmbeddedMirrorState { DISCONNECTED, CONNECTING, LIVE, RECONNECTING, FAILED }
 
+/** Result of [EmbeddedMirrorRuntime.pumpVideo]: whether the decode loop ended because the run was
+ * superseded, or because the underlying stream itself ended (the caller then reconnects). */
+private enum class VideoPumpOutcome { ABORTED, STREAM_ENDED }
+
 internal data class MirrorFrame(
     val width: Int,
     val height: Int,
@@ -266,113 +270,16 @@ internal class EmbeddedMirrorRuntime(
         var attempt = 0
         while (isCurrent(runId)) {
             if (attempt > 0) {
-                synchronized(lock) {
-                    if (!isCurrentLocked(runId)) return
-                    publishLocked(
-                        snapshotValue.copy(
-                            state = EmbeddedMirrorState.RECONNECTING,
-                            reconnectAttempt = attempt,
-                            error = null,
-                        ),
-                    )
-                }
-                if (!sleepBeforeReconnect()) return
+                if (!prepareReconnectAttempt(runId, attempt)) return
             }
             var opened: EmbeddedMirrorConnection? = null
             try {
                 opened = transport.open(serial, options)
-                synchronized(lock) {
-                    if (!isCurrentLocked(runId)) {
-                        opened.close()
-                        return
-                    }
-                    connection = opened
-                    publishLocked(
-                        snapshotValue.copy(
-                            state = EmbeddedMirrorState.LIVE,
-                            reconnectAttempt = attempt,
-                            error = null,
-                        ),
-                    )
+                if (!publishLiveOrAbort(runId, opened, attempt)) return
+                when (pumpVideo(runId, opened)) {
+                    VideoPumpOutcome.ABORTED -> return
+                    VideoPumpOutcome.STREAM_ENDED -> throw IllegalStateException("mirror video stream ended")
                 }
-                if (directDecoder != null) {
-                    val packetFeed = BoundedScrcpyPacketFeed(requireNotNull(opened).videoInput)
-                    try {
-                        if (directFallbackActive.get()) {
-                            val fallback = directFallbackDecoder
-                                ?: error("Direct mirror fallback is active without a Compose decoder")
-                            decodeComposeFallback(packetFeed, fallback, runId)
-                        } else {
-                            val directSink = requireNotNull(onDirectFrame)
-                            try {
-                                directDecoder.decode(packetFeed) { frame ->
-                                    if (isCurrent(runId)) {
-                                        // Native presentation is already queued off the packet reader.
-                                        // Publish only a size change, never one Compose/AWT task per frame.
-                                        directSink(frame)
-                                        val info = frame
-                                        synchronized(lock) {
-                                            if (isCurrentLocked(runId) && snapshotValue.frameInfo?.let {
-                                                    it.width != info.width || it.height != info.height
-                                                } != false
-                                            ) {
-                                                publishLocked(
-                                                    snapshotValue.copy(
-                                                        frame = null,
-                                                        frameInfo = info,
-                                                        droppedFrames = packetFeed.droppedPackets,
-                                                    ),
-                                                )
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (failure: Throwable) {
-                                // stop()/restart() interrupts a reader blocked waiting for the next
-                                // packet. That is cancellation of this run, not a renderer failure;
-                                // don't switch the same connection to Compose while it is closing.
-                                if (!isCurrent(runId)) return
-                                // Keep the only live scrcpy connection and packet reader. The bounded
-                                // feed starts a new GOP boundary before the Compose decoder consumes
-                                // it, so a native VideoToolbox failure never opens a second encoder.
-                                val fallback = directFallbackDecoder
-                                if (fallback == null) throw failure
-                                directFallbackActive.set(true)
-                                onDirectDecoderFailure?.invoke(failure)
-                                decodeComposeFallback(packetFeed, fallback, runId)
-                            }
-                        }
-                    } finally {
-                        packetFeed.close()
-                    }
-                } else {
-                    // Keep the established bounded Annex-B path for Compose on nonnative
-                    // platforms. The packet-preserving fan-out is only needed by the direct
-                    // VideoToolbox route and its same-socket fallback.
-                    val composeFeed = BoundedScrcpyAnnexBFeed(requireNotNull(opened).videoInput)
-                    try {
-                        requireNotNull(decoder).decode(composeFeed.input) { frame ->
-                            if (isCurrent(runId)) {
-                                frameBuffer.offer(frame)
-                                synchronized(lock) {
-                                    if (isCurrentLocked(runId)) {
-                                        publishLocked(
-                                            snapshotValue.copy(
-                                                frame = frame,
-                                                frameInfo = null,
-                                                droppedFrames = frameBuffer.droppedFrames(),
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    } finally {
-                        composeFeed.close()
-                    }
-                }
-                if (!isCurrent(runId)) return
-                throw IllegalStateException("mirror video stream ended")
             } catch (failure: Throwable) {
                 runCatching { opened?.close() }
                 synchronized(lock) {
@@ -396,6 +303,129 @@ internal class EmbeddedMirrorRuntime(
                 }
             }
         }
+    }
+
+    /** Publishes RECONNECTING and waits out the backoff delay. False means the run was
+     * superseded (by [stop]/restart) while doing so, so [runSession] must abort without
+     * publishing FAILED. Split out of [runSession] to keep it under detekt's cyclomatic-
+     * complexity/return-count thresholds; behaviour is unchanged. */
+    private fun prepareReconnectAttempt(runId: Long, attempt: Int): Boolean {
+        synchronized(lock) {
+            if (!isCurrentLocked(runId)) return false
+            publishLocked(
+                snapshotValue.copy(
+                    state = EmbeddedMirrorState.RECONNECTING,
+                    reconnectAttempt = attempt,
+                    error = null,
+                ),
+            )
+        }
+        return sleepBeforeReconnect()
+    }
+
+    /** Marks [opened] as the live connection and publishes LIVE, or closes it and returns false
+     * when the run was superseded while the transport was opening. Split out of [runSession] to
+     * keep it under detekt's cyclomatic-complexity/return-count thresholds; behaviour unchanged. */
+    private fun publishLiveOrAbort(runId: Long, opened: EmbeddedMirrorConnection, attempt: Int): Boolean {
+        synchronized(lock) {
+            if (!isCurrentLocked(runId)) {
+                opened.close()
+                return false
+            }
+            connection = opened
+            publishLocked(
+                snapshotValue.copy(
+                    state = EmbeddedMirrorState.LIVE,
+                    reconnectAttempt = attempt,
+                    error = null,
+                ),
+            )
+        }
+        return true
+    }
+
+    /** Pumps decoded video for one live connection until the stream ends or the run is
+     * superseded. Split out of [runSession] to keep it under detekt's cyclomatic-complexity/
+     * long-method/return-count thresholds; control flow and every branch are unchanged — this is
+     * exactly the body that used to sit inline in [runSession]. */
+    private fun pumpVideo(runId: Long, opened: EmbeddedMirrorConnection): VideoPumpOutcome {
+        if (directDecoder != null) {
+            val packetFeed = BoundedScrcpyPacketFeed(opened.videoInput)
+            try {
+                if (directFallbackActive.get()) {
+                    val fallback = directFallbackDecoder
+                        ?: error("Direct mirror fallback is active without a Compose decoder")
+                    decodeComposeFallback(packetFeed, fallback, runId)
+                } else {
+                    val directSink = requireNotNull(onDirectFrame)
+                    try {
+                        directDecoder.decode(packetFeed) { frame ->
+                            if (isCurrent(runId)) {
+                                // Native presentation is already queued off the packet reader.
+                                // Publish only a size change, never one Compose/AWT task per frame.
+                                directSink(frame)
+                                val info = frame
+                                synchronized(lock) {
+                                    if (isCurrentLocked(runId) && snapshotValue.frameInfo?.let {
+                                            it.width != info.width || it.height != info.height
+                                        } != false
+                                    ) {
+                                        publishLocked(
+                                            snapshotValue.copy(
+                                                frame = null,
+                                                frameInfo = info,
+                                                droppedFrames = packetFeed.droppedPackets,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } catch (failure: Throwable) {
+                        // stop()/restart() interrupts a reader blocked waiting for the next
+                        // packet. That is cancellation of this run, not a renderer failure;
+                        // don't switch the same connection to Compose while it is closing.
+                        if (!isCurrent(runId)) return VideoPumpOutcome.ABORTED
+                        // Keep the only live scrcpy connection and packet reader. The bounded
+                        // feed starts a new GOP boundary before the Compose decoder consumes
+                        // it, so a native VideoToolbox failure never opens a second encoder.
+                        val fallback = directFallbackDecoder
+                        if (fallback == null) throw failure
+                        directFallbackActive.set(true)
+                        onDirectDecoderFailure?.invoke(failure)
+                        decodeComposeFallback(packetFeed, fallback, runId)
+                    }
+                }
+            } finally {
+                packetFeed.close()
+            }
+        } else {
+            // Keep the established bounded Annex-B path for Compose on nonnative
+            // platforms. The packet-preserving fan-out is only needed by the direct
+            // VideoToolbox route and its same-socket fallback.
+            val composeFeed = BoundedScrcpyAnnexBFeed(opened.videoInput)
+            try {
+                requireNotNull(decoder).decode(composeFeed.input) { frame ->
+                    if (isCurrent(runId)) {
+                        frameBuffer.offer(frame)
+                        synchronized(lock) {
+                            if (isCurrentLocked(runId)) {
+                                publishLocked(
+                                    snapshotValue.copy(
+                                        frame = frame,
+                                        frameInfo = null,
+                                        droppedFrames = frameBuffer.droppedFrames(),
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            } finally {
+                composeFeed.close()
+            }
+        }
+        return if (isCurrent(runId)) VideoPumpOutcome.STREAM_ENDED else VideoPumpOutcome.ABORTED
     }
 
     private fun sleepBeforeReconnect(): Boolean = try {
