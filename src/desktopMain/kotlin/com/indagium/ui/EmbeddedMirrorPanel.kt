@@ -51,6 +51,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -224,7 +225,7 @@ internal class EmbeddedMirrorHandle private constructor(
             return try {
                 lateinit var backend: MirrorBackend.StandaloneRuntime
                 surface = EmbeddedMirrorMacSurface(
-                    onDiagnostic = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
+                    diagnosticSink = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
                 )
                 val metalSurface = requireNotNull(surface)
                 lateinit var handle: EmbeddedMirrorHandle
@@ -286,7 +287,7 @@ internal class EmbeddedMirrorHandle private constructor(
             return try {
                 val surfaceFactory = {
                     EmbeddedMirrorMacSurface(
-                        onDiagnostic = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
+                        diagnosticSink = { diagnostic -> AppLogger.warn("embedded-mirror", diagnostic) },
                     )
                 }
                 surface = surfaceFactory()
@@ -695,6 +696,9 @@ internal fun EmbeddedMirrorPanel(
     val macOverlayOccluded by remember(macSurface) {
         macSurface?.overlayOccludedState ?: MutableStateFlow(false)
     }.collectAsState()
+    val macUnderlayActive by remember(macSurface) {
+        macSurface?.underlayActiveState ?: MutableStateFlow(false)
+    }.collectAsState()
     val macSurfaceHostToken = remember(macSurface) { Any() }
     // The Metal layer is an AppKit sibling of Compose's scene. Its owner is this panel's actual
     // SwingPanel host, so navigation out of a capture tab detaches the layer while leaving the
@@ -807,7 +811,10 @@ internal fun EmbeddedMirrorPanel(
             }
             val keyListener = object : KeyAdapter() {
                 override fun keyPressed(event: AwtKeyEvent) {
-                    if (macSurface.isOverlayOccluded) return
+                    if (macSurface.isOverlayOccluded) {
+                        macSurface.forwardOverlayKeyEvent(event)
+                        return
+                    }
                     if (event.isControlDown || event.isMetaDown || event.isAltDown) return
                     val keycode = when (event.keyCode) {
                         AwtKeyEvent.VK_ENTER -> 66
@@ -898,6 +905,7 @@ internal fun EmbeddedMirrorPanel(
                     ) {
                         Box(
                             Modifier.width(boxWidth).height(boxHeight)
+                                .then(if (macUnderlayActive) MirrorUnderlayHole else Modifier)
                                 .then(
                                     mirrorSurfaceModifier(
                                         handle = handle,
@@ -918,7 +926,7 @@ internal fun EmbeddedMirrorPanel(
                             contentAlignment = Alignment.Center,
                         ) {
                             if (macSurface != null) {
-                                if (macOverlayOccluded && !macSurface.overlayLayerExperimentEnabled) {
+                                if (macOverlayOccluded && !macUnderlayActive) {
                                     Column(
                                         Modifier.fillMaxSize().background(Color.Black, MIRROR_SURFACE_TOP_CORNERS).padding(12.dp),
                                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -978,6 +986,11 @@ internal fun EmbeddedMirrorPanel(
 
 private val DEVICE_HEADER_HEIGHT = 32.dp
 
+/** Underlay only: the native layer sits *below* Compose there, so Compose must leave a transparent
+ * hole over the surface or the frame's black background (and the window background) cover the
+ * video permanently. Clear writes transparent pixels straight into the window surface; it only
+ * reaches it if no ancestor forces an offscreen layer (alpha, graphicsLayer, shadow). */
+private val MirrorUnderlayHole = Modifier.drawBehind { drawRect(Color.Black, blendMode = BlendMode.Clear) }
 private val MIRROR_CONTROL_BAR_HEIGHT = 30.dp
 private val MIRROR_CONTROL_BAR_BG = Color(0xFF0D1117)
 private val MIRROR_CONTROL_BAR_TINT = Color(0xFFE6EDF3)

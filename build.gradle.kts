@@ -520,6 +520,17 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     }
     System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
     System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
+    // macOS mirror bisect switches: the underlay ordering (on by default — see
+    // EmbeddedMirrorMacSurface.underlayRequested), its stderr diagnostics, Compose interop blending
+    // and the skiko render API all change how the native mirror layer composes with Compose.
+    listOf(
+        "indagium.mirror.underlay",
+        "indagium.mirror.stderr",
+        "compose.interop.blending",
+        "skiko.renderApi",
+    ).forEach { key ->
+        System.getProperty(key)?.let { systemProperty(key, it) }
+    }
 }
 
 // Manual large-file perf harness (LargeFilePerfHarness.kt) — activated by passing

@@ -52,6 +52,16 @@ struct PendingGeometryUpdate {
     CGFloat clipTop = 0.0;
     CGFloat clipRight = 1.0;
     CGFloat clipBottom = 1.0;
+    // Where the Canvas sits in its window, in the same terms nativeAttach receives. With it the
+    // geometry pass re-asserts the layer frame instead of trusting JAWT to have done so: after a
+    // detach/return round trip JAWT can apply the new peer's bounds before our layer is back in
+    // its tree, and nothing reapplies them — the layer then stays 0x0 (or at the previous
+    // window's size) and the mirror is black while decoding and touches keep working.
+    bool hasOrigin = false;
+    CGFloat windowX = 0.0;
+    CGFloat windowY = 0.0;
+    CGFloat insetLeft = 0.0;
+    CGFloat insetTop = 0.0;
 };
 
 template <typename T> struct CfOwner {
@@ -73,6 +83,11 @@ struct Mirror {
     VTDecompressionSessionRef decoder = nullptr;
     DecoderContext *decoderContext = nullptr;
     CVPixelBufferRef latest = nullptr;
+    // The frame most recently put on screen. `latest` is consumed by a successful present, so without
+    // this a layer that is re-attached (detach/return, a closed overlay) or resized has nothing to
+    // draw until the device sends another frame — and a still Android screen may send none for a
+    // long time, leaving the mirror black. See replayLastPresentedLocked.
+    CVPixelBufferRef lastPresented = nullptr;
     dispatch_queue_t renderQueue = nullptr;
     std::mutex lock;
     std::condition_variable decodeCompleted;
@@ -84,7 +99,7 @@ struct Mirror {
     bool failed = false;
     bool closed = false;
     bool testPattern = false;
-    bool overlayLayerExperiment = false;
+    bool underlayOrdering = false;
     int failureCode = 0;
     OSStatus failureStatus = noErr;
     int width = 0;
@@ -206,6 +221,19 @@ static void updateLayerClipMask(
     layer.mask = mask;
 }
 
+static CGRect initialLayerFrame(
+    CGFloat windowHeight,
+    CGFloat topLevelX,
+    CGFloat topLevelY,
+    CGFloat insetLeft,
+    CGFloat insetTop,
+    CGFloat width,
+    CGFloat height) {
+    const CGFloat contentX = topLevelX - insetLeft;
+    const CGFloat contentY = topLevelY - insetTop;
+    return CGRectMake(contentX, windowHeight - contentY - height, width, height);
+}
+
 static void schedulePendingGeometryUpdate(
     const std::shared_ptr<PendingGeometryUpdate> &pending,
     CAMetalLayer *layer,
@@ -220,6 +248,8 @@ static void schedulePendingGeometryUpdate(
     dispatch_async(dispatch_get_main_queue(), ^{
         CGFloat width = 0.0, height = 0.0, pixelWidth = 0.0, pixelHeight = 0.0;
         CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
+        bool hasOrigin = false;
+        CGFloat windowX = 0.0, windowY = 0.0, insetLeft = 0.0, insetTop = 0.0;
         uint64_t appliedGeneration = 0;
         {
             std::lock_guard<std::mutex> guard(retainedPending->lock);
@@ -235,10 +265,22 @@ static void schedulePendingGeometryUpdate(
             clipTop = retainedPending->clipTop;
             clipRight = retainedPending->clipRight;
             clipBottom = retainedPending->clipBottom;
+            hasOrigin = retainedPending->hasOrigin;
+            windowX = retainedPending->windowX;
+            windowY = retainedPending->windowY;
+            insetLeft = retainedPending->insetLeft;
+            insetTop = retainedPending->insetTop;
             appliedGeneration = retainedPending->generation;
         }
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
+        // Frame first: the clip mask below is computed from the layer's bounds.
+        CALayer *parentLayer = layer.superlayer;
+        if (hasOrigin && parentLayer && parentLayer.bounds.size.height > 0 && width > 0 && height > 0) {
+            const CGRect frame = initialLayerFrame(
+                parentLayer.bounds.size.height, windowX, windowY, insetLeft, insetTop, width, height);
+            if (!CGRectEqualToRect(layer.frame, frame)) layer.frame = frame;
+        }
         updateDrawableGeometry(layer, width, height, pixelWidth, pixelHeight);
         updateLayerClipMask(layer, clipMask, clipLeft, clipTop, clipRight, clipBottom);
         [CATransaction commit];
@@ -356,28 +398,44 @@ static void sampleDrawableGrid(
 }
 
 static CGFloat mirrorLayerZPosition(
-    bool overlayLayerExperiment,
+    bool underlayOrdering,
     bool testPattern,
     bool hasOtherSibling,
     CGFloat siblingMinZ,
     CGFloat siblingMaxZ) {
     if (testPattern) return 1000.0;
-    if (overlayLayerExperiment) return hasOtherSibling ? siblingMinZ - 1.0 : -1.0;
+    if (underlayOrdering) return hasOtherSibling ? siblingMinZ - 1.0 : -1.0;
     const CGFloat aboveSiblingsZ = hasOtherSibling ? siblingMaxZ + 1.0 : 1.0;
     return std::max(aboveSiblingsZ, 1.0);
 }
 
-static CGRect initialLayerFrame(
-    CGFloat windowHeight,
-    CGFloat topLevelX,
-    CGFloat topLevelY,
-    CGFloat insetLeft,
-    CGFloat insetTop,
-    CGFloat width,
-    CGFloat height) {
-    const CGFloat contentX = topLevelX - insetLeft;
-    const CGFloat contentY = topLevelY - insetTop;
-    return CGRectMake(contentX, windowHeight - contentY - height, width, height);
+/** True when [layer] has a strictly lower zPosition than every other sibling in [siblings]. Trivially
+ *  true when there are no other siblings — pair with a sibling-exists check (nativeUnderlayStatus's
+ *  bit2) for a meaningful "genuinely below something" signal. */
+static bool layerIsBelowAllSiblings(CAMetalLayer *layer, NSArray<CALayer *> *siblings) {
+    if (!layer || !siblings) return false;
+    for (CALayer *sibling in siblings) {
+        if (sibling == layer) continue;
+        if (layer.zPosition >= sibling.zPosition) return false;
+    }
+    return true;
+}
+
+/** True when [layer] has at least one other sibling and none of them is opaque. Deliberately
+ *  independent of the siblings' z-order relative to ours: the underlay decision must be answerable
+ *  while the fallback has our layer ABOVE its siblings, or a fallback could never upgrade again
+ *  (e.g. our attach won the race against skiko's layer and saw no sibling on the first sample).
+ *  An opaque sibling anywhere is treated as "not supported" — conservative, and what
+ *  -Dcompose.interop.blending=false produces (skiko's layer turns opaque). */
+static bool otherSiblingsAreTransparent(CAMetalLayer *layer, NSArray<CALayer *> *siblings) {
+    if (!layer || !siblings) return false;
+    bool hasOtherSibling = false;
+    for (CALayer *sibling in siblings) {
+        if (sibling == layer) continue;
+        hasOtherSibling = true;
+        if (sibling.opaque) return false;
+    }
+    return hasOtherSibling;
 }
 
 static bool needsInitialLayerFrame(CALayer *previousParent, CALayer *targetWindowLayer) {
@@ -531,7 +589,9 @@ static NSString *describeAppKitViewHierarchy(CALayer *windowLayer, CAMetalLayer 
             for (NSUInteger index = 0; index < parentLayer.sublayers.count; ++index) {
                 CALayer *sibling = parentLayer.sublayers[index];
                 id siblingDelegate = sibling.delegate;
-                [description appendFormat:@"%s%lu:%@ z=%.3f frame=%@ hidden=%d opacity=%.2f delegate=%@",
+                // opaque= decides whether a transparent hole Compose clears in its own layer can
+                // reveal the mirror beneath: an opaque sibling above it hides it regardless.
+                [description appendFormat:@"%s%lu:%@ z=%.3f frame=%@ hidden=%d opacity=%.2f opaque=%d delegate=%@",
                     index == 0 ? "" : ",",
                     (unsigned long)index,
                     NSStringFromClass([sibling class]),
@@ -539,6 +599,7 @@ static NSString *describeAppKitViewHierarchy(CALayer *windowLayer, CAMetalLayer 
                     NSStringFromRect(sibling.frame),
                     sibling.hidden,
                     sibling.opacity,
+                    sibling.opaque,
                     siblingDelegate ? NSStringFromClass([siblingDelegate class]) : @"nil"];
             }
             [description appendString:@"}"];
@@ -578,6 +639,15 @@ static std::vector<Nalu> parseAnnexB(const uint8_t *data, size_t count) {
         cursor = end;
     }
     return result;
+}
+
+/** Queues the last presented frame again when nothing newer is pending. Caller holds mirror->lock.
+ *  A replay carries ingress 0 so it stays out of the latency metrics: its age measures how long the
+ *  screen was still, not how late the pipeline was. */
+static void replayLastPresentedLocked(Mirror *mirror) {
+    if (mirror->closed || mirror->latest || !mirror->lastPresented) return;
+    mirror->latest = (CVPixelBufferRef)CFRetain(mirror->lastPresented);
+    mirror->latestIngressNs = 0;
 }
 
 static void renderLoop(Mirror *mirror) {
@@ -714,7 +784,7 @@ static void renderLoop(Mirror *mirror) {
                 if (renderFailed) {
                     ++mirror->renderErrors;
                     setFailureLocked(mirror, 9, renderStatus);
-                } else if (drawable && !mirror->closed) {
+                } else if (drawable && !mirror->closed && ingressNs > 0) {
                     int64_t ageNs = std::max<int64_t>(0, presentedAtNs - ingressNs);
                     ++mirror->presentCount;
                     mirror->presentAgeTotalNs += ageNs;
@@ -729,6 +799,10 @@ static void renderLoop(Mirror *mirror) {
                     CFRelease(pixel);
                     mirror->renderScheduled = false;
                     return;
+                }
+                if (!renderFailed && drawable && mirror->lastPresented != pixel) {
+                    if (mirror->lastPresented) CFRelease(mirror->lastPresented);
+                    mirror->lastPresented = (CVPixelBufferRef)CFRetain(pixel);
                 }
                 if (mirror->latest == pixel) { CFRelease(mirror->latest); mirror->latest = nullptr; }
                 bool again = !mirror->closed && mirror->latest != nullptr && mirror->layer != nil;
@@ -912,10 +986,10 @@ static id<MTLRenderPipelineState> createRenderPipeline(id<MTLDevice> device) {
 }
 
 extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeCreate(
-    JNIEnv *env, jclass, jobject canvas, jboolean overlayLayerExperiment) {
+    JNIEnv *env, jclass, jobject canvas, jboolean underlayOrdering) {
     Mirror *mirror = new Mirror{};
     mirror->canvas = env->NewGlobalRef(canvas);
-    mirror->overlayLayerExperiment = overlayLayerExperiment == JNI_TRUE;
+    mirror->underlayOrdering = underlayOrdering == JNI_TRUE;
     mirror->device = MTLCreateSystemDefaultDevice();
     if (!mirror->device) { env->DeleteGlobalRef(mirror->canvas); delete mirror; return 0; }
     mirror->commands = [mirror->device newCommandQueue];
@@ -952,6 +1026,100 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
     // AppKit removal from detaching a layer that was already reattached to a newer host.
     const uint64_t generation = nextLayerAttachmentGeneration(attachmentState);
     detachLayerFromTreeWhenCurrent(layer, attachmentState, generation);
+}
+
+/** Whether our layer is currently in a Core Animation tree. An attach can return normally and still
+ *  leave it unparented (a window handoff racing JAWT), so the Kotlin side cannot infer this from
+ *  having called attach; it asks here. A plain property read, deliberately without a main-thread
+ *  hop: it is polled from the AWT thread, which must never block on AppKit. */
+extern "C" JNIEXPORT jboolean JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeLayerAttached(
+    JNIEnv *, jclass, jlong handle) {
+    Mirror *mirror = (Mirror *)handle;
+    if (!mirror) return JNI_FALSE;
+    CAMetalLayer *layer = nil;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        if (mirror->closed) return JNI_FALSE;
+        layer = mirror->layer;
+    }
+    return layer && layer.superlayer != nil ? JNI_TRUE : JNI_FALSE;
+}
+
+/** Packed bitfield the Kotlin side polls to decide whether the underlay can work here: bit0
+ *  attached (superlayer != nil), bit1 our layer is currently below every sibling, bit2 at least one
+ *  other sibling exists, bit3 every other sibling is non-opaque. The decision uses bits 0, 2 and 3
+ *  only; bit1 describes the ordering we applied ourselves (it is false by construction while the
+ *  fallback keeps us above), so it is reported for diagnostics and never gates an upgrade. A plain property read, deliberately without a main-thread hop — see
+ *  nativeLayerAttached's comment for why: it is polled from the EDT, which must never block on
+ *  AppKit. */
+extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeUnderlayStatus(
+    JNIEnv *, jclass, jlong handle) {
+    Mirror *mirror = (Mirror *)handle;
+    if (!mirror) return 0;
+    CAMetalLayer *layer = nil;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        if (mirror->closed) return 0;
+        layer = mirror->layer;
+    }
+    if (!layer) return 0;
+    CALayer *parent = layer.superlayer;
+    if (!parent) return 0;
+    jlong status = 0x1; // bit0: attached
+    NSArray<CALayer *> *siblings = parent.sublayers;
+    bool hasOtherSibling = false;
+    for (CALayer *sibling in siblings) {
+        if (sibling != layer) { hasOtherSibling = true; break; }
+    }
+    if (layerIsBelowAllSiblings(layer, siblings)) status |= 0x2; // bit1
+    if (hasOtherSibling) status |= 0x4; // bit2
+    if (otherSiblingsAreTransparent(layer, siblings)) status |= 0x8; // bit3
+    return status;
+}
+
+/** Kotlin flips this after reading nativeUnderlayStatus, both to fall back (no longer supported)
+ *  and to upgrade (a later sample finds the underlay conditions satisfied after all — e.g. our
+ *  attach won the race against skiko's own layer and there was no sibling yet on the first
+ *  sample). Re-applies mirrorLayerZPosition against the layer's current siblings on AppKit's main
+ *  thread. Always dispatch_async, never dispatch_sync: this can be called from the EDT, which must
+ *  never block on AppKit (see performOnAppKitMainThreadSync's callers for the same rule). */
+extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetUnderlayOrdering(
+    JNIEnv *, jclass, jlong handle, jboolean underlayOrdering) {
+    Mirror *mirror = (Mirror *)handle;
+    if (!mirror) return;
+    const bool requested = underlayOrdering == JNI_TRUE;
+    CAMetalLayer *layer = nil;
+    bool testPattern = false;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        if (mirror->closed) return;
+        mirror->underlayOrdering = requested;
+        layer = mirror->layer;
+        testPattern = mirror->testPattern;
+    }
+    if (!layer) return;
+    __strong CAMetalLayer *retainedLayer = layer;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        CALayer *parentLayer = retainedLayer.superlayer;
+        if (!parentLayer) return;
+        NSArray<CALayer *> *siblings = parentLayer.sublayers;
+        CGFloat siblingMinZ = 0.0, siblingMaxZ = 0.0;
+        bool hasOtherSibling = false;
+        for (CALayer *sibling in siblings) {
+            if (sibling == retainedLayer) continue;
+            if (hasOtherSibling) {
+                siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
+                siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
+            } else {
+                siblingMinZ = siblingMaxZ = sibling.zPosition;
+            }
+            hasOtherSibling = true;
+        }
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        retainedLayer.zPosition = mirrorLayerZPosition(requested, testPattern, hasOtherSibling, siblingMinZ, siblingMaxZ);
+        [CATransaction commit];
+    });
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeAttach(
@@ -1044,9 +1212,9 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                                 mirror->layer.device = mirror->device;
                                 mirror->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
                                 mirror->layer.opaque = YES;
-                                // The experiment starts behind siblings; attach will refine this
+                                // The underlay starts behind siblings; attach will refine this
                                 // against the actual parent layer's sibling depths.
-                                mirror->layer.zPosition = mirror->overlayLayerExperiment ? -1.0 : 1.0;
+                                mirror->layer.zPosition = mirror->underlayOrdering ? -1.0 : 1.0;
                                 mirror->layer.framebufferOnly = NO;
                                 mirror->layer.presentsWithTransaction = NO;
                             }
@@ -1081,6 +1249,16 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                     [CATransaction begin];
                     [CATransaction setDisableActions:YES];
                     platformLayers.layer = layer;
+                    // AWTSurfaceLayers.setLayer is a no-op when handed the layer it already holds,
+                    // and nativeDetach removes our layer from the tree without clearing JAWT's
+                    // reference (the peer may be gone by then). So every re-attach to a Canvas we
+                    // had detached from left the layer outside the window: decoding and touches
+                    // kept working behind a black hole, and Disconnect/Connect (same layer) could
+                    // not recover it. Re-add it ourselves; JAWT keeps its reference, so its later
+                    // bounds updates still move this layer.
+                    if (!layer.superlayer && windowLayer && platformLayers.layer == layer) {
+                        [windowLayer addSublayer:layer];
+                    }
                     if (needsInitialLayerFrame(previousParent, windowLayer) && windowLayer &&
                         windowLayer.bounds.size.height > 0 && attachWidth > 0 && attachHeight > 0) {
                         // AWT peer bounds can be sent before JAWT attaches this new layer. Seed
@@ -1122,11 +1300,11 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                                 hasOtherSibling = true;
                             }
                         }
-                        // Experimental mode leaves the live layer at natural depth so Compose
-                        // content can paint over it. Retain the prior above-siblings placement by
-                        // default, and keep the test pattern topmost for native diagnostics.
+                        // The underlay leaves the live layer at natural depth so Compose content
+                        // can paint over it; the fallback keeps the prior above-siblings placement,
+                        // and the test pattern stays topmost for native diagnostics either way.
                         layer.zPosition = mirrorLayerZPosition(
-                            mirror->overlayLayerExperiment,
+                            mirror->underlayOrdering,
                             mirror->testPattern,
                             hasOtherSibling,
                             siblingMinZ,
@@ -1187,6 +1365,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
     bool schedule = false;
     {
         std::lock_guard<std::mutex> guard(mirror->lock);
+        replayLastPresentedLocked(mirror);
         if (!mirror->closed && mirror->latest && !mirror->renderScheduled) {
             mirror->renderScheduled = true;
             schedule = true;
@@ -1341,7 +1520,8 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoTool
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetBounds(
-    JNIEnv *, jclass, jlong handle, jint width, jint height, jint pixelWidth, jint pixelHeight) {
+    JNIEnv *, jclass, jlong handle, jint width, jint height, jint pixelWidth, jint pixelHeight,
+    jboolean hasOrigin, jint windowX, jint windowY, jint insetLeft, jint insetTop) {
     Mirror *mirror = (Mirror *)handle;
     if (!mirror || width <= 0 || height <= 0 || pixelWidth <= 0 || pixelHeight <= 0) return;
     bool schedule = false;
@@ -1359,6 +1539,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
             clipTop = mirror->clipTop;
             clipRight = mirror->clipRight;
             clipBottom = mirror->clipBottom;
+            replayLastPresentedLocked(mirror);
             if (mirror->latest && !mirror->renderScheduled) {
                 mirror->renderScheduled = true;
                 schedule = true;
@@ -1374,6 +1555,11 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
                 pending->height = height;
                 pending->pixelWidth = pixelWidth;
                 pending->pixelHeight = pixelHeight;
+                pending->hasOrigin = hasOrigin == JNI_TRUE;
+                pending->windowX = windowX;
+                pending->windowY = windowY;
+                pending->insetLeft = insetLeft;
+                pending->insetTop = insetTop;
                 pending->clipLeft = clipLeft;
                 pending->clipTop = clipTop;
                 pending->clipRight = clipRight;
@@ -1559,6 +1745,7 @@ static void shutdownMirror(Mirror *mirror) {
     }
     if (mirror->renderQueue) dispatch_sync(mirror->renderQueue, ^{});
     if (mirror->latest) { CFRelease(mirror->latest); mirror->latest = nullptr; }
+    if (mirror->lastPresented) { CFRelease(mirror->lastPresented); mirror->lastPresented = nullptr; }
     if (mirror->format) { CFRelease(mirror->format); mirror->format = nullptr; }
     delete mirror->decoderContext;
     mirror->decoderContext = nullptr;

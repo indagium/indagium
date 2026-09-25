@@ -821,20 +821,10 @@ private fun CaptureSnapshotPopover(
         }
     }
     val bodyScroll = rememberScrollState()
-    val mirrorDetached = state.isEmbeddedMirrorDetached(tab.id)
-    // On macOS the live VideoToolbox renderer is a native JAWT layer and therefore sits over
-    // Compose Popup content in the same window. Scope the mask to this popup's composition so it
-    // is restored on every dismissal path, including capture stop and tab disposal. A detached
-    // mirror belongs to another window, so this main-window popup cannot overlap it. Keying on
-    // [mirrorDetached] also restores/remasks correctly if the user moves the mirror while the
-    // popup remains open.
-    androidx.compose.runtime.DisposableEffect(state, tab.id, mirrorDetached) {
-        val shouldOcclude = !mirrorDetached
-        if (shouldOcclude) state.setEmbeddedMirrorOverlayOccluded(tab.id, true)
-        onDispose {
-            if (shouldOcclude) state.setEmbeddedMirrorOverlayOccluded(tab.id, false)
-        }
-    }
+    // This popover already resolves to the package-local `Popup` in MirrorOccludingLayers.kt,
+    // which registers mirror occlusion for its own composition scope (see
+    // RegisterMirrorOcclusionForCurrentWindow) — an explicit occlusion source here would only
+    // double-register the same mask, so none is registered in this function.
     val session = snapshot.session
     val recordVideoConfigured = session?.settings?.recordVideo
     val canIncludeVideo = recordVideoConfigured == true
