@@ -33,20 +33,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureDevice
-import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
 import com.indagium.capture.deviceStateGuidance
-import com.indagium.capture.effectiveMirrorMode
-import com.indagium.capture.withMirrorMode
 import kotlinx.coroutines.delay
 
 private const val DEVICE_REFRESH_INTERVAL_MS = 3_000L
-private val CAPTURE_LAUNCH_BUFFER_NAMES = listOf("main", "system", "crash", "kernel", "events", "radio")
-private const val CAPTURE_BUFFER_GRID_COLUMNS = 3
 
 /** The device-capture launcher's content, embeddable in any surface that already knows which tab
  *  it belongs to. Split out of the old standalone `CaptureLauncher` composable so ui/HomeScreen.kt
@@ -186,96 +180,8 @@ private fun CaptureDeviceStatePill(device: CaptureDevice) {
  * stacked below, since they don't fit the same one-line treatment. */
 @Composable
 private fun CaptureBeforeStartRow(state: AppState, launcherTabId: String, draft: CaptureSettings) {
-    LauncherPanel("Before start") {
-        Row(Modifier.fillMaxWidth()) {
-            Box(Modifier.weight(1f)) {
-                CheckRow(draft.recordVideo, {
-                    state.updateCaptureLaunchSettings(launcherTabId) { it.copy(recordVideo = !it.recordVideo) }
-                }) { AppText("Record video to file", color = tc().tx, fontSize = 11.sp) }
-            }
-            Box(Modifier.weight(1f)) {
-                CheckRow(draft.includeBufferedLogs, {
-                    state.updateCaptureLaunchSettings(launcherTabId) { it.copy(includeBufferedLogs = !it.includeBufferedLogs) }
-                }) { AppText("Include earlier device logs", color = tc().tx, fontSize = 11.sp) }
-            }
-        }
-        // Verified against CaptureRecorder.kt: off passes `-T 1` (start at the newest logcat
-        // line); on lets logcat dump the device's existing ring buffers first, then stream.
-        AppText(
-            "Earlier device logs: also copies what the device already holds from before Start " +
-                "(often minutes to hours), not only new lines.",
-            color = tc().td,
-            fontSize = 10.sp,
-        )
-        AppText("Device display", color = tc().td, fontSize = 10.sp)
-        SegmentedControl(
-            options = listOf("In-app mirror", "scrcpy window", "Off"),
-            selectedIndices = setOf(
-                when (draft.effectiveMirrorMode) {
-                    CaptureMirrorMode.EMBEDDED -> 0
-                    CaptureMirrorMode.EXTERNAL -> 1
-                    CaptureMirrorMode.DISABLED -> 2
-                },
-            ),
-            onToggle = { index ->
-                state.updateCaptureLaunchSettings(launcherTabId) {
-                    it.withMirrorMode(CaptureMirrorMode.entries[index])
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            fillWidth = true,
-        )
-        AppText("Buffer mode", color = tc().td, fontSize = 10.sp)
-        SegmentedControl(
-            options = listOf("Default", "All", "Custom"),
-            selectedIndices = setOf(CaptureBufferMode.entries.indexOf(draft.bufferMode)),
-            onToggle = { index ->
-                state.updateCaptureLaunchSettings(launcherTabId) {
-                    it.copy(bufferMode = CaptureBufferMode.entries[index])
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-            fillWidth = true,
-        )
-        if (draft.bufferMode == CaptureBufferMode.CUSTOM) {
-            CaptureCustomBufferPicker(state = state, launcherTabId = launcherTabId, draft = draft)
-        }
-        AppText(
-            when (draft.bufferMode) {
-                CaptureBufferMode.DEFAULT -> "Default follows adb's own buffer selection."
-                CaptureBufferMode.ALL -> "All captures every buffer exposed by the device."
-                CaptureBufferMode.CUSTOM -> "Custom passes only the selected buffers to adb."
-            },
-            color = tc().td,
-            fontSize = 10.sp,
-        )
-    }
-}
-
-/** The Custom-buffer checkbox grid: [CAPTURE_LAUNCH_BUFFER_NAMES]' six buffers laid out three per
- * row instead of stacked, so the picker doesn't dominate the panel. Buffers picked here always
- * apply once Custom mode is selected — `logcatBufferArgs()` in CaptureModels.kt ignores
- * `includeBufferedLogs` — hence "Buffers to capture" rather than tying the label to that toggle. */
-@Composable
-private fun CaptureCustomBufferPicker(state: AppState, launcherTabId: String, draft: CaptureSettings) {
-    AppText("Buffers to capture", color = tc().td, fontSize = 10.sp)
-    CAPTURE_LAUNCH_BUFFER_NAMES.chunked(CAPTURE_BUFFER_GRID_COLUMNS).forEach { rowNames ->
-        Row(Modifier.fillMaxWidth()) {
-            rowNames.forEach { name ->
-                Box(Modifier.weight(1f)) {
-                    val checked = name in draft.buffers
-                    CheckRow(checked, {
-                        state.updateCaptureLaunchSettings(launcherTabId) {
-                            it.copy(buffers = toggleCaptureBuffer(it.buffers, name))
-                        }
-                    }) { AppText(name, color = tc().tx, fontSize = 11.sp) }
-                }
-            }
-        }
-    }
-    if (draft.buffers.isEmpty()) {
-        AppText("Choose at least one buffer for Custom mode.", color = DANGER_RED, fontSize = 10.sp)
-    }
+    val edit: CaptureSettingsEdit = { transform -> state.updateCaptureLaunchSettings(launcherTabId, transform) }
+    LauncherPanel("Before start") { CaptureStartOptions(draft, edit) }
 }
 
 /** Fixes the inverted custom-buffer toggle (was: ticking an unticked buffer removed it, a no-op,
