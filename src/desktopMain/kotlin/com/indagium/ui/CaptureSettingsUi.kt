@@ -15,11 +15,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.indagium.capture.CaptureBufferMode
-import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.captureFilenameTemplateError
-import com.indagium.capture.effectiveMirrorMode
-import com.indagium.capture.withMirrorMode
 import java.io.File
 
 internal const val CAPTURE_GIB = 1024L * 1024L * 1024L
@@ -53,8 +50,6 @@ internal fun invalidCaptureSettings(settings: CaptureSettings): Set<String> = bu
 internal fun visibleCaptureBuffers(settings: CaptureSettings): List<String> =
     settings.buffers.takeIf { settings.bufferMode == CaptureBufferMode.CUSTOM }.orEmpty()
 
-private val CAPTURE_BUFFER_NAMES = listOf("main", "system", "crash", "kernel", "events", "radio")
-
 // Layout follows the design: Tools full width at the top (it's the one group whose fields —
 // paths, the recheck/install actions, tool status — genuinely want the full row), then two
 // side-by-side pairs below it (Log buffers | Screen recording, Storage | Snapshot files) so the
@@ -84,17 +79,22 @@ internal fun CaptureSettingsSection(state: AppState) {
 
         CaptureToolsGroup(state, settings, toolResolution, invalid, update)
 
+        // Full width and identical to the New tab's "Before start" panel (CaptureStartOptions):
+        // these are the defaults that panel starts from, so they should read the same.
         Divider()
-        CapturePairedGroupRow(
-            first = { CaptureLogBuffersGroup(settings, update) },
-            second = { CaptureScreenRecordingGroup(settings, update) },
-        )
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            CaptureGroupLabel("Before start")
+            CaptureStartOptions(settings) { transform -> update(transform(settings)) }
+        }
 
         Divider()
         CapturePairedGroupRow(
-            first = { CaptureStorageGroup(settings, update) },
-            second = { CaptureSnapshotFilesGroup(settings, update) },
+            first = { CaptureScreenRecordingGroup(settings, update) },
+            second = { CaptureStorageGroup(settings, update) },
         )
+
+        Divider()
+        CaptureSnapshotFilesGroup(settings, update)
 
         // Sixth group. Unlike the two rows above, this one has no natural partner to pair with, so
         // it renders full width like the Tools group at the top — same CaptureGroupLabel idiom,
@@ -178,76 +178,21 @@ private fun CaptureToolsGroup(
 }
 
 @Composable
-private fun CaptureLogBuffersGroup(settings: CaptureSettings, update: (CaptureSettings) -> Unit) {
-    val tc = tc()
-    CaptureGroupLabel("Log buffers")
-    val modes = CaptureBufferMode.entries
-    CompactSetting("Mode", Modifier.fillMaxWidth()) {
-        SegmentedControl(
-            options = listOf("Default", "All", "Custom…"),
-            selectedIndices = setOf(modes.indexOf(settings.bufferMode)),
-            onToggle = { index -> update(settings.copy(bufferMode = modes[index])) },
-            modifier = Modifier.fillMaxWidth(),
-            fillWidth = true,
-        )
-    }
-    AppText(
-        when (settings.bufferMode) {
-            CaptureBufferMode.DEFAULT -> "Use adb's own default buffers. No -b flag is sent."
-            CaptureBufferMode.ALL -> "Capture every buffer the device exposes (-b all)."
-            CaptureBufferMode.CUSTOM -> "Choose the buffers explicitly; this is useful for excluding noisy radio logs."
-        },
-        color = tc.td,
-        fontSize = 10.sp,
-    )
-    if (settings.bufferMode == CaptureBufferMode.CUSTOM) {
-        CAPTURE_BUFFER_NAMES.forEach { name ->
-            val checked = name in settings.buffers
-            CheckRow(checked, {
-                update(
-                    settings.copy(
-                        buffers = if (checked) settings.buffers - name else (settings.buffers + name).distinct(),
-                    ),
-                )
-            }) {
-                AppText(name, fontSize = 11.sp)
-            }
-        }
-        if (settings.buffers.isEmpty()) {
-            AppText("Choose at least one buffer for Custom mode.", color = DANGER_RED, fontSize = 10.sp)
-        }
-    }
-    CheckRow(settings.includeBufferedLogs, { update(settings.copy(includeBufferedLogs = !settings.includeBufferedLogs)) }) {
-        AppText("Include buffered logs before capture starts", fontSize = 11.sp)
-    }
-}
-
-@Composable
 private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (CaptureSettings) -> Unit) {
     CaptureGroupLabel("Screen recording")
-    CheckRow(settings.recordVideo, { update(settings.copy(recordVideo = !settings.recordVideo)) }) {
-        AppText("Record video", fontSize = 11.sp)
-    }
-    AppText("Device display", color = tc().td, fontSize = 10.sp)
-    SegmentedControl(
-        options = listOf("In-app mirror", "scrcpy window", "Off"),
-        selectedIndices = setOf(
-            when (settings.effectiveMirrorMode) {
-                CaptureMirrorMode.EMBEDDED -> 0
-                CaptureMirrorMode.EXTERNAL -> 1
-                CaptureMirrorMode.DISABLED -> 2
-            },
-        ),
-        onToggle = { index -> update(settings.withMirrorMode(CaptureMirrorMode.entries[index])) },
-        modifier = Modifier.fillMaxWidth(),
-        fillWidth = true,
-    )
     CheckRow(settings.audio, { update(settings.copy(audio = !settings.audio)) }) {
         AppText("Capture audio", fontSize = 11.sp)
     }
     CaptureNumericField("Max size", settings.maxSize.toString(), MIN_CAPTURE_SIZE..MAX_CAPTURE_SIZE) {
         update(settings.copy(maxSize = it))
     }
+    // Applies to the recorded file, the in-app mirror and the scrcpy window alike (scrcpy max_size).
+    AppText(
+        "Longest side in pixels; larger screens are scaled down, keeping the aspect ratio. 0 = full device resolution.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = 3,
+    )
     CaptureNumericField("Max FPS", settings.maxFps.toString(), MIN_CAPTURE_FPS..MAX_CAPTURE_FPS) {
         update(settings.copy(maxFps = it))
     }
