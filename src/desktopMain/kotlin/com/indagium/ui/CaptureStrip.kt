@@ -312,6 +312,10 @@ internal fun captureSinceSaveHint(session: CaptureSession?, atElapsedMs: Long = 
         "Last save ${formatCaptureElapsed(age)} ago."
     }
 
+/** No recorded video, or the file is missing/empty, for the range this snapshot would export. */
+private fun captureVideoUnavailableForRange(session: CaptureSession): Boolean =
+    session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() <= 0L
+
 /** Maps the current tab selection to source capture ordinals without assuming row ids start at 1. */
 internal fun selectedCaptureOrdinals(tab: LogTab): IntRange? {
     if (tab.selected.isEmpty() || tab.logData.isEmpty()) return null
@@ -963,148 +967,146 @@ private fun CaptureSnapshotPopover(
                 Modifier.weight(1f, fill = false).verticalScroll(bodyScroll),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText("Range", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                // Range is mutually exclusive (exactly one of All/Last N minutes/Since last
-                // save/Current selection applies to the export), so this is a radio group — see
-                // RadioRow in Components.kt — not a checkbox list. A checkbox implies "choose any",
-                // which was the semantic bug here even though it happened to render one selection
-                // at a time.
-                SnapshotRangeChoice.entries.forEach { choice ->
-                    val choiceEnabled = when (choice) {
-                        SnapshotRangeChoice.SELECTION -> selection != null
-                        SnapshotRangeChoice.SINCE_SAVE -> sinceSaveEnabled
-                        else -> true
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    AppText("Range", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    // Range is mutually exclusive (exactly one of All/Last N minutes/Since last
+                    // save/Current selection applies to the export), so this is a radio group — see
+                    // RadioRow in Components.kt — not a checkbox list. A checkbox implies "choose any",
+                    // which was the semantic bug here even though it happened to render one selection
+                    // at a time.
+                    SnapshotRangeChoice.entries.forEach { choice ->
+                        val choiceEnabled = when (choice) {
+                            SnapshotRangeChoice.SELECTION -> selection != null
+                            SnapshotRangeChoice.SINCE_SAVE -> sinceSaveEnabled
+                            else -> true
+                        }
+                        RadioRow(
+                            selected = rangeChoice == choice,
+                            onSelect = {
+                                rangeChoice = choice
+                                onReturnFocus()
+                            },
+                            enabled = choiceEnabled,
+                        ) {
+                            AppText(choice.label, color = if (choiceEnabled) colors.ts else colors.td, fontSize = 11.sp)
+                        }
                     }
-                    RadioRow(
-                        selected = rangeChoice == choice,
-                        onSelect = {
-                            rangeChoice = choice
-                            onReturnFocus()
-                        },
-                        enabled = choiceEnabled,
-                    ) {
-                        AppText(choice.label, color = if (choiceEnabled) colors.ts else colors.td, fontSize = 11.sp)
-                    }
-                }
-                AppText(
-                    captureSinceSaveHint(session),
-                    color = if (sinceSaveEnabled) colors.td else colors.ts,
-                    fontSize = 10.sp,
-                )
-            }
-            if (rangeChoice == SnapshotRangeChoice.LAST_MINUTES) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    AppText("Minutes", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                    InlineField(
-                        value = customMinutesText,
-                        onValue = { value -> customMinutesText = value.filter(Char::isDigit).take(4) },
-                        modifier = Modifier.width(64.dp),
+                    AppText(
+                        captureSinceSaveHint(session),
+                        color = if (sinceSaveEnabled) colors.td else colors.ts,
+                        fontSize = 10.sp,
                     )
-                    if (customMinutes == 0) AppText("Enter a positive number", color = DANGER_RED, fontSize = 10.sp)
                 }
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                AppText("Archive name", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                InlineField(
-                    value = basename,
-                    onValue = { basename = it.take(180) },
-                    modifier = Modifier.fillMaxWidth(),
-                )
-                if (filename == null) AppText("Enter a valid archive basename", color = DANGER_RED, fontSize = 10.sp)
-            }
-            CheckRow(
-                includeVideo,
-                {
-                    if (canIncludeVideo) includeVideo = !includeVideo
-                    onReturnFocus()
-                },
-                enabled = canIncludeVideo,
-            ) {
-                AppText("Include video", color = if (canIncludeVideo) colors.ts else colors.td, fontSize = 11.sp)
-            }
-            if (recordVideoConfigured == false) {
+                if (rangeChoice == SnapshotRangeChoice.LAST_MINUTES) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        AppText("Minutes", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                        InlineField(
+                            value = customMinutesText,
+                            onValue = { value -> customMinutesText = value.filter(Char::isDigit).take(4) },
+                            modifier = Modifier.width(64.dp),
+                        )
+                        if (customMinutes == 0) AppText("Enter a positive number", color = DANGER_RED, fontSize = 10.sp)
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Archive name", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    InlineField(
+                        value = basename,
+                        onValue = { basename = it.take(180) },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    if (filename == null) AppText("Enter a valid archive basename", color = DANGER_RED, fontSize = 10.sp)
+                }
+                CheckRow(
+                    includeVideo,
+                    {
+                        if (canIncludeVideo) includeVideo = !includeVideo
+                        onReturnFocus()
+                    },
+                    enabled = canIncludeVideo,
+                ) {
+                    AppText("Include video", color = if (canIncludeVideo) colors.ts else colors.td, fontSize = 11.sp)
+                }
+                if (recordVideoConfigured == false) {
+                    AppText(
+                        "Video recording was disabled for this capture. This archive will contain logs only.",
+                        color = colors.td,
+                        fontSize = 10.sp,
+                    )
+                }
+                if (includeVideo && canIncludeVideo && captureVideoUnavailableForRange(session)) {
+                    AppText(
+                        "Video is unavailable for the current range; the archive will still save logs and advance Since last save.",
+                        color = colors.ts,
+                        fontSize = 10.sp,
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    AppText("Destination", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+                    AppText(
+                        destination.absolutePath,
+                        color = colors.ts,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    AppButton(
+                        "Choose folder…",
+                        { state.pickSaveFolder(); onReturnFocus() },
+                        ButtonVariant.Secondary,
+                        enabled = !state.captureExportBusy,
+                    )
+                }
+                if (rangeChoice == SnapshotRangeChoice.SELECTION && selection != null) {
+                    AppText("Rows ${selection.first}–${selection.last}; separators between those rows are included.", color = colors.td, fontSize = 10.sp)
+                }
+                // Coverage lines are always laid out (placeholder until the async preview lands), so the
+                // content-sized popover doesn't grow right after opening; the video line exists exactly
+                // when video is included, whatever its outcome.
+                val preview = state.captureExportPreview
                 AppText(
-                    "Video recording was disabled for this capture. This archive will contain logs only.",
-                    color = colors.td,
-                    fontSize = 10.sp,
-                )
-            }
-            if (includeVideo && canIncludeVideo &&
-                (session.videoStartElapsedMs == null || !session.videoFile.isFile || session.videoFile.length() <= 0L)
-            ) {
-                AppText(
-                    "Video is unavailable for the current range; the archive will still save logs and advance Since last save.",
-                    color = colors.ts,
-                    fontSize = 10.sp,
-                )
-            }
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                AppText("Destination", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                AppText(
-                    destination.absolutePath,
-                    color = colors.ts,
-                    fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                AppButton(
-                    "Choose folder…",
-                    { state.pickSaveFolder(); onReturnFocus() },
-                    ButtonVariant.Secondary,
-                    enabled = !state.captureExportBusy,
-                )
-            }
-            if (rangeChoice == SnapshotRangeChoice.SELECTION && selection != null) {
-                AppText("Rows ${selection.first}–${selection.last}; separators between those rows are included.", color = colors.td, fontSize = 10.sp)
-            }
-            // Coverage lines are always laid out (placeholder until the async preview lands), so the
-            // content-sized popover doesn't grow right after opening; the video line exists exactly
-            // when video is included, whatever its outcome.
-            val preview = state.captureExportPreview
-            AppText(
-                captureLogCoverageLine(preview),
-                color = if (preview == null) colors.td else colors.ts,
-                fontSize = 10.sp,
-                fontFamily = FontFamily.Monospace,
-            )
-            if (includeVideo) {
-                AppText(
-                    captureVideoCoverageLine(preview),
+                    captureLogCoverageLine(preview),
                     color = if (preview == null) colors.td else colors.ts,
                     fontSize = 10.sp,
-                    maxLines = 2,
+                    fontFamily = FontFamily.Monospace,
                 )
-            }
-            if (destination.exists() && !overwriteConfirmed) {
-                AppText(
-                    "An archive with this name already exists. Confirm overwrite to continue.",
-                    color = DANGER_RED,
-                    fontSize = 10.sp,
-                )
-                AppButton("Confirm overwrite", { overwriteConfirmed = true; onReturnFocus() }, ButtonVariant.Secondary)
-            }
-            if (state.captureExportBusy) {
-                state.captureExportBusyMessage?.let {
-                    AppText(it, color = colors.td, fontSize = 10.sp)
-                }
-            }
-            state.captureExportError?.let { error ->
-                AppText("Snapshot failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
-            }
-            state.captureExportResult?.let { result ->
-                AppText("Saved ${result.file.name}: ${result.message}", color = colors.ac, fontSize = 10.sp, maxLines = 2)
-                if (includeVideo && result.videoCoveredEndMs != null && result.videoCoveredEndMs < result.logCoveredEndMs) {
+                if (includeVideo) {
                     AppText(
-                        "Video coverage ends at ${formatCaptureElapsed(result.videoCoveredEndMs)}; " +
-                            "log coverage ends at ${formatCaptureElapsed(result.logCoveredEndMs)}.",
-                        color = colors.ts,
+                        captureVideoCoverageLine(preview),
+                        color = if (preview == null) colors.td else colors.ts,
                         fontSize = 10.sp,
                         maxLines = 2,
                     )
                 }
-            }
+                if (destination.exists() && !overwriteConfirmed) {
+                    AppText(
+                        "An archive with this name already exists. Confirm overwrite to continue.",
+                        color = DANGER_RED,
+                        fontSize = 10.sp,
+                    )
+                    AppButton("Confirm overwrite", { overwriteConfirmed = true; onReturnFocus() }, ButtonVariant.Secondary)
+                }
+                if (state.captureExportBusy) {
+                    state.captureExportBusyMessage?.let {
+                        AppText(it, color = colors.td, fontSize = 10.sp)
+                    }
+                }
+                state.captureExportError?.let { error ->
+                    AppText("Snapshot failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
+                }
+                state.captureExportResult?.let { result ->
+                    AppText("Saved ${result.file.name}: ${result.message}", color = colors.ac, fontSize = 10.sp, maxLines = 2)
+                    if (includeVideo && result.videoCoveredEndMs != null && result.videoCoveredEndMs < result.logCoveredEndMs) {
+                        AppText(
+                            "Video coverage ends at ${formatCaptureElapsed(result.videoCoveredEndMs)}; " +
+                                "log coverage ends at ${formatCaptureElapsed(result.logCoveredEndMs)}.",
+                            color = colors.ts,
+                            fontSize = 10.sp,
+                            maxLines = 2,
+                        )
+                    }
+                }
             }
             Row(
                 Modifier.fillMaxWidth(),

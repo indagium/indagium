@@ -264,7 +264,9 @@ class EmbeddedMirrorTest {
             object : EmbeddedMirrorConnection {
                 override val videoInput: InputStream = input
                 override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) = Unit
+
                 override fun close() {
                     runCatching { input.close() }
                     runCatching { output.close() }
@@ -334,7 +336,9 @@ class EmbeddedMirrorTest {
             object : EmbeddedMirrorConnection {
                 override val videoInput: InputStream = input
                 override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) = Unit
+
                 override fun close() {
                     runCatching { input.close() }
                     runCatching { output.close() }
@@ -344,7 +348,7 @@ class EmbeddedMirrorTest {
         val directDecoder = DirectH264Decoder { feed, _ ->
             nativeCalls.incrementAndGet()
             assertTrue(feed.nextPacket()?.config == true, "native path starts with SPS/PPS")
-            throw IllegalStateException("simulated native renderer failure")
+            error("simulated native renderer failure")
         }
         val composeDecoder = object : H264Decoder {
             override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {

@@ -327,12 +327,17 @@ class ScrcpyStreamAdaptersTest {
     private fun writePacket(out: OutputStream, packet: BoundedScrcpyPacketFeed.Packet) {
         DataOutputStream(out).apply {
             var ptsAndFlags = packet.ptsUs
-            if (packet.config) ptsAndFlags = ptsAndFlags or (1L shl 62)
-            if (packet.keyFrame) ptsAndFlags = ptsAndFlags or (1L shl 61)
+            if (packet.config) ptsAndFlags = ptsAndFlags or CONFIG_FLAG
+            if (packet.keyFrame) ptsAndFlags = ptsAndFlags or KEY_FRAME_FLAG
             writeLong(ptsAndFlags)
             writeInt(packet.data.size)
             write(packet.data)
         }
     }
 
+    private companion object {
+        // Same wire-format bit positions as ScrcpyPacketReader's private CONFIG_FLAG/KEY_FRAME_FLAG.
+        const val CONFIG_FLAG = 1L shl 62
+        const val KEY_FRAME_FLAG = 1L shl 61
+    }
 }

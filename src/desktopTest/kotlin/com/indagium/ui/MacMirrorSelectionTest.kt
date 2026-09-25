@@ -10,13 +10,13 @@ import com.indagium.capture.mirror.EmbeddedMirrorState
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.H264Decoder
 import com.indagium.capture.mirror.MirrorFrame
+import org.jetbrains.skiko.GraphicsApi
 import java.io.ByteArrayInputStream
 import java.io.InputStream
 import kotlin.test.Test
-import kotlin.test.assertFalse
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import org.jetbrains.skiko.GraphicsApi
 
 class MacMirrorSelectionTest {
     @Test
@@ -198,7 +198,9 @@ class MacMirrorSelectionTest {
             object : EmbeddedMirrorConnection {
                 override val videoInput: InputStream = ByteArrayInputStream(ByteArray(0))
                 override val audioInput: InputStream? = null
+
                 override fun sendControl(bytes: ByteArray) = Unit
+
                 override fun close() = Unit
             }
         },
