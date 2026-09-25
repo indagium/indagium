@@ -1438,6 +1438,62 @@ fun App(
                 }
             }
 
+            // Phase 4 (snapshot archive + import) — see AppState.offerCaptureNotesReimportIfNeeded /
+            // PendingCaptureNotesImport's own doc for exactly when this can appear: reopening or
+            // redropping an archive whose tab is already open AND already has its own notes.
+            // Dropping a zip always opens a brand-new tab, which never reaches this dialog.
+            state.pendingCaptureNotesImport?.let { pending ->
+                Dialog(
+                    onDismissRequest = { state.dismissCaptureNotesImport() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            "This snapshot has notes too",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.archiveName}\" carries its own notes, and this tab already has some. " +
+                                "Nothing is being changed while this is open — choose how to proceed.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton("Append", active = true) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.APPEND)
+                                }
+                                DialogActionButton("Replace", active = true, danger = true) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.REPLACE)
+                                }
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton("Skip", active = false) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.SKIP)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             state.pendingFilterLoad?.takeIf { state.updateExistingPickerOpen }?.let { pending ->
                 val target = state.savedFilters.find { it.id == pending.targetFilterId }
                 Dialog(onDismissRequest = { state.cancelUpdateExistingPick() }) {

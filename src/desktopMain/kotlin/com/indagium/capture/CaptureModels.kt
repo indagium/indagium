@@ -5,6 +5,7 @@ import java.io.File
 private const val BYTES_PER_GIBIBYTE = 1024L * 1024L * 1024L
 private const val DEFAULT_SESSION_LIMIT_BYTES = 10L * BYTES_PER_GIBIBYTE
 private const val DEFAULT_FREE_SPACE_RESERVE_BYTES = BYTES_PER_GIBIBYTE
+private const val DEFAULT_MARKER_WINDOW_MS = 5_000L
 
 /**
  * `-b` buffer selection for `adb logcat`. Three modes:
@@ -50,6 +51,16 @@ data class CaptureSettings(
     // descriptors round-trip unchanged; this field only selects how `buffers` is interpreted.
     val bufferMode: CaptureBufferMode = CaptureBufferMode.DEFAULT,
     val mirrorMode: CaptureMirrorMode = CaptureMirrorMode.EMBEDDED,
+    // Mark issue (restyle plan Phase 3), appended last per this class's own convention comment
+    // above. markerPreMs/markerPostMs bound the log window a press captures around itself;
+    // markerScreenshot gates the extra adb screencap that press also takes. markerNotesInSnapshot
+    // is read only by Phase 4 (snapshot archive export) — that phase isn't implemented yet, so
+    // nothing consumes this value today, but the setting and its UI row exist now so Phase 4 has
+    // nothing left to add to the settings surface itself.
+    val markerPreMs: Long = DEFAULT_MARKER_WINDOW_MS,
+    val markerPostMs: Long = DEFAULT_MARKER_WINDOW_MS,
+    val markerScreenshot: Boolean = true,
+    val markerNotesInSnapshot: Boolean = true,
 )
 
 /** The active display choice after applying the pre-choice `mirror` compatibility switch. */

@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.indagium.model.AddAnnRequest
 import com.indagium.model.AnnBlock
+import com.indagium.model.LogEntry
 import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.utils.downscaleAndEncodeJpeg
@@ -90,14 +91,34 @@ internal class AnnotationManager(private val appState: AppState) {
         return id.takeIf { appState.tab(tabId)?.annotations?.blocks?.any { block -> block.id == id } == true }
     }
 
-    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? {
+    fun addLogRefBlock(
+        tabId: String,
+        logIds: List<Int>,
+        caption: String = "",
+        // Phase 3 (Mark issue): so the LogRef lands right under its own marker Note instead of at
+        // the end of Notes. Mirrors addNoteBlock's own insert-or-append logic below — a stale/
+        // missing anchor (block already removed) falls back to append rather than failing.
+        afterId: String? = null,
+        // Phase 3's tail-lag fallback (AppState.markIssue): when some of [logIds] aren't in the
+        // tab's live `rmap` yet (the tail-append coordinator hasn't caught up to rows the recorder
+        // already flushed), the caller resolves them straight from the capture log by byte offset
+        // and passes the complete, ordered result here. resolveRows (Model.kt) prefers
+        // AnnBlock.LogRef.sourceEntries over `logIds`/`rmap` for exactly this reason. Left null for
+        // every other caller (MCP's add_log_note, the plain in-app "add note from selection" flow),
+        // which keeps today's live-rmap-only behaviour unchanged.
+        sourceEntries: List<LogEntry>? = null,
+    ): String? {
         val t = appState.tab(tabId) ?: return null
-        val cleanIds = logIds.distinct().sorted().filter { it in t.rmap }
-        if (cleanIds.isEmpty()) return null
+        val cleanIds = logIds.distinct().sorted().let { ids -> if (sourceEntries != null) ids else ids.filter { it in t.rmap } }
+        if (cleanIds.isEmpty() && sourceEntries.isNullOrEmpty()) return null
         val id = "r${System.nanoTime()}"
         appState.upAnn(tabId) { tab ->
-            val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption)
-            tab.copy(annotations = tab.annotations.copy(blocks = tab.annotations.blocks + block))
+            val block = AnnBlock.LogRef(id = id, logIds = cleanIds, caption = caption, sourceEntries = sourceEntries)
+            val blocks = tab.annotations.blocks.toMutableList()
+            val idx =
+                if (afterId != null) (blocks.indexOfFirst { it.id == afterId } + 1).coerceAtLeast(0) else blocks.size
+            blocks.add(idx, block)
+            tab.copy(annotations = tab.annotations.copy(blocks = blocks))
         }
         // Same membership check as addNoteBlock, and for the same reason: upAnn's overwrite-conflict
         // gate (AppState.upAnn/PendingNoteOverwrite) can stash this mutation on pendingNoteOverwrite

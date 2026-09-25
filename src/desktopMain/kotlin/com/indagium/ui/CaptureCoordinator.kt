@@ -12,12 +12,14 @@ import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureRecorder
 import com.indagium.capture.CaptureScreenshot
 import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureSessionBoundary
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.CaptureVideoExporter
 import com.indagium.capture.ImportedCapture
+import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
@@ -278,6 +280,15 @@ internal class TabCaptureController(
 
     fun supportsScreenshots(): Boolean = recorder.supportsScreenshots()
 
+    /** Press-time capture-clock snapshot for AppState.markIssue (restyle plan Phase 3): the same
+     *  flushed log/index byte bounds plus elapsedMs that [export]/[preview] already read via
+     *  [CaptureRecorder.snapshotForExport] — see that function's own doc for why the boundary must
+     *  come from there rather than reading `selectedSession.value` directly. */
+    fun snapshotForExport(): CaptureSessionBoundary {
+        val session = requireNotNull(selectedSession.value) { "Capture has no session to mark" }
+        return recorder.snapshotForExport(session.id)
+    }
+
     fun openMirror(): Boolean = recorder.openMirror()
 
     /** The recording's active embedded device session, if video recording is currently running —
@@ -295,14 +306,21 @@ internal class TabCaptureController(
      * checkpoint advances only after the archive has been published successfully; exporter
      * failures and coroutine cancellation therefore cannot stop or mutate a live capture.
      */
-    fun export(request: CaptureExportRequest, onWaitingForVideo: (() -> Unit)? = null): CaptureExportResult {
+    fun export(
+        request: CaptureExportRequest,
+        onWaitingForVideo: (() -> Unit)? = null,
+        // Phase 4 (snapshot archive + import), appended last: threaded straight through to
+        // CaptureArchiveExporter.export — see that parameter's own doc for why the tab's Notes must
+        // arrive as a plain Annotations value rather than this controller reaching into AppState.
+        notes: Annotations? = null,
+    ): CaptureExportResult {
         val session = requireNotNull(selectedSession.value) { "Capture has no session to export" }
         val boundary = recorder.snapshotForExport(session.id)
         // Save is a point-in-time operation: ignore the preview's stale cutoff and take a fresh
         // recorder boundary immediately before staging the archive. Selection bounds remain
         // ordinal-based; cutoff only bounds the non-selection ranges.
         val boundedRequest = request.copy(cutoffElapsedMs = boundary.elapsedMs)
-        val result = archiveExporter.export(boundary.session, boundedRequest, onWaitingForVideo)
+        val result = archiveExporter.export(boundary.session, boundedRequest, onWaitingForVideo, notes)
         recorder.updateSuccessfulExportCheckpoints(
             sessionId = boundary.session.id,
             logCheckpointMs = result.logCoveredEndMs,
@@ -345,4 +363,16 @@ internal enum class CaptureScreenshotAvailability { PENDING, ENABLED, DISABLED }
 internal data class CaptureScreenshotCapability(
     val availability: CaptureScreenshotAvailability,
     val reason: String? = null,
+)
+
+/** What [AppState.undoMarkIssue] removes — the Note (always), the screenshot AnnBlock.Image and
+ * its on-disk PNG (only when the screenshot setting was on and the capture succeeded before undo),
+ * and the trailing LogRef (only when the postMs rescan finished before undo). Immutable and
+ * replaced wholesale on every update (never mutated in place) so it stays a plain Compose
+ * `mutableStateMapOf` value like every other per-tab map on AppState. */
+internal data class MarkerUndoState(
+    val noteId: String,
+    val imageBlockId: String? = null,
+    val logRefId: String? = null,
+    val screenshotFile: File? = null,
 )
