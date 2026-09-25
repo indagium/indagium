@@ -173,6 +173,22 @@ static int64_t steadyNowNs() {
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+/** Turns off Core Animation's implicit animations for [layer]. Our own updates already run inside
+ *  setDisableActions transactions, but JAWT's frame writes and anything else that touches the layer
+ *  do not, so each window resize animated the picture to its new frame over the default 0.25 s:
+ *  it visibly trailed the window, and the transparent hole Compose had already moved showed the
+ *  black window background beside it. With no actions every change lands in the frame it is made. */
+static void disableImplicitAnimations(CALayer *layer) {
+    if (!layer) return;
+    NSNull *none = [NSNull null];
+    layer.actions = @{
+        @"position": none, @"bounds": none, @"frame": none, @"anchorPoint": none,
+        @"contents": none, @"contentsScale": none, @"contentsRect": none,
+        @"zPosition": none, @"hidden": none, @"opacity": none, @"mask": none,
+        @"path": none, @"sublayers": none, @"onOrderIn": none, @"onOrderOut": none,
+    };
+}
+
 static void updateDrawableGeometry(CAMetalLayer *layer, CGFloat width, CGFloat height, CGFloat pixelWidth, CGFloat pixelHeight) {
     if (!layer || width <= 0 || height <= 0 || pixelWidth <= 0 || pixelHeight <= 0) return;
     // JAWT_SurfaceLayers owns the CALayer frame and positions it over the AWT Component bounds.
@@ -1217,11 +1233,13 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                                 mirror->layer.zPosition = mirror->underlayOrdering ? -1.0 : 1.0;
                                 mirror->layer.framebufferOnly = NO;
                                 mirror->layer.presentsWithTransaction = NO;
+                                disableImplicitAnimations(mirror->layer);
                             }
                             if (!mirror->clipMask) {
                                 mirror->clipMask = [CAShapeLayer layer];
                                 mirror->clipMask.fillColor = NSColor.whiteColor.CGColor;
                                 mirror->clipMask.strokeColor = nil;
+                                disableImplicitAnimations(mirror->clipMask);
                             }
                             mirror->layer.opaque = YES;
                             updateDrawableGeometry(

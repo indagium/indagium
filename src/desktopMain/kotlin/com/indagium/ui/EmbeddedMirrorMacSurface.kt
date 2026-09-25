@@ -11,6 +11,7 @@ import java.awt.EventQueue
 import java.awt.GraphicsEnvironment
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
+import java.awt.event.HierarchyBoundsListener
 import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
 import java.awt.event.KeyEvent as AwtKeyEvent
@@ -167,6 +168,20 @@ internal class EmbeddedMirrorMacSurface(
         override fun componentShown(event: ComponentEvent) { attachAndResize() }
         override fun componentHidden(event: ComponentEvent) { detachNativeSurface("canvas hidden") }
         override fun componentResized(event: ComponentEvent) = resize()
+
+        override fun componentMoved(event: ComponentEvent) = resize()
+    }
+
+    /**
+     * A window resize usually moves the Canvas by moving a container above it, which fires no
+     * event on the Canvas itself. resize() re-sends the Canvas position with its size, and the
+     * native geometry pass re-asserts the layer frame from it — without this the layer could stay
+     * where the panel used to be after a maximise (picture shifted, black where it should be).
+     */
+    private val ancestorBoundsListener = object : HierarchyBoundsListener {
+        override fun ancestorMoved(event: HierarchyEvent) = resize()
+
+        override fun ancestorResized(event: HierarchyEvent) = resize()
     }
     private val hierarchyListener = HierarchyListener { event ->
         if (event.changeFlags and (
@@ -198,6 +213,7 @@ internal class EmbeddedMirrorMacSurface(
         native = MacVideoToolboxMirrorNative(canvas, underlayRequested)
         canvas.addComponentListener(resizeListener)
         canvas.addHierarchyListener(hierarchyListener)
+        canvas.addHierarchyBoundsListener(ancestorBoundsListener)
         attachWatchdog.start()
     }
 
@@ -402,6 +418,10 @@ internal class EmbeddedMirrorMacSurface(
             // sibling can appear or disappear (skiko's own layer attaching later, a window handoff)
             // without ever leaving our layer detached in between.
             refreshUnderlayStatus()
+            // And re-send the geometry: a late frame write from a stale position (JAWT's or ours)
+            // otherwise has nothing to correct it until the next resize. The native side writes
+            // the frame only when it actually differs, so this is free when all is well.
+            resize()
             return
         }
         onDiagnostic("Metal mirror layer was outside the window while its canvas is showing; re-attaching")
@@ -451,6 +471,7 @@ internal class EmbeddedMirrorMacSurface(
         attachedWindow = null
         canvas.removeComponentListener(resizeListener)
         canvas.removeHierarchyListener(hierarchyListener)
+        canvas.removeHierarchyBoundsListener(ancestorBoundsListener)
         native.close()
     }
 
