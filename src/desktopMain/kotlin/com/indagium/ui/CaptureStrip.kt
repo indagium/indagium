@@ -1,29 +1,43 @@
+@file:OptIn(
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+)
+
 package com.indagium.ui
 
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.DisableSelection
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AddAPhoto
 import androidx.compose.material.icons.outlined.FolderOpen
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Save
 import androidx.compose.material.icons.outlined.Stop
-import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -33,7 +47,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.PointerEventType
+import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -50,19 +73,22 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureExportRequest
+import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.renderCaptureFilename
+import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
 
-internal const val CAPTURE_STRIP_HEIGHT_DP = 46
+internal const val CAPTURE_STRIP_HEIGHT_DP = 48
 
 // Fits the snapshot dialog's three DialogActionButtons (132dp each, from Dialogs.kt) plus its own
 // 20dp side padding and the 8dp gaps the centered action row uses between them.
@@ -134,10 +160,106 @@ internal fun formatCaptureBytes(bytes: Long): String {
     }
 }
 
+/** Summary line for a stopped capture. Marker count leads when there is one — after a session ends
+ *  it is the thing you came back for, and it is what the capture-screen design shows here. */
+internal fun captureStoppedSummary(tab: LogTab, logBytes: Long): String {
+    val markers = tab.annotations.blocks.count { it is AnnBlock.Note && parseMarkerHeader(it.text) != null }
+    val rows = "${tab.logData.size} rows · ${formatCaptureBytes(logBytes)}"
+    return if (markers > 0) "$markers marker${if (markers == 1) "" else "s"} · $rows" else rows
+}
+
 internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
     snapshot.videoRecording -> "Video REC"
     snapshot.session?.settings?.recordVideo == true -> "Video idle"
     else -> "Video off"
+}
+
+/** Status only, not a toggle: video recording is decided when the session starts
+ * (CaptureRecorder.kt:328 reads settings.recordVideo; there is no mid-session start/stop). Tapping
+ * it opens Capture settings — the same action the gear ToolbarBtn used to offer directly before it
+ * moved into the ⋯ overflow menu. 24dp fully-rounded pill; the camera icon swaps for a solid accent
+ * dot and the border/background/label go accent once video is actually recording. */
+@Composable
+private fun CaptureVideoPill(snapshot: RecorderSnapshot, onClick: () -> Unit) {
+    val colors = tc()
+    val recording = snapshot.videoRecording
+    val borderColor = if (recording) colors.ac else colors.br
+    val bgColor = if (recording) colors.ac.copy(alpha = .12f) else colors.p
+    val labelColor = if (recording) colors.ac else colors.ts
+    Row(
+        Modifier
+            .height(24.dp)
+            .border(1.dp, borderColor, RoundedCornerShape(12.dp))
+            .background(bgColor, RoundedCornerShape(12.dp))
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (recording) {
+            Box(Modifier.size(6.dp).background(colors.ac, RoundedCornerShape(50)))
+        } else {
+            Icon(Icons.Outlined.Videocam, contentDescription = null, tint = colors.ts, modifier = Modifier.size(13.dp))
+        }
+        DisableSelection {
+            AppText(
+                captureVideoStatus(snapshot),
+                color = labelColor,
+                fontSize = 11.sp,
+                fontWeight = if (recording) FontWeight.SemiBold else FontWeight.Normal,
+            )
+        }
+    }
+}
+
+/** Ceiling on the marker list inside CaptureCard so it never starves the mirror above it. */
+private val MARKER_LIST_MAX_HEIGHT = 150.dp
+
+private val CAPTURE_STORAGE_METER_TRACK_WIDTH = 84.dp
+private val CAPTURE_STORAGE_METER_TRACK_HEIGHT = 5.dp
+
+/** Fraction of the session storage limit already used, clamped to [0, 1]. A null/non-positive
+ * limit (no session yet) reads as empty rather than crashing on the division. Pure and separate
+ * from Compose so a focused test doesn't need a composition, matching formatCaptureElapsed/
+ * formatCaptureBytes above (see CaptureStripTest). */
+internal fun captureStorageMeterFraction(usedBytes: Long, limitBytes: Long?): Float {
+    if (limitBytes == null || limitBytes <= 0L) return 0f
+    return (usedBytes.toFloat() / limitBytes.toFloat()).coerceIn(0f, 1f)
+}
+
+internal const val CAPTURE_STORAGE_METER_WARN_THRESHOLD = 0.85f
+
+internal fun captureStorageMeterIsWarn(usedBytes: Long, limitBytes: Long?): Boolean =
+    captureStorageMeterFraction(usedBytes, limitBytes) >= CAPTURE_STORAGE_METER_WARN_THRESHOLD
+
+/** Replaces the old "Storage x/y" monospace text (Problem 1 in the restyle plan: this fact was
+ * printed twice, once here and once in the DEVICE card — Phase 2 removes the card's copy) with an
+ * 84×5dp track plus the same formatCaptureBytes label. The track's fill colour is the only thing
+ * that changes: colors.td normally, colors.warn once usage crosses
+ * CAPTURE_STORAGE_METER_WARN_THRESHOLD of the session limit. */
+@Composable
+private fun CaptureStorageMeter(usedBytes: Long, limitBytes: Long?) {
+    val colors = tc()
+    val fraction = captureStorageMeterFraction(usedBytes, limitBytes)
+    val warn = captureStorageMeterIsWarn(usedBytes, limitBytes)
+    val label = limitBytes?.let { "${formatCaptureBytes(usedBytes)} / ${formatCaptureBytes(it)}" }
+        ?: formatCaptureBytes(usedBytes)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box(
+            Modifier.width(CAPTURE_STORAGE_METER_TRACK_WIDTH).height(CAPTURE_STORAGE_METER_TRACK_HEIGHT)
+                .background(colors.br, RoundedCornerShape(50)),
+        ) {
+            Box(
+                Modifier.fillMaxHeight().fillMaxWidth(fraction)
+                    .background(if (warn) colors.warn else colors.td, RoundedCornerShape(50)),
+            )
+        }
+        AppText(
+            label, color = colors.td, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+    }
 }
 
 internal fun captureSinceSaveEnabled(session: CaptureSession?): Boolean =
@@ -180,14 +302,6 @@ private fun screenshotButtonEnabled(
 ): Boolean = snapshot.state == RecorderState.RECORDING &&
     capability.availability == CaptureScreenshotAvailability.ENABLED
 
-private fun captureSessionDeviceLabel(session: CaptureSession?, fallback: String): String {
-    val device = session?.device ?: return fallback
-    return buildString {
-        append(device.model.ifBlank { device.serial })
-        if (device.serial.isNotBlank() && device.serial != device.model) append(" · ").append(device.serial)
-    }
-}
-
 /** Model/serial split for [CaptureDeviceChip], which renders the two independently instead of one
  * fixed-width string (that was the truncation bug fixed in the strip's restyle). */
 private fun captureSessionDeviceParts(session: CaptureSession?, fallback: String): Pair<String, String> {
@@ -215,7 +329,7 @@ private fun rememberCaptureSnapshot(state: AppState, tab: LogTab): RecorderSnaps
     return snapshot
 }
 
-/** 46dp live-capture chrome rendered only above an active streaming log tab. */
+/** 48dp live-capture chrome rendered only above an active streaming log tab. */
 @Composable
 internal fun CaptureStrip(
     state: AppState,
@@ -248,16 +362,23 @@ internal fun CaptureStrip(
     val (deviceModel, deviceSerial) = captureSessionDeviceParts(session, tab.filename.removePrefix("Capture — "))
     var snapshotOpen by remember(tab.id) { mutableStateOf(false) }
     var snapshotTriggerBounds by remember(tab.id) { mutableStateOf<Rect?>(null) }
+
     fun dismissSnapshotPopover() {
         if (state.captureExportBusy) state.cancelCaptureSnapshot()
         snapshotOpen = false
         state.clearCaptureExportStatus()
         onReturnFocus()
     }
-    val storageLabel = session?.let {
-        "${formatCaptureBytes(snapshot.logBytes)} / ${formatCaptureBytes(it.settings.sessionLimitBytes)}"
-    } ?: formatCaptureBytes(snapshot.logBytes)
     val finalizing = state.captureFinalizationStatus(tab.id) == CAPTURE_FINALIZING_STATUS
+    var overflowOpen by remember(tab.id) { mutableStateOf(false) }
+    var overflowHovered by remember(tab.id) { mutableStateOf(false) }
+    val density = LocalDensity.current.density
+
+    fun openCaptureSettings() {
+        state.requestedSettingsSection = SettingsSection.Capture
+        state.settingsOpen = true
+        onReturnFocus()
+    }
 
     Column(Modifier.fillMaxWidth().background(colors.p2)) {
         // Status cluster (device chip + rec/state + storage/video) sits on the left; the action
@@ -267,7 +388,7 @@ internal fun CaptureStrip(
         Row(
             Modifier.fillMaxWidth().height(CAPTURE_STRIP_HEIGHT_DP.dp).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             CaptureDeviceChip(model = deviceModel, serial = deviceSerial, live = active)
             when {
@@ -281,102 +402,159 @@ internal fun CaptureStrip(
                     fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
             }
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AppText(
-                    "Storage $storageLabel", color = colors.td, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
-                )
-                AppText(
-                    captureVideoStatus(snapshot),
-                    color = if (snapshot.videoRecording) colors.ac else colors.td,
-                    fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-            }
-            ToolbarBtn(
-                label = "Screenshot",
-                icon = Icons.Outlined.AddAPhoto,
-                tooltip = "Capture a device screenshot",
-                enabled = screenshotButtonEnabled(snapshot, screenshotCapability),
-                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
-                onClick = {
-                    state.screenshotCapture(tab.id)
-                    onReturnFocus()
-                },
-            )
-            ToolbarBtn(
-                label = "Stop",
-                icon = Icons.Outlined.Stop,
-                tooltip = "Stop capture",
-                enabled = active,
-                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
-                onClick = {
-                    state.stopCaptureTab(tab.id)
-                    onReturnFocus()
-                },
-            )
-            Box(Modifier.onGloballyPositioned { snapshotTriggerBounds = it.boundsInWindow() }) {
-                ToolbarBtn(
-                    label = "Save snapshot",
-                    icon = Icons.Outlined.Save,
-                    active = true,
-                    tooltip = "Export a capture snapshot",
-                    enabled = active && (snapshotOpen || !state.captureExportBusy),
-                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+            CaptureStorageMeter(usedBytes = snapshot.logBytes, limitBytes = session?.settings?.sessionLimitBytes)
+            CaptureVideoPill(snapshot = snapshot, onClick = ::openCaptureSettings)
+            Spacer(Modifier.weight(1f))
+            // Right action cluster: its own row with tighter 8dp spacing, every button a uniform
+            // 30dp tall — deliberately kept as a nested Row (not folded into the outer 12dp
+            // rhythm) so it reads as one grouped control cluster, right-aligned by the Spacer above.
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CaptureMarkIssueButton(
+                    enabled = active,
                     onClick = {
-                        if (snapshotOpen) {
-                            dismissSnapshotPopover()
-                        } else {
-                            snapshotOpen = true
-                            state.clearCaptureExportStatus()
-                        }
-                    },
-                )
-                if (snapshotOpen) {
-                    CaptureSnapshotPopover(
-                        state = state,
-                        tab = tab,
-                        snapshot = snapshot,
-                        triggerBounds = snapshotTriggerBounds,
-                        onDismiss = ::dismissSnapshotPopover,
-                        onReturnFocus = onReturnFocus,
-                    )
-                }
-            }
-            ToolbarBtn(
-                label = "Settings",
-                icon = Icons.Outlined.Tune,
-                showLabel = false,
-                tooltip = "Open Capture settings",
-                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
-                onClick = {
-                    state.requestedSettingsSection = SettingsSection.Capture
-                    state.settingsOpen = true
-                    onReturnFocus()
-                },
-            )
-            if (snapshot.diagnostics.isNotEmpty()) {
-                PillBtn(
-                    label = snapshot.diagnostics.size.toString(),
-                    active = diagnosticsOpen,
-                    onClick = {
-                        diagnosticsOpen = !diagnosticsOpen
+                        state.markIssue(tab.id)
                         onReturnFocus()
                     },
                 )
+                ToolbarBtn(
+                    label = "Screenshot",
+                    icon = Icons.Outlined.AddAPhoto,
+                    showLabel = false,
+                    tooltip = "Capture a device screenshot",
+                    enabled = screenshotButtonEnabled(snapshot, screenshotCapability),
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                    onClick = {
+                        state.screenshotCapture(tab.id)
+                        onReturnFocus()
+                    },
+                )
+                ToolbarBtn(
+                    label = "Stop",
+                    icon = Icons.Outlined.Stop,
+                    tooltip = "Stop capture",
+                    enabled = active,
+                    modifier = Modifier.height(30.dp),
+                    contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                    onClick = {
+                        state.stopCaptureTab(tab.id)
+                        onReturnFocus()
+                    },
+                )
+                Box(Modifier.onGloballyPositioned { snapshotTriggerBounds = it.boundsInWindow() }) {
+                    ToolbarBtn(
+                        // Trailing caret rather than a split button: ToolbarBtn has no slot for a
+                        // separate trailing element, so the simplest faithful rendering of "opens a
+                        // popover" is baking the indicator into the label itself.
+                        label = "Save snapshot ▾",
+                        icon = Icons.Outlined.Save,
+                        active = true,
+                        tooltip = "Export a capture snapshot",
+                        enabled = active && (snapshotOpen || !state.captureExportBusy),
+                        modifier = Modifier.height(30.dp),
+                        contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
+                        onClick = {
+                            if (snapshotOpen) {
+                                dismissSnapshotPopover()
+                            } else {
+                                snapshotOpen = true
+                                state.clearCaptureExportStatus()
+                            }
+                        },
+                    )
+                    if (snapshotOpen) {
+                        CaptureSnapshotPopover(
+                            state = state,
+                            tab = tab,
+                            snapshot = snapshot,
+                            triggerBounds = snapshotTriggerBounds,
+                            onDismiss = ::dismissSnapshotPopover,
+                            onReturnFocus = onReturnFocus,
+                        )
+                    }
+                }
+                Box {
+                    TooltipArea(tooltip = { ToolbarTooltip("More capture actions") }) {
+                        Box(
+                            Modifier.size(30.dp)
+                                .background(if (overflowHovered) colors.hv else Color.Transparent, CORNER_MD)
+                                .clip(CORNER_MD)
+                                .clickable {
+                                    overflowOpen = !overflowOpen
+                                    onReturnFocus()
+                                }
+                                .onPointerEvent(PointerEventType.Enter) { overflowHovered = true }
+                                .onPointerEvent(PointerEventType.Exit) { overflowHovered = false },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                Icons.Outlined.MoreHoriz,
+                                contentDescription = "More capture actions",
+                                tint = colors.ts,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                    if (overflowOpen) {
+                        // The gear ToolbarBtn and diagnostics PillBtn used to live in the strip itself;
+                        // both are low-frequency actions, so they move here to make room for the
+                        // storage meter/video pill/Mark issue button without the strip scrolling or
+                        // shrinking (see the table in the restyle plan's Phase 1).
+                        Popup(
+                            alignment = Alignment.TopEnd,
+                            offset = IntOffset(0, (CAPTURE_STRIP_HEIGHT_DP * density).toInt()),
+                            onDismissRequest = {
+                                overflowOpen = false
+                                onReturnFocus()
+                            },
+                            properties = PopupProperties(focusable = true),
+                        ) {
+                            Column(
+                                Modifier.width(220.dp)
+                                    .background(colors.p, RoundedCornerShape(7.dp))
+                                    .border(1.dp, colors.br, RoundedCornerShape(7.dp))
+                                    .padding(vertical = 4.dp),
+                            ) {
+                                Seq3DropdownMenuItem("Capture settings…") {
+                                    overflowOpen = false
+                                    openCaptureSettings()
+                                }
+                                Seq3DropdownMenuItem("Open capture folder", enabled = session != null) {
+                                    session?.let { state.openRetainedCaptureFolder(it.id) }
+                                    overflowOpen = false
+                                    onReturnFocus()
+                                }
+                                Seq3DropdownMenuItem(
+                                    "Diagnostics (${snapshot.diagnostics.size})",
+                                    active = diagnosticsOpen,
+                                ) {
+                                    diagnosticsOpen = !diagnosticsOpen
+                                    overflowOpen = false
+                                    onReturnFocus()
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
-        state.captureService.error
+        // One truncating status row replaces the previous ad hoc stack: the external-mirror error
+        // (if any) takes priority since it signals a real failure, otherwise the last screenshot
+        // status — the strip's only feedback for the Screenshot/Mark issue buttons now that
+        // diagnostics live behind the ⋯ menu instead of always being in view.
+        val mirrorError = state.captureService.error
             ?.takeIf { it.startsWith("External scrcpy mirror could not open:") }
-            ?.let { error ->
-                AppText(
-                    error,
-                    color = DANGER_RED,
-                    fontSize = 10.sp,
-                    maxLines = 2,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp),
-                )
-            }
+        val statusLine = mirrorError ?: state.captureScreenshotStatus
+        if (statusLine != null) {
+            AppText(
+                statusLine,
+                color = if (mirrorError != null) DANGER_RED else colors.ts,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
+            )
+        }
         if (diagnosticsOpen) {
             CaptureDiagnosticsDrawer(
                 state = state,
@@ -425,14 +603,78 @@ private fun CaptureDeviceChip(model: String, serial: String, live: Boolean, modi
 @Composable
 private fun CaptureRecordingIndicator(elapsedMs: Long) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(Modifier.size(7.dp).background(DANGER_RED, RoundedCornerShape(50)))
+        Box(Modifier.size(8.dp).background(DANGER_RED, RoundedCornerShape(50)))
         AppText(
-            "REC ${formatCaptureElapsed(elapsedMs)}",
+            formatCaptureElapsed(elapsedMs),
             color = DANGER_RED,
             fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 12.sp,
+            fontSize = 13.sp,
         )
+    }
+}
+
+private val CAPTURE_MARK_ISSUE_CORNER = RoundedCornerShape(8.dp)
+
+/** Not a plain [ToolbarBtn] call: that widget's icon slot is a fixed-size
+ * [androidx.compose.material.icons.Icons] vector tinted from the row's normal palette, and this
+ * control needs to read as a filled danger action with a 16dp radial-gradient "dome" rather than a
+ * flat Material icon — so it copies ToolbarBtn's chrome (30dp tall, matching its Screenshot/Stop/
+ * Save snapshot siblings) instead of reusing it directly. Enabled by `recorderIsActive(snapshot)`,
+ * matching the Stop button's own gate exactly since a marker only makes sense while a capture is
+ * running. */
+@Composable
+private fun CaptureMarkIssueButton(enabled: Boolean, onClick: () -> Unit) {
+    val colors = tc()
+    var hovered by remember { mutableStateOf(false) }
+    val mutedColor = colors.td.copy(alpha = .5f)
+    val domeHighlight = remember { lerp(DANGER_RED, Color.White, 0.5f) }
+    TooltipArea(tooltip = { ToolbarTooltip("Mark this moment as an issue") }) {
+        Box(
+            Modifier
+                .height(30.dp)
+                .border(1.dp, if (enabled) DANGER_RED.copy(alpha = .6f) else colors.br, CAPTURE_MARK_ISSUE_CORNER)
+                .background(
+                    when {
+                        enabled && hovered -> DANGER_RED.copy(alpha = .16f)
+                        enabled -> DANGER_RED.copy(alpha = .10f)
+                        else -> Color.Transparent
+                    },
+                    CAPTURE_MARK_ISSUE_CORNER,
+                )
+                .clip(CAPTURE_MARK_ISSUE_CORNER)
+                .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .padding(start = 10.dp, end = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            DisableSelection {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(16.dp).drawBehind {
+                            if (enabled) {
+                                drawCircle(
+                                    brush = Brush.radialGradient(
+                                        colors = listOf(domeHighlight, DANGER_RED),
+                                        center = Offset(size.width * 0.34f, size.height * 0.30f),
+                                        radius = size.maxDimension * 0.75f,
+                                    ),
+                                )
+                            } else {
+                                drawCircle(color = mutedColor)
+                            }
+                        },
+                    )
+                    AppText(
+                        "Mark issue",
+                        color = if (enabled) DANGER_RED else mutedColor,
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -460,7 +702,7 @@ private fun CaptureStoppedStrip(
         Row(
             Modifier.fillMaxWidth().height(CAPTURE_STRIP_HEIGHT_DP.dp).padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             CaptureDeviceChip(model = deviceModel, serial = deviceSerial, live = false)
             AppText(
@@ -468,11 +710,15 @@ private fun CaptureStoppedStrip(
                 color = colors.td, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
             )
+            // No weight on this text. It used to carry weight(1f, fill = false) *and* be followed
+            // by a Spacer(weight(1f)): two weighted children split the row's spare space in half,
+            // which left a gap in the middle of the strip and pushed the actions hard against the
+            // right edge, detached from everything else. The Spacer alone is what right-aligns the
+            // cluster, exactly as in the live strip.
             AppText(
-                "${tab.logData.size} rows · ${formatCaptureBytes(session?.logFile?.length() ?: 0L)}",
+                captureStoppedSummary(tab, session?.logFile?.length() ?: 0L),
                 color = colors.td, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
                 maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
             )
             Spacer(Modifier.weight(1f))
             ToolbarBtn(
@@ -481,6 +727,7 @@ private fun CaptureStoppedStrip(
                 active = true,
                 tooltip = "Export this capture as a ZIP",
                 enabled = session != null && !state.captureExportBusy,
+                modifier = Modifier.height(30.dp),
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                 onClick = {
                     state.saveRetainedCapture(sessionId)
@@ -492,6 +739,7 @@ private fun CaptureStoppedStrip(
                 icon = Icons.Outlined.FolderOpen,
                 tooltip = "Open the capture's session folder",
                 enabled = session != null,
+                modifier = Modifier.height(30.dp),
                 contentPadding = PaddingValues(horizontal = 7.dp, vertical = 4.dp),
                 onClick = {
                     state.openRetainedCaptureFolder(sessionId)
@@ -661,7 +909,11 @@ private fun CaptureSnapshotPopover(
         properties = PopupProperties(focusable = true),
     ) {
         Column(
-            Modifier.width(popupWidth).height(popupHeight)
+            // heightIn(max=), not height(): a fixed height made the panel as tall as the whole
+            // window below the trigger (capped at 680dp) no matter how little it had to show, so
+            // a three-radio range picker rendered as a mostly-empty column. The body's own
+            // verticalScroll still handles the case where the content genuinely exceeds the space.
+            Modifier.width(popupWidth).heightIn(max = popupHeight)
                 .background(colors.p, RoundedCornerShape(8.dp))
                 .border(1.dp, colors.br, RoundedCornerShape(8.dp))
                 .padding(20.dp),
@@ -676,7 +928,10 @@ private fun CaptureSnapshotPopover(
                 })
             }
             Column(
-                Modifier.weight(1f).verticalScroll(bodyScroll),
+                // fill = false so the body takes only the height it needs; a plain weight(1f)
+                // would stretch to the parent's max constraint and re-introduce the empty panel
+                // that heightIn(max=) above exists to avoid.
+                Modifier.weight(1f, fill = false).verticalScroll(bodyScroll),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -918,7 +1173,18 @@ private fun CaptureDiagnosticsDrawer(
 }
 
 /** Right-sidebar card for a live capture. The embedded mirror is deliberately kept separate from
- * recorder state: a mirror failure only updates its own status and never stops log recording. */
+ * recorder state: a mirror failure only updates its own status and never stops log recording.
+ *
+ * Layout, top to bottom: when embedded and attached there is no header at all — the picture
+ * starts at the top and the status dot, Connect/Disconnect and detach live in its attached control
+ * bar, because every dp of a header came out of the picture. The other branches (external, off,
+ * detached) have no picture to protect and keep a full-bleed [DeviceHeaderRow]. Then the mirror
+ * surface + its attached control bar (still `weight(1f)`, see the `flexible` doc in
+ * EmbeddedMirrorPanel.kt for why that must not change); a bounded/scrollable marker list; and a
+ * clipboard footer pinned to the card's bottom edge, hoisted out of EmbeddedMirrorPanel via
+ * [clipboardFooter]/[MirrorClipboardState] so it can sit below the markers instead of immediately
+ * under the mirror (Paste itself lives in the surface's own control bar, which still reads the
+ * same hoisted [MirrorClipboardState]). */
 @Composable
 internal fun CaptureCard(state: AppState, tab: LogTab) {
     if (tab.captureSessionId == null) return
@@ -926,83 +1192,215 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
     val colors = tc()
     val session = snapshot.session
     val mirrorMode = session?.settings?.effectiveMirrorMode ?: CaptureMirrorMode.DISABLED
-    var mirrorHeight by remember(tab.id) { mutableStateOf(MIRROR_DEFAULT_HEIGHT) }
     LaunchedEffect(tab.id, session?.id, mirrorMode) {
         if (mirrorMode == CaptureMirrorMode.EMBEDDED) {
             state.ensureEmbeddedMirror(tab.id, autoStart = true)
         }
     }
     val mirror = state.embeddedMirrorFor(tab.id)
-    val deviceLabel = captureSessionDeviceLabel(session, tab.filename.removePrefix("Capture — "))
-    val storageLabel = session?.let {
-        "${formatCaptureBytes(snapshot.logBytes)} / ${formatCaptureBytes(it.settings.sessionLimitBytes)}"
-    } ?: formatCaptureBytes(snapshot.logBytes)
-    Column(
-        Modifier.fillMaxSize().background(colors.p).verticalScroll(rememberScrollState()).padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        SectionHeader("DEVICE")
+    val clipboardState = remember(tab.id) { MirrorClipboardState() }
+    val detached = state.isEmbeddedMirrorDetached(tab.id)
+    // This card fills RightSidebarPanel's video slot, which is a *weighted* share of the sidebar
+    // (videoSplit, default 0.42) — a fixed height, not a free-growing column. It therefore must NOT
+    // scroll: inside a verticalScroll the incoming max height is infinite, so the mirror kept its
+    // full 420dp however small the slot was, overflowed, and got clipped at the slot edge — which
+    // reads as "Notes is drawn on top of the video". Laying it out as a plain Column instead lets
+    // the surface take exactly the space left over, with no guess about how much the rows below it
+    // need. Resizing is the sidebar's own video/notes divider, one level up.
+    Column(Modifier.fillMaxSize().background(colors.p)) {
         when (mirrorMode) {
-            CaptureMirrorMode.EMBEDDED -> if (!state.isEmbeddedMirrorDetached(tab.id)) {
+            CaptureMirrorMode.EMBEDDED -> if (!detached) {
+                // weight(1f): the surface gets the slot's leftover height after the header, the
+                // marker list and the footer. The old in-card VDivider is gone with it — it set a
+                // height this Column no longer honours, and the sidebar's own video/notes divider
+                // is the control that actually makes this panel taller.
                 EmbeddedMirrorPanel(
                     handle = mirror,
                     setupError = state.embeddedMirrorSetupError(tab.id),
                     onConnect = { state.openCaptureMirror(tab.id) },
                     onDisconnect = { state.stopEmbeddedMirror(tab.id) },
                     onDetach = { state.detachEmbeddedMirror(tab.id) },
-                    sidebarSurfaceHeight = mirrorHeight,
-                    modifier = Modifier.fillMaxWidth(),
+                    fillAvailableHeight = true,
+                    clipboardFooter = false,
+                    clipboardState = clipboardState,
+                    modifier = Modifier.fillMaxWidth().weight(1f),
                 )
-                VDivider { delta ->
-                    mirrorHeight = (mirrorHeight.value + delta).dp.coerceIn(120.dp, MIRROR_SIDEBAR_MAX_HEIGHT)
-                }
             } else {
-                AppText("Device mirror is open in its own window.", color = colors.td, fontSize = 10.sp)
+                DeviceHeaderRow("DEVICE")
+                Box(
+                    Modifier.fillMaxWidth().padding(12.dp).height(76.dp)
+                        .border(1.dp, colors.br, RoundedCornerShape(8.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText(
+                        "Device mirror is open in its own window.",
+                        color = colors.td,
+                        fontSize = 10.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+                }
             }
             CaptureMirrorMode.EXTERNAL -> {
-                AppText(
-                    "Device display is running in an external scrcpy window.",
-                    color = colors.td,
-                    fontSize = 10.sp,
-                    maxLines = 2,
-                )
-                AppButton("Open scrcpy window", { state.openExternalCaptureMirror(tab.id) }, ButtonVariant.Secondary)
+                DeviceHeaderRow("DEVICE")
+                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppText(
+                        "Device display is running in an external scrcpy window.",
+                        color = colors.td,
+                        fontSize = 10.sp,
+                        maxLines = 2,
+                    )
+                    AppButton("Open scrcpy window", { state.openExternalCaptureMirror(tab.id) }, ButtonVariant.Secondary)
+                }
             }
-            CaptureMirrorMode.DISABLED -> AppText("Device display is off for this capture.", color = colors.td, fontSize = 10.sp)
+            CaptureMirrorMode.DISABLED -> {
+                DeviceHeaderRow("DEVICE")
+                Column(Modifier.fillMaxWidth().padding(12.dp)) {
+                    AppText("Device display is off for this capture.", color = colors.td, fontSize = 10.sp)
+                }
+            }
         }
-        CaptureCardValueGrid(
-            deviceLabel = deviceLabel,
-            elapsedLabel = formatCaptureElapsed(sessionElapsed(snapshot)),
-            storageLabel = storageLabel,
-            videoLabel = captureVideoStatus(snapshot),
-        )
-        state.captureScreenshotStatus?.let {
-            AppText(it, color = colors.ts, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        // Bounded + scrollable: markers accumulate over a long capture, and an unbounded list
+        // would eat the weight(1f) the surface above depends on, shrinking the mirror as you work.
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+                .heightIn(max = MARKER_LIST_MAX_HEIGHT).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            CaptureMarkerList(state, tab)
         }
-        if (snapshot.diagnostics.isNotEmpty()) {
-            AppText("${snapshot.diagnostics.size} diagnostic message(s)", color = colors.td, fontSize = 10.sp)
+        if (mirrorMode == CaptureMirrorMode.EMBEDDED && !detached) {
+            EmbeddedMirrorClipboardFooter(
+                handle = mirror,
+                clipboardState = clipboardState,
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
+            )
         }
     }
 }
 
+/** Device/Elapsed/Storage/Video moved into the strip itself (Problem 1 in the restyle plan: they
+ * used to be printed twice); this freed space is for markers instead.
+ *
+ * The list is always DERIVED from `<!-- indagium:marker v1 ... -->` Note headers in
+ * `tab.annotations.blocks` (capture/CaptureMarkerCodec.kt, mirroring `diagram3/Seq3Codec`'s
+ * approach for diagrams) — nothing about a marker is stored anywhere else, so this is the only
+ * place that needs to know the on-disk shape. Memoised on the block list's own identity so a
+ * completely unrelated annotation edit (e.g. typing in the prefix) doesn't re-walk every block. */
 @Composable
-private fun CaptureCardValueGrid(deviceLabel: String, elapsedLabel: String, storageLabel: String, videoLabel: String) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        CaptureCardValueRow("Device", deviceLabel)
-        CaptureCardValueRow("Elapsed", elapsedLabel)
-        CaptureCardValueRow("Storage", storageLabel)
-        CaptureCardValueRow("Video", videoLabel)
-    }
-}
-
-@Composable
-private fun CaptureCardValueRow(label: String, value: String) {
+private fun CaptureMarkerList(state: AppState, tab: LogTab) {
     val colors = tc()
-    Row(Modifier.fillMaxWidth()) {
-        AppText(label, color = colors.td, fontSize = 11.sp, modifier = Modifier.width(64.dp))
-        AppText(
-            value, color = colors.tx, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
-            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        )
+    val entries = remember(tab.id, tab.annotations.blocks) { deriveMarkerEntries(tab.annotations.blocks) }
+    SectionHeader("MARKERS · ${entries.size}")
+    val undo = state.markerUndoByTab[tab.id]
+    if (undo != null) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            AppText("Marker added", color = colors.td, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            AppButton("Undo", { state.undoMarkIssue(tab.id) }, ButtonVariant.Secondary)
+        }
     }
+    if (entries.isEmpty()) {
+        AppText("No markers yet", color = colors.td, fontSize = 11.sp)
+        return
+    }
+    entries.forEachIndexed { index, entry -> CaptureMarkerRow(state, tab, entry, highlighted = index == entries.lastIndex) }
+}
+
+private val CAPTURE_MARKER_ROW_CORNER = RoundedCornerShape(7.dp)
+private val CAPTURE_MARKER_THUMB_CORNER = RoundedCornerShape(4.dp)
+private val CAPTURE_MARKER_THUMB_WIDTH = 26.dp
+private val CAPTURE_MARKER_THUMB_HEIGHT = 20.dp
+
+/** One marker: elapsed + label (+ "(collecting…)" while its trailing LogRef hasn't landed yet —
+ * see AppState.finishMarkerWindow) and a screenshot thumbnail on the right when the press took
+ * one, inside a one-line bordered card. Single-click is only wired once a LogRef exists — before
+ * that there is nothing yet for [AppState.requestAnnotationNavigation] to select — but
+ * double-click always reveals the marker's own note in Notes, via the same channel AI evidence
+ * cards use ([AppState.revealNoteBlock]/`aiEvidenceNoteTarget`), since that works off the note
+ * block id alone and needs no LogRef. [highlighted] marks the newest marker (last in note order). */
+@Composable
+private fun CaptureMarkerRow(state: AppState, tab: LogTab, entry: MarkerListEntry, highlighted: Boolean) {
+    val colors = tc()
+    val logRef = entry.logRef
+    val borderColor = if (highlighted) DANGER_RED.copy(alpha = .35f) else colors.br
+    val bgColor = if (highlighted) DANGER_RED.copy(alpha = .07f) else colors.p2
+    val timeColor = if (highlighted) DANGER_RED else colors.ts
+    Row(
+        Modifier.fillMaxWidth()
+            .background(bgColor, CAPTURE_MARKER_ROW_CORNER)
+            .border(1.dp, borderColor, CAPTURE_MARKER_ROW_CORNER)
+            .clip(CAPTURE_MARKER_ROW_CORNER)
+            .combinedClickable(
+                onClick = { if (logRef != null) state.requestAnnotationNavigation(tab.id, logRef) },
+                onDoubleClick = { entry.marker.noteBlockId?.let { state.revealNoteBlock(tab.id, it) } },
+            )
+            .padding(horizontal = 7.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        AppText(
+            formatCaptureElapsed(entry.marker.elapsedMs.coerceAtLeast(0L)),
+            color = timeColor,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.SemiBold,
+        )
+        AppText(
+            if (logRef == null) "${entry.marker.label} (collecting…)" else entry.marker.label,
+            color = colors.tx,
+            fontSize = 11.5.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        entry.screenshot?.let { image ->
+            val bitmap = remember(image.id) { decodeImageBlockBitmap(image.bytes) }
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.size(width = CAPTURE_MARKER_THUMB_WIDTH, height = CAPTURE_MARKER_THUMB_HEIGHT)
+                        .clip(CAPTURE_MARKER_THUMB_CORNER),
+                )
+            }
+        }
+    }
+}
+
+/** One derived marker plus the screenshot/LogRef blocks written alongside it — everything between
+ * its Note and the next one (or the end of Notes), matching the exact insertion order
+ * AppState.markIssue writes: Note, then optionally an Image, then eventually a LogRef. */
+private data class MarkerListEntry(
+    val marker: CaptureMarker,
+    val screenshot: AnnBlock.Image?,
+    val logRef: AnnBlock.LogRef?,
+)
+
+private fun deriveMarkerEntries(blocks: List<AnnBlock>): List<MarkerListEntry> {
+    val entries = mutableListOf<MarkerListEntry>()
+    var i = 0
+    while (i < blocks.size) {
+        val block = blocks[i]
+        val marker = (block as? AnnBlock.Note)?.let { parseMarkerHeader(it.text) }
+        if (marker != null) {
+            var screenshot: AnnBlock.Image? = null
+            var logRef: AnnBlock.LogRef? = null
+            var j = i + 1
+            while (j < blocks.size && blocks[j] !is AnnBlock.Note) {
+                when (val sibling = blocks[j]) {
+                    is AnnBlock.Image -> if (screenshot == null) screenshot = sibling
+                    is AnnBlock.LogRef -> if (logRef == null) logRef = sibling
+                    else -> Unit
+                }
+                j++
+            }
+            entries.add(MarkerListEntry(marker.copy(noteBlockId = block.id), screenshot, logRef))
+        }
+        i++
+    }
+    return entries
 }

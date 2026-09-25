@@ -62,6 +62,23 @@ class CaptureStripTest {
     }
 
     @Test
+    fun storageMeterFractionClampsAndTreatsMissingLimitAsEmpty() {
+        assertEquals(0f, captureStorageMeterFraction(0, 1_000))
+        assertEquals(0.5f, captureStorageMeterFraction(500, 1_000))
+        assertEquals(1f, captureStorageMeterFraction(1_500, 1_000))
+        assertEquals(0f, captureStorageMeterFraction(500, null))
+        assertEquals(0f, captureStorageMeterFraction(500, 0))
+    }
+
+    @Test
+    fun storageMeterWarnsAtEightyFivePercentOfTheSessionLimit() {
+        assertTrue(!captureStorageMeterIsWarn(840, 1_000))
+        assertTrue(captureStorageMeterIsWarn(850, 1_000))
+        assertTrue(captureStorageMeterIsWarn(1_000, 1_000))
+        assertTrue(!captureStorageMeterIsWarn(850, null))
+    }
+
+    @Test
     fun selectedCaptureOrdinalsUseActualRowPositionsAndIgnoreStaleIds() {
         val rows = (10..14).map { id ->
             LogEntry(id, "ts", LogLevel.I, "tag", "row $id")
