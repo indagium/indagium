@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -23,24 +24,33 @@ import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.InsertDriveFile
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.automirrored.outlined.Subject
+import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.FolderZip
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.HomeRecentsLayout
 import com.indagium.model.LogTab
 import kotlinx.coroutines.Dispatchers
@@ -50,6 +60,7 @@ import java.awt.Frame
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.roundToInt
 
 // ── Pure helpers (unit-testable, no Compose — see ui/HomeScreenTest.kt) ────
 
@@ -111,15 +122,162 @@ internal fun readRecentEntries(paths: List<String>): List<RecentEntry> = paths.m
     )
 }
 
-/** Matches the file name **and** its containing folder — a blank query returns every entry
- *  unchanged (including missing ones; filtering is not the place that prunes those). */
-internal fun filterRecentEntries(entries: List<RecentEntry>, query: String): List<RecentEntry> {
-    val needle = query.trim().lowercase(Locale.US)
-    if (needle.isEmpty()) return entries
-    return entries.filter { entry ->
-        entry.name.lowercase(Locale.US).contains(needle) ||
-            (File(entry.path).parent ?: "").lowercase(Locale.US).contains(needle)
+/** Type-filter values for the Recent-files filter row's "Type" pill. */
+internal enum class RecentTypeFilter { ALL, LOGS, ARCHIVES, NOTES }
+
+/** "Modified" pill values. [TODAY] compares local calendar days, not a rolling 24h window. */
+internal enum class RecentModifiedFilter { ANY_TIME, TODAY, LAST_7_DAYS, LAST_30_DAYS }
+
+/** "Size" pill values. Boundaries: [UNDER_10_MB] is `< 10 MB`, [BETWEEN_10_AND_100_MB] is
+ *  `10 MB..100 MB` inclusive, [OVER_100_MB] is `> 100 MB`. */
+internal enum class RecentSizeFilter { ANY_SIZE, UNDER_10_MB, BETWEEN_10_AND_100_MB, OVER_100_MB }
+
+/** "Sort" pill values. [RECENTLY_OPENED] is the default and applies no reordering at all — it
+ *  trusts the incoming list to already be in `AppState.recentFiles` order. */
+internal enum class RecentSortOption { RECENTLY_OPENED, MODIFIED_NEWEST, NAME_AZ, SIZE_LARGEST }
+
+/** The home tab's Recent-files filter-row state: one value per pill. The all-default instance
+ *  (used as both the initial state and the "Reset" target) is exactly `RecentFilters()` — see
+ *  [isDefault], which every pill's highlight and the "Reset" link's visibility key off of. */
+internal data class RecentFilters(
+    val type: RecentTypeFilter = RecentTypeFilter.ALL,
+    val modified: RecentModifiedFilter = RecentModifiedFilter.ANY_TIME,
+    val size: RecentSizeFilter = RecentSizeFilter.ANY_SIZE,
+    val sort: RecentSortOption = RecentSortOption.RECENTLY_OPENED,
+) {
+    val isDefault: Boolean get() = this == RecentFilters()
+}
+
+private fun matchesType(kind: RecentKind, filter: RecentTypeFilter): Boolean = when (filter) {
+    RecentTypeFilter.ALL -> true
+    RecentTypeFilter.LOGS -> kind == RecentKind.LOG
+    RecentTypeFilter.ARCHIVES -> kind == RecentKind.ARCHIVE
+    RecentTypeFilter.NOTES -> kind == RecentKind.NOTES
+}
+
+private fun startOfLocalDay(epochMs: Long): Long =
+    java.time.Instant.ofEpochMilli(epochMs)
+        .atZone(java.time.ZoneId.systemDefault())
+        .toLocalDate()
+        .atStartOfDay(java.time.ZoneId.systemDefault())
+        .toInstant()
+        .toEpochMilli()
+
+/** A null [lastModifiedMs] (missing file) fails every non-default filter — see [RecentEntry]'s own
+ *  KDoc on why a missing entry still exists in the list at all, and [filterRecentEntries]'s KDoc on
+ *  why that's the desired exclusion behaviour here specifically. */
+private fun matchesModified(lastModifiedMs: Long?, filter: RecentModifiedFilter, now: Long): Boolean {
+    if (filter == RecentModifiedFilter.ANY_TIME) return true
+    val modified = lastModifiedMs ?: return false
+    return when (filter) {
+        RecentModifiedFilter.ANY_TIME -> true
+        RecentModifiedFilter.TODAY -> startOfLocalDay(modified) == startOfLocalDay(now)
+        RecentModifiedFilter.LAST_7_DAYS -> now - modified <= 7 * MILLIS_PER_DAY
+        RecentModifiedFilter.LAST_30_DAYS -> now - modified <= 30 * MILLIS_PER_DAY
     }
+}
+
+private const val TEN_MB_BYTES = 10L * 1024 * 1024
+private const val HUNDRED_MB_BYTES = 100L * 1024 * 1024
+
+private fun matchesSize(sizeBytes: Long?, filter: RecentSizeFilter): Boolean {
+    if (filter == RecentSizeFilter.ANY_SIZE) return true
+    val size = sizeBytes ?: return false
+    return when (filter) {
+        RecentSizeFilter.ANY_SIZE -> true
+        RecentSizeFilter.UNDER_10_MB -> size < TEN_MB_BYTES
+        RecentSizeFilter.BETWEEN_10_AND_100_MB -> size in TEN_MB_BYTES..HUNDRED_MB_BYTES
+        RecentSizeFilter.OVER_100_MB -> size > HUNDRED_MB_BYTES
+    }
+}
+
+/** [RECENTLY_OPENED] passes [entries] through untouched (the incoming order IS that order — see
+ *  [RecentSortOption.RECENTLY_OPENED]'s KDoc). The other three put a missing file ([sizeBytes] or
+ *  [lastModifiedMs] null) last regardless of direction, via the `== null` boolean key sorting
+ *  false-before-true. */
+private fun sortRecentEntries(entries: List<RecentEntry>, sort: RecentSortOption): List<RecentEntry> =
+    when (sort) {
+        RecentSortOption.RECENTLY_OPENED -> entries
+        RecentSortOption.MODIFIED_NEWEST -> entries.sortedWith(
+            compareBy<RecentEntry> { it.lastModifiedMs == null }.thenByDescending { it.lastModifiedMs ?: 0L },
+        )
+        RecentSortOption.NAME_AZ -> entries.sortedBy { it.name.lowercase(Locale.US) }
+        RecentSortOption.SIZE_LARGEST -> entries.sortedWith(
+            compareBy<RecentEntry> { it.sizeBytes == null }.thenByDescending { it.sizeBytes ?: 0L },
+        )
+    }
+
+/** Matches the file name **and** its containing folder — a blank query and default [filters] both
+ *  pass every entry through unchanged (including missing ones for the *text* filter; missing ones
+ *  ARE dropped by a non-default [RecentModifiedFilter]/[RecentSizeFilter] — see [matchesModified]/
+ *  [matchesSize]). [now] defaults to the real clock so every existing 2-arg call site (UI code, and
+ *  the pre-filter-row tests in ui/HomeScreenTest.kt) is unaffected; tests that exercise date
+ *  filtering pass a fixed [now] explicitly. */
+internal fun filterRecentEntries(
+    entries: List<RecentEntry>,
+    query: String,
+    filters: RecentFilters = RecentFilters(),
+    now: Long = System.currentTimeMillis(),
+): List<RecentEntry> {
+    val needle = query.trim().lowercase(Locale.US)
+    val matched = entries.filter { entry ->
+        (needle.isEmpty() ||
+            entry.name.lowercase(Locale.US).contains(needle) ||
+            (File(entry.path).parent ?: "").lowercase(Locale.US).contains(needle)) &&
+            matchesType(entry.kind, filters.type) &&
+            matchesModified(entry.lastModifiedMs, filters.modified, now) &&
+            matchesSize(entry.sizeBytes, filters.size)
+    }
+    return sortRecentEntries(matched, filters.sort)
+}
+
+/** Display label for a filter pill's current value, e.g. "Type: Logs". */
+internal fun recentTypeFilterLabel(filter: RecentTypeFilter): String = when (filter) {
+    RecentTypeFilter.ALL -> "All"
+    RecentTypeFilter.LOGS -> "Logs"
+    RecentTypeFilter.ARCHIVES -> "Archives"
+    RecentTypeFilter.NOTES -> "Notes"
+}
+
+internal fun recentModifiedFilterLabel(filter: RecentModifiedFilter): String = when (filter) {
+    RecentModifiedFilter.ANY_TIME -> "Any time"
+    RecentModifiedFilter.TODAY -> "Today"
+    RecentModifiedFilter.LAST_7_DAYS -> "Last 7 days"
+    RecentModifiedFilter.LAST_30_DAYS -> "Last 30 days"
+}
+
+internal fun recentSizeFilterLabel(filter: RecentSizeFilter): String = when (filter) {
+    RecentSizeFilter.ANY_SIZE -> "Any size"
+    RecentSizeFilter.UNDER_10_MB -> "Under 10 MB"
+    RecentSizeFilter.BETWEEN_10_AND_100_MB -> "10–100 MB"
+    RecentSizeFilter.OVER_100_MB -> "Over 100 MB"
+}
+
+internal fun recentSortOptionLabel(filter: RecentSortOption): String = when (filter) {
+    RecentSortOption.RECENTLY_OPENED -> "Recently opened"
+    RecentSortOption.MODIFIED_NEWEST -> "Modified, newest first"
+    RecentSortOption.NAME_AZ -> "Name A–Z"
+    RecentSortOption.SIZE_LARGEST -> "Size, largest first"
+}
+
+/** The Recent-files empty state message: only mentions the text query when one is actually active,
+ *  per item 1's ask that a filter-only miss doesn't read as if it were a text-search miss. */
+internal fun homeRecentEmptyMessage(query: String, filters: RecentFilters): String {
+    val trimmedQuery = query.trim()
+    return when {
+        trimmedQuery.isNotEmpty() && !filters.isDefault -> "Nothing matches \"$trimmedQuery\" with these filters"
+        trimmedQuery.isNotEmpty() -> "Nothing matches \"$trimmedQuery\""
+        else -> "Nothing matches these filters"
+    }
+}
+
+/** Shared LOG/ARCHIVE/NOTES/OTHER -> icon mapping for [RecentGridCard]'s centered pictogram and
+ *  [RecentListRow]'s small leading icon — one mapping so grid and list never drift apart. */
+internal fun recentKindIcon(kind: RecentKind): ImageVector = when (kind) {
+    RecentKind.LOG -> Icons.AutoMirrored.Outlined.Subject
+    RecentKind.ARCHIVE -> Icons.Outlined.FolderZip
+    RecentKind.NOTES -> Icons.Outlined.EditNote
+    RecentKind.OTHER -> Icons.AutoMirrored.Outlined.InsertDriveFile
 }
 
 private const val MILLIS_PER_MINUTE = 60_000L
@@ -290,8 +448,11 @@ private fun HomeRecentSection(
     val entries by produceState(initialValue = emptyList<RecentEntry>(), state.recentFiles) {
         value = withContext(Dispatchers.IO) { readRecentEntries(state.recentFiles) }
     }
-    val filtered = remember(entries, state.homeRecentFilter) { filterRecentEntries(entries, state.homeRecentFilter) }
     val now = remember(entries) { System.currentTimeMillis() }
+    val filters = state.homeRecentFilters
+    val filtered = remember(entries, state.homeRecentFilter, filters, now) {
+        filterRecentEntries(entries, state.homeRecentFilter, filters, now)
+    }
     val layout = state.settings.homeRecentsLayout
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -313,10 +474,15 @@ private fun HomeRecentSection(
                 },
             )
         }
+        HomeRecentFilterRow(
+            filters = filters,
+            onFilters = { state.homeRecentFilters = it },
+            onReclaimFocus = onReclaimFocus,
+        )
         when {
             entries.isEmpty() -> HomeRecentEmptyState("No recent files yet", Modifier.weight(1f))
             filtered.isEmpty() -> HomeRecentEmptyState(
-                "Nothing matches \"${state.homeRecentFilter}\"",
+                homeRecentEmptyMessage(state.homeRecentFilter, filters),
                 Modifier.weight(1f),
             )
             layout == HomeRecentsLayout.GRID -> RecentGrid(
@@ -341,6 +507,138 @@ private fun HomeRecentSection(
 private fun HomeRecentEmptyState(message: String, modifier: Modifier = Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         AppText(message, color = tc().td, fontSize = 12.sp)
+    }
+}
+
+/** The compact filter-pill row under the "Filter recent files" field: one [RecentFilterPill] per
+ *  [RecentFilters] field, plus a "Reset" link that only appears once any pill has left its
+ *  default. */
+@Composable
+private fun HomeRecentFilterRow(
+    filters: RecentFilters,
+    onFilters: (RecentFilters) -> Unit,
+    onReclaimFocus: () -> Unit,
+) {
+    val defaults = remember { RecentFilters() }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        RecentFilterPill(
+            label = "Type",
+            values = RecentTypeFilter.entries,
+            selected = filters.type,
+            displayName = ::recentTypeFilterLabel,
+            isDefault = filters.type == defaults.type,
+            onSelect = { onFilters(filters.copy(type = it)) },
+            onReclaimFocus = onReclaimFocus,
+        )
+        RecentFilterPill(
+            label = "Modified",
+            values = RecentModifiedFilter.entries,
+            selected = filters.modified,
+            displayName = ::recentModifiedFilterLabel,
+            isDefault = filters.modified == defaults.modified,
+            onSelect = { onFilters(filters.copy(modified = it)) },
+            onReclaimFocus = onReclaimFocus,
+        )
+        RecentFilterPill(
+            label = "Size",
+            values = RecentSizeFilter.entries,
+            selected = filters.size,
+            displayName = ::recentSizeFilterLabel,
+            isDefault = filters.size == defaults.size,
+            onSelect = { onFilters(filters.copy(size = it)) },
+            onReclaimFocus = onReclaimFocus,
+        )
+        RecentFilterPill(
+            label = "Sort",
+            values = RecentSortOption.entries,
+            selected = filters.sort,
+            displayName = ::recentSortOptionLabel,
+            isDefault = filters.sort == defaults.sort,
+            onSelect = { onFilters(filters.copy(sort = it)) },
+            onReclaimFocus = onReclaimFocus,
+        )
+        if (!filters.isDefault) {
+            HomeRecentFilterResetLink(onClick = { onFilters(RecentFilters()); onReclaimFocus() })
+        }
+    }
+}
+
+/** One "Label: value" pill. Click toggles a small menu (the package-local [Popup] from
+ *  ui/MirrorOccludingLayers.kt, per this screen's own convention) listing every value in
+ *  [values]; picking one closes the menu and reclaims root focus, same as every other clickable on
+ *  this screen (see [HomeTile]'s KDoc on why that matters). Highlighted with an accent border/tint
+ *  whenever [isDefault] is false. */
+@Composable
+private fun <T> RecentFilterPill(
+    label: String,
+    values: List<T>,
+    selected: T,
+    displayName: (T) -> String,
+    isDefault: Boolean,
+    onSelect: (T) -> Unit,
+    onReclaimFocus: () -> Unit,
+) {
+    val tc = tc()
+    var expanded by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(50)
+    Box {
+        Row(
+            Modifier
+                .clip(shape)
+                .background(if (!isDefault) tc.ac.copy(alpha = 0.14f) else Color.Transparent, shape)
+                .border(1.dp, if (!isDefault) tc.ac else tc.br, shape)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            AppText("$label: ${displayName(selected)}", color = if (!isDefault) tc.ac else tc.ts, fontSize = 10.sp)
+            AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 9.sp)
+        }
+        if (expanded) {
+            val density = LocalDensity.current.density
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, (28 * density).roundToInt()),
+                onDismissRequest = { expanded = false; onReclaimFocus() },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(170.dp)
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    values.forEach { value ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = { onSelect(value); expanded = false; onReclaimFocus() },
+                        ) {
+                            AppText(
+                                displayName(value),
+                                color = if (value == selected) tc.ac else tc.tx,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HomeRecentFilterResetLink(onClick: () -> Unit) {
+    val tc = tc()
+    HoverBox(modifier = Modifier.clip(RoundedCornerShape(4.dp)), onClick = onClick) {
+        AppText(
+            "Reset",
+            color = tc.ac,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp),
+        )
     }
 }
 
@@ -431,11 +729,18 @@ private fun RecentGridCard(
             onReclaimFocus()
         },
     ) {
-        Column(
-            Modifier.fillMaxSize().padding(10.dp),
-            verticalArrangement = Arrangement.SpaceBetween,
-        ) {
+        Column(Modifier.fillMaxSize().padding(10.dp)) {
             RecentTypeBadge(entry.kind)
+            // Fills the space between the badge and the name/meta block below with a centered
+            // pictogram (item 2) instead of leaving it empty.
+            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Icon(
+                    recentKindIcon(entry.kind),
+                    contentDescription = null,
+                    tint = tc.td.copy(alpha = if (entry.exists) 1f else 0.5f),
+                    modifier = Modifier.size(40.dp),
+                )
+            }
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 AppText(
                     entry.name,
@@ -471,6 +776,12 @@ private fun RecentListRow(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             RecentTypeBadge(entry.kind)
+            Icon(
+                recentKindIcon(entry.kind),
+                contentDescription = null,
+                tint = tc.td.copy(alpha = if (entry.exists) 1f else 0.5f),
+                modifier = Modifier.size(18.dp),
+            )
             Column(Modifier.weight(1f)) {
                 AppText(
                     entry.name,

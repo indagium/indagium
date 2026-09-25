@@ -70,6 +70,124 @@ class HomeScreenTest {
     }
 
     @Test
+    fun filterRecentEntriesDefaultFiltersMatchExisting2ArgBehavior() {
+        val entries = listOf(
+            entry("/a/one.log", name = "one.log", kind = RecentKind.LOG),
+            entry("/b/two.zip", name = "two.zip", kind = RecentKind.ARCHIVE),
+        )
+        assertEquals(entries, filterRecentEntries(entries, ""))
+    }
+
+    @Test
+    fun filterRecentEntriesTypeFilterKeepsOnlyMatchingKind() {
+        val entries = listOf(
+            entry("/a/one.log", kind = RecentKind.LOG),
+            entry("/b/two.zip", kind = RecentKind.ARCHIVE),
+            entry("/c/three.ann", kind = RecentKind.NOTES),
+        )
+        assertEquals(
+            listOf(entries[0]),
+            filterRecentEntries(entries, "", RecentFilters(type = RecentTypeFilter.LOGS)),
+        )
+        assertEquals(
+            listOf(entries[1]),
+            filterRecentEntries(entries, "", RecentFilters(type = RecentTypeFilter.ARCHIVES)),
+        )
+        assertEquals(
+            listOf(entries[2]),
+            filterRecentEntries(entries, "", RecentFilters(type = RecentTypeFilter.NOTES)),
+        )
+    }
+
+    @Test
+    fun filterRecentEntriesModifiedFilterUsesLocalCalendarDayForToday() {
+        val now = 10L * 24 * 60 * 60 * 1000 + 12 * 60 * 60 * 1000 // some day, mid-afternoon UTC-ish
+        val today = entry("/a.log", lastModifiedMs = now - 60_000L)
+        val startOfToday = java.time.Instant.ofEpochMilli(now)
+            .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+            .atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val yesterday = entry("/b.log", lastModifiedMs = startOfToday - 60_000L)
+        val sixDaysAgo = entry("/c.log", lastModifiedMs = now - 6L * 24 * 60 * 60 * 1000)
+        val twentyDaysAgo = entry("/d.log", lastModifiedMs = now - 20L * 24 * 60 * 60 * 1000)
+        val missing = entry("/e.log", lastModifiedMs = null, sizeBytes = null, exists = false)
+        val entries = listOf(today, yesterday, sixDaysAgo, twentyDaysAgo, missing)
+
+        assertEquals(
+            listOf(today),
+            filterRecentEntries(entries, "", RecentFilters(modified = RecentModifiedFilter.TODAY), now),
+        )
+        assertEquals(
+            listOf(today, yesterday, sixDaysAgo),
+            filterRecentEntries(entries, "", RecentFilters(modified = RecentModifiedFilter.LAST_7_DAYS), now),
+        )
+        assertEquals(
+            listOf(today, yesterday, sixDaysAgo, twentyDaysAgo),
+            filterRecentEntries(entries, "", RecentFilters(modified = RecentModifiedFilter.LAST_30_DAYS), now),
+        )
+        // Missing files are excluded by a non-default Modified filter.
+        assertFalse(
+            filterRecentEntries(entries, "", RecentFilters(modified = RecentModifiedFilter.LAST_30_DAYS), now)
+                .contains(missing),
+        )
+        // ...but included when Modified stays at its default.
+        assertTrue(filterRecentEntries(entries, "", RecentFilters(), now).contains(missing))
+    }
+
+    @Test
+    fun filterRecentEntriesSizeFilterBoundariesAndMissingExclusion() {
+        val now = 1_000_000L
+        val small = entry("/a.log", sizeBytes = 5L * 1024 * 1024) // 5 MB
+        val mid = entry("/b.log", sizeBytes = 50L * 1024 * 1024) // 50 MB
+        val big = entry("/c.log", sizeBytes = 150L * 1024 * 1024) // 150 MB
+        val missing = entry("/d.log", sizeBytes = null, lastModifiedMs = null, exists = false)
+        val entries = listOf(small, mid, big, missing)
+
+        assertEquals(listOf(small), filterRecentEntries(entries, "", RecentFilters(size = RecentSizeFilter.UNDER_10_MB), now))
+        assertEquals(listOf(mid), filterRecentEntries(entries, "", RecentFilters(size = RecentSizeFilter.BETWEEN_10_AND_100_MB), now))
+        assertEquals(listOf(big), filterRecentEntries(entries, "", RecentFilters(size = RecentSizeFilter.OVER_100_MB), now))
+        assertTrue(filterRecentEntries(entries, "", RecentFilters(), now).contains(missing))
+    }
+
+    @Test
+    fun filterRecentEntriesSortOptions() {
+        val now = 1_000_000L
+        val a = entry("/z_first_opened.log", name = "z_first_opened.log", sizeBytes = 10L, lastModifiedMs = 500L)
+        val b = entry("/a_second_opened.log", name = "a_second_opened.log", sizeBytes = 30L, lastModifiedMs = 900L)
+        val missing = entry("/missing.log", name = "missing.log", sizeBytes = null, lastModifiedMs = null, exists = false)
+        val entries = listOf(a, b, missing) // "recently opened" order == this list order
+
+        assertEquals(entries, filterRecentEntries(entries, "", RecentFilters(sort = RecentSortOption.RECENTLY_OPENED), now))
+        assertEquals(
+            listOf(b, a, missing),
+            filterRecentEntries(entries, "", RecentFilters(sort = RecentSortOption.MODIFIED_NEWEST), now),
+        )
+        assertEquals(
+            listOf(b, missing, a),
+            filterRecentEntries(entries, "", RecentFilters(sort = RecentSortOption.NAME_AZ), now),
+        )
+        assertEquals(
+            listOf(b, a, missing),
+            filterRecentEntries(entries, "", RecentFilters(sort = RecentSortOption.SIZE_LARGEST), now),
+        )
+    }
+
+    @Test
+    fun homeRecentEmptyMessageMentionsQueryOnlyWhenOneIsActive() {
+        assertEquals("Nothing matches these filters", homeRecentEmptyMessage("", RecentFilters(type = RecentTypeFilter.LOGS)))
+        assertEquals("Nothing matches \"foo\"", homeRecentEmptyMessage("foo", RecentFilters()))
+        assertEquals(
+            "Nothing matches \"foo\" with these filters",
+            homeRecentEmptyMessage("foo", RecentFilters(type = RecentTypeFilter.LOGS)),
+        )
+    }
+
+    @Test
+    fun recentKindIconMapsEveryKindDistinctly() {
+        val icons = RecentKind.entries.map(::recentKindIcon)
+        assertEquals(icons.toSet().size, icons.size, "every RecentKind should map to a distinct icon")
+    }
+
+    @Test
     fun readRecentEntriesReadsRealFilesAndFlagsADeletedPath() {
         val dir = Files.createTempDirectory("home-screen-test").toFile()
         try {
