@@ -144,16 +144,78 @@ static void verifyViewportClipMaskCoordinates() {
 
 static void verifyMirrorLayerOrderForComposeOverlays() {
     if (mirrorLayerZPosition(true, false, true, 0.0, 12.0) != -1.0) {
-        fail("overlay experiment did not place the mirror below sibling layers");
+        fail("underlay ordering did not place the mirror below sibling layers");
     }
     if (mirrorLayerZPosition(true, false, true, -2.0, 12.0) != -3.0) {
-        fail("overlay experiment did not account for negative sibling depths");
+        fail("underlay ordering did not account for negative sibling depths");
     }
     if (mirrorLayerZPosition(false, false, true, 0.0, 12.0) != 13.0) {
-        fail("fallback mode no longer keeps the mirror above its siblings");
+        fail("fallback ordering no longer keeps the mirror above its siblings");
     }
     if (mirrorLayerZPosition(true, true, true, 0.0, 12.0) != 1000.0) {
         fail("native test pattern stopped being topmost");
+    }
+}
+
+static CAMetalLayer *makeSibling(CGFloat zPosition, BOOL opaque) {
+    CAMetalLayer *sibling = [CAMetalLayer layer];
+    sibling.zPosition = zPosition;
+    sibling.opaque = opaque;
+    return sibling;
+}
+
+static void verifyUnderlayStatusPredicates() {
+    CALayer *parent = [CALayer layer];
+    CAMetalLayer *ours = [CAMetalLayer layer];
+    ours.zPosition = -5.0;
+    [parent addSublayer:ours];
+
+    // No other siblings yet: vacuously below everything, but nothing that could host a hole.
+    if (!layerIsBelowAllSiblings(ours, parent.sublayers)) {
+        fail("a layer with no other siblings should be trivially below all of them");
+    }
+    if (otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("transparency predicate should require at least one other sibling to exist");
+    }
+
+    CAMetalLayer *opaqueAbove = makeSibling(10.0, YES);
+    [parent addSublayer:opaqueAbove];
+    if (!layerIsBelowAllSiblings(ours, parent.sublayers)) {
+        fail("our layer should still read as below the one sibling placed above it");
+    }
+    if (otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("an opaque sibling must fail the transparency predicate");
+    }
+
+    CAMetalLayer *transparentAbove = makeSibling(20.0, NO);
+    [parent addSublayer:transparentAbove];
+    if (otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("mixing an opaque and a transparent sibling must still fail");
+    }
+
+    [opaqueAbove removeFromSuperlayer];
+    if (!otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("every other sibling being non-opaque should satisfy the transparency predicate");
+    }
+
+    // The fallback puts our layer ABOVE its siblings. The predicate must still hold there, or a
+    // fallback taken before skiko's layer existed could never upgrade back to the underlay.
+    ours.zPosition = 30.0;
+    if (layerIsBelowAllSiblings(ours, parent.sublayers)) {
+        fail("a layer above its sibling must not read as below all siblings");
+    }
+    if (!otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("the transparency predicate must not depend on our own z-order");
+    }
+    ours.zPosition = -5.0;
+
+    CAMetalLayer *below = makeSibling(-10.0, YES);
+    [parent addSublayer:below];
+    if (layerIsBelowAllSiblings(ours, parent.sublayers)) {
+        fail("a sibling placed below us must fail the below-all-siblings predicate");
+    }
+    if (otherSiblingsAreTransparent(ours, parent.sublayers)) {
+        fail("an opaque sibling anywhere must fail the transparency predicate");
     }
 }
 
@@ -221,6 +283,7 @@ int main() {
     verifyJawtManagedLayerPlacement();
     verifyViewportClipMaskCoordinates();
     verifyMirrorLayerOrderForComposeOverlays();
+    verifyUnderlayStatusPredicates();
     verifyQueuedGeometryOwnsPendingState();
     const uint8_t annexB[] = {
         0x00, 0x00, 0x01, 0x67, 0x11,
@@ -264,7 +327,7 @@ int main() {
     }
 
     shutdownMirror(&mirror);
-    if (!mirror.closed || mirror.decoder || mirror.format || mirror.decoderContext || mirror.textureCache || mirror.latest) {
+    if (!mirror.closed || mirror.decoder || mirror.format || mirror.decoderContext || mirror.textureCache || mirror.latest || mirror.lastPresented) {
         fail("shutdown left decoder-owned resources alive");
     }
     std::cout << "native mirror parser, SPS/PPS reconfiguration, and shutdown checks passed" << std::endl;

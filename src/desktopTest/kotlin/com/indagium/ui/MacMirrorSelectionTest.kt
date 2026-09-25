@@ -16,6 +16,7 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
+import org.jetbrains.skiko.GraphicsApi
 
 class MacMirrorSelectionTest {
     @Test
@@ -63,7 +64,10 @@ class MacMirrorSelectionTest {
     }
 
     @Test
-    fun nativeMirrorRemainsVisibleBehindComposeOverlayAndGatesDeviceInput() {
+    fun nativeMirrorStaysVisibleBehindComposeOverlayUnderTheDefaultUnderlay() {
+        // keepPixelsUnderOverlay = true is the default-underlay branch: the mirror keeps
+        // presenting live pixels behind a same-window Compose popup/dialog, while device input
+        // is still gated off so the popup — not the device — receives the click.
         val visible = MirrorClipFractions(0f, 0.2f, 1f, 0.8f)
 
         assertEquals(
@@ -72,12 +76,46 @@ class MacMirrorSelectionTest {
         )
         assertFalse(mirrorCanvasAcceptsDeviceInput(hostMounted = true, overlayOccluded = true))
         assertTrue(mirrorCanvasAcceptsDeviceInput(hostMounted = true, overlayOccluded = false))
+        assertEquals(visible, effectiveMirrorClip(visible, overlayOccluded = false))
+        assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(null, overlayOccluded = false))
+    }
+
+    @Test
+    fun nativeMirrorIsFullyClippedBehindComposeOverlayUnderTheLegacyFallback() {
+        // keepPixelsUnderOverlay = false is the fallback branch (underlay not requested or not
+        // supported on this machine): today's above-siblings master behavior masks the mirror
+        // entirely while any overlay is open, exactly as it always has.
+        val visible = MirrorClipFractions(0f, 0.2f, 1f, 0.8f)
+
         assertEquals(
             MirrorClipFractions(0f, 0f, 0f, 0f),
             effectiveMirrorClip(visible, overlayOccluded = true, keepPixelsUnderOverlay = false),
         )
-        assertEquals(visible, effectiveMirrorClip(visible, overlayOccluded = false))
-        assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(null, overlayOccluded = false))
+    }
+
+    @Test
+    fun underlayActiveRequiresTheRequestAndTheOrderIndependentStatusBits() {
+        assertFalse(underlayActiveFor(requested = false, status = 0b1111L))
+        assertFalse(underlayActiveFor(requested = true, status = 0b1110L)) // bit0 (attached) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0b1011L)) // bit2 (sibling exists) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0b0111L)) // bit3 (siblings transparent) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0L))
+        assertTrue(underlayActiveFor(requested = true, status = 0b1111L))
+        // bit1 (currently below siblings) is what the fallback's own "above" ordering clears, so it
+        // must not gate the decision — otherwise a fallback could never upgrade back.
+        assertTrue(underlayActiveFor(requested = true, status = 0b1101L))
+        // Extra high bits beyond the four defined ones must not affect the decision either way.
+        assertTrue(underlayActiveFor(requested = true, status = 0b1_1101L))
+    }
+
+    @Test
+    fun underlayNeedsComposeToActuallyBlendInterop() {
+        assertTrue(composeInteropBlendingEffective(flagEnabled = true, renderApi = GraphicsApi.METAL))
+        // -Dcompose.interop.blending=false: Compose cuts the SwingPanel rect through popups.
+        assertFalse(composeInteropBlendingEffective(flagEnabled = false, renderApi = GraphicsApi.METAL))
+        // A software renderer cannot blend interop even with the flag on.
+        assertFalse(composeInteropBlendingEffective(flagEnabled = true, renderApi = GraphicsApi.SOFTWARE_FAST))
+        assertFalse(composeInteropBlendingEffective(flagEnabled = true, renderApi = null))
     }
 
     @Test

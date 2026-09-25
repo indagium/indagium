@@ -2450,14 +2450,13 @@ class AppState(
     }
 
     /**
-     * A Compose [Popup] cannot appear above the native JAWT/Metal layer in the same macOS
-     * window. The capture snapshot popup masks that surface for its lifetime and restores the
-     * already-computed viewport on dismissal.
+     * A Compose [Popup] cannot appear above the native JAWT/Metal layer in the same macOS window
+     * under the legacy above-siblings fallback (the underlay keeps it live instead — see
+     * EmbeddedMirrorMacSurface.underlayActive). Callers — currently only
+     * RegisterMirrorOcclusionForCurrentWindow in MirrorOccludingLayers.kt, which every
+     * package-local `Popup`/`Dialog` in this package registers through — mask that surface for the
+     * lifetime of their own composition and restore the already-computed viewport on dismissal.
      */
-    internal fun setEmbeddedMirrorOverlayOccluded(tabId: String, occluded: Boolean) {
-        setEmbeddedMirrorOverlayOcclusionSource(tabId, "capture-snapshot-popover", occluded)
-    }
-
     internal fun setEmbeddedMirrorOverlayOcclusionSource(tabId: String, source: String, occluded: Boolean) {
         synchronized(stateLock) {
             val sources = embeddedMirrorOverlaySourcesByTab.getOrPut(tabId) { mutableSetOf() }

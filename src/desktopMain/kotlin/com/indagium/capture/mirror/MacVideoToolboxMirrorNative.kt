@@ -11,7 +11,7 @@ import kotlin.concurrent.write
 /** Small Kotlin facade around the packaged macOS VideoToolbox/Metal/JAWT implementation. */
 internal class MacVideoToolboxMirrorNative(
     private val canvas: Canvas,
-    private val overlayLayerExperimentEnabled: Boolean,
+    private val underlayRequested: Boolean,
 ) : AutoCloseable {
     private val lifecycle = ReentrantReadWriteLock()
     private var handle: Long
@@ -19,7 +19,7 @@ internal class MacVideoToolboxMirrorNative(
     init {
         check(isMac()) { "VideoToolbox mirror is available only on macOS" }
         check(load()) { loadFailure ?: "Bundled VideoToolbox mirror library is unavailable" }
-        handle = nativeCreate(canvas, overlayLayerExperimentEnabled)
+        handle = nativeCreate(canvas, underlayRequested)
         check(handle != 0L) { "Could not create VideoToolbox mirror surface" }
     }
 
@@ -59,9 +59,15 @@ internal class MacVideoToolboxMirrorNative(
         if (width > 0 && height > 0) width to height else null
     }
 
-    fun setBounds(width: Int, height: Int, pixelWidth: Int, pixelHeight: Int) = lifecycle.read {
+    /** [origin] is the Canvas position in its window as `(windowX, windowY, insetLeft, insetTop)`,
+     * the same terms [attachCanvas] takes; when present the native side re-asserts the layer frame
+     * from it rather than relying on JAWT alone (see PendingGeometryUpdate.hasOrigin). */
+    fun setBounds(width: Int, height: Int, pixelWidth: Int, pixelHeight: Int, origin: MirrorCanvasOrigin? = null) = lifecycle.read {
         if (handle != 0L && width > 0 && height > 0 && pixelWidth > 0 && pixelHeight > 0) {
-            nativeSetBounds(handle, width, height, pixelWidth, pixelHeight)
+            nativeSetBounds(
+                handle, width, height, pixelWidth, pixelHeight,
+                origin != null, origin?.windowX ?: 0, origin?.windowY ?: 0, origin?.insetLeft ?: 0, origin?.insetTop ?: 0,
+            )
         }
     }
 
@@ -70,6 +76,20 @@ internal class MacVideoToolboxMirrorNative(
     }
 
     /** Removes the retained Metal layer from its AppKit window without stopping VideoToolbox. */
+    fun isLayerAttached(): Boolean = lifecycle.read { handle != 0L && nativeLayerAttached(handle) }
+
+    /** Packed bitfield (see the native doc on `nativeUnderlayStatus`) the Kotlin side decodes with
+     * `underlayActiveFor` to decide whether the underlay ordering is genuinely working right now. */
+    fun underlayStatus(): Long = lifecycle.read {
+        if (handle == 0L) 0L else nativeUnderlayStatus(handle)
+    }
+
+    /** Flips the native z-order between underlay (below Core Animation siblings) and the legacy
+     * above-siblings fallback. Safe to call from the EDT: native re-applies it asynchronously. */
+    fun setUnderlayOrdering(underlayOrdering: Boolean) = lifecycle.read {
+        if (handle != 0L) nativeSetUnderlayOrdering(handle, underlayOrdering)
+    }
+
     fun detachCanvas() = lifecycle.read {
         if (handle != 0L) nativeDetach(handle)
     }
@@ -115,7 +135,7 @@ internal class MacVideoToolboxMirrorNative(
             }
         }
 
-        @JvmStatic private external fun nativeCreate(canvas: Canvas, overlayLayerExperimentEnabled: Boolean): Long
+        @JvmStatic private external fun nativeCreate(canvas: Canvas, underlayRequested: Boolean): Long
         @JvmStatic private external fun nativeDecode(
             handle: Long,
             bytes: ByteArray,
@@ -125,11 +145,31 @@ internal class MacVideoToolboxMirrorNative(
             keyFrame: Boolean,
             ingressNs: Long,
         ): Long
-        @JvmStatic private external fun nativeSetBounds(handle: Long, width: Int, height: Int, pixelWidth: Int, pixelHeight: Int)
+        @JvmStatic private external fun nativeSetBounds(
+            handle: Long,
+            width: Int,
+            height: Int,
+            pixelWidth: Int,
+            pixelHeight: Int,
+            hasOrigin: Boolean,
+            windowX: Int,
+            windowY: Int,
+            insetLeft: Int,
+            insetTop: Int,
+        )
         @JvmStatic private external fun nativeAttach(handle: Long, windowX: Int, windowY: Int, insetLeft: Int, insetTop: Int): String?
         @JvmStatic private external fun nativeDetach(handle: Long)
+        @JvmStatic private external fun nativeLayerAttached(handle: Long): Boolean
+
+        @JvmStatic private external fun nativeUnderlayStatus(handle: Long): Long
+
+        @JvmStatic private external fun nativeSetUnderlayOrdering(handle: Long, underlayOrdering: Boolean)
+
         @JvmStatic private external fun nativeSetClip(handle: Long, left: Float, top: Float, right: Float, bottom: Float)
         @JvmStatic private external fun nativeReadMetrics(handle: Long): LongArray?
         @JvmStatic private external fun nativeClose(handle: Long)
     }
 }
+
+/** A Canvas's position in its top-level window, in the terms the native attach expects. */
+internal data class MirrorCanvasOrigin(val windowX: Int, val windowY: Int, val insetLeft: Int, val insetTop: Int)

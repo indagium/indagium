@@ -60,10 +60,12 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
-    // The macOS mirror is a native CAMetalLayer hosted by SwingPanel. Keep Compose's documented
-    // interop blending switch enabled where supported. Compose Desktop 1.11.1's Metal order
-    // workaround still keeps interop above ComposeWindow content; the native-layer underlay
-    // experiment is separately opt-in via -Dindagium.mirror.overlay-experiment=true.
+    // The macOS mirror is a native CAMetalLayer hosted by SwingPanel. Compose's documented interop
+    // blending switch is now load-bearing, not merely an experiment: the mirror's default underlay
+    // ordering (EmbeddedMirrorMacSurface.underlayRequested, -Dindagium.mirror.underlay, default
+    // true) relies on it to make Compose's own layer non-opaque so a punched hole can reveal the
+    // native layer beneath. Without it — or under -Dindagium.mirror.underlay=false — the automatic
+    // fallback keeps the pre-underlay above-siblings behavior instead.
     if (System.getProperty("os.name").contains("mac", ignoreCase = true)) {
         if (System.getProperty("compose.interop.blending") == null) {
             System.setProperty("compose.interop.blending", "true")

@@ -682,6 +682,11 @@ fun ToolbarBtn(
     }
 }
 
+/** Rendered by androidx's own [TooltipArea]/Popup, which deliberately never registers mirror
+ * occlusion (unlike the package-local `Popup`/`Dialog` in MirrorOccludingLayers.kt): under the
+ * default underlay it now paints over the mirror's punched hole and becomes visible for the first
+ * time, and its clicks still pass straight through to the device either way — left unregistered
+ * on purpose. */
 @Composable
 internal fun ToolbarTooltip(text: String) {
     val tc = tc()
