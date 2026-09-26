@@ -266,6 +266,27 @@ internal fun recentSortOptionLabel(filter: RecentSortOption): String = when (fil
     RecentSortOption.SIZE_LARGEST -> "Size, largest first"
 }
 
+/** What the Recent-files section body should render, decided purely from whether a stat read has
+ *  ever completed and what it found — see [homeRecentSectionMode]. [LOADING] is only reachable
+ *  before the very first read finishes in this run (see [AppState.homeRecentEntriesCache]'s own
+ *  doc): once any read has completed, a later re-read (tab switch, `recentFiles` changing) shows the
+ *  previous result in place rather than reverting to [LOADING], which is the whole point of the
+ *  flicker fix (item 1). */
+internal enum class HomeRecentSectionMode { LOADING, EMPTY_NO_FILES, EMPTY_FILTERED, RESULTS }
+
+/** Pure decision behind [HomeRecentSection]'s `when` — see [HomeRecentSectionMode]'s own doc for
+ *  what each value means and why [entriesLoaded] (not `entries.isEmpty()`) is what gates [LOADING]. */
+internal fun homeRecentSectionMode(
+    entriesLoaded: Boolean,
+    entries: List<RecentEntry>,
+    filtered: List<RecentEntry>,
+): HomeRecentSectionMode = when {
+    !entriesLoaded -> HomeRecentSectionMode.LOADING
+    entries.isEmpty() -> HomeRecentSectionMode.EMPTY_NO_FILES
+    filtered.isEmpty() -> HomeRecentSectionMode.EMPTY_FILTERED
+    else -> HomeRecentSectionMode.RESULTS
+}
+
 /** The Recent-files empty state message: only mentions the text query when one is actually active,
  *  per item 1's ask that a filter-only miss doesn't read as if it were a text-search miss. */
 internal fun homeRecentEmptyMessage(query: String, filters: RecentFilters): String {
@@ -456,14 +477,20 @@ private fun HomeRecentSection(
     modifier: Modifier = Modifier,
 ) {
     LaunchedEffect(Unit) { state.pruneMissingRecentFiles() }
-    val entries by produceState(initialValue = emptyList<RecentEntry>(), state.recentFiles) {
-        value = withContext(Dispatchers.IO) { readRecentEntries(state.recentFiles) }
+    // Seeded from AppState.homeRecentEntriesCache (survives this composable's own disposal on tab
+    // switch — see that field's doc) rather than emptyList(), so re-entering the New tab paints the
+    // previous grid/list on the very first frame instead of "No recent files yet" while this re-stats
+    // in the background (item 1 of the flicker fix). Only null before any read has ever completed.
+    val entries by produceState(initialValue = state.homeRecentEntriesCache, state.recentFiles) {
+        value = withContext(Dispatchers.IO) { readRecentEntries(state.recentFiles) }.also { state.homeRecentEntriesCache = it }
     }
-    val now = remember(entries) { System.currentTimeMillis() }
+    val resolvedEntries = entries.orEmpty()
+    val now = remember(resolvedEntries) { System.currentTimeMillis() }
     val filters = state.homeRecentFilters
-    val filtered = remember(entries, state.homeRecentFilter, filters, now) {
-        filterRecentEntries(entries, state.homeRecentFilter, filters, now)
+    val filtered = remember(resolvedEntries, state.homeRecentFilter, filters, now) {
+        filterRecentEntries(resolvedEntries, state.homeRecentFilter, filters, now)
     }
+    val mode = homeRecentSectionMode(entriesLoaded = entries != null, entries = resolvedEntries, filtered = filtered)
     val layout = state.settings.homeRecentsLayout
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -499,27 +526,34 @@ private fun HomeRecentSection(
             onFilters = { state.homeRecentFilters = it },
             onReclaimFocus = onReclaimFocus,
         )
-        when {
-            entries.isEmpty() -> HomeRecentEmptyState("No recent files yet", Modifier.weight(1f))
-            filtered.isEmpty() -> HomeRecentEmptyState(
+        when (mode) {
+            // Nothing has ever been read yet (only reachable on this run's very first stat pass —
+            // see HomeRecentSectionMode's own doc): reserve the space rather than claiming there are
+            // no recent files, which would immediately be contradicted a frame later.
+            HomeRecentSectionMode.LOADING -> Box(Modifier.weight(1f))
+            HomeRecentSectionMode.EMPTY_NO_FILES -> HomeRecentEmptyState("No recent files yet", Modifier.weight(1f))
+            HomeRecentSectionMode.EMPTY_FILTERED -> HomeRecentEmptyState(
                 homeRecentEmptyMessage(state.homeRecentFilter, filters),
                 Modifier.weight(1f),
             )
-            layout == HomeRecentsLayout.GRID -> RecentGrid(
-                entries = filtered,
-                now = now,
-                preferredColumns = state.settings.homeRecentGridColumns,
-                onOpen = { entry -> state.openPath(File(entry.path)) },
-                onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
-            )
-            else -> RecentList(
-                entries = filtered,
-                now = now,
-                onOpen = { entry -> state.openPath(File(entry.path)) },
-                onReclaimFocus = onReclaimFocus,
-                modifier = Modifier.weight(1f),
-            )
+            HomeRecentSectionMode.RESULTS -> if (layout == HomeRecentsLayout.GRID) {
+                RecentGrid(
+                    entries = filtered,
+                    now = now,
+                    preferredColumns = state.settings.homeRecentGridColumns,
+                    onOpen = { entry -> state.openPath(File(entry.path)) },
+                    onReclaimFocus = onReclaimFocus,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                RecentList(
+                    entries = filtered,
+                    now = now,
+                    onOpen = { entry -> state.openPath(File(entry.path)) },
+                    onReclaimFocus = onReclaimFocus,
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
     }
 }

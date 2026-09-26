@@ -231,4 +231,47 @@ class HomeScreenTest {
         // A single narrow window still keeps at least one column.
         assertEquals(1, recentGridColumnCount(availableWidthDp = 50f, preferredColumns = 4))
     }
+
+    // homeRecentSectionMode (item 1 of the New-tab flicker fix): the "no stat read has completed
+    // yet" state is driven by entriesLoaded, never by entries.isEmpty() — a completed read that
+    // genuinely found nothing must render the real empty state, not the loading placeholder.
+    @Test
+    fun homeRecentSectionModeIsLoadingOnlyBeforeTheFirstReadCompletes() {
+        assertEquals(
+            HomeRecentSectionMode.LOADING,
+            homeRecentSectionMode(entriesLoaded = false, entries = emptyList(), filtered = emptyList()),
+        )
+        // Even a non-empty result is ignored while entriesLoaded is false — the caller must not be
+        // able to fake a completed read by seeding data without also flipping the flag.
+        assertEquals(
+            HomeRecentSectionMode.LOADING,
+            homeRecentSectionMode(entriesLoaded = false, entries = listOf(entry("/a.log")), filtered = listOf(entry("/a.log"))),
+        )
+    }
+
+    @Test
+    fun homeRecentSectionModeIsEmptyNoFilesWhenACompletedReadFoundNothing() {
+        assertEquals(
+            HomeRecentSectionMode.EMPTY_NO_FILES,
+            homeRecentSectionMode(entriesLoaded = true, entries = emptyList(), filtered = emptyList()),
+        )
+    }
+
+    @Test
+    fun homeRecentSectionModeIsEmptyFilteredWhenEntriesExistButFiltersHideAll() {
+        val entries = listOf(entry("/a.log"))
+        assertEquals(
+            HomeRecentSectionMode.EMPTY_FILTERED,
+            homeRecentSectionMode(entriesLoaded = true, entries = entries, filtered = emptyList()),
+        )
+    }
+
+    @Test
+    fun homeRecentSectionModeIsResultsWhenTheFilteredListIsNonEmpty() {
+        val entries = listOf(entry("/a.log"), entry("/b.log"))
+        assertEquals(
+            HomeRecentSectionMode.RESULTS,
+            homeRecentSectionMode(entriesLoaded = true, entries = entries, filtered = entries),
+        )
+    }
 }

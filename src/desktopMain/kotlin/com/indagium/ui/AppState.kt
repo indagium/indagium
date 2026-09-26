@@ -3242,6 +3242,14 @@ class AppState(
      *  next launch. */
     internal var homeRecentFilters by mutableStateOf(RecentFilters())
 
+    /** Last-computed Recent-files stat results (ui/HomeScreen.kt's [RecentEntry]), cached here
+     *  because `HomeRecentSection` is fully disposed on every tab switch — its own `produceState`
+     *  would otherwise restart from an empty list each time the New tab is re-entered, which is
+     *  exactly the "No recent files yet" flash the flicker fix (item 1) removes. Null only before the
+     *  very first stat read has ever completed in this run; an empty (but non-null) list means a real
+     *  read completed and genuinely found nothing — see [HomeRecentSectionMode]. */
+    internal var homeRecentEntriesCache by mutableStateOf<List<RecentEntry>?>(null)
+
     /** Persisted history of regex patterns committed from the horizontal filter bar's Regex mode
      *  (ui/FilterBar.kt) — see [rememberRegexPattern]'s own doc for the commit contract. Global
      *  across tabs (not per-tab), same reasoning as [recentFiles] above: a pattern used to hunt for
