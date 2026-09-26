@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -243,5 +244,159 @@ class DeviceLogSettingsTest {
             "On device: buffer info unavailable · log.tag not set (device default)",
             formatDeviceLogStatusLine(emptyList(), null),
         )
+    }
+
+    // deviceLogStatusText (item 3 of the New-tab flicker fix): a background refresh must never blank
+    // a status line the panel already has good cached data for, and only an actual applied change
+    // gets the bare "Applying…" treatment — see the function's own doc.
+    private val loadedSizes = listOf(LogBufferSize("main", 4L * 1024 * 1024))
+
+    @Test
+    fun deviceLogStatusTextShowsNotReadYetBeforeTheFirstReadStarts() {
+        assertEquals("Not read yet", deviceLogStatusText(null))
+        assertEquals(
+            "Not read yet",
+            deviceLogStatusText(DeviceLogState(serial = "s1", activity = DeviceLogActivity.IDLE, loaded = false)),
+        )
+    }
+
+    @Test
+    fun deviceLogStatusTextShowsAReadingPlaceholderForTheFirstEverRead() {
+        assertEquals(
+            "Reading device settings…",
+            deviceLogStatusText(DeviceLogState(serial = "s1", activity = DeviceLogActivity.REFRESHING, loaded = false)),
+        )
+    }
+
+    @Test
+    fun deviceLogStatusTextKeepsTheCachedLineDuringABackgroundRefresh() {
+        val state = DeviceLogState(
+            serial = "s1",
+            bufferSizes = loadedSizes,
+            globalLevel = LogTagLevel.VERBOSE,
+            activity = DeviceLogActivity.REFRESHING,
+            loaded = true,
+        )
+        assertEquals(
+            "On device: main 4 MB · log.tag = V (Verbose) · Refreshing…",
+            deviceLogStatusText(state),
+        )
+    }
+
+    @Test
+    fun deviceLogStatusTextShowsThePlainCachedLineWhenIdle() {
+        val state = DeviceLogState(
+            serial = "s1",
+            bufferSizes = loadedSizes,
+            globalLevel = null,
+            activity = DeviceLogActivity.IDLE,
+            loaded = true,
+        )
+        assertEquals("On device: main 4 MB · log.tag not set (device default)", deviceLogStatusText(state))
+    }
+
+    @Test
+    fun deviceLogStatusTextShowsApplyingEvenWithCachedDataBehindIt() {
+        val state = DeviceLogState(
+            serial = "s1",
+            bufferSizes = loadedSizes,
+            globalLevel = LogTagLevel.VERBOSE,
+            activity = DeviceLogActivity.APPLYING,
+            loaded = true,
+        )
+        assertEquals("Applying…", deviceLogStatusText(state))
+    }
+
+    @Test
+    fun deviceLogStateBusyIsTrueForAnyNonIdleActivity() {
+        assertFalse(DeviceLogState(serial = "s1", activity = DeviceLogActivity.IDLE).busy)
+        assertTrue(DeviceLogState(serial = "s1", activity = DeviceLogActivity.REFRESHING).busy)
+        assertTrue(DeviceLogState(serial = "s1", activity = DeviceLogActivity.APPLYING).busy)
+        assertTrue(DeviceLogState(serial = "s1", activity = DeviceLogActivity.ROOTING).busy)
+    }
+
+    @Test
+    fun deviceLogStatusTextShowsARootingMessageWhileRestartingAdb() {
+        val state = DeviceLogState(
+            serial = "s1",
+            bufferSizes = loadedSizes,
+            globalLevel = LogTagLevel.VERBOSE,
+            activity = DeviceLogActivity.ROOTING,
+            loaded = true,
+        )
+        // Same bare-message treatment as APPLYING: the cached line is about to be stale anyway once
+        // adbd finishes restarting, so it isn't worth showing behind this one.
+        assertEquals("Restarting adb as root…", deviceLogStatusText(state))
+    }
+
+    // isPermissionFailure (the "Restart adb as root" button's trigger): loose, case-insensitive
+    // keyword matching against real-world adb/Android wording for a permission problem — see the
+    // function's own doc for why it deliberately over-triggers rather than under-triggers.
+
+    @Test
+    fun isPermissionFailureMatchesEveryDocumentedKeywordCaseInsensitively() {
+        val messages = listOf(
+            "Permission denied",
+            "permission",
+            "Operation not permitted",
+            "Failed to set property \"log.tag\" to \"V\"",
+            "avc: denied { set } for property=log.tag",
+            "SELinux policy prevents this",
+            "setprop: failed to set property",
+            "Unable to set property 'log.tag' to 'V'",
+            "insufficient permissions for device",
+            "open failed: EACCES",
+        )
+        messages.forEach { message ->
+            assertTrue(isPermissionFailure(message), "expected a permission match for: $message")
+            assertTrue(isPermissionFailure(message.uppercase()), "expected a case-insensitive match for: $message")
+        }
+    }
+
+    @Test
+    fun isPermissionFailureIsFalseForUnrelatedText() {
+        assertFalse(isPermissionFailure("device offline"))
+        assertFalse(isPermissionFailure(""))
+        assertFalse(isPermissionFailure("main: ring buffer is 256KB (0KB consumed)"))
+    }
+
+    @Test
+    fun isPermissionFailureOnACaptureCommandResultRequiresANonZeroExit() {
+        val denied = CaptureCommandResult(exitCode = 1, stdout = ByteArray(0), stderr = "Permission denied".toByteArray())
+        assertTrue(isPermissionFailure(denied))
+
+        // A zero exit is never a permission failure, even if the text happens to mention the word
+        // in passing (e.g. a getprop dump that legitimately contains it).
+        val succeededButMentionsIt = CaptureCommandResult(exitCode = 0, stdout = "permission".toByteArray(), stderr = ByteArray(0))
+        assertFalse(isPermissionFailure(succeededButMentionsIt))
+
+        val unrelatedFailure = CaptureCommandResult(exitCode = 1, stdout = ByteArray(0), stderr = "device offline".toByteArray())
+        assertFalse(isPermissionFailure(unrelatedFailure))
+    }
+
+    // classifyAdbRootOutput (the root-output parsing this feature's task doc calls for): restarting
+    // / already root / production refusal / unknown, matched on adb's own real wording.
+
+    @Test
+    fun classifyAdbRootOutputRecognizesARestart() {
+        assertEquals(AdbRootOutcome.RESTARTING, classifyAdbRootOutput("restarting adbd as root\n"))
+        assertEquals(AdbRootOutcome.RESTARTING, classifyAdbRootOutput("* daemon not running; starting now *\nrestarting adbd as root"))
+    }
+
+    @Test
+    fun classifyAdbRootOutputRecognizesAlreadyRoot() {
+        assertEquals(AdbRootOutcome.ALREADY_ROOT, classifyAdbRootOutput("adbd is already running as root\n"))
+    }
+
+    @Test
+    fun classifyAdbRootOutputRecognizesAProductionBuildRefusal() {
+        assertEquals(AdbRootOutcome.PRODUCTION_REFUSAL, classifyAdbRootOutput("adbd cannot run as root in production builds\n"))
+    }
+
+    @Test
+    fun classifyAdbRootOutputFallsBackToUnknownForAnythingElse() {
+        assertEquals(AdbRootOutcome.UNKNOWN, classifyAdbRootOutput(""))
+        assertEquals(AdbRootOutcome.UNKNOWN, classifyAdbRootOutput("error: closed"))
+        assertEquals(AdbRootOutcome.UNKNOWN, classifyAdbRootOutput("error: no devices/emulators found"))
     }
 }

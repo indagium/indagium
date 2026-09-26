@@ -1,6 +1,9 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.indagium.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,11 +43,12 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.DeviceLogActivity
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
 import com.indagium.capture.bufferSizeButtonLabel
+import com.indagium.capture.deviceLogStatusText
 import com.indagium.capture.deviceStateGuidance
-import com.indagium.capture.formatDeviceLogStatusLine
 import com.indagium.capture.logLevelButtonLabel
 import com.indagium.capture.mainBufferIsSmall
 import com.indagium.capture.matchingBufferSizeChoice
@@ -74,7 +78,21 @@ internal fun CaptureLauncherContent(
     // persisted, not part of AppState, and re-resolved against the live device list every
     // recomposition so a 3s background refresh (below) never silently resets it.
     var selectedSerial by remember { mutableStateOf<String?>(null) }
-    val selectedDevice = service.devices.firstOrNull { it.serial == selectedSerial } ?: service.devices.firstOrNull()
+    val liveSelectedDevice = service.devices.firstOrNull { it.serial == selectedSerial }
+    // "Restart adb as root" (DeviceLoggingPanelContent below) restarts adbd, which briefly drops the
+    // device off `adb devices` while it reconnects. Without this, the plain `?: service.devices.
+    // firstOrNull()` fallback below would silently swap the Device logging panel to a different
+    // device (or hide it) for that window. Remembered only while this serial is actually rooting —
+    // the instant that clears, the live list is authoritative again.
+    var lastKnownDeviceBySerial by remember { mutableStateOf<CaptureDevice?>(null) }
+    LaunchedEffect(liveSelectedDevice) {
+        if (liveSelectedDevice != null) lastKnownDeviceBySerial = liveSelectedDevice
+    }
+    val isSelectedDeviceRooting = selectedSerial != null &&
+        service.deviceLogStates[selectedSerial]?.activity == DeviceLogActivity.ROOTING
+    val selectedDevice = liveSelectedDevice
+        ?: lastKnownDeviceBySerial?.takeIf { isSelectedDeviceRooting && it.serial == selectedSerial }
+        ?: service.devices.firstOrNull()
     LaunchedEffect(service) {
         service.refreshDevices(force = true)
         while (true) {
@@ -99,27 +117,39 @@ internal fun CaptureLauncherContent(
                 AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
                 service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppButton("Recheck tools", { service.recheckToolsFromSettings() })
+                    AppButton("Recheck tools", { service.recheckToolsFromSettings() }, enabled = !service.discovering)
                     AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
                 }
             }
         }
         LauncherPanel("Devices") {
-            if (service.devices.isEmpty()) {
-                AppText("No devices discovered", color = tc().td)
-                AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost)
-            } else {
-                service.devices.forEach { device ->
+            when {
+                service.devices.isNotEmpty() -> service.devices.forEach { device ->
                     CaptureDeviceRow(
                         device = device,
                         selected = device.serial == selectedDevice?.serial,
                         onSelect = { selectedSerial = device.serial },
                     )
                 }
+                // Never discovered yet (the launcher's own first refresh hasn't landed): a same-
+                // height placeholder instead of "No devices discovered", so a device that shows up a
+                // moment later doesn't read as if the panel first claimed there was nothing there —
+                // see CaptureCoordinator.kt's `hasCheckedDevicesOnce` doc (item 2 of the flicker fix).
+                !service.hasCheckedDevicesOnce -> AppText(
+                    "Looking for devices…",
+                    color = tc().td,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                )
+                else -> {
+                    AppText("No devices discovered", color = tc().td)
+                    AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost, enabled = !service.discovering)
+                }
             }
         }
         selectedDevice?.let { device ->
-            LauncherPanel("Device logging") { DeviceLoggingPanelContent(service, device, onReclaimFocus) }
+            LauncherPanel("Device logging") {
+                DeviceLoggingPanelContent(service, device, noLiveCapture = state.liveCaptureTabId == null, onReclaimFocus)
+            }
         }
         CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
         AppButton(
@@ -232,7 +262,12 @@ private const val DEVICE_LOG_OVERRIDES_ROW_LIMIT = 5
  *  [CaptureService]; this composable only renders whatever state is there and fires the calls that
  *  change it. */
 @Composable
-private fun DeviceLoggingPanelContent(service: CaptureService, device: CaptureDevice, onReclaimFocus: () -> Unit) {
+private fun DeviceLoggingPanelContent(
+    service: CaptureService,
+    device: CaptureDevice,
+    noLiveCapture: Boolean,
+    onReclaimFocus: () -> Unit,
+) {
     val tc = tc()
     LaunchedEffect(device.serial) { service.refreshDeviceLog(device.serial) }
     val logState = service.deviceLogStates[device.serial]
@@ -290,12 +325,15 @@ private fun DeviceLoggingPanelContent(service: CaptureService, device: CaptureDe
     }
 
     // Explicit confirmation that a change actually landed, right under the dropdowns: built from
-    // the re-read state (formatDeviceLogStatusLine), never from the dropdown selection itself —
-    // see that function's own doc. "Applying…" covers both the initial read and any
-    // apply-then-reread cycle, matching DeviceLogState.busy's own doc.
+    // the re-read state (formatDeviceLogStatusLine via deviceLogStatusText), never from the dropdown
+    // selection itself — see formatDeviceLogStatusLine's own doc. deviceLogStatusText keeps the last
+    // good line on screen (with a "Refreshing…" suffix) for a background re-read and reserves the
+    // bare "Applying…" for an actual user-requested change — see its own doc (item 3 of the New-tab
+    // flicker fix): a device switch or the 3s poll must never blank a line this panel already has
+    // good data for.
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         AppText(
-            if (busy) "Applying…" else formatDeviceLogStatusLine(sizes, logState?.globalLevel),
+            deviceLogStatusText(logState),
             color = tc.ts, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -305,7 +343,31 @@ private fun DeviceLoggingPanelContent(service: CaptureService, device: CaptureDe
     if (mainBufferIsSmall(sizes)) {
         AppText("Small buffers can drop lines during bursts", color = DANGER_RED, fontSize = 10.sp)
     }
-    logState?.error?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp, maxLines = 3) }
+    logState?.error?.let { message ->
+        Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppText(message, color = DANGER_RED, fontSize = 10.sp, maxLines = 3, modifier = Modifier.weight(1f))
+            // Only for a permission failure this serial hasn't already tried rooting for (see
+            // DeviceLogState.failedChange's own doc), and never while a capture is live on this
+            // device — restarting adbd kills the logcat stream mid-recording.
+            if (logState.failedChange != null && noLiveCapture) {
+                TooltipArea(
+                    tooltip = {
+                        ToolbarTooltip(
+                            "Restarts adbd on the device with root (userdebug/eng builds only), then retries the " +
+                                "change. Production builds refuse.",
+                        )
+                    },
+                ) {
+                    AppButton(
+                        "Restart adb as root",
+                        { service.restartAdbAsRoot(device.serial) },
+                        ButtonVariant.Ghost,
+                        enabled = !busy,
+                    )
+                }
+            }
+        }
+    }
 
     val overrides = logState?.perTagOverrides.orEmpty()
     if (overrides.isNotEmpty()) {

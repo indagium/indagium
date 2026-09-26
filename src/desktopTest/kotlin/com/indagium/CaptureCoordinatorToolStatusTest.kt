@@ -1,9 +1,17 @@
 package com.indagium
 
 import com.indagium.capture.CaptureToolValidation
+import com.indagium.capture.DeviceLogActivity
+import com.indagium.capture.DeviceLogRetryableChange
+import com.indagium.capture.DeviceLogState
+import com.indagium.capture.LogBufferSizeChoice
+import com.indagium.ui.deviceLogFailedChangeState
+import com.indagium.ui.deviceLogRootAttemptFailedState
 import com.indagium.ui.toolStatusLine
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 /**
  * `CaptureCoordinator` itself (ui/CaptureCoordinator.kt) is not reasonably unit-testable in
@@ -70,5 +78,69 @@ class AdbFailureMessageTest {
     fun fallsBackToTheExitCodeWhenThereIsNoOutputAtAll() {
         val result = com.indagium.capture.CaptureCommandResult(exitCode = 137, stdout = ByteArray(0), stderr = ByteArray(0))
         assertEquals("Could not set buffer size (exit 137)", com.indagium.ui.adbFailureMessage("Could not set buffer size", result))
+    }
+}
+
+/** [deviceLogFailedChangeState]/[deviceLogRootAttemptFailedState] are the "Restart adb as root"
+ *  recovery's own decision logic, pulled out of `CaptureService` for the same reason
+ *  [toolStatusLine]/`adbFailureMessage` were (see this file's own top-level doc) — `CaptureService`
+ *  itself needs a live `AppState` + `CoroutineScope` and a real, non-injectable `adb`, so its
+ *  `applyDeviceLogChange`/`restartAdbAsRoot` flows aren't reasonably unit-testable end to end, but
+ *  these two state transitions have none of that dependency. */
+class DeviceLogRootRecoveryStateTest {
+    private val base = DeviceLogState(serial = "SERIAL", loaded = true)
+
+    @Test
+    fun recordsTheFailedChangeOnlyForAFreshPermissionFailure() {
+        val change = DeviceLogRetryableChange.BufferSize(LogBufferSizeChoice.SIZE_4M)
+
+        val result = deviceLogFailedChangeState(base, change, "Could not set buffer size: Permission denied", permissionFailure = true)
+
+        assertEquals(DeviceLogActivity.IDLE, result.activity)
+        assertEquals("Could not set buffer size: Permission denied", result.error)
+        assertEquals(change, result.failedChange)
+    }
+
+    @Test
+    fun doesNotRecordAChangeForANonPermissionFailure() {
+        val change = DeviceLogRetryableChange.GlobalLevel(null)
+
+        val result = deviceLogFailedChangeState(base, change, "device offline", permissionFailure = false)
+
+        assertNull(result.failedChange)
+        assertEquals("device offline", result.error)
+    }
+
+    @Test
+    fun neverOffersTheButtonAgainOnceThisSerialHasAlreadyHadARootAttempt() {
+        val alreadyAttempted = base.copy(rootAttempted = true)
+        val change = DeviceLogRetryableChange.ClearTagOverride("MyTag")
+
+        val result = deviceLogFailedChangeState(alreadyAttempted, change, "Permission denied", permissionFailure = true)
+
+        assertNull(result.failedChange)
+        assertTrue(result.rootAttempted)
+    }
+
+    @Test
+    fun rootAttemptFailedStateAlwaysClearsTheChangeAndMarksRootAttempted() {
+        val pending = base.copy(failedChange = DeviceLogRetryableChange.GlobalLevel(null))
+
+        val result = deviceLogRootAttemptFailedState(pending, "adbd cannot run as root in production builds")
+
+        assertEquals(DeviceLogActivity.IDLE, result.activity)
+        assertEquals("adbd cannot run as root in production builds", result.error)
+        assertNull(result.failedChange)
+        assertTrue(result.rootAttempted)
+    }
+
+    @Test
+    fun rootAttemptFailedStatePreservesEverythingElseOnTheBaseState() {
+        val loadedState = base.copy(perTagOverrides = mapOf("Foo" to "D"))
+
+        val result = deviceLogRootAttemptFailedState(loadedState, "some failure")
+
+        assertEquals(loadedState.perTagOverrides, result.perTagOverrides)
+        assertTrue(result.loaded)
     }
 }
