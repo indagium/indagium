@@ -5,6 +5,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
+import com.indagium.capture.CaptureCommandResult
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
@@ -18,7 +19,12 @@ import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.CaptureVideoExporter
+import com.indagium.capture.DeviceLogState
 import com.indagium.capture.ImportedCapture
+import com.indagium.capture.LogBufferSizeChoice
+import com.indagium.capture.LogTagLevel
+import com.indagium.capture.parseLogcatBufferSizes
+import com.indagium.capture.perTagLogLevelOverrides
 import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -77,6 +83,112 @@ internal class CaptureService(
         private set
     var error by mutableStateOf<String?>(null)
         private set
+
+    // Device logging (New tab's "Device logging" panel): buffer sizes + log.tag/log.tag.<TAG>,
+    // keyed by serial so it survives the launcher's 3s device-refresh poll and a device switch
+    // without living in a composable `remember` (per the panel's own doc in CaptureLauncher.kt).
+    // Deliberately a *replace-the-whole-map* mutableStateOf, matching every other per-tab map on
+    // AppState, rather than a mutableStateMapOf — reads/writes here are always "one serial's state
+    // changed", never a partial in-place mutation.
+    var deviceLogStates by mutableStateOf(emptyMap<String, DeviceLogState>())
+        private set
+
+    /** Reads buffer sizes, the global level and per-tag overrides for [serial] off the caller's
+     *  thread. Safe to call repeatedly (device switch, the panel's Refresh action) — each call reads
+     *  a fresh snapshot and replaces whatever was there, so a stale in-flight read never overwrites
+     *  a newer one out of order in practice (the panel only ever has one device selected at a time). */
+    fun refreshDeviceLog(serial: String) {
+        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(busy = true, error = null) }
+        scope.launch {
+            try {
+                val tools = toolsForStart(app.settings.captureSettings)
+                val state = runInterruptible { readDeviceLogState(tools, serial) }
+                setDeviceLogState(serial) { state }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                setDeviceLogState(serial) {
+                    (it ?: DeviceLogState(serial)).copy(busy = false, error = failure.message ?: "Could not read device logging state")
+                }
+            }
+        }
+    }
+
+    /** Applies `-G` to every buffer at once (`-b all`) rather than one call per buffer — see this
+     *  feature's own task doc: a single `logcat -b all -G <size>` call is exactly what "applies
+     *  immediately, to all buffers" means here. Re-reads on success so the panel reflects what the
+     *  device actually accepted (some devices clamp or round a requested size). */
+    fun setDeviceLogBufferSize(serial: String, choice: LogBufferSizeChoice) {
+        applyDeviceLogChange(serial, "Could not set buffer size") { tools ->
+            tools.runAdb(serial, listOf("logcat", "-b", "all", "-G", choice.logcatArg))
+        }
+    }
+
+    /** Sets (or, for `level == null`, clears) the global `log.tag` filter. Clearing writes an empty
+     *  value — `setprop log.tag ""` — rather than removing the property outright; `setprop` has no
+     *  "unset" verb, and an empty value is exactly what `log.tag`'s own "device default" behavior
+     *  reads as (see [LogTagLevel.fromPropValue]). */
+    fun setDeviceGlobalLogLevel(serial: String, level: LogTagLevel?) {
+        applyDeviceLogChange(serial, "Could not set log level") { tools ->
+            tools.runAdb(serial, listOf("shell", "setprop", "log.tag", level?.propValue ?: ADB_SHELL_EMPTY_VALUE))
+        }
+    }
+
+    /** Removes one per-tag override, same "empty value" convention as [setDeviceGlobalLogLevel]. */
+    fun clearDeviceLogTagOverride(serial: String, tag: String) {
+        applyDeviceLogChange(serial, "Could not clear the override for $tag") { tools ->
+            tools.runAdb(serial, listOf("shell", "setprop", "log.tag.$tag", ADB_SHELL_EMPTY_VALUE))
+        }
+    }
+
+    private fun applyDeviceLogChange(serial: String, failurePrefix: String, command: (CaptureTools) -> CaptureCommandResult) {
+        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(busy = true, error = null) }
+        scope.launch {
+            try {
+                val tools = toolsForStart(app.settings.captureSettings)
+                val state = runInterruptible {
+                    val result = command(tools)
+                    check(result.exitCode == 0) { adbFailureMessage(failurePrefix, result) }
+                    readDeviceLogState(tools, serial)
+                }
+                setDeviceLogState(serial) { state }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                setDeviceLogState(serial) {
+                    (it ?: DeviceLogState(serial)).copy(busy = false, error = failure.message ?: failurePrefix)
+                }
+            }
+        }
+    }
+
+    private fun setDeviceLogState(serial: String, transform: (DeviceLogState?) -> DeviceLogState) {
+        deviceLogStates = deviceLogStates + (serial to transform(deviceLogStates[serial]))
+    }
+
+    private fun readDeviceLogState(tools: CaptureTools, serial: String): DeviceLogState {
+        // Each of the three reads is checked individually (an unauthorized device or an SELinux
+        // denial on just one of them must still surface as a readable inline error, not a silently
+        // empty panel) rather than only checking apply-time commands.
+        val sizesResult = tools.runAdb(serial, listOf("logcat", "-g"))
+        check(sizesResult.exitCode == 0) { adbFailureMessage("Could not read buffer sizes", sizesResult) }
+        val sizes = parseLogcatBufferSizes("${sizesResult.stdoutText()}\n${sizesResult.stderrText()}")
+        val levelResult = tools.runAdb(serial, listOf("shell", "getprop", "log.tag"))
+        check(levelResult.exitCode == 0) { adbFailureMessage("Could not read the global log level", levelResult) }
+        val globalLevel = LogTagLevel.fromPropValue(levelResult.stdoutText())
+        val propsResult = tools.runAdb(serial, listOf("shell", "getprop"))
+        check(propsResult.exitCode == 0) { adbFailureMessage("Could not read per-tag overrides", propsResult) }
+        val overrides = perTagLogLevelOverrides(propsResult.stdoutText())
+        return DeviceLogState(
+            serial = serial,
+            bufferSizes = sizes,
+            globalLevel = globalLevel,
+            perTagOverrides = overrides,
+            busy = false,
+            error = null,
+            loaded = true,
+        )
+    }
 
     init {
         scope.launch {
@@ -390,6 +502,20 @@ internal class TabCaptureController(
  */
 internal fun toolStatusLine(validation: CaptureToolValidation): String =
     if (validation.available) validation.version ?: validation.message else validation.message
+
+/** `adb shell` joins its arguments into one command line for the device's shell, so a bare empty
+ *  argument vanishes and `setprop log.tag` fails with a usage error; a quoted empty string survives. */
+private const val ADB_SHELL_EMPTY_VALUE = "''"
+
+/** Same "prefer stderr, bound the length" shape as CaptureTools.kt's own private `boundedDiagnostic`
+ *  (not reused directly — that one is private to CaptureTools) — a device logging apply failure
+ *  (unauthorized device, SELinux denying `setprop`) needs the same readable inline error. */
+private const val MAX_ADB_FAILURE_MESSAGE_CHARS = 4_096
+
+internal fun adbFailureMessage(prefix: String, result: CaptureCommandResult): String {
+    val detail = (result.stderrText().ifBlank { result.stdoutText() }).trim().take(MAX_ADB_FAILURE_MESSAGE_CHARS)
+    return if (detail.isEmpty()) "$prefix (exit ${result.exitCode})" else "$prefix: $detail"
+}
 
 /**
  * Combines the listings CaptureService.listSessions/recoverSessions read from each capture root

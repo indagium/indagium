@@ -36,7 +36,11 @@ data class CaptureSettings(
     val adbPath: String = "",
     val scrcpyPath: String = "",
     val buffers: List<String> = listOf("main", "system", "crash"),
-    val includeBufferedLogs: Boolean = false,
+    // On by default: a capture that starts mid-session is far more useful with whatever the device
+    // had already buffered before adb attached, and the common failure mode of a missed early crash
+    // is worse than the (usually small) amount of pre-existing noise this pulls in. Stored settings
+    // keep whatever the user chose; only settings that never saved this key pick up the new default.
+    val includeBufferedLogs: Boolean = true,
     // On by default: a capture is most useful with the screen recording beside the log. Stored
     // settings keep whatever the user chose; only settings that never saved this key pick it up.
     val recordVideo: Boolean = true,

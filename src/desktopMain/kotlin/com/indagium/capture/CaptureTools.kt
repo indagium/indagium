@@ -138,6 +138,19 @@ class CaptureTools(
         }
     }
 
+    /**
+     * Runs one bounded, one-shot adb command against a device and returns its result instead of
+     * throwing — used by the "Device logging" panel (`logcat -g`/`-G`, `getprop`/`setprop`) via the
+     * same [runner]/[CaptureProcessSpec] seam every other adb call in this class already goes
+     * through, so it is bounded by a real timeout, cancellable, and testable through
+     * `FakeCaptureRunner` like everything else here. Deliberately returns [CaptureCommandResult]
+     * rather than `check()`-ing the exit code: a caller reading device state (e.g. an unauthorized
+     * device, or SELinux denying `setprop`) needs the raw stderr to show a useful inline error, not
+     * an exception message.
+     */
+    fun runAdb(serial: String?, arguments: List<String>, timeout: Duration = Duration.ofSeconds(5)): CaptureCommandResult =
+        runner.run(adbSpec(serial, arguments), timeout = timeout)
+
     fun listDevices(): List<CaptureDeviceResult> {
         val result = runner.run(CaptureProcessSpec(adb.command(listOf("devices", "-l"))))
         check(!result.timedOut) { "adb devices timed out" }

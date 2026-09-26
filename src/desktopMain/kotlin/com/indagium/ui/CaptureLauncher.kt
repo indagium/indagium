@@ -28,17 +28,28 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureStatus
+import com.indagium.capture.LogBufferSizeChoice
+import com.indagium.capture.LogTagLevel
+import com.indagium.capture.bufferSizeButtonLabel
 import com.indagium.capture.deviceStateGuidance
+import com.indagium.capture.formatDeviceLogStatusLine
+import com.indagium.capture.logLevelButtonLabel
+import com.indagium.capture.mainBufferIsSmall
+import com.indagium.capture.matchingBufferSizeChoice
 import kotlinx.coroutines.delay
+import kotlin.math.roundToInt
 
 private const val DEVICE_REFRESH_INTERVAL_MS = 3_000L
 
@@ -51,7 +62,12 @@ private const val DEVICE_REFRESH_INTERVAL_MS = 3_000L
  *  active tab. One `verticalScroll` here (not a max-width-clamped centered column): the caller
  *  decides layout, this only decides content. */
 @Composable
-internal fun CaptureLauncherContent(state: AppState, launcherTabId: String, modifier: Modifier = Modifier) {
+internal fun CaptureLauncherContent(
+    state: AppState,
+    launcherTabId: String,
+    modifier: Modifier = Modifier,
+    onReclaimFocus: () -> Unit = {},
+) {
     val service = state.captureService
     val draft = state.captureLaunchSettings(launcherTabId)
     // Local, presentation-only selection of which discovered device "Start capture" acts on — not
@@ -101,6 +117,9 @@ internal fun CaptureLauncherContent(state: AppState, launcherTabId: String, modi
                     )
                 }
             }
+        }
+        selectedDevice?.let { device ->
+            LauncherPanel("Device logging") { DeviceLoggingPanelContent(service, device, onReclaimFocus) }
         }
         CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
         AppButton(
@@ -199,6 +218,191 @@ private fun LauncherPanel(title: String, content: @Composable () -> Unit) {
     ) {
         AppText(title, color = tc().ts, fontSize = 11.sp)
         content()
+    }
+}
+
+private const val DEVICE_LOG_OVERRIDES_ROW_LIMIT = 5
+
+/** "Device logging": logd ring-buffer sizes and the `log.tag`/`log.tag.<TAG>` filter level for the
+ *  selected device (items 2/3). Reads on every device change and lets the user apply a buffer size
+ *  or the global level immediately — both are DEVICE settings, not capture-session settings, hence
+ *  the explicit hint and hence this reads/writes [CaptureService.deviceLogStates] (keyed by serial)
+ *  rather than anything on the capture-launch draft. All three adb reads (`logcat -g`,
+ *  `getprop log.tag`, `getprop`) and every apply happen off the caller's thread inside
+ *  [CaptureService]; this composable only renders whatever state is there and fires the calls that
+ *  change it. */
+@Composable
+private fun DeviceLoggingPanelContent(service: CaptureService, device: CaptureDevice, onReclaimFocus: () -> Unit) {
+    val tc = tc()
+    LaunchedEffect(device.serial) { service.refreshDeviceLog(device.serial) }
+    val logState = service.deviceLogStates[device.serial]
+    val busy = logState?.busy == true
+    val sizes = logState?.bufferSizes.orEmpty()
+
+    AppText(
+        "These change the DEVICE's own settings: buffer size usually persists across reboots, " +
+            "the log level does not.",
+        color = tc.td, fontSize = 10.sp, maxLines = 2,
+    )
+
+    // One line, two dropdowns, side by side — replaces the old stacked SegmentedControls (item 3):
+    // "Buffer size [4 MB ▾]" / "Log level [Verbose ▾]". Each shows the CURRENT device value as its
+    // button text (via bufferSizeButtonLabel/logLevelButtonLabel), not a pending user pick, so the
+    // button itself never lies about what's actually on the device between a click and the re-read
+    // landing — see the status line below for the same values spelled out explicitly.
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        val currentChoice = matchingBufferSizeChoice(sizes)
+        DeviceLogDropdown(
+            label = "Buffer size",
+            buttonText = bufferSizeButtonLabel(sizes),
+            enabled = !busy,
+            onReclaimFocus = onReclaimFocus,
+            modifier = Modifier.weight(1f),
+        ) { close ->
+            LogBufferSizeChoice.entries.forEach { choice ->
+                DeviceLogDropdownItem(choice.label, active = choice == currentChoice) {
+                    service.setDeviceLogBufferSize(device.serial, choice)
+                    close()
+                }
+            }
+        }
+        DeviceLogDropdown(
+            label = "Log level",
+            buttonText = logLevelButtonLabel(logState?.globalLevel),
+            enabled = !busy,
+            onReclaimFocus = onReclaimFocus,
+            modifier = Modifier.weight(1f),
+        ) { close ->
+            DeviceLogDropdownItem("Default (device)", active = logState?.globalLevel == null) {
+                service.setDeviceGlobalLogLevel(device.serial, null)
+                close()
+            }
+            // LogTagLevel.selectable's own order (V D I W E S — see that field's doc for why
+            // ASSERT is excluded here even though it can still show up read-only under Per-tag
+            // overrides below).
+            LogTagLevel.selectable.forEach { level ->
+                DeviceLogDropdownItem(level.label, active = logState?.globalLevel == level) {
+                    service.setDeviceGlobalLogLevel(device.serial, level)
+                    close()
+                }
+            }
+        }
+    }
+
+    // Explicit confirmation that a change actually landed, right under the dropdowns: built from
+    // the re-read state (formatDeviceLogStatusLine), never from the dropdown selection itself —
+    // see that function's own doc. "Applying…" covers both the initial read and any
+    // apply-then-reread cycle, matching DeviceLogState.busy's own doc.
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        AppText(
+            if (busy) "Applying…" else formatDeviceLogStatusLine(sizes, logState?.globalLevel),
+            color = tc.ts, fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        AppButton("Refresh", { service.refreshDeviceLog(device.serial) }, ButtonVariant.Ghost, enabled = !busy)
+    }
+    if (mainBufferIsSmall(sizes)) {
+        AppText("Small buffers can drop lines during bursts", color = DANGER_RED, fontSize = 10.sp)
+    }
+    logState?.error?.let { AppText(it, color = DANGER_RED, fontSize = 10.sp, maxLines = 3) }
+
+    val overrides = logState?.perTagOverrides.orEmpty()
+    if (overrides.isNotEmpty()) {
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            AppText("Per-tag overrides", color = tc.td, fontSize = 10.sp)
+            overrides.entries.take(DEVICE_LOG_OVERRIDES_ROW_LIMIT).forEach { (tag, level) ->
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    AppText(
+                        "$tag: $level", color = tc.ts, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                    )
+                    AppButton(
+                        "Remove", { service.clearDeviceLogTagOverride(device.serial, tag) },
+                        ButtonVariant.Ghost, enabled = !busy,
+                    )
+                }
+            }
+            if (overrides.size > DEVICE_LOG_OVERRIDES_ROW_LIMIT) {
+                AppText("+${overrides.size - DEVICE_LOG_OVERRIDES_ROW_LIMIT} more", color = tc.td, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+/** A labeled "Buffer size"/"Log level" field that opens a [Popup] menu, replacing the old
+ *  SegmentedControls (item 3). Same shape as HomeScreen.kt's `RecentFilterPill` — a bordered
+ *  clickable field plus a [Popup]-hosted [Column] of rows — since that's the New tab's own existing
+ *  convention for a labeled value picker; rendered as a full-width field with a caption above it
+ *  rather than a compact pill, since this sits in a fixed two-column row instead of a filter strip.
+ *  [onReclaimFocus] is called both on dismiss and after picking a row, per this codebase's
+ *  clickable/Popup focus rule (see CLAUDE.md's "A dismissed Popup... steals keyboard focus" gotcha)
+ *  — the same call HomeScreen.kt's own dropdowns make. */
+@Composable
+private fun DeviceLogDropdown(
+    label: String,
+    buttonText: String,
+    enabled: Boolean,
+    onReclaimFocus: () -> Unit,
+    modifier: Modifier = Modifier,
+    menu: @Composable (close: () -> Unit) -> Unit,
+) {
+    val tc = tc()
+    var expanded by remember { mutableStateOf(false) }
+    val shape = CORNER_MD
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        AppText(label, color = tc.td, fontSize = 10.sp)
+        Box {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .border(1.dp, tc.br, shape)
+                    .let { base -> if (enabled) base.clickable { expanded = !expanded } else base }
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                AppText(
+                    buttonText, color = if (enabled) tc.tx else tc.td, fontSize = 11.sp,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+                )
+                AppText(if (expanded) "▾" else "▸", color = tc.ts, fontSize = 9.sp)
+            }
+            if (expanded) {
+                val density = LocalDensity.current.density
+                Popup(
+                    alignment = Alignment.TopStart,
+                    offset = IntOffset(0, (32 * density).roundToInt()),
+                    onDismissRequest = { expanded = false; onReclaimFocus() },
+                    properties = PopupProperties(focusable = true),
+                ) {
+                    Column(
+                        Modifier.width(180.dp)
+                            .background(tc.p, RoundedCornerShape(7.dp))
+                            .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                            .padding(vertical = 4.dp),
+                    ) {
+                        menu { expanded = false; onReclaimFocus() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** One row of a [DeviceLogDropdown]'s menu — accent tint when it's the device's current value,
+ *  same visual language as `RecentFilterPill`'s own menu rows. */
+@Composable
+private fun DeviceLogDropdownItem(label: String, active: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    HoverBox(modifier = Modifier.fillMaxWidth(), onClick = onClick) {
+        AppText(
+            label,
+            color = if (active) tc.ac else tc.tx,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }
 
