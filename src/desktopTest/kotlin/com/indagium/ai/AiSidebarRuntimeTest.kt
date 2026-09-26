@@ -12,8 +12,10 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AiSidebarRuntimeTest {
@@ -42,6 +44,46 @@ class AiSidebarRuntimeTest {
         } finally {
             runtime.close()
         }
+    }
+
+    @Test
+    fun captureReplacementMovesTheActiveConversationAndRunToTheNewTab() {
+        val runtime = runtime(provider = { ScriptedProvider(emptyList()) })
+        try {
+            val session = runtime.sessionFor("capture-before")
+            val run = AiRun(
+                tabId = "capture-before",
+                userPrompt = "Start a new capture",
+                context = AiInvestigationContext("capture-before", isDeviceCapture = true),
+            )
+            session.activeRun = run
+            session.retain(run)
+            session.messages += LlmMessage(LlmRole.USER, "Start a new capture")
+
+            runtime.transferCaptureSession("capture-before", "capture-after")
+
+            assertSame(session, runtime.sessionFor("capture-after"))
+            assertEquals("capture-after", session.tabId)
+            assertEquals("capture-after", run.tabId)
+            assertEquals("capture-after", run.context.tabId)
+            assertTrue(run.context.isDeviceCapture)
+            assertEquals("capture-after", session.lastContext.tabId)
+            assertTrue(session.lastContext.isDeviceCapture)
+            assertEquals(listOf("Start a new capture"), session.messages.map { it.content })
+            assertTrue(runtime.sessionFor("capture-before").runs.isEmpty())
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun liveDeviceCaptureGuidanceIsOnlyAddedForDeviceCaptureTabs() {
+        val guidance = deviceCapturePromptGuidance(isDeviceCapture = true)
+        assertTrue(guidance.contains("The Mac's Chrome/browser and desktop are not the captured device"))
+        assertTrue(guidance.contains("get_device_screen"))
+        assertTrue(guidance.contains("device_tap"))
+        assertTrue(guidance.contains("mark_device_issue"))
+        assertTrue(deviceCapturePromptGuidance(isDeviceCapture = false).isEmpty())
     }
 
     @Test
@@ -94,6 +136,62 @@ class AiSidebarRuntimeTest {
             assertEquals(0, executions)
             assertEquals(0, run.pendingConfirmationCount)
             assertNotNull(run.history.filterIsInstance<AiRunEvent.ToolCompleted>().singleOrNull())
+        } finally {
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun liveCaptureDeviceOperationsRequireOneApprovalAndStayPinnedToTheirCapture() = runBlocking<Unit> {
+        val receivedArguments = mutableListOf<Map<String, Any?>>()
+        var round = 0
+        val provider = object : LlmProvider {
+            override val capabilities = ProviderCapabilities(streaming = true, toolCalls = true, modelDiscovery = false)
+
+            override suspend fun listModels(): ModelDiscoveryResult = ModelDiscoveryResult.Unavailable("not used")
+
+            override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
+                when (round++) {
+                    0 -> emit(LlmStreamEvent.ToolCall(LlmToolCall("screen", "get_device_screen", "{}")))
+                    1 -> emit(LlmStreamEvent.ToolCall(LlmToolCall("tap", "device_tap", "{\"x\":20,\"y\":30}")))
+                    else -> emit(LlmStreamEvent.TextDelta("I inspected the device."))
+                }
+                emit(LlmStreamEvent.Completed)
+            }
+        }
+        val runtime = runtime(
+            provider = { provider },
+            handlers = mapOf(
+                "get_device_screen" to { args ->
+                    receivedArguments += args
+                    mapOf("deviceSerial" to "emulator-5554", "imageBase64" to "c2NyZWVu", "mimeType" to "image/jpeg")
+                },
+                "device_tap" to { args ->
+                    receivedArguments += args
+                    mapOf("deviceSerial" to "emulator-5554", "action" to "tap")
+                },
+            ),
+        )
+        try {
+            val started = assertIs<AiStartResult.Started>(
+                runtime.start(
+                    tabId = "capture-tab",
+                    profile = defaultAiProviderProfile().copy(model = "local-model"),
+                    apiKey = "",
+                    prompt = "Inspect this device",
+                    context = AiInvestigationContext("capture-tab", isDeviceCapture = true),
+                ),
+            )
+            val run = started.run
+            val confirmation = run.events.filterIsInstance<AiRunEvent.ConfirmationRequired>().first().confirmation
+            assertEquals(1, run.pendingConfirmationCount)
+            assertTrue(runtime.resolveConfirmation(run, confirmation, accepted = true))
+            run.job!!.join()
+
+            assertEquals(listOf("capture-tab", "capture-tab"), receivedArguments.map { it["tabId"] })
+            assertEquals(1, run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().size)
+            assertEquals("capture-tab", run.deviceCaptureTabId)
+            assertFalse(run.deviceControlApproved, "consent is revoked after the AI request completes")
         } finally {
             runtime.close()
         }

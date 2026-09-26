@@ -210,8 +210,7 @@ class ControlServerMcpTest {
     fun toolsListExposesAllTools() {
         val session = initSession()
         val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
-        // Every op the retired Node bridge exposed must still be present, by exact name, plus the
-        // tools added since (get_line_context, get_packages).
+        // Keep the MCP tool registry complete, including the device capture POC surface.
         val expected = listOf(
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
@@ -224,10 +223,25 @@ class ControlServerMcpTest {
             "resolve_log_source", "get_source_file", "list_source_declarations", "get_source_declarations", "get_project_info",
             "set_highlighters", "register_source_folder", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
             "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
+            "list_android_devices", "start_device_capture", "stop_device_capture", "get_device_screen",
+            "device_tap", "device_swipe", "device_key", "device_text", "mark_device_issue",
+            "export_capture_snapshot", "get_capture_operation_status",
         )
-        assertEquals(56, expected.size)
+        assertEquals(67, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
+        assertTrue(body.contains("mapped to physical pixels automatically"), "gesture tool descriptions need the image-coordinate contract:\n$body")
+        assertTrue(body.contains("Wait for completion before starting another capture"), "stop/start ordering needs to be documented:\n$body")
     }
+
+    @Test
+    fun serverInitializationExplainsDeviceCaptureWorkflow() {
+        val response = mcp(INITIALIZE_REQUEST)
+        assertTrue(response.statusCode() in 200..299, "initialize failed: ${response.statusCode()} ${response.body()}")
+        assertTrue(response.body().contains("attached Android device"), response.body())
+        assertTrue(response.body().contains("get_device_screen"), response.body())
+        assertTrue(response.body().contains("newCapture=true"), response.body())
+    }
+
 
     @Test
     fun toolsListDeclaresLevelsEnum() {

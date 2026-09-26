@@ -379,36 +379,23 @@ class CaptureRecorder internal constructor(
 
     fun screenshot(): File = screenshotCapture().file
 
+    /** Reads a transient screen image for an AI/MCP tool. Unlike [screenshotCapture], this does not
+     * persist the image into the capture; only an explicit marker or archive export does that. */
+    fun readScreen(): ByteArray {
+        val (session, tools) = synchronized(lock) {
+            check(active.get()) { "Screen capture requires an active capture session" }
+            requireNotNull(currentSession) to requireNotNull(currentTools)
+        }
+        return readScreenPng(session, tools)
+    }
+
     fun screenshotCapture(): CaptureScreenshot {
         val (session, tools) = synchronized(lock) {
             check(active.get()) { "Screenshot requires an active capture session" }
             requireNotNull(currentSession) to requireNotNull(currentTools)
         }
         val elapsed = elapsedNow()
-        val result = runner.run(
-            tools.adbSpec(session.device.serial, "exec-out", "screencap", "-p"),
-            timeout = Duration.ofSeconds(SCREENSHOT_TIMEOUT_SECONDS),
-            outputLimitBytes = MAX_SCREENSHOT_BYTES,
-        )
-        check(!result.timedOut) { "Screenshot timed out" }
-        check(result.exitCode == 0 && result.stdout.isNotEmpty()) {
-            val detail = result.stderrText().trim().take(MAX_DIAGNOSTIC_CHARS)
-            if (detail.isEmpty()) "Screenshot failed (exit ${result.exitCode})" else "Screenshot failed: $detail"
-        }
-        // `screencap` itself (not adb) writes a "[Warning] Multiple displays were found..." banner
-        // to stdout ahead of the PNG bytes on devices/emulators with more than one display — it is
-        // not routed to stderr, so `exec-out` passes it straight through as part of the "binary"
-        // stream. Left in place, the leading text corrupts the PNG signature: ImageIO.read() (and
-        // downscaleAndEncodeJpeg, which is built on it) then fails to decode the image at all, so
-        // the screenshot silently never reaches Notes even though the raw bytes were captured fine.
-        val pngBytes = stripLeadingNonPngBytes(result.stdout)
-        checkNotNull(pngBytes) { "Screenshot did not contain PNG data" }
-        if (pngBytes.size != result.stdout.size) {
-            addDiagnostic(
-                "Screenshot: stripped ${result.stdout.size - pngBytes.size} byte(s) of device banner text " +
-                    "before the PNG signature",
-            )
-        }
+        val pngBytes = readScreenPng(session, tools)
         val destination = File(session.directory, "screenshots/screenshot-$elapsed.png")
         FileOutputStream(destination).use { output ->
             output.write(pngBytes)
@@ -421,6 +408,30 @@ class CaptureRecorder internal constructor(
             videoStartElapsedMs = session.videoStartElapsedMs,
             videoFile = session.videoFile,
         )
+    }
+
+    private fun readScreenPng(session: CaptureSession, tools: CaptureTools): ByteArray {
+        val result = runner.run(
+            tools.adbSpec(session.device.serial, "exec-out", "screencap", "-p"),
+            timeout = Duration.ofSeconds(SCREENSHOT_TIMEOUT_SECONDS),
+            outputLimitBytes = MAX_SCREENSHOT_BYTES,
+        )
+        check(!result.timedOut) { "Screenshot timed out" }
+        check(result.exitCode == 0 && result.stdout.isNotEmpty()) {
+            val detail = result.stderrText().trim().take(MAX_DIAGNOSTIC_CHARS)
+            if (detail.isEmpty()) "Screenshot failed (exit ${result.exitCode})" else "Screenshot failed: $detail"
+        }
+        // Multi-display devices may prefix a warning line to the PNG stream. Strip it in both the
+        // transient AI path and durable screenshot path before image consumers see the bytes.
+        val pngBytes = stripLeadingNonPngBytes(result.stdout)
+        checkNotNull(pngBytes) { "Screenshot did not contain PNG data" }
+        if (pngBytes.size != result.stdout.size) {
+            addDiagnostic(
+                "Screenshot: stripped ${result.stdout.size - pngBytes.size} byte(s) of device banner text " +
+                    "before the PNG signature",
+            )
+        }
+        return pngBytes
     }
 
     /** Performs the per-session functional screenshot capability probe lazily. */

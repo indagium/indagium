@@ -76,6 +76,8 @@ internal class AccountAgentRunner(
                 if (profile.kind != AiProviderKind.CLAUDE_CODE_ACCOUNT) deleteWorkspace(workspace)
                 run.confirmations.values.forEach { it.cancel() }
                 run.confirmations.clear()
+                run.deviceControlApproved = false
+                run.deviceControlApprovedSerial = null
                 if (session.activeRun === run) session.activeRun = null
             }
         }
@@ -96,6 +98,7 @@ internal class AccountAgentRunner(
     ) {
         val command = CodexAppServerClient.command(profile.executablePath) +
             codexDisableUserServersConfig() +
+            codexManagedToolRestrictionConfig() +
             codexManagedMcpConfig(lease.url)
         CodexAppServerClient.launch(
             command = command,
@@ -286,7 +289,8 @@ internal class AccountAgentRunner(
     private fun accountPrompt(run: AiRun, systemPrompt: String, prompt: String): String =
         "$systemPrompt\n\n${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named " +
             "$MANAGED_MCP_SERVER_NAME. Use only its tools for log, source, filter, " +
-            "tab, or note evidence and actions. Do not inspect the local workspace; it is intentionally empty." +
+            "tab, device, or note evidence and actions. Do not use host shell/browser/desktop actions, " +
+            "and do not inspect the local workspace; it is intentionally empty." +
             "\n\nUser request:\n$prompt"
 
     private fun deleteWorkspace(workspace: Path) {
@@ -320,6 +324,7 @@ internal fun resolveAccountAgentWorkspace(session: AiSession, kind: AiProviderKi
 internal fun codexManagedMcpConfig(url: String): List<String> = listOf(
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.url=\"$url\"",
     "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.bearer_token_env_var=\"$CODEX_INDAGIUM_MCP_TOKEN_ENV\"",
+    "--config", "mcp_servers.$MANAGED_MCP_SERVER_NAME.required=true",
 )
 
 /**
@@ -351,6 +356,14 @@ internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
     mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)
 
 private const val CODEX_INDAGIUM_MCP_TOKEN_ENV = "INDAGIUM_MCP_TOKEN"
+/** Restrict a managed evidence-only Codex run to its configured Indagium MCP server. These are
+ * per-process CLI overrides; the user's persistent Codex configuration is never modified. */
+internal fun codexManagedToolRestrictionConfig(): List<String> = listOf(
+    "--config", "features.shell_tool=false",
+    "--config", "features.unified_exec=false",
+    "--config", "features.apps=false",
+    "--config", "browser_use.default_origin_policy.access=\"deny\"",
+)
 
 /**
  * `--config mcp_servers.<name>.enabled=false` for every MCP server in the user's Codex config
@@ -399,23 +412,25 @@ internal data class CodexElicitationDecision(
  *   "message":"Allow the indagium MCP server to run tool \"list_tabs\"?", ...}
  * ```
  * This is a tool-call approval, not an OAuth prompt. When it is for the managed
- * [MANAGED_MCP_SERVER_NAME] server (identified by `serverName` or `_meta.codex_approval_kind`),
+ * [MANAGED_MCP_SERVER_NAME] server (identified by `serverName`, or by `_meta.codex_approval_kind`
+ * only when the protocol omits the server name),
  * accept it and let the tool run — Indagium already gates destructive tools itself via
  * [AiToolExecutionCoordinator]. Any other server (e.g. an OAuth-backed integration from the user's
  * own `~/.codex/config.toml`) is declined; that server simply stays unavailable for this run
  * instead of aborting it.
  *
- * `serverName` alone is not a safe gate here: the `||` against `approvalKind` below means that if
- * [MANAGED_MCP_SERVER_NAME] and the config sites that register it under that name (Claude Code's
- * `mcpServers` key, Codex's `mcp_servers.<name>`) ever drift apart, this keeps returning true for
- * most elicitations anyway — the drift would only surface for ones that arrive without
- * `_meta.codex_approval_kind`. That is why the name lives in one shared constant instead of being
- * typed out at each call site.
+ * A supplied server name takes precedence over the generic MCP approval kind, so a request from
+ * another server cannot be accepted just because it uses the same elicitation type. The name lives
+ * in one shared constant with both CLI config sites to avoid drift.
  */
 internal fun decideCodexElicitation(params: JsonObject): CodexElicitationDecision {
     val serverName = params.stringOrNull("serverName")
     val approvalKind = (params["_meta"] as? JsonObject)?.stringOrNull("codex_approval_kind")
-    val isManagedServerApproval = serverName == MANAGED_MCP_SERVER_NAME || approvalKind == "mcp_tool_call"
+    val isManagedServerApproval = if (serverName != null) {
+        serverName == MANAGED_MCP_SERVER_NAME
+    } else {
+        approvalKind == "mcp_tool_call"
+    }
     val response = buildJsonObject {
         put("action", if (isManagedServerApproval) "accept" else "decline")
         put("content", buildJsonObject { })

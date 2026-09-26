@@ -93,7 +93,12 @@ class AnthropicMessagesProvider(
                 setBody(request.toAnthropicJson().toString())
             }.execute { response ->
                 if (!response.status.isSuccess()) {
-                    emit(LlmStreamEvent.Error("Provider request failed (HTTP ${response.status.value})."))
+                    val details = runCatching { response.bodyAsText().take(1_000) }.getOrNull().orEmpty()
+                    val message = if (request.messages.any { it.images.isNotEmpty() }) {
+                        "The selected Anthropic model rejected the screen image input (HTTP ${response.status.value}). " +
+                            details.ifBlank { "Choose a model that accepts image inputs." }
+                    } else "Provider request failed (HTTP ${response.status.value})."
+                    emit(LlmStreamEvent.Error(message))
                     terminalHttpFailure = true
                     return@execute
                 }
@@ -319,7 +324,11 @@ class AnthropicMessagesProvider(
         when (role) {
             LlmRole.USER -> {
                 put("role", "user")
-                put("content", content ?: "")
+                if (images.isEmpty()) {
+                    put("content", content ?: "")
+                } else {
+                    put("content", anthropicTextAndImages(content, images))
+                }
             }
 
             LlmRole.ASSISTANT -> {
@@ -355,12 +364,35 @@ class AnthropicMessagesProvider(
                     add(buildJsonObject {
                         put("type", "tool_result")
                         put("tool_use_id", toolCallId ?: "")
-                        put("content", content ?: "")
+                        if (images.isEmpty()) {
+                            put("content", content ?: "")
+                        } else {
+                            put("content", anthropicTextAndImages(content, images))
+                        }
                     })
                 })
             }
 
             LlmRole.SYSTEM -> error("System messages are lifted to the top-level system field.")
+        }
+    }
+
+    private fun anthropicTextAndImages(text: String?, images: List<LlmImage>) = buildJsonArray {
+        text?.takeIf(String::isNotBlank)?.let { value ->
+            add(buildJsonObject {
+                put("type", "text")
+                put("text", value)
+            })
+        }
+        images.forEach { image ->
+            add(buildJsonObject {
+                put("type", "image")
+                put("source", buildJsonObject {
+                    put("type", "base64")
+                    put("media_type", image.mimeType)
+                    put("data", image.base64)
+                })
+            })
         }
     }
 

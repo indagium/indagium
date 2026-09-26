@@ -259,7 +259,10 @@ class ControlServer(
     // execution in lockstep without an HTTP loopback hop.
     private val operations = IndagiumToolOperations(appState)
     internal val toolGateway: IndagiumToolGateway get() = operations.toolGateway
-    private val managedMcpRuns = ManagedMcpRunRegistry(toolGateway)
+    private val managedMcpRuns = ManagedMcpRunRegistry(
+        toolGateway,
+        onCaptureTabChanged = appState.aiSidebarRuntime::transferCaptureSession,
+    )
 
     private data class ClientRecord(val name: String, val lastSeenMs: Long)
 
@@ -312,6 +315,7 @@ class ControlServer(
     // ServerSession.close() (inherited from Protocol) closes the underlying transport, which
     // actually drops the client's HTTP/SSE connection rather than just forgetting our own state.
     fun disconnectMcpSession(id: String) {
+        appState.revokeExternalDeviceAiApproval(id)
         val session = mcpServer?.sessions?.get(id) ?: return
         runBlocking { session.close() }
     }
@@ -327,7 +331,10 @@ class ControlServer(
                 mcp.sessions.values.forEach { session ->
                     launch {
                         val alive = runCatching { withTimeout(mcpPingTimeoutMs) { session.ping() } }.isSuccess
-                        if (!alive) runCatching { session.close() }
+                        if (!alive) {
+                            appState.revokeExternalDeviceAiApproval(session.sessionId)
+                            runCatching { session.close() }
+                        }
                     }
                 }
             }
@@ -404,6 +411,7 @@ class ControlServer(
     }
 
     fun stop() {
+        mcpServer?.sessions?.keys?.forEach(appState::revokeExternalDeviceAiApproval)
         engine?.stop()
         engine = null
         mcpServer = null
@@ -470,11 +478,17 @@ class ControlServer(
         val server = Server(
             serverInfo = Implementation(name = "indagium-control", version = "1.0.0"),
             options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+            instructions = DEVICE_CAPTURE_MCP_INSTRUCTIONS,
         )
         toolGateway.tools.forEach { tool ->
             server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
-                val result = runCatching { toolGateway.execute(tool.name, request.arguments?.toArgMap() ?: emptyMap()) }
-                    .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
+                val arguments = request.arguments?.toArgMap() ?: emptyMap()
+                val result = if (tool.name in DEVICE_CONTROL_MCP_TOOLS) {
+                    executeExternalDeviceTool(tool.name, arguments, sessionId, server.sessions[sessionId]?.clientVersion?.name)
+                } else {
+                    runCatching { toolGateway.execute(tool.name, arguments) }
+                        .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
+                }
                 toCallToolResult(tool.name, result, Json.encode(result))
             }
         }
@@ -486,6 +500,7 @@ class ControlServer(
             Server(
                 serverInfo = Implementation(name = "indagium-managed-agent", version = "1.0.0"),
                 options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+                instructions = DEVICE_CAPTURE_MCP_INSTRUCTIONS,
             ).also { server ->
                 toolGateway.tools.forEach { tool ->
                     server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
@@ -502,18 +517,86 @@ class ControlServer(
         }
 
     internal fun openAiFunctionDefinitions() = operations.openAiFunctionDefinitions()
+
+    private suspend fun executeExternalDeviceTool(
+        name: String,
+        arguments: Map<String, Any?>,
+        sessionId: String,
+        clientName: String?,
+    ): Any? {
+        val tabId = arguments["tabId"] as? String
+        val explicitSerial = (arguments["deviceSerial"] as? String)?.trim()?.takeIf(String::isNotBlank)
+        val target = runCatching {
+            if (tabId != null) {
+                val (capture, _) = appState.aiCaptureBinding(tabId)
+                capture.device
+            } else {
+                val devices = appState.aiCaptureDevices().filter { it.available }
+                val serial = explicitSerial ?: when (devices.size) {
+                    1 -> devices.single().serial
+                    0 -> error("No ready Android devices were found")
+                    else -> return mapOf(
+                        "needsDeviceSelection" to true,
+                        "message" to "Several Android devices are ready. Call list_android_devices and pass deviceSerial.",
+                    )
+                }
+                devices.firstOrNull { it.serial == serial }
+                    ?: error("Android device $serial is not connected or authorized")
+            }
+        }.getOrElse { return mapOf("error" to (it.message ?: "No live Android capture/device is available")) }
+        val label = "${target.model} (${target.serial})"
+        return appState.executeExternalDeviceAiAction(
+            sessionId = sessionId,
+            clientName = clientName?.takeIf(String::isNotBlank) ?: "MCP client",
+            deviceLabel = label,
+        ) {
+            toolGateway.execute(name, arguments)
+        }
+    }
 }
 
-// get_video_frame is the one tool whose result is a real image rather than data to describe in
-// text: when `rawResult` is the Map get_video_frame's handler returns on success (carrying a
-// non-null imageBase64), reply with a real MCP ImageContent block instead of the default
-// TextContent(JSON) wrap every other tool gets. An error map (no imageBase64) — or any other
-// tool — falls straight through to the usual text path, `textFallback` unchanged.
-private fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
-    val imageBase64 = (rawResult as? Map<*, *>)?.get("imageBase64") as? String
-    if (toolName != "get_video_frame" || imageBase64 == null) return CallToolResult(content = listOf(TextContent(textFallback)))
-    val mimeType = (rawResult["mimeType"] as? String) ?: "image/png"
-    return CallToolResult(content = listOf(ImageContent(data = imageBase64, mimeType = mimeType)))
+private val DEVICE_CAPTURE_MCP_INSTRUCTIONS = """
+Device capture tools control the attached Android device, not the computer running this server.
+To inspect the Android display, call get_device_screen and use its returned image and stated pixel dimensions.
+device_tap and device_swipe coordinates are measured in that image's pixel space and mapped automatically.
+Use device_text, device_key, and gestures for device navigation. start_device_capture reuses a live capture by default; set newCapture=true to finalize and retain the current one before a fresh capture. If stop_device_capture is called separately, poll its operation to completion before starting again. mark_device_issue and export_capture_snapshot are asynchronous; poll get_capture_operation_status until complete.
+""".trimIndent()
+
+private val DEVICE_CONTROL_MCP_TOOLS = setOf(
+    "start_device_capture", "get_device_screen", "device_tap", "device_swipe", "device_key", "device_text",
+    "stop_device_capture", "mark_device_issue", "export_capture_snapshot",
+)
+
+// Screen reads and video frames are returned as real MCP image content rather than base64 text.
+// When `rawResult` is the Map a handler returns on success (carrying a non-null imageBase64),
+// reply with an ImageContent block instead of default TextContent(JSON); errors and all other
+// operations retain the text fallback.
+internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
+    val fields = rawResult as? Map<*, *>
+    val imageBase64 = fields?.get("imageBase64") as? String
+    if (toolName !in setOf("get_video_frame", "get_device_screen") || imageBase64 == null) {
+        return CallToolResult(content = listOf(TextContent(textFallback)))
+    }
+    val mimeType = (fields["mimeType"] as? String) ?: "image/png"
+    val content = buildList {
+        if (toolName == "get_device_screen") {
+            val width = (fields["width"] as? Number)?.toInt()
+            val height = (fields["height"] as? Number)?.toInt()
+            val instructions = fields["coordinateInstructions"] as? String
+            add(
+                TextContent(
+                    text = buildString {
+                        append(fields["message"] as? String ?: "Current Android device screen")
+                        if (width != null && height != null) append(" Screenshot dimensions: ${width}×${height} pixels.")
+                        append(' ')
+                        append(instructions ?: "Tap and swipe coordinates are measured from this returned image's top-left and mapped to physical device pixels.")
+                    },
+                ),
+            )
+        }
+        add(ImageContent(data = imageBase64, mimeType = mimeType))
+    }
+    return CallToolResult(content = content)
 }
 
 private fun bearerToken(rawHeader: String?): String? = rawHeader
@@ -1378,6 +1461,73 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "entries may resolve a message's target lifeline. Defaults to true.",
             ),
         ),
+    ),
+    McpTool(
+        "list_android_devices",
+        "List ready Android devices that can be selected for a capture. This discovery call does not read or control a device.",
+        schema(),
+    ),
+    McpTool(
+        "start_device_capture",
+        "Start a capture on the selected Android device, or reuse the live capture when it is already recording. " +
+            "Set newCapture=true to finalize and retain the current capture before starting a fresh one. When several " +
+            "devices are ready, pass deviceSerial from list_android_devices. Device access requires user approval.",
+        schema(
+            "deviceSerial" to "string", "newCapture" to "boolean",
+            descriptions = mapOf(
+                "deviceSerial" to "Serial from list_android_devices. Omit only when exactly one device is ready or to reuse the current device.",
+                "newCapture" to "Finalize the current capture and start a fresh capture (default false).",
+            ),
+        ),
+    ),
+    McpTool(
+        "stop_device_capture",
+        "Stop and finalize the live capture session after preserving its logs and video. Returns an operationId to poll with get_capture_operation_status. Wait for completion before starting another capture.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_device_screen",
+        "Read the live Android screen as a transient image. The result includes image dimensions and coordinate instructions; gestures use pixels in this returned image. The screenshot is not saved into the capture. Device access requires user approval.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "device_tap",
+        "Tap an image pixel on the live Android screen. x/y are measured from the top-left of the latest get_device_screen image and mapped to physical pixels automatically. Device access requires user approval.",
+        schema("tabId" to "string", "x" to "integer", "y" to "integer", required = listOf("tabId", "x", "y")),
+    ),
+    McpTool(
+        "device_swipe",
+        "Swipe between pixels in the latest get_device_screen image. Coordinates are measured from its top-left and mapped to physical pixels automatically; duration is bounded and validated. Device access requires user approval.",
+        schema(
+            "tabId" to "string", "x1" to "integer", "y1" to "integer", "x2" to "integer", "y2" to "integer",
+            "durationMs" to "integer", required = listOf("tabId", "x1", "y1", "x2", "y2"),
+            descriptions = mapOf("durationMs" to "Gesture duration from 50 to 2000 ms (default 350)."),
+        ),
+    ),
+    McpTool(
+        "device_key",
+        "Press one allowlisted Android navigation key: BACK, HOME, RECENTS, or ENTER. Device access requires user approval.",
+        schema("tabId" to "string", "key" to "string", required = listOf("tabId", "key"), enums = mapOf("key" to listOf("BACK", "HOME", "RECENTS", "ENTER"))),
+    ),
+    McpTool(
+        "device_text",
+        "Enter bounded plain text into the focused Android field. Device access requires user approval.",
+        schema("tabId" to "string", "text" to "string", required = listOf("tabId", "text")),
+    ),
+    McpTool(
+        "mark_device_issue",
+        "Create a durable issue marker and attach a screenshot to Notes for this live capture. Returns an operationId to poll with get_capture_operation_status. Device access requires user approval.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "export_capture_snapshot",
+        "Export the full capture as a non-overwriting ZIP snapshot including available logs, video, notes, and issue markers. Returns an operationId to poll with get_capture_operation_status. Device access requires user approval.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_capture_operation_status",
+        "Check a device capture, marker, or snapshot operation by operationId.",
+        schema("operationId" to "string", required = listOf("operationId")),
     ),
 )
 

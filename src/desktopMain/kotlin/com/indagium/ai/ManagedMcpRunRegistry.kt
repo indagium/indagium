@@ -20,8 +20,9 @@ internal data class ManagedMcpRun(
 internal class ManagedMcpRunRegistry(
     toolGateway: IndagiumToolGateway,
     maxToolResultChars: Int = 12_000,
+    onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
 ) {
-    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars)
+    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars, onCaptureTabChanged)
     private val runs = ConcurrentHashMap<String, ManagedMcpRun>()
 
     fun register(run: AiRun): ManagedMcpAccess {

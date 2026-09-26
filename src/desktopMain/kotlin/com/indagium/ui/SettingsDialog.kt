@@ -2583,11 +2583,9 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
         if (kind.usesHttpEndpoint && endpoint.isNotBlank() && !com.indagium.ai.isLoopbackHost(endpointHost)) {
             CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
-                // (SEC-4) Plain-HTTP-only clause added: the original text covered log/source
-                // content leaving the device but not that a non-HTTPS endpoint also puts the API
-                // key itself on the wire unencrypted — a distinct, credential-level risk.
+                // Screen images from device capture tools are sent to this provider when used.
                 AppText(
-                    "I understand logs, source code, paths, and tool results may leave this " +
+                    "I understand logs, source code, paths, device screen images, and tool results may leave this " +
                         "device, and that a plain HTTP (non-HTTPS) endpoint also sends my API key unencrypted.",
                     color = tc.td,
                     fontSize = 10.sp,

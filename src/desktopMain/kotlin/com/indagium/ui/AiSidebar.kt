@@ -100,6 +100,7 @@ import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.isLoopbackHost
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.AiProviderKind
+import com.indagium.model.AiProviderProfile
 import com.indagium.model.LogTab
 import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.utils.formatDuration
@@ -653,6 +654,7 @@ private fun AiSidebarPanel(
                 } else {
                     val context = AiInvestigationContext(
                         tabId = tab.id,
+                        isDeviceCapture = tab.captureSessionId != null || tab.captureSourceSessionId != null,
                         lineId = selectedLineId?.takeIf { action?.requiresLine == true || attachedIds.isNotEmpty() },
                         lineIds = attachedIds,
                         action = action,
@@ -884,7 +886,7 @@ private fun AiProviderControls(
         if (profile.kind.usesHttpEndpoint && !isLoopbackHost(endpointHost) && !profile.remoteDisclosureAcknowledged) {
             Box(Modifier.fillMaxWidth().background(DANGER_RED.copy(.10f), CORNER_SM).padding(7.dp)) {
                 AppText(
-                    "Remote provider is blocked until you acknowledge the data disclosure in Settings.",
+                    "This provider is blocked until you acknowledge in Settings that device screen images and other AI evidence may leave this device.",
                     color = DANGER_RED,
                     fontSize = 10.sp,
                     maxLines = 3,

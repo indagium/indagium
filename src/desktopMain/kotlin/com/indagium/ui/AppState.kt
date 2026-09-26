@@ -12,6 +12,8 @@ import com.indagium.ai.AiSidebarRuntime
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.ai.recoveredBundledCodexPath
+import com.indagium.ai.LocalAccountCli
 import com.indagium.ai.validateAiProviderProfile
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
@@ -907,6 +909,22 @@ data class PendingDuplicateFilterSave(val tabId: String, val existingId: String,
 // three ways this can resolve.
 data class PendingCaptureNotesImport(val tabId: String, val incoming: Annotations, val archiveName: String)
 
+internal data class ExternalDeviceAiApproval(
+    val requestId: String,
+    val sessionId: String,
+    val clientName: String,
+    val deviceLabel: String,
+)
+
+private data class DeviceAiOperationRecord(
+    val id: String,
+    val description: String,
+    val status: String,
+    val createdAtMs: Long,
+    val result: Any? = null,
+    val error: String? = null,
+)
+
 data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
 
 // upAnn's synchronous overwrite gate publishes this instead of COMMITTING a mutation when it would
@@ -1513,6 +1531,9 @@ class AppState(
     // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
     // so the mapping/persistence tests in this file's video section never touch real FFmpeg.
     private val videoControllerFactory: (String) -> VideoPlayerController = ::defaultVideoPlayerController,
+    // Lets saved-profile migration tests provide the current bundled executable independently of
+    // the host running the test; production still requires the real bundled path to exist.
+    private val bundledCodexExecutableProvider: () -> String? = LocalAccountCli::bundledCodexExecutable,
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -1526,6 +1547,15 @@ class AppState(
     // Session-only by construction: AppSettings is the only settings object serialized into
     // autosave.cache, so pasted API keys cannot reach an autosave or exported-settings path.
     private val aiProviderApiKeys = ConcurrentHashMap<String, String>()
+
+    private val externalDeviceApprovalDecisions = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val approvedExternalDeviceSessions = ConcurrentHashMap<String, String>()
+    private val externalDeviceSessionLocks = ConcurrentHashMap<String, Mutex>()
+    internal var externalDeviceAiApprovals by mutableStateOf<List<ExternalDeviceAiApproval>>(emptyList())
+        private set
+    private val deviceAiOperations = ConcurrentHashMap<String, DeviceAiOperationRecord>()
+    private val deviceAiStopOperations = ConcurrentHashMap<String, String>()
+    private val deviceAiMarkerBarrier = DeviceAiMarkerBarrier()
 
     // The AI panel owns current-launch conversation state. Keeping the registry here lets tab
     // closure cancel its in-flight request without adding any AI fields to LogTab/autosave.
@@ -1617,7 +1647,12 @@ class AppState(
         activateTab(tabId)
         aiPanelVisible = true
         pendingAiPromptRequest = AiPromptRequest(
-            context = AiInvestigationContext(tabId = tabId, lineId = resolvedLineId, action = action),
+            context = AiInvestigationContext(
+                tabId = tabId,
+                isDeviceCapture = tab.captureSessionId != null || tab.captureSourceSessionId != null,
+                lineId = resolvedLineId,
+                action = action,
+            ),
             prompt = action.prompt,
         )
         ctx = null
@@ -1633,7 +1668,12 @@ class AppState(
         activateTab(tabId)
         aiPanelVisible = true
         pendingAiPromptRequest = AiPromptRequest(
-            context = AiInvestigationContext(tabId = tabId, lineId = null, action = null),
+            context = AiInvestigationContext(
+                tabId = tabId,
+                isDeviceCapture = tab(tabId)?.let { it.captureSessionId != null || it.captureSourceSessionId != null } == true,
+                lineId = null,
+                action = null,
+            ),
             prompt = command.promptTemplate,
         )
         ctx = null
@@ -2013,6 +2053,296 @@ class AppState(
     internal fun captureControllerFor(tabId: String): TabCaptureController? =
         synchronized(stateLock) { captureControllersByTab[tabId] }
 
+    internal fun aiCaptureDevices(): List<CaptureDevice> = captureService.discoverDevicesNow()
+
+    /** AI/MCP device tools stay pinned to a live capture tab, and recheck adb connectivity on each
+     * control request so a disconnect cannot leave stale device consent usable. */
+    internal fun aiCaptureBinding(tabId: String): Pair<CaptureSession, CaptureTools> {
+        val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+        val session = controller.selectedSession.value ?: error("The bound capture has no active session")
+        val tools = captureService.toolsForStart(session.settings)
+        val connected = tools.listDevices().any { it.device.serial == session.device.serial && it.device.available }
+        check(connected) { "Android device ${session.device.serial} is disconnected" }
+        return session to tools
+    }
+
+    /** Starts or reuses the one active capture. A requested fresh run first stops and retains the
+     * old session through AppState's normal finalization path, then starts its replacement. */
+    internal fun startCaptureForAi(deviceSerial: String?, newCapture: Boolean): Map<String, Any?> {
+        ensureNoDeviceAiStopIsFinalizing()
+        val liveTabId = liveCaptureTabId
+        val currentSession = liveTabId?.let { captureControllerFor(it)?.selectedSession?.value }
+        if (liveTabId != null && !newCapture && currentSession == null) {
+            error("The current capture is still starting; try again in a moment")
+        }
+        val devices = aiCaptureDevices().filter { it.available }
+        val choice = resolveAiCaptureDevice(
+            readyDevices = devices,
+            liveCaptureSerial = currentSession?.device?.serial,
+            requestedSerial = deviceSerial,
+            newCapture = newCapture,
+        )
+        val device = when (choice) {
+            is AiCaptureDeviceChoice.Selected -> choice.device
+            is AiCaptureDeviceChoice.NeedsSelection -> return mapOf(
+                "needsDeviceSelection" to true,
+                "message" to "More than one Android device is ready. Ask the user to choose one, then pass its deviceSerial before starting capture.",
+                "devices" to choice.devices.map { mapOf("serial" to it.serial, "model" to it.model, "emulator" to it.emulator) },
+            )
+            is AiCaptureDeviceChoice.Unavailable -> error("Android device ${choice.serial} is not connected or authorized")
+            is AiCaptureDeviceChoice.LiveCaptureDeviceConflict -> error(
+                "A capture is already live on ${choice.liveSerial}. Choose Start a new capture to switch devices.",
+            )
+            AiCaptureDeviceChoice.NoReadyDevices -> error("No ready Android devices were found")
+        }
+        if (liveTabId != null && !newCapture) {
+            val activeSerial = currentSession?.device?.serial
+                ?: error("The current capture is still starting; try again in a moment")
+            check(activeSerial == device.serial) {
+                "A capture is already live on $activeSerial. Choose Start a new capture to switch devices."
+            }
+            return mapOf(
+                "tabId" to liveTabId,
+                "sessionId" to currentSession.id,
+                "deviceSerial" to activeSerial,
+                "reused" to true,
+            )
+        }
+        if (liveTabId != null) {
+            stopCaptureTab(liveTabId)
+            awaitCaptureControllerRemoval(liveTabId)
+        }
+        val tabId = startCaptureTab(device) ?: error(captureService.error ?: "Capture could not start")
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120)
+        while (System.nanoTime() < deadline) {
+            val started = tab(tabId)?.captureSessionId
+            if (started != null) return mapOf(
+                "tabId" to tabId,
+                "sessionId" to started,
+                "deviceSerial" to device.serial,
+                "reused" to false,
+            )
+            val snapshot = captureControllerFor(tabId)?.snapshot?.value
+            if (snapshot?.state == com.indagium.capture.RecorderState.INTERRUPTED) {
+                error(snapshot.diagnostics.lastOrNull() ?: captureService.error ?: "Capture was interrupted while starting")
+            }
+            Thread.sleep(100)
+        }
+        error("Capture did not become ready within 120 seconds")
+    }
+
+    private fun awaitCaptureControllerRemoval(tabId: String) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120)
+        while (captureControllerFor(tabId) != null && System.nanoTime() < deadline) Thread.sleep(100)
+        check(captureControllerFor(tabId) == null) { "The previous capture did not finish finalizing within 120 seconds" }
+    }
+
+    internal fun launchDeviceAiOperation(
+        description: String,
+        action: suspend () -> Any?,
+        markerTabId: String? = null,
+    ): Map<String, Any?> {
+        val id = UUID.randomUUID().toString()
+        deviceAiOperations[id] = DeviceAiOperationRecord(id, description, "running", System.currentTimeMillis())
+        markerTabId?.let { deviceAiMarkerBarrier.register(it, id) }
+        if (deviceAiOperations.size > 128) {
+            val cutoff = System.currentTimeMillis() - DEVICE_AI_OPERATION_RETENTION_MS
+            deviceAiOperations.entries.removeIf { it.value.createdAtMs < cutoff && it.value.status != "running" }
+        }
+        ioScope.launch {
+            var succeeded = false
+            try {
+                val result = action()
+                deviceAiOperations.computeIfPresent(id) { _, old -> old.copy(status = "completed", result = result) }
+                succeeded = true
+            } catch (cancelled: CancellationException) {
+                deviceAiOperations.computeIfPresent(id) { _, old -> old.copy(status = "cancelled") }
+                throw cancelled
+            } catch (failure: Throwable) {
+                deviceAiOperations.computeIfPresent(id) { _, old ->
+                    old.copy(status = "failed", error = failure.message ?: failure::class.simpleName ?: "Operation failed")
+                }
+            } finally {
+                markerTabId?.let { deviceAiMarkerBarrier.complete(it, id, succeeded) }
+            }
+        }
+        return mapOf("operationId" to id, "status" to "running", "message" to description)
+    }
+
+    internal fun deviceAiOperationStatus(operationId: String): Map<String, Any?> {
+        val operation = deviceAiOperations[operationId] ?: return mapOf("error" to "Unknown or expired operation id")
+        return buildMap {
+            put("operationId", operation.id)
+            put("status", operation.status)
+            put("description", operation.description)
+            operation.result?.let { put("result", it) }
+            operation.error?.let { put("error", it) }
+        }
+    }
+
+    internal fun markIssueForAi(tabId: String): Map<String, Any?> = launchDeviceAiOperation(
+        description = "Marking issue on the capture",
+        action = {
+            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+            val context = beginMarkerNote(tabId, controller) ?: error(captureScreenshotStatus ?: "Issue marker could not be created")
+            val resolvedScreenshotCapability = if (context.settings.markerScreenshot) {
+                resolveScreenshotCapabilityForAi(tabId, controller)
+            } else {
+                screenshotCapability(tabId)
+            }
+            var afterId = context.noteId
+            try {
+                afterId = attachMarkerScreenshot(tabId, controller, context)
+            } finally {
+                // Keep the marker window durable even when screenshot capture itself throws.
+                finishMarkerWindow(tabId, context, afterId)
+            }
+            val screenshotAttached = afterId != context.noteId
+            buildMap {
+                put("tabId", tabId)
+                put("markerId", context.marker.id)
+                put("noteId", context.noteId)
+                put("screenshotAttached", screenshotAttached)
+                if (context.settings.markerScreenshot && !screenshotAttached) {
+                    put(
+                        "warning",
+                        resolvedScreenshotCapability.reason ?: "The issue marker was saved, but its screenshot could not be attached.",
+                    )
+                }
+            }
+        },
+        markerTabId = tabId,
+    )
+
+    internal fun stopCaptureForAi(tabId: String): Map<String, Any?> =
+        launchDeviceAiOperation("Stopping and finalizing the capture", action = {
+            check(captureControllerFor(tabId) != null) { "The bound capture tab is no longer live" }
+            stopCaptureTab(tabId)
+            awaitCaptureControllerRemoval(tabId)
+            mapOf("tabId" to tabId, "status" to "stopped", "retained" to true)
+        }).also { operation ->
+            (operation["operationId"] as? String)?.let { trackDeviceAiStopOperation(it, tabId) }
+        }
+
+    internal fun trackDeviceAiStopOperation(operationId: String, tabId: String) {
+        deviceAiStopOperations[operationId] = tabId
+    }
+
+    internal fun ensureNoDeviceAiStopIsFinalizing() {
+        deviceAiStopOperations.entries.removeIf { (operationId, _) ->
+            deviceAiOperations[operationId]?.status != "running"
+        }
+        val pending = deviceAiStopOperations.entries.firstOrNull { (operationId, _) ->
+            deviceAiOperations[operationId]?.status == "running"
+        } ?: return
+        error(
+            "The previous capture is still finalizing. Poll get_capture_operation_status for operation " +
+                "${pending.key} until it completes before starting another capture.",
+        )
+    }
+
+    internal fun exportCaptureSnapshotForAi(tabId: String): Map<String, Any?> =
+        launchDeviceAiOperation("Exporting the capture as a ZIP archive", action = {
+            // Marker creation includes its post-window and screenshot attachment. If the model
+            // requests a snapshot immediately after mark_device_issue, wait for durable evidence
+            // before capturing the archive boundary.
+            check(deviceAiMarkerBarrier.awaitAndConsume(tabId)) {
+                "An issue marker failed to finish; the snapshot was not exported without its evidence."
+            }
+            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+            val boundary = controller.snapshotForExport()
+            val session = boundary.session
+            val directory = effectiveCaptureSnapshotsDir()
+            check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
+            val suggestedName = com.indagium.capture.renderCaptureFilename(
+                session.settings.filenameTemplate,
+                session.device,
+                session.startedEpochMs,
+                com.indagium.capture.CaptureRange.ALL,
+                session.exportCounter,
+                session.settings.label,
+            )
+            val destination = uniqueSnapshotDestination(directory, suggestedName)
+            val request = CaptureExportRequest(
+                destination = destination,
+                range = com.indagium.capture.CaptureRange.ALL,
+                includeVideo = true,
+                cutoffElapsedMs = boundary.elapsedMs,
+                overwriteExisting = false,
+            )
+            val notes = tab(tabId)?.let { it.annotations.preparedForSave(it) }
+            val result = kotlinx.coroutines.runInterruptible { controller.export(request, notes = notes) }
+            mapOf("path" to result.file.absolutePath, "message" to result.message, "includedVideo" to (result.videoCoveredEndMs != null))
+        })
+
+    internal suspend fun awaitExternalDeviceAiApproval(sessionId: String, clientName: String, deviceLabel: String): Boolean {
+        if (approvedExternalDeviceSessions[sessionId] == deviceLabel) return true
+        approvedExternalDeviceSessions.remove(sessionId)
+        val requestId = "$sessionId\u0000$deviceLabel"
+        val deferred = externalDeviceApprovalDecisions.computeIfAbsent(requestId) { CompletableDeferred() }
+        val item = ExternalDeviceAiApproval(requestId, sessionId, clientName, deviceLabel)
+        if (externalDeviceAiApprovals.none { it.requestId == requestId }) {
+            externalDeviceAiApprovals = externalDeviceAiApprovals + item
+        }
+        return try {
+            val accepted = withTimeoutOrNull(DEVICE_AI_APPROVAL_TIMEOUT_MS) { deferred.await() } ?: false
+            if (accepted) approvedExternalDeviceSessions[sessionId] = deviceLabel
+            accepted
+        } finally {
+            externalDeviceApprovalDecisions.remove(requestId, deferred)
+            externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.requestId == requestId }
+        }
+    }
+
+    internal fun resolveExternalDeviceAiApproval(requestId: String, accepted: Boolean) {
+        externalDeviceApprovalDecisions[requestId]?.complete(accepted)
+    }
+
+    internal fun revokeExternalDeviceAiApproval(sessionId: String) {
+        approvedExternalDeviceSessions.remove(sessionId)
+        externalDeviceApprovalDecisions.entries
+            .filter { it.key.startsWith("$sessionId\u0000") }
+            .forEach { (requestId, deferred) ->
+                externalDeviceApprovalDecisions.remove(requestId, deferred)
+                deferred.complete(false)
+            }
+        externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.sessionId == sessionId }
+    }
+
+    /** Serialize a native MCP session's approval and device command as one bound action. */
+    internal suspend fun executeExternalDeviceAiAction(
+        sessionId: String,
+        clientName: String,
+        deviceLabel: String,
+        action: suspend () -> Any?,
+    ): Any? {
+        val lock = externalDeviceSessionLocks.computeIfAbsent(sessionId) { Mutex() }
+        return lock.withLock {
+            if (!awaitExternalDeviceAiApproval(sessionId, clientName, deviceLabel)) {
+                return@withLock mapOf("error" to "Device access was not approved for this MCP session.")
+            }
+            val result = runCatching { action() }
+                .getOrElse { error -> mapOf("error" to (error.message ?: "Device tool failed")) }
+            val failure = (result as? Map<*, *>)?.get("error") as? String
+            if (failure != null && listOf("disconnect", "not connected", "no longer live", "no active session").any { failure.contains(it, true) }) {
+                revokeExternalDeviceAiApproval(sessionId)
+            }
+            result
+        }
+    }
+
+    internal fun deviceAiApprovalLabel(tabId: String?, serial: String?): String {
+        val target = tabId?.let { id -> captureControllerFor(id)?.selectedSession?.value?.device }
+        return target?.let { "${it.model} (${it.serial})" }
+            ?: serial?.takeIf(String::isNotBlank)?.let { "Android device $it" }
+            ?: "the selected Android device"
+    }
+
+    private companion object DeviceAiLimits {
+        const val DEVICE_AI_OPERATION_RETENTION_MS = 30 * 60_000L
+        const val DEVICE_AI_APPROVAL_TIMEOUT_MS = 5 * 60_000L
+    }
+
     /** Test seam: registers a controller for [tabId] without going through [startCaptureTab]'s real
      * device/tool-resolution flow, so ensureEmbeddedMirror's race handling can be exercised directly
      * against a [TabCaptureController] backed by fakes (see EmbeddedMirrorAutostartTest). */
@@ -2025,6 +2355,34 @@ class AppState(
     internal fun screenshotCapability(tabId: String): CaptureScreenshotCapability =
         captureScreenshotCapabilities[tabId]
             ?: CaptureScreenshotCapability(CaptureScreenshotAvailability.PENDING)
+
+    /** AI issue markers need to resolve the lazy screenshot probe before attaching evidence. A
+     * pending UI probe must not silently produce a durable marker without the configured image. */
+    private fun resolveScreenshotCapabilityForAi(
+        tabId: String,
+        controller: TabCaptureController,
+    ): CaptureScreenshotCapability {
+        val existing = screenshotCapability(tabId)
+        if (existing.availability != CaptureScreenshotAvailability.PENDING) return existing
+        val result = runCatching { controller.supportsScreenshots() }
+        val resolved = result.fold(
+            onSuccess = { supported ->
+                if (supported) CaptureScreenshotCapability(CaptureScreenshotAvailability.ENABLED)
+                else CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    "This device does not support adb exec-out screenshots",
+                )
+            },
+            onFailure = { failure ->
+                CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    failure.message ?: "adb exec-out screenshot probe failed",
+                )
+            },
+        )
+        captureScreenshotCapabilities[tabId] = resolved
+        return resolved
+    }
 
     /** Starts the lazy per-session exec-out probe; repeated recompositions are harmless. */
     internal fun ensureScreenshotCapability(tabId: String) {
@@ -3377,6 +3735,8 @@ class AppState(
         autosaveScheduler.cancelPending()
         cancelAllCapturePreviews()
         aiProviderApiKeys.clear()
+        (externalDeviceApprovalDecisions.keys + approvedExternalDeviceSessions.keys).distinct()
+            .forEach(::revokeExternalDeviceAiApproval)
         aiSidebarRuntime.close()
         aiSessions.clear()
         controlServerManager.stopControlServer()
@@ -10708,7 +11068,15 @@ class AppState(
                 } else {
                     settingsFromToken(decoded)
                 }
-                restored?.let { settings = it }
+                restored?.let { value ->
+                    val bundledCodex = bundledCodexExecutableProvider()
+                    val migratedProfiles = value.aiProviderProfiles.map { profile ->
+                        if (profile.kind == AiProviderKind.CODEX_ACCOUNT) {
+                            profile.copy(executablePath = recoveredBundledCodexPath(profile.executablePath, bundledCodex))
+                        } else profile
+                    }
+                    settings = value.copy(aiProviderProfiles = normalizeAiProviderProfiles(migratedProfiles))
+                }
             }
             "active" -> activeTabId = value.unb64()
             "compare" -> restoreCompareState(value.unb64())

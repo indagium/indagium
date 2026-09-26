@@ -20,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
  * Session-only transcript for one log tab. It intentionally is not part of [com.indagium.model.LogTab]
  * or [com.indagium.ui.AppState], so neither autosave nor note export can retain an AI conversation.
  */
-internal class AiSession internal constructor(val tabId: String) {
+internal class AiSession internal constructor(@Volatile var tabId: String) {
     internal val messages = mutableListOf<LlmMessage>()
     internal var activeRun: AiRun? = null
     internal var lastPrompt: String? = null
@@ -87,7 +87,31 @@ internal class AiSession internal constructor(val tabId: String) {
 internal class AiSessionRegistry {
     private val sessions = ConcurrentHashMap<String, AiSession>()
 
+    @Synchronized
     fun sessionFor(tabId: String): AiSession = sessions.computeIfAbsent(tabId, ::AiSession)
+
+    /** Moves the current-launch conversation with a run that replaces its live capture tab. */
+    @Synchronized
+    fun transfer(fromTabId: String, toTabId: String): AiSession? {
+        if (fromTabId == toTabId) return sessions[fromTabId]
+        val session = sessions[fromTabId] ?: return null
+        val collision = sessions[toTabId]
+        if (collision != null && collision !== session) {
+            check(collision.activeRun == null && collision.runs.isEmpty() && collision.messages.isEmpty()) {
+                "The destination tab already has an AI conversation."
+            }
+            sessions.remove(toTabId, collision)
+        }
+        sessions.remove(fromTabId, session)
+        session.tabId = toTabId
+        session.lastContext = AiInvestigationContext(toTabId, isDeviceCapture = true)
+        session.activeRun?.let { run ->
+            run.tabId = toTabId
+            run.context = AiInvestigationContext(toTabId, isDeviceCapture = true)
+        }
+        sessions[toTabId] = session
+        return session
+    }
 
     fun remove(tabId: String) {
         sessions.remove(tabId)?.let { session ->
@@ -108,9 +132,9 @@ internal class AiSessionRegistry {
 /** One ephemeral user request running inside an [AiSession]. */
 internal class AiRun internal constructor(
     val id: String = UUID.randomUUID().toString(),
-    val tabId: String,
+    @Volatile var tabId: String,
     val userPrompt: String = "",
-    val context: AiInvestigationContext = AiInvestigationContext(tabId),
+    @Volatile var context: AiInvestigationContext = AiInvestigationContext(tabId),
     maxToolCalls: Int = com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS,
     val sentAt: Long = System.currentTimeMillis(),
 ) {
@@ -119,6 +143,9 @@ internal class AiRun internal constructor(
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     internal val toolCallBudget = AiToolCallBudget(maxToolCalls)
     internal var job: Job? = null
+    @Volatile internal var deviceControlApproved: Boolean = false
+    @Volatile internal var deviceControlApprovedSerial: String? = null
+    @Volatile internal var deviceCaptureTabId: String = tabId
 
     /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
     var firstResponseAt: Long? = null
@@ -223,13 +250,14 @@ internal class AiAgentRunner(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob()),
     private val maxToolRounds: Int = MAX_TOOL_ROUNDS,
     private val maxToolResultChars: Int = MAX_TOOL_RESULT_CHARS,
+    private val onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
 ) : AutoCloseable {
     init {
         require(maxToolRounds > 0) { "maxToolRounds must be positive" }
         require(maxToolResultChars > 0) { "maxToolResultChars must be positive" }
     }
 
-    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars)
+    private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars, onCaptureTabChanged)
 
     fun start(
         session: AiSession,
@@ -255,6 +283,8 @@ internal class AiAgentRunner(
             } finally {
                 run.confirmations.values.forEach { it.cancel() }
                 run.confirmations.clear()
+                run.deviceControlApproved = false
+                run.deviceControlApprovedSerial = null
                 if (session.activeRun === run) session.activeRun = null
             }
         }
@@ -367,7 +397,12 @@ internal class AiAgentRunner(
 
                 toolCalls.forEach { call ->
                     val result = toolExecutor.execute(run, call)
-                    conversation += LlmMessage(LlmRole.TOOL, content = result.content, toolCallId = call.id)
+                    conversation += LlmMessage(
+                        LlmRole.TOOL,
+                        content = result.content,
+                        toolCallId = call.id,
+                        images = result.images,
+                    )
                 }
             }
         } finally {

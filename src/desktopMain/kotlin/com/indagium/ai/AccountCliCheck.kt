@@ -12,7 +12,13 @@ import java.io.File
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.TimeUnit
 
-private const val MACOS_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex"
+private const val MACOS_BUNDLED_CODEX =
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+private const val LEGACY_MACOS_BUNDLED_CODEX = "/Applications/ChatGPT.app/Contents/Resources/codex"
+
+internal fun recoveredBundledCodexPath(configuredPath: String, currentPath: String?): String =
+    if (configuredPath.trim() == LEGACY_MACOS_BUNDLED_CODEX && !currentPath.isNullOrBlank()) currentPath
+    else configuredPath
 
 /** Result of a non-billed local account-agent prerequisite check. */
 internal data class AccountCliCheck(val isReady: Boolean, val message: String)
@@ -35,9 +41,21 @@ internal object LocalAccountCli {
 
     fun executable(kind: AiProviderKind, configuredPath: String = ""): String {
         val configured = configuredPath.trim()
-        if (configured.isNotBlank()) return configured
+        if (configured.isNotBlank()) {
+            // ChatGPT moved its bundled CLI into CodexCLI.app. Recover only the exact obsolete
+            // path written by older Indagium builds; a custom executable path stays authoritative.
+            if (kind == AiProviderKind.CODEX_ACCOUNT) {
+                return recoveredBundledCodexPath(configured, bundledCodexExecutable())
+            }
+            return configured
+        }
         return detectExecutable(kind) ?: commandName(kind)
     }
+
+    internal fun bundledCodexExecutable(): String? = listOf(
+        File(MACOS_BUNDLED_CODEX),
+        File(System.getProperty("user.home").orEmpty(), "Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"),
+    ).firstOrNull { it.isFile && it.canExecute() }?.absolutePath
 
     fun detectExecutable(kind: AiProviderKind): String? = candidatePaths(kind)
         .firstOrNull { it.isFile && it.canExecute() }
@@ -128,7 +146,11 @@ internal fun accountCliSearchDirs(
         pnpmHome?.takeIf(String::isNotBlank)?.let(::add)
         if (kind == AiProviderKind.CODEX_ACCOUNT) {
             add(File(MACOS_BUNDLED_CODEX).parent.orEmpty())
-            if (home.isNotBlank()) add(File(home, "Applications/ChatGPT.app/Contents/Resources").path)
+            if (home.isNotBlank()) {
+                add(File(home, "Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS").path)
+                // Older desktop builds shipped the executable at Resources/codex.
+                add(File(home, "Applications/ChatGPT.app/Contents/Resources").path)
+            }
         }
         appData?.takeIf(String::isNotBlank)?.let {
             add(File(it, "npm").path)
