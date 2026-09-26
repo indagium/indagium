@@ -11,8 +11,8 @@ enum class AiProviderUrlProblem(val message: String) {
     // itself also travels in the clear whenever the endpoint is plain HTTP (as opposed to HTTPS),
     // which is a materially different risk (a credential, not just log content) to leave unstated.
     REMOTE_DISCLOSURE_REQUIRED(
-        "Acknowledge that logs and source context may leave this device, and that a plain HTTP " +
-            "(non-HTTPS) endpoint also sends your API key unencrypted.",
+        "Acknowledge that logs, source context, device screen images, and tool results may leave " +
+            "this device, and that a plain HTTP (non-HTTPS) endpoint also sends your API key unencrypted.",
     ),
 }
 

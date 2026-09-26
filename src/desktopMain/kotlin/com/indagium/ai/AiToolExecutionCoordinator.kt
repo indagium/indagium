@@ -23,6 +23,7 @@ import java.util.UUID
 internal class AiToolExecutionCoordinator(
     private val toolGateway: IndagiumToolGateway,
     private val maxToolResultChars: Int = DEFAULT_MAX_TOOL_RESULT_CHARS,
+    private val onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
 ) {
     init {
         require(maxToolResultChars > 0) { "maxToolResultChars must be positive" }
@@ -60,18 +61,38 @@ internal class AiToolExecutionCoordinator(
         }
         // The in-app panel is always tied to the tab that created the run. External MCP clients
         // remain explicitly multi-tab; only managed account-agent sessions take this path.
-        val pinnedArguments = if (
+        val deviceScoped = call.name in DEVICE_CAPTURE_TOOL_NAMES
+        val requestedDeviceSerial = (arguments["deviceSerial"] as? String)?.trim()?.takeIf(String::isNotBlank)
+        if (
+            call.name == "start_device_capture" && run.deviceControlApproved && requestedDeviceSerial != null &&
+            run.deviceControlApprovedSerial != null && requestedDeviceSerial != run.deviceControlApprovedSerial
+        ) {
+            // Switching devices invalidates this run's prior consent before any new-device command
+            // can execute; the next protected call will show the confirmation card again.
+            run.deviceControlApproved = false
+            run.deviceControlApprovedSerial = null
+        }
+        val pinnedArguments = if (deviceScoped) {
+            arguments + ("tabId" to run.deviceCaptureTabId)
+        } else if (
             call.name in TAB_SCOPED_TOOL_NAMES || (call.name == "resolve_log_source" && "tabId" in arguments)
         ) {
             arguments + ("tabId" to run.tabId)
         } else {
             arguments
         }
-        if (toolGateway.actionPolicy(call.name) == IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) {
+        val sameBoundDeviceArguments = if (
+            call.name == "start_device_capture" &&
+            requestedDeviceSerial == null && run.deviceControlApprovedSerial != null
+        ) pinnedArguments + ("deviceSerial" to run.deviceControlApprovedSerial) else pinnedArguments
+        val requiresDeviceApproval = call.name in DEVICE_CONTROL_TOOL_NAMES && !run.deviceControlApproved
+        if (requiresDeviceApproval || toolGateway.actionPolicy(call.name) == IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) {
             val confirmation = AiToolConfirmation(
                 id = UUID.randomUUID().toString(),
                 call = call,
-                description = confirmationDescription(call.name),
+                description = if (requiresDeviceApproval) {
+                    "Allow this AI request to view and control the Android device in this capture? Screen images may be sent to the selected provider."
+                } else confirmationDescription(call.name),
             )
             val decision = CompletableDeferred<Boolean>()
             run.confirmations[confirmation.id] = decision
@@ -84,15 +105,40 @@ internal class AiToolExecutionCoordinator(
             if (!accepted) {
                 return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
             }
+            if (requiresDeviceApproval) run.deviceControlApproved = true
         }
 
         val result = try {
-            val rawResult = toolGateway.execute(call.name, pinnedArguments)
+            val rawResult = toolGateway.execute(call.name, sameBoundDeviceArguments)
             AiToolExecutionResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
             AiToolExecutionResult.error("Tool '${call.name}' failed: ${error.message ?: "unexpected error"}")
+        }
+        val resultMap = result.raw as? Map<*, *>
+        if (call.name == "start_device_capture") {
+            (resultMap?.get("tabId") as? String)?.takeIf(String::isNotBlank)?.let { newTabId ->
+                val previousTabId = run.deviceCaptureTabId
+                if (newTabId != previousTabId) {
+                    // A start after stop_device_capture also returns a new tab even when
+                    // newCapture=false. Move the active conversation before returning to the
+                    // model so the visible sidebar, retained transcript, and subsequent
+                    // tab-scoped tools follow whichever capture was actually started.
+                    onCaptureTabChanged(previousTabId, newTabId)
+                    run.tabId = newTabId
+                    run.context = AiInvestigationContext(newTabId, isDeviceCapture = true)
+                }
+                run.deviceCaptureTabId = newTabId
+            }
+        }
+        (resultMap?.get("deviceSerial") as? String)?.takeIf(String::isNotBlank)?.let { returnedSerial ->
+            if (run.deviceControlApprovedSerial == null) run.deviceControlApprovedSerial = returnedSerial
+        }
+        val deviceFailure = (resultMap?.get("error") as? String).orEmpty().lowercase()
+        if (deviceScoped && listOf("disconnected", "not connected", "no longer live", "no active session").any(deviceFailure::contains)) {
+            run.deviceControlApproved = false
+            run.deviceControlApprovedSerial = null
         }
         return completeCountedResult(run, call, result)
     }
@@ -176,6 +222,14 @@ internal class AiToolExecutionCoordinator(
             // not a tabId, so pinning either would silently inject an unused/wrong argument.
             "set_case_metadata",
         )
+        val DEVICE_CAPTURE_TOOL_NAMES = setOf(
+            "start_device_capture", "get_device_screen", "device_tap", "device_swipe", "device_key", "device_text",
+            "stop_device_capture", "mark_device_issue", "export_capture_snapshot",
+        )
+        val DEVICE_CONTROL_TOOL_NAMES = setOf(
+            "start_device_capture", "get_device_screen", "device_tap", "device_swipe", "device_key", "device_text",
+            "stop_device_capture", "mark_device_issue", "export_capture_snapshot",
+        )
         val json = Json { ignoreUnknownKeys = true }
     }
 }
@@ -191,6 +245,7 @@ internal data class AiToolExecutionResult(
     // their Map.toString() rendering — doesn't have to re-parse `content`. Null for `error()`
     // results, where there is no underlying tool value.
     val raw: Any? = null,
+    val images: List<LlmImage> = emptyList(),
 ) {
     val returnedChars: Int get() = content.length
 
@@ -199,13 +254,18 @@ internal data class AiToolExecutionResult(
 
     companion object {
         fun from(value: Any?, maxChars: Int, evidence: List<AiEvidence>): AiToolExecutionResult {
-            val rendered = value?.toString() ?: "null"
+            val valueMap = value as? Map<*, *>
+            val imageBase64 = valueMap?.get("imageBase64") as? String
+            val mimeType = valueMap?.get("mimeType") as? String ?: "image/png"
+            val displayValue = if (imageBase64 != null) valueMap.minus("imageBase64") else value
+            val rendered = displayValue?.toString() ?: "null"
+            val images = imageBase64?.let { listOf(LlmImage(it, mimeType)) }.orEmpty()
             return if (rendered.length <= maxChars) {
-                AiToolExecutionResult(rendered, rendered, truncated = false, evidence = evidence, raw = value)
+                AiToolExecutionResult(rendered, rendered, truncated = false, evidence = evidence, raw = value, images = images)
             } else {
                 val notice = "\n\n[Tool result truncated to $maxChars characters by Indagium.]"
                 val bounded = rendered.take((maxChars - notice.length).coerceAtLeast(0)) + notice
-                AiToolExecutionResult(bounded, bounded, truncated = true, evidence = evidence, raw = value)
+                AiToolExecutionResult(bounded, bounded, truncated = true, evidence = evidence, raw = value, images = images)
             }
         }
 

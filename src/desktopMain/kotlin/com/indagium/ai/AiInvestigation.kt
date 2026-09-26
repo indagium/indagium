@@ -9,11 +9,21 @@ import java.util.UUID
  */
 internal data class AiInvestigationContext(
     val tabId: String,
+    /** The request originated from a live Android capture tab, so device requests must stay on-device. */
+    val isDeviceCapture: Boolean = false,
     val lineId: Int? = null,
     /** Additional selected lines attached from the log context menu. */
     val lineIds: List<Int> = emptyList(),
     val action: AiQuickAction? = null,
 )
+
+internal fun deviceCapturePromptGuidance(isDeviceCapture: Boolean): String = if (!isDeviceCapture) {
+    ""
+} else {
+    """
+    This is a live Android device capture. When the user asks to inspect or control a device, open an app or website, or perform a sequence on the device, do every observation and action through the `indagium` MCP device tools (`get_device_screen`, `device_tap`, `device_swipe`, `device_key`, and `device_text`). The Mac's Chrome/browser and desktop are not the captured device; never launch or control host apps, use host browser/computer automation, or run shell commands for a device request. Start from the currently bound capture. `get_device_screen` returns the exact image to inspect; gesture coordinates are measured in that image's pixels and mapped to the device automatically. Use `mark_device_issue` and `export_capture_snapshot` when requested, and poll `get_capture_operation_status` until those operations finish. If you call `stop_device_capture` separately, wait for its operation to complete before `start_device_capture`; prefer `newCapture=true` when the user asks to finalize the current recording and begin another one.
+    """.trimIndent()
+}
 
 /** Pre-built investigations exposed by the in-app panel and log-row context menu. */
 internal enum class AiQuickAction(val label: String, val prompt: String, val requiresLine: Boolean, val slashName: String) {

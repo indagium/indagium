@@ -720,21 +720,21 @@ private fun HomeRecentGridColumnsStepper(columns: Int, onColumns: (Int) -> Unit)
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        StepperButton("−", enabled = columns > MIN_HOME_RECENT_GRID_COLUMNS) {
+        HomeStepperButton("−", enabled = columns > MIN_HOME_RECENT_GRID_COLUMNS) {
             onColumns((columns - 1).coerceAtLeast(MIN_HOME_RECENT_GRID_COLUMNS))
         }
         AppText(
             "$columns/row", color = tc.td, fontSize = 10.sp,
             modifier = Modifier.padding(horizontal = 4.dp),
         )
-        StepperButton("+", enabled = columns < MAX_HOME_RECENT_GRID_COLUMNS) {
+        HomeStepperButton("+", enabled = columns < MAX_HOME_RECENT_GRID_COLUMNS) {
             onColumns((columns + 1).coerceAtMost(MAX_HOME_RECENT_GRID_COLUMNS))
         }
     }
 }
 
 @Composable
-private fun StepperButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+private fun HomeStepperButton(label: String, enabled: Boolean, onClick: () -> Unit) {
     val tc = tc()
     Box(
         Modifier.size(20.dp).clip(RoundedCornerShape(4.dp))

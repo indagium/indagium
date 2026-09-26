@@ -86,7 +86,7 @@ private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
 
 private fun appHasOpenAppLevelDialog(state: AppState): Boolean =
     state.isLoading || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
-        state.supportDialogOpen || state.updateDialogVisible || state.cacheClearConfirmOpen ||
+        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.updateDialogVisible || state.cacheClearConfirmOpen ||
         state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen
 
 /** Root-owned overlays can cover the embedded mirror's elevated native layer. */
@@ -2491,6 +2491,57 @@ fun App(
             state.sourceFolderInfoEditorTarget?.let { path ->
                 Dialog(onDismissRequest = { state.sourceFolderInfoEditorTarget = null }) {
                     SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
+                }
+            }
+
+            state.externalDeviceAiApprovals.firstOrNull()?.let { approval ->
+                var answered by remember(approval.requestId) { mutableStateOf(false) }
+                Dialog(onDismissRequest = {
+                    if (!answered) {
+                        answered = true
+                        state.resolveExternalDeviceAiApproval(approval.requestId, false)
+                    }
+                }) {
+                    val colors = tc()
+                    Column(
+                        Modifier.widthIn(min = 360.dp, max = 500.dp)
+                            .background(colors.p, RoundedCornerShape(10.dp))
+                            .border(1.dp, colors.br, RoundedCornerShape(10.dp))
+                            .padding(22.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        AppText("Allow device access?", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            "${approval.clientName} wants to view and control ${approval.deviceLabel}. " +
+                                "Screen images may be sent to the connected AI provider. This approval lasts for this MCP session.",
+                            color = colors.td,
+                            fontSize = 12.sp,
+                            maxLines = 6,
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                            AppButton(
+                                "Deny",
+                                onClick = {
+                                    if (!answered) {
+                                        answered = true
+                                        state.resolveExternalDeviceAiApproval(approval.requestId, false)
+                                    }
+                                },
+                                enabled = !answered,
+                            )
+                            AppButton(
+                                "Allow for this session",
+                                onClick = {
+                                    if (!answered) {
+                                        answered = true
+                                        state.resolveExternalDeviceAiApproval(approval.requestId, true)
+                                    }
+                                },
+                                variant = ButtonVariant.Primary,
+                                enabled = !answered,
+                            )
+                        }
+                    }
                 }
             }
         }

@@ -126,6 +126,72 @@ class OpenAiCompatibleProviderTest {
     }
 
     @Test
+    fun sendsParallelToolRepliesBeforeFollowingToolImageUserMessage() = runBlocking {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(sse("[DONE]"), HttpStatusCode.OK, headersOf("Content-Type", "text/event-stream"))
+        }) { expectSuccess = false }
+        val imageRequest = request().copy(
+            messages = listOf(
+                LlmMessage(LlmRole.USER, "Inspect the device"),
+                LlmMessage(
+                    LlmRole.ASSISTANT,
+                    toolCalls = listOf(
+                        LlmToolCall("screen-1", "get_device_screen", "{}"),
+                        LlmToolCall("filter-1", "get_filter", "{}"),
+                    ),
+                ),
+                LlmMessage(
+                    LlmRole.TOOL,
+                    "Current device screen",
+                    toolCallId = "screen-1",
+                    images = listOf(LlmImage("c2NyZWVu", "image/jpeg")),
+                ),
+                LlmMessage(LlmRole.TOOL, "Current filter", toolCallId = "filter-1"),
+            ),
+        )
+        OpenAiCompatibleProvider(
+            profile = defaultAiProviderProfile().copy(baseUrl = "http://provider.test/v1"),
+            httpClient = client,
+        ).use { it.streamChat(imageRequest).toList() }
+
+        val messages = Json.parseToJsonElement((requireNotNull(capturedRequest).body as TextContent).text)
+            .jsonObject["messages"]!!.jsonArray
+        assertEquals("tool", messages[2].jsonObject["role"]!!.jsonPrimitive.content)
+        assertEquals("Current device screen", messages[2].jsonObject["content"]!!.jsonPrimitive.content)
+        assertEquals("tool", messages[3].jsonObject["role"]!!.jsonPrimitive.content)
+        assertEquals("filter-1", messages[3].jsonObject["tool_call_id"]!!.jsonPrimitive.content)
+        assertEquals("Current filter", messages[3].jsonObject["content"]!!.jsonPrimitive.content)
+        assertEquals("user", messages[4].jsonObject["role"]!!.jsonPrimitive.content)
+        val content = messages[4].jsonObject["content"]!!.jsonArray
+        assertEquals("text", content[0].jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals("image_url", content[1].jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals(
+            "data:image/jpeg;base64,c2NyZWVu",
+            content[1].jsonObject["image_url"]!!.jsonObject["url"]!!.jsonPrimitive.content,
+        )
+    }
+
+    @Test
+    fun explainsWhenOpenAiCompatibleProviderRejectsImages() = runBlocking {
+        val client = HttpClient(MockEngine {
+            respond("model has no vision support", HttpStatusCode.BadRequest, headersOf("Content-Type", "application/json"))
+        }) { expectSuccess = false }
+        val imageRequest = request().copy(
+            messages = listOf(LlmMessage(LlmRole.USER, "Describe this screen", images = listOf(LlmImage("c2NyZWVu")))),
+        )
+        OpenAiCompatibleProvider(
+            profile = defaultAiProviderProfile().copy(baseUrl = "http://provider.test/v1"),
+            httpClient = client,
+        ).use { provider ->
+            val failure = provider.streamChat(imageRequest).toList().single() as LlmStreamEvent.Error
+            assertTrue(failure.message.contains("rejected the screen image input"))
+            assertTrue(failure.message.contains("model has no vision support"))
+        }
+    }
+
+    @Test
     fun pathlessBaseUrlIsTreatedAsItsV1Base() = runBlocking {
         var capturedRequest: HttpRequestData? = null
         val client = HttpClient(MockEngine { request ->

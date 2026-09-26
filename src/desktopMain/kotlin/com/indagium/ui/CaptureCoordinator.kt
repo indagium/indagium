@@ -358,6 +358,11 @@ internal class CaptureService(
     /** Resolves and validates adb for the synchronous start path. */
     fun toolsForStart(settings: CaptureSettings): CaptureTools = resolveTools(settings, force = false)
 
+    /** Fresh synchronous device listing for AI/MCP callers that cannot depend on launcher polling. */
+    fun discoverDevicesNow(): List<CaptureDevice> = toolsForStart(app.settings.captureSettings)
+        .listDevices()
+        .map { it.device }
+
     private fun resolveTools(settings: CaptureSettings, force: Boolean): CaptureTools {
         if (!force && tools != null && resolvedSettings == settings) return requireNotNull(tools)
         val found = resolver.resolve(settings)
@@ -548,6 +553,8 @@ internal class TabCaptureController(
     fun screenshot(): File = recorder.screenshot()
 
     fun screenshotCapture(): CaptureScreenshot = recorder.screenshotCapture()
+
+    fun readScreen(): ByteArray = recorder.readScreen()
 
     fun supportsScreenshots(): Boolean = recorder.supportsScreenshots()
 

@@ -91,7 +91,12 @@ class OpenAiCompatibleProvider(
                 setBody(request.toOpenAiJson().toString())
             }.execute { response ->
                 if (!response.status.isSuccess()) {
-                    emit(LlmStreamEvent.Error("Provider request failed (HTTP ${response.status.value})."))
+                    val details = runCatching { response.bodyAsText().take(1_000) }.getOrNull().orEmpty()
+                    val message = if (request.messages.any { it.images.isNotEmpty() }) {
+                        "The selected model/provider rejected the screen image input (HTTP ${response.status.value}). " +
+                            details.ifBlank { "Choose a vision-capable model or provider." }
+                    } else "Provider request failed (HTTP ${response.status.value})."
+                    emit(LlmStreamEvent.Error(message))
                     terminalHttpFailure = true
                     return@execute
                 }
@@ -196,7 +201,7 @@ class OpenAiCompatibleProvider(
         // OpenAI's harmony reasoning_effort field (low/medium/high). Servers that don't recognize
         // it - including most non-reasoning local models served via LM Studio - simply ignore it.
         reasoningEffort?.takeIf { it.isNotBlank() }?.let { put("reasoning_effort", it) }
-        put("messages", buildJsonArray { messages.forEach { add(it.toOpenAiJson()) } })
+        put("messages", buildJsonArray { messages.toOpenAiJsonMessages().forEach { add(it) } })
         if (tools.isNotEmpty()) {
             put("tools", buildJsonArray {
                 tools.forEach { tool ->
@@ -231,6 +236,59 @@ class OpenAiCompatibleProvider(
                 }
             })
         }
+    }
+
+    /** OpenAI Chat Completions requires tool output to remain text; attach an image returned by a
+     * tool in a separate following user message, matching the documented tool-message shape. */
+    private fun LlmMessage.toOpenAiJsonMessages(): List<JsonObject> {
+        if (images.isEmpty()) return listOf(toOpenAiJson())
+        val output = mutableListOf<JsonObject>()
+        if (role == LlmRole.TOOL) output += toOpenAiJson()
+        output += buildJsonObject {
+            put("role", "user")
+            put("content", buildJsonArray {
+                content?.takeIf(String::isNotBlank)?.let { text ->
+                    add(buildJsonObject {
+                        put("type", "text")
+                        put("text", text)
+                    })
+                }
+                images.forEach { image ->
+                    add(buildJsonObject {
+                        put("type", "image_url")
+                        put("image_url", buildJsonObject {
+                            put("url", "data:${image.mimeType};base64,${image.base64}")
+                        })
+                    })
+                }
+            })
+        }
+        return output
+    }
+
+    /** Keep every tool-role reply from one assistant tool-call batch adjacent. Image payloads
+     * returned by tools are emitted as following user messages, after the batch's tool replies,
+     * because OpenAI-compatible APIs generally require all requested tool_call_id responses
+     * before another message begins. */
+    private fun List<LlmMessage>.toOpenAiJsonMessages(): List<JsonObject> {
+        val output = mutableListOf<JsonObject>()
+        val deferredToolImages = mutableListOf<JsonObject>()
+        fun flushDeferredImages() {
+            output += deferredToolImages
+            deferredToolImages.clear()
+        }
+        for (message in this) {
+            if (message.role != LlmRole.TOOL) flushDeferredImages()
+            val expanded = message.toOpenAiJsonMessages()
+            if (message.role == LlmRole.TOOL && message.images.isNotEmpty()) {
+                output += expanded.first()
+                deferredToolImages += expanded.drop(1)
+            } else {
+                output += expanded
+            }
+        }
+        flushDeferredImages()
+        return output
     }
 
     private data class ToolCallAccumulator(

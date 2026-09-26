@@ -57,7 +57,11 @@ data class LlmMessage(
      * results, or the API rejects the turn. Providers that do not use them ignore this field.
      */
     val reasoning: List<LlmReasoning> = emptyList(),
+    /** Images attached to this message; used for real MCP screenshot results. */
+    val images: List<LlmImage> = emptyList(),
 )
+
+data class LlmImage(val base64: String, val mimeType: String = "image/png")
 
 /** One extended-thinking block. Either [thinking]+[signature] or [redactedData] is populated. */
 data class LlmReasoning(

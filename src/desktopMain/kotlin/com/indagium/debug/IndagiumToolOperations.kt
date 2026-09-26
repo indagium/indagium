@@ -54,9 +54,15 @@ import com.indagium.utils.newId
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
 import java.io.File
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.LinkedHashMap
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
+import javax.imageio.IIOImage
+import javax.imageio.ImageWriteParam
 import kotlin.math.roundToInt
 
 // Hex-color parsing constants for set_highlighters (parseHexColor / colorToHex).
@@ -269,6 +275,24 @@ internal class IndagiumToolOperations(
                 limit = a.anyInt("limit") ?: DEFAULT_LOG_COMPOSITION_LIMIT,
             )
         },
+        "list_android_devices" to { listAndroidDevicesRoute() },
+        "start_device_capture" to { a ->
+            appState.startCaptureForAi(a.str("deviceSerial"), a.anyBool("newCapture") == true)
+        },
+        "stop_device_capture" to { a -> appState.stopCaptureForAi(a.str("tabId") ?: "") },
+        "get_device_screen" to { a -> getDeviceScreenRoute(a.str("tabId") ?: "") },
+        "device_tap" to { a -> deviceTapRoute(a.str("tabId") ?: "", a.anyInt("x") ?: -1, a.anyInt("y") ?: -1) },
+        "device_swipe" to { a ->
+            deviceSwipeRoute(
+                a.str("tabId") ?: "", a.anyInt("x1") ?: -1, a.anyInt("y1") ?: -1,
+                a.anyInt("x2") ?: -1, a.anyInt("y2") ?: -1, a.anyInt("durationMs") ?: 350,
+            )
+        },
+        "device_key" to { a -> deviceKeyRoute(a.str("tabId") ?: "", a.str("key") ?: "") },
+        "device_text" to { a -> deviceTextRoute(a.str("tabId") ?: "", a.str("text") ?: "") },
+        "mark_device_issue" to { a -> appState.markIssueForAi(a.str("tabId") ?: "") },
+        "export_capture_snapshot" to { a -> appState.exportCaptureSnapshotForAi(a.str("tabId") ?: "") },
+        "get_capture_operation_status" to { a -> appState.deviceAiOperationStatus(a.str("operationId") ?: "") },
     )
 
     // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
@@ -305,6 +329,108 @@ internal class IndagiumToolOperations(
     internal fun openAiFunctionDefinitions() = toolGateway.openAiFunctions()
 
     // ── Routes ──────────────────────────────────────────────────────────
+
+    private fun listAndroidDevicesRoute(): Map<String, Any?> = runCatching {
+        val devices = appState.aiCaptureDevices()
+        mapOf(
+            "devices" to devices.map { device ->
+                mapOf("serial" to device.serial, "model" to device.model, "state" to device.state, "emulator" to device.emulator)
+            },
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not discover Android devices")) }
+
+    private fun getDeviceScreenRoute(tabId: String): Map<String, Any?> = runCatching {
+        require(tabId.isNotBlank()) { "A live capture tab is required" }
+        val (session, _) = appState.aiCaptureBinding(tabId)
+        val bytes = requireNotNull(appState.captureControllerFor(tabId)).readScreen()
+        val image = encodeBoundedDeviceScreen(bytes)
+        mapOf(
+            "message" to "Current device screen from capture tab $tabId",
+            "deviceSerial" to session.device.serial,
+            "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
+            "mimeType" to "image/jpeg",
+            "width" to image.width,
+            "height" to image.height,
+            "coordinateSpace" to "returned-image-pixels",
+            "coordinateInstructions" to "Gesture coordinates use this returned image's top-left origin and pixel dimensions; they are mapped to physical device pixels automatically.",
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not read the Android screen")) }
+
+    private fun deviceTapRoute(tabId: String, x: Int, y: Int): Map<String, Any?> = runCatching {
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        val space = currentDeviceScreenCoordinateSpace(tabId)
+        val (deviceX, deviceY) = mapDisplayedScreenCoordinatesToDevice(x, y, space)
+        runDeviceInput(tools, session.device.serial, listOf("input", "tap", deviceX.toString(), deviceY.toString()))
+        mapOf(
+            "tabId" to tabId,
+            "deviceSerial" to session.device.serial,
+            "action" to "tap",
+            "imageX" to x,
+            "imageY" to y,
+            "deviceX" to deviceX,
+            "deviceY" to deviceY,
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Device tap failed")) }
+
+    private fun deviceSwipeRoute(tabId: String, x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int): Map<String, Any?> = runCatching {
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        val space = currentDeviceScreenCoordinateSpace(tabId)
+        requireDeviceSwipe(x1, y1, x2, y2, durationMs, space.imageWidth, space.imageHeight)
+        val (deviceX1, deviceY1) = mapDisplayedScreenCoordinatesToDevice(x1, y1, space)
+        val (deviceX2, deviceY2) = mapDisplayedScreenCoordinatesToDevice(x2, y2, space)
+        runDeviceInput(
+            tools,
+            session.device.serial,
+            listOf("input", "swipe", deviceX1.toString(), deviceY1.toString(), deviceX2.toString(), deviceY2.toString(), durationMs.toString()),
+        )
+        mapOf(
+            "tabId" to tabId,
+            "deviceSerial" to session.device.serial,
+            "action" to "swipe",
+            "imageCoordinates" to listOf(x1, y1, x2, y2),
+            "deviceCoordinates" to listOf(deviceX1, deviceY1, deviceX2, deviceY2),
+            "durationMs" to durationMs,
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Device swipe failed")) }
+
+    private fun deviceKeyRoute(tabId: String, key: String): Map<String, Any?> = runCatching {
+        val keyCode = when (key.uppercase()) {
+            "BACK" -> "KEYCODE_BACK"
+            "HOME" -> "KEYCODE_HOME"
+            "RECENTS" -> "KEYCODE_APP_SWITCH"
+            "ENTER" -> "KEYCODE_ENTER"
+            else -> error("Supported device keys are BACK, HOME, RECENTS, and ENTER")
+        }
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        runDeviceInput(tools, session.device.serial, listOf("input", "keyevent", keyCode))
+        mapOf("tabId" to tabId, "deviceSerial" to session.device.serial, "key" to key.uppercase())
+    }.getOrElse { mapOf("error" to (it.message ?: "Device key action failed")) }
+
+    private fun deviceTextRoute(tabId: String, text: String): Map<String, Any?> = runCatching {
+        requireSafeAndroidInputText(text)
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        runDeviceInput(tools, session.device.serial, listOf("input", "text", text.replace(" ", "%s")))
+        mapOf("tabId" to tabId, "deviceSerial" to session.device.serial, "charactersEntered" to text.length)
+    }.getOrElse { mapOf("error" to (it.message ?: "Device text entry failed")) }
+
+    private fun currentDeviceScreenCoordinateSpace(tabId: String): DeviceScreenCoordinateSpace {
+        val bytes = requireNotNull(appState.captureControllerFor(tabId)).readScreen()
+        val image = encodeBoundedDeviceScreen(bytes)
+        return DeviceScreenCoordinateSpace(
+            imageWidth = image.width,
+            imageHeight = image.height,
+            deviceWidth = image.sourceWidth,
+            deviceHeight = image.sourceHeight,
+        )
+    }
+
+    private fun runDeviceInput(tools: com.indagium.capture.CaptureTools, serial: String, command: List<String>) {
+        val result = tools.runAdb(serial, listOf("shell") + command, timeout = java.time.Duration.ofSeconds(5))
+        check(!result.timedOut) { "The bounded adb input command timed out" }
+        check(result.exitCode == 0) {
+            "adb device input failed: ${(result.stderrText() + "\n" + result.stdoutText()).trim().take(500)}"
+        }
+    }
 
     // AppState already computes a specific refusal reason for most open/merge failures — it just
     // stores it in the UI-only appState.openError instead of returning it. Routes below snapshot
@@ -2044,3 +2170,140 @@ internal class IndagiumToolOperations(
         else -> null
     }
 }
+
+internal fun requireDeviceTapCoordinates(x: Int, y: Int, width: Int, height: Int) {
+    require(width > 0 && height > 0 && x in 0 until width && y in 0 until height) {
+        "Tap coordinates must be inside the ${width}×${height} screen"
+    }
+}
+
+internal fun requireDeviceSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, width: Int, height: Int) {
+    require(width > 0 && height > 0 && x1 in 0 until width && y1 in 0 until height && x2 in 0 until width && y2 in 0 until height) {
+        "Swipe coordinates must be inside the ${width}×${height} screen"
+    }
+    require(durationMs in 50..2_000) { "Swipe duration must be between 50 and 2000 milliseconds" }
+}
+
+internal data class DeviceScreenCoordinateSpace(
+    val imageWidth: Int,
+    val imageHeight: Int,
+    val deviceWidth: Int,
+    val deviceHeight: Int,
+)
+
+/** Validate against the exact image dimensions shown to the model, then map pixel centers onto
+ * physical device pixels. The inclusive endpoint mapping preserves (0, 0) and the bottom-right
+ * pixel, including when the image has been downsampled. */
+internal fun mapDisplayedScreenCoordinatesToDevice(
+    x: Int,
+    y: Int,
+    space: DeviceScreenCoordinateSpace,
+): Pair<Int, Int> {
+    require(space.deviceWidth > 0 && space.deviceHeight > 0) { "Physical device dimensions are invalid" }
+    requireDeviceTapCoordinates(x, y, space.imageWidth, space.imageHeight)
+    fun map(value: Int, imageSize: Int, deviceSize: Int): Int =
+        if (imageSize <= 1 || deviceSize <= 1) 0
+        else (value.toDouble() * (deviceSize - 1) / (imageSize - 1)).roundToInt().coerceIn(0, deviceSize - 1)
+
+    return map(x, space.imageWidth, space.deviceWidth) to map(y, space.imageHeight, space.deviceHeight)
+}
+
+internal fun requireSafeAndroidInputText(text: String) {
+    require(text.isNotEmpty() && text.length <= 300) { "Text must contain 1–300 characters" }
+    require(text.matches(SAFE_ANDROID_INPUT_TEXT)) {
+        "Text input must start with a letter or number and contain only letters, numbers, spaces, or safe URL punctuation (no shell metacharacters)"
+    }
+}
+
+private val SAFE_ANDROID_INPUT_TEXT = Regex("[A-Za-z0-9][A-Za-z0-9_.,:/@+ -]{0,299}")
+
+internal data class BoundedDeviceScreenImage(
+    val bytes: ByteArray,
+    val width: Int,
+    val height: Int,
+    val sourceWidth: Int,
+    val sourceHeight: Int,
+)
+
+/** Decode with source subsampling, then JPEG-encode to a small provider-safe image. */
+internal fun encodeBoundedDeviceScreen(
+    png: ByteArray,
+    maxDimension: Int = MAX_AI_SCREEN_DIMENSION,
+    maxBytes: Int = MAX_AI_SCREEN_IMAGE_BYTES,
+): BoundedDeviceScreenImage {
+    require(png.isNotEmpty()) { "Device screen image is empty" }
+    require(maxDimension >= 320 && maxBytes >= 32_768) { "Screen image limits are too small" }
+    val stream = ImageIO.createImageInputStream(ByteArrayInputStream(png)) ?: error("Could not read device screen image")
+    val (sourceWidth, sourceHeight, source) = try {
+        val reader = ImageIO.getImageReaders(stream).asSequence().firstOrNull()
+            ?: error("Device screen image is not a supported image")
+        reader.input = stream
+        val sourceWidth = reader.getWidth(0)
+        val sourceHeight = reader.getHeight(0)
+        require(sourceWidth > 0 && sourceHeight > 0 && sourceWidth.toLong() * sourceHeight <= MAX_AI_SCREEN_PIXELS) {
+            "Device screen dimensions exceed the safe decode limit"
+        }
+        val sample = maxOf(1, kotlin.math.ceil(maxOf(sourceWidth, sourceHeight).toDouble() / maxDimension).toInt())
+        val param = reader.defaultReadParam.apply { setSourceSubsampling(sample, sample, 0, 0) }
+        try {
+            Triple(sourceWidth, sourceHeight, reader.read(0, param) ?: error("Device screen image could not be decoded"))
+        } finally {
+            reader.dispose()
+        }
+    } finally {
+        stream.close()
+    }
+    var resized = source
+    var encoded = encodeDeviceJpeg(resized, 0.78f)
+    while (encoded.size > maxBytes && maxOf(resized.width, resized.height) > 320) {
+        val scale = minOf(0.82, maxBytes.toDouble() / encoded.size * 0.9).coerceIn(0.55, 0.82)
+        val width = maxOf(1, (resized.width * scale).toInt())
+        val height = maxOf(1, (resized.height * scale).toInt())
+        resized = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { next ->
+            val graphics = next.createGraphics()
+            try {
+                graphics.setRenderingHint(java.awt.RenderingHints.KEY_INTERPOLATION, java.awt.RenderingHints.VALUE_INTERPOLATION_BILINEAR)
+                graphics.drawImage(resized, 0, 0, width, height, null)
+            } finally {
+                graphics.dispose()
+            }
+        }
+        encoded = encodeDeviceJpeg(resized, 0.72f)
+    }
+    require(encoded.size <= maxBytes) { "Device screen image exceeds the safe 2 MB provider limit" }
+    return BoundedDeviceScreenImage(encoded, resized.width, resized.height, sourceWidth, sourceHeight)
+}
+
+private fun encodeDeviceJpeg(image: BufferedImage, quality: Float): ByteArray {
+    val rgb = if (image.type == BufferedImage.TYPE_INT_RGB) image else BufferedImage(image.width, image.height, BufferedImage.TYPE_INT_RGB).also { copy ->
+        val graphics = copy.createGraphics()
+        try {
+            graphics.color = java.awt.Color.WHITE
+            graphics.fillRect(0, 0, copy.width, copy.height)
+            graphics.drawImage(image, 0, 0, null)
+        } finally {
+            graphics.dispose()
+        }
+    }
+    val writer = ImageIO.getImageWritersByFormatName("jpeg").asSequence().firstOrNull()
+        ?: error("JPEG screen-image encoder is unavailable")
+    val output = ByteArrayOutputStream()
+    val imageOutput = ImageIO.createImageOutputStream(output) ?: error("Could not encode device screen image")
+    try {
+        writer.output = imageOutput
+        val param = writer.defaultWriteParam.apply {
+            compressionMode = ImageWriteParam.MODE_EXPLICIT
+            compressionQuality = quality
+        }
+        writer.write(null, IIOImage(rgb, null, null), param)
+        imageOutput.flush()
+        return output.toByteArray()
+    } finally {
+        writer.dispose()
+        imageOutput.close()
+    }
+}
+
+private const val MAX_AI_SCREEN_DIMENSION = 1440
+private const val MAX_AI_SCREEN_IMAGE_BYTES = 2 * 1024 * 1024
+private const val MAX_AI_SCREEN_PIXELS = 100_000_000L
