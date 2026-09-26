@@ -241,6 +241,75 @@ private fun CaptureVideoPill(snapshot: RecorderSnapshot, onClick: () -> Unit) {
     }
 }
 
+/** Pure copy for [CaptureFollowBadge]'s tooltip, kept separate from Compose for a focused test.
+ *  `settings.autoScrollWhileTailing` gates whether following can ever actually move a viewport (see
+ *  LogViewer.kt's own follow LaunchedEffect) — a pill still shows and reports its raw per-panel
+ *  [following] state rather than forcing "off" when that global setting is off, so toggling a pane
+ *  on here pre-arms it to resume the moment the user re-enables the setting in Settings, instead of
+ *  the click silently doing nothing. The tooltip says so explicitly. */
+internal fun followBadgeTooltip(autoScrollEnabled: Boolean, following: Boolean, paneName: String): String = when {
+    !autoScrollEnabled -> "Auto-scroll while tailing is off in Settings; this only pre-arms the $paneName pane."
+    following -> "Following the newest $paneName line. Click to stop."
+    else -> "Not following. Click to jump to the newest $paneName line."
+}
+
+/** "Follow filtered"/"Follow unfiltered" pill badges, shown only while a capture is ACTIVE (see
+ *  [recorderIsActive]) — a stopped capture's tab behaves like any static log tab, where following is
+ *  meaningless. Each pill mirrors one LogViewer panel's own
+ *  [LogViewerScrollStateStore.followTailState] (":main" for the filtered pane, ":original" for the
+ *  unfiltered one — see LogViewer.kt's panelKey convention), the same session-only state the log
+ *  viewer's own scroll-position sampler already flips off when the user scrolls up and back on when
+ *  they return to the last row. Clicking a pill toggles that state directly: on->off simply stops
+ *  following, and off->on relies on LogViewer's own follow LaunchedEffect (keyed on
+ *  `followTail.value`, see its own comment) to jump the panel to the newest row on the very next
+ *  recomposition. The unfiltered pill only renders while [LogTab.showUnfiltered] is on — following an
+ *  unfiltered pane that isn't even shown has nothing to report. */
+@Composable
+private fun CaptureFollowBadges(state: AppState, tab: LogTab) {
+    val mainFollow = state.logViewerScrollStateStore.followTailState("${tab.id}:main")
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        CaptureFollowBadge(
+            label = "↓ Filtered",
+            tooltip = followBadgeTooltip(state.settings.autoScrollWhileTailing, mainFollow.value, "filtered"),
+            following = mainFollow.value,
+            onClick = { mainFollow.value = !mainFollow.value },
+        )
+        if (tab.showUnfiltered) {
+            val originalFollow = state.logViewerScrollStateStore.followTailState("${tab.id}:original")
+            CaptureFollowBadge(
+                label = "↓ Unfiltered",
+                tooltip = followBadgeTooltip(state.settings.autoScrollWhileTailing, originalFollow.value, "unfiltered"),
+                following = originalFollow.value,
+                onClick = { originalFollow.value = !originalFollow.value },
+            )
+        }
+    }
+}
+
+private val CAPTURE_FOLLOW_BADGE_SHAPE = RoundedCornerShape(11.dp)
+
+@Composable
+private fun CaptureFollowBadge(label: String, tooltip: String, following: Boolean, onClick: () -> Unit) {
+    val colors = tc()
+    val tone = if (following) colors.ac else colors.td
+    TooltipArea(tooltip = { ToolbarTooltip(tooltip) }) {
+        Box(
+            Modifier
+                .height(22.dp)
+                .border(1.dp, if (following) tone.copy(alpha = .5f) else colors.br, CAPTURE_FOLLOW_BADGE_SHAPE)
+                .background(if (following) tone.copy(alpha = .12f) else Color.Transparent, CAPTURE_FOLLOW_BADGE_SHAPE)
+                .clip(CAPTURE_FOLLOW_BADGE_SHAPE)
+                .clickable(onClick = onClick)
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            DisableSelection {
+                AppText(label, color = tone, fontSize = 10.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+            }
+        }
+    }
+}
+
 /** SectionHeader's fixed row height — the part of the marker section that is always visible. */
 private val SECTION_HEADER_HEIGHT = 32.dp
 
@@ -447,6 +516,7 @@ internal fun CaptureStrip(
             }
             CaptureStorageMeter(usedBytes = snapshot.logBytes, limitBytes = session?.settings?.sessionLimitBytes)
             CaptureVideoPill(snapshot = snapshot, onClick = ::openCaptureSettings)
+            if (active) CaptureFollowBadges(state = state, tab = tab)
             Spacer(Modifier.weight(1f))
             // Right action cluster: its own row with tighter 8dp spacing, every button a uniform
             // 30dp tall — deliberately kept as a nested Row (not folded into the outer 12dp

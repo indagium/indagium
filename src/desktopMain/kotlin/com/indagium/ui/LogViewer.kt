@@ -1343,15 +1343,25 @@ fun LogViewer(
             // following off, while any real viewport move (wheel, drag, scrollbar, minimap, keyboard
             // nav, or a note/Find/video jump — see the note beside the annotation-nav effects above)
             // does. snapshotFlow conflates, so a burst of scroll frames collapses to one reading.
+            // The decision itself is followTailSampleDecision (see its own doc for the two bugs
+            // this guards against): the FIRST emission after this effect (re)launches is recorded
+            // as the baseline and never changes `followTail` on its own — only a genuine backward
+            // move relative to that baseline turns follow off, and only actually reaching the last
+            // row turns it back on. `previousSample` is updated on every emission regardless of
+            // `selfScrolling`, so the sample right after our own scroll settles (not a stale
+            // pre-scroll one) is what the next real user move gets compared against.
             LaunchedEffect(panelKey, lazyState) {
+                var previousSample: Pair<Int, Int>? = null
                 snapshotFlow { lazyState.firstVisibleItemIndex to lazyState.firstVisibleItemScrollOffset }
-                    .collect {
+                    .collect { sample ->
                         if (!selfScrolling) {
-                            followTail.value = isAtLastRow(
+                            val atLastRow = isAtLastRow(
                                 lazyState.layoutInfo.visibleItemsInfo.lastOrNull()?.index,
                                 currentLastRowIndex,
                             )
+                            followTailSampleDecision(previousSample, sample, atLastRow)?.let { followTail.value = it }
                         }
+                        previousSample = sample
                     }
             }
             // The follow itself. listItems.size is the append signal; it deliberately does not fire
@@ -1361,7 +1371,12 @@ fun LogViewer(
             // scrollForCursor records below). The spacer index is listItems.size, one past the last
             // real row — see newestRowScrollOffset for why that lands the newest row flush at the
             // bottom edge with no row-height estimate.
-            LaunchedEffect(panelKey, settings.autoScrollWhileTailing, effectiveTab.tailing, listItems.size) {
+            // followTail.value is also a key (not just read in the body) so that flipping it off->on
+            // externally — e.g. the capture strip's "Follow filtered/unfiltered" badge — restarts
+            // this effect and jumps straight to the newest row, instead of waiting for the next
+            // listItems.size change. selfScrolling's own set/reset around the body is unaffected: it
+            // still masks exactly the frame this effect's own scroll produces, whichever key changed.
+            LaunchedEffect(panelKey, settings.autoScrollWhileTailing, effectiveTab.tailing, listItems.size, followTail.value) {
                 if (!settings.autoScrollWhileTailing || !effectiveTab.tailing || !followTail.value) return@LaunchedEffect
                 selfScrolling = true
                 try {
@@ -2500,6 +2515,42 @@ internal fun centerAnchorIndex(index: Int, viewportHeight: Int, visibleItemSizes
 // "not following" reading first.
 internal fun isAtLastRow(lastVisibleIndex: Int?, lastRowIndex: Int): Boolean =
     lastVisibleIndex == null || lastVisibleIndex >= lastRowIndex
+
+// The user-intent sampler's own decision, pulled out as a pure function so the two bugs it exists
+// to prevent (follow defaulting OFF right as a capture starts; opening the Unfiltered split
+// turning BOTH panels' follow off) can be pinned with a plain unit test instead of a Compose one.
+//
+// The bug in both cases was the SAME: the sampler treated every snapshotFlow emission — including
+// the very first one after a LaunchedEffect (re)launches — as a genuine user scroll. A capture's
+// first rows can land before the first real follow-scroll runs, and opening the Unfiltered split
+// remounts this whole branch (a fresh composition, not a recomposition — see ItemList's own split
+// vs. single-view branches), so the FIRST position this sampler ever sees for either panel is
+// whatever the layout happens to report before anything has actually moved. Reading that as "not
+// at the bottom" flipped follow off although the user never touched a scrollbar.
+//
+// The fix: only ever turn follow OFF for a genuine backward move (an earlier item index, or the
+// same index scrolled further up) relative to the PREVIOUS sample, and only ever turn it back ON
+// once the last row is actually visible. The very first sample after a (re)launch has no previous
+// sample to compare against, so it can only ever be a no-op — the caller keeps whatever the store
+// already had (default `true` for a brand-new panel, or the follow state a resize/remount didn't
+// actually earn a chance to disturb). A pure resize/remount with an unchanged position, or a
+// forward move that doesn't yet reach the bottom, likewise leaves the current value alone: neither
+// is evidence one way or the other.
+//
+// Returns the new follow-state, or `null` to mean "leave it exactly as it is."
+internal fun followTailSampleDecision(
+    previousSample: Pair<Int, Int>?,
+    currentSample: Pair<Int, Int>,
+    atLastRow: Boolean,
+): Boolean? {
+    if (previousSample == null) return null
+    if (atLastRow) return true
+    val (previousIndex, previousOffset) = previousSample
+    val (currentIndex, currentOffset) = currentSample
+    val movedBackward = currentIndex < previousIndex ||
+        (currentIndex == previousIndex && currentOffset < previousOffset)
+    return if (movedBackward) false else null
+}
 
 // Placing the tail-space SPACER's top at the viewport bottom puts the last row's bottom edge
 // exactly there, with no row-height estimate needed — LazyListState's scrollOffset convention is

@@ -107,4 +107,20 @@ class CaptureStripTest {
         assertEquals(listOf("n2"), markerOwnedBlockIds(blocks, "n2"))
         assertTrue(markerOwnedBlockIds(blocks, "missing").isEmpty())
     }
+
+    @Test
+    fun followBadgeTooltipReflectsTheGlobalSettingBeforeTheRawPerPanelState() {
+        assertEquals(
+            "Auto-scroll while tailing is off in Settings; this only pre-arms the filtered pane.",
+            followBadgeTooltip(autoScrollEnabled = false, following = true, paneName = "filtered"),
+        )
+        assertEquals(
+            "Following the newest unfiltered line. Click to stop.",
+            followBadgeTooltip(autoScrollEnabled = true, following = true, paneName = "unfiltered"),
+        )
+        assertEquals(
+            "Not following. Click to jump to the newest filtered line.",
+            followBadgeTooltip(autoScrollEnabled = true, following = false, paneName = "filtered"),
+        )
+    }
 }
