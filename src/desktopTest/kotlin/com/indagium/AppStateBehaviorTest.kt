@@ -3122,6 +3122,33 @@ class AppStateBehaviorTest {
         assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
     }
 
+    // Regression for the "note file already exists" prompt firing on a note THIS session just
+    // created moments earlier: before the fix, LogTab.noteTargetName was only ever set AFTER the
+    // commit, by autoExportAnnotations running outside stateLock — leaving a window where a second
+    // upAnn call on the same tab could read the still-unpinned `current`, and later mistake this
+    // session's own about-to-exist file for a foreign collision (see upAnn's AutoExportDecision doc
+    // comment). The fix folds the pin into the SAME upTab commit as the edit that first adds blocks,
+    // so it must already be visible the instant the call that added those blocks returns.
+    @Test
+    fun firstAnnotationEditPinsNoteTargetNameInTheSameCommitAsTheEdit() {
+        val dir = createTempDirectory("openlog-atomic-pin").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val sourcePath = File(dir, "sample.log").absolutePath
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.addNoteBlock("log", "first note")
+
+        // The pin must already be on the committed tab the instant addNoteBlock returns — not
+        // "eventually, once autoExportAnnotations gets around to it" from some other thread.
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() }
+    }
+
     // The reported bug this whole mechanism exists for: a fresh tab/session opens the SAME log
     // file an earlier session already analyzed and saved notes for. The sourcePath fingerprint
     // recorded in the earlier .ann sidecar matches, so the OLD collision-avoidance logic alone
