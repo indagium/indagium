@@ -23,7 +23,9 @@ import javax.sound.sampled.AudioSystem
 import javax.sound.sampled.DataLine
 import javax.sound.sampled.FloatControl
 import javax.sound.sampled.SourceDataLine
+import kotlin.math.abs
 import kotlin.math.log10
+import kotlin.math.roundToInt
 
 // Presentation tolerance for the timestamped wall-clock wait below: a video frame within this
 // many microseconds of the current clock is shown immediately rather than sleeping for a
@@ -741,6 +743,35 @@ interface VideoPlayerController {
     fun close()
 }
 
+/** Optional source metadata capability. FFmpeg exposes container display-matrix rotation only
+ * after the stream is opened; keeping it separate from VideoAttachment.rotationDegrees preserves
+ * the user's persisted clockwise adjustment and lets the UI combine both exactly once. */
+internal interface VideoDisplayRotationAware {
+    val displayRotationDegrees: Int
+}
+
+internal val VideoPlayerController.sourceDisplayRotationDegrees: Int
+    get() = (this as? VideoDisplayRotationAware)?.displayRotationDegrees ?: 0
+
+/** Convert FFmpeg's Display Matrix angle (counterclockwise per av_display_rotation_get) into the
+ * clockwise rotation Compose and rotatedFramePng apply. The legacy `rotate` metadata tag uses the
+ * clockwise display convention and is consulted only when the Display Matrix is absent/zero. */
+internal fun ffmpegDisplayRotationDegrees(
+    displayMatrixCounterclockwiseDegrees: Double?,
+    rotateMetadata: String? = null,
+): Int {
+    val matrixAngle = displayMatrixCounterclockwiseDegrees?.takeIf { it.isFinite() && abs(it) >= 1.0 }
+    val clockwise = if (matrixAngle != null) -matrixAngle else rotateMetadata?.toDoubleOrNull() ?: 0.0
+    val quarterTurn = (clockwise / 90.0).roundToInt() * 90
+    if (abs(clockwise - quarterTurn) > 1.0) return 0
+    return ((quarterTurn % 360) + 360) % 360
+}
+
+private fun detectDisplayRotation(grabber: FFmpegFrameGrabber): Int = ffmpegDisplayRotationDegrees(
+    displayMatrixCounterclockwiseDegrees = runCatching { grabber.displayRotation }.getOrNull(),
+    rotateMetadata = runCatching { grabber.getVideoMetadata("rotate") }.getOrNull(),
+)
+
 /** Default factory used by AppState.videoController — a thin function reference so tests can
  *  substitute a fake [VideoPlayerController] instead (see AppState's videoControllerFactory). */
 fun defaultVideoPlayerController(path: String): VideoPlayerController = FfmpegVideoPlayerController(path)
@@ -795,7 +826,10 @@ internal class FailedVideoPlayerController(override val error: String) : VideoPl
     override fun close() = Unit
 }
 
-private class FfmpegVideoPlayerController(private val path: String) : VideoPlayerController, SeekReadinessAwareVideoPlayerController {
+private class FfmpegVideoPlayerController(private val path: String) :
+    VideoPlayerController,
+    SeekReadinessAwareVideoPlayerController,
+    VideoDisplayRotationAware {
     private val grabber = FFmpegFrameGrabber(path)
     private val converter = Java2DFrameConverter()
 
@@ -806,6 +840,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     private var errorState by mutableStateOf<String?>(null)
     private var volumeState by mutableStateOf(1f)
     private var isMutedState by mutableStateOf(false)
+    private var sourceRotationDegreesState by mutableStateOf(0)
 
     // FFmpeg opens and decodes on [decodeThread], while Compose reads these fields during a UI
     // snapshot. A direct `mutableStateOf` write from the decoder can otherwise remain in that
@@ -828,6 +863,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override val volume: Float get() = volumeState
     override val isMuted: Boolean get() = isMutedState
     override val error: String? get() = errorState
+    override val displayRotationDegrees: Int get() = sourceRotationDegreesState
 
     // Written only from the decode thread; read from any thread (Compose recomposition, MCP,
     // grabCurrentFrame callers) — a plain @Volatile is enough since it's always assigned wholesale
@@ -1012,6 +1048,7 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
     override fun grabFrameAt(ms: Long): ByteArray? = runCatching {
         FFmpegFrameGrabber(path).use { g ->
             g.start()
+            publishUiState { sourceRotationDegreesState = detectDisplayRotation(g) }
             g.setTimestamp((ms * MICROS_PER_MS).coerceAtLeast(0))
             val frame = g.grabImage() ?: return@use null
             Java2DFrameConverter().use { c -> c.convert(frame)?.let(::encodePng) }
@@ -1252,6 +1289,9 @@ private class FfmpegVideoPlayerController(private val path: String) : VideoPlaye
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         grabber.start()
         AppLogger.info("video", "openGrabber: grabber.start() returned")
+        // FFmpegFrameGrabber's image conversion does not apply the stream Display Matrix; it
+        // exposes it separately. Keep decoded pixels raw and rotate only at presentation/capture.
+        publishUiState { sourceRotationDegreesState = detectDisplayRotation(grabber) }
         applyDecodeDownscale()
         val declaredDurationMs = grabber.lengthInTime / MICROS_PER_MS
         AppLogger.info("video", "openGrabber: declaredDurationMs=$declaredDurationMs")

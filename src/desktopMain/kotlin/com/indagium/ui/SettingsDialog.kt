@@ -757,6 +757,19 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             },
         )
 
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            CompactSettingWithTooltip(
+                label = "Regex summary",
+                tooltip = "Shows retained Tags-mode selectors above the Regex field. This summary is informational and does not change filtering.",
+            ) {
+                SegmentedControl(
+                    options = listOf("Off", "On"),
+                    selectedIndices = setOf(if (state.settings.showRegexFilterSummary) 1 else 0),
+                    onToggle = { index -> state.updateSettings { it.copy(showRegexFilterSummary = index == 1) } },
+                )
+            }
+        }
+
         EditorBehaviorGridRow(
             first = {
                 CompactSettingWithTooltip(
@@ -1135,6 +1148,17 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
     CopyMetadataSettingsRow(state)
+    CompactSettingWithTooltip(
+        label = "Copy default",
+        tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
+    ) {
+        val formats = AnnotationCopyFormat.entries
+        SegmentedControl(
+            options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
+            selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
+            onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
+        )
+    }
     // The two diagram defaults used to sit one-per-row, each spending a full row on a single
     // control and leaving the section's last row's worth of space empty below. They share one
     // row instead, natural-width like the rest of this section's rows — NOT stretched into equal
@@ -3020,7 +3044,7 @@ internal fun AnnotationSettingsRow(state: AppState) {
         CompactSetting("Log blocks") {
             val styles = AnnotationLogBlockStyle.entries
             SegmentedControl(
-                options = listOf("Indented", "{code:java}"),
+                options = listOf("Indented", "Wiki", "Cloud"),
                 selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
                 onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
             )

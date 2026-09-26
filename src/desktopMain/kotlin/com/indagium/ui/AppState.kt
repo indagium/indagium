@@ -143,6 +143,7 @@ import com.indagium.utils.visibleEntries
 import com.indagium.video.FailedVideoPlayerController
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
+import com.indagium.video.sourceDisplayRotationDegrees
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
@@ -4455,8 +4456,19 @@ class AppState(
     // "restored tab counter" test once autosave restore became async).
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
         val before = tab(tabId)
-        tabs = tabs.map { if (it.id == tabId) fn(it) else it }
-        val after = tab(tabId)
+        val candidate = before?.let(fn)
+        val compositionInputsChanged = before != null && candidate != null &&
+            (before.logData !== candidate.logData ||
+                before.analysis.stackTraceGroups !== candidate.analysis.stackTraceGroups)
+        val after = if (compositionInputsChanged) {
+            candidate!!.copy(
+                messageCompositionRevision = before!!.messageCompositionRevision + 1,
+                messageComposition = MessageCompositionState.NotComputed,
+            )
+        } else {
+            candidate
+        }
+        tabs = tabs.map { if (it.id == tabId) after ?: it else it }
         if (before != null && after != null && searchNeedsRecompute(before, after)) {
             scheduleSearchRecompute(tabId)
         }
@@ -4737,34 +4749,38 @@ class AppState(
      * the single-flight guard is observable rather than something callers have to time.
      */
     fun requestMessageComposition(tabId: String): Boolean {
-        var target: Filter? = null
+        var target: Pair<Filter, Long>? = null
         upTab(tabId) { t ->
             val state = t.messageComposition
             // Keyed on what actually defines the view, not the whole Filter: adding a highlighter
             // changes `filter` but not one line of what is admitted, so it must not trigger a
             // rescan (see Filter.viewDefiningKey).
             val wanted = t.filter.viewDefiningKey()
+            val revision = t.messageCompositionRevision
             val alreadyCurrent = when (state) {
-                is MessageCompositionState.Computing -> state.forFilter == wanted
-                is MessageCompositionState.Computed -> state.forFilter == wanted
+                is MessageCompositionState.Computing -> state.forFilter == wanted && state.forRevision == revision
+                is MessageCompositionState.Computed -> state.forFilter == wanted && state.forRevision == revision
                 else -> false
             }
             if (alreadyCurrent) {
                 t
             } else {
-                target = wanted
+                target = wanted to revision
                 // Carry the last good result through the rescan so the panel keeps showing it
                 // rather than blanking; hiding one shape is the common trigger and blanking there
                 // reads as a glitch.
                 val previous = (state as? MessageCompositionState.Computed)?.histogram
                     ?: (state as? MessageCompositionState.Computing)?.previous
-                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous))
+                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous, revision))
             }
         }
-        val startedFor = target ?: return false
+        val (startedFor, startedRevision) = target ?: return false
         compositionJobs.remove(tabId)?.cancel()
         val job = ioScope.launch {
             val snapshot = tab(tabId) ?: return@launch
+            if (snapshot.messageCompositionRevision != startedRevision ||
+                snapshot.filter.viewDefiningKey() != startedFor
+            ) return@launch
             val result = runCatching {
                 // The composition answers "what is this VIEW made of", so it scans what the filter
                 // admits, not the whole file. That is also what makes it cheap in the case that
@@ -4778,10 +4794,13 @@ class AppState(
                 // state with its own Computing(forFilter), so a superseded scan finds a mismatch
                 // here and drops its result rather than overwriting fresher data.
                 val state = t.messageComposition
-                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor) return@upTab t
+                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor ||
+                    state.forRevision != startedRevision || t.messageCompositionRevision != startedRevision ||
+                    t.filter.viewDefiningKey() != startedFor
+                ) return@upTab t
                 result.fold(
                     onSuccess = { histogram ->
-                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor))
+                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor, startedRevision))
                     },
                     onFailure = { e ->
                         if (e is CancellationException) throw e
@@ -5862,18 +5881,21 @@ class AppState(
 
     /** Attaches a local video to the specified tab rather than whichever tab happens to be active.
      *  Drop handling uses this after the paired log has finished its asynchronous load. */
-    fun attachVideoToTab(file: File, targetTabId: String): String? =
-        attachVideo(targetTabId, VideoSource.LocalFile(file.absolutePath), file.absolutePath)
+    fun attachVideoToTab(file: File, targetTabId: String): String? {
+        val source = VideoSource.LocalFile(file.absolutePath)
+        return attachVideo(targetTabId, source, source.annotationDisplayLabel())
+    }
 
     /** Attaches a durable archive reference. Extraction is deferred until playback and uses the
      *  app-managed archive cache, so autosave never records an ephemeral temp-file path. */
     fun attachVideoFromZip(zipFile: File, candidate: ZipLogCandidate, targetTabId: String? = null): String? {
         val tabId = targetTabId ?: activeTabId.takeIf { it.isNotBlank() } ?: return null
         if (candidate.kind != ZipLogCandidateKind.VIDEO) return null
+        val source = VideoSource.ArchiveEntry(zipFile.absolutePath, candidate.entryPath, candidate.displayName)
         return attachVideo(
             tabId,
-            VideoSource.ArchiveEntry(zipFile.absolutePath, candidate.entryPath, candidate.displayName),
-            "${zipFile.name}/${candidate.displayName}",
+            source,
+            source.annotationDisplayLabel(),
         )
     }
 
@@ -5921,7 +5943,11 @@ class AppState(
         }
     }
 
-    fun videoRotationDegrees(tabId: String): Int = tab(tabId)?.attachedVideo?.rotationDegrees ?: 0
+    fun videoRotationDegrees(tabId: String): Int {
+        val manualDegrees = tab(tabId)?.attachedVideo?.rotationDegrees ?: return 0
+        val sourceDegrees = videoControllers[tabId]?.sourceDisplayRotationDegrees ?: 0
+        return ((manualDegrees + sourceDegrees) % 360 + 360) % 360
+    }
 
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
      *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
@@ -8801,7 +8827,27 @@ class AppState(
     }
 
     fun copyAnn(tabId: String) {
-        tab(tabId)?.let { copyToClipboard(maskWordForCopy(buildMd(it, settings), settings)) }
+        copyAnnotationFormat(tabId, settings.annotationCopyFormat)
+    }
+
+    /** One explicit annotation clipboard format. Choosing a menu item never changes the saved default. */
+    fun copyAnnotationFormat(tabId: String, format: AnnotationCopyFormat) {
+        val t = tab(tabId) ?: return
+        val currentSettings = settings
+        val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML) {
+            buildAnnotationsHtml(t, currentSettings) { document ->
+                Seq3RenderCache.brandedPngBytes(
+                    Seq3RenderCache.layout(document),
+                    resolveSeq3ThemeColors(document, currentSettings).toSeq3RasterTheme(),
+                )
+            }
+        } else {
+            ""
+        }
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(
+            annotationClipboardTransferable(t, currentSettings, format, html),
+            null,
+        )
     }
 
     // Per-image "Copy image" (AnnotationPanel's ImageBlockView) — puts real image bytes on the
@@ -8836,19 +8882,7 @@ class AppState(
     // URIs, so a single paste reproduces text *and* pictures. Falls back to the same masked
     // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
     fun copyRichPreview(tabId: String) {
-        val t = tab(tabId) ?: return
-        // Each diagram is rasterized in ITS OWN theme (WP4's resolveSeq3ThemeColors — a document
-        // saved with a theme override keeps it here too), falling back to the active app theme
-        // for a document that follows it, so a pasted picture matches what the user is looking at
-        // rather than a fixed light palette.
-        val html = buildAnnotationsHtml(t, settings) { document ->
-            Seq3RenderCache.brandedPngBytes(
-                Seq3RenderCache.layout(document),
-                resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
-            )
-        }
-        val plainText = maskWordForCopy(buildMd(t, settings), settings)
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
+        copyAnnotationFormat(tabId, AnnotationCopyFormat.JIRA_CLOUD)
     }
 
     fun exportAnalysisTo(tabId: String, file: File): Boolean {

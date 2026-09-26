@@ -1,13 +1,17 @@
 package com.indagium
 
 import com.indagium.model.Filter
+import com.indagium.model.LogFormat
 import com.indagium.model.MessageCompositionState
 import com.indagium.model.MessageTemplateHistogram
 import com.indagium.model.TemplateGranularity
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
 import com.indagium.ui.persistedSnapshot
+import com.indagium.utils.ParsedLog
+import com.indagium.utils.parseLogcat
 import java.io.File
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -138,6 +142,74 @@ class MessageCompositionTest {
         waitUntil { restored.tabs.size == 1 && !restored.isLoading }
 
         assertEquals(MessageCompositionState.NotComputed, restored.tabs.single().messageComposition)
+    }
+
+    @Test
+    fun restoredShellRescansCompositionAfterDelayedRowsAndStackTraceAnalysisArrive() {
+        val dir = createTempDirectory("openlog-composition-restored-shell").toFile()
+        val cacheFile = File(dir, "state.cache")
+        val logFile = File(dir, "restored.log").apply {
+            writeText(
+                listOf(
+                    "06-26 10:00:00.000 100 100 I App: repeated ready",
+                    "06-26 10:00:00.100 100 100 E AndroidRuntime: FATAL EXCEPTION: main",
+                    "06-26 10:00:00.200 100 100 E AndroidRuntime: java.lang.NullPointerException: boom",
+                    "06-26 10:00:00.300 100 100 E AndroidRuntime:     at com.app.Main.onCreate(Main.java:10)",
+                    "06-26 10:00:00.400 100 100 E AndroidRuntime:     at android.app.Activity.performCreate(Activity.java:1)",
+                    "06-26 10:00:00.500 100 100 I App: repeated ready",
+                ).joinToString("\n"),
+            )
+        }
+        val saved = AppState(autosaveFile = cacheFile)
+        val shell = mkTab("t1", logFile.name, emptyList()).copy(sourcePath = logFile.absolutePath)
+        saved.tabs = listOf(shell)
+        saved.activeTabId = shell.id
+        saved.autosaveNow()
+        waitUntil { cacheFile.exists() }
+
+        val parserEntered = CountDownLatch(1)
+        val allowParserToFinish = CountDownLatch(1)
+        val restored = AppState(
+            autosaveFile = cacheFile,
+            restoreOnCreate = true,
+            parser = { file ->
+                parserEntered.countDown()
+                check(allowParserToFinish.await(10, TimeUnit.SECONDS))
+                ParsedLog(LogFormat.LOGCAT, parseLogcat(file))
+            },
+        )
+        val tabId = restored.tabs.single().id
+        assertTrue(restored.requestMessageComposition(tabId))
+        waitUntil {
+            val state = restored.tab(tabId)?.messageComposition
+            state is MessageCompositionState.Computed && state.histogram.totalEntries == 0
+        }
+        val emptyRevision = restored.tab(tabId)!!.messageCompositionRevision
+
+        restored.startPendingRestoredTabLoads()
+        assertTrue(parserEntered.await(5, TimeUnit.SECONDS), "restored parser should start after the initial empty-shell scan")
+        assertEquals(0, restored.tab(tabId)!!.logData.size, "file parsing remains deliberately blocked")
+        allowParserToFinish.countDown()
+
+        waitUntil(timeoutMs = 15_000) {
+            val tab = restored.tab(tabId) ?: return@waitUntil false
+            !restored.isLoading && !tab.analysis.pending && tab.analysis.stackTraceGroups.isNotEmpty()
+        }
+        val loaded = restored.tab(tabId)!!
+        assertEquals(6, loaded.logData.size)
+        assertTrue(loaded.messageCompositionRevision >= emptyRevision + 2, "rows and full stack analysis each advance freshness")
+        assertEquals(MessageCompositionState.NotComputed, loaded.messageComposition)
+
+        assertTrue(restored.requestMessageComposition(tabId))
+        waitUntil(timeoutMs = 15_000) {
+            val tab = restored.tab(tabId) ?: return@waitUntil false
+            val composition = tab.messageComposition as? MessageCompositionState.Computed
+            composition?.forRevision == tab.messageCompositionRevision
+        }
+        val current = restored.tab(tabId)!!
+        val composition = current.messageComposition as MessageCompositionState.Computed
+        assertEquals(current.logData.size, composition.histogram.totalEntries)
+        assertTrue(composition.histogram.countedEntries < composition.histogram.totalEntries, "full stack groups exclude their member rows")
     }
 
     // ── Tailing: never triggers the initial scan, never discards an existing one ────────────────

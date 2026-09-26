@@ -254,6 +254,7 @@ internal fun FileView(
                     tagUsage = state.tagUsage,
                     mostUsedTagLimit = state.settings.mostUsedTagLimit,
                     regexHistory = state.regexPatternHistory,
+                    showRegexFilterSummary = state.settings.showRegexFilterSummary,
                 )
             } else {
                 null
@@ -357,9 +358,9 @@ internal fun FileView(
                             activeNotePath = state.activeNoteFilePath(tab),
                             onToggleMd = { state.toggleMd(tab.id) },
                             onCopy = { state.copyAnn(tab.id) },
+                            onCopyFormat = { state.copyAnnotationFormat(tab.id, it) },
                             onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
                             onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-                            onCopyRichPreview = { state.copyRichPreview(tab.id) },
                             onExportFrames = { state.exportAnnotationFrames(tab.id) },
                             onSave = { state.saveAnalysis(tab.id) },
                             onNewAnalysis = { state.newAnalysis(tab.id) },

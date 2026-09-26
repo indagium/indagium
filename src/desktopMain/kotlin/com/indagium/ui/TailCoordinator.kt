@@ -13,6 +13,7 @@ import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.mergeMessageTemplates
 import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.passesFilter
+import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -202,8 +203,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                     // of, so folding in raw unfiltered lines would quietly mix filtered and
                     // unfiltered counts into one number. forFilter carries through unchanged: this
                     // merge extends an existing result, it does not answer a new question.
+                    val nextCompositionRevision = cur.messageCompositionRevision + 1
                     val existingComposition = cur.messageComposition
-                    val nextComposition = if (existingComposition is MessageCompositionState.Computed) {
+                    val nextComposition = if (existingComposition is MessageCompositionState.Computed &&
+                        existingComposition.forRevision == cur.messageCompositionRevision &&
+                        existingComposition.forFilter == cur.filter.viewDefiningKey()
+                    ) {
                         val forFilter = existingComposition.forFilter
                         val ctx = RegexEvaluationContext()
                         val admitted = newEntries.filter { passesFilter(it, forFilter, ctx) }
@@ -213,7 +218,14 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                                 computeMessageTemplates(admitted, computeStackTraceGroups(admitted)),
                             ),
                             forFilter,
+                            nextCompositionRevision,
                         )
+                    } else if (existingComposition is MessageCompositionState.Computing ||
+                        existingComposition is MessageCompositionState.Computed
+                    ) {
+                        // A scan over previous rows (or an old computed histogram) must never
+                        // remain visible as if it described this batch.
+                        MessageCompositionState.NotComputed
                     } else {
                         existingComposition
                     }
@@ -229,6 +241,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                         // off) — same as the byte-based decision it mirrors.
                         largeFileMode = cur.largeFileMode || nextData.size >= LARGE_FILE_MODE_ROWS,
                         messageComposition = nextComposition,
+                        messageCompositionRevision = nextCompositionRevision,
                         analysis = cur.analysis.copy(
                             tagCounts = cur.analysis.tagCounts.toMutableMap().apply {
                                 newEntries.forEach { merge(it.tag, 1, Int::plus) }

@@ -2,6 +2,8 @@ package com.indagium
 
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.model.Filter
+import com.indagium.model.Highlighter
 import com.indagium.model.MessageRule
 import com.indagium.model.RuleTarget
 import com.indagium.ui.contextualMessageRuleCandidates
@@ -9,6 +11,8 @@ import com.indagium.ui.messageRuleInputSpec
 import com.indagium.ui.messageRulePillLabel
 import com.indagium.ui.messageRuleScopeOptions
 import com.indagium.ui.messageRuleScopePrompt
+import com.indagium.ui.regexFilterSummary
+import androidx.compose.ui.graphics.Color
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -111,5 +115,49 @@ class MessageRuleInputTest {
         val candidates = contextualMessageRuleCandidates(listOf(entry, entry.copy(id = 2)), "com.my.app.*method", regex = true)
 
         assertEquals(2, candidates.size)
+    }
+
+    @Test
+    fun contextualRegexCanSpanTagAndMessageAndTypedPatternStaysIntact() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "Car_SDK", "part_of_message")
+        val typed = "Car_SDK.*part_of_message"
+
+        val candidates = contextualMessageRuleCandidates(listOf(entry), typed, regex = true)
+        val rule = messageRuleInputSpec(typed, regexMode = true)
+
+        assertTrue(candidates.any { it.tag == "Car_SDK" })
+        assertEquals(typed, rule.pattern)
+        assertTrue(rule.regex)
+    }
+
+    @Test
+    fun regexSummaryShowsInactiveSelectorsAndActiveLevelsAndHighlighters() {
+        val summary = regexFilterSummary(
+            Filter(
+                levels = setOf(LogLevel.I, LogLevel.W),
+                activeTags = setOf("Car_SDK"),
+                pkgPrefixes = setOf("com.example"),
+                excludeTags = setOf("Noise"),
+                excludePkgPrefixes = setOf("vendor"),
+                excludeKw = "ignore me",
+                pidTidFilter = "123 456",
+                messageRules = listOf(
+                    MessageRule("include", include = true, pattern = "ready"),
+                    MessageRule("exclude", include = false, pattern = "retry", regex = true),
+                ),
+                highlighters = listOf(
+                    Highlighter("on", "hot", false, Color.Red, true),
+                    Highlighter("off", "cold", false, Color.Blue, false),
+                ),
+            ),
+        )
+
+        assertTrue(summary.contains("Tags-mode selectors (inactive in Regex)"))
+        assertTrue(summary.contains("Car_SDK"))
+        assertTrue(summary.contains("com.example"))
+        assertTrue(summary.contains("ready"))
+        assertTrue(summary.contains("123 456"))
+        assertTrue(summary.contains("IW"))
+        assertTrue(summary.contains("Display highlighters: 1 on, 1 off"))
     }
 }

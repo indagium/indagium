@@ -1,6 +1,13 @@
 package com.indagium.ui
 
+import com.indagium.model.AnnotationCopyFormat
+import com.indagium.model.AnnotationLogBlockStyle
+import com.indagium.model.AppSettings
+import com.indagium.model.LogTab
+import com.indagium.utils.annotationMarkdownToJiraWiki
+import com.indagium.utils.buildMd
 import java.awt.datatransfer.DataFlavor
+import java.awt.datatransfer.StringSelection
 import java.awt.datatransfer.Transferable
 import java.awt.datatransfer.UnsupportedFlavorException
 import java.awt.image.BufferedImage
@@ -92,5 +99,33 @@ internal class HtmlTransferable(private val html: String, private val plainText:
         HTML_FLAVOR -> html
         DataFlavor.stringFlavor -> plainText
         else -> throw UnsupportedFlavorException(flavor)
+    }
+}
+
+/** Build the clipboard object for one explicit menu choice. The preference is read-only here so
+ * choosing a one-off format can never mutate the saved default. [html] is required for Cloud's
+ * rich flavor and the HTML-source choice; callers may omit it for plain-text formats. */
+internal fun annotationClipboardTransferable(
+    tab: LogTab,
+    settings: AppSettings,
+    format: AnnotationCopyFormat,
+    html: String = "",
+): Transferable {
+    fun markdown(style: AnnotationLogBlockStyle): String = buildMd(tab, settings.copy(annotationLogBlockStyle = style))
+    return when (format) {
+        AnnotationCopyFormat.JIRA_CLOUD -> HtmlTransferable(
+            html = html,
+            plainText = maskWordForCopy(markdown(AnnotationLogBlockStyle.JIRA_CLOUD), settings),
+        )
+        AnnotationCopyFormat.JIRA_WIKI -> StringSelection(
+            maskWordForCopy(
+                annotationMarkdownToJiraWiki(markdown(AnnotationLogBlockStyle.JIRA_JAVA)),
+                settings,
+            ),
+        )
+        AnnotationCopyFormat.MARKDOWN -> StringSelection(
+            maskWordForCopy(markdown(AnnotationLogBlockStyle.INDENTED), settings),
+        )
+        AnnotationCopyFormat.HTML -> StringSelection(html)
     }
 }
