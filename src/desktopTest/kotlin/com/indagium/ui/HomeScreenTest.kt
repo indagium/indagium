@@ -210,4 +210,25 @@ class HomeScreenTest {
             dir.deleteRecursively()
         }
     }
+
+    @Test
+    fun recentGridColumnCountUsesThePreferredCountWhenThereIsRoom() {
+        assertEquals(4, recentGridColumnCount(availableWidthDp = 1000f, preferredColumns = 4))
+        assertEquals(7, recentGridColumnCount(availableWidthDp = 1000f, preferredColumns = 7))
+        assertEquals(8, recentGridColumnCount(availableWidthDp = 1000f, preferredColumns = 8))
+    }
+
+    @Test
+    fun recentGridColumnCountClampsToTheConfiguredRange() {
+        assertEquals(3, recentGridColumnCount(availableWidthDp = 1000f, preferredColumns = 1))
+        assertEquals(8, recentGridColumnCount(availableWidthDp = 1000f, preferredColumns = 20))
+    }
+
+    @Test
+    fun recentGridColumnCountNeverGoesNarrowerThanTheMinimumCardWidth() {
+        // 400dp wide / 110dp minimum card width = 3 columns max, even though 6 was requested.
+        assertEquals(3, recentGridColumnCount(availableWidthDp = 400f, preferredColumns = 6))
+        // A single narrow window still keeps at least one column.
+        assertEquals(1, recentGridColumnCount(availableWidthDp = 50f, preferredColumns = 4))
+    }
 }

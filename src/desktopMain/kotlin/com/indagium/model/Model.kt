@@ -1214,7 +1214,16 @@ data class AppSettings(
     // destination in a Save dialog never silently overwrites the configured "Analysis artifacts
     // folder" setting. JSON form ONLY.
     val lastSaveDialogDir: String? = null,
+    // Recent-files grid density on the home tab (ui/HomeScreen.kt's RecentGrid), independent of the
+    // grid/list toggle above. Clamped to a sane range and never let narrower than a card's minimum
+    // width at render time — see RecentGrid's own columns computation. JSON form ONLY, same rule as
+    // the other settings-JSON-only fields above.
+    val homeRecentGridColumns: Int = DEFAULT_HOME_RECENT_GRID_COLUMNS,
 )
+
+const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4
+const val MIN_HOME_RECENT_GRID_COLUMNS: Int = 3
+const val MAX_HOME_RECENT_GRID_COLUMNS: Int = 8
 
 enum class ThemePreset(val label: String) {
     LIGHT("Light"),

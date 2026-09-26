@@ -1,5 +1,8 @@
+@file:OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+
 package com.indagium.ui
 
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.VerticalScrollbar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -45,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -53,6 +57,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.HomeRecentsLayout
 import com.indagium.model.LogTab
+import com.indagium.model.MAX_HOME_RECENT_GRID_COLUMNS
+import com.indagium.model.MIN_HOME_RECENT_GRID_COLUMNS
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.awt.FileDialog
@@ -469,6 +475,15 @@ private fun HomeRecentSection(
                 modifier = Modifier.weight(1f),
                 onClear = { state.homeRecentFilter = "" },
             )
+            if (layout == HomeRecentsLayout.GRID) {
+                HomeRecentGridColumnsStepper(
+                    columns = state.settings.homeRecentGridColumns,
+                    onColumns = { columns ->
+                        state.updateSettings { it.copy(homeRecentGridColumns = columns) }
+                        onReclaimFocus()
+                    },
+                )
+            }
             SegmentedControl(
                 options = listOf("Grid", "List"),
                 selectedIndices = setOf(if (layout == HomeRecentsLayout.GRID) 0 else 1),
@@ -493,6 +508,7 @@ private fun HomeRecentSection(
             layout == HomeRecentsLayout.GRID -> RecentGrid(
                 entries = filtered,
                 now = now,
+                preferredColumns = state.settings.homeRecentGridColumns,
                 onOpen = { entry -> state.openPath(File(entry.path)) },
                 onReclaimFocus = onReclaimFocus,
                 modifier = Modifier.weight(1f),
@@ -647,8 +663,53 @@ private fun HomeRecentFilterResetLink(onClick: () -> Unit) {
     }
 }
 
-private const val RECENT_GRID_CARD_TARGET_WIDTH_DP = 190
-private const val RECENT_GRID_MAX_COLUMNS = 4
+private const val RECENT_GRID_MIN_CARD_WIDTH_DP = 110
+
+/** The user's chosen density (3–8 per row, `AppSettings.homeRecentGridColumns`), clamped down so a
+ *  card never renders narrower than [RECENT_GRID_MIN_CARD_WIDTH_DP] — a narrow window wins over the
+ *  stored preference rather than letting cards overflow or squeeze unreadably. Pure so it's testable
+ *  without a composition (see HomeScreenGridColumnsTest). */
+internal fun recentGridColumnCount(availableWidthDp: Float, preferredColumns: Int): Int {
+    val wanted = preferredColumns.coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS)
+    val maxByWidth = (availableWidthDp / RECENT_GRID_MIN_CARD_WIDTH_DP).toInt().coerceAtLeast(1)
+    return wanted.coerceAtMost(maxByWidth)
+}
+
+/** Compact -/+ stepper next to the Grid/List toggle (only shown in Grid layout) for choosing how
+ *  many recent-file cards sit per row, 3 through 8. Mirrors the stepper affordance rather than a
+ *  6-way SegmentedControl, which at this row's width would crowd the Grid/List toggle beside it. */
+@Composable
+private fun HomeRecentGridColumnsStepper(columns: Int, onColumns: (Int) -> Unit) {
+    val tc = tc()
+    Row(
+        Modifier.border(1.dp, tc.br, RoundedCornerShape(6.dp)).padding(horizontal = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        StepperButton("−", enabled = columns > MIN_HOME_RECENT_GRID_COLUMNS) {
+            onColumns((columns - 1).coerceAtLeast(MIN_HOME_RECENT_GRID_COLUMNS))
+        }
+        AppText(
+            "$columns/row", color = tc.td, fontSize = 10.sp,
+            modifier = Modifier.padding(horizontal = 4.dp),
+        )
+        StepperButton("+", enabled = columns < MAX_HOME_RECENT_GRID_COLUMNS) {
+            onColumns((columns + 1).coerceAtMost(MAX_HOME_RECENT_GRID_COLUMNS))
+        }
+    }
+}
+
+@Composable
+private fun StepperButton(label: String, enabled: Boolean, onClick: () -> Unit) {
+    val tc = tc()
+    Box(
+        Modifier.size(20.dp).clip(RoundedCornerShape(4.dp))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText(label, color = if (enabled) tc.tx else tc.td.copy(alpha = 0.4f), fontSize = 12.sp, fontWeight = FontWeight.Medium)
+    }
+}
 
 /** Chunked `Row`s inside one `verticalScroll`, not `LazyVerticalGrid` — recents are capped at 30
  *  entries by `AppState.rememberRecentFile`, and a lazy grid nested inside a scrolling `Column`
@@ -658,12 +719,13 @@ private const val RECENT_GRID_MAX_COLUMNS = 4
 private fun RecentGrid(
     entries: List<RecentEntry>,
     now: Long,
+    preferredColumns: Int,
     onOpen: (RecentEntry) -> Unit,
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.fillMaxWidth()) {
-        val columns = (maxWidth / RECENT_GRID_CARD_TARGET_WIDTH_DP.dp).toInt().coerceIn(1, RECENT_GRID_MAX_COLUMNS)
+        val columns = recentGridColumnCount(maxWidth.value, preferredColumns)
         val scroll = rememberScrollState()
         Box(Modifier.fillMaxSize()) {
             Column(
@@ -676,6 +738,7 @@ private fun RecentGrid(
                             RecentGridCard(
                                 entry = entry,
                                 now = now,
+                                columns = columns,
                                 onOpen = { onOpen(entry) },
                                 onReclaimFocus = onReclaimFocus,
                                 modifier = Modifier.weight(1f),
@@ -718,15 +781,25 @@ private fun RecentList(
     }
 }
 
+/** Above this column count, cards shrink their pictogram/padding/text so 7–8/row still fits without
+ *  overflow — the same breakpoint feel as [RecentTypeBadge]'s already-small 9sp label. */
+private const val RECENT_GRID_COMPACT_COLUMNS = 6
+
 @Composable
 private fun RecentGridCard(
     entry: RecentEntry,
     now: Long,
+    columns: Int,
     onOpen: () -> Unit,
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
+    val compact = columns > RECENT_GRID_COMPACT_COLUMNS
+    val iconSize = if (compact) 26.dp else 40.dp
+    val padding = if (compact) 6.dp else 10.dp
+    val nameFontSize = if (compact) 10.sp else 12.sp
+    val metaFontSize = if (compact) 9.sp else 10.sp
     HoverBox(
         modifier = modifier.aspectRatio(1.3f).border(1.dp, tc.br, CORNER_MD).clip(CORNER_MD),
         onClick = {
@@ -734,7 +807,7 @@ private fun RecentGridCard(
             onReclaimFocus()
         },
     ) {
-        Column(Modifier.fillMaxSize().padding(10.dp)) {
+        Column(Modifier.fillMaxSize().padding(padding)) {
             RecentTypeBadge(entry.kind)
             // Fills the space between the badge and the name/meta block below with a centered
             // pictogram (item 2) instead of leaving it empty.
@@ -743,21 +816,52 @@ private fun RecentGridCard(
                     recentKindIcon(entry.kind),
                     contentDescription = null,
                     tint = tc.td.copy(alpha = if (entry.exists) 1f else 0.5f),
-                    modifier = Modifier.size(40.dp),
+                    modifier = Modifier.size(iconSize),
                 )
             }
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                AppText(
-                    entry.name,
-                    color = if (entry.exists) tc.tx else tc.td,
-                    fontSize = 12.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                AppText(formatRecentMeta(entry, now), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            RecentEntryTooltipArea(entry) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    AppText(
+                        entry.name,
+                        color = if (entry.exists) tc.tx else tc.td,
+                        fontSize = nameFontSize,
+                        maxLines = if (compact) 1 else 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    AppText(
+                        formatRecentMeta(entry, now), color = tc.td, fontSize = metaFontSize,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
+}
+
+/** Hover tooltip for a recent-file name/path that can truncate ([RecentGridCard]'s name at narrow
+ *  grid widths, [RecentListRow]'s single-line name and path cells) — same bordered-box style as
+ *  SettingsDialog.kt's own `appDataPath` tooltip, showing the full name and full path together so
+ *  a click-worthy card never hides which file it actually is. */
+@Composable
+private fun RecentEntryTooltipArea(entry: RecentEntry, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    val tc = tc()
+    TooltipArea(
+        tooltip = {
+            Box(
+                Modifier
+                    .background(tc.p2, RoundedCornerShape(4.dp))
+                    .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    AppText(entry.name, color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                    AppText(entry.path, color = tc.td, fontSize = 10.sp, fontFamily = FontFamily.Monospace)
+                }
+            }
+        },
+        modifier = modifier,
+        content = content,
+    )
 }
 
 @Composable
@@ -787,21 +891,23 @@ private fun RecentListRow(
                 tint = tc.td.copy(alpha = if (entry.exists) 1f else 0.5f),
                 modifier = Modifier.size(18.dp),
             )
-            Column(Modifier.weight(1f)) {
-                AppText(
-                    entry.name,
-                    color = if (entry.exists) tc.tx else tc.td,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                AppText(
-                    truncatePathForDisplay(File(entry.path).parent ?: entry.path),
-                    color = tc.td,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            RecentEntryTooltipArea(entry, modifier = Modifier.weight(1f)) {
+                Column {
+                    AppText(
+                        entry.name,
+                        color = if (entry.exists) tc.tx else tc.td,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    AppText(
+                        truncatePathForDisplay(File(entry.path).parent ?: entry.path),
+                        color = tc.td,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             AppText(formatRecentMeta(entry, now), color = tc.td, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }

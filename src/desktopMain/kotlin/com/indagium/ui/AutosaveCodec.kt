@@ -653,6 +653,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     captureSnapshotsDir?.let { put("captureSnapshotsDir", it) }
     captureZipDir?.let { put("captureZipDir", it) }
     lastSaveDialogDir?.let { put("lastSaveDialogDir", it) }
+    put("homeRecentGridColumns", homeRecentGridColumns)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -963,6 +964,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         captureSnapshotsDir = o.stringOrNull("captureSnapshotsDir"),
         captureZipDir = o.stringOrNull("captureZipDir"),
         lastSaveDialogDir = o.stringOrNull("lastSaveDialogDir"),
+        homeRecentGridColumns = o.intOrDefault("homeRecentGridColumns", DEFAULT_HOME_RECENT_GRID_COLUMNS)
+            .coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS),
     )
 }.getOrNull()
 
