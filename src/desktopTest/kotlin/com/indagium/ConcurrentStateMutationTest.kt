@@ -215,4 +215,45 @@ class ConcurrentStateMutationTest {
         val texts = blocks.filterIsInstance<AnnBlock.Note>().map { it.text }.toSet()
         assertEquals((0 until ANNOTATE_THREAD_COUNT).map { "note from thread $it" }.toSet(), texts)
     }
+
+    // The atomic-pin fix for upAnn's AutoExportDecision (see AppState.kt): several coroutines adding
+    // blocks to the SAME fresh, still-unpinned tab within milliseconds of each other — Mark issue, a
+    // screenshot, a snapshot note, all fired by the in-app AI during one live device capture — must
+    // never raise pendingNoteOverwrite for a note file this very session is in the middle of
+    // creating. Before the fix, LogTab.noteTargetName was pinned only AFTER a commit, by
+    // autoExportAnnotations running OUTSIDE stateLock; a later concurrent upAnn call could still see
+    // the tab as unpinned even after an earlier call's file had already landed on disk, and wrongly
+    // treat this session's own export as a foreign collision. N real threads hitting addNoteBlock on
+    // one brand-new tab at the same released instant exercise exactly that window.
+    @Test
+    fun concurrentAddNoteBlockCallsOnAFreshTabNeverRaiseASpuriousOverwritePrompt() {
+        val dir = createTempDirectory("openlog-concurrent-fresh-pin").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val sourcePath = File(dir, "sample.log").absolutePath
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        runConcurrently(ANNOTATE_THREAD_COUNT) { i ->
+            state.addNoteBlock("log", "note from thread $i")
+        }
+
+        assertNull(
+            state.pendingNoteOverwrite,
+            "this session's own freshly-created note file must never be mistaken for a foreign collision",
+        )
+        val blocks = state.tab("log")?.annotations?.blocks.orEmpty()
+        assertEquals(ANNOTATE_THREAD_COUNT, blocks.size, "every concurrent addNoteBlock call must still land")
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+
+        waitUntil {
+            val file = File(notesDir, "sample_analysis.md")
+            file.exists() && (0 until ANNOTATE_THREAD_COUNT).all { file.readText().contains("note from thread $it") }
+        }
+        // Written once, to one name — no "_2" sibling from a call that (wrongly) thought it needed
+        // to disambiguate away from its own session's file.
+        assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
+    }
 }

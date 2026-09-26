@@ -250,6 +250,16 @@ private class NoteExportWriter {
     val revision = AtomicLong()
 }
 
+// A write lane reservation made INSIDE upAnn's own synchronized(stateLock) block, at commit time —
+// see AppState.reserveExportTarget's doc comment for why the revision number MUST be minted there
+// and not later, unsynchronized, in autoExportAnnotations.
+private class PendingExportTarget(val mdFile: File, val writer: NoteExportWriter, val revision: Long)
+
+// What upAnn hands off to autoExportAnnotations once a commit is safely serialized under
+// stateLock: the committed tab itself, plus the write-lane reservation for it (or null when no
+// write is warranted right now — auto-export off, no blocks, or a genuine conflict/fold case).
+private class CommittedAnnotationEdit(val tab: LogTab, val exportTarget: PendingExportTarget?)
+
 // Stage 1 wired computeMessageTemplates() into this function (Stage 2a unwired it): the
 // ~4s-on-10M-lines scan is too much to pay on every load for a panel most sessions never open. It
 // now runs only on demand (requestMessageComposition, below on AppState), landing on
@@ -9272,7 +9282,7 @@ class AppState(
     //
     // Uses upTab, not upAnn: like openNoteFile, starting fresh is not itself an edit to react to —
     // and since nextFreeNoteTargetName-by-construction only ever returns a name nothing on disk owns
-    // yet, upAnn's needsFreshOverwritePrompt could never fire on it anyway (it requires blocks to be
+    // yet, upAnn's autoExportDecision could never return Conflict on it anyway (it requires blocks to be
     // non-empty, and this tab has none). Going through plain upTab makes that guarantee visible at
     // the call site instead of relying on a downstream check to happen to agree: pendingNoteOverwrite
     // is untouched by this function, full stop. The previous file is never read, moved, or written —
@@ -10001,17 +10011,44 @@ class AppState(
     // As of the fix for the "note is added the instant the overwrite prompt appears" bug, the REAL
     // gate lives one level up, in upAnn: it decides — synchronously, before committing anything to
     // `tabs` — whether applying a mutation would create a brand-new conflict, and if so stashes the
-    // mutated tab on pendingNoteOverwrite instead of ever calling this function. So by the time
-    // autoExportAnnotations runs, `tab` has already been committed to `tabs` and is known-safe to
-    // export: either it's pinned (noteTargetName != null, so resolveNoteTarget can't disagree with
-    // what's already on disk under this session's ownership), or upAnn's own
-    // needsFreshOverwritePrompt check just found no collision moments ago, on this same thread. The
-    // pendingNoteOverwrite/exists() checks below are consequently a defensive backstop for a
-    // same-thread TOCTOU (something else creating the file in the instant between that check and
-    // this one) — not the load-bearing gate any more, and by construction they should never fire on
-    // the intended path. Kept anyway: cheap insurance beats a silent overwrite, and removing them
-    // would be trading a belt for a suspender rather than any real behavior duplication.
-    private fun autoExportAnnotations(tab: LogTab) {
+    // mutated tab on pendingNoteOverwrite instead of ever calling this function. And as of the fix
+    // for the follow-up race (several coroutines — Mark issue, a screenshot, a snapshot note —
+    // adding blocks to the same fresh tab within milliseconds during a live capture), upAnn's
+    // AutoExportDecision.ReadyToPin path also PINS noteTargetName in that very same commit, not just
+    // detects the absence of a conflict — see AutoExportDecision's doc comment for why setting the
+    // pin here, one level up and outside the lock, used to leave a window for a second, concurrent
+    // upAnn call on the same tab to see "no conflict yet" against a stale unpinned snapshot and
+    // mistake this session's own about-to-exist file for a foreign collision.
+    //
+    // So by the time autoExportAnnotations runs, `tab` has already been committed to `tabs` and is
+    // known-safe to export: either it's pinned (noteTargetName != null, so resolveNoteTarget can't
+    // disagree with what's already on disk under this session's ownership — true for essentially
+    // every call now that the pin is atomic with the first blocks-adding commit), or upAnn skipped
+    // its own decision entirely because some OTHER tab's prompt was up at commit time (case 4 in
+    // upAnn's doc comment) — which this function's own `pendingNoteOverwrite != null` check just
+    // above already guards against re-running the export for, so it never reaches the block below in
+    // that case either. The pendingNoteOverwrite/exists() checks below are consequently a defensive
+    // backstop for a same-thread TOCTOU (something else creating the file in the instant between
+    // upAnn's check and this one) — not the load-bearing gate any more, and by construction they
+    // should never fire on the intended path. Kept anyway: cheap insurance beats a silent overwrite,
+    // and removing them would be trading a belt for a suspender rather than any real behavior
+    // duplication.
+    //
+    // [reserved], when non-null, is the write-lane reservation upAnn already made for this exact
+    // commit, INSIDE its own synchronized(stateLock) block — see reserveExportTarget's doc comment
+    // for the second race this closes: without it, every call (not just the first, conflict-prone
+    // one) allocated its NoteExportWriter.revision here, AFTER releasing stateLock, purely in
+    // whichever order the OS scheduler happened to let threads reach this line — not in actual
+    // commit order. Under real concurrent load (several coroutines adding blocks to one tab within
+    // milliseconds — exactly the "Mark issue + screenshot + snapshot" capture scenario this whole
+    // gate exists for) that let an EARLIER, smaller snapshot's write win the "latest revision" race
+    // over a LATER, more complete one, permanently writing a note file that silently lagged behind
+    // the tab's actual (correct) in-memory annotations — no prompt, no error, just a stale file.
+    // [reserved] is null only on the rare defensive-backstop path below (something else created the
+    // file in the narrow window between upAnn's check and this one, or a same-thread TOCTOU) or when
+    // this call is blocked behind another tab's prompt — see the `pendingNoteOverwrite != null`
+    // check just below, which returns before [reserved] would ever be consulted in that case anyway.
+    private fun autoExportAnnotations(tab: LogTab, reserved: PendingExportTarget?) {
         if (!autoExportNotes || !settings.autoExportNotes || tab.annotations.blocks.isEmpty()) return
         // A prompt is already up (for this tab or another) — write nothing until it's resolved,
         // rather than silently proceeding or silently dropping the edit. For THIS tab, upAnn never
@@ -10020,7 +10057,7 @@ class AppState(
         // prompt being up.
         if (pendingNoteOverwrite != null) return
         val targetDir = activeNotesDir()
-        val mdFile = resolveNoteTarget(targetDir, tab)
+        val mdFile = reserved?.mdFile ?: resolveNoteTarget(targetDir, tab)
         // The in-memory check comes FIRST, before the exists() syscall: once a tab has a pinned
         // noteTargetName, every later keystroke short-circuits on this and never re-stats the
         // file. Only a still-undecided tab (fresh session, or a legacy autosave restored with
@@ -10051,8 +10088,8 @@ class AppState(
             // very write is about to create and prompt on the very next edit.
             upTab(tab.id) { it.copy(noteTargetName = mdFile.name) }
         }
-        val writer = noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
-        val revision = writer.revision.incrementAndGet()
+        val writer = reserved?.writer ?: noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
+        val revision = reserved?.revision ?: writer.revision.incrementAndGet()
         ioScope.launch {
             writer.mutex.withLock {
                 // A newer mutation was already queued while this coroutine waited for the file's
@@ -10316,27 +10353,75 @@ class AppState(
         pendingNoteOverwrite = null
     }
 
-    // The two halves of upAnn's overwrite gate, split out so upAnn itself stays readable and so
+    // upAnn's overwrite gate, split out so upAnn itself stays readable and so
     // autoExportAnnotations' defensive re-check can describe itself as "the same check upAnn
     // already ran" without inlining the logic twice.
 
-    /** True exactly when applying a mutation would be the FIRST edit on this tab to collide with an
-     *  existing, un-owned export target — the case that needs a human decision before anything
-     *  commits. Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab
-     *  that hasn't been (and, if this returns true, will not be) written into `tabs` yet. */
-    private fun needsFreshOverwritePrompt(next: LogTab): Boolean {
-        if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return false
-        if (next.noteTargetName != null) return false
-        return resolveNoteTarget(activeNotesDir(), next).exists()
+    /** What upAnn should do about auto-export for an about-to-be-committed tab snapshot — computed
+     *  AND acted on inside upAnn's own `synchronized(stateLock)` block, so the decision and the
+     *  commit are atomic.
+     *
+     *  Before [ReadyToPin] existed, [LogTab.noteTargetName] was only ever set later, by
+     *  [autoExportAnnotations] running OUTSIDE the lock. That left a window: several coroutines
+     *  (Mark issue, a screenshot, a snapshot note — the in-app AI's own quick-succession block
+     *  additions during a live capture) each call upAnn on the same still-unpinned tab within
+     *  milliseconds of each other. The first call's `next` has no conflict (the file doesn't exist
+     *  yet), commits, and only pins the tab afterwards from autoExportAnnotations — but by then a
+     *  second call may already have read the still-unpinned `current`, computed its OWN `next`
+     *  (also correctly seeing no conflict at that instant), and committed it too, still unpinned.
+     *  Both calls then run their own autoExportAnnotations against their OWN captured (and by now
+     *  stale) tab snapshot: whichever runs second sees `tab.noteTargetName == null` on ITS stale
+     *  parameter — even though the live tab was already pinned to that very name moments earlier by
+     *  the other call — re-checks `mdFile.exists()`, finds the first call's file genuinely on disk,
+     *  and raises [PendingNoteOverwrite] for a file this same session just created.
+     *
+     *  Resolving-and-pinning here instead, under the same lock and against the same fresh `next`
+     *  that is about to be committed, closes that window: the very first commit that adds blocks to
+     *  an unpinned tab pins it in the SAME atomic step, so no later call on the same tab can ever
+     *  observe "blocks present, still unpinned" and re-derive a target from scratch. */
+    private sealed interface AutoExportDecision {
+        /** Auto-export is off, `next` has no blocks yet, or `next` is already pinned — nothing to
+         *  decide; commit `next` as-is and let [autoExportAnnotations] do its usual thing. */
+        data object Skip : AutoExportDecision
+
+        /** `next` would be the first edit on this (still-unpinned) tab to collide with an existing,
+         *  un-owned export target — the case that needs a human decision before anything commits. */
+        data class Conflict(val mdFile: File) : AutoExportDecision
+
+        /** `next` is the first edit to add blocks to a still-unpinned tab, and its resolved target
+         *  does not exist yet — safe to claim it right now, in the same commit as the edit. */
+        data class ReadyToPin(val mdFile: File) : AutoExportDecision
     }
 
-    /** Builds the stashed-mutation record upAnn publishes instead of committing [next] — resolves
-     *  the same target file autoExportAnnotations would otherwise have exported to, and carries the
-     *  fully-mutated tab itself so the three resolution functions above have the actual edit to
-     *  commit once the user decides, not just whatever's still sitting in `tabs`. */
-    private fun buildPendingNoteOverwrite(tabId: String, next: LogTab): PendingNoteOverwrite {
+    /** Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab that
+     *  hasn't been (and, for [AutoExportDecision.Conflict], will not be) written into `tabs` yet. */
+    private fun autoExportDecision(next: LogTab): AutoExportDecision {
+        if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return AutoExportDecision.Skip
+        if (next.noteTargetName != null) return AutoExportDecision.Skip
         val mdFile = resolveNoteTarget(activeNotesDir(), next)
-        return PendingNoteOverwrite(tabId, mdFile.absolutePath, mdFile.name, pendingTab = next)
+        return if (mdFile.exists()) AutoExportDecision.Conflict(mdFile) else AutoExportDecision.ReadyToPin(mdFile)
+    }
+
+    /** Reserves this commit's write-lane slot for [mdFile] — MUST be called from inside upAnn's own
+     *  `synchronized(stateLock)` block, at the moment a commit is decided, not later from
+     *  autoExportAnnotations after the lock is released.
+     *
+     *  [NoteExportWriter.revision] exists so a slower coroutine writing an OLDER snapshot can never
+     *  clobber a faster one that already wrote a NEWER one — but that guarantee only holds if the
+     *  revision numbers are handed out in the same order the snapshots were actually committed.
+     *  Minting the revision here, inside the same monitor that serializes every commit to this tab,
+     *  guarantees exactly that: whichever call's commit is ordered later by the lock always receives
+     *  the higher revision too. Minting it later, unsynchronized, in autoExportAnnotations (as this
+     *  code used to) only guaranteed the revision matched whichever thread happened to reach that
+     *  line last — under real concurrent load (several coroutines adding blocks to one tab within
+     *  milliseconds, e.g. Mark issue + a screenshot + a snapshot note during one live capture) an
+     *  EARLIER, smaller commit's write could reach that unsynchronized line AFTER a LATER, more
+     *  complete commit's did, win the "latest revision" race, and silently write a note file that
+     *  permanently lagged behind the tab's actual (correct) in-memory annotations — no prompt, no
+     *  error thrown, just a stale file nobody was told about. */
+    private fun reserveExportTarget(mdFile: File): PendingExportTarget {
+        val writer = noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
+        return PendingExportTarget(mdFile, writer, writer.revision.incrementAndGet())
     }
 
     // Annotation-aware tab updater — auto-exports after any annotation change. internal, not
@@ -10347,30 +10432,37 @@ class AppState(
     // see PendingNoteOverwrite's doc comment. This is the fix for the reported bug where the new
     // note visibly appeared in the Notes panel (and so, reasonably, looked already-saved) the
     // instant the "Existing notes found" prompt rendered, before the user had picked an option.
-    // Three cases, checked in order:
+    // Four cases, checked in order:
     //  1. A prompt is ALREADY up for THIS tab: `fn` is applied to the still-pending snapshot
     //     (pendingForThisTab.pendingTab), not the stale committed tab, and the result replaces it.
     //     This is what makes a second keystroke, or a second MCP call, arriving before the modal is
     //     dismissed safe — it folds into the pending edit instead of being lost or applied against
     //     out-of-date state.
     //  2. No prompt is up anywhere, and applying `fn` would create a BRAND NEW conflict
-    //     (needsFreshOverwritePrompt): the mutated tab is stashed on pendingNoteOverwrite and
-    //     deliberately NOT committed to `tabs` — the note doesn't exist anywhere the user, the
+    //     (autoExportDecision returns Conflict): the mutated tab is stashed on pendingNoteOverwrite
+    //     and deliberately NOT committed to `tabs` — the note doesn't exist anywhere the user, the
     //     export writer, or an MCP reader can observe it until the prompt is resolved.
-    //  3. Anything else — a DIFFERENT tab's prompt is up, this tab is already pinned
-    //     (noteTargetName != null), or there's no conflict at all — commits immediately and
+    //  3. No prompt is up, and applying `fn` would be the first edit to add blocks to a still-unpinned
+    //     tab whose resolved target does NOT collide with anything (autoExportDecision returns
+    //     ReadyToPin): the pin is folded into `next` and committed in the SAME upTab call as the
+    //     edit itself — see AutoExportDecision's doc for why this has to happen here, atomically
+    //     with the commit, rather than later in autoExportAnnotations (which used to be the only
+    //     place that set the pin, and raced when several coroutines added blocks to the same fresh
+    //     tab in quick succession).
+    //  4. Anything else — a DIFFERENT tab's prompt is up, this tab is already pinned
+    //     (noteTargetName != null), or auto-export is off — commits `next` immediately and
     //     auto-exports, exactly as every mutation did before this change.
     //
-    // Accepted limitation, deliberately not fixed here: case 3 also covers a SECOND tab hitting a
+    // Accepted limitation, deliberately not fixed here: case 4 also covers a SECOND tab hitting a
     // brand-new, first-time conflict while some OTHER tab's prompt is already open — that mutation
-    // still commits immediately (needsFreshOverwritePrompt is only consulted when
-    // pendingNoteOverwrite == null), though its export stays held back by autoExportAnnotations'
-    // own `pendingNoteOverwrite != null` guard until the first prompt resolves. Properly gating a
+    // still commits immediately (autoExportDecision is only consulted when pendingNoteOverwrite ==
+    // null), though its export stays held back by autoExportAnnotations' own
+    // `pendingNoteOverwrite != null` guard until the first prompt resolves. Properly gating a
     // second, independent conflict needs per-tab pending state and a non-singleton modal — real
     // work, for a genuinely rare interleaving (two different tabs each hitting a FIRST-time
     // conflict in the same narrow window), so it's left as a known gap rather than in scope here.
     //
-    // The read (current), the decision (which of the three cases above applies), and the write
+    // The read (current), the decision (which of the four cases above applies), and the write
     // (upTab / pendingNoteOverwrite = ...) are one synchronized(stateLock) block — not read-then-
     // lock-then-blind-write. upTab (see its own comment above) exists precisely because a tabs
     // read-modify-write split across two unsynchronized steps loses updates under concurrency: a UI
@@ -10382,13 +10474,13 @@ class AppState(
     // (kotlin.synchronized), so the non-local `return` on a missing tab, and upTab's own nested
     // synchronized(stateLock) call inside the `else` branch, both work exactly as they read: the
     // monitor is reentrant, and `return` exits upAnn itself, not just the lambda. Note this does put
-    // needsFreshOverwritePrompt's File.exists() probe under the lock — accepted deliberately: it
-    // only runs on the *unpinned* first-conflict path (at most once per tab per session, before a
-    // decision pins noteTargetName), the same stat call already happened synchronously on the
-    // caller's thread before this fix, and a compare-and-swap scheme to keep I/O off the lock is
-    // more machinery than this rare path justifies. autoExportAnnotations itself stays OUTSIDE the
-    // lock — it only launches work on ioScope, so holding stateLock across it would serialize
-    // unrelated tabs' exports for no benefit.
+    // autoExportDecision's File.exists() probe (and, on the ReadyToPin path, the pin itself) under
+    // the lock — accepted deliberately: it only runs on the *unpinned* first-edit path (at most once
+    // per tab per session, before a decision pins noteTargetName), the same stat call already
+    // happened synchronously on the caller's thread before the original fix that introduced this
+    // gate, and a compare-and-swap scheme to keep I/O off the lock is more machinery than this rare
+    // path justifies. autoExportAnnotations itself stays OUTSIDE the lock — it only launches work on
+    // ioScope, so holding stateLock across it would serialize unrelated tabs' exports for no benefit.
     internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
         val committed = synchronized(stateLock) {
             // WP14: `it.handEdit == null` excludes a Seq3Session.confirm() hand-edit conflict
@@ -10403,22 +10495,43 @@ class AppState(
             val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
             val current = pendingForThisTab?.pendingTab ?: tab(tabId) ?: return
             val next = fn(current)
-            when {
-                pendingForThisTab != null -> {
-                    pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
-                    null
-                }
-                pendingNoteOverwrite == null && needsFreshOverwritePrompt(next) -> {
-                    pendingNoteOverwrite = buildPendingNoteOverwrite(tabId, next)
-                    null
-                }
-                else -> {
-                    upTab(tabId) { next }
-                    tab(tabId)
+            if (pendingForThisTab != null) {
+                pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
+                null
+            } else {
+                // Only consulted when no OTHER tab's prompt is already up — see the accepted
+                // limitation above.
+                when (val decision = if (pendingNoteOverwrite == null) autoExportDecision(next) else AutoExportDecision.Skip) {
+                    is AutoExportDecision.Conflict -> {
+                        pendingNoteOverwrite = PendingNoteOverwrite(tabId, decision.mdFile.absolutePath, decision.mdFile.name, pendingTab = next)
+                        null
+                    }
+                    is AutoExportDecision.ReadyToPin -> {
+                        // The atomic fix: pin in the SAME commit as the edit that first added blocks,
+                        // not afterwards — see AutoExportDecision's doc comment. The write-lane
+                        // reservation (reserveExportTarget) is minted here too, for the same reason.
+                        val pinned = next.copy(noteTargetName = decision.mdFile.name)
+                        upTab(tabId) { pinned }
+                        val committedTab = tab(tabId) ?: pinned
+                        CommittedAnnotationEdit(committedTab, reserveExportTarget(decision.mdFile))
+                    }
+                    AutoExportDecision.Skip -> {
+                        upTab(tabId) { next }
+                        val committedTab = tab(tabId) ?: next
+                        // Reserve a write lane whenever this commit will actually reach
+                        // autoExportAnnotations' write path — i.e. it's already pinned and has
+                        // blocks; auto-export being off or blocks being empty means no write is
+                        // coming, so reserving a revision for it would just be wasted bookkeeping
+                        // (and autoExportAnnotations' own top guard would discard it unread anyway).
+                        val target = committedTab.noteTargetName
+                            ?.takeIf { autoExportNotes && settings.autoExportNotes && committedTab.annotations.blocks.isNotEmpty() }
+                            ?.let { name -> reserveExportTarget(File(activeNotesDir(), name)) }
+                        CommittedAnnotationEdit(committedTab, target)
+                    }
                 }
             }
         }
-        committed?.let { autoExportAnnotations(it) }
+        committed?.let { autoExportAnnotations(it.tab, it.exportTarget) }
     }
 
     /** Browse for one of the five save folders in Settings → General → Storage. Defaults to
