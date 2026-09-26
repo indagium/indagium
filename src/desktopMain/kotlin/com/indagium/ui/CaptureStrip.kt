@@ -83,7 +83,6 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureExportPreview
-import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
@@ -980,14 +979,13 @@ private fun CaptureSnapshotPopover(
         (rangeChoice != SnapshotRangeChoice.SINCE_SAVE || sinceSaveEnabled) &&
         (rangeChoice != SnapshotRangeChoice.SELECTION || selection != null) && filename != null
     val request = session?.let {
-        CaptureExportRequest(
+        buildCaptureSnapshotExportRequest(
+            tab = tab,
             destination = destination,
             range = range,
             customMinutes = customMinutes,
             includeVideo = includeVideo,
             cutoffElapsedMs = it.elapsedMs,
-            selectedFirstRowOrdinal = selection?.first,
-            selectedLastRowOrdinal = selection?.last,
             overwriteExisting = overwriteConfirmed,
         )
     }

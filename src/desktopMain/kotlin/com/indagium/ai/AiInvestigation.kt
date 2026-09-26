@@ -20,9 +20,30 @@ internal data class AiInvestigationContext(
 internal fun deviceCapturePromptGuidance(isDeviceCapture: Boolean): String = if (!isDeviceCapture) {
     ""
 } else {
-    """
-    This is a live Android device capture. When the user asks to inspect or control a device, open an app or website, or perform a sequence on the device, do every observation and action through the `indagium` MCP device tools (`get_device_screen`, `device_tap`, `device_swipe`, `device_key`, and `device_text`). The Mac's Chrome/browser and desktop are not the captured device; never launch or control host apps, use host browser/computer automation, or run shell commands for a device request. Start from the currently bound capture. `get_device_screen` returns the exact image to inspect; gesture coordinates are measured in that image's pixels and mapped to the device automatically. Use `mark_device_issue` and `export_capture_snapshot` when requested, and poll `get_capture_operation_status` until those operations finish. If you call `stop_device_capture` separately, wait for its operation to complete before `start_device_capture`; prefer `newCapture=true` when the user asks to finalize the current recording and begin another one.
-    """.trimIndent()
+    "This is a live Android device capture. Every device request is already authorized by the " +
+        "user's own message in this panel — there is no separate approval step to ask for or wait on. " +
+        "When the user asks to inspect or control a device, open an app or website, or perform a " +
+        "sequence on the device, do every observation and action through the `indagium` MCP device " +
+        "tools (`get_device_screen`, `device_tap`, `device_swipe`, `device_key`, `device_text`, " +
+        "`device_launch_app`, `list_device_apps`, `device_open_url`). " +
+        "The Mac's Chrome/browser and desktop are not the captured device; never launch or control " +
+        "host apps, use host browser/computer automation, or run shell commands for a device request. " +
+        "Start from the currently bound capture. `get_device_screen` returns the exact image to " +
+        "inspect — it is a transient look only, never saved; when the user asks for \"a screenshot\", " +
+        "call `capture_device_screenshot` instead, which saves one into Notes. " +
+        "`mark_device_issue` is for a marker (a log window plus an optional screenshot), not a plain " +
+        "screenshot request — use its optional `label`/`note` when the user gives one. " +
+        "`export_capture_snapshot` takes an optional `range` " +
+        "(all/last_minutes/since_last_save/selection), `minutes`, `includeVideo`, `filename`, and " +
+        "`open` — pass `open=true` when the user asks to save AND open the result, instead of " +
+        "opening it yourself afterward. " +
+        "`get_device_capture_status` reports the capture's elapsed time, markers, and storage " +
+        "without touching the device. " +
+        "Use `mark_device_issue` and `export_capture_snapshot` when requested, and poll " +
+        "`get_capture_operation_status` until those operations finish. " +
+        "If you call `stop_device_capture` separately, wait for its operation to complete before " +
+        "`start_device_capture`; prefer `newCapture=true` when the user asks to finalize the " +
+        "current recording and begin another one."
 }
 
 /** Pre-built investigations exposed by the in-app panel and log-row context menu. */

@@ -165,8 +165,12 @@ class AiProviderProfileTest {
             AiProviderProfile("openai", "OpenAI API", "https://api.openai.com/v1", "gpt", kind = AiProviderKind.OPENAI_API),
             AiProviderProfile("anthropic", "Anthropic API", "https://api.anthropic.com", "claude", kind = AiProviderKind.ANTHROPIC_API),
             AiProviderProfile(
+                // A neutral, non-obsolete path: this test is about persistence round-tripping, not
+                // LocalAccountCli's own obsolete-bundled-path migration (see
+                // AccountCliCheckTest.bundledCodexMigrationOnlyReplacesTheKnownObsoletePath for
+                // that), so it must not use the exact legacy path recoveredBundledCodexPath rewrites.
                 "codex", "Codex account", "", "", kind = AiProviderKind.CODEX_ACCOUNT,
-                executablePath = "/Applications/ChatGPT.app/Contents/Resources/codex", reasoningEffort = "high",
+                executablePath = "/usr/local/bin/codex", reasoningEffort = "high",
             ),
             AiProviderProfile(
                 "claude-code", "Claude Code account", "", "", selected = true,
@@ -190,7 +194,7 @@ class AiProviderProfileTest {
             restored.settings.aiProviderProfiles.map { it.kind },
         )
         assertEquals(
-            listOf("", "", "", "/Applications/ChatGPT.app/Contents/Resources/codex", "/opt/homebrew/bin/claude"),
+            listOf("", "", "", "/usr/local/bin/codex", "/opt/homebrew/bin/claude"),
             restored.settings.aiProviderProfiles.map { it.executablePath },
         )
         assertEquals(listOf("", "", "", "high", ""), restored.settings.aiProviderProfiles.map { it.reasoningEffort })

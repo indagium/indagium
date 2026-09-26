@@ -559,13 +559,33 @@ private val DEVICE_CAPTURE_MCP_INSTRUCTIONS = """
 Device capture tools control the attached Android device, not the computer running this server.
 To inspect the Android display, call get_device_screen and use its returned image and stated pixel dimensions.
 device_tap and device_swipe coordinates are measured in that image's pixel space and mapped automatically.
-Use device_text, device_key, and gestures for device navigation. start_device_capture reuses a live capture by default; set newCapture=true to finalize and retain the current one before a fresh capture. If stop_device_capture is called separately, poll its operation to completion before starting again. mark_device_issue and export_capture_snapshot are asynchronous; poll get_capture_operation_status until complete.
+Use device_text, device_key, device_launch_app, and device_open_url for device navigation; list_device_apps
+looks up a package name first. get_device_screen is a transient look only, never saved — call
+capture_device_screenshot to save a screenshot into Notes. start_device_capture reuses a live capture by
+default; set newCapture=true to finalize and retain the current one before a fresh capture, and optionally
+override recordVideo/includeEarlierDeviceLogs for just that one launch. If stop_device_capture is called
+separately, poll its operation to completion before starting again. mark_device_issue and
+export_capture_snapshot are asynchronous; poll get_capture_operation_status until complete.
+export_capture_snapshot accepts a range (all/last_minutes/since_last_save/selection); once the capture is
+stopped, only range=all is available. get_device_capture_status reports the capture's markers, elapsed time,
+and last snapshot path without touching the device.
 """.trimIndent()
 
+// Device-changing or screen-reading tools external MCP clients must get per-session approval for
+// (see AppState.executeExternalDeviceAiAction). Pure discovery/status calls — list_android_devices,
+// list_device_apps, get_device_capture_status, get_device_log_settings, get_capture_operation_status —
+// deliberately stay out of this set, matching list_android_devices' existing no-approval precedent.
 private val DEVICE_CONTROL_MCP_TOOLS = setOf(
     "start_device_capture", "get_device_screen", "device_tap", "device_swipe", "device_key", "device_text",
-    "stop_device_capture", "mark_device_issue", "export_capture_snapshot",
+    "stop_device_capture", "mark_device_issue", "export_capture_snapshot", "capture_device_screenshot",
+    "device_launch_app", "device_open_url", "set_device_log_settings",
 )
+
+// Shared wording for every DEVICE_CONTROL_MCP_TOOLS description, so the two authorization paths
+// stay worded identically everywhere they're mentioned instead of drifting tool by tool.
+private const val EXTERNAL_APPROVAL_NOTE =
+    "External MCP clients need per-session approval; requests from Indagium's own AI panel are " +
+        "authorized by the prompt that started them."
 
 // Screen reads and video frames are returned as real MCP image content rather than base64 text.
 // When `rawResult` is the Map a handler returns on success (carrying a non-null imageBase64),
@@ -587,9 +607,12 @@ internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: S
                 TextContent(
                     text = buildString {
                         append(fields["message"] as? String ?: "Current Android device screen")
-                        if (width != null && height != null) append(" Screenshot dimensions: ${width}×${height} pixels.")
+                        if (width != null && height != null) append(" Screenshot dimensions: $width×$height pixels.")
                         append(' ')
-                        append(instructions ?: "Tap and swipe coordinates are measured from this returned image's top-left and mapped to physical device pixels.")
+                        append(
+                            instructions ?: "Tap and swipe coordinates are measured from this returned image's " +
+                                "top-left and mapped to physical device pixels.",
+                        )
                     },
                 ),
             )
@@ -1471,33 +1494,42 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "start_device_capture",
         "Start a capture on the selected Android device, or reuse the live capture when it is already recording. " +
             "Set newCapture=true to finalize and retain the current capture before starting a fresh one. When several " +
-            "devices are ready, pass deviceSerial from list_android_devices. Device access requires user approval.",
+            "devices are ready, pass deviceSerial from list_android_devices. " + EXTERNAL_APPROVAL_NOTE,
         schema(
-            "deviceSerial" to "string", "newCapture" to "boolean",
+            "deviceSerial" to "string", "newCapture" to "boolean", "recordVideo" to "boolean", "includeEarlierDeviceLogs" to "boolean",
             descriptions = mapOf(
                 "deviceSerial" to "Serial from list_android_devices. Omit only when exactly one device is ready or to reuse the current device.",
                 "newCapture" to "Finalize the current capture and start a fresh capture (default false).",
+                "recordVideo" to "Override this one launch's video recording without changing the saved capture settings. " +
+                    "Defaults to the configured setting.",
+                "includeEarlierDeviceLogs" to "Override this one launch's inclusion of log lines already buffered on the " +
+                    "device before capture started, without changing the saved capture settings.",
             ),
         ),
     ),
     McpTool(
         "stop_device_capture",
-        "Stop and finalize the live capture session after preserving its logs and video. Returns an operationId to poll with get_capture_operation_status. Wait for completion before starting another capture.",
+        "Stop and finalize the live capture session after preserving its logs and video. Returns an operationId to " +
+            "poll with get_capture_operation_status. Wait for completion before starting another capture.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "get_device_screen",
-        "Read the live Android screen as a transient image. The result includes image dimensions and coordinate instructions; gestures use pixels in this returned image. The screenshot is not saved into the capture. Device access requires user approval.",
+        "Read the live Android screen as a transient image. The result includes image dimensions and coordinate " +
+            "instructions; gestures use pixels in this returned image. The screenshot is not saved into the capture. " +
+            EXTERNAL_APPROVAL_NOTE,
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "device_tap",
-        "Tap an image pixel on the live Android screen. x/y are measured from the top-left of the latest get_device_screen image and mapped to physical pixels automatically. Device access requires user approval.",
+        "Tap an image pixel on the live Android screen. x/y are measured from the top-left of the latest " +
+            "get_device_screen image and mapped to physical pixels automatically. " + EXTERNAL_APPROVAL_NOTE,
         schema("tabId" to "string", "x" to "integer", "y" to "integer", required = listOf("tabId", "x", "y")),
     ),
     McpTool(
         "device_swipe",
-        "Swipe between pixels in the latest get_device_screen image. Coordinates are measured from its top-left and mapped to physical pixels automatically; duration is bounded and validated. Device access requires user approval.",
+        "Swipe between pixels in the latest get_device_screen image. Coordinates are measured from its top-left and " +
+            "mapped to physical pixels automatically; duration is bounded and validated. " + EXTERNAL_APPROVAL_NOTE,
         schema(
             "tabId" to "string", "x1" to "integer", "y1" to "integer", "x2" to "integer", "y2" to "integer",
             "durationMs" to "integer", required = listOf("tabId", "x1", "y1", "x2", "y2"),
@@ -1506,23 +1538,129 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     ),
     McpTool(
         "device_key",
-        "Press one allowlisted Android navigation key: BACK, HOME, RECENTS, or ENTER. Device access requires user approval.",
-        schema("tabId" to "string", "key" to "string", required = listOf("tabId", "key"), enums = mapOf("key" to listOf("BACK", "HOME", "RECENTS", "ENTER"))),
+        "Press one allowlisted Android key. $EXTERNAL_APPROVAL_NOTE",
+        schema(
+            "tabId" to "string", "key" to "string", required = listOf("tabId", "key"),
+            enums = mapOf(
+                "key" to listOf(
+                    "BACK", "HOME", "RECENTS", "ENTER", "DEL", "TAB", "ESCAPE",
+                    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_CENTER",
+                    "VOLUME_UP", "VOLUME_DOWN", "MENU", "SEARCH", "WAKEUP",
+                ),
+            ),
+        ),
     ),
     McpTool(
         "device_text",
-        "Enter bounded plain text into the focused Android field. Device access requires user approval.",
+        "Enter bounded plain text into the focused Android field. $EXTERNAL_APPROVAL_NOTE",
         schema("tabId" to "string", "text" to "string", required = listOf("tabId", "text")),
     ),
     McpTool(
+        "device_launch_app",
+        "Launch an installed Android app by package name. Fails clearly when the package isn't installed or has " +
+            "no launchable activity. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "packageName" to "string", required = listOf("tabId", "packageName"),
+            descriptions = mapOf("packageName" to "Reverse-domain Android package id, e.g. com.example.app."),
+        ),
+    ),
+    McpTool(
+        "list_device_apps",
+        "List launchable apps installed on the bound device. This discovery call does not read or control the " +
+            "device's screen or state.",
+        schema(
+            "tabId" to "string", "query" to "string", "includeSystem" to "boolean", required = listOf("tabId"),
+            descriptions = mapOf(
+                "query" to "Case-insensitive substring filter on package name or activity.",
+                "includeSystem" to "Include likely system packages (default false).",
+            ),
+        ),
+    ),
+    McpTool(
+        "device_open_url",
+        "Open an http/https URL on the device in its default handler. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "url" to "string", required = listOf("tabId", "url"),
+            descriptions = mapOf(
+                "url" to "An http:// or https:// URL with no quotes, backslashes, whitespace, or control characters.",
+            ),
+        ),
+    ),
+    McpTool(
         "mark_device_issue",
-        "Create a durable issue marker and attach a screenshot to Notes for this live capture. Returns an operationId to poll with get_capture_operation_status. Device access requires user approval.",
+        "Create a durable issue marker — a log window plus a screenshot when supported — and add it to Notes for " +
+            "this live capture. Returns an operationId to poll with get_capture_operation_status. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "label" to "string", "note" to "string", required = listOf("tabId"),
+            descriptions = mapOf(
+                "label" to "Short heading for the marker (default \"Issue detected here\").",
+                "note" to "Extra text added to the marker's note, under its heading.",
+            ),
+        ),
+    ),
+    McpTool(
+        "capture_device_screenshot",
+        "Save a screenshot of the live Android screen into this capture's Notes, with a linked video frame when " +
+            "available — exactly what the capture strip's own Screenshot button does. Unlike get_device_screen (a " +
+            "transient look that is not saved), this leaves durable evidence in Notes. " + EXTERNAL_APPROVAL_NOTE,
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(
         "export_capture_snapshot",
-        "Export the full capture as a non-overwriting ZIP snapshot including available logs, video, notes, and issue markers. Returns an operationId to poll with get_capture_operation_status. Device access requires user approval.",
-        schema("tabId" to "string", required = listOf("tabId")),
+        "Export the capture as a non-overwriting ZIP snapshot including available logs, video, notes, and issue " +
+            "markers. Returns an operationId to poll with get_capture_operation_status. Once the capture has been " +
+            "stopped, only range=all is supported (the stopped capture's retained ZIP). " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "range" to "string", "minutes" to "integer", "includeVideo" to "boolean",
+            "open" to "boolean", "filename" to "string",
+            required = listOf("tabId"),
+            enums = mapOf("range" to listOf("all", "last_minutes", "since_last_save", "selection")),
+            descriptions = mapOf(
+                "range" to "Which part of the capture to export. Defaults to all.",
+                "minutes" to "Minutes to cover for range=last_minutes (default 5). 5 or 10 match the popover's " +
+                    "own presets; any other value is a custom window.",
+                "includeVideo" to "Include the recorded video. Defaults to whatever this session records.",
+                "open" to "Open the saved archive in a new tab once it finishes exporting (default false).",
+                "filename" to "Archive basename (a .zip extension is added automatically). A non-overwriting name " +
+                    "is chosen automatically when this is omitted or already taken.",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_device_capture_status",
+        "Read-only status for a device capture: device, live/stopped, elapsed time, whether video is recording, " +
+            "storage used, its markers, and the last exported snapshot path if any. This discovery call does not " +
+            "read or control the device's screen or state.",
+        schema("tabId" to "string", descriptions = mapOf("tabId" to "Omit to use the currently live capture tab, if any.")),
+    ),
+    McpTool(
+        "get_device_log_settings",
+        "Read a device's current logcat buffer sizes, global log level, and per-tag overrides. This discovery " +
+            "call does not read or control the device's screen or state.",
+        schema(
+            "tabId" to "string", "deviceSerial" to "string",
+            descriptions = mapOf(
+                "tabId" to "A live capture tab bound to the device, used only when deviceSerial is omitted.",
+                "deviceSerial" to "Serial from list_android_devices. Takes priority over tabId.",
+            ),
+        ),
+    ),
+    McpTool(
+        "set_device_log_settings",
+        "Change a device's logcat buffer size and/or global log level and return the re-read state. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "deviceSerial" to "string", "bufferSize" to "string", "logLevel" to "string",
+            enums = mapOf(
+                "bufferSize" to listOf("256K", "1M", "4M", "16M"),
+                "logLevel" to listOf("default", "V", "D", "I", "W", "E", "S"),
+            ),
+            descriptions = mapOf(
+                "tabId" to "A live capture tab bound to the device, used only when deviceSerial is omitted.",
+                "deviceSerial" to "Serial from list_android_devices. Takes priority over tabId.",
+                "bufferSize" to "Applies -G to every logcat buffer at once. Provide this and/or logLevel.",
+                "logLevel" to "Sets (or, for default, clears) the global log.tag filter. Provide this and/or bufferSize.",
+            ),
+        ),
     ),
     McpTool(
         "get_capture_operation_status",

@@ -158,6 +158,25 @@ internal class CaptureService(
         applyDeviceLogChange(serial, DeviceLogRetryableChange.ClearTagOverride(tag), "Could not clear the override for $tag")
     }
 
+    /** Synchronous counterpart of [refreshDeviceLog] for the AI/MCP `get_device_log_settings` tool,
+     *  which needs the state as a return value rather than a [deviceLogStates] publication to poll.
+     *  Blocking (runs real adb calls) — callers must invoke it off the Compose thread; the AI tool
+     *  path already runs on an IO-dispatcher coroutine. Deliberately does not touch [deviceLogStates]
+     *  itself, so an in-flight AI request and the New tab panel's own controls stay independent. */
+    internal fun readDeviceLogStateNow(serial: String): DeviceLogState =
+        readDeviceLogState(toolsForStart(app.settings.captureSettings), serial)
+
+    /** Synchronous counterpart of [setDeviceLogBufferSize]/[setDeviceGlobalLogLevel] for the AI/MCP
+     *  `set_device_log_settings` tool: applies one change and returns the re-read state, throwing on
+     *  failure instead of publishing to [deviceLogStates] — see [readDeviceLogStateNow]'s own doc for
+     *  why the two stay separate. */
+    internal fun applyDeviceLogChangeNow(serial: String, change: DeviceLogRetryableChange): DeviceLogState {
+        val tools = toolsForStart(app.settings.captureSettings)
+        val result = runRetryableChange(tools, serial, change)
+        check(result.exitCode == 0) { adbFailureMessage("Could not apply device log setting", result) }
+        return readDeviceLogState(tools, serial)
+    }
+
     /** Runs the exact adb command one [DeviceLogRetryableChange] represents — the single place all
      *  three setters above (and [restartAdbAsRoot]'s own retry) build their command from, so a
      *  retry after "Restart adb as root" re-issues precisely the command that failed rather than a

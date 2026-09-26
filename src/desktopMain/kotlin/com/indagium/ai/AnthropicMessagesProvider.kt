@@ -93,11 +93,13 @@ class AnthropicMessagesProvider(
                 setBody(request.toAnthropicJson().toString())
             }.execute { response ->
                 if (!response.status.isSuccess()) {
-                    val details = runCatching { response.bodyAsText().take(1_000) }.getOrNull().orEmpty()
+                    val details = runCatching { response.bodyAsText().take(MAX_ERROR_BODY_CHARS) }.getOrNull().orEmpty()
                     val message = if (request.messages.any { it.images.isNotEmpty() }) {
                         "The selected Anthropic model rejected the screen image input (HTTP ${response.status.value}). " +
                             details.ifBlank { "Choose a model that accepts image inputs." }
-                    } else "Provider request failed (HTTP ${response.status.value})."
+                    } else {
+                        "Provider request failed (HTTP ${response.status.value})."
+                    }
                     emit(LlmStreamEvent.Error(message))
                     terminalHttpFailure = true
                     return@execute
@@ -465,6 +467,9 @@ class AnthropicMessagesProvider(
         const val THINKING_BUDGET_LOW = 4_096
         const val THINKING_BUDGET_MEDIUM = 12_288
         const val THINKING_BUDGET_HIGH = 24_576
+
+        // Bounds how much of a failed Messages response body is echoed into the error event.
+        const val MAX_ERROR_BODY_CHARS = 1_000
 
         // Reasoning levels offered for thinking-capable models, mapped to token budgets in
         // thinkingBudgetFor. Anthropic exposes no per-model effort list, so this is a fixed set.

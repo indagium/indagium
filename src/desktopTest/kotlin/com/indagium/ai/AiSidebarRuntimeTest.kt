@@ -12,9 +12,9 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -142,7 +142,7 @@ class AiSidebarRuntimeTest {
     }
 
     @Test
-    fun liveCaptureDeviceOperationsRequireOneApprovalAndStayPinnedToTheirCapture() = runBlocking<Unit> {
+    fun liveCaptureDeviceOperationsRunWithoutApprovalAndStayPinnedToTheirCapture() = runBlocking<Unit> {
         val receivedArguments = mutableListOf<Map<String, Any?>>()
         var round = 0
         val provider = object : LlmProvider {
@@ -183,15 +183,16 @@ class AiSidebarRuntimeTest {
                 ),
             )
             val run = started.run
-            val confirmation = run.events.filterIsInstance<AiRunEvent.ConfirmationRequired>().first().confirmation
-            assertEquals(1, run.pendingConfirmationCount)
-            assertTrue(runtime.resolveConfirmation(run, confirmation, accepted = true))
             run.job!!.join()
 
+            // No approval card: the user's own prompt that started this in-app run authorizes
+            // both device tool calls, so neither waits on a confirmation.
             assertEquals(listOf("capture-tab", "capture-tab"), receivedArguments.map { it["tabId"] })
-            assertEquals(1, run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().size)
+            assertTrue(run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().isEmpty())
             assertEquals("capture-tab", run.deviceCaptureTabId)
-            assertFalse(run.deviceControlApproved, "consent is revoked after the AI request completes")
+            // The bound serial is scoped to one run and is reset once it completes, same as the
+            // approval state it replaced.
+            assertNull(run.deviceBoundSerial)
         } finally {
             runtime.close()
         }

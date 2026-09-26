@@ -76,8 +76,7 @@ internal class AccountAgentRunner(
                 if (profile.kind != AiProviderKind.CLAUDE_CODE_ACCOUNT) deleteWorkspace(workspace)
                 run.confirmations.values.forEach { it.cancel() }
                 run.confirmations.clear()
-                run.deviceControlApproved = false
-                run.deviceControlApprovedSerial = null
+                run.deviceBoundSerial = null
                 if (session.activeRun === run) session.activeRun = null
             }
         }
@@ -356,6 +355,7 @@ internal fun codexManagedMcpEnvironment(token: String): Map<String, String> =
     mapOf(CODEX_INDAGIUM_MCP_TOKEN_ENV to token)
 
 private const val CODEX_INDAGIUM_MCP_TOKEN_ENV = "INDAGIUM_MCP_TOKEN"
+
 /** Restrict a managed evidence-only Codex run to its configured Indagium MCP server. These are
  * per-process CLI overrides; the user's persistent Codex configuration is never modified. */
 internal fun codexManagedToolRestrictionConfig(): List<String> = listOf(

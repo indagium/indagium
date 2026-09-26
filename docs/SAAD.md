@@ -107,7 +107,7 @@ target.
 | Test Kotlin | ~26,000 lines in `src/desktopTest` |
 | Packages | 13 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`) |
 | Test classes | ~90 |
-| MCP/automation tools exposed | 55 |
+| MCP/automation tools exposed | 75 |
 
 ### 2.3 Technology stack
 
