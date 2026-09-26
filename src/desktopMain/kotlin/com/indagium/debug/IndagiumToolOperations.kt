@@ -2029,26 +2029,48 @@ internal class IndagiumToolOperations(
         else -> null
     }
 
-    // Reuses tab.messageComposition when it is already Computed for the tab's current view
-    // (identical to how ui/FilterPanel.kt's panel decides whether AppState.requestMessageComposition
-    // needs to start a new scan). On a miss, scans visibleEntries(t) — the same source the filter
-    // panel scans — directly on this (Ktor request) thread; see this function's caller for why that
-    // beats polling. The fresh result is written back through appState.upTab, but only if the tab's
-    // filter still matches what was scanned — a concurrent filter change during the scan must not
-    // stamp a result that no longer describes the current view.
+    // Reuses tab.messageComposition only when both the view filter and its row/analysis revision
+    // match. A row append or completed stack-trace analysis changes that revision even when the
+    // filter is unchanged. On a miss, scan synchronously and publish only if both inputs still
+    // match; if they changed during the scan, retry against the new snapshot instead of caching a
+    // stale histogram.
     private fun resolveMessageComposition(t: LogTab): Pair<MessageTemplateHistogram, Boolean> {
-        val wanted = t.filter.viewDefiningKey()
-        val cached = t.messageComposition as? MessageCompositionState.Computed
-        if (cached != null && cached.forFilter == wanted) return cached.histogram to true
-        val histogram = computeMessageTemplates(visibleEntries(t), t.analysis.stackTraceGroups)
-        appState.upTab(t.id) { fresh ->
-            if (fresh.filter.viewDefiningKey() == wanted) {
-                fresh.copy(messageComposition = MessageCompositionState.Computed(histogram, wanted))
-            } else {
-                fresh
+        var snapshot = synchronized(appState.stateLock) {
+            appState.tab(t.id) ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
+        }
+        repeat(3) {
+            val wanted = snapshot.filter.viewDefiningKey()
+            val revision = snapshot.messageCompositionRevision
+            val current = synchronized(appState.stateLock) {
+                appState.tab(snapshot.id)
+                    ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
+            }
+            if (current.messageCompositionRevision != revision || current.filter.viewDefiningKey() != wanted) {
+                snapshot = current
+                return@repeat
+            }
+            snapshot = current
+            val cached = snapshot.messageComposition as? MessageCompositionState.Computed
+            if (cached != null && cached.forFilter == wanted && cached.forRevision == revision) {
+                return cached.histogram to true
+            }
+            val histogram = computeMessageTemplates(visibleEntries(snapshot), snapshot.analysis.stackTraceGroups)
+            var published = false
+            appState.upTab(snapshot.id) { fresh ->
+                if (fresh.filter.viewDefiningKey() == wanted && fresh.messageCompositionRevision == revision) {
+                    published = true
+                    fresh.copy(messageComposition = MessageCompositionState.Computed(histogram, wanted, revision))
+                } else {
+                    fresh
+                }
+            }
+            if (published) return histogram to false
+            snapshot = synchronized(appState.stateLock) {
+                appState.tab(snapshot.id)
+                    ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
             }
         }
-        return histogram to false
+        throw IllegalStateException("Log rows changed during the composition scan; retry the request")
     }
 
     private fun buildLogCompositionResponse(

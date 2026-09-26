@@ -223,7 +223,12 @@ sealed interface MessageCompositionState {
      *  produced it. Carrying it here is also what makes a superseded scan harmless: a newer request
      *  overwrites this state with its own [forFilter], so when the older scan finishes it no longer
      *  matches and its result is dropped rather than clobbering the fresher one. */
-    data class Computing(val forFilter: Filter, val previous: MessageTemplateHistogram? = null) : MessageCompositionState
+    data class Computing(
+        val forFilter: Filter,
+        val previous: MessageTemplateHistogram? = null,
+        /** In-memory row/stack-analysis generation this scan was started against. */
+        val forRevision: Long = 0,
+    ) : MessageCompositionState
 
     /** The scan completed for [forFilter]. [histogram] may legitimately be empty — e.g. a view that
      *  is entirely one excluded stack-trace dump — and that is a genuine, displayable result, not
@@ -234,7 +239,12 @@ sealed interface MessageCompositionState {
      *  [Computing.previous] carries the last completed histogram so a rescan can keep showing it
      *  instead of blanking the list — a recompute triggered by hiding one shape would otherwise
      *  flash the whole panel empty and back. */
-    data class Computed(val histogram: MessageTemplateHistogram, val forFilter: Filter) : MessageCompositionState
+    data class Computed(
+        val histogram: MessageTemplateHistogram,
+        val forFilter: Filter,
+        /** In-memory row/stack-analysis generation represented by [histogram]. */
+        val forRevision: Long = 0,
+    ) : MessageCompositionState
 
     /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
     data class Failed(val message: String) : MessageCompositionState
@@ -583,10 +593,26 @@ sealed interface VideoSource {
     ) : VideoSource
 }
 
-// [sourceLabel] is the provenance string shown on any frame grabbed from this video
-// ("from <sourceLabel>"). [durationMs] defaults to 0 until the player opens the file and reports
-// the real value. The secondary constructor deliberately preserves source compatibility with
-// callers and saved-data tests written before VideoSource was introduced.
+/** Short user-facing video provenance derived from the durable source identity. Local paths show
+ * only their basename; archive videos identify both the archive and the full in-archive path. An
+ * empty archive path is the portable-capture marker used inside its own archive, where the saved
+ * display name is the only portable archive label available. */
+fun VideoSource.annotationDisplayLabel(): String = when (this) {
+    is VideoSource.LocalFile -> path.videoPathFileName().ifBlank { path }
+    is VideoSource.ArchiveEntry -> if (archivePath.isBlank()) {
+        displayName.ifBlank { entryPath }
+    } else {
+        "${archivePath.videoPathFileName()}/$entryPath"
+    }
+}
+
+private fun String.videoPathFileName(): String = substringAfterLast('/').substringAfterLast('\\')
+
+// [sourceLabel] is a concise cached/legacy display label; frame-note provenance is derived from
+// the durable [source] so old absolute local labels do not leak into exported notes. [durationMs]
+// defaults to 0 until the player opens the file and reports the real value. The secondary
+// constructor deliberately preserves source compatibility with callers and saved-data tests
+// written before VideoSource was introduced.
 data class VideoAttachment(
     val source: VideoSource,
     val sourceLabel: String,
@@ -636,15 +662,19 @@ data class VideoAttachment(
 /**
  * Structured provenance for an annotation image captured from a video. [source] is the durable
  * identity used to verify that a currently attached video is the same recording; [sourceLabel]
- * is the user-facing label displayed below the image; and [positionMs] is the exact playhead
- * timestamp to seek when the evidence is activated.
+ * is retained for saved-data compatibility; and [positionMs] is the exact playhead timestamp to
+ * seek when the evidence is activated. Display text comes from [VideoSource.annotationDisplayLabel].
  */
 data class VideoFrameReference(
     val source: VideoSource,
     val sourceLabel: String,
     val positionMs: Long,
 ) {
-    val provenanceLabel: String get() = "From $sourceLabel @ ${formatVideoTime(positionMs)}"
+    // sourceLabel remains serialized for old autosaves and callers, but older versions stored the
+    // absolute local path there. Derive display text from the structured source so provenance is
+    // concise without losing the full path needed by VideoSource.LocalFile navigation.
+    val provenanceLabel: String
+        get() = "From ${source.annotationDisplayLabel().ifBlank { sourceLabel }} @ ${formatVideoTime(positionMs)}"
 }
 
 // Recognized by both the drag-drop attach path (ui/App.kt's onDrop) and the zip-archive
@@ -797,6 +827,12 @@ data class LogTab(
     // exception as captureSessionId immediately above: deliberately ABSENT from AutosaveCodec's
     // tabToken()/tabShellFromToken()/persistedSnapshot(). Do not add it there.
     val captureSourceSessionId: String? = null,
+    // Session-only generation for the inputs behind messageComposition. AppState.upTab increments
+    // it whenever log rows or stack-trace groups are replaced; TailCoordinator advances it while
+    // incrementally folding a tail batch. It intentionally stays out of autosave because restored
+    // rows are new inputs and must receive a fresh scan. Appended last to preserve positional
+    // LogTab construction.
+    val messageCompositionRevision: Long = 0,
 )
 
 /**
@@ -845,7 +881,15 @@ data class SavedFilter(
 )
 
 // ── Settings ───────────────────────────────────────────────────────
-enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
+enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA, JIRA_CLOUD }
+
+/** Clipboard representation for the annotation document's main Copy action. */
+enum class AnnotationCopyFormat(val label: String) {
+    JIRA_CLOUD("Jira Cloud"),
+    JIRA_WIKI("Jira wiki"),
+    MARKDOWN("Markdown"),
+    HTML("HTML"),
+}
 
 // What Ctrl/Cmd+F does. FIND_BAR (the default) opens the non-destructive in-view Find bar
 // (AppState.openSearch, ui/SearchBar.kt); TAGS/KEYWORD_REGEX instead focus the corresponding
@@ -1219,6 +1263,12 @@ data class AppSettings(
     // width at render time — see RecentGrid's own columns computation. JSON form ONLY, same rule as
     // the other settings-JSON-only fields above.
     val homeRecentGridColumns: Int = DEFAULT_HOME_RECENT_GRID_COLUMNS,
+    // Main annotation Copy action. Explicit choices in its menu do not rewrite this preference.
+    // JSON-only so the frozen positional settings token remains compatible.
+    val annotationCopyFormat: AnnotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD,
+    // Shows a compact inventory of retained selectors above the Regex input. Off by default and
+    // informational only; it never changes filter behavior.
+    val showRegexFilterSummary: Boolean = false,
 )
 
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4

@@ -8,6 +8,7 @@ import com.indagium.model.MessageTemplateHistogram
 import com.indagium.model.TemplateGranularity
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.ui.mkRmap
 import com.indagium.utils.viewDefiningKey
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -226,6 +227,23 @@ class GetLogCompositionToolTest {
         val tags = (filtered["templates"] as List<*>).map { (it as Map<*, *>)["tag"] }.toSet()
         assertEquals(setOf("Net"), tags, "the UI-tagged shapes are excluded by the active filter, not just hidden client-side")
         assertEquals(2, filtered["shapeCount"])
+    }
+
+    @Test
+    fun rowChangesInvalidateTheToolCompositionCacheEvenWhenTheFilterIsUnchanged() {
+        val state = AppState()
+        val tabId = openMixedShapesTab(state)
+        val operations = operationsFor(state)
+        val first = operations.toolGateway.execute("get_log_composition", mapOf("tabId" to tabId)) as Map<*, *>
+        assertEquals(false, first["cacheHit"])
+
+        val before = state.tab(tabId)!!
+        val rows = before.logData + entry(before.logData.last().id + 1, "Net", "new diagnostic row")
+        state.upTab(tabId) { it.copy(logData = rows, rmap = mkRmap(rows)) }
+
+        val refreshed = operations.toolGateway.execute("get_log_composition", mapOf("tabId" to tabId)) as Map<*, *>
+        assertEquals(false, refreshed["cacheHit"], "a row revision must invalidate a matching-filter histogram")
+        assertEquals(before.messageCompositionRevision + 1, state.tab(tabId)!!.messageCompositionRevision)
     }
 
     // ── overflowed is surfaced, not silently dropped ────────────────────────────────────────

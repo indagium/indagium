@@ -1,6 +1,7 @@
 package com.indagium
 
 import com.indagium.model.AnnBlock
+import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.Annotations
 import com.indagium.model.AppSettings
@@ -11,11 +12,13 @@ import com.indagium.model.VideoFrameReference
 import com.indagium.model.VideoSource
 import com.indagium.ui.HtmlTransferable
 import com.indagium.ui.ImageTransferable
+import com.indagium.ui.annotationClipboardTransferable
 import com.indagium.ui.imageBytesFromTransferable
 import com.indagium.ui.maskWordForCopy
 import com.indagium.ui.mkTab
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
+import com.indagium.utils.annotationMarkdownToJiraWiki
 import java.awt.Image
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.UnsupportedFlavorException
@@ -95,14 +98,14 @@ class AnnotationClipboardTest {
         val html = buildAnnotationsHtml(tab)
 
         val markdownCaption = markdown.indexOf("Crash dialog")
-        val markdownSource = markdown.indexOf("From bugreport.zip/screen.mp4")
+        val markdownSource = markdown.indexOf("From screen.mp4 @ ")
         val markdownImage = markdown.indexOf("[screenshot]")
         assertTrue(markdownCaption >= 0 && markdownSource >= 0 && markdownImage >= 0)
         assertTrue(markdownCaption < markdownSource)
         assertTrue(markdownSource < markdownImage)
 
         val htmlCaption = html.indexOf("Crash dialog")
-        val htmlSource = html.indexOf("From bugreport.zip/screen.mp4")
+        val htmlSource = html.indexOf("From screen.mp4 @ ")
         val htmlImage = html.indexOf("<img ")
         assertTrue(htmlCaption >= 0 && htmlSource >= 0 && htmlImage >= 0)
         assertTrue(htmlCaption < htmlSource)
@@ -147,8 +150,28 @@ class AnnotationClipboardTest {
 
         val html = buildAnnotationsHtml(tab, AppSettings(numberAnnotationBlocks = true))
 
-        assertTrue(html.contains("1. Evidence"))
+        assertTrue(html.contains("<ol><li>Evidence</li></ol>"))
         assertTrue(html.contains("boot complete"))
+    }
+
+    @Test
+    fun buildAnnotationsHtmlPreservesCaptionMarkdownWithoutBoldingPlainText() {
+        val tab = mkTab("log", "LOGCAT_example.log", emptyList()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.LogRef("r1", emptyList(), "**Important** evidence with *emphasis*"),
+                    AnnBlock.Image("i1", "**Screenshot** evidence with *emphasis*", "pasted", "jpeg", byteArrayOf(1)),
+                ),
+            ),
+        )
+
+        val html = buildAnnotationsHtml(tab)
+
+        val renderedCaption = "<p><strong>Important</strong> evidence with <em>emphasis</em></p>"
+        assertTrue(html.contains(renderedCaption))
+        assertTrue(html.contains("<p><strong>Screenshot</strong> evidence with <em>emphasis</em></p>"))
+        assertFalse(html.contains("<p><strong><strong>Important"))
+        assertFalse(html.contains("<p><strong><strong>Screenshot"))
     }
 
     // ── maskWordForCopy: [screenshot: ...] marker skip ──────────────────
@@ -205,5 +228,132 @@ class AnnotationClipboardTest {
         assertEquals("<p>hi</p>", t.getTransferData(HtmlTransferable.HTML_FLAVOR))
         assertEquals("hi", t.getTransferData(DataFlavor.stringFlavor))
         assertFailsWith<UnsupportedFlavorException> { t.getTransferData(DataFlavor.imageFlavor) }
+    }
+
+    @Test
+    fun copyFormatsExposeExpectedFlavorsAndCloudMarkdownFallbackWithoutChangingDefault() {
+        val tab = mkTab("log", "LOGCAT_example.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Car_SDK", "ready"),
+        )).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note("n1", "**MSG_DONE**"),
+                    AnnBlock.LogRef("l1", listOf(1), "Captured logs"),
+                    AnnBlock.Image("i1", "Screenshot", "pasted", "jpeg", byteArrayOf(1, 2)),
+                ),
+            ),
+        )
+        val settings = AppSettings(annotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD)
+        val html = buildAnnotationsHtml(tab, settings)
+
+        val cloud = annotationClipboardTransferable(tab, settings, AnnotationCopyFormat.JIRA_CLOUD, html)
+        assertTrue(cloud.isDataFlavorSupported(HtmlTransferable.HTML_FLAVOR))
+        assertTrue(cloud.isDataFlavorSupported(DataFlavor.stringFlavor))
+        val richHtml = cloud.getTransferData(HtmlTransferable.HTML_FLAVOR) as String
+        assertTrue(richHtml.contains("<strong>MSG_DONE</strong>"))
+        assertTrue(richHtml.contains("<p>Captured logs</p>"))
+        assertFalse(richHtml.contains("<p><strong>Captured logs</strong></p>"))
+        assertTrue(richHtml.contains("<pre><code>"), "log refs must remain preformatted in the text/html clipboard flavor")
+        val fallback = cloud.getTransferData(DataFlavor.stringFlavor) as String
+        assertTrue(fallback.contains("```java"))
+        assertTrue(fallback.contains("Car_SDK"))
+        assertTrue(fallback.contains("ready"))
+        assertTrue(fallback.contains("![Screenshot]("))
+
+        val wiki = annotationClipboardTransferable(tab, settings, AnnotationCopyFormat.JIRA_WIKI)
+        val wikiText = wiki.getTransferData(DataFlavor.stringFlavor) as String
+        assertTrue(wikiText.contains("*MSG_DONE*"))
+        assertTrue(wikiText.contains("{code:java}"))
+
+        val markdown = annotationClipboardTransferable(tab, settings, AnnotationCopyFormat.MARKDOWN)
+        val markdownText = markdown.getTransferData(DataFlavor.stringFlavor) as String
+        assertTrue(markdownText.contains("**MSG_DONE**"))
+        assertFalse(markdownText.contains("{code:java}"))
+
+        val htmlSource = annotationClipboardTransferable(tab, settings, AnnotationCopyFormat.HTML, html)
+        assertEquals(html, htmlSource.getTransferData(DataFlavor.stringFlavor))
+        assertFalse(htmlSource.isDataFlavorSupported(HtmlTransferable.HTML_FLAVOR))
+        assertEquals(AnnotationCopyFormat.JIRA_CLOUD, settings.annotationCopyFormat)
+    }
+
+    @Test
+    fun richClipboardHtmlMatchesPreviewProseAndKeepsMarkdownAndLogsAsCodeBlocks() {
+        val tab = mkTab("log", "LOGCAT_example.log", listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "Car_SDK", "ready <now>"),
+        )).copy(
+            annotations = Annotations(
+                prefix = "Context **ready**",
+                blocks = listOf(
+                    AnnBlock.Note("n1", "Before\n\n```kotlin\nif (ready) {\n  finish()\n}\n```"),
+                    AnnBlock.LogRef("l1", listOf(1), "Routine **bold** caption"),
+                ),
+                suffix = "Next *steps*",
+            ),
+        )
+        val html = buildAnnotationsHtml(tab)
+        val cloud = annotationClipboardTransferable(
+            tab,
+            AppSettings(annotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD),
+            AnnotationCopyFormat.JIRA_CLOUD,
+            html,
+        )
+
+        assertTrue(html.contains("<p>Context <strong>ready</strong></p>"))
+        assertTrue(html.contains("<p>Routine <strong>bold</strong> caption</p>"))
+        assertFalse(html.contains("<strong>Routine"))
+        assertTrue(html.contains("<pre><code class=\"language-kotlin\">if (ready) {\n  finish()\n}\n</code></pre>"))
+        assertTrue(html.contains("<pre><code>"))
+        assertTrue(html.contains("ready &lt;now&gt;"))
+        assertTrue(html.contains("<p>Next <em>steps</em></p>"))
+        assertEquals(html, cloud.getTransferData(HtmlTransferable.HTML_FLAVOR))
+        val fallback = cloud.getTransferData(DataFlavor.stringFlavor) as String
+        assertTrue(fallback.contains("```kotlin"), "plain-text fallback should retain the note code fence")
+        assertTrue(fallback.contains("```java"), "Cloud fallback should fence log rows")
+    }
+
+    @Test
+    fun markdownHtmlFormatsInlineMarkupEscapesContentAndRejectsUnsafeUrls() {
+        val tab = mkTab("log", "notes.log", emptyList()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note(
+                        "n1",
+                        "**MSG_DONE** and `**literal** <code>` <script> & [unsafe](javascript:alert(1)) " +
+                            "![bad](data:text/html;base64,PHNj) ![ok](data:image/png;base64,YQ==)",
+                    ),
+                    AnnBlock.Image("i1", "app image", "pasted", "jpeg", byteArrayOf(1, 2)),
+                ),
+            ),
+        )
+
+        val html = buildAnnotationsHtml(tab)
+
+        assertTrue(html.contains("<strong>MSG_DONE</strong>"))
+        assertTrue(html.contains("<code>**literal** &lt;code&gt;</code>"))
+        assertTrue(html.contains("&lt;script&gt;"))
+        assertFalse(html.contains("<script>"))
+        assertFalse(html.contains("javascript:"))
+        assertFalse(html.contains("data:text/html"))
+        assertTrue(html.contains("data:image/png;base64,YQ=="))
+        assertTrue(html.contains("data:image/jpeg;base64,AQI="))
+
+        val malformedImageType = buildAnnotationsHtml(
+            tab.copy(annotations = Annotations(blocks = listOf(AnnBlock.Image("bad", "", "", "jpeg\" onerror=\"alert(1)", byteArrayOf(1))))),
+        )
+        assertTrue(malformedImageType.contains("data:image/jpeg;base64,AQ=="))
+        assertFalse(malformedImageType.contains("onerror"))
+
+        val codeHtml = buildAnnotationsHtml(
+            tab.copy(annotations = Annotations(blocks = listOf(AnnBlock.Note("code", "```text\n  **literal**\n\n```")))),
+        )
+        assertTrue(codeHtml.contains("<code class=\"language-text\">  **literal**\n\n</code>"))
+    }
+
+    @Test
+    fun wikiProseKeepsInlineCodeLiteralAndConvertsCloudBold() {
+        val wiki = annotationMarkdownToJiraWiki("`**literal**` **MSG_DONE**\n```kotlin\n**fenced literal**\n```\n")
+
+        assertTrue(wiki.startsWith("{{**literal**}} *MSG_DONE*"))
+        assertTrue(wiki.contains("{code:kotlin}\n**fenced literal**\n{code}"))
     }
 }

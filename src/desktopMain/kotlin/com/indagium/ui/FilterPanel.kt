@@ -64,6 +64,7 @@ import com.indagium.utils.matchingMessageRule
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.passesFilter
 import com.indagium.utils.resolvePidTidTokens
+import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -425,6 +426,27 @@ internal data class LogCompositionActions(
     val onHighlight: (MessageTemplate) -> Unit,
     val onGoToFirst: (MessageTemplate) -> Unit,
 )
+
+/**
+ * Owns the visibility/filter/data freshness trigger for the expanded Log composition panel.
+ * Kept as a small composable so the restored-shell path can exercise the exact revision-keyed
+ * effect without constructing the whole filter panel.
+ */
+@Composable
+internal fun LogCompositionFreshnessEffect(
+    expanded: Boolean,
+    tabId: String,
+    filter: Filter,
+    revision: Long,
+    onRefresh: () -> Unit,
+) {
+    if (expanded) {
+        LaunchedEffect(tabId, filter.viewDefiningKey(), revision) {
+            delay(LOG_COMPOSITION_REFRESH_DEBOUNCE_MS)
+            onRefresh()
+        }
+    }
+}
 
 private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
@@ -1750,6 +1772,13 @@ internal fun FilterPanel(
                 onUiStateChanged()
             },
         )
+        LogCompositionFreshnessEffect(
+            expanded = fpState.logCompositionExpanded,
+            tabId = tab.id,
+            filter = tab.filter,
+            revision = tab.messageCompositionRevision,
+            onRefresh = logCompositionActions.onExpand,
+        )
         if (fpState.logCompositionExpanded) {
             // This block is only in composition while expanded, so remounting it (first expand,
             // or a collapse->expand) re-fires this LaunchedEffect for the current tab.id; switching
@@ -1765,10 +1794,6 @@ internal fun FilterPanel(
             // not a keystroke-latency path. Changing the filter again inside the window cancels
             // this effect before it fires, and once it has fired the in-flight scan is cancelled by
             // requestMessageComposition itself.
-            LaunchedEffect(tab.id, tab.filter) {
-                delay(LOG_COMPOSITION_REFRESH_DEBOUNCE_MS)
-                logCompositionActions.onExpand()
-            }
             // Page bookkeeping lives HERE, not inside LogCompositionResults: that composable is
             // called from two different when-branches, so a Computed -> Computing swap changes its
             // call site and Compose remounts it, re-firing any LaunchedEffect inside. That is what

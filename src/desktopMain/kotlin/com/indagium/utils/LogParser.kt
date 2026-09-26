@@ -10,6 +10,18 @@ import java.io.InputStream
 // LogLevel.A instead of getting its own enum constant.
 private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s*(.*)$""")
 
+// Some bug-report/capture wrappers retain the source timezone between the timestamp and the
+// thread columns. Also accept year-qualified timestamps from newer logcat exports. The offset is
+// syntax, not part of LogEntry.ts (which intentionally stores local time-of-day only).
+private val RE_THREADTIME_WITH_OFFSET = Regex(
+    """^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d+)(?:\s*([+-]\d{2}:?\d{2}|Z))\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s*(.*)$""",
+)
+
+// Two RAW wrappers occur in captured files: Android's `I/RAW: ...` tag form (optionally with an
+// outer pid) and the whitespace form `I RAW: ...`. Do not normalize unless the payload is itself
+// a complete structured logcat row; the ordinary RAW fallback below remains authoritative.
+private val RE_RAW_WRAPPER = Regex("""^I/RAW(?:\s*\(\s*\d+\s*\))?(?:[ \t]+|:[ \t]*)(.+)$|^I[ \t]+RAW\s*:[ \t]*(.+)$""")
+
 // Time:        MM-DD HH:MM:SS.mmm Level/Tag( PID): message
 private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEAF])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
 
@@ -61,43 +73,76 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
     // A multi-GB logcat has millions of lines but only a handful of distinct tags — interning
     // them collapses millions of duplicate Strings into shared references (hundreds of MB saved).
     val tagCache = HashMap<String, String>()
-
-    fun intern(tag: String): String = tagCache.getOrPut(tag) { tag }
+    val internTag: (String) -> String = { tag -> tagCache.getOrPut(tag) { tag } }
 
     return lines.mapNotNull { raw ->
         val line = raw.trim()
         if (line.isEmpty() || line.startsWith("-----")) return@mapNotNull null
 
-        parseThreadtimeFast(line)?.let { p ->
-            return@mapNotNull LogEntry(id++, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid)
+        parseStructuredLogcatLine(line, id, internTag)?.let { parsed ->
+            id++
+            return@mapNotNull parsed
         }
-        RE_THREADTIME.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, stripDatePrefix(m.groupValues[1]),
-                androidLogLevelFrom(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
-                pid = m.groupValues[2].toIntOrNull() ?: 0,
-                tid = m.groupValues[3].toIntOrNull() ?: 0,
-            )
+        val wrappedPayload = RE_RAW_WRAPPER.matchEntire(line)?.let { m ->
+            m.groupValues.drop(1).firstOrNull(String::isNotEmpty)
         }
-        RE_TIME.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, stripDatePrefix(m.groupValues[1]),
-                androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
-                pid = m.groupValues[4].toIntOrNull() ?: 0,
-            )
-        }
-        RE_BARE.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(id++, m.groupValues[1], androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
-        }
-        RE_BRIEF.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, "", androidLogLevelFrom(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
-                pid = m.groupValues[3].toIntOrNull() ?: 0,
-            )
+        wrappedPayload?.let { payload ->
+            parseStructuredLogcatLine(payload, id, internTag)?.let { parsed ->
+                id++
+                return@mapNotNull parsed
+            }
         }
 
         LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
     }.toList()
+}
+
+private fun parseStructuredLogcatLine(
+    line: String,
+    id: Int,
+    intern: (String) -> String,
+): LogEntry? {
+    parseThreadtimeFast(line)?.let { p ->
+        return LogEntry(id, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid)
+    }
+    RE_THREADTIME_WITH_OFFSET.matchEntire(line)?.let { m ->
+        val dateAndTime = m.groupValues[1]
+        val ts = if (dateAndTime.length > 5 && dateAndTime[2] == '-') {
+            stripDatePrefix(dateAndTime)
+        } else {
+            dateAndTime.substringAfterLast(' ').substringAfter('T')
+        }
+        return LogEntry(
+            id, ts, androidLogLevelFrom(m.groupValues[5][0]), intern(m.groupValues[6].trim()), m.groupValues[7],
+            pid = m.groupValues[3].toIntOrNull() ?: 0,
+            tid = m.groupValues[4].toIntOrNull() ?: 0,
+        )
+    }
+    RE_THREADTIME.matchEntire(line)?.let { m ->
+        return LogEntry(
+            id, stripDatePrefix(m.groupValues[1]),
+            androidLogLevelFrom(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
+            pid = m.groupValues[2].toIntOrNull() ?: 0,
+            tid = m.groupValues[3].toIntOrNull() ?: 0,
+        )
+    }
+    RE_TIME.matchEntire(line)?.let { m ->
+        return LogEntry(
+            id, stripDatePrefix(m.groupValues[1]),
+            androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
+            pid = m.groupValues[4].toIntOrNull() ?: 0,
+        )
+    }
+    RE_BARE.matchEntire(line)?.let { m ->
+        return LogEntry(id, m.groupValues[1], androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
+    }
+    RE_BRIEF.matchEntire(line)?.let { m ->
+        return LogEntry(
+            id, "", androidLogLevelFrom(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
+            pid = m.groupValues[3].toIntOrNull() ?: 0,
+        )
+    }
+    return null
 }
 
 // LogEntry.ts deliberately carries no date (see LogTime.parseMillisOfDay, which requires a bare

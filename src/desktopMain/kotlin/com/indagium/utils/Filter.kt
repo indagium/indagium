@@ -196,8 +196,17 @@ private fun ruleScopeMatches(entry: LogEntry, rule: MessageRule): Boolean {
     return true
 }
 
-private fun rulePatternMatches(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean =
-    containsPattern(entry.msg, rule.pattern, rule.regex, regexContext = regexContext)
+private fun rulePatternMatches(entry: LogEntry, rule: MessageRule, regexContext: RegexEvaluationContext): Boolean {
+    if (!rule.regex) return containsPattern(entry.msg, rule.pattern, regex = false, regexContext = regexContext)
+    // Keep existing message-only expressions valid, while allowing a single regex to span the
+    // tag/message boundary (for example `Car_SDK.*part_of_message`). Accept the space and colon
+    // separators used by message-rule suggestions without pulling timestamps or pid/tid into the
+    // rule's matching surface. Literal rules retain their message-only semantics above.
+    return containsPattern(entry.msg, rule.pattern, regex = true, regexContext = regexContext) ||
+        containsPattern("${entry.tag} ${entry.msg}", rule.pattern, regex = true, regexContext = regexContext) ||
+        containsPattern("${entry.tag}: ${entry.msg}", rule.pattern, regex = true, regexContext = regexContext) ||
+        containsPattern("${entry.tag} : ${entry.msg}", rule.pattern, regex = true, regexContext = regexContext)
+}
 
 // Single source of truth for "what counts as currently visible" — used by both computeItems()
 // (applyFilter = true, the normal rendering path) and log export, so a filtered export always
@@ -1227,6 +1236,12 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
             rows.forEach { row -> appendLine(presentLogLine(tab, row, settings, context, allowProcessName = localSource)) }
             appendLine("{code}")
         }
+
+        AnnotationLogBlockStyle.JIRA_CLOUD -> {
+            appendLine("```java")
+            rows.forEach { row -> appendLine(presentLogLine(tab, row, settings, context, allowProcessName = localSource)) }
+            appendLine("```")
+        }
     }
     appendLine()
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
@@ -1268,6 +1283,9 @@ private fun StringBuilder.appendDiagramNote(
 
             AnnotationLogBlockStyle.JIRA_JAVA ->
                 appendLine("!${annotationDiagramFileName(diagramOrdinal, frameStamp)}!")
+
+            AnnotationLogBlockStyle.JIRA_CLOUD ->
+                appendLine("![${diagram.caption.ifBlank { "Sequence diagram" }}](${annotationDiagramFileName(diagramOrdinal, frameStamp)})")
         }
 
         DiagramExportMode.SOURCE -> when (settings.annotationLogBlockStyle) {
@@ -1281,6 +1299,12 @@ private fun StringBuilder.appendDiagramNote(
                 appendLine("{code}")
                 appendLine(diagram.source.trimEnd('\n'))
                 appendLine("{code}")
+            }
+
+            AnnotationLogBlockStyle.JIRA_CLOUD -> {
+                appendLine("```${fenceLanguage}")
+                appendLine(diagram.source.trimEnd('\n'))
+                appendLine("```")
             }
         }
     }
@@ -1336,6 +1360,10 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
                     AnnotationLogBlockStyle.JIRA_JAVA ->
                         appendLine("!${annotationImageFileName(imageOrdinal, block.format, tab.annotations.frameStamp)}!")
                     AnnotationLogBlockStyle.INDENTED -> appendLine("[screenshot]")
+                    AnnotationLogBlockStyle.JIRA_CLOUD -> {
+                        val fileName = annotationImageFileName(imageOrdinal, block.format, tab.annotations.frameStamp)
+                        appendLine("![${block.caption.ifBlank { "screenshot" }}]($fileName)")
+                    }
                 }
                 appendLine()
             }

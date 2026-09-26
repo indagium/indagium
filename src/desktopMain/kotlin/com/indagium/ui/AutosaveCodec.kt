@@ -325,7 +325,8 @@ internal fun maskWordForCopy(text: String, settings: AppSettings): String {
     return text.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         val isScreenshotMarker = trimmed.startsWith("[screenshot: ") && trimmed.endsWith("]")
-        if (trimmed == "{code:java}" || trimmed == "{code}" || isScreenshotMarker) {
+        val isCloudFenceMarker = Regex("^(?:`{3,}|~{3,})(?:java)?$").matches(trimmed)
+        if (trimmed == "{code:java}" || trimmed == "{code}" || isCloudFenceMarker || isScreenshotMarker) {
             line
         } else {
             rules.fold(line) { masked, rule ->
@@ -654,6 +655,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     captureZipDir?.let { put("captureZipDir", it) }
     lastSaveDialogDir?.let { put("lastSaveDialogDir", it) }
     put("homeRecentGridColumns", homeRecentGridColumns)
+    put("annotationCopyFormat", annotationCopyFormat.name)
+    put("showRegexFilterSummary", showRegexFilterSummary)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -966,6 +969,10 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         lastSaveDialogDir = o.stringOrNull("lastSaveDialogDir"),
         homeRecentGridColumns = o.intOrDefault("homeRecentGridColumns", DEFAULT_HOME_RECENT_GRID_COLUMNS)
             .coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS),
+        annotationCopyFormat = o.stringOrNull("annotationCopyFormat")
+            ?.let { raw -> runCatching { AnnotationCopyFormat.valueOf(raw) }.getOrNull() }
+            ?: AnnotationCopyFormat.JIRA_CLOUD,
+        showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
     )
 }.getOrNull()
 
