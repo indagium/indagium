@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.indagium.capture.AdbRootOutcome
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
 import com.indagium.capture.CaptureCommandResult
@@ -19,10 +20,14 @@ import com.indagium.capture.CaptureToolResolver
 import com.indagium.capture.CaptureToolValidation
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.CaptureVideoExporter
+import com.indagium.capture.DeviceLogActivity
+import com.indagium.capture.DeviceLogRetryableChange
 import com.indagium.capture.DeviceLogState
 import com.indagium.capture.ImportedCapture
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
+import com.indagium.capture.classifyAdbRootOutput
+import com.indagium.capture.isPermissionFailure
 import com.indagium.capture.parseLogcatBufferSizes
 import com.indagium.capture.perTagLogLevelOverrides
 import com.indagium.model.Annotations
@@ -36,6 +41,7 @@ import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
 import java.net.URI
+import java.time.Duration
 
 internal data class CaptureToolResolution(
     val adbPath: String?,
@@ -84,6 +90,20 @@ internal class CaptureService(
     var error by mutableStateOf<String?>(null)
         private set
 
+    /** True while a [refreshDevices] call is in flight (either the launcher's own initial/polling
+     *  refresh or an explicit "Recheck tools"/"Refresh devices" click) — see [refreshDevices]'s own
+     *  doc for why this exists instead of blanking [devices]/[toolStatus] the way a naive "clear
+     *  then reload" would. */
+    var discovering by mutableStateOf(false)
+        private set
+
+    /** False only until the very first [refreshDevices] attempt has completed (success, failure or
+     *  "adb unavailable") for this process. The Devices panel uses this to tell "haven't looked yet"
+     *  (show a same-height "Looking for devices…" placeholder) apart from "looked, found none" (show
+     *  the real "No devices discovered" empty state) — see [refreshDevices]'s own doc. */
+    var hasCheckedDevicesOnce by mutableStateOf(false)
+        private set
+
     // Device logging (New tab's "Device logging" panel): buffer sizes + log.tag/log.tag.<TAG>,
     // keyed by serial so it survives the launcher's 3s device-refresh poll and a device switch
     // without living in a composable `remember` (per the panel's own doc in CaptureLauncher.kt).
@@ -98,7 +118,7 @@ internal class CaptureService(
      *  a fresh snapshot and replaces whatever was there, so a stale in-flight read never overwrites
      *  a newer one out of order in practice (the panel only ever has one device selected at a time). */
     fun refreshDeviceLog(serial: String) {
-        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(busy = true, error = null) }
+        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(activity = DeviceLogActivity.REFRESHING, error = null) }
         scope.launch {
             try {
                 val tools = toolsForStart(app.settings.captureSettings)
@@ -108,7 +128,10 @@ internal class CaptureService(
                 throw cancelled
             } catch (failure: Exception) {
                 setDeviceLogState(serial) {
-                    (it ?: DeviceLogState(serial)).copy(busy = false, error = failure.message ?: "Could not read device logging state")
+                    (it ?: DeviceLogState(serial)).copy(
+                        activity = DeviceLogActivity.IDLE,
+                        error = failure.message ?: "Could not read device logging state",
+                    )
                 }
             }
         }
@@ -119,9 +142,7 @@ internal class CaptureService(
      *  immediately, to all buffers" means here. Re-reads on success so the panel reflects what the
      *  device actually accepted (some devices clamp or round a requested size). */
     fun setDeviceLogBufferSize(serial: String, choice: LogBufferSizeChoice) {
-        applyDeviceLogChange(serial, "Could not set buffer size") { tools ->
-            tools.runAdb(serial, listOf("logcat", "-b", "all", "-G", choice.logcatArg))
-        }
+        applyDeviceLogChange(serial, DeviceLogRetryableChange.BufferSize(choice), "Could not set buffer size")
     }
 
     /** Sets (or, for `level == null`, clears) the global `log.tag` filter. Clearing writes an empty
@@ -129,36 +150,131 @@ internal class CaptureService(
      *  "unset" verb, and an empty value is exactly what `log.tag`'s own "device default" behavior
      *  reads as (see [LogTagLevel.fromPropValue]). */
     fun setDeviceGlobalLogLevel(serial: String, level: LogTagLevel?) {
-        applyDeviceLogChange(serial, "Could not set log level") { tools ->
-            tools.runAdb(serial, listOf("shell", "setprop", "log.tag", level?.propValue ?: ADB_SHELL_EMPTY_VALUE))
-        }
+        applyDeviceLogChange(serial, DeviceLogRetryableChange.GlobalLevel(level), "Could not set log level")
     }
 
     /** Removes one per-tag override, same "empty value" convention as [setDeviceGlobalLogLevel]. */
     fun clearDeviceLogTagOverride(serial: String, tag: String) {
-        applyDeviceLogChange(serial, "Could not clear the override for $tag") { tools ->
-            tools.runAdb(serial, listOf("shell", "setprop", "log.tag.$tag", ADB_SHELL_EMPTY_VALUE))
-        }
+        applyDeviceLogChange(serial, DeviceLogRetryableChange.ClearTagOverride(tag), "Could not clear the override for $tag")
     }
 
-    private fun applyDeviceLogChange(serial: String, failurePrefix: String, command: (CaptureTools) -> CaptureCommandResult) {
-        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(busy = true, error = null) }
+    /** Runs the exact adb command one [DeviceLogRetryableChange] represents — the single place all
+     *  three setters above (and [restartAdbAsRoot]'s own retry) build their command from, so a
+     *  retry after "Restart adb as root" re-issues precisely the command that failed rather than a
+     *  freshly-derived one. */
+    private fun runRetryableChange(tools: CaptureTools, serial: String, change: DeviceLogRetryableChange): CaptureCommandResult =
+        when (change) {
+            is DeviceLogRetryableChange.BufferSize ->
+                tools.runAdb(serial, listOf("logcat", "-b", "all", "-G", change.choice.logcatArg))
+            is DeviceLogRetryableChange.GlobalLevel ->
+                tools.runAdb(serial, listOf("shell", "setprop", "log.tag", change.level?.propValue ?: ADB_SHELL_EMPTY_VALUE))
+            is DeviceLogRetryableChange.ClearTagOverride ->
+                tools.runAdb(serial, listOf("shell", "setprop", "log.tag.${change.tag}", ADB_SHELL_EMPTY_VALUE))
+        }
+
+    private fun applyDeviceLogChange(serial: String, change: DeviceLogRetryableChange, failurePrefix: String) {
+        setDeviceLogState(serial) {
+            (it ?: DeviceLogState(serial)).copy(activity = DeviceLogActivity.APPLYING, error = null, failedChange = null)
+        }
         scope.launch {
             try {
                 val tools = toolsForStart(app.settings.captureSettings)
-                val state = runInterruptible {
-                    val result = command(tools)
-                    check(result.exitCode == 0) { adbFailureMessage(failurePrefix, result) }
-                    readDeviceLogState(tools, serial)
+                val outcome = runInterruptible {
+                    val result = runRetryableChange(tools, serial, change)
+                    if (result.exitCode == 0) {
+                        DeviceLogChangeOutcome.Applied(readDeviceLogState(tools, serial))
+                    } else {
+                        DeviceLogChangeOutcome.Failed(adbFailureMessage(failurePrefix, result), isPermissionFailure(result))
+                    }
                 }
-                setDeviceLogState(serial) { state }
+                applyDeviceLogChangeOutcome(serial, change, outcome)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 setDeviceLogState(serial) {
-                    (it ?: DeviceLogState(serial)).copy(busy = false, error = failure.message ?: failurePrefix)
+                    (it ?: DeviceLogState(serial)).copy(
+                        activity = DeviceLogActivity.IDLE,
+                        error = failure.message ?: failurePrefix,
+                        failedChange = null,
+                    )
                 }
             }
+        }
+    }
+
+    private fun applyDeviceLogChangeOutcome(serial: String, change: DeviceLogRetryableChange, outcome: DeviceLogChangeOutcome) {
+        when (outcome) {
+            is DeviceLogChangeOutcome.Applied -> setDeviceLogState(serial) { outcome.state }
+            is DeviceLogChangeOutcome.Failed -> setDeviceLogState(serial) { current ->
+                deviceLogFailedChangeState(current ?: DeviceLogState(serial), change, outcome.message, outcome.permissionFailure)
+            }
+        }
+    }
+
+    /**
+     * "Restart adb as root" (device-logging panel's permission-failure recovery): runs
+     * `adb -s <serial> root`, waits out adbd's restart when it actually bounces, retries the one
+     * change [DeviceLogState.failedChange] recorded, then re-reads the panel exactly like any other
+     * apply. A no-op if there is nothing recorded to retry (the button shouldn't be clickable in
+     * that state, but this guards the call directly rather than trusting the caller). The panel
+     * itself (CaptureLauncher.kt) is responsible for only showing the button when no capture is
+     * live — restarting adbd kills any running logcat stream.
+     */
+    fun restartAdbAsRoot(serial: String) {
+        val change = deviceLogStates[serial]?.failedChange ?: return
+        setDeviceLogState(serial) { (it ?: DeviceLogState(serial)).copy(activity = DeviceLogActivity.ROOTING, error = null) }
+        scope.launch {
+            try {
+                val tools = toolsForStart(app.settings.captureSettings)
+                val state = runInterruptible { rootThenRetry(tools, serial, change) }
+                setDeviceLogState(serial) { state }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                setDeviceLogState(serial) { current ->
+                    deviceLogRootAttemptFailedState(current ?: DeviceLogState(serial), failure.message ?: "Could not restart adb as root")
+                }
+            }
+        }
+    }
+
+    /** The blocking body of [restartAdbAsRoot], run inside `runInterruptible` off the caller's
+     *  thread. Always returns a [DeviceLogState] with [DeviceLogState.rootAttempted] set — a root
+     *  attempt happened one way or another, whether it ended in success, a production-build refusal,
+     *  or a retry that still failed — so the button never reappears for another automatic loop. */
+    private fun rootThenRetry(tools: CaptureTools, serial: String, change: DeviceLogRetryableChange): DeviceLogState {
+        val current = deviceLogStates[serial] ?: DeviceLogState(serial)
+        val rootResult = tools.runAdb(serial, listOf("root"), timeout = ADB_ROOT_TIMEOUT)
+        val rootOutput = "${rootResult.stdoutText()}\n${rootResult.stderrText()}"
+        when (classifyAdbRootOutput(rootOutput)) {
+            AdbRootOutcome.RESTARTING -> {
+                tools.runAdb(serial, listOf("wait-for-device"), timeout = ADB_WAIT_FOR_DEVICE_TIMEOUT)
+                waitForDeviceShell(tools, serial)
+            }
+            AdbRootOutcome.ALREADY_ROOT -> Unit
+            AdbRootOutcome.PRODUCTION_REFUSAL, AdbRootOutcome.UNKNOWN -> {
+                val message = rootOutput.trim().ifBlank { "adb root failed (exit ${rootResult.exitCode})" }
+                return deviceLogRootAttemptFailedState(current, message)
+            }
+        }
+        val retryResult = runRetryableChange(tools, serial, change)
+        if (retryResult.exitCode != 0) {
+            return deviceLogRootAttemptFailedState(current, adbFailureMessage("Could not apply the change", retryResult))
+        }
+        return readDeviceLogState(tools, serial).copy(rootAttempted = true)
+    }
+
+    /** Polls `adb -s <serial> shell id -u` after `wait-for-device` returns: the device is back on
+     *  the adb transport at that point, but adbd itself can still take a moment to finish coming up
+     *  as root, during which a `shell` command may fail outright. Bounded so a device that never
+     *  fully comes back doesn't hang the recovery indefinitely — a poll that runs out simply falls
+     *  through to the retry attempt anyway, whose own failure becomes the surfaced error. */
+    private fun waitForDeviceShell(tools: CaptureTools, serial: String) {
+        val deadline = System.nanoTime() + ADB_SHELL_POLL_TOTAL.toNanos()
+        while (System.nanoTime() < deadline) {
+            val probe = tools.runAdb(serial, listOf("shell", "id", "-u"), timeout = ADB_SHELL_POLL_TIMEOUT)
+            if (probe.exitCode == 0 && probe.stdoutText().isNotBlank()) return
+            Thread.sleep(ADB_SHELL_POLL_INTERVAL_MS)
         }
     }
 
@@ -184,7 +300,7 @@ internal class CaptureService(
             bufferSizes = sizes,
             globalLevel = globalLevel,
             perTagOverrides = overrides,
-            busy = false,
+            activity = DeviceLogActivity.IDLE,
             error = null,
             loaded = true,
         )
@@ -197,16 +313,24 @@ internal class CaptureService(
         }
     }
 
-    /** Refreshes tool validation and device discovery without touching any live controller. */
+    /**
+     * Refreshes tool validation and device discovery without touching any live controller.
+     *
+     * Stale-while-revalidate (item 2 of the New-tab flicker fix): [devices]/[toolStatus]/[error] are
+     * left exactly as they were while this runs, even for [force] — a forced re-resolution still
+     * only invalidates the *internal* [tools]/[resolvedSettings] cache so [resolveTools] actually
+     * re-probes, it does not blank the observable state the New tab is already showing. Every one of
+     * those three fields is only ever replaced once the async read below has an actual new answer
+     * (or a real failure), never pre-emptively — see [discovering] for the transient "a refresh is
+     * running" signal a caller can show a busy indicator from instead, and [hasCheckedDevicesOnce]
+     * for how the Devices panel tells "never looked yet" apart from "looked, found none".
+     */
     fun refreshDevices(force: Boolean = false) {
         if (!discoveryLock.tryLock()) return
+        discovering = true
         if (force) {
             tools = null
             resolvedSettings = null
-            toolResolution = null
-            toolStatus = null
-            error = null
-            devices = emptyList()
         }
         scope.launch {
             try {
@@ -218,12 +342,14 @@ internal class CaptureService(
                 }
                 if (app.settings.captureSettings != settings) return@launch
                 devices = runInterruptible { found.listDevices() }.map { it.device }
+                error = null
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
                 error = failure.message ?: "Capture tools could not be checked"
-                devices = emptyList()
             } finally {
+                hasCheckedDevicesOnce = true
+                discovering = false
                 discoveryLock.unlock()
             }
         }
@@ -516,6 +642,63 @@ internal fun adbFailureMessage(prefix: String, result: CaptureCommandResult): St
     val detail = (result.stderrText().ifBlank { result.stdoutText() }).trim().take(MAX_ADB_FAILURE_MESSAGE_CHARS)
     return if (detail.isEmpty()) "$prefix (exit ${result.exitCode})" else "$prefix: $detail"
 }
+
+/**
+ * Pure merge of a failed device-log change into its previous [DeviceLogState] — pulled out of
+ * [CaptureService.applyDeviceLogChange] for the same reason [toolStatusLine]/[adbFailureMessage]
+ * were (see `CaptureCoordinatorToolStatusTest`'s own doc): `CaptureService` needs a live `AppState`
+ * + `CoroutineScope` and isn't reasonably unit-testable end to end, but this decision has none of
+ * that dependency. [change] is only ever recorded as [DeviceLogState.failedChange] — the trigger
+ * for the "Restart adb as root" button — when [permissionFailure] is true AND this serial hasn't
+ * already had a root attempt ([DeviceLogState.rootAttempted]); see that field's own doc for why a
+ * prior attempt permanently suppresses the button instead of retrying in a loop.
+ */
+internal fun deviceLogFailedChangeState(
+    base: DeviceLogState,
+    change: DeviceLogRetryableChange,
+    message: String,
+    permissionFailure: Boolean,
+): DeviceLogState = base.copy(
+    activity = DeviceLogActivity.IDLE,
+    error = message,
+    failedChange = if (permissionFailure && !base.rootAttempted) change else null,
+)
+
+/**
+ * Pure terminal state for a "Restart adb as root" attempt that didn't end in a successful,
+ * fully-applied retry — a production-build refusal, an unrecognized `adb root` failure, or a retry
+ * that still failed after root itself succeeded. All three get identical treatment: clear
+ * [DeviceLogState.failedChange] and set [DeviceLogState.rootAttempted] so the button is never
+ * offered again for this serial (see that field's own doc), surfacing [message] as the visible
+ * error either way.
+ */
+internal fun deviceLogRootAttemptFailedState(base: DeviceLogState, message: String): DeviceLogState = base.copy(
+    activity = DeviceLogActivity.IDLE,
+    error = message,
+    failedChange = null,
+    rootAttempted = true,
+)
+
+/** [CaptureService.applyDeviceLogChange]'s own result type — a plain success/failure split so the
+ *  blocking `runInterruptible` block can hand back whether the failure looked like a permission
+ *  problem without resorting to throwing+parsing an exception message for it. */
+private sealed class DeviceLogChangeOutcome {
+    data class Applied(val state: DeviceLogState) : DeviceLogChangeOutcome()
+
+    data class Failed(val message: String, val permissionFailure: Boolean) : DeviceLogChangeOutcome()
+}
+
+// "Restart adb as root" timing (CaptureService.restartAdbAsRoot/rootThenRetry/waitForDeviceShell):
+// `adb root` itself is normally near-instant (it just asks the existing adbd to restart), 15s is
+// purely a safety bound against a wedged adb server. wait-for-device's 20s covers a slow USB
+// re-enumeration on some hosts/hubs. The shell poll is intentionally short (a "few seconds" per
+// the task spec) since by the time wait-for-device returns the transport is already back — this is
+// only waiting out adbd's own startup, not a full device reboot.
+private val ADB_ROOT_TIMEOUT: Duration = Duration.ofSeconds(15)
+private val ADB_WAIT_FOR_DEVICE_TIMEOUT: Duration = Duration.ofSeconds(20)
+private val ADB_SHELL_POLL_TOTAL: Duration = Duration.ofSeconds(5)
+private val ADB_SHELL_POLL_TIMEOUT: Duration = Duration.ofSeconds(2)
+private const val ADB_SHELL_POLL_INTERVAL_MS = 300L
 
 /**
  * Combines the listings CaptureService.listSessions/recoverSessions read from each capture root

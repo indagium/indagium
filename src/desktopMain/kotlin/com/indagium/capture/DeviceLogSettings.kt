@@ -214,17 +214,137 @@ fun formatDeviceLogStatusLine(sizes: List<LogBufferSize>, globalLevel: LogTagLev
     return "On device: $bufferPart · $levelPart"
 }
 
+/** What a [DeviceLogState] is currently doing off-thread — split out of a single `busy: Boolean` so
+ *  the panel can tell a passive background re-read ([REFRESHING]: the device-refresh poll, a device
+ *  switch, or the panel's own "Refresh" button — none of them changed anything) apart from an
+ *  actual user-requested change ([APPLYING]: a buffer-size/log-level pick or a per-tag override
+ *  removal) or an in-flight "Restart adb as root" recovery ([ROOTING]: `adb root`, the device
+ *  reconnect wait, and the one retry of the change that failed — see
+ *  [com.indagium.ui.CaptureService.restartAdbAsRoot]) — see [deviceLogStatusText]'s own doc for why
+ *  that distinction is the whole point. */
+enum class DeviceLogActivity { IDLE, REFRESHING, APPLYING, ROOTING }
+
+/** One user-requested device-logging change that can fail and be retried after "Restart adb as
+ *  root" — the exact adb command a permission failure was hit on, held on [DeviceLogState.failedChange]
+ *  so [com.indagium.ui.CaptureService.restartAdbAsRoot] can re-issue precisely that command rather
+ *  than guessing from whatever the dropdowns currently show (which may have moved on by the time
+ *  the user clicks the button). Mirrors the three setters on `CaptureService`
+ *  (setDeviceLogBufferSize/setDeviceGlobalLogLevel/clearDeviceLogTagOverride) one-for-one. */
+sealed class DeviceLogRetryableChange {
+    data class BufferSize(val choice: LogBufferSizeChoice) : DeviceLogRetryableChange()
+
+    data class GlobalLevel(val level: LogTagLevel?) : DeviceLogRetryableChange()
+
+    data class ClearTagOverride(val tag: String) : DeviceLogRetryableChange()
+}
+
+/** Keyword match for an adb failure that looks like a permission problem (an unrooted userdebug
+ *  build refusing `setprop`, SELinux denying it outright, `logcat -G` refused on a locked-down
+ *  buffer, …) — the trigger for the "Restart adb as root" button. Deliberately loose (bare
+ *  "permission" and "eacces" match on their own) since adb/Android's own wording for this class of
+ *  failure has never been consistent across versions or vendors; a false positive here only offers
+ *  a button that then does nothing useful (adb root harmlessly no-ops or refuses), while a false
+ *  negative hides real recovery from the user entirely. Case-insensitive. */
+private val PERMISSION_FAILURE_KEYWORDS = listOf(
+    "permission",
+    "not permitted",
+    "failed to set property",
+    "avc: denied",
+    "selinux",
+    "setprop: failed",
+    "unable to set property",
+    "insufficient permissions",
+    "eacces",
+)
+
+/** Text-only classifier so callers can match either a raw adb result (see the [CaptureCommandResult]
+ *  overload below) or an already-formatted failure message (e.g. [com.indagium.ui.adbFailureMessage]'s
+ *  output) without re-deriving the same keyword list. */
+fun isPermissionFailure(text: String): Boolean {
+    val lower = text.lowercase()
+    return PERMISSION_FAILURE_KEYWORDS.any { lower.contains(it) }
+}
+
+/** True for a non-zero-exit adb result whose combined stdout+stderr reads like a permission
+ *  failure. A zero exit is never a permission failure even if the text happens to mention one of
+ *  the keywords in passing (e.g. a getprop dump that legitimately contains the word "permission"). */
+fun isPermissionFailure(result: CaptureCommandResult): Boolean =
+    result.exitCode != 0 && isPermissionFailure("${result.stdoutText()}\n${result.stderrText()}")
+
+/** What one `adb -s <serial> root` attempt reported, parsed from its combined stdout+stderr —
+ *  see `adb`'s own client source for these exact phrases; they have been stable across
+ *  platform-tools releases. [RESTARTING] means adbd is bouncing and the caller must wait for the
+ *  device to reappear before doing anything else; [ALREADY_ROOT] means it's safe to proceed
+ *  immediately; [PRODUCTION_REFUSAL] is the one outcome that is not a transient failure — a
+ *  production build will never allow this, so the caller should stop offering the button for this
+ *  serial; [UNKNOWN] covers everything else (an unrecognized message, a genuine adb failure, a
+ *  timeout) and is treated the same as [PRODUCTION_REFUSAL] by the caller: don't loop on it. */
+enum class AdbRootOutcome { RESTARTING, ALREADY_ROOT, PRODUCTION_REFUSAL, UNKNOWN }
+
+/** Parses `adb root`'s own combined stdout+stderr into an [AdbRootOutcome]. Matched on substrings
+ *  rather than an exact-line match since adb has, in the past, prefixed or suffixed these messages
+ *  with extra context (a warning banner, a server-starting notice) depending on version. */
+fun classifyAdbRootOutput(output: String): AdbRootOutcome {
+    val text = output.lowercase()
+    return when {
+        text.contains("already running as root") -> AdbRootOutcome.ALREADY_ROOT
+        text.contains("cannot run as root in production") -> AdbRootOutcome.PRODUCTION_REFUSAL
+        text.contains("restarting adbd as root") -> AdbRootOutcome.RESTARTING
+        else -> AdbRootOutcome.UNKNOWN
+    }
+}
+
 /** Read-only snapshot of one device's logging configuration, kept on [com.indagium.ui.CaptureService]
  *  keyed by serial (never in composable `remember` — see the New tab panel's own doc) so it survives
- *  the device-refresh polling and a tab switch alike. [busy] covers both the initial read and any
- *  apply-then-reread cycle; [error] is the last read/apply failure's message, cleared on the next
- *  successful read. */
+ *  the device-refresh polling and a tab switch alike. [activity] covers both the initial read and any
+ *  refresh/apply-then-reread cycle — see [DeviceLogActivity]'s own doc; [busy] is the old "something
+ *  is in flight" shorthand every enable/disable check still wants. [error] is the last read/apply
+ *  failure's message, cleared on the next successful read. */
 data class DeviceLogState(
     val serial: String,
     val bufferSizes: List<LogBufferSize> = emptyList(),
     val globalLevel: LogTagLevel? = null,
     val perTagOverrides: Map<String, String> = emptyMap(),
-    val busy: Boolean = false,
+    val activity: DeviceLogActivity = DeviceLogActivity.IDLE,
     val error: String? = null,
     val loaded: Boolean = false,
-)
+    /** The change to retry once "Restart adb as root" succeeds — set only when [error] is the
+     *  result of a permission failure (see [isPermissionFailure]) and this serial hasn't already
+     *  had a root attempt ([rootAttempted]); null in every other case, which is exactly the
+     *  condition the panel uses to decide whether to show the button at all. This and
+     *  [rootAttempted] back the "Restart adb as root" recovery (see
+     *  [com.indagium.ui.CaptureService.restartAdbAsRoot]) and are deliberately NOT reset by every
+     *  failure the way [error] is — they track state across the whole recovery flow, not just the
+     *  latest apply. Both go back to their defaults on the next successful read (a plain [error]
+     *  is enough context for any failure that isn't a rooting candidate). */
+    val failedChange: DeviceLogRetryableChange? = null,
+    /** True once "Restart adb as root" has actually been attempted for this serial — whether the
+     *  root itself failed (production build, unknown error) or the post-root retry still failed.
+     *  Keeps the button from reappearing and looping on the same unresolved permission problem;
+     *  cleared only by a fresh, from-scratch read (a device switch or the panel's own "Refresh"). */
+    val rootAttempted: Boolean = false,
+) {
+    val busy: Boolean get() = activity != DeviceLogActivity.IDLE
+}
+
+/** The device-logging panel's status line (item 3): prefers the last successfully-read values over
+ *  whatever is currently in flight, so a background refresh never blanks a line the panel already
+ *  has good data for. [DeviceLogActivity.APPLYING] is the one case that still shows a bare
+ *  "Applying…" with no cached line behind it — the user just changed a device setting, and the old
+ *  values are about to be wrong, so showing them as current would be misleading. A plain
+ *  [DeviceLogActivity.REFRESHING] (the 3s poll, a device switch, the "Refresh" button) keeps the
+ *  cached line and appends a small suffix instead, so the row's text — and therefore the panel's
+ *  height — never jumps. Before the very first successful read for this serial ([DeviceLogState.loaded]
+ *  false), there is nothing cached to fall back to. */
+fun deviceLogStatusText(state: DeviceLogState?): String = when {
+    state?.activity == DeviceLogActivity.APPLYING -> "Applying…"
+    // Same bare-message treatment as APPLYING, for the same reason: adbd is restarting and about
+    // to reconnect, so the cached buffer/level line is about to be stale anyway.
+    state?.activity == DeviceLogActivity.ROOTING -> "Restarting adb as root…"
+    state != null && state.loaded -> {
+        val cached = formatDeviceLogStatusLine(state.bufferSizes, state.globalLevel)
+        if (state.activity == DeviceLogActivity.REFRESHING) "$cached · Refreshing…" else cached
+    }
+    state?.activity == DeviceLogActivity.REFRESHING -> "Reading device settings…"
+    else -> "Not read yet"
+}
