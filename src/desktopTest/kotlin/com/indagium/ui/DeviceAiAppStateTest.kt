@@ -2,8 +2,8 @@ package com.indagium.ui
 
 import com.indagium.model.AppSettings
 import com.indagium.model.defaultCodexAccountProfile
-import kotlinx.coroutines.async
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -14,6 +14,9 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+
+private const val AWAIT_TIMEOUT_MS = 1_000L
+private const val POLL_INTERVAL_MS = 5L
 
 class DeviceAiAppStateTest {
     @Test
@@ -112,9 +115,41 @@ class DeviceAiAppStateTest {
         }
     }
 
+    @Test
+    fun newDeviceAiOperationsFailClearlyWithoutALiveCaptureTab() = runBlocking {
+        val state = appState()
+        try {
+            suspend fun awaitError(started: Map<String, Any?>): String {
+                val operationId = started["operationId"] as String
+                return withTimeout(2_000) {
+                    var status = state.deviceAiOperationStatus(operationId)
+                    while (status["status"] == "running") {
+                        delay(10)
+                        status = state.deviceAiOperationStatus(operationId)
+                    }
+                    status["error"] as String
+                }
+            }
+            // Distinct fake tab ids per call: markIssueForAi's own failure completes that tab's
+            // marker barrier as "failed" (see DeviceAiMarkerBarrier), and a subsequent export on
+            // the SAME tab would then report that instead of its own "no longer live" refusal.
+            assertTrue(awaitError(state.markIssueForAi("missing-tab-1", "Custom label", "Extra note")).contains("no longer live"))
+            assertTrue(awaitError(state.captureDeviceScreenshotForAi("missing-tab-2")).contains("no longer live"))
+            assertTrue(awaitError(state.exportCaptureSnapshotForAi("missing-tab-3")).contains("no longer live"))
+            assertTrue(
+                awaitError(state.exportCaptureSnapshotForAi("missing-tab-4", rangeParam = "bogus")).contains("range must be one of"),
+            )
+
+            val status = state.deviceCaptureStatusForAi(null)
+            assertTrue((status["error"] as String).contains("No tabId"))
+        } finally {
+            state.close()
+        }
+    }
+
     private suspend fun awaitApproval(state: AppState, deviceLabel: String) {
-        withTimeout(1_000) {
-            while (state.externalDeviceAiApprovals.none { it.deviceLabel == deviceLabel }) delay(5)
+        withTimeout(AWAIT_TIMEOUT_MS) {
+            while (state.externalDeviceAiApprovals.none { it.deviceLabel == deviceLabel }) delay(POLL_INTERVAL_MS)
         }
     }
 

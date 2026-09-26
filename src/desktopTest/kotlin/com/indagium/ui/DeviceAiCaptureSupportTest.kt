@@ -1,6 +1,8 @@
 package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureRange
+import com.indagium.model.LogTab
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -9,7 +11,9 @@ import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DeviceAiCaptureSupportTest {
@@ -81,6 +85,53 @@ class DeviceAiCaptureSupportTest {
         barrier.register("capture-tab", "marker-2")
         barrier.complete("capture-tab", "marker-2", succeeded = false)
         assertFalse(barrier.awaitAndConsume("capture-tab"), "failed marker evidence must prevent the snapshot export")
+    }
+
+    @Test
+    fun rangeResolutionMapsThePopoverPresetsAndRejectsUnknownRanges() {
+        assertEquals(CaptureRange.ALL, resolveCaptureSnapshotRangeForAi(null, null))
+        assertEquals(CaptureRange.ALL, resolveCaptureSnapshotRangeForAi("", null))
+        assertEquals(CaptureRange.ALL, resolveCaptureSnapshotRangeForAi("all", null))
+        assertEquals(CaptureRange.LAST_FIVE, resolveCaptureSnapshotRangeForAi("last_minutes", null))
+        assertEquals(CaptureRange.LAST_FIVE, resolveCaptureSnapshotRangeForAi("last_minutes", 5))
+        assertEquals(CaptureRange.LAST_TEN, resolveCaptureSnapshotRangeForAi("last_minutes", 10))
+        assertEquals(CaptureRange.CUSTOM, resolveCaptureSnapshotRangeForAi("last_minutes", 7))
+        assertEquals(CaptureRange.SINCE_SAVE, resolveCaptureSnapshotRangeForAi("since_last_save", null))
+        assertEquals(CaptureRange.SELECTION, resolveCaptureSnapshotRangeForAi("SELECTION", null))
+        assertFailsWith<IllegalStateException> { resolveCaptureSnapshotRangeForAi("bogus", null) }
+    }
+
+    @Test
+    fun buildCaptureSnapshotExportRequestCarriesTheTabsCurrentSelection() {
+        val rows = (10..14).map { id -> com.indagium.model.LogEntry(id, "ts", com.indagium.model.LogLevel.I, "tag", "row $id") }
+        val selectedTab = LogTab("capture", "capture", rows, rows.associateBy { it.id }, selected = setOf(11, 13))
+        val destination = File("capture.zip")
+
+        val withSelection = buildCaptureSnapshotExportRequest(
+            tab = selectedTab,
+            destination = destination,
+            range = CaptureRange.SELECTION,
+            customMinutes = 5,
+            includeVideo = true,
+            cutoffElapsedMs = 12_000,
+            overwriteExisting = false,
+        )
+        assertEquals(2, withSelection.selectedFirstRowOrdinal)
+        assertEquals(4, withSelection.selectedLastRowOrdinal)
+        assertEquals(12_000, withSelection.cutoffElapsedMs)
+        assertEquals(destination, withSelection.destination)
+
+        val withoutSelection = buildCaptureSnapshotExportRequest(
+            tab = selectedTab.copy(selected = emptySet()),
+            destination = destination,
+            range = CaptureRange.ALL,
+            customMinutes = 5,
+            includeVideo = false,
+            cutoffElapsedMs = 0,
+            overwriteExisting = false,
+        )
+        assertNull(withoutSelection.selectedFirstRowOrdinal)
+        assertNull(withoutSelection.selectedLastRowOrdinal)
     }
 
     @Test

@@ -1,11 +1,17 @@
 package com.indagium
 
-import com.indagium.debug.encodeBoundedDeviceScreen
+import com.indagium.debug.DEVICE_KEY_CODES
 import com.indagium.debug.DeviceScreenCoordinateSpace
+import com.indagium.debug.encodeBoundedDeviceScreen
+import com.indagium.debug.isLikelySystemAndroidPackage
 import com.indagium.debug.mapDisplayedScreenCoordinatesToDevice
+import com.indagium.debug.parsePackageListOutput
+import com.indagium.debug.parseQueryActivitiesOutput
 import com.indagium.debug.requireDeviceSwipe
 import com.indagium.debug.requireDeviceTapCoordinates
 import com.indagium.debug.requireSafeAndroidInputText
+import com.indagium.debug.requireSafeDeviceUrl
+import com.indagium.debug.requireValidAndroidPackageName
 import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import javax.imageio.ImageIO
@@ -54,6 +60,73 @@ class DeviceAiToolValidationTest {
         listOf("url?x=1", "a&b", "value%20here", "a;b", "$(id)", "`id`", "'quoted'").forEach { unsafe ->
             assertFailsWith<IllegalArgumentException>(unsafe) { requireSafeAndroidInputText(unsafe) }
         }
+    }
+
+    @Test
+    fun packageNameValidationRequiresAReverseDomainId() {
+        requireValidAndroidPackageName("com.example.app")
+        requireValidAndroidPackageName("com.example.app_2")
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("com") }
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("") }
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("com.example.app; rm -rf") }
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("com.example.$(id)") }
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("1com.example") }
+        assertFailsWith<IllegalArgumentException> { requireValidAndroidPackageName("com.example.".repeat(50)) }
+    }
+
+    @Test
+    fun deviceUrlValidationOnlyAllowsPlainHttpAndHttpsUrls() {
+        requireSafeDeviceUrl("https://indagium.com")
+        requireSafeDeviceUrl("http://example.com/path?x=1&y=2#frag")
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("ftp://example.com") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("javascript:alert(1)") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("https://example.com/ path") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("https://example.com/'; rm -rf") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("https://example.com/\"quoted\"") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("https://example.com/\\escaped") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("https://example.com/\ttab") }
+        assertFailsWith<IllegalArgumentException> { requireSafeDeviceUrl("") }
+    }
+
+    @Test
+    fun deviceKeyAllowlistExcludesPowerAndSleepButCoversNavigationAndVolume() {
+        assertEquals("KEYCODE_BACK", DEVICE_KEY_CODES["BACK"])
+        assertEquals("KEYCODE_DEL", DEVICE_KEY_CODES["DEL"])
+        assertEquals("KEYCODE_DPAD_CENTER", DEVICE_KEY_CODES["DPAD_CENTER"])
+        assertEquals("KEYCODE_VOLUME_UP", DEVICE_KEY_CODES["VOLUME_UP"])
+        assertEquals("KEYCODE_WAKEUP", DEVICE_KEY_CODES["WAKEUP"])
+        assertTrue("POWER" !in DEVICE_KEY_CODES)
+        assertTrue("SLEEP" !in DEVICE_KEY_CODES)
+    }
+
+    @Test
+    fun likelySystemPackageDetectionOnlyExcludesThePlatformNamespace() {
+        assertTrue(isLikelySystemAndroidPackage("android"))
+        assertTrue(isLikelySystemAndroidPackage("com.android.settings"))
+        assertTrue(!isLikelySystemAndroidPackage("com.example.app"))
+        assertTrue(!isLikelySystemAndroidPackage("com.google.android.apps.maps"))
+    }
+
+    @Test
+    fun queryActivitiesOutputParsesPackageAndActivityPairsAndDeduplicates() {
+        val output = """
+            priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true,
+              com.example.app/com.example.app.MainActivity filter ...
+              com.example.app/com.example.app.MainActivity filter ...
+              com.other.app/.LauncherActivity filter ...
+        """.trimIndent()
+        val apps = parseQueryActivitiesOutput(output)
+        assertEquals(2, apps.size)
+        assertEquals("com.example.app.MainActivity", apps.first { it.packageName == "com.example.app" }.activity)
+        assertEquals(".LauncherActivity", apps.first { it.packageName == "com.other.app" }.activity)
+    }
+
+    @Test
+    fun packageListOutputFallbackParsesPlainPackageNames() {
+        val output = "package:com.example.app\npackage:com.other.app\n\n"
+        val apps = parsePackageListOutput(output)
+        assertEquals(listOf("com.example.app", "com.other.app"), apps.map { it.packageName })
+        assertTrue(apps.all { it.activity == null })
     }
 
     @Test

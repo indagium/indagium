@@ -53,15 +53,15 @@ import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.newId
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
-import java.io.File
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.security.MessageDigest
 import java.util.Base64
 import java.util.LinkedHashMap
-import java.awt.image.BufferedImage
-import javax.imageio.ImageIO
 import javax.imageio.IIOImage
+import javax.imageio.ImageIO
 import javax.imageio.ImageWriteParam
 import kotlin.math.roundToInt
 
@@ -277,7 +277,12 @@ internal class IndagiumToolOperations(
         },
         "list_android_devices" to { listAndroidDevicesRoute() },
         "start_device_capture" to { a ->
-            appState.startCaptureForAi(a.str("deviceSerial"), a.anyBool("newCapture") == true)
+            appState.startCaptureForAi(
+                a.str("deviceSerial"),
+                a.anyBool("newCapture") == true,
+                a.anyBool("recordVideo"),
+                a.anyBool("includeEarlierDeviceLogs"),
+            )
         },
         "stop_device_capture" to { a -> appState.stopCaptureForAi(a.str("tabId") ?: "") },
         "get_device_screen" to { a -> getDeviceScreenRoute(a.str("tabId") ?: "") },
@@ -290,8 +295,28 @@ internal class IndagiumToolOperations(
         },
         "device_key" to { a -> deviceKeyRoute(a.str("tabId") ?: "", a.str("key") ?: "") },
         "device_text" to { a -> deviceTextRoute(a.str("tabId") ?: "", a.str("text") ?: "") },
-        "mark_device_issue" to { a -> appState.markIssueForAi(a.str("tabId") ?: "") },
-        "export_capture_snapshot" to { a -> appState.exportCaptureSnapshotForAi(a.str("tabId") ?: "") },
+        "device_launch_app" to { a -> deviceLaunchAppRoute(a.str("tabId") ?: "", a.str("packageName") ?: "") },
+        "list_device_apps" to { a ->
+            listDeviceAppsRoute(a.str("tabId") ?: "", a.str("query"), a.anyBool("includeSystem") == true)
+        },
+        "device_open_url" to { a -> deviceOpenUrlRoute(a.str("tabId") ?: "", a.str("url") ?: "") },
+        "mark_device_issue" to { a -> appState.markIssueForAi(a.str("tabId") ?: "", a.str("label"), a.str("note")) },
+        "capture_device_screenshot" to { a -> appState.captureDeviceScreenshotForAi(a.str("tabId") ?: "") },
+        "export_capture_snapshot" to { a ->
+            appState.exportCaptureSnapshotForAi(
+                tabId = a.str("tabId") ?: "",
+                rangeParam = a.str("range"),
+                minutes = a.anyInt("minutes"),
+                includeVideo = a.anyBool("includeVideo"),
+                open = a.anyBool("open") == true,
+                filenameParam = a.str("filename"),
+            )
+        },
+        "get_device_capture_status" to { a -> appState.deviceCaptureStatusForAi(a.str("tabId")) },
+        "get_device_log_settings" to { a -> getDeviceLogSettingsRoute(a.str("tabId"), a.str("deviceSerial")) },
+        "set_device_log_settings" to { a ->
+            setDeviceLogSettingsRoute(a.str("tabId"), a.str("deviceSerial"), a.str("bufferSize"), a.str("logLevel"))
+        },
         "get_capture_operation_status" to { a -> appState.deviceAiOperationStatus(a.str("operationId") ?: "") },
     )
 
@@ -352,7 +377,8 @@ internal class IndagiumToolOperations(
             "width" to image.width,
             "height" to image.height,
             "coordinateSpace" to "returned-image-pixels",
-            "coordinateInstructions" to "Gesture coordinates use this returned image's top-left origin and pixel dimensions; they are mapped to physical device pixels automatically.",
+            "coordinateInstructions" to "Gesture coordinates use this returned image's top-left origin and pixel " +
+                "dimensions; they are mapped to physical device pixels automatically.",
         )
     }.getOrElse { mapOf("error" to (it.message ?: "Could not read the Android screen")) }
 
@@ -394,13 +420,8 @@ internal class IndagiumToolOperations(
     }.getOrElse { mapOf("error" to (it.message ?: "Device swipe failed")) }
 
     private fun deviceKeyRoute(tabId: String, key: String): Map<String, Any?> = runCatching {
-        val keyCode = when (key.uppercase()) {
-            "BACK" -> "KEYCODE_BACK"
-            "HOME" -> "KEYCODE_HOME"
-            "RECENTS" -> "KEYCODE_APP_SWITCH"
-            "ENTER" -> "KEYCODE_ENTER"
-            else -> error("Supported device keys are BACK, HOME, RECENTS, and ENTER")
-        }
+        val keyCode = DEVICE_KEY_CODES[key.uppercase()]
+            ?: error("Supported device keys are ${DEVICE_KEY_CODES.keys.joinToString(", ")}")
         val (session, tools) = appState.aiCaptureBinding(tabId)
         runDeviceInput(tools, session.device.serial, listOf("input", "keyevent", keyCode))
         mapOf("tabId" to tabId, "deviceSerial" to session.device.serial, "key" to key.uppercase())
@@ -428,9 +449,127 @@ internal class IndagiumToolOperations(
         val result = tools.runAdb(serial, listOf("shell") + command, timeout = java.time.Duration.ofSeconds(5))
         check(!result.timedOut) { "The bounded adb input command timed out" }
         check(result.exitCode == 0) {
-            "adb device input failed: ${(result.stderrText() + "\n" + result.stdoutText()).trim().take(500)}"
+            "adb device input failed: ${(result.stderrText() + "\n" + result.stdoutText()).trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}"
         }
     }
+
+    private fun deviceLaunchAppRoute(tabId: String, packageName: String): Map<String, Any?> = runCatching {
+        requireValidAndroidPackageName(packageName)
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        val result = tools.runAdb(
+            session.device.serial,
+            listOf("shell", "monkey", "-p", packageName, "-c", "android.intent.category.LAUNCHER", "1"),
+            timeout = java.time.Duration.ofSeconds(10),
+        )
+        val output = (result.stdoutText() + "\n" + result.stderrText())
+        check(!result.timedOut) { "The bounded adb launch command timed out" }
+        // monkey often exits 0 even when it found nothing to launch, so its own stated failure
+        // ("No activities found...") is checked explicitly rather than trusting the exit code alone.
+        check(result.exitCode == 0 && !output.contains("No activities found", ignoreCase = true)) {
+            "Could not launch $packageName — it may not be installed or has no launchable activity: ${output.trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}"
+        }
+        mapOf("tabId" to tabId, "deviceSerial" to session.device.serial, "packageName" to packageName)
+    }.getOrElse { mapOf("error" to (it.message ?: "Device app launch failed")) }
+
+    private fun listDeviceAppsRoute(tabId: String, query: String?, includeSystem: Boolean): Map<String, Any?> = runCatching {
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        val primary = tools.runAdb(
+            session.device.serial,
+            listOf(
+                "shell", "cmd", "package", "query-activities", "--brief",
+                "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+            ),
+            timeout = java.time.Duration.ofSeconds(10),
+        )
+        var apps = if (!primary.timedOut && primary.exitCode == 0) parseQueryActivitiesOutput(primary.stdoutText()) else emptyList()
+        if (apps.isEmpty()) {
+            val fallback = tools.runAdb(session.device.serial, listOf("shell", "pm", "list", "packages", "-3"), timeout = java.time.Duration.ofSeconds(10))
+            check(!fallback.timedOut) { "The bounded adb app-list command timed out" }
+            check(fallback.exitCode == 0) {
+                "Could not list device apps: ${fallback.stderrText().trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}"
+            }
+            apps = parsePackageListOutput(fallback.stdoutText())
+        }
+        val bySystem = if (includeSystem) apps else apps.filterNot { isLikelySystemAndroidPackage(it.packageName) }
+        val filtered = query?.trim()?.takeIf(String::isNotBlank)?.let { q ->
+            bySystem.filter { it.packageName.contains(q, ignoreCase = true) || it.activity?.contains(q, ignoreCase = true) == true }
+        } ?: bySystem
+        val bounded = filtered.take(MAX_DEVICE_APP_RESULTS)
+        mapOf(
+            "tabId" to tabId,
+            "deviceSerial" to session.device.serial,
+            "apps" to bounded.map { mapOf("packageName" to it.packageName, "activity" to it.activity) },
+            "count" to bounded.size,
+            "truncated" to (filtered.size > bounded.size),
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not list device apps")) }
+
+    private fun deviceOpenUrlRoute(tabId: String, url: String): Map<String, Any?> = runCatching {
+        requireSafeDeviceUrl(url)
+        val (session, tools) = appState.aiCaptureBinding(tabId)
+        // Passed as ONE already-quoted remote command string (not several plain arguments the way
+        // runDeviceInput's keywords/coordinates are) — see requireSafeDeviceUrl's own doc for why
+        // the URL is single-quoted here instead of relying on adb's own space-joining.
+        val remoteCommand = "am start -a android.intent.action.VIEW -d '$url'"
+        val result = tools.runAdb(session.device.serial, listOf("shell", remoteCommand), timeout = java.time.Duration.ofSeconds(10))
+        check(!result.timedOut) { "The bounded adb open-url command timed out" }
+        check(result.exitCode == 0) {
+            "Could not open URL: ${(result.stderrText() + "\n" + result.stdoutText()).trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}"
+        }
+        mapOf("tabId" to tabId, "deviceSerial" to session.device.serial, "url" to url)
+    }.getOrElse { mapOf("error" to (it.message ?: "Device open URL failed")) }
+
+    private fun resolveDeviceLogSerial(tabId: String?, deviceSerial: String?): String {
+        deviceSerial?.trim()?.takeIf(String::isNotBlank)?.let { return it }
+        val id = tabId?.trim()?.takeIf(String::isNotBlank) ?: error("Provide deviceSerial or tabId")
+        return appState.aiCaptureBinding(id).first.device.serial
+    }
+
+    private fun parseLogBufferSizeChoice(raw: String): com.indagium.capture.LogBufferSizeChoice =
+        com.indagium.capture.LogBufferSizeChoice.entries.firstOrNull { it.logcatArg.equals(raw.trim(), ignoreCase = true) }
+            ?: error("bufferSize must be one of 256K, 1M, 4M, 16M")
+
+    private fun parseLogTagLevel(raw: String): com.indagium.capture.LogTagLevel? {
+        val trimmed = raw.trim()
+        if (trimmed.equals("default", ignoreCase = true)) return null
+        return com.indagium.capture.LogTagLevel.selectable.firstOrNull { it.propValue.equals(trimmed, ignoreCase = true) }
+            ?: error("logLevel must be one of default, V, D, I, W, E, S")
+    }
+
+    private fun deviceLogStateToMap(serial: String, state: com.indagium.capture.DeviceLogState): Map<String, Any?> = mapOf(
+        "deviceSerial" to serial,
+        "bufferSizes" to state.bufferSizes.map {
+            mapOf("buffer" to it.buffer, "sizeBytes" to it.sizeBytes, "consumedBytes" to it.consumedBytes, "maxEntryBytes" to it.maxEntryBytes)
+        },
+        "globalLevel" to (state.globalLevel?.propValue ?: "default"),
+        "perTagOverrides" to state.perTagOverrides,
+        "error" to state.error,
+    )
+
+    private fun getDeviceLogSettingsRoute(tabId: String?, deviceSerial: String?): Map<String, Any?> = runCatching {
+        val serial = resolveDeviceLogSerial(tabId, deviceSerial)
+        deviceLogStateToMap(serial, appState.captureService.readDeviceLogStateNow(serial))
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not read device logging settings")) }
+
+    private fun setDeviceLogSettingsRoute(
+        tabId: String?,
+        deviceSerial: String?,
+        bufferSize: String?,
+        logLevel: String?,
+    ): Map<String, Any?> = runCatching {
+        require(bufferSize != null || logLevel != null) { "Provide bufferSize and/or logLevel" }
+        val serial = resolveDeviceLogSerial(tabId, deviceSerial)
+        var state: com.indagium.capture.DeviceLogState? = null
+        bufferSize?.let {
+            val choice = parseLogBufferSizeChoice(it)
+            state = appState.captureService.applyDeviceLogChangeNow(serial, com.indagium.capture.DeviceLogRetryableChange.BufferSize(choice))
+        }
+        logLevel?.let {
+            val level = parseLogTagLevel(it)
+            state = appState.captureService.applyDeviceLogChangeNow(serial, com.indagium.capture.DeviceLogRetryableChange.GlobalLevel(level))
+        }
+        deviceLogStateToMap(serial, state ?: appState.captureService.readDeviceLogStateNow(serial))
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not change device logging settings")) }
 
     // AppState already computes a specific refusal reason for most open/merge failures — it just
     // stores it in the UI-only appState.openError instead of returning it. Routes below snapshot
@@ -2173,15 +2312,20 @@ internal class IndagiumToolOperations(
 
 internal fun requireDeviceTapCoordinates(x: Int, y: Int, width: Int, height: Int) {
     require(width > 0 && height > 0 && x in 0 until width && y in 0 until height) {
-        "Tap coordinates must be inside the ${width}×${height} screen"
+        "Tap coordinates must be inside the $width×$height screen"
     }
 }
 
+private const val SWIPE_DURATION_MIN_MS = 50
+private const val SWIPE_DURATION_MAX_MS = 2_000
+
 internal fun requireDeviceSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, width: Int, height: Int) {
     require(width > 0 && height > 0 && x1 in 0 until width && y1 in 0 until height && x2 in 0 until width && y2 in 0 until height) {
-        "Swipe coordinates must be inside the ${width}×${height} screen"
+        "Swipe coordinates must be inside the $width×$height screen"
     }
-    require(durationMs in 50..2_000) { "Swipe duration must be between 50 and 2000 milliseconds" }
+    require(durationMs in SWIPE_DURATION_MIN_MS..SWIPE_DURATION_MAX_MS) {
+        "Swipe duration must be between $SWIPE_DURATION_MIN_MS and $SWIPE_DURATION_MAX_MS milliseconds"
+    }
 }
 
 internal data class DeviceScreenCoordinateSpace(
@@ -2201,6 +2345,7 @@ internal fun mapDisplayedScreenCoordinatesToDevice(
 ): Pair<Int, Int> {
     require(space.deviceWidth > 0 && space.deviceHeight > 0) { "Physical device dimensions are invalid" }
     requireDeviceTapCoordinates(x, y, space.imageWidth, space.imageHeight)
+
     fun map(value: Int, imageSize: Int, deviceSize: Int): Int =
         if (imageSize <= 1 || deviceSize <= 1) 0
         else (value.toDouble() * (deviceSize - 1) / (imageSize - 1)).roundToInt().coerceIn(0, deviceSize - 1)
@@ -2209,13 +2354,106 @@ internal fun mapDisplayedScreenCoordinatesToDevice(
 }
 
 internal fun requireSafeAndroidInputText(text: String) {
-    require(text.isNotEmpty() && text.length <= 300) { "Text must contain 1–300 characters" }
+    require(text.isNotEmpty() && text.length <= MAX_ANDROID_INPUT_TEXT_CHARS) {
+        "Text must contain 1–$MAX_ANDROID_INPUT_TEXT_CHARS characters"
+    }
     require(text.matches(SAFE_ANDROID_INPUT_TEXT)) {
         "Text input must start with a letter or number and contain only letters, numbers, spaces, or safe URL punctuation (no shell metacharacters)"
     }
 }
 
+private const val MAX_ANDROID_INPUT_TEXT_CHARS = 300
 private val SAFE_ANDROID_INPUT_TEXT = Regex("[A-Za-z0-9][A-Za-z0-9_.,:/@+ -]{0,299}")
+
+/** `device_key`'s allowlist: navigation/editing/media keys with no destructive or system-wide
+ *  effect. Deliberately excludes POWER/SLEEP — those can lock or shut down the device out from
+ *  under the capture. */
+internal val DEVICE_KEY_CODES: Map<String, String> = mapOf(
+    "BACK" to "KEYCODE_BACK",
+    "HOME" to "KEYCODE_HOME",
+    "RECENTS" to "KEYCODE_APP_SWITCH",
+    "ENTER" to "KEYCODE_ENTER",
+    "DEL" to "KEYCODE_DEL",
+    "TAB" to "KEYCODE_TAB",
+    "ESCAPE" to "KEYCODE_ESCAPE",
+    "DPAD_UP" to "KEYCODE_DPAD_UP",
+    "DPAD_DOWN" to "KEYCODE_DPAD_DOWN",
+    "DPAD_LEFT" to "KEYCODE_DPAD_LEFT",
+    "DPAD_RIGHT" to "KEYCODE_DPAD_RIGHT",
+    "DPAD_CENTER" to "KEYCODE_DPAD_CENTER",
+    "VOLUME_UP" to "KEYCODE_VOLUME_UP",
+    "VOLUME_DOWN" to "KEYCODE_VOLUME_DOWN",
+    "MENU" to "KEYCODE_MENU",
+    "SEARCH" to "KEYCODE_SEARCH",
+    "WAKEUP" to "KEYCODE_WAKEUP",
+)
+
+/** Strict Android reverse-domain package id: at least two dot-separated segments, each starting
+ *  with a letter. Rejects anything a shell/adb argument could otherwise misinterpret. */
+private const val MAX_ANDROID_PACKAGE_NAME_CHARS = 255
+private val ANDROID_PACKAGE_NAME = Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+")
+
+internal fun requireValidAndroidPackageName(packageName: String) {
+    require(packageName.length in 1..MAX_ANDROID_PACKAGE_NAME_CHARS && ANDROID_PACKAGE_NAME.matches(packageName)) {
+        "packageName must be a reverse-domain Android package id, e.g. com.example.app"
+    }
+}
+
+/** One launchable app as parsed from `cmd package query-activities` or the `pm list packages`
+ *  fallback. [activity] is null when only the fallback (package names alone) was available. */
+internal data class DeviceLaunchableApp(val packageName: String, val activity: String?)
+
+// Matches `package/Activity` tokens inside `cmd package query-activities --brief` output, e.g.
+// "com.example.app/com.example.app.MainActivity" or "com.example.app/.MainActivity". The
+// activity half is intentionally permissive (dollar signs for inner classes, a leading dot for a
+// package-relative name) since it is display-only here, never itself passed back to adb.
+private val QUERY_ACTIVITIES_ENTRY = Regex("""([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+)/([A-Za-z0-9_.$]+)""")
+
+internal fun parseQueryActivitiesOutput(output: String): List<DeviceLaunchableApp> {
+    val seen = LinkedHashMap<String, String?>()
+    QUERY_ACTIVITIES_ENTRY.findAll(output).forEach { match ->
+        val packageName = match.groupValues[1]
+        if (ANDROID_PACKAGE_NAME.matches(packageName)) seen.putIfAbsent(packageName, match.groupValues[2])
+    }
+    return seen.map { (packageName, activity) -> DeviceLaunchableApp(packageName, activity) }
+}
+
+internal fun parsePackageListOutput(output: String): List<DeviceLaunchableApp> =
+    output.lineSequence()
+        .map { it.trim().removePrefix("package:").trim() }
+        .filter { ANDROID_PACKAGE_NAME.matches(it) }
+        .distinct()
+        .map { DeviceLaunchableApp(it, activity = null) }
+        .toList()
+
+/** Best-effort, deliberately simple: real "is this a system app" requires reading the device's
+ *  install flags, which this tool surface doesn't fetch. Anything under the platform's own
+ *  namespace is excluded by default; everything else (including preinstalled OEM/Google apps a
+ *  user might reasonably want to launch, like Gmail or Maps) is left in. */
+internal fun isLikelySystemAndroidPackage(packageName: String): Boolean =
+    packageName == "android" || packageName.startsWith("com.android.")
+
+private const val MAX_DEVICE_APP_RESULTS = 200
+
+/** Bounds how much of a failed adb command's stderr/stdout is echoed back into a tool error. */
+private const val ADB_ERROR_MESSAGE_MAX_CHARS = 500
+
+private const val MAX_DEVICE_URL_CHARS = 2_000
+
+/** adb joins every argument after `shell` into ONE command line with spaces before the device's
+ *  own shell interprets it, so a value containing whitespace or shell metacharacters can't simply
+ *  be passed as its own argument the way [runDeviceInput]'s plain keywords/coordinates are. Rather
+ *  than hand-roll quoting/escaping for a device-side shell we don't control, this rejects anything
+ *  that could break out of a single-quoted literal or otherwise confuse that shell — whitespace,
+ *  quotes, backslashes, and control characters — and the caller wraps the surviving value in single
+ *  quotes itself. */
+internal fun requireSafeDeviceUrl(url: String) {
+    require(url.length in 1..MAX_DEVICE_URL_CHARS) { "URL must contain 1–$MAX_DEVICE_URL_CHARS characters" }
+    require(url.startsWith("http://") || url.startsWith("https://")) { "Only http:// and https:// URLs are supported" }
+    require(url.none { it.isWhitespace() || it.isISOControl() || it == '\'' || it == '"' || it == '\\' }) {
+        "URL must not contain quotes, backslashes, whitespace, or control characters"
+    }
+}
 
 internal data class BoundedDeviceScreenImage(
     val bytes: ByteArray,
@@ -2232,7 +2470,9 @@ internal fun encodeBoundedDeviceScreen(
     maxBytes: Int = MAX_AI_SCREEN_IMAGE_BYTES,
 ): BoundedDeviceScreenImage {
     require(png.isNotEmpty()) { "Device screen image is empty" }
-    require(maxDimension >= 320 && maxBytes >= 32_768) { "Screen image limits are too small" }
+    require(maxDimension >= MIN_AI_SCREEN_DIMENSION && maxBytes >= MIN_AI_SCREEN_IMAGE_BYTES) {
+        "Screen image limits are too small"
+    }
     val stream = ImageIO.createImageInputStream(ByteArrayInputStream(png)) ?: error("Could not read device screen image")
     val (sourceWidth, sourceHeight, source) = try {
         val reader = ImageIO.getImageReaders(stream).asSequence().firstOrNull()
@@ -2254,9 +2494,10 @@ internal fun encodeBoundedDeviceScreen(
         stream.close()
     }
     var resized = source
-    var encoded = encodeDeviceJpeg(resized, 0.78f)
-    while (encoded.size > maxBytes && maxOf(resized.width, resized.height) > 320) {
-        val scale = minOf(0.82, maxBytes.toDouble() / encoded.size * 0.9).coerceIn(0.55, 0.82)
+    var encoded = encodeDeviceJpeg(resized, INITIAL_JPEG_QUALITY)
+    while (encoded.size > maxBytes && maxOf(resized.width, resized.height) > MIN_AI_SCREEN_DIMENSION) {
+        val scale = minOf(MAX_SHRINK_SCALE, maxBytes.toDouble() / encoded.size * SHRINK_SAFETY_FACTOR)
+            .coerceIn(MIN_SHRINK_SCALE, MAX_SHRINK_SCALE)
         val width = maxOf(1, (resized.width * scale).toInt())
         val height = maxOf(1, (resized.height * scale).toInt())
         resized = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB).also { next ->
@@ -2268,7 +2509,7 @@ internal fun encodeBoundedDeviceScreen(
                 graphics.dispose()
             }
         }
-        encoded = encodeDeviceJpeg(resized, 0.72f)
+        encoded = encodeDeviceJpeg(resized, SHRUNK_JPEG_QUALITY)
     }
     require(encoded.size <= maxBytes) { "Device screen image exceeds the safe 2 MB provider limit" }
     return BoundedDeviceScreenImage(encoded, resized.width, resized.height, sourceWidth, sourceHeight)
@@ -2307,3 +2548,15 @@ private fun encodeDeviceJpeg(image: BufferedImage, quality: Float): ByteArray {
 private const val MAX_AI_SCREEN_DIMENSION = 1440
 private const val MAX_AI_SCREEN_IMAGE_BYTES = 2 * 1024 * 1024
 private const val MAX_AI_SCREEN_PIXELS = 100_000_000L
+
+// encodeBoundedDeviceScreen's own floors/quality ladder: shrink-and-reencode stops once either the
+// image is down to MIN_AI_SCREEN_DIMENSION on its longest side or maxBytes is met, trying
+// progressively lower JPEG quality and a scale bounded to [MIN_SHRINK_SCALE, MAX_SHRINK_SCALE] each
+// pass (SHRINK_SAFETY_FACTOR keeps the estimate from re-growing past maxBytes on the next encode).
+private const val MIN_AI_SCREEN_DIMENSION = 320
+private const val MIN_AI_SCREEN_IMAGE_BYTES = 32_768
+private const val INITIAL_JPEG_QUALITY = 0.78f
+private const val SHRUNK_JPEG_QUALITY = 0.72f
+private const val MAX_SHRINK_SCALE = 0.82
+private const val MIN_SHRINK_SCALE = 0.55
+private const val SHRINK_SAFETY_FACTOR = 0.9

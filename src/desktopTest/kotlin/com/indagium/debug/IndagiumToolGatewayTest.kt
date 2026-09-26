@@ -74,6 +74,11 @@ class IndagiumToolGatewayTest {
             "save_filter_preset", "search_similar_cases", "get_case",
             "build_sequence_diagram", "set_case_metadata", "reindex_cases",
             "get_video_frame", "get_follow_diagnostics",
+            "list_android_devices", "start_device_capture", "stop_device_capture", "get_device_screen",
+            "device_tap", "device_swipe", "device_key", "device_text", "device_launch_app", "list_device_apps",
+            "device_open_url", "mark_device_issue", "capture_device_screenshot", "export_capture_snapshot",
+            "get_device_capture_status", "get_device_log_settings", "set_device_log_settings",
+            "get_capture_operation_status",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)

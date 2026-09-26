@@ -143,8 +143,12 @@ internal class AiRun internal constructor(
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
     internal val toolCallBudget = AiToolCallBudget(maxToolCalls)
     internal var job: Job? = null
-    @Volatile internal var deviceControlApproved: Boolean = false
-    @Volatile internal var deviceControlApprovedSerial: String? = null
+
+    /** The device serial this run's device tools are currently bound to, so a follow-up call that
+     *  omits `deviceSerial` reuses the same device instead of re-resolving it. Cleared when the
+     *  device is switched or disconnects; re-bound from the next successful device tool result. */
+    @Volatile internal var deviceBoundSerial: String? = null
+
     @Volatile internal var deviceCaptureTabId: String = tabId
 
     /** Wall-clock time of the first model-originated event (a reply or a tool call), if any yet. */
@@ -283,8 +287,7 @@ internal class AiAgentRunner(
             } finally {
                 run.confirmations.values.forEach { it.cancel() }
                 run.confirmations.clear()
-                run.deviceControlApproved = false
-                run.deviceControlApprovedSerial = null
+                run.deviceBoundSerial = null
                 if (session.activeRun === run) session.activeRun = null
             }
         }

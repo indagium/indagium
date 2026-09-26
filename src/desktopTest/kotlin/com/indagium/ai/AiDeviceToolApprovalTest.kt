@@ -3,17 +3,22 @@ package com.indagium.ai
 import com.indagium.debug.IndagiumToolDescriptor
 import com.indagium.debug.IndagiumToolGateway
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+/**
+ * In-app device tool calls (both direct-API runs via [AiAgentRunner] and managed account-agent
+ * runs via [ManagedMcpRunRegistry] — both go through [AiToolExecutionCoordinator]) never show a
+ * device-approval card: the user's own prompt that started the run is the authorization. This
+ * class instead covers what's left of the device-tool bookkeeping — tab pinning, the bound-serial
+ * auto-fill across calls, device-switch handling, and disconnect handling. External MCP clients
+ * keep their own per-session approval; see ControlServer.executeExternalDeviceTool and
+ * AppState.executeExternalDeviceAiAction, which never route through this coordinator.
+ */
 class AiDeviceToolApprovalTest {
     @Test
     fun startAfterStopRebindsSessionRunAndLaterTabToolsEvenWithDefaultNewCaptureFlag() = runBlocking {
@@ -37,8 +42,7 @@ class AiDeviceToolApprovalTest {
         )
         val coordinator = AiToolExecutionCoordinator(gateway, onCaptureTabChanged = { from, to -> movedTabs += from to to })
         val run = AiRun(tabId = "capture-old", context = AiInvestigationContext("capture-old", isDeviceCapture = true))
-        run.deviceControlApproved = true
-        run.deviceControlApprovedSerial = "SERIAL-1"
+        run.deviceBoundSerial = "SERIAL-1"
 
         coordinator.executeManaged(run, "stop_device_capture", emptyMap())
         val started = coordinator.executeManaged(run, "start_device_capture", emptyMap())
@@ -50,10 +54,11 @@ class AiDeviceToolApprovalTest {
         assertEquals("capture-new", run.deviceCaptureTabId)
         assertTrue(run.context.isDeviceCapture)
         assertEquals(listOf("capture-new"), receivedFilterTabs)
+        assertTrue(run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().isEmpty())
     }
 
     @Test
-    fun asksOncePerDevicePinsLiveRunAndMovesItWithANewCapture() = runBlocking {
+    fun deviceToolsRunWithoutApprovalAndTrackTheBoundSerialAcrossSwitchesAndDisconnects() = runBlocking {
         val receivedTabIds = mutableListOf<String>()
         val movedTabs = mutableListOf<Pair<String, String>>()
         val gateway = IndagiumToolGateway(
@@ -75,11 +80,11 @@ class AiDeviceToolApprovalTest {
         val coordinator = AiToolExecutionCoordinator(gateway, onCaptureTabChanged = { from, to -> movedTabs += from to to })
         val run = AiRun(tabId = "capture-old")
 
-        val initialCount = run.history.size
-        val screen = async { coordinator.executeManaged(run, "get_device_screen", emptyMap()) }
-        approveNext(run, initialCount)
-        assertEquals("c2NyZWVu", screen.await().images.single().base64)
-        assertEquals("SERIAL-1", run.deviceControlApprovedSerial)
+        // No card and no pending confirmation for a device tool call from the in-app panel.
+        val screen = coordinator.executeManaged(run, "get_device_screen", emptyMap())
+        assertEquals(0, run.pendingConfirmationCount)
+        assertEquals("c2NyZWVu", screen.images.single().base64)
+        assertEquals("SERIAL-1", run.deviceBoundSerial)
 
         val replacementResult = coordinator.executeManaged(
             run,
@@ -91,46 +96,25 @@ class AiDeviceToolApprovalTest {
         assertEquals(listOf("capture-old" to "capture-SERIAL-1"), movedTabs)
         coordinator.executeManaged(run, "get_device_screen", emptyMap())
         assertEquals(listOf("capture-old", "capture-SERIAL-1"), receivedTabIds)
-        assertEquals(1, run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().size)
 
-        val beforeDeviceChange = run.history.size
-        val replacement = async {
-            coordinator.executeManaged(
-                run,
-                "start_device_capture",
-                mapOf("deviceSerial" to "SERIAL-2", "newCapture" to true),
-            )
-        }
-        approveNext(run, beforeDeviceChange)
-        replacement.await()
-        assertEquals("SERIAL-2", run.deviceControlApprovedSerial)
+        // Requesting a different device drops the previously bound serial before the call runs,
+        // so the result below re-binds it to the device that actually started.
+        val replacement = coordinator.executeManaged(
+            run,
+            "start_device_capture",
+            mapOf("deviceSerial" to "SERIAL-2", "newCapture" to true),
+        )
+        assertEquals("capture-SERIAL-2", (replacement.raw as Map<*, *>)["tabId"])
+        assertEquals("SERIAL-2", run.deviceBoundSerial)
         assertEquals("capture-SERIAL-2", run.tabId)
         assertEquals("capture-SERIAL-1" to "capture-SERIAL-2", movedTabs.last())
-        assertEquals(2, run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().size)
 
-        val beforeDisconnect = run.history.size
+        // A disconnect result clears the bound serial so a later call won't auto-fill a stale one.
         val disconnected = coordinator.executeManaged(run, "device_tap", emptyMap())
         assertTrue(disconnected.content.contains("disconnected"))
-        assertFalse(run.deviceControlApproved)
-        val beforeNextApproval = run.history.size
-        val nextControl = async { coordinator.executeManaged(run, "device_tap", emptyMap()) }
-        approveNext(run, beforeNextApproval)
-        nextControl.await()
-        assertEquals(3, run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().size)
-    }
+        assertNull(run.deviceBoundSerial)
 
-    private suspend fun approveNext(run: AiRun, afterEventIndex: Int) {
-        val confirmation = withTimeout(1_000) {
-            while (true) {
-                val next = run.history.drop(afterEventIndex)
-                    .filterIsInstance<AiRunEvent.ConfirmationRequired>()
-                    .firstOrNull()
-                if (next != null) return@withTimeout next.confirmation
-                delay(5)
-            }
-            error("confirmation timeout")
-        }
-        assertNotNull(confirmation)
-        assertTrue(run.confirmations[confirmation.id]?.complete(true) == true)
+        // Still no confirmation anywhere in this run's whole history.
+        assertTrue(run.history.filterIsInstance<AiRunEvent.ConfirmationRequired>().isEmpty())
     }
 }

@@ -11,9 +11,9 @@ import com.indagium.ai.AiSessionRegistry
 import com.indagium.ai.AiSidebarRuntime
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
+import com.indagium.ai.LocalAccountCli
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.ai.recoveredBundledCodexPath
-import com.indagium.ai.LocalAccountCli
 import com.indagium.ai.validateAiProviderProfile
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
@@ -200,6 +200,22 @@ internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
 // Mark issue (restyle plan Phase 3). No customization per the plan's scope decision (one fixed
 // button, no skins/labels), so every marker gets this same heading text.
 private const val MARKER_DEFAULT_LABEL = "Issue detected here"
+
+// mark_device_issue's optional label/note bounds — generous for a heading/short note, well under
+// CaptureMarkerCodec's own MAX_MARKER_STRING_CHARS for the header's `label` field.
+private const val MARKER_LABEL_MAX_CHARS = 120
+private const val MARKER_NOTE_MAX_CHARS = 2_000
+
+// startCaptureForAi's recordVideo/includeEarlierDeviceLogs per-launch overrides (see
+// startCaptureTab's settingsOverride parameter): named only to keep that parameter's declaration
+// under the line-length limit.
+private typealias CaptureSettingsOverride = (com.indagium.capture.CaptureSettings) -> com.indagium.capture.CaptureSettings
+
+// startCaptureForAi/awaitCaptureControllerRemoval's shared "wait for the recorder to catch up"
+// polling budget: long enough for a slow device/emulator to actually start or finish finalizing,
+// short enough that a genuinely stuck capture still fails within one user-visible wait.
+private const val CAPTURE_START_TIMEOUT_SECONDS = 120L
+private const val CAPTURE_POLL_INTERVAL_MS = 100L
 
 // How long a fresh marker stays undoable (AppState.markerUndoByTab / undoMarkIssue).
 private const val MARKER_UNDO_WINDOW_MS = 10_000L
@@ -2068,7 +2084,12 @@ class AppState(
 
     /** Starts or reuses the one active capture. A requested fresh run first stops and retains the
      * old session through AppState's normal finalization path, then starts its replacement. */
-    internal fun startCaptureForAi(deviceSerial: String?, newCapture: Boolean): Map<String, Any?> {
+    internal fun startCaptureForAi(
+        deviceSerial: String?,
+        newCapture: Boolean,
+        recordVideo: Boolean? = null,
+        includeEarlierDeviceLogs: Boolean? = null,
+    ): Map<String, Any?> {
         ensureNoDeviceAiStopIsFinalizing()
         val liveTabId = liveCaptureTabId
         val currentSession = liveTabId?.let { captureControllerFor(it)?.selectedSession?.value }
@@ -2095,25 +2116,53 @@ class AppState(
             )
             AiCaptureDeviceChoice.NoReadyDevices -> error("No ready Android devices were found")
         }
-        if (liveTabId != null && !newCapture) {
-            val activeSerial = currentSession?.device?.serial
-                ?: error("The current capture is still starting; try again in a moment")
-            check(activeSerial == device.serial) {
-                "A capture is already live on $activeSerial. Choose Start a new capture to switch devices."
-            }
-            return mapOf(
-                "tabId" to liveTabId,
-                "sessionId" to currentSession.id,
-                "deviceSerial" to activeSerial,
-                "reused" to true,
-            )
-        }
+        reuseLiveCaptureIfRequested(liveTabId, newCapture, currentSession, device)?.let { return it }
         if (liveTabId != null) {
             stopCaptureTab(liveTabId)
             awaitCaptureControllerRemoval(liveTabId)
         }
-        val tabId = startCaptureTab(device) ?: error(captureService.error ?: "Capture could not start")
-        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120)
+        val settingsOverride = captureSettingsOverrideFor(recordVideo, includeEarlierDeviceLogs)
+        val tabId = startCaptureTab(device, settingsOverride) ?: error(captureService.error ?: "Capture could not start")
+        return awaitCaptureStart(tabId, device)
+    }
+
+    /** The "reuse the current live capture" branch of [startCaptureForAi]: null when a fresh
+     *  capture should start instead (no live capture, or the caller asked for a new one). */
+    private fun reuseLiveCaptureIfRequested(
+        liveTabId: String?,
+        newCapture: Boolean,
+        currentSession: com.indagium.capture.CaptureSession?,
+        device: CaptureDevice,
+    ): Map<String, Any?>? {
+        if (liveTabId == null || newCapture) return null
+        val activeSerial = currentSession?.device?.serial ?: error("The current capture is still starting; try again in a moment")
+        check(activeSerial == device.serial) {
+            "A capture is already live on $activeSerial. Choose Start a new capture to switch devices."
+        }
+        return mapOf(
+            "tabId" to liveTabId,
+            "sessionId" to currentSession.id,
+            "deviceSerial" to activeSerial,
+            "reused" to true,
+        )
+    }
+
+    /** [startCaptureForAi]'s per-launch settings transform, or null when neither override was
+     *  given — see [startCaptureTab]'s own doc for why this never writes back to saved settings. */
+    private fun captureSettingsOverrideFor(recordVideo: Boolean?, includeEarlierDeviceLogs: Boolean?): CaptureSettingsOverride? {
+        if (recordVideo == null && includeEarlierDeviceLogs == null) return null
+        return { base ->
+            base.copy(
+                recordVideo = recordVideo ?: base.recordVideo,
+                includeBufferedLogs = includeEarlierDeviceLogs ?: base.includeBufferedLogs,
+            )
+        }
+    }
+
+    /** Polls the freshly-started tab until its capture session id appears, an interruption is
+     *  reported, or [CAPTURE_START_TIMEOUT_SECONDS] elapses. */
+    private fun awaitCaptureStart(tabId: String, device: CaptureDevice): Map<String, Any?> {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(CAPTURE_START_TIMEOUT_SECONDS)
         while (System.nanoTime() < deadline) {
             val started = tab(tabId)?.captureSessionId
             if (started != null) return mapOf(
@@ -2126,15 +2175,15 @@ class AppState(
             if (snapshot?.state == com.indagium.capture.RecorderState.INTERRUPTED) {
                 error(snapshot.diagnostics.lastOrNull() ?: captureService.error ?: "Capture was interrupted while starting")
             }
-            Thread.sleep(100)
+            Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
         }
-        error("Capture did not become ready within 120 seconds")
+        error("Capture did not become ready within $CAPTURE_START_TIMEOUT_SECONDS seconds")
     }
 
     private fun awaitCaptureControllerRemoval(tabId: String) {
-        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(120)
-        while (captureControllerFor(tabId) != null && System.nanoTime() < deadline) Thread.sleep(100)
-        check(captureControllerFor(tabId) == null) { "The previous capture did not finish finalizing within 120 seconds" }
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(CAPTURE_START_TIMEOUT_SECONDS)
+        while (captureControllerFor(tabId) != null && System.nanoTime() < deadline) Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
+        check(captureControllerFor(tabId) == null) { "The previous capture did not finish finalizing within $CAPTURE_START_TIMEOUT_SECONDS seconds" }
     }
 
     internal fun launchDeviceAiOperation(
@@ -2145,7 +2194,7 @@ class AppState(
         val id = UUID.randomUUID().toString()
         deviceAiOperations[id] = DeviceAiOperationRecord(id, description, "running", System.currentTimeMillis())
         markerTabId?.let { deviceAiMarkerBarrier.register(it, id) }
-        if (deviceAiOperations.size > 128) {
+        if (deviceAiOperations.size > DEVICE_AI_OPERATION_TRIM_THRESHOLD) {
             val cutoff = System.currentTimeMillis() - DEVICE_AI_OPERATION_RETENTION_MS
             deviceAiOperations.entries.removeIf { it.value.createdAtMs < cutoff && it.value.status != "running" }
         }
@@ -2180,11 +2229,14 @@ class AppState(
         }
     }
 
-    internal fun markIssueForAi(tabId: String): Map<String, Any?> = launchDeviceAiOperation(
+    internal fun markIssueForAi(tabId: String, label: String? = null, note: String? = null): Map<String, Any?> = launchDeviceAiOperation(
         description = "Marking issue on the capture",
         action = {
             val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
-            val context = beginMarkerNote(tabId, controller) ?: error(captureScreenshotStatus ?: "Issue marker could not be created")
+            val boundedLabel = label?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_LABEL_MAX_CHARS) ?: MARKER_DEFAULT_LABEL
+            val boundedNote = note?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_NOTE_MAX_CHARS)
+            val context = beginMarkerNote(tabId, controller, boundedLabel, boundedNote)
+                ?: error(captureScreenshotStatus ?: "Issue marker could not be created")
             val resolvedScreenshotCapability = if (context.settings.markerScreenshot) {
                 resolveScreenshotCapabilityForAi(tabId, controller)
             } else {
@@ -2241,39 +2293,143 @@ class AppState(
         )
     }
 
-    internal fun exportCaptureSnapshotForAi(tabId: String): Map<String, Any?> =
-        launchDeviceAiOperation("Exporting the capture as a ZIP archive", action = {
-            // Marker creation includes its post-window and screenshot attachment. If the model
-            // requests a snapshot immediately after mark_device_issue, wait for durable evidence
-            // before capturing the archive boundary.
-            check(deviceAiMarkerBarrier.awaitAndConsume(tabId)) {
-                "An issue marker failed to finish; the snapshot was not exported without its evidence."
+    /** AI/MCP `export_capture_snapshot`. Mirrors the Capture snapshot popover's own range/minutes/
+     *  includeVideo/filename choices (see [buildCaptureSnapshotExportRequest], the construction the
+     *  two share) plus `open`, matching the popover's "Save + open". Once the capture has stopped,
+     *  only [rangeParam] "all" is supported — a stopped session has no live index/video to compute
+     *  any other range against, so it goes through [saveRetainedCapture]'s own retained-ZIP path
+     *  instead of [TabCaptureController.export]. */
+    internal fun exportCaptureSnapshotForAi(
+        tabId: String,
+        rangeParam: String? = null,
+        minutes: Int? = null,
+        includeVideo: Boolean? = null,
+        open: Boolean = false,
+        filenameParam: String? = null,
+    ): Map<String, Any?> = launchDeviceAiOperation("Exporting the capture as a ZIP archive", action = {
+        // Marker creation includes its post-window and screenshot attachment. If the model
+        // requests a snapshot immediately after mark_device_issue, wait for durable evidence
+        // before capturing the archive boundary.
+        check(deviceAiMarkerBarrier.awaitAndConsume(tabId)) {
+            "An issue marker failed to finish; the snapshot was not exported without its evidence."
+        }
+        val range = resolveCaptureSnapshotRangeForAi(rangeParam, minutes)
+        val filename = filenameParam?.let {
+            requireNotNull(captureArchiveName(it)) { "filename must be a valid archive basename" }
+        }
+        val controller = captureControllerFor(tabId)
+        val result = if (controller == null) {
+            check(range == com.indagium.capture.CaptureRange.ALL) {
+                "This capture has already stopped; only range=all is available (the stopped capture's retained ZIP)."
             }
-            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
-            val boundary = controller.snapshotForExport()
-            val session = boundary.session
-            val directory = effectiveCaptureSnapshotsDir()
-            check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
-            val suggestedName = com.indagium.capture.renderCaptureFilename(
-                session.settings.filenameTemplate,
-                session.device,
-                session.startedEpochMs,
-                com.indagium.capture.CaptureRange.ALL,
-                session.exportCounter,
-                session.settings.label,
-            )
-            val destination = uniqueSnapshotDestination(directory, suggestedName)
-            val request = CaptureExportRequest(
-                destination = destination,
-                range = com.indagium.capture.CaptureRange.ALL,
-                includeVideo = true,
-                cutoffElapsedMs = boundary.elapsedMs,
-                overwriteExisting = false,
-            )
-            val notes = tab(tabId)?.let { it.annotations.preparedForSave(it) }
-            val result = kotlinx.coroutines.runInterruptible { controller.export(request, notes = notes) }
-            mapOf("path" to result.file.absolutePath, "message" to result.message, "includedVideo" to (result.videoCoveredEndMs != null))
-        })
+            exportStoppedCaptureSnapshotForAi(tabId, filename)
+        } else {
+            exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename)
+        }
+        if (open) openExportedCaptureForAi(result.file)
+        mapOf(
+            "path" to result.file.absolutePath,
+            "message" to result.message,
+            "includedVideo" to (result.videoCoveredEndMs != null),
+            "opened" to open,
+        )
+    })
+
+    private fun exportStoppedCaptureSnapshotForAi(tabId: String, filenameOverride: String?): CaptureExportResult {
+        val sessionId = tab(tabId)?.captureSessionId ?: error("The bound capture tab is no longer live")
+        val session = captureService.retainedSession(sessionId) ?: error("This capture session is no longer on disk")
+        val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
+        check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
+        val suggestedName = filenameOverride ?: com.indagium.capture.renderCaptureFilename(
+            session.settings.filenameTemplate, session.device, session.startedEpochMs,
+            com.indagium.capture.CaptureRange.ALL, session.exportCounter, session.settings.label,
+        )
+        val destination = uniqueSnapshotDestination(directory, suggestedName)
+        val notes = tab(tabId)?.let { it.annotations.preparedForSave(it) }
+        return captureService.exportRetainedSession(sessionId, destination, notes = notes)
+    }
+
+    private suspend fun exportLiveCaptureSnapshotForAi(
+        tabId: String,
+        controller: TabCaptureController,
+        range: com.indagium.capture.CaptureRange,
+        customMinutes: Int,
+        includeVideo: Boolean?,
+        filenameOverride: String?,
+    ): CaptureExportResult {
+        val tabNow = tab(tabId) ?: error("The bound capture tab is no longer live")
+        if (range == com.indagium.capture.CaptureRange.SELECTION && selectedCaptureOrdinals(tabNow) == null) {
+            error("No rows are selected in this tab; select rows before requesting range=selection.")
+        }
+        val boundary = controller.snapshotForExport()
+        val session = boundary.session
+        val directory = effectiveCaptureSnapshotsDir()
+        check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
+        val suggestedName = filenameOverride ?: com.indagium.capture.renderCaptureFilename(
+            session.settings.filenameTemplate, session.device, session.startedEpochMs, range, session.exportCounter, session.settings.label,
+        )
+        val destination = uniqueSnapshotDestination(directory, suggestedName)
+        val request = buildCaptureSnapshotExportRequest(
+            tab = tabNow,
+            destination = destination,
+            range = range,
+            customMinutes = customMinutes,
+            includeVideo = includeVideo ?: session.settings.recordVideo,
+            cutoffElapsedMs = boundary.elapsedMs,
+            overwriteExisting = false,
+        )
+        val notes = tabNow.annotations.preparedForSave(tabNow)
+        return kotlinx.coroutines.runInterruptible { controller.export(request, notes = notes) }
+    }
+
+    /** "Save + open" for an AI-triggered export: open the archive exactly like the popover's own
+     *  `LaunchedEffect` does — a real capture archive through [openCaptureFile], anything else (a
+     *  hand-edited/corrupted export) through plain [openFile]. */
+    private fun openExportedCaptureForAi(file: File) {
+        if (com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) openCaptureFile(file) else openFile(file)
+    }
+
+    /** AI/MCP `get_device_capture_status`: read-only device/elapsed/markers/storage snapshot for a
+     *  live or already-stopped capture tab. Never touches the device itself. */
+    internal fun deviceCaptureStatusForAi(tabId: String?): Map<String, Any?> = runCatching {
+        val resolvedTabId = tabId?.trim()?.takeIf(String::isNotBlank)
+            ?: liveCaptureTabId
+            ?: error("No tabId was given and no capture is currently live")
+        val tabNow = tab(resolvedTabId) ?: error("Unknown tab: $resolvedTabId")
+        val controller = captureControllerFor(resolvedTabId)
+        val live = controller != null
+        val session = controller?.selectedSession?.value
+            ?: tabNow.captureSessionId?.let { captureService.retainedSession(it) }
+            ?: error("$resolvedTabId is not a capture tab")
+        val storageBytesUsed = listOf(session.logFile, session.indexFile, session.videoFile)
+            .filter { it.isFile }
+            .sumOf { it.length() }
+        val markers = tabNow.annotations.blocks.filterIsInstance<AnnBlock.Note>().mapNotNull { block ->
+            parseMarkerHeader(block.text)?.let { marker ->
+                mapOf(
+                    "id" to marker.id,
+                    "elapsedMs" to marker.elapsedMs,
+                    "label" to marker.label,
+                    "firstOrdinal" to marker.firstOrdinal,
+                    "lastOrdinal" to marker.lastOrdinal,
+                    "noteId" to block.id,
+                )
+            }
+        }
+        mapOf(
+            "tabId" to resolvedTabId,
+            "deviceModel" to session.device.model,
+            "deviceSerial" to session.device.serial,
+            "status" to if (live) "live" else "stopped",
+            "elapsedMs" to session.elapsedMs,
+            "videoRecording" to (session.settings.recordVideo && session.videoStartElapsedMs != null),
+            "storageBytesUsed" to storageBytesUsed,
+            "markers" to markers,
+            // Best-effort only: the last export this process itself saved for ANY tab, since a
+            // per-tab record isn't kept. Null when nothing has been exported yet this launch.
+            "lastSnapshotPath" to captureExportResult?.file?.absolutePath,
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not read capture status")) }
 
     internal suspend fun awaitExternalDeviceAiApproval(sessionId: String, clientName: String, deviceLabel: String): Boolean {
         if (approvedExternalDeviceSessions[sessionId] == deviceLabel) return true
@@ -2341,6 +2497,11 @@ class AppState(
     private companion object DeviceAiLimits {
         const val DEVICE_AI_OPERATION_RETENTION_MS = 30 * 60_000L
         const val DEVICE_AI_APPROVAL_TIMEOUT_MS = 5 * 60_000L
+
+        /** [deviceAiOperations] is trimmed (finished entries older than the retention window
+         *  dropped) once it grows past this size, so a long-running launch doesn't retain every
+         *  operation it ever started forever. */
+        const val DEVICE_AI_OPERATION_TRIM_THRESHOLD = 128
     }
 
     /** Test seam: registers a controller for [tabId] without going through [startCaptureTab]'s real
@@ -2409,6 +2570,33 @@ class AppState(
         }
     }
 
+    /** Core of both the strip's Screenshot button ([screenshotCapture]) and the AI/MCP
+     *  `capture_device_screenshot` tool ([captureDeviceScreenshotForAi]): takes a raw device
+     *  screenshot, links it to the matching video frame when one is available, and adds it to
+     *  Notes. Throws on failure — each caller translates that into its own status line or tool
+     *  error field, exactly like [controller.screenshotCapture] itself already does for its one
+     *  prior caller. */
+    private suspend fun performScreenshotCapture(tabId: String, controller: TabCaptureController): ScreenshotCaptureOutcome {
+        val screenshot = controller.screenshotCapture()
+        // manualOffsetMs matches every other session-elapsed -> video-position conversion (see
+        // CaptureArchive.kt's writeMapping/finalizeSessionInPlace) — omitting it here used to leave
+        // a fresh screenshot's frame link off by whatever calibration offset the session had
+        // accumulated.
+        val manualOffsetMs = controller.selectedSession.value?.manualOffsetMs ?: 0L
+        val videoFrame = screenshot.videoStartElapsedMs?.let { videoStart ->
+            VideoFrameReference(
+                source = VideoSource.LocalFile(screenshot.videoFile.absolutePath),
+                sourceLabel = "capture.indagium.json/${screenshot.videoFile.name}",
+                positionMs = (screenshot.elapsedMs - videoStart + manualOffsetMs).coerceAtLeast(0L),
+            )
+        }
+        val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
+        val blockId = addImageBlock(tabId = tabId, sourceBytes = screenshot.bytes, provenance = provenance, videoFrame = videoFrame)
+        return ScreenshotCaptureOutcome(screenshot.file, blockId)
+    }
+
+    private data class ScreenshotCaptureOutcome(val file: File, val noteBlockId: String?)
+
     /** Runs adb screencap away from the Compose thread and publishes a short-lived status line. */
     internal fun screenshotCapture(tabId: String) {
         val capability = screenshotCapability(tabId)
@@ -2426,33 +2614,13 @@ class AppState(
         }
         captureScreenshotStatus = "Taking screenshot…"
         ioScope.launch {
-            val result = runCatching { controller.screenshotCapture() }
+            val result = runCatching { performScreenshotCapture(tabId, controller) }
             captureScreenshotStatus = result.fold(
-                onSuccess = { screenshot ->
-                    val tab = tab(tabId)
-                    // manualOffsetMs matches every other session-elapsed -> video-position
-                    // conversion (see CaptureArchive.kt's writeMapping/finalizeSessionInPlace) —
-                    // omitting it here used to leave a fresh screenshot's frame link off by
-                    // whatever calibration offset the session had accumulated.
-                    val manualOffsetMs = controller.selectedSession.value?.manualOffsetMs ?: 0L
-                    val videoFrame = screenshot.videoStartElapsedMs?.let { videoStart ->
-                        VideoFrameReference(
-                            source = VideoSource.LocalFile(screenshot.videoFile.absolutePath),
-                            sourceLabel = "capture.indagium.json/${screenshot.videoFile.name}",
-                            positionMs = (screenshot.elapsedMs - videoStart + manualOffsetMs).coerceAtLeast(0L),
-                        )
-                    }
-                    val provenance = videoFrame?.provenanceLabel ?: "From ${tab?.filename ?: "capture"}"
-                    val blockId = addImageBlock(
-                        tabId = tabId,
-                        sourceBytes = screenshot.bytes,
-                        provenance = provenance,
-                        videoFrame = videoFrame,
-                    )
-                    if (blockId == null) {
-                        "Screenshot saved: ${screenshot.file.name} (could not add it to Notes)"
+                onSuccess = { outcome ->
+                    if (outcome.noteBlockId == null) {
+                        "Screenshot saved: ${outcome.file.name} (could not add it to Notes)"
                     } else {
-                        "Screenshot saved and added to Notes: ${screenshot.file.name}"
+                        "Screenshot saved and added to Notes: ${outcome.file.name}"
                     }
                 },
                 onFailure = { "Screenshot failed: ${it.message ?: it::class.simpleName}" },
@@ -2465,6 +2633,37 @@ class AppState(
             }
         }
     }
+
+    /** AI/MCP `capture_device_screenshot`: exactly [screenshotCapture]'s own logic (see
+     *  [performScreenshotCapture]), synchronous within the operation so the caller gets a durable
+     *  result rather than polling a UI status line. */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun captureDeviceScreenshotForAi(tabId: String): Map<String, Any?> = launchDeviceAiOperation(
+        description = "Saving a device screenshot to Notes",
+        action = {
+            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+            val capability = if (screenshotCapability(tabId).availability == CaptureScreenshotAvailability.PENDING) {
+                resolveScreenshotCapabilityForAi(tabId, controller)
+            } else {
+                screenshotCapability(tabId)
+            }
+            if (capability.availability != CaptureScreenshotAvailability.ENABLED) {
+                error(capability.reason ?: "This device does not support screenshots")
+            }
+            val outcome = try {
+                performScreenshotCapture(tabId, controller)
+            } catch (failure: Exception) {
+                captureScreenshotCapabilities[tabId] =
+                    CaptureScreenshotCapability(CaptureScreenshotAvailability.DISABLED, failure.message ?: "Screenshot capture failed")
+                throw failure
+            }
+            mapOf(
+                "tabId" to tabId,
+                "file" to outcome.file.name,
+                "addedToNotes" to (outcome.noteBlockId != null),
+            )
+        },
+    )
 
     /**
      * "Mark issue" press (restyle plan Phase 3): writes an ordinary Note immediately (an
@@ -2518,7 +2717,12 @@ class AppState(
      *  half of the window, and commit the Note. Returns null (having already set
      *  [captureScreenshotStatus]) when the boundary can't be read — e.g. the controller lost its
      *  session between the guard in [markIssue] and this coroutine actually running. */
-    private fun beginMarkerNote(tabId: String, controller: TabCaptureController): MarkerPressContext? {
+    private fun beginMarkerNote(
+        tabId: String,
+        controller: TabCaptureController,
+        label: String = MARKER_DEFAULT_LABEL,
+        note: String? = null,
+    ): MarkerPressContext? {
         val boundary = runCatching { controller.snapshotForExport() }.getOrElse {
             captureScreenshotStatus = "Mark issue failed: ${it.message ?: it::class.simpleName}"
             return null
@@ -2550,14 +2754,15 @@ class AppState(
             firstOrdinal = leadingRange?.first,
             lastOrdinal = leadingRange?.last,
             videoMs = videoMs,
-            label = MARKER_DEFAULT_LABEL,
+            label = label,
             preMs = settings.markerPreMs,
             postMs = settings.markerPostMs,
             screenshotPath = if (settings.markerScreenshot) "screenshots/marker-$ordinal.png" else null,
         )
         val noteId = "n${System.nanoTime()}"
         upAnn(tabId) { t ->
-            val text = markerHeader(marker) + "\n" + markerHeadingLine(ordinal, marker.label) + "\n"
+            val text = markerHeader(marker) + "\n" + markerHeadingLine(ordinal, marker.label) + "\n" +
+                (note?.let { "$it\n" } ?: "")
             t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + AnnBlock.Note(noteId, text)))
         }
         markerUndoJobsByTab.remove(tabId)?.cancel()
@@ -3241,8 +3446,13 @@ class AppState(
      * is synchronous because the recorder's startup callback is the ordering boundary; callers on
      * the Compose thread should treat it as a short operation, while tests can assert the exact
      * tab/tailer ordering without a race.
+     *
+     * [settingsOverride], when given, transforms the settings this one launch actually uses
+     * (launcher draft, or the saved default) without writing anything back — see
+     * [startCaptureForAi]'s `recordVideo`/`includeEarlierDeviceLogs` per-launch overrides, the only
+     * current caller that passes one.
      */
-    internal fun startCaptureTab(device: CaptureDevice): String? {
+    internal fun startCaptureTab(device: CaptureDevice, settingsOverride: CaptureSettingsOverride? = null): String? {
         val existing = liveCaptureTabId
         if (existing != null) {
             activateTab(existing)
@@ -3261,7 +3471,8 @@ class AppState(
         }
         val settings = synchronized(stateLock) {
             val launcher = tabs.firstOrNull { it.isCaptureLauncher && it.id == activeTabId }
-            launcher?.let { captureLaunchDrafts[it.id] } ?: this.settings.captureSettings
+            val base = launcher?.let { captureLaunchDrafts[it.id] } ?: this.settings.captureSettings
+            settingsOverride?.invoke(base) ?: base
         }
         val controller = captureService.newController()
         val tabId = "t${tabCounter.getAndIncrement()}"
@@ -11073,7 +11284,9 @@ class AppState(
                     val migratedProfiles = value.aiProviderProfiles.map { profile ->
                         if (profile.kind == AiProviderKind.CODEX_ACCOUNT) {
                             profile.copy(executablePath = recoveredBundledCodexPath(profile.executablePath, bundledCodex))
-                        } else profile
+                        } else {
+                            profile
+                        }
                     }
                     settings = value.copy(aiProviderProfiles = normalizeAiProviderProfiles(migratedProfiles))
                 }

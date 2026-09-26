@@ -7,6 +7,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.preparePost
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -16,6 +17,7 @@ import io.ktor.http.isSuccess
 import io.ktor.utils.io.readLine
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonNull
@@ -81,57 +83,8 @@ class OpenAiCompatibleProvider(
             emit(LlmStreamEvent.Error("Select or enter a model before starting an AI request."))
             return@flow
         }
-        val toolCalls = sortedMapOf<Int, ToolCallAccumulator>()
-        var receivedTerminator = false
-        var terminalHttpFailure = false
         try {
-            httpClient.preparePost(endpoint("chat/completions")) {
-                applyAuthorization()
-                contentType(ContentType.Application.Json)
-                setBody(request.toOpenAiJson().toString())
-            }.execute { response ->
-                if (!response.status.isSuccess()) {
-                    val details = runCatching { response.bodyAsText().take(1_000) }.getOrNull().orEmpty()
-                    val message = if (request.messages.any { it.images.isNotEmpty() }) {
-                        "The selected model/provider rejected the screen image input (HTTP ${response.status.value}). " +
-                            details.ifBlank { "Choose a vision-capable model or provider." }
-                    } else "Provider request failed (HTTP ${response.status.value})."
-                    emit(LlmStreamEvent.Error(message))
-                    terminalHttpFailure = true
-                    return@execute
-                }
-                val dataLines = mutableListOf<String>()
-
-                suspend fun dispatchFrame() {
-                    if (dataLines.isEmpty()) return
-                    val data = dataLines.joinToString("\n")
-                    dataLines.clear()
-                    if (data == "[DONE]") {
-                        toolCalls.values.forEach { accumulator ->
-                            accumulator.completeOrNull()?.let { emit(LlmStreamEvent.ToolCall(it)) }
-                                ?: emit(LlmStreamEvent.Warning("Ignored incomplete tool call from provider."))
-                        }
-                        receivedTerminator = true
-                        emit(LlmStreamEvent.Completed)
-                        return
-                    }
-                    parseChunk(data, toolCalls).forEach { emit(it) }
-                }
-
-                val channel = response.bodyAsChannel()
-                while (!receivedTerminator) {
-                    val line = channel.readLine() ?: break
-                    if (line.isEmpty()) {
-                        dispatchFrame()
-                    } else if (line.startsWith("data:")) {
-                        dataLines += line.removePrefix("data:").removePrefix(" ")
-                    }
-                }
-                dispatchFrame()
-            }
-            if (!receivedTerminator && !terminalHttpFailure) {
-                emit(LlmStreamEvent.Warning("Provider stream ended before its completion marker."))
-            }
+            streamChatCompletion(request)
         } catch (cancelled: CancellationException) {
             // Keep structured-concurrency cancellation intact: callers must never see a fake
             // completed/error event for a request they stopped.
@@ -139,6 +92,71 @@ class OpenAiCompatibleProvider(
         } catch (_: Exception) {
             emit(LlmStreamEvent.Error("Unable to connect to the configured model provider."))
         }
+    }
+
+    /** The body of [streamChat] once a model is confirmed: post the request, read the SSE frames,
+     *  and emit their events until the stream's own `[DONE]` terminator (or EOF/HTTP failure). Split
+     *  out of [streamChat] itself so the outer flow keeps only the blank-model guard and the
+     *  cancellation-preserving try/catch, which is all that needs to run before a model is chosen. */
+    private suspend fun FlowCollector<LlmStreamEvent>.streamChatCompletion(request: LlmRequest) {
+        val toolCalls = sortedMapOf<Int, ToolCallAccumulator>()
+        var receivedTerminator = false
+        var terminalHttpFailure = false
+        httpClient.preparePost(endpoint("chat/completions")) {
+            applyAuthorization()
+            contentType(ContentType.Application.Json)
+            setBody(request.toOpenAiJson().toString())
+        }.execute { response ->
+            if (!response.status.isSuccess()) {
+                emit(httpFailureEvent(request, response))
+                terminalHttpFailure = true
+                return@execute
+            }
+            val dataLines = mutableListOf<String>()
+
+            suspend fun dispatchFrame() {
+                if (dataLines.isEmpty()) return
+                val data = dataLines.joinToString("\n")
+                dataLines.clear()
+                if (data == "[DONE]") {
+                    toolCalls.values.forEach { accumulator ->
+                        accumulator.completeOrNull()?.let { emit(LlmStreamEvent.ToolCall(it)) }
+                            ?: emit(LlmStreamEvent.Warning("Ignored incomplete tool call from provider."))
+                    }
+                    receivedTerminator = true
+                    emit(LlmStreamEvent.Completed)
+                    return
+                }
+                parseChunk(data, toolCalls).forEach { emit(it) }
+            }
+
+            val channel = response.bodyAsChannel()
+            while (!receivedTerminator) {
+                val line = channel.readLine() ?: break
+                if (line.isEmpty()) {
+                    dispatchFrame()
+                } else if (line.startsWith("data:")) {
+                    dataLines += line.removePrefix("data:").removePrefix(" ")
+                }
+            }
+            dispatchFrame()
+        }
+        if (!receivedTerminator && !terminalHttpFailure) {
+            emit(LlmStreamEvent.Warning("Provider stream ended before its completion marker."))
+        }
+    }
+
+    /** Builds the one error event a non-2xx chat-completion response reports, with a specific
+     *  vision-support hint when the request itself included an image. */
+    private suspend fun httpFailureEvent(request: LlmRequest, response: HttpResponse): LlmStreamEvent.Error {
+        val details = runCatching { response.bodyAsText().take(MAX_ERROR_BODY_CHARS) }.getOrNull().orEmpty()
+        val message = if (request.messages.any { it.images.isNotEmpty() }) {
+            "The selected model/provider rejected the screen image input (HTTP ${response.status.value}). " +
+                details.ifBlank { "Choose a vision-capable model or provider." }
+        } else {
+            "Provider request failed (HTTP ${response.status.value})."
+        }
+        return LlmStreamEvent.Error(message)
     }
 
     override fun close() {
@@ -273,6 +291,7 @@ class OpenAiCompatibleProvider(
     private fun List<LlmMessage>.toOpenAiJsonMessages(): List<JsonObject> {
         val output = mutableListOf<JsonObject>()
         val deferredToolImages = mutableListOf<JsonObject>()
+
         fun flushDeferredImages() {
             output += deferredToolImages
             deferredToolImages.clear()
@@ -320,6 +339,9 @@ class OpenAiCompatibleProvider(
 
     private companion object {
         val json = Json { ignoreUnknownKeys = true }
+
+        // Bounds how much of a failed chat-completion response body is echoed into the error event.
+        const val MAX_ERROR_BODY_CHARS = 1_000
 
         // Reasoning levels offered for reasoning-capable models; LM Studio and other
         // llama.cpp-based servers accept this fixed low/medium/high set for gpt-oss's harmony
