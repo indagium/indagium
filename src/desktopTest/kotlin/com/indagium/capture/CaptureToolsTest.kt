@@ -191,4 +191,29 @@ class CaptureToolsTest {
         assertTrue(failure.isFailure)
         assertTrue(runner.specs.isEmpty())
     }
+
+    @Test
+    fun runAdbBuildsAnExplicitSerialCommandAndReturnsRawOutputWithoutThrowing() {
+        val runner = FakeCaptureRunner()
+        runner.enqueue(CompletedFakeProcess("main: ring buffer is 256KB (0KB consumed)\n"))
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+
+        val result = tools.runAdb("SERIAL", listOf("logcat", "-g"))
+
+        assertEquals(listOf("/sdk/adb", "-s", "SERIAL", "logcat", "-g"), runner.specs.single().command)
+        assertEquals(0, result.exitCode)
+        assertTrue(result.stdoutText().contains("ring buffer"))
+    }
+
+    @Test
+    fun runAdbSurfacesANonZeroExitInsteadOfThrowing() {
+        val runner = FakeCaptureRunner()
+        runner.enqueue(CompletedFakeProcess("", "Permission denied\n", 1))
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+
+        val result = tools.runAdb("SERIAL", listOf("shell", "setprop", "log.tag", "D"))
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stderrText().contains("Permission denied"))
+    }
 }

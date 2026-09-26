@@ -44,3 +44,31 @@ class CaptureCoordinatorToolStatusTest {
         assertEquals("adb version check timed out", toolStatusLine(failedBeforeVersion))
     }
 }
+
+/** [com.indagium.ui.adbFailureMessage] is the device-logging panel's equivalent of
+ *  CaptureTools.kt's own private `boundedDiagnostic` — same "prefer stderr, fall back to stdout,
+ *  bound the length" contract, pulled out as a pure function for the same reason toolStatusLine was
+ *  (see this file's own top-level doc). */
+class AdbFailureMessageTest {
+    @Test
+    fun prefersStderrOverStdoutWhenBothArePresent() {
+        val result = com.indagium.capture.CaptureCommandResult(
+            exitCode = 1,
+            stdout = "some stdout noise".toByteArray(),
+            stderr = "Permission denied".toByteArray(),
+        )
+        assertEquals("Could not set log level: Permission denied", com.indagium.ui.adbFailureMessage("Could not set log level", result))
+    }
+
+    @Test
+    fun fallsBackToStdoutWhenStderrIsBlank() {
+        val result = com.indagium.capture.CaptureCommandResult(exitCode = 1, stdout = "device unauthorized".toByteArray(), stderr = ByteArray(0))
+        assertEquals("Could not read buffer sizes: device unauthorized", com.indagium.ui.adbFailureMessage("Could not read buffer sizes", result))
+    }
+
+    @Test
+    fun fallsBackToTheExitCodeWhenThereIsNoOutputAtAll() {
+        val result = com.indagium.capture.CaptureCommandResult(exitCode = 137, stdout = ByteArray(0), stderr = ByteArray(0))
+        assertEquals("Could not set buffer size (exit 137)", com.indagium.ui.adbFailureMessage("Could not set buffer size", result))
+    }
+}

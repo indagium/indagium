@@ -344,7 +344,12 @@ internal fun HomeScreen(
     Row(modifier.fillMaxSize()) {
         HomeOpenZone(state = state, tab = tab, onReclaimFocus = onReclaimFocus, modifier = Modifier.weight(1f).fillMaxHeight())
         Box(Modifier.fillMaxHeight().width(1.dp).background(tc.br))
-        CaptureLauncherContent(state = state, launcherTabId = tab.id, modifier = Modifier.weight(1f).fillMaxHeight())
+        CaptureLauncherContent(
+            state = state,
+            launcherTabId = tab.id,
+            modifier = Modifier.weight(1f).fillMaxHeight(),
+            onReclaimFocus = onReclaimFocus,
+        )
     }
 }
 
