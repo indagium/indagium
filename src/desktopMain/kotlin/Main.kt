@@ -132,7 +132,13 @@ fun main(args: Array<String>) {
 
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
-        val appState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) }
+        val appState = remember {
+            AppState(
+                restoreOnCreate = true,
+                filterBackupsDir = DesktopStorage.filterBackupsDir(),
+                platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
+            )
+        }
         DisposableEffect(appState) {
             val desktop = runCatching { if (Desktop.isDesktopSupported()) Desktop.getDesktop() else null }.getOrNull()
             if (desktop?.isSupported(Desktop.Action.APP_OPEN_FILE) == true) {
