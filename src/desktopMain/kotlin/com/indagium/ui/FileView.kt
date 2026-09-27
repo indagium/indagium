@@ -12,6 +12,8 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import com.indagium.model.*
 
 internal data class FilterSearchRequest(
@@ -229,7 +231,13 @@ internal fun FileView(
                 onReturnFocus = { runCatching { logViewerFr.requestFocus() } },
             )
         }
-        Row(Modifier.weight(1f).fillMaxWidth()) {
+        // Tracked so the right sidebar's rendered width can be clamped to what this row actually
+        // has available (annotationPanelEffectiveMaxWidth below) — the stored annotationPanelWidth
+        // alone (now allowed up to ANNOTATION_PANEL_MAX_WIDTH, for a big capture mirror) would
+        // otherwise happily squeeze LogViewer's weight(1f) share to nothing on a narrow window.
+        var rowWidthPx by remember { mutableStateOf(0) }
+        val rowDensity = LocalDensity.current
+        Row(Modifier.weight(1f).fillMaxWidth().onSizeChanged { rowWidthPx = it.width }) {
             BoundFilterPanel(
                 state, tab,
                 focusRequester = filterFr,
@@ -337,13 +345,41 @@ internal fun FileView(
                 (tab.attachedVideo != null || tab.captureSessionId != null)
             val notesVisibleForTab = state.annotationVisible
             if (notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible) {
+                val rowWidthDp = with(rowDensity) { rowWidthPx.toDp().value }
+                val annotationEffectiveMax = annotationPanelEffectiveMaxWidth(
+                    availableRowWidth = rowWidthDp,
+                    filterVisible = state.filterVisible,
+                    filterPanelWidth = state.filterPanelWidth,
+                )
+                // The rendered width only ever clamps DOWN from the stored value — the stored
+                // value itself is left alone so widening the window again restores it without a
+                // redrag. Both the sidebar's own width and the divider drag below are computed
+                // from this same rendered value, never from the raw (possibly much larger) stored
+                // annotationPanelWidth, so dragging tracks the mouse from wherever the sidebar's
+                // edge actually is on screen right now.
+                val annotationRenderedWidth = minOf(state.annotationPanelWidth, annotationEffectiveMax)
                 HDivider { delta ->
-                    state.updateAnnotationPanelWidth(state.annotationPanelWidth - delta)
+                    // Recompute live instead of closing over annotationRenderedWidth/
+                    // annotationEffectiveMax above: those are plain vals frozen at whatever this
+                    // composable's last recomposition happened to see, but HDivider's drag gesture
+                    // (Components.kt) can fire several deltas before recomposition catches up, and
+                    // state.annotationPanelWidth already reflects each prior delta immediately
+                    // (mutableStateOf writes are synchronous even when recomposition is deferred).
+                    // Closing over the stale locals here reproduced the drag jitter/snap-back —
+                    // every delta landed on the same pre-drag base instead of the mouse's actual
+                    // running position.
+                    val liveEffectiveMax = annotationPanelEffectiveMaxWidth(
+                        availableRowWidth = with(rowDensity) { rowWidthPx.toDp().value },
+                        filterVisible = state.filterVisible,
+                        filterPanelWidth = state.filterPanelWidth,
+                    )
+                    val liveRenderedWidth = minOf(state.annotationPanelWidth, liveEffectiveMax)
+                    state.updateAnnotationPanelWidth((liveRenderedWidth - delta).coerceAtMost(liveEffectiveMax))
                 }
                 RightSidebarPanel(
                     state = state,
                     tab = tab,
-                    width = state.annotationPanelWidth,
+                    width = annotationRenderedWidth,
                     aiFocusRequester = aiFr,
                     onAiPanelFocusChanged = { focused ->
                         if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
@@ -410,7 +446,7 @@ internal fun FileView(
                             notesDiagramSummary = remember(tab.annotations, tab.logData) { seq3NotesSelection(tab) },
                             onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, tab.id) },
                             onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
-                            width = state.annotationPanelWidth,
+                            width = annotationRenderedWidth,
                             focusRequester = annotationFr,
                             onPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }
