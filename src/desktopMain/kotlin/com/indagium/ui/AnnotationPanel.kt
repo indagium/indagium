@@ -2144,8 +2144,8 @@ private fun CopyFormatSplitButton(
             AppButton(
                 "▾",
                 onClick = { expanded = !expanded },
-                modifier = modifier.height(28.dp).width(24.dp),
-                horizontalPadding = 3.dp,
+                modifier = modifier.height(28.dp).width(18.dp),
+                horizontalPadding = 0.dp,
                 shape = rightShape,
             )
         }
