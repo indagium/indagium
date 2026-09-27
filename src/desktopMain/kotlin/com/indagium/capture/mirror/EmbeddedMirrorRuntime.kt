@@ -63,6 +63,12 @@ internal data class MirrorStreamOptions(
      * keeps exact-start snapshot re-encodes cheap (see [com.indagium.capture.FfmpegCaptureVideoExporter])
      * and bounds how much of a live recording a fresh mirror connection must wait to resync on. */
     val keyFrameIntervalSeconds: Float = 2f,
+    /** Extra scrcpy-server options appended after the base `audio=$audio`/`audio_codec=opus` pair
+     *  when [audio] is on — the "keep sound on the device" delta from
+     *  [com.indagium.capture.captureAudioPlan] (`audio_source=playback`, `audio_dup=true`), decided
+     *  once by the caller (which has the adb access this pure options holder deliberately does not)
+     *  rather than here. Empty for the long-standing default behavior. */
+    val audioServerArgs: List<String> = emptyList(),
 ) {
     init {
         require(maxSize >= 0)
@@ -590,7 +596,10 @@ internal class AdbScrcpyTransport(
                 // MirrorStreamOptions.keyFrameIntervalSeconds's doc. "float" matches the type
                 // Android's KEY_I_FRAME_INTERVAL expects for this key.
                 add("video_codec_options=i-frame-interval:float=${options.keyFrameIntervalSeconds}")
-                if (options.audio) add("audio_codec=opus")
+                if (options.audio) {
+                    add("audio_codec=opus")
+                    addAll(options.audioServerArgs)
+                }
             }
             server = runner.start(
                 tools.adbSpec(

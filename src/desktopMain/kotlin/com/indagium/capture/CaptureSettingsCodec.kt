@@ -23,6 +23,8 @@ private const val MAX_MAX_FPS = 240
 private const val MIN_BITRATE_MBPS = 1
 private const val MAX_BITRATE_MBPS = 500
 private const val MAX_MARKER_WINDOW_MS = 120_000L
+private const val MIN_LIVE_AUDIO_VOLUME = 0
+private const val MAX_LIVE_AUDIO_VOLUME = 100
 
 /** Keyed, versioned persistence for capture preferences embedded in app settings. */
 fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
@@ -48,6 +50,9 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("markerScreenshot", settings.markerScreenshot)
     put("markerNotesInSnapshot", settings.markerNotesInSnapshot)
     put("videoContainer", settings.videoContainer.name)
+    put("keepDeviceAudio", settings.keepDeviceAudio)
+    put("playAudioLive", settings.playAudioLive)
+    put("liveAudioVolume", settings.liveAudioVolume)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -98,6 +103,16 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         // above — a settings file written by a newer build with a container this build doesn't know
         // must not fail the whole decode.
         videoContainer = root.videoContainerOrDefault("videoContainer", defaults.videoContainer),
+        // "Keep sound on the device", appended last matching CaptureSettings' own field order.
+        // Absent on any settings JSON written before this feature existed, which decodes to false
+        // (the long-standing "device muted while its audio is captured" default).
+        keepDeviceAudio = root.optional("keepDeviceAudio", defaults.keepDeviceAudio, ::booleanValue),
+        // Live audio playback, appended last matching CaptureSettings' own field order. Absent on
+        // any settings JSON written before this feature existed, which decodes to defaults (off,
+        // 80% volume).
+        playAudioLive = root.optional("playAudioLive", defaults.playAudioLive, ::booleanValue),
+        liveAudioVolume = root.optional("liveAudioVolume", defaults.liveAudioVolume, ::intValue)
+            .coerceIn(MIN_LIVE_AUDIO_VOLUME, MAX_LIVE_AUDIO_VOLUME),
     )
 }.getOrNull()
 

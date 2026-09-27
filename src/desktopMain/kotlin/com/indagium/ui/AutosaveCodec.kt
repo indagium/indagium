@@ -657,6 +657,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("homeRecentGridColumns", homeRecentGridColumns)
     put("annotationCopyFormat", annotationCopyFormat.name)
     put("showRegexFilterSummary", showRegexFilterSummary)
+    put("deviceLoggingPanelExpanded", deviceLoggingPanelExpanded)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -973,6 +974,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?.let { raw -> runCatching { AnnotationCopyFormat.valueOf(raw) }.getOrNull() }
             ?: AnnotationCopyFormat.JIRA_CLOUD,
         showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
+        deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
     )
 }.getOrNull()
 

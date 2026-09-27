@@ -1269,6 +1269,9 @@ data class AppSettings(
     // Shows a compact inventory of retained selectors above the Regex input. Off by default and
     // informational only; it never changes filter behavior.
     val showRegexFilterSummary: Boolean = false,
+    // New tab launcher's "Device logging" section: expanded by default; collapsing it is remembered.
+    // JSON-only, same rule as the settings-JSON-only fields above.
+    val deviceLoggingPanelExpanded: Boolean = true,
 )
 
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4

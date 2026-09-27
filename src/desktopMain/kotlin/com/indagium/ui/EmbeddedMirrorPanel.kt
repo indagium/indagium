@@ -31,6 +31,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
+import androidx.compose.material.icons.automirrored.outlined.VolumeOff
+import androidx.compose.material.icons.automirrored.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.CloseFullscreen
 import androidx.compose.material.icons.outlined.ContentPaste
 import androidx.compose.material.icons.outlined.Home
@@ -165,6 +167,13 @@ internal class EmbeddedMirrorHandle private constructor(
     }
 
     fun send(command: MirrorControlCommand): Boolean = backend.send(command)
+
+    /** Whether this mirror's device stream has an audio track to play — see [MirrorBackend.hasLiveAudio]. */
+    val hasLiveAudio: Boolean get() = backend.hasLiveAudio
+
+    /** Starts or stops live audio playback for this mirror — see [MirrorBackend.setLiveAudioEnabled]. */
+    fun setLiveAudioEnabled(enabled: Boolean, volume: () -> Float = { 1f }, onDiagnostic: (String) -> Unit = {}) =
+        backend.setLiveAudioEnabled(enabled, volume, onDiagnostic)
 
     fun sendTouch(
         mapper: MirrorCoordinateMapper,
@@ -381,6 +390,16 @@ internal sealed interface MirrorBackend : Closeable {
      * backends. */
     fun isAlreadyStarted(serial: String): Boolean
 
+    /** Whether this backend's device stream actually has an audio track to play — the mirror
+     * panel's speaker toggle only shows when this is true. Only [SharedRecordingSession] can ever
+     * say yes: a standalone runtime's own transport never reads the scrcpy audio socket at all (see
+     * that class's doc), so live playback there would need a materially larger change to the
+     * mirror-only path — out of scope for this pass, see LiveAudioPlayer.kt's own doc. */
+    val hasLiveAudio: Boolean get() = false
+
+    /** Starts or stops live audio playback. A no-op for a backend that never has [hasLiveAudio]. */
+    fun setLiveAudioEnabled(enabled: Boolean, volume: () -> Float, onDiagnostic: (String) -> Unit) = Unit
+
     /** The pre-redesign path: opens its own embedded scrcpy server/device encoder. Used only when
      * the capture isn't recording video — see [EmbeddedMirrorHandle.create]'s doc. */
     class StandaloneRuntime(
@@ -480,6 +499,7 @@ internal sealed interface MirrorBackend : Closeable {
         private var lastFrameInfo: com.indagium.capture.mirror.MirrorFrameInfo? = null
         private var attached = false
         private var overlayOccluded = false
+        private var liveAudioPlayer: com.indagium.capture.mirror.LiveAudioPlayer? = null
         private val connectionListener = session.addConnectionListener { snapshot, version ->
             val next = synchronized(lock) {
                 if (version < connectionSnapshotVersion) {
@@ -643,12 +663,42 @@ internal sealed interface MirrorBackend : Closeable {
         override fun send(command: MirrorControlCommand): Boolean =
             session.sendControl(ScrcpyControlEncoder.encode(command))
 
+        override val hasLiveAudio: Boolean get() = session.hasAudioStream()
+
+        /** Creates (or tears down) a [com.indagium.capture.mirror.LiveAudioPlayer] and attaches/
+         * detaches it on the shared session — the recording and its device connection are never
+         * touched either way, same as [start]/[stop] above only ever attach/detach a decoder. */
+        override fun setLiveAudioEnabled(enabled: Boolean, volume: () -> Float, onDiagnostic: (String) -> Unit) {
+            val newPlayer = synchronized(lock) {
+                val current = liveAudioPlayer
+                if (enabled == (current != null)) return
+                val next = if (enabled) {
+                    com.indagium.capture.mirror.LiveAudioPlayer(onDiagnostic = onDiagnostic, volume = volume)
+                } else {
+                    null
+                }
+                liveAudioPlayer = next
+                next
+            }
+            if (newPlayer != null) {
+                // EmbeddedDeviceSession.attachLiveAudio() closes the previous sink itself (see its
+                // own doc) — never attached here since [enabled] only reaches this branch when there
+                // was none.
+                session.attachLiveAudio(newPlayer)
+            } else {
+                // detachLiveAudio() closes the sink it removes (the player this same method created
+                // last time it was enabled), so there is nothing further to close here.
+                session.detachLiveAudio()
+            }
+        }
+
         /** Detaches the decoder and stops listening for the session's connection state — never
          * stops or closes the shared recording session itself. */
         override fun close() {
             // Closing a handle is terminal. Do not create a fresh native surface only to close it
             // immediately: that briefly creates an unattached Canvas and can race window teardown.
             synchronized(lifecycleLock) { stop(recreateNativeSurface = false) }
+            setLiveAudioEnabled(false, volume = { 1f }, onDiagnostic = {})
             connectionListener.close()
             runCatching { macSurface?.close() }
             macSurface = null
@@ -704,6 +754,13 @@ internal fun EmbeddedMirrorPanel(
     // Passed by CaptureCard, remembered per tab, so the typed text and the open/closed text row
     // survive the panel leaving and re-entering composition; the detached window uses its own.
     clipboardState: MirrorClipboardState? = null,
+    // Live audio playback (the speaker toggle) — see LiveAudioPlayer.kt. hasAudio gates whether the
+    // button shows at all (only a shared recording session with audio=true ever has one, see
+    // MirrorBackend.hasLiveAudio); onToggleLiveAudio is null exactly when the caller has nowhere to
+    // persist/apply the change (e.g. no handle yet), same convention as onDetach above.
+    hasAudio: Boolean = false,
+    liveAudioEnabled: Boolean = false,
+    onToggleLiveAudio: (() -> Unit)? = null,
 ) {
     val colors = tc()
     val snapshot by (handle?.snapshot ?: remember { MutableStateFlow(EmbeddedMirrorSnapshot()) }).collectAsState()
@@ -998,6 +1055,9 @@ internal fun EmbeddedMirrorPanel(
                         detached = detached,
                         onDetach = onDetach,
                         onReturnToSidebar = onReturnToSidebar,
+                        hasAudio = hasAudio,
+                        liveAudioEnabled = liveAudioEnabled,
+                        onToggleLiveAudio = onToggleLiveAudio,
                     )
                     if (ownClipboardState.expanded) {
                         MirrorTextRow(handle = handle, live = live, clipboardState = ownClipboardState)
@@ -1099,6 +1159,9 @@ private fun MirrorControlBar(
     detached: Boolean,
     onDetach: (() -> Unit)?,
     onReturnToSidebar: (() -> Unit)?,
+    hasAudio: Boolean = false,
+    liveAudioEnabled: Boolean = false,
+    onToggleLiveAudio: (() -> Unit)? = null,
 ) {
     val connected = displayedState == EmbeddedMirrorState.LIVE || displayedState == EmbeddedMirrorState.RECONNECTING
     Box(
@@ -1128,6 +1191,16 @@ private fun MirrorControlBar(
             MirrorControlBarButton(Icons.Outlined.ContentPaste, "Paste clipboard to device", live) {
                 val text = clipboardState.text.ifEmpty { clipboardString().orEmpty() }
                 if (text.isNotEmpty()) handle?.send(MirrorControlCommand.Clipboard(text, paste = true))
+            }
+            if (hasAudio && onToggleLiveAudio != null) {
+                MirrorBarDivider()
+                MirrorControlBarButton(
+                    icon = if (liveAudioEnabled) Icons.AutoMirrored.Outlined.VolumeUp else Icons.AutoMirrored.Outlined.VolumeOff,
+                    tooltip = "Play device audio on this computer (≈0.1–0.2 s behind)",
+                    enabled = live,
+                    active = liveAudioEnabled,
+                    onClick = onToggleLiveAudio,
+                )
             }
         }
         Row(
@@ -1297,8 +1370,9 @@ private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
             LocalMirrorOverlayAppState provides state,
             LocalMirrorOverlayTabId provides tab.id,
         ) {
+            val detachedMirror = state.embeddedMirrorFor(tab.id)
             EmbeddedMirrorPanel(
-                handle = state.embeddedMirrorFor(tab.id),
+                handle = detachedMirror,
                 setupError = state.embeddedMirrorSetupError(tab.id),
                 onConnect = { state.openCaptureMirror(tab.id) },
                 onDisconnect = { state.stopEmbeddedMirror(tab.id) },
@@ -1308,6 +1382,9 @@ private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
                 // content Column applies the 12dp inset below it, so this outer modifier must not
                 // pad the header too.
                 modifier = Modifier.fillMaxSize().background(tc().p),
+                hasAudio = detachedMirror?.hasLiveAudio == true,
+                liveAudioEnabled = state.settings.captureSettings.playAudioLive,
+                onToggleLiveAudio = { state.setEmbeddedMirrorLiveAudioEnabled(tab.id, !state.settings.captureSettings.playAudioLive) },
             )
         }
     }

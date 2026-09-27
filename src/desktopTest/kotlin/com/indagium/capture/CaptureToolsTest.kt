@@ -59,6 +59,50 @@ class CaptureToolsTest {
         assertFalse(spec.command.contains("--no-audio"))
     }
 
+    // "Keep sound on the device": mirrorSpec forwards captureAudioPlan's cliArgs verbatim when
+    // audio is on, and never applies them (audio off always wins with --no-audio) when it's off —
+    // see CaptureAudioPlanTest for the plan decision itself.
+    @Test
+    fun mirrorSpecAppliesTheAudioCliArgsOnlyWhenAudioIsOn() {
+        val tools = CaptureTools(
+            adb = CaptureExecutable("/sdk/platform-tools/adb"),
+            scrcpy = CaptureExecutable("/usr/bin/scrcpy"),
+            runner = FakeCaptureRunner(),
+        )
+        val withAudio = tools.scrcpyMirrorSpec(
+            serial = "ABC",
+            settings = CaptureSettings(audio = true),
+            audioCliArgs = listOf("--audio-source=playback", "--audio-dup"),
+        )
+        assertTrue(withAudio.command.containsAll(listOf("--audio-source=playback", "--audio-dup")))
+        assertFalse(withAudio.command.contains("--no-audio"))
+
+        val audioOff = tools.scrcpyMirrorSpec(
+            serial = "ABC",
+            settings = CaptureSettings(audio = false),
+            audioCliArgs = listOf("--audio-source=playback", "--audio-dup"),
+        )
+        assertTrue(audioOff.command.contains("--no-audio"))
+        assertFalse(audioOff.command.contains("--audio-source=playback"))
+    }
+
+    @Test
+    fun readDeviceSdkLevelParsesABarePropertyReply() {
+        val runner = FakeCaptureRunner().apply { enqueue(CompletedFakeProcess("33\n")) }
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+
+        assertEquals(33, tools.readDeviceSdkLevel("SERIAL"))
+    }
+
+    @Test
+    fun readDeviceSdkLevelIsNullOnFailureOrTimeout() {
+        val failed = FakeCaptureRunner().apply { enqueue(CompletedFakeProcess(stdout = "", stderr = "no devices", code = 1)) }
+        assertNull(CaptureTools(CaptureExecutable("/sdk/adb"), null, failed).readDeviceSdkLevel("SERIAL"))
+
+        val garbled = FakeCaptureRunner().apply { enqueue(CompletedFakeProcess("not-a-number\n")) }
+        assertNull(CaptureTools(CaptureExecutable("/sdk/adb"), null, garbled).readDeviceSdkLevel("SERIAL"))
+    }
+
     @Test
     fun flatpakResolutionAndCommandsRunOnHostWithBusWatch() {
         val runner = FakeCaptureRunner().apply {

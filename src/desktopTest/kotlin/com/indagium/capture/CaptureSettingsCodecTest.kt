@@ -139,6 +139,22 @@ class CaptureSettingsCodecTest {
         assertEquals(45, decoded.maxFps)
     }
 
+    // "Keep sound on the device" (CaptureSettings.keepDeviceAudio): off by default, and absent on
+    // any settings JSON written before this feature existed decodes to that same default — same
+    // "appended last, defaults on absence" contract as markerPreMs/videoContainer above.
+
+    @Test
+    fun keepDeviceAudioDefaultsToFalseWhenAbsent() {
+        val decoded = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
+        assertEquals(false, decoded.keepDeviceAudio)
+    }
+
+    @Test
+    fun keepDeviceAudioRoundTrips() {
+        val decoded = assertNotNull(captureSettingsFromJson(captureSettingsToJson(CaptureSettings(keepDeviceAudio = true))))
+        assertEquals(true, decoded.keepDeviceAudio)
+    }
+
     @Test
     fun logcatBufferArgsForEachMode() {
         assertEquals(emptyList(), CaptureSettings(bufferMode = CaptureBufferMode.DEFAULT).logcatBufferArgs())

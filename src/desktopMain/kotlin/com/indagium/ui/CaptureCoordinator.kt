@@ -90,6 +90,17 @@ internal class CaptureService(
     var error by mutableStateOf<String?>(null)
         private set
 
+    /** Whether the last-resolved adb (see [resolveTools]) validated successfully — the Devices
+     *  panel header uses this, together with [error], to decide whether "Capture tools" needs its
+     *  own full panel or can fold into one muted line ("adb 1.0.41" + Recheck/Install) next to the
+     *  "Devices" title. Deliberately a separate published field rather than re-parsing [toolStatus]
+     *  text: `toolStatus` keeps whatever the raw `adb version`/`scrcpy --version` output said even
+     *  after a failed validation (see [toolStatusLine]'s own doc), so it alone can't tell success
+     *  from failure. Stays at its last value on the cached (non-`force`) [resolveTools] fast path,
+     *  same as [toolStatus] itself. */
+    var adbAvailable by mutableStateOf(false)
+        private set
+
     /** True while a [refreshDevices] call is in flight (either the launcher's own initial/polling
      *  refresh or an explicit "Recheck tools"/"Refresh devices" click) — see [refreshDevices]'s own
      *  doc for why this exists instead of blanking [devices]/[toolStatus] the way a naive "clear
@@ -390,6 +401,7 @@ internal class CaptureService(
             CaptureToolValidation(false, message = "scrcpy validation failed: ${failure.message}")
         }
         toolStatus = "${toolStatusLine(adb)}\n${toolStatusLine(scrcpy)}"
+        adbAvailable = adb.available
         tools = found
         resolvedSettings = settings
         if (app.settings.captureSettings == settings) {

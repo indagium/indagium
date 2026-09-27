@@ -100,6 +100,47 @@ internal class EmbeddedDeviceSession(
     private var decoderThread: Thread? = null
     private var attachedDecoder: Closeable? = null
 
+    // Live audio playback (ui/EmbeddedMirrorPanel's speaker toggle) — independent of both the
+    // recording/reconnect lifecycle and the video decoder attach/detach above. Tees the same raw
+    // Opus config/packets the muxer sees (see feedLiveAudio's doc for why this is a separate,
+    // earlier tee point rather than reusing writeAudioFrame's muxer-anchored path), decoupled from
+    // whether a live audio listener happens to be attached right now.
+    @Volatile private var audioRequestedFlag = false
+    private var lastAudioConfigBytes: ByteArray? = null
+    private var attachedLiveAudio: LiveAudioSink? = null
+
+    /** Whether the current (or most recent) [start] requested an audio stream at all — the UI gates
+     * its live-audio speaker toggle on this so it never shows when there is nothing to play. Reads a
+     * `@Volatile` field directly, same rationale as [hasStartedVideo]: no lock needed, and taking one
+     * here would risk the same cross-object deadlock that field's doc describes. */
+    fun hasAudioStream(): Boolean = audioRequestedFlag
+
+    /**
+     * Attaches a live audio player to this session's own audio stream. At most one is attached at a
+     * time; attaching a new one detaches and closes any previous one first. Safe to call whether or
+     * not audio is actually flowing yet — [feedLiveAudio] simply has nothing to deliver until it
+     * does. Mirrors [attachDecoder]'s "replay the last config to a late attacher" pattern: a listener
+     * that attaches after the one-time Opus config packet already went by is handed it explicitly
+     * here, since [OpusPcmDecoder] can't produce anything without it.
+     */
+    fun attachLiveAudio(sink: LiveAudioSink) {
+        detachLiveAudio()
+        val replayConfig = synchronized(lock) {
+            attachedLiveAudio = sink
+            lastAudioConfigBytes
+        }
+        replayConfig?.let { bytes -> runCatching { sink.onAudioConfig(bytes) } }
+    }
+
+    fun detachLiveAudio() {
+        val sink = synchronized(lock) {
+            val current = attachedLiveAudio
+            attachedLiveAudio = null
+            current
+        }
+        runCatching { sink?.close() }
+    }
+
     fun start(deviceSerial: String, options: MirrorStreamOptions) {
         // Published before the worker thread is even created (not inside the same synchronized
         // block as before): publishConnectionSnapshot() itself briefly takes [lock] and then calls
@@ -107,6 +148,7 @@ internal class EmbeddedDeviceSession(
         // fake transport in a test could otherwise have the worker thread publish LIVE before this
         // CONNECTING publish ran, if both raced inside one lock scope.
         publishConnectionSnapshot(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
+        audioRequestedFlag = options.audio
         synchronized(lock) {
             stopping = false
             val runId = generation.incrementAndGet()
@@ -131,6 +173,7 @@ internal class EmbeddedDeviceSession(
         runCatching { connectionToClose?.close() }
         if (threadToJoin !== Thread.currentThread()) threadToJoin?.join(STOP_JOIN_MS)
         detachDecoder()
+        detachLiveAudio()
     }
 
     /**
@@ -612,10 +655,29 @@ internal class EmbeddedDeviceSession(
                 event.config -> {
                     configPending = event.data
                     resolveAudio(event.data) // unblocks startMuxerCoordinatingWithAudio's wait, if still waiting
+                    synchronized(lock) { lastAudioConfigBytes = event.data }
+                    feedLiveAudio { it.onAudioConfig(event.data) }
                 }
-                else -> audioStreamAdded = writeAudioFrame(event, configPending, audioStreamAdded)
+                else -> {
+                    feedLiveAudio { it.onAudioPacket(event.ptsUs, event.data) }
+                    audioStreamAdded = writeAudioFrame(event, configPending, audioStreamAdded)
+                }
             }
         }
+    }
+
+    /**
+     * Tees one raw Opus config/packet to the attached [LiveAudioSink], if any — completely
+     * independent of [writeAudioFrame]'s muxer-anchored PTS/timeline (live playback should start the
+     * moment audio arrives, not wait for [firstAnchorPtsUs] the way the recording's own audio track
+     * does) and independent of whether the muxer ever resolves an audio track at all. Wrapped in
+     * `runCatching` so a failure inside the sink (decode error, closed line, …) can never propagate
+     * back into this thread, which also reads the real device socket and feeds the recording —
+     * exactly the "never back-pressure or crash the reader" contract [LiveAudioSink] documents.
+     */
+    private fun feedLiveAudio(deliver: (LiveAudioSink) -> Unit) {
+        val sink = synchronized(lock) { attachedLiveAudio } ?: return
+        runCatching { deliver(sink) }
     }
 
     /** Writes one non-config audio packet if the timeline is already anchored (by video) and the
