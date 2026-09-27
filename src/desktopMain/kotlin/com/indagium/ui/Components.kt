@@ -164,6 +164,15 @@ fun HDivider(onDelta: (Float) -> Unit) {
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // pointerInput below is keyed on `density` alone, so its coroutine (and the
+    // detectDragGestures call inside it) is launched once and never relaunched for the life of
+    // this composable. Closing over the raw `onDelta` parameter there would freeze whichever
+    // lambda instance existed the first time it was launched — every later recomposition's fresh
+    // `onDelta` (e.g. one closing over a just-recomputed clamp) would be silently ignored, and the
+    // divider would keep applying deltas against a base that was current only at that first
+    // launch. rememberUpdatedState keeps `currentOnDelta` pointing at the latest lambda without
+    // needing to relaunch the gesture detector.
+    val currentOnDelta by rememberUpdatedState(onDelta)
     // 10dp hit area keeps the pointer inside during normal drags.
     // For fast drags the AWT window cursor is locked for the entire drag so no
     // flicker occurs when the pointer briefly exits the visual stripe.
@@ -177,7 +186,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
                     onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.x / density) },
+                    onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.x / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),
@@ -194,6 +203,9 @@ fun VDivider(onDelta: (Float) -> Unit) {
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // See HDivider's identical comment: keeps the drag gesture (launched once, never relaunched)
+    // calling the latest `onDelta` instead of whichever closure existed at first composition.
+    val currentOnDelta by rememberUpdatedState(onDelta)
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -204,7 +216,7 @@ fun VDivider(onDelta: (Float) -> Unit) {
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
                     onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.y / density) },
+                    onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.y / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),

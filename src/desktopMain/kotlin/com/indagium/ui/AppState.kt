@@ -406,9 +406,50 @@ private fun defaultAutosaveFile(): File =
     DesktopStorage.autosaveFile()
 
 internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
-internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
+
+// Raised from 500f so the right sidebar can grow wide enough to show a meaningfully bigger device
+// mirror while capturing (see CaptureCard/EmbeddedMirrorPanel — the mirror sizes itself from the
+// panel's actual measured width). The window-relative guard in annotationPanelEffectiveMaxWidth
+// below is what actually keeps the log view from being squeezed out on a narrow window; this
+// constant is just the stored ceiling, reached on a wide-enough window.
+internal const val ANNOTATION_PANEL_MAX_WIDTH = 1400f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
+
+// Width reserved for the log view so the right sidebar (and, when visible, the filter panel) can
+// never squeeze it out entirely. Matches the sidebar/filter dividers' own hit width (HDivider,
+// ui/Components.kt) so the arithmetic in annotationPanelEffectiveMaxWidth lines up with what is
+// actually drawn.
+internal const val LOG_VIEW_MIN_WIDTH = 320f
+internal const val PANEL_DIVIDER_WIDTH = 10f
+
+/**
+ * The largest the right sidebar (Notes/AI/CaptureCard) is allowed to render at *right now*, given
+ * the row's actual measured width. [ANNOTATION_PANEL_MAX_WIDTH] is a generous stored ceiling so a
+ * wide window can show a large device mirror; this is the window-relative guard that keeps the log
+ * view from being squeezed to nothing on a narrower one. The stored `annotationPanelWidth` itself
+ * is never rewritten by this — callers render `min(annotationPanelWidth, this result)` and leave
+ * the stored value alone, so widening the window later restores the larger size without the user
+ * having to redrag the divider.
+ *
+ * Never returns less than [ANNOTATION_PANEL_MIN_WIDTH]: on an extremely narrow window the sidebar
+ * keeps its own floor even if that leaves the log view narrower than [LOG_VIEW_MIN_WIDTH].
+ */
+internal fun annotationPanelEffectiveMaxWidth(
+    availableRowWidth: Float,
+    filterVisible: Boolean,
+    filterPanelWidth: Float,
+    minLogViewWidth: Float = LOG_VIEW_MIN_WIDTH,
+): Float {
+    // One divider between the filter panel and the log view (only drawn while the filter panel
+    // is visible), and one between the log view and the sidebar (this function is only relevant
+    // while the sidebar itself is showing, so that divider is always present).
+    val filterReserved = if (filterVisible) filterPanelWidth + PANEL_DIVIDER_WIDTH else 0f
+    val sidebarDividerReserved = PANEL_DIVIDER_WIDTH
+    val available = availableRowWidth - filterReserved - sidebarDividerReserved - minLogViewWidth
+    return available.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
+}
+
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 internal const val RIGHT_SIDEBAR_SPLIT_MIN = 0.2f
