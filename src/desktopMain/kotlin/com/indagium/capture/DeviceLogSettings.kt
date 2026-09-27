@@ -200,6 +200,27 @@ fun bufferSizeButtonLabel(sizes: List<LogBufferSize>): String {
  *  case (the property is absent or blank), otherwise the level's own display label. */
 fun logLevelButtonLabel(level: LogTagLevel?): String = level?.label ?: "Default (device)"
 
+/** The collapsed "Device logging" section header's one-line summary (New tab launcher and
+ *  Settings → Capture), e.g. `"Device logging · main 4 MB · log.tag D · 2 overrides"` — built only
+ *  from the last successfully loaded state ([DeviceLogState.loaded]), never from an in-flight read,
+ *  so collapsing the section never shows a summary that doesn't match what's actually on the
+ *  device. Falls back to the bare title when nothing has loaded yet, or when a loaded device
+ *  reports no main buffer, no explicit log level and no per-tag overrides. */
+fun deviceLoggingSummaryLine(state: DeviceLogState?): String {
+    val title = "Device logging"
+    if (state == null || !state.loaded) return title
+    val parts = mutableListOf<String>()
+    state.bufferSizes.firstOrNull { it.buffer == "main" }?.let {
+        parts += "main ${formatBufferSizeShort(it.sizeBytes)}"
+    }
+    state.globalLevel?.let { parts += "log.tag ${it.propValue}" }
+    if (state.perTagOverrides.isNotEmpty()) {
+        val count = state.perTagOverrides.size
+        parts += "$count override${if (count == 1) "" else "s"}"
+    }
+    return if (parts.isEmpty()) title else "$title · ${parts.joinToString(" · ")}"
+}
+
 /** The "On device: …" status line shown under both dropdowns (New tab's "Device logging" panel),
  *  built from the device's own re-read state — NEVER from whatever the user just picked in a
  *  dropdown — so the line only changes once the apply has actually landed and been confirmed by a

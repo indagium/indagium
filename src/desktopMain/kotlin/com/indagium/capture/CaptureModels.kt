@@ -79,6 +79,21 @@ data class CaptureSettings(
     // stays MKV regardless of this setting. See CaptureArchive.kt's export() and
     // FfmpegCaptureVideoExporter for where this is actually consumed.
     val videoContainer: CaptureVideoContainer = CaptureVideoContainer.MP4,
+    /** "Keep sound on the device" (appended last per this class's own convention comment above).
+     *  Off by default: it only ever matters when [audio] is also on, and the plain "device muted
+     *  while its audio is captured" behavior is the long-standing default nobody should be opted
+     *  into silently. See [captureAudioPlan] for the Android-13+ gate and the exact scrcpy
+     *  arguments this selects. */
+    val keepDeviceAudio: Boolean = false,
+    /** Live audio playback on this computer for the embedded (in-app) mirror, appended last per this
+     *  class's own convention comment above. Off by default — muted until the user opts in via the
+     *  mirror panel's speaker toggle (ui/EmbeddedMirrorPanel.kt). Only ever matters when [audio] is
+     *  also on and the mirror is EMBEDDED; irrelevant for EXTERNAL (the scrcpy window plays its own
+     *  audio) or DISABLED. See capture/mirror/LiveAudioPlayer.kt. */
+    val playAudioLive: Boolean = false,
+    /** 0-100 volume applied to the live audio player above, appended last matching [playAudioLive].
+     *  Default 80 rather than 100 so turning this on for the first time isn't jarringly loud. */
+    val liveAudioVolume: Int = 80,
 )
 
 /** The active display choice after applying the pre-choice `mirror` compatibility switch. */

@@ -1330,6 +1330,9 @@ internal fun CaptureCard(state: AppState, tab: LogTab) {
                     fillAvailableHeight = true,
                     clipboardState = clipboardState,
                     modifier = Modifier.fillMaxWidth(),
+                    hasAudio = mirror?.hasLiveAudio == true,
+                    liveAudioEnabled = state.settings.captureSettings.playAudioLive,
+                    onToggleLiveAudio = { state.setEmbeddedMirrorLiveAudioEnabled(tab.id, !state.settings.captureSettings.playAudioLive) },
                 )
             },
             below = {

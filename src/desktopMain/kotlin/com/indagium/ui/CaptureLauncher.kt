@@ -48,6 +48,7 @@ import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
 import com.indagium.capture.bufferSizeButtonLabel
 import com.indagium.capture.deviceLogStatusText
+import com.indagium.capture.deviceLoggingSummaryLine
 import com.indagium.capture.deviceStateGuidance
 import com.indagium.capture.logLevelButtonLabel
 import com.indagium.capture.mainBufferIsSmall
@@ -56,6 +57,23 @@ import kotlinx.coroutines.delay
 import kotlin.math.roundToInt
 
 private const val DEVICE_REFRESH_INTERVAL_MS = 3_000L
+
+/** Extracts a version number after the word "version" (case-insensitive), e.g. "1.0.41" out of
+ *  "Android Debug Bridge version 1.0.41". */
+private val TOOL_VERSION_NUMBER = Regex("""version\s+([0-9]+(?:\.[0-9]+)*)""", RegexOption.IGNORE_CASE)
+
+/** Short "adb 1.0.41" label for the Devices panel header when adb validated successfully —
+ *  extracted from the first line of [CaptureService.toolStatus] (the adb line; the second line is
+ *  scrcpy's — see [toolStatusLine]) rather than showing that whole, sometimes multi-line, raw
+ *  `adb version` blob inline. Falls back to the untrimmed first line when no version number is
+ *  found in it, so an unexpected adb build still shows something instead of a blank header. Null
+ *  only when there is no status yet at all. */
+internal fun adbShortStatusLabel(toolStatus: String?): String? {
+    val firstLine = toolStatus?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+    if (firstLine.isEmpty()) return null
+    val version = TOOL_VERSION_NUMBER.find(firstLine)?.groupValues?.get(1)
+    return if (version != null) "adb $version" else firstLine
+}
 
 /** The device-capture launcher's content, embeddable in any surface that already knows which tab
  *  it belongs to. Split out of the old standalone `CaptureLauncher` composable so ui/HomeScreen.kt
@@ -100,9 +118,14 @@ internal fun CaptureLauncherContent(
             service.refreshDevices()
         }
     }
+    // Tools folds into the Devices panel header as one muted line once adb is found and valid (item
+    // 2 of the "make it compact" pass) — a whole extra bordered panel just to say "adb 1.0.41" ate
+    // vertical space the New tab can't spare. An invalid/missing adb, or any error, keeps the full
+    // panel below exactly as before: that's the one state where this needs its old prominence.
+    val toolsFoldedIntoDevicesHeader = service.toolStatus != null && service.adbAvailable && service.error == null
     Column(
         modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 40.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Capture from a device", fontSize = 20.sp, color = tc().tx)
@@ -112,17 +135,35 @@ internal fun CaptureLauncherContent(
                 fontSize = 12.sp,
             )
         }
-        service.toolStatus?.let { status ->
-            LauncherPanel("Capture tools") {
-                AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
-                service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AppButton("Recheck tools", { service.recheckToolsFromSettings() }, enabled = !service.discovering)
-                    AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+        if (!toolsFoldedIntoDevicesHeader) {
+            service.toolStatus?.let { status ->
+                LauncherPanel("Capture tools") {
+                    AppText(status, color = tc().ts, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    service.error?.let { AppText(it, color = DANGER_RED, fontSize = 11.sp) }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AppButton("Recheck tools", { service.recheckToolsFromSettings() }, enabled = !service.discovering)
+                        AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+                    }
                 }
             }
         }
-        LauncherPanel("Devices") {
+        LauncherPanel(header = {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                AppText("Devices", color = tc().ts, fontSize = 11.sp)
+                if (toolsFoldedIntoDevicesHeader) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        adbShortStatusLabel(service.toolStatus)?.let {
+                            AppText(
+                                it, color = tc().td, fontFamily = FontFamily.Monospace, fontSize = 10.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        AppButton("Recheck tools", { service.recheckToolsFromSettings() }, ButtonVariant.Ghost, enabled = !service.discovering)
+                        AppButton("Install guidance", { service.openInstallGuidanceFromSettings() }, ButtonVariant.Ghost)
+                    }
+                }
+            }
+        }) {
             when {
                 service.devices.isNotEmpty() -> service.devices.forEach { device ->
                     CaptureDeviceRow(
@@ -147,9 +188,13 @@ internal fun CaptureLauncherContent(
             }
         }
         selectedDevice?.let { device ->
-            LauncherPanel("Device logging") {
-                DeviceLoggingPanelContent(service, device, noLiveCapture = state.liveCaptureTabId == null, onReclaimFocus)
-            }
+            DeviceLoggingPanel(
+                state = state,
+                service = service,
+                device = device,
+                noLiveCapture = state.liveCaptureTabId == null,
+                onReclaimFocus = onReclaimFocus,
+            )
         }
         CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
         AppButton(
@@ -159,7 +204,8 @@ internal fun CaptureLauncherContent(
             enabled = selectedDevice?.available == true && state.liveCaptureTabId == null && !state.captureStartInProgress,
             modifier = Modifier.fillMaxWidth(),
         )
-        LauncherPanel("Unfinished sessions") {
+        val unfinishedCount = service.sessions.count { it.status != CaptureStatus.RECORDING }
+        LauncherPanel("Unfinished sessions · $unfinishedCount") {
             UnfinishedSessionsSection(state = state, service = service)
         }
     }
@@ -242,25 +288,79 @@ internal fun toggleCaptureBuffer(buffers: List<String>, name: String): List<Stri
 
 @Composable
 private fun LauncherPanel(title: String, content: @Composable () -> Unit) {
+    LauncherPanel(header = { AppText(title, color = tc().ts, fontSize = 11.sp) }, content = content)
+}
+
+/** [LauncherPanel] overload for a header row richer than one label — e.g. the Devices panel folding
+ *  a muted adb status line and its Recheck/Install actions in next to the title (item 2 of the
+ *  "make it compact" pass). */
+@Composable
+private fun LauncherPanel(header: @Composable () -> Unit, content: @Composable () -> Unit) {
     Column(
         Modifier.fillMaxWidth().border(BorderStroke(1.dp, tc().br), CORNER_MD).padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        AppText(title, color = tc().ts, fontSize = 11.sp)
+        header()
         content()
     }
 }
 
 private const val DEVICE_LOG_OVERRIDES_ROW_LIMIT = 5
 
-/** "Device logging": logd ring-buffer sizes and the `log.tag`/`log.tag.<TAG>` filter level for the
- *  selected device (items 2/3). Reads on every device change and lets the user apply a buffer size
- *  or the global level immediately — both are DEVICE settings, not capture-session settings, hence
- *  the explicit hint and hence this reads/writes [CaptureService.deviceLogStates] (keyed by serial)
- *  rather than anything on the capture-launch draft. All three adb reads (`logcat -g`,
- *  `getprop log.tag`, `getprop`) and every apply happen off the caller's thread inside
- *  [CaptureService]; this composable only renders whatever state is there and fires the calls that
- *  change it. */
+/** "Device logging": a collapsible section — expanded by default, collapsed to one summary
+ *  line ([deviceLoggingSummaryLine]) plus a Refresh button usable without expanding, plus the
+ *  [SectionHeader] chevron (the same collapsible idiom CaptureStrip.kt's `CaptureMarkerSection`
+ *  uses, for consistent styling). Force-expands whenever there's a device-logging error or the
+ *  small-buffer warning, so a real problem is never hidden behind a remembered collapse; otherwise
+ *  follows [AppSettings.deviceLoggingPanelExpanded], one persisted preference for every device.
+ *
+ *  The refresh-on-device-change effect lives here rather than in [DeviceLoggingPanelContent] so the
+ *  summary line keeps loading fresh data even while the section is collapsed and that content isn't
+ *  composed at all. */
+@Composable
+private fun DeviceLoggingPanel(
+    state: AppState,
+    service: CaptureService,
+    device: CaptureDevice,
+    noLiveCapture: Boolean,
+    onReclaimFocus: () -> Unit,
+) {
+    LaunchedEffect(device.serial) { service.refreshDeviceLog(device.serial) }
+    val logState = service.deviceLogStates[device.serial]
+    val hasProblem = logState?.error != null || mainBufferIsSmall(logState?.bufferSizes.orEmpty())
+    val expanded = state.settings.deviceLoggingPanelExpanded || hasProblem
+    Column(Modifier.fillMaxWidth().border(BorderStroke(1.dp, tc().br), CORNER_MD)) {
+        SectionHeader(
+            title = deviceLoggingSummaryLine(logState),
+            trailing = {
+                AppButton(
+                    "Refresh", { service.refreshDeviceLog(device.serial) }, ButtonVariant.Ghost,
+                    enabled = logState?.busy != true,
+                )
+            },
+            expanded = expanded,
+            onToggle = { state.toggleDeviceLoggingPanelExpanded() },
+        )
+        if (expanded) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DeviceLoggingPanelContent(service, device, noLiveCapture, onReclaimFocus)
+            }
+        }
+    }
+}
+
+/** "Device logging" body: logd ring-buffer sizes and the `log.tag`/`log.tag.<TAG>` filter level for
+ *  the selected device (items 2/3). Lets the user apply a buffer size or the global level
+ *  immediately — both are DEVICE settings, not capture-session settings, hence the explicit hint
+ *  and hence this reads/writes [CaptureService.deviceLogStates] (keyed by serial) rather than
+ *  anything on the capture-launch draft. All three adb reads (`logcat -g`, `getprop log.tag`,
+ *  `getprop`) and every apply happen off the caller's thread inside [CaptureService]; this
+ *  composable only renders whatever state is there and fires the calls that change it. Rendered
+ *  only while [DeviceLoggingPanel] is expanded — the refresh-on-device-change effect lives on that
+ *  wrapper instead, so the summary line up there keeps working while this is collapsed. */
 @Composable
 private fun DeviceLoggingPanelContent(
     service: CaptureService,
@@ -269,7 +369,6 @@ private fun DeviceLoggingPanelContent(
     onReclaimFocus: () -> Unit,
 ) {
     val tc = tc()
-    LaunchedEffect(device.serial) { service.refreshDeviceLog(device.serial) }
     val logState = service.deviceLogStates[device.serial]
     val busy = logState?.busy == true
     val sizes = logState?.bufferSizes.orEmpty()
@@ -338,7 +437,6 @@ private fun DeviceLoggingPanelContent(
             maxLines = 1, overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        AppButton("Refresh", { service.refreshDeviceLog(device.serial) }, ButtonVariant.Ghost, enabled = !busy)
     }
     if (mainBufferIsSmall(sizes)) {
         AppText("Small buffers can drop lines during bursts", color = DANGER_RED, fontSize = 10.sp)

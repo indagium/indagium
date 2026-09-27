@@ -15,6 +15,8 @@ import com.indagium.capture.CaptureSettings
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.withMirrorMode
 
+private const val CHECK_LABEL_MAX_LINES = 2
+
 /**
  * The capture controls that appear both on the New tab's "Before start" panel (a per-launch draft)
  * and in Settings → Capture (the saved defaults), so the two always read and behave the same.
@@ -27,27 +29,89 @@ internal val CAPTURE_BUFFER_NAMES = listOf("main", "system", "crash", "kernel", 
 private const val CAPTURE_BUFFER_GRID_COLUMNS = 3
 private const val CAPTURE_HINT_MAX_LINES = 3
 
-/** The whole "Before start" block, laid out once: the two checkboxes side by side, the hint,
- * Device display, then Buffer mode. The launcher shows it in its panel, Settings as a full-width
- * group, so both screens look the same rather than merely sharing the individual controls. */
+/** The whole "Before start" block, laid out once: Record video, Capture audio and Include earlier
+ * device logs as three equal columns on one row (item 1 of the "make it compact" pass — labels
+ * wrap to two lines via [CHECK_LABEL_MAX_LINES] rather than ellipsize when a column is narrow),
+ * then the dependent "Keep sound on the device" checkbox and its muted notice, the earlier-logs
+ * hint, then Device display and Buffer mode side by side in two columns. The launcher shows it in
+ * its panel, Settings as a full-width group, so both screens look the same rather than merely
+ * sharing the individual controls. */
 @Composable
 internal fun CaptureStartOptions(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) { RecordVideoToFileCheck(settings, edit) }
+            Box(Modifier.weight(1f)) { CaptureAudioCheck(settings, edit) }
             Box(Modifier.weight(1f)) { IncludeEarlierDeviceLogsCheck(settings, edit) }
         }
+        KeepDeviceAudioCheck(settings, edit)
+        if (settings.audio) DeviceAudioMutingNotice()
         EarlierDeviceLogsHint()
-        CaptureDeviceDisplayControl(settings, edit)
-        CaptureBufferModeControl(settings, edit)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CaptureDeviceDisplayControl(settings, edit)
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CaptureBufferModeControl(settings, edit)
+            }
+        }
     }
 }
 
 @Composable
 internal fun RecordVideoToFileCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     CheckRow(settings.recordVideo, { edit { it.copy(recordVideo = !it.recordVideo) } }) {
-        AppText("Record video to file", color = tc().tx, fontSize = 11.sp)
+        AppText(
+            "Record video to file", color = tc().tx, fontSize = 11.sp,
+            maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
+        )
     }
+}
+
+/** Device audio goes into the recorded file and the scrcpy window; the in-app mirror is silent.
+ *  Whenever this is on, the device's own speaker is muted for the duration unless
+ *  [KeepDeviceAudioCheck] is also on and the device qualifies — see [DeviceAudioMutingNotice]. */
+@Composable
+internal fun CaptureAudioCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
+    CheckRow(settings.audio, { edit { it.copy(audio = !it.audio) } }) {
+        AppText(
+            "Capture audio", color = tc().tx, fontSize = 11.sp,
+            maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/** Dependent on [CaptureSettings.audio] — greyed out and inert while audio capture is off, since
+ *  there is nothing to keep sound on the device FOR otherwise. Asks the embedded scrcpy server (or
+ *  the external scrcpy window) for `audio_source=playback` + `audio_dup`, which only Android 13+
+ *  accepts; a device below that still gets the plain "device muted" behavior plus a diagnostic —
+ *  see [captureAudioPlan][com.indagium.capture.captureAudioPlan]. */
+@Composable
+internal fun KeepDeviceAudioCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
+    CheckRow(
+        settings.keepDeviceAudio,
+        { edit { it.copy(keepDeviceAudio = !it.keepDeviceAudio) } },
+        enabled = settings.audio,
+    ) {
+        AppText(
+            "Keep sound on the device (Android 13+)",
+            color = if (settings.audio) tc().tx else tc().td,
+            fontSize = 11.sp,
+            maxLines = CHECK_LABEL_MAX_LINES,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+internal fun DeviceAudioMutingNotice() {
+    AppText(
+        "While audio is captured the phone's speaker is muted (Android 11–12 always; Android 13+ " +
+            "unless \"Keep sound on the device\" is on). Apps can block capture of their sound.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = CAPTURE_HINT_MAX_LINES,
+    )
 }
 
 /** Off passes `-T 1` to logcat (start at the newest line, CaptureRecorder); on lets logcat dump
@@ -55,7 +119,10 @@ internal fun RecordVideoToFileCheck(settings: CaptureSettings, edit: CaptureSett
 @Composable
 internal fun IncludeEarlierDeviceLogsCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     CheckRow(settings.includeBufferedLogs, { edit { it.copy(includeBufferedLogs = !it.includeBufferedLogs) } }) {
-        AppText("Include earlier device logs", color = tc().tx, fontSize = 11.sp)
+        AppText(
+            "Include earlier device logs", color = tc().tx, fontSize = 11.sp,
+            maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
+        )
     }
 }
 

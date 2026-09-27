@@ -2064,6 +2064,14 @@ class AppState(
     // unchecked checkbox on screen while Start capture used the hidden updated value.
     private val captureLaunchDrafts = mutableStateMapOf<String, com.indagium.capture.CaptureSettings>()
 
+    /** Flips the New tab launcher's "Device logging" section, persisted as
+     *  [AppSettings.deviceLoggingPanelExpanded] (expanded by default). The panel also force-expands
+     *  on an error or the small-buffer warning regardless — see CaptureLauncher.kt's
+     *  `DeviceLoggingPanel` — so a real problem is never hidden by a remembered collapse. */
+    internal fun toggleDeviceLoggingPanelExpanded() {
+        updateSettings { it.copy(deviceLoggingPanelExpanded = !it.deviceLoggingPanelExpanded) }
+    }
+
     /** Observable guard covering tool validation, recovery, and process launch. */
     internal var captureStartInProgress by mutableStateOf(false)
         private set
@@ -3160,6 +3168,29 @@ class AppState(
     internal fun stopEmbeddedMirror(tabId: String) {
         val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
         ioScope.launch { handle.stop() }
+    }
+
+    /**
+     * The embedded mirror's speaker toggle (EmbeddedMirrorPanel's control bar): persists the
+     * preference in [CaptureSettings.playAudioLive] (a global default, same as e.g. `keepDeviceAudio`
+     * — not per-tab) and, if this tab currently has a live mirror handle, applies it immediately by
+     * attaching/detaching a [com.indagium.capture.mirror.LiveAudioPlayer] on the shared recording
+     * session. Volume reads [CaptureSettings.liveAudioVolume] live on every playback chunk (via the
+     * lambda), so adjusting the Settings slider while audio is already playing takes effect without
+     * retoggling. Off the calling thread for the same reason [stopEmbeddedMirror] is: attaching opens
+     * an FFmpeg decoder context and a javax.sound.sampled line, neither of which should run on a
+     * Compose click handler's thread.
+     */
+    internal fun setEmbeddedMirrorLiveAudioEnabled(tabId: String, enabled: Boolean) {
+        updateSettings { it.copy(captureSettings = it.captureSettings.copy(playAudioLive = enabled)) }
+        val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
+        ioScope.launch {
+            handle.setLiveAudioEnabled(
+                enabled,
+                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+            )
+        }
     }
 
     /**

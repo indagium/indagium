@@ -41,14 +41,17 @@ class CaptureTools(
         return CaptureProcessSpec(adb.command(args))
     }
 
-    /** Starts a visible, non-recording scrcpy window for an active capture. */
-    fun scrcpyMirrorSpec(serial: String, settings: CaptureSettings): CaptureProcessSpec {
+    /** Starts a visible, non-recording scrcpy window for an active capture. [audioCliArgs] is the
+     *  "keep sound on the device" delta from [captureAudioPlan] (`--audio-source=playback
+     *  --audio-dup`), decided once by the caller (which has the adb access needed for the Android
+     *  13+ gate) rather than here; empty for the long-standing default behavior. */
+    fun scrcpyMirrorSpec(serial: String, settings: CaptureSettings, audioCliArgs: List<String> = emptyList()): CaptureProcessSpec {
         val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
         val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
             // An auxiliary mirror is explicitly visible even when recording was configured with
             // --no-window. It deliberately carries no --record flag, so it cannot overwrite or
             // race the canonical session MKV.
-            if (!settings.audio) add("--no-audio")
+            if (!settings.audio) add("--no-audio") else addAll(audioCliArgs)
         }
         return if (executable.runOnHost) {
             CaptureProcessSpec(
@@ -150,6 +153,17 @@ class CaptureTools(
      */
     fun runAdb(serial: String?, arguments: List<String>, timeout: Duration = Duration.ofSeconds(5)): CaptureCommandResult =
         runner.run(adbSpec(serial, arguments), timeout = timeout)
+
+    /** Reads `ro.build.version.sdk` once — the "keep sound on the device" Android-13+ gate (see
+     *  [captureAudioPlan]) — with the same plain synchronous shape as this class's other
+     *  single-property probes. Null on any failure (timeout, non-zero exit, unparsable output)
+     *  rather than throwing, so this one probe can never fail an entire capture start; the caller
+     *  falls back to the "device muted" behavior and surfaces a diagnostic instead. */
+    fun readDeviceSdkLevel(serial: String): Int? {
+        val result = runAdb(serial, listOf("shell", "getprop", "ro.build.version.sdk"))
+        if (result.timedOut || result.exitCode != 0) return null
+        return parseAndroidSdkLevel(result.stdoutText())
+    }
 
     fun listDevices(): List<CaptureDeviceResult> {
         val result = runner.run(CaptureProcessSpec(adb.command(listOf("devices", "-l"))))

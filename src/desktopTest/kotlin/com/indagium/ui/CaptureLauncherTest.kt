@@ -5,6 +5,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CaptureLauncherTest {
@@ -67,5 +68,32 @@ class CaptureLauncherTest {
         assertFalse(requiresTypedDeleteConfirmation(selectedCount = 2, totalCount = 3))
         assertTrue(requiresTypedDeleteConfirmation(selectedCount = 3, totalCount = 3))
         assertFalse(requiresTypedDeleteConfirmation(selectedCount = 0, totalCount = 0))
+    }
+
+    // adbShortStatusLabel (item 2 of the "make it compact" pass): the Devices panel header's short
+    // "adb 1.0.41" line, extracted from the (possibly multi-line, verbose) raw `adb version` output
+    // on CaptureService.toolStatus rather than showing that whole blob inline.
+
+    @Test
+    fun adbShortStatusLabelExtractsTheVersionNumberFromTheFirstLine() {
+        assertEquals("adb 1.0.41", adbShortStatusLabel("Android Debug Bridge version 1.0.41\nscrcpy is ready"))
+    }
+
+    @Test
+    fun adbShortStatusLabelHandlesAMultiLineVersionBlob() {
+        val toolStatus = "Android Debug Bridge version 1.0.41\nVersion 34.0.4-10411341\nInstalled as /opt/adb\nscrcpy is ready"
+        assertEquals("adb 1.0.41", adbShortStatusLabel(toolStatus))
+    }
+
+    @Test
+    fun adbShortStatusLabelFallsBackToTheRawFirstLineWhenNoVersionNumberIsFound() {
+        assertEquals("adb is ready", adbShortStatusLabel("adb is ready\nscrcpy is ready"))
+    }
+
+    @Test
+    fun adbShortStatusLabelIsNullForBlankOrMissingStatus() {
+        assertNull(adbShortStatusLabel(null))
+        assertNull(adbShortStatusLabel(""))
+        assertNull(adbShortStatusLabel("\n"))
     }
 }

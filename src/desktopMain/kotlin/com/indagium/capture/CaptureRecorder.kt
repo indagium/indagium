@@ -357,6 +357,7 @@ class CaptureRecorder internal constructor(
                     newSession.close()
                     return synchronized(lock) { requireNotNull(currentSession) }
                 }
+                val audioPlan = resolveAudioPlan(tools, device.serial, settings)
                 newSession.start(
                     device.serial,
                     MirrorStreamOptions(
@@ -364,6 +365,7 @@ class CaptureRecorder internal constructor(
                         maxFps = settings.maxFps,
                         bitrateMbps = settings.bitrateMbps,
                         audio = settings.audio,
+                        audioServerArgs = audioPlan.serverArgs,
                     ),
                 )
             } catch (failure: IOException) {
@@ -461,7 +463,8 @@ class CaptureRecorder internal constructor(
             if (mirrorProcess?.isAlive == true) return true
             mirrorProcess = null
         }
-        val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings))
+        val audioPlan = resolveAudioPlan(tools, session.device.serial, session.settings)
+        val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings, audioPlan.cliArgs))
         val accepted = synchronized(lock) {
             if (!active.get()) {
                 false
@@ -758,6 +761,21 @@ class CaptureRecorder internal constructor(
     private fun addDiagnostic(message: String) = synchronized(lock) {
         addDiagnosticLocked(message)
         publishLocked(mutableSnapshot.value.state, force = true)
+    }
+
+    /** Resolves the "keep sound on the device" delta args for this session's audio (see
+     *  [captureAudioPlan]), reading the device's SDK level once via adb only when it's actually
+     *  needed (audio and the setting are both on) — never on the far more common "audio off" or
+     *  "keep off" paths. Any diagnostic the plan carries (the Android-13+ fallback notice) is
+     *  surfaced immediately, the same way every other capture-start diagnostic is. */
+    private fun resolveAudioPlan(tools: CaptureTools, serial: String, settings: CaptureSettings): CaptureAudioPlan {
+        if (!settings.audio || !settings.keepDeviceAudio) {
+            return captureAudioPlan(settings.audio, settings.keepDeviceAudio, deviceSdk = null)
+        }
+        val sdk = runCatching { tools.readDeviceSdkLevel(serial) }.getOrNull()
+        return captureAudioPlan(settings.audio, settings.keepDeviceAudio, sdk).also { plan ->
+            plan.diagnostic?.let(::addDiagnostic)
+        }
     }
 
     private fun addDiagnosticLocked(message: String) {

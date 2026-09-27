@@ -29,6 +29,8 @@ internal const val MIN_CAPTURE_BITRATE_MBPS = 1
 internal const val MAX_CAPTURE_BITRATE_MBPS = 500
 internal const val MIN_MARKER_WINDOW_SECONDS = 0
 internal const val MAX_MARKER_WINDOW_SECONDS = 120
+internal const val MIN_LIVE_AUDIO_VOLUME = 0
+internal const val MAX_LIVE_AUDIO_VOLUME = 100
 private const val CAPTURE_MARKER_MS_PER_SECOND = 1_000L
 
 /** Returns the settings fields that would prevent starting a capture. */
@@ -45,6 +47,7 @@ internal fun invalidCaptureSettings(settings: CaptureSettings): Set<String> = bu
     val markerWindowRangeMs = MIN_MARKER_WINDOW_SECONDS * CAPTURE_MARKER_MS_PER_SECOND..MAX_MARKER_WINDOW_SECONDS * CAPTURE_MARKER_MS_PER_SECOND
     if (settings.markerPreMs !in markerWindowRangeMs) add("markerPreMs")
     if (settings.markerPostMs !in markerWindowRangeMs) add("markerPostMs")
+    if (settings.liveAudioVolume !in MIN_LIVE_AUDIO_VOLUME..MAX_LIVE_AUDIO_VOLUME) add("liveAudioVolume")
 }
 
 /** Pure presentation rule shared by the settings UI and its focused tests. */
@@ -181,9 +184,7 @@ private fun CaptureToolsGroup(
 @Composable
 private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (CaptureSettings) -> Unit) {
     CaptureGroupLabel("Screen recording")
-    CheckRow(settings.audio, { update(settings.copy(audio = !settings.audio)) }) {
-        AppText("Capture audio", fontSize = 11.sp)
-    }
+    // Capture audio lives in the shared "Before start" block above (CaptureStartOptions).
     CaptureNumericField("Max size", settings.maxSize.toString(), MIN_CAPTURE_SIZE..MAX_CAPTURE_SIZE) {
         update(settings.copy(maxSize = it))
     }
@@ -218,6 +219,19 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
         color = tc().td,
         fontSize = 10.sp,
         maxLines = 3,
+    )
+    CaptureNumericField(
+        "Live audio volume %",
+        settings.liveAudioVolume.toString(),
+        MIN_LIVE_AUDIO_VOLUME..MAX_LIVE_AUDIO_VOLUME,
+    ) {
+        update(settings.copy(liveAudioVolume = it))
+    }
+    AppText(
+        "Volume for the embedded mirror's speaker toggle (device audio played live on this computer).",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = 2,
     )
 }
 

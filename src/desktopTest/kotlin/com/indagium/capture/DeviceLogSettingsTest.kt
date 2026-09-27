@@ -220,6 +220,43 @@ class DeviceLogSettingsTest {
         assertEquals("Verbose", logLevelButtonLabel(LogTagLevel.VERBOSE))
     }
 
+    // deviceLoggingSummaryLine (the New tab launcher's collapsed "Device logging" section header —
+    // item 3 of the "make it compact" pass): built only from a loaded state, never from an
+    // in-flight read, so collapsing the section never shows stale-looking data.
+
+    @Test
+    fun deviceLoggingSummaryLineShowsTheBareTitleBeforeAnyLoad() {
+        assertEquals("Device logging", deviceLoggingSummaryLine(null))
+        assertEquals("Device logging", deviceLoggingSummaryLine(DeviceLogState(serial = "s1", loaded = false)))
+    }
+
+    @Test
+    fun deviceLoggingSummaryLineShowsMainBufferLevelAndOverrideCount() {
+        val state = DeviceLogState(
+            serial = "s1",
+            bufferSizes = listOf(LogBufferSize("main", 4L * 1024 * 1024)),
+            globalLevel = LogTagLevel.DEBUG,
+            perTagOverrides = mapOf("Foo" to "D", "Bar" to "S"),
+            loaded = true,
+        )
+        assertEquals("Device logging · main 4 MB · log.tag D · 2 overrides", deviceLoggingSummaryLine(state))
+    }
+
+    @Test
+    fun deviceLoggingSummaryLineUsesSingularOverrideForExactlyOne() {
+        val state = DeviceLogState(serial = "s1", perTagOverrides = mapOf("Foo" to "D"), loaded = true)
+        assertEquals("Device logging · 1 override", deviceLoggingSummaryLine(state))
+    }
+
+    @Test
+    fun deviceLoggingSummaryLineOmitsPartsThatAreAbsent() {
+        val onlyMainBuffer = DeviceLogState(serial = "s1", bufferSizes = listOf(LogBufferSize("main", 1024L * 1024)), loaded = true)
+        assertEquals("Device logging · main 1 MB", deviceLoggingSummaryLine(onlyMainBuffer))
+
+        val nothingLoaded = DeviceLogState(serial = "s1", loaded = true)
+        assertEquals("Device logging", deviceLoggingSummaryLine(nothingLoaded))
+    }
+
     @Test
     fun formatDeviceLogStatusLineJoinsBuffersAndTagLevel() {
         val sizes = listOf(
