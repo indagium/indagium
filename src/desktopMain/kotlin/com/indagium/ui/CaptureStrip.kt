@@ -440,6 +440,11 @@ private fun rememberCaptureSnapshot(state: AppState, tab: LogTab): RecorderSnaps
     return snapshot
 }
 
+internal fun latestMicrophoneCaptureWarning(diagnostics: List<String>): String? = diagnostics.lastOrNull { line ->
+    val lower = line.lowercase()
+    "microphone" in lower && listOf("unavailable", "could not", "failed", "stopped", "denied").any(lower::contains)
+}
+
 /** 48dp live-capture chrome rendered only above an active streaming log tab. */
 @Composable
 internal fun CaptureStrip(
@@ -656,11 +661,12 @@ internal fun CaptureStrip(
         // diagnostics live behind the ⋯ menu instead of always being in view.
         val mirrorError = state.captureService.error
             ?.takeIf { it.startsWith("External scrcpy mirror could not open:") }
-        val statusLine = mirrorError ?: state.captureScreenshotStatus
+        val microphoneWarning = latestMicrophoneCaptureWarning(snapshot.diagnostics)
+        val statusLine = mirrorError ?: microphoneWarning ?: state.captureScreenshotStatus
         if (statusLine != null) {
             AppText(
                 statusLine,
-                color = if (mirrorError != null) DANGER_RED else colors.ts,
+                color = if (mirrorError != null || microphoneWarning != null) DANGER_RED else colors.ts,
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

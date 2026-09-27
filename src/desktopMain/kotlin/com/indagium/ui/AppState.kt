@@ -3249,6 +3249,22 @@ class AppState(
                 bitrateMbps = session.settings.bitrateMbps,
             ),
         )
+        // A user's persisted speaker preference must apply when an embedded mirror connects too.
+        // Previously this player was created only by the toggle callback, so audio stayed silent
+        // until the user toggled mute/unmute even when playAudioLive was already enabled.
+        applyEmbeddedMirrorLiveAudioPreference(tabId, handle)
+    }
+
+    private fun applyEmbeddedMirrorLiveAudioPreference(tabId: String, handle: EmbeddedMirrorHandle) {
+        ioScope.launch {
+            if (synchronized(stateLock) { embeddedMirrorsByTab[tabId] } !== handle) return@launch
+            val captureSettings = settings.captureSettings
+            handle.setLiveAudioEnabled(
+                enabled = captureSettings.playAudioLive && handle.hasLiveAudio,
+                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+            )
+        }
     }
 
     private fun closeEmbeddedMirror(tabId: String) {

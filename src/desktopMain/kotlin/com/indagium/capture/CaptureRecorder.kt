@@ -343,6 +343,7 @@ class CaptureRecorder internal constructor(
                     elapsedMillis = ::elapsedNow,
                     onDiagnostic = ::addDiagnostic,
                     onVideoStartElapsedMs = ::recordVideoStartElapsedMs,
+                    microphoneDeviceId = settings.microphoneDeviceId,
                 )
                 var accepted = false
                 synchronized(lock) {

@@ -670,7 +670,8 @@ class CaptureArchiveExporter(
             // MP4 whose audio track many players can't decode — see FfmpegCaptureVideoExporter's
             // own module doc for the detail and the plan this is a scoped-down version of.
             val requestedContainer = session.settings.videoContainer
-            val container = if (requestedContainer == CaptureVideoContainer.MP4 && session.settings.audio) {
+            val capturesAudio = session.settings.audio || session.settings.microphoneDeviceId != MICROPHONE_OFF_ID
+            val container = if (requestedContainer == CaptureVideoContainer.MP4 && capturesAudio) {
                 CaptureVideoContainer.MKV
             } else {
                 requestedContainer

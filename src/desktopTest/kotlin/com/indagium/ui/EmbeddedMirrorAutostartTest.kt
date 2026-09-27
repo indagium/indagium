@@ -14,6 +14,7 @@ import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
 import com.indagium.capture.mirror.EmbeddedMirrorState
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.H264Decoder
+import com.indagium.capture.mirror.LiveAudioSink
 import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.ScrcpyCodecIds
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
@@ -27,6 +28,7 @@ import java.nio.ByteBuffer
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -40,6 +42,64 @@ import kotlin.test.assertTrue
  * first call's create job (tool resolution + [EmbeddedMirrorHandle.create]) was still in flight.
  */
 class EmbeddedMirrorAutostartTest {
+    @org.junit.Test(timeout = 20_000)
+    fun persistedLiveAudioPreferenceAttachesPlaybackWhenSharedMirrorStarts() {
+        val root = createTempDirectory("embedded-mirror-live-audio-preference").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val transport = EmbeddedMirrorTransport { _, _ -> fakeRecordingConnection() }
+        val controller = TabCaptureController(root, runner = runner, embeddedTransportFactory = { transport })
+        val app = AppState(
+            autosaveFile = Files.createTempFile("embedded-mirror-live-audio-preference-autosave", "").toFile(),
+            autoExportNotes = false,
+        )
+        val sinkCreations = AtomicInteger()
+        try {
+            val tabId = "t1"
+            app.registerCaptureControllerForTest(tabId, controller)
+            app.updateSettings { current ->
+                current.copy(captureSettings = current.captureSettings.copy(playAudioLive = true))
+            }
+            controller.start(
+                CaptureDevice("SERIAL", "device", "Pixel"),
+                CaptureSettings(audio = true, freeSpaceReserveBytes = 0),
+                CaptureTools(CaptureExecutable("adb"), null, runner),
+            ) {}
+            awaitCondition(5_000) { controller.activeEmbeddedSession()?.hasStartedVideo() == true }
+
+            app.embeddedMirrorHandleFactory = { _, _, sharedSession ->
+                EmbeddedMirrorHandle.createShared(
+                    session = requireNotNull(sharedSession),
+                    decoder = object : H264Decoder {
+                        override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                            while (!Thread.currentThread().isInterrupted) {
+                                if (input.read() < 0) return
+                            }
+                        }
+                    },
+                    liveAudioSinkFactory = { _, _ ->
+                        sinkCreations.incrementAndGet()
+                        object : LiveAudioSink {
+                            override fun onAudioConfig(extradata: ByteArray) = Unit
+
+                            override fun onAudioPacket(ptsUs: Long, data: ByteArray) = Unit
+
+                            override fun close() = Unit
+                        }
+                    },
+                )
+            }
+
+            app.ensureEmbeddedMirror(tabId, autoStart = true)
+            awaitCondition(5_000) { sinkCreations.get() == 1 }
+            assertEquals(1, sinkCreations.get(), "persisted speaker preference should attach exactly one player")
+        } finally {
+            app.close()
+            controller.close()
+            root.deleteRecursively()
+        }
+    }
+
     @org.junit.Test(timeout = 20_000)
     fun aLateAutoStartRequestDuringAnInFlightCreateJobIsHonouredOnceItFinishes() {
         val root = createTempDirectory("embedded-mirror-autostart").toFile()

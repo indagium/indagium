@@ -27,6 +27,7 @@ import org.bytedeco.ffmpeg.global.avformat.avio_closep
 import org.bytedeco.ffmpeg.global.avformat.avio_open
 import org.bytedeco.ffmpeg.global.avutil.AVERROR_EOF
 import org.bytedeco.ffmpeg.global.avutil.AVERROR_INVALIDDATA
+import org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_AUDIO
 import org.bytedeco.ffmpeg.global.avutil.AVMEDIA_TYPE_VIDEO
 import org.bytedeco.ffmpeg.global.avutil.AV_NOPTS_VALUE
 import org.bytedeco.ffmpeg.global.avutil.av_dict_copy
@@ -124,7 +125,9 @@ class FfmpegCaptureVideoExporter(
             val clip = withPrefixSnapshot(source) { snapshot ->
                 val window = scanWindow(snapshot, requestedStartMs, requestedEndMs)
                 val keyframeGapMs = requestedStartMs - window.actualStartUs / MILLIS_PER_SECOND
-                val exact = if (keyframeGapMs > EXACT_START_TOLERANCE_MS) {
+                // The exact-start path decodes/re-encodes video only. Keep audio-bearing captures
+                // on the stream-copy path so their Opus track remains in snapshot exports.
+                val exact = if (!window.hasAudio && keyframeGapMs > EXACT_START_TOLERANCE_MS) {
                     reencodeFromRequestedStart(
                         snapshot,
                         staging,
@@ -414,7 +417,12 @@ private fun encodeFramesInRange(
     return firstUs
 }
 
-private data class ExportWindow(val actualStartUs: Long, val coveredEndUs: Long, val videoStreamIndex: Int)
+private data class ExportWindow(
+    val actualStartUs: Long,
+    val coveredEndUs: Long,
+    val videoStreamIndex: Int,
+    val hasAudio: Boolean,
+)
 
 /** File.length() is sampled once: bytes appended after this point are deliberately invisible. */
 private fun copyCurrentPrefix(source: File, snapshot: File) {
@@ -457,6 +465,7 @@ private fun scanWindow(snapshot: File, requestedStartMs: Long, requestedEndMs: L
 @Suppress("ThrowsCount")
 private fun scanWindow(input: AVFormatContext, inputLength: Long, requestedStartMs: Long, requestedEndMs: Long): ExportWindow {
     val videoStreamIndex = firstVideoStream(input)
+    val hasAudio = (0 until input.nb_streams()).any { input.streams(it).codecpar().codec_type() == AVMEDIA_TYPE_AUDIO }
     val requestedStartUs = requestedStartMs * MILLIS_PER_SECOND
     val requestedEndUs = requestedEndMs * MILLIS_PER_SECOND
     var actualStartUs: Long? = null
@@ -496,7 +505,7 @@ private fun scanWindow(input: AVFormatContext, inputLength: Long, requestedStart
     if (coveredEndUs <= actualStart) {
         throw IOException("Capture snapshot contains no complete video in the requested interval")
     }
-    return ExportWindow(actualStart, coveredEndUs, videoStreamIndex)
+    return ExportWindow(actualStart, coveredEndUs, videoStreamIndex, hasAudio)
 }
 
 private fun remux(snapshot: File, staging: File, window: ExportWindow, mp4: Boolean) {

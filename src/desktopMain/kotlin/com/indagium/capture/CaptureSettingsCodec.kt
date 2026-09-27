@@ -53,6 +53,7 @@ fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
     put("keepDeviceAudio", settings.keepDeviceAudio)
     put("playAudioLive", settings.playAudioLive)
     put("liveAudioVolume", settings.liveAudioVolume)
+    put("microphoneDeviceId", settings.microphoneDeviceId)
 }.toString()
 
 /** Returns null for malformed or unsupported settings instead of partially applying them. */
@@ -113,6 +114,9 @@ fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
         playAudioLive = root.optional("playAudioLive", defaults.playAudioLive, ::booleanValue),
         liveAudioVolume = root.optional("liveAudioVolume", defaults.liveAudioVolume, ::intValue)
             .coerceIn(MIN_LIVE_AUDIO_VOLUME, MAX_LIVE_AUDIO_VOLUME),
+        // Keep unknown but well-formed device IDs intact. The device may be temporarily absent;
+        // capture startup reports that condition and leaves the setting available for later.
+        microphoneDeviceId = root.optional("microphoneDeviceId", defaults.microphoneDeviceId, ::stringValue),
     )
 }.getOrNull()
 

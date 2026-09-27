@@ -20,6 +20,18 @@ class CaptureSettingsCodecTest {
     }
 
     @Test
+    fun microphoneSelectionDefaultsOffAndRoundTrips() {
+        val defaultSettings = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
+        assertEquals(MICROPHONE_OFF_ID, defaultSettings.microphoneDeviceId)
+        val selected = "dshow\u001faudio=USB Microphone"
+        val decoded = assertNotNull(captureSettingsFromJson(captureSettingsToJson(CaptureSettings(microphoneDeviceId = selected))))
+        assertEquals(selected, decoded.microphoneDeviceId)
+        val defaultRoundTrip = CaptureSettings(microphoneDeviceId = MICROPHONE_DEFAULT_ID)
+        val decodedDefault = assertNotNull(captureSettingsFromJson(captureSettingsToJson(defaultRoundTrip)))
+        assertEquals(MICROPHONE_DEFAULT_ID, decodedDefault.microphoneDeviceId)
+    }
+
+    @Test
     fun legacyMirrorBooleanMigratesToTheEquivalentDisplayMode() {
         assertEquals(
             CaptureMirrorMode.EMBEDDED,

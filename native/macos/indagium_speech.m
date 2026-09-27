@@ -113,3 +113,9 @@ JNIEXPORT jstring JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeTransc
     if (failure != nil) return javaString(env, jsonResult(@"failure", nil, failure));
     return javaString(env, jsonResult(@"success", text ?: @"", nil));
 }
+
+JNIEXPORT jboolean JNICALL Java_com_indagium_voice_AppleSpeechNative_nativeMicrophoneAccessDenied
+  (JNIEnv *env, jclass clazz) {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    return status == AVAuthorizationStatusDenied || status == AVAuthorizationStatusRestricted ? JNI_TRUE : JNI_FALSE;
+}

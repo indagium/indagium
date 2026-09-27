@@ -66,6 +66,12 @@ object AppleSpeechNative {
         return nativeTranscribe(pcm16le, language)
     }
 
+    /** This only reads TCC's current state. It does not prompt or turn an unrelated enumeration
+     * failure into a privacy diagnosis. */
+    @Synchronized
+    fun microphoneAccessDenied(): Boolean =
+        VoiceRecognitionEngines.isMac() && load() && nativeMicrophoneAccessDenied()
+
     @Synchronized
     private fun load(): Boolean {
         if (loaded) return true
@@ -100,4 +106,6 @@ object AppleSpeechNative {
     @JvmStatic private external fun nativeAvailabilityMessage(language: String): String
 
     @JvmStatic private external fun nativeTranscribe(pcm16le: ByteArray, language: String): String
+
+    @JvmStatic private external fun nativeMicrophoneAccessDenied(): Boolean
 }

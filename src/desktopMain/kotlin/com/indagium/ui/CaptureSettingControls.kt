@@ -1,19 +1,45 @@
 package com.indagium.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.DesktopMicrophone
+import com.indagium.capture.MICROPHONE_DEFAULT_ID
+import com.indagium.capture.MICROPHONE_OFF_ID
 import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.enumerateDesktopMicrophones
 import com.indagium.capture.withMirrorMode
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 private const val CHECK_LABEL_MAX_LINES = 2
 
@@ -37,7 +63,11 @@ private const val CAPTURE_HINT_MAX_LINES = 3
  * its panel, Settings as a full-width group, so both screens look the same rather than merely
  * sharing the individual controls. */
 @Composable
-internal fun CaptureStartOptions(settings: CaptureSettings, edit: CaptureSettingsEdit) {
+internal fun CaptureStartOptions(
+    settings: CaptureSettings,
+    onReclaimFocus: () -> Unit = {},
+    edit: CaptureSettingsEdit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f)) { RecordVideoToFileCheck(settings, edit) }
@@ -46,6 +76,7 @@ internal fun CaptureStartOptions(settings: CaptureSettings, edit: CaptureSetting
         }
         KeepDeviceAudioCheck(settings, edit)
         if (settings.audio) DeviceAudioMutingNotice()
+        CaptureMicrophoneControl(settings, edit, onReclaimFocus)
         EarlierDeviceLogsHint()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -55,6 +86,161 @@ internal fun CaptureStartOptions(settings: CaptureSettings, edit: CaptureSetting
                 CaptureBufferModeControl(settings, edit)
             }
         }
+    }
+}
+
+@Composable
+private fun CaptureMicrophoneControl(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    onReclaimFocus: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    var microphones by remember { mutableStateOf<List<DesktopMicrophone>?>(null) }
+    var enumerationFailure by remember { mutableStateOf<String?>(null) }
+    var scanning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    fun refreshMicrophones() {
+        if (scanning) return
+        scope.launch {
+            scanning = true
+            try {
+                val enumeration = withContext(Dispatchers.IO) { enumerateDesktopMicrophones() }
+                microphones = enumeration.devices
+                enumerationFailure = enumeration.failure
+            } finally {
+                scanning = false
+            }
+        }
+    }
+    LaunchedEffect(settings.microphoneDeviceId) {
+        if (settings.microphoneDeviceId != MICROPHONE_OFF_ID &&
+            settings.microphoneDeviceId != MICROPHONE_DEFAULT_ID && microphones == null
+        ) {
+            refreshMicrophones()
+        }
+    }
+    val selected = when (settings.microphoneDeviceId) {
+        MICROPHONE_OFF_ID -> "Off"
+        MICROPHONE_DEFAULT_ID -> "System default"
+        else -> when {
+            scanning -> "Loading microphone…"
+            enumerationFailure != null -> "Microphone list unavailable"
+            microphones == null -> "Selected microphone"
+            else -> microphones?.firstOrNull { it.id == settings.microphoneDeviceId }?.label
+                ?: "Selected microphone unavailable"
+        }
+    }
+    val colors = tc()
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppText("Microphone", color = colors.td, fontSize = 10.sp)
+            Box(Modifier.widthIn(max = 250.dp).fillMaxWidth()) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(CORNER_MD)
+                        .border(1.dp, colors.br, CORNER_MD)
+                        .clickable {
+                            menuExpanded = !menuExpanded
+                            if (menuExpanded) refreshMicrophones()
+                        }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    AppText(
+                        if (scanning) "Loading microphones…" else selected,
+                        color = colors.tx,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    AppText(if (menuExpanded) "▾" else "▸", color = colors.ts, fontSize = 9.sp)
+                }
+                if (menuExpanded) {
+                    val density = androidx.compose.ui.platform.LocalDensity.current.density
+                    Popup(
+                        alignment = Alignment.TopStart,
+                        offset = IntOffset(0, (32 * density).roundToInt()),
+                        onDismissRequest = { menuExpanded = false; onReclaimFocus() },
+                        properties = PopupProperties(focusable = true),
+                    ) {
+                        Column(
+                            Modifier.widthIn(min = 190.dp, max = 250.dp)
+                                .background(colors.p, RoundedCornerShape(7.dp))
+                                .border(1.dp, colors.br, RoundedCornerShape(7.dp))
+                                .padding(vertical = 4.dp),
+                        ) {
+                            MicrophoneOption("Off", settings.microphoneDeviceId == MICROPHONE_OFF_ID) {
+                                edit { it.copy(microphoneDeviceId = MICROPHONE_OFF_ID) }
+                                menuExpanded = false
+                                onReclaimFocus()
+                            }
+                            MicrophoneOption("System default", settings.microphoneDeviceId == MICROPHONE_DEFAULT_ID) {
+                                edit { it.copy(microphoneDeviceId = MICROPHONE_DEFAULT_ID) }
+                                menuExpanded = false
+                                onReclaimFocus()
+                            }
+                            microphones.orEmpty().forEach { microphone ->
+                                MicrophoneOption(microphone.label, settings.microphoneDeviceId == microphone.id) {
+                                    edit { it.copy(microphoneDeviceId = microphone.id) }
+                                    menuExpanded = false
+                                    onReclaimFocus()
+                                }
+                            }
+                            when {
+                                scanning -> MicrophoneOption("Loading microphones…", active = false, enabled = false)
+                                enumerationFailure != null -> MicrophoneOption(
+                                    enumerationFailure ?: "Microphone list unavailable",
+                                    active = false,
+                                    enabled = false,
+                                )
+                                microphones.isNullOrEmpty() -> MicrophoneOption("No microphones found", active = false, enabled = false)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        AppText(
+            "Records audio from this computer microphone with the screen capture.",
+            color = colors.td,
+            fontSize = 10.sp,
+        )
+    }
+    if (settings.microphoneDeviceId != MICROPHONE_OFF_ID) {
+        AppText(
+            "Nearby speaker audio may be picked up; microphone monitoring is off.",
+            color = colors.td,
+            fontSize = 10.sp,
+            maxLines = 2,
+        )
+    }
+}
+
+@Composable
+private fun MicrophoneOption(label: String, active: Boolean, enabled: Boolean = true, onClick: () -> Unit = {}) {
+    val colors = tc()
+    HoverBox(
+        modifier = Modifier.fillMaxWidth(),
+        hoverEnabled = enabled,
+        onClick = onClick.takeIf { enabled },
+    ) {
+        AppText(
+            label,
+            color = when {
+                !enabled -> colors.td
+                active -> colors.ac
+                else -> colors.tx
+            },
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+        )
     }
 }
 
