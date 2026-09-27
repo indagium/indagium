@@ -1,9 +1,10 @@
 package com.indagium
 
-import com.indagium.model.LogEntry
-import com.indagium.model.LogLevel
+import androidx.compose.ui.graphics.Color
 import com.indagium.model.Filter
 import com.indagium.model.Highlighter
+import com.indagium.model.LogEntry
+import com.indagium.model.LogLevel
 import com.indagium.model.MessageRule
 import com.indagium.model.RuleTarget
 import com.indagium.ui.contextualMessageRuleCandidates
@@ -12,7 +13,6 @@ import com.indagium.ui.messageRulePillLabel
 import com.indagium.ui.messageRuleScopeOptions
 import com.indagium.ui.messageRuleScopePrompt
 import com.indagium.ui.regexFilterSummary
-import androidx.compose.ui.graphics.Color
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

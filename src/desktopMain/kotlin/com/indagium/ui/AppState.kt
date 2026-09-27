@@ -196,6 +196,10 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+// Used to normalize a clockwise rotation (manual adjustment + source display rotation) into
+// [0, 360) — see videoRotationDegrees below.
+private const val FULL_CIRCLE_DEGREES = 360
+
 internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
 
 // Mark issue (restyle plan Phase 3). No customization per the plan's scope decision (one fixed
@@ -4835,10 +4839,10 @@ class AppState(
                 // state with its own Computing(forFilter), so a superseded scan finds a mismatch
                 // here and drops its result rather than overwriting fresher data.
                 val state = t.messageComposition
-                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor ||
-                    state.forRevision != startedRevision || t.messageCompositionRevision != startedRevision ||
-                    t.filter.viewDefiningKey() != startedFor
-                ) return@upTab t
+                if (state !is MessageCompositionState.Computing) return@upTab t
+                val revisionStale = state.forRevision != startedRevision || t.messageCompositionRevision != startedRevision
+                val filterStale = state.forFilter != startedFor || t.filter.viewDefiningKey() != startedFor
+                if (revisionStale || filterStale) return@upTab t
                 result.fold(
                     onSuccess = { histogram ->
                         t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor, startedRevision))
@@ -5987,7 +5991,7 @@ class AppState(
     fun videoRotationDegrees(tabId: String): Int {
         val manualDegrees = tab(tabId)?.attachedVideo?.rotationDegrees ?: return 0
         val sourceDegrees = videoControllers[tabId]?.sourceDisplayRotationDegrees ?: 0
-        return ((manualDegrees + sourceDegrees) % 360 + 360) % 360
+        return ((manualDegrees + sourceDegrees) % FULL_CIRCLE_DEGREES + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES
     }
 
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null

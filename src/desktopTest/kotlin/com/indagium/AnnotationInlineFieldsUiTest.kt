@@ -5,9 +5,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.v2.createComposeRule
@@ -122,7 +122,7 @@ class AnnotationInlineFieldsUiTest {
                 annotations = Annotations(
                     prefix = prefix(),
                     suffix = suffix(),
-                blocks = listOf(AnnBlock.Note("note", note())),
+                    blocks = listOf(AnnBlock.Note("note", note())),
                 ),
             )
             AnnotationPanel(

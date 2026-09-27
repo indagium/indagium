@@ -7,8 +7,8 @@ import com.indagium.model.MessageTemplate
 import com.indagium.model.MessageTemplateHistogram
 import com.indagium.model.TemplateGranularity
 import com.indagium.ui.AppState
-import com.indagium.ui.mkTab
 import com.indagium.ui.mkRmap
+import com.indagium.ui.mkTab
 import com.indagium.utils.viewDefiningKey
 import kotlin.test.Test
 import kotlin.test.assertEquals

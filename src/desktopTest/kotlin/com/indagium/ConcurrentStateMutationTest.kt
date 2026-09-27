@@ -167,14 +167,21 @@ class ConcurrentStateMutationTest {
             controlServerFactory = { s, p -> kotlinx.coroutines.delay(50); ControlServer(s, p).also { it.start() } },
         )
 
-        // Each "enable" gets its own freshly-obtained free port so real OS-level bind collisions
-        // (a different, pre-existing concern outside A-01) don't mask what's actually under test
-        // here: whether the generation-counter/@Volatile publish stay consistent when the shared
+        // Each "enable" gets its own free port so real OS-level bind collisions (a different,
+        // pre-existing concern outside A-01) don't mask what's actually under test here: whether
+        // the generation-counter/@Volatile publish stay consistent when the shared
         // controlServer/controlServerStartGeneration fields are toggled from many threads at once.
+        // Reserved up front by holding all 12 probe sockets open simultaneously (rather than each
+        // thread probing-then-closing its own during the race) so the OS cannot hand two different
+        // threads the same "free" port — a real, if rare, TOCTOU window that otherwise let two
+        // concurrent real Ktor binds collide and leak an async, uncaught BindException (via Ktor's
+        // own internal engine coroutine) into whatever test ran next.
+        val enableSockets = List(12) { java.net.ServerSocket(0) }
+        val enablePorts = enableSockets.map { it.localPort }
+        enableSockets.forEach { it.close() }
         runConcurrently(24) { i ->
             if (i % 2 == 0) {
-                val port = java.net.ServerSocket(0).use { it.localPort }
-                state.setMcpControlEnabled(true, port)
+                state.setMcpControlEnabled(true, enablePorts[i / 2])
             } else {
                 state.setMcpControlEnabled(false, state.settings.mcpControlPort)
             }
