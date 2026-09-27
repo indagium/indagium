@@ -86,6 +86,9 @@ internal const val MAX_MCP_DIAGRAM_SOURCE_CACHE_ENTRIES = 256
 internal const val DIAGRAM_SOURCE_CACHE_KEY_CHARS = 43
 private const val LRU_LOAD_FACTOR = 0.75f
 
+// Shared message for resolveMessageComposition's stale-snapshot guards below.
+private const val TAB_CLOSED_DURING_COMPOSITION_SCAN = "Log tab closed while its composition was being scanned"
+
 /** Fixed-size per-build cache; keys are digests, so arbitrary log text is never retained here. */
 internal class DiagramSourceLruCache<V>(private val maxEntries: Int) :
     LinkedHashMap<String, V>(maxEntries + 1, LRU_LOAD_FACTOR, true) {
@@ -2036,14 +2039,13 @@ internal class IndagiumToolOperations(
     // stale histogram.
     private fun resolveMessageComposition(t: LogTab): Pair<MessageTemplateHistogram, Boolean> {
         var snapshot = synchronized(appState.stateLock) {
-            appState.tab(t.id) ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
+            appState.tab(t.id) ?: error(TAB_CLOSED_DURING_COMPOSITION_SCAN)
         }
         repeat(3) {
             val wanted = snapshot.filter.viewDefiningKey()
             val revision = snapshot.messageCompositionRevision
             val current = synchronized(appState.stateLock) {
-                appState.tab(snapshot.id)
-                    ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
+                appState.tab(snapshot.id) ?: error(TAB_CLOSED_DURING_COMPOSITION_SCAN)
             }
             if (current.messageCompositionRevision != revision || current.filter.viewDefiningKey() != wanted) {
                 snapshot = current
@@ -2066,11 +2068,10 @@ internal class IndagiumToolOperations(
             }
             if (published) return histogram to false
             snapshot = synchronized(appState.stateLock) {
-                appState.tab(snapshot.id)
-                    ?: throw IllegalStateException("Log tab closed while its composition was being scanned")
+                appState.tab(snapshot.id) ?: error(TAB_CLOSED_DURING_COMPOSITION_SCAN)
             }
         }
-        throw IllegalStateException("Log rows changed during the composition scan; retry the request")
+        error("Log rows changed during the composition scan; retry the request")
     }
 
     private fun buildLogCompositionResponse(

@@ -1302,7 +1302,7 @@ private fun StringBuilder.appendDiagramNote(
             }
 
             AnnotationLogBlockStyle.JIRA_CLOUD -> {
-                appendLine("```${fenceLanguage}")
+                appendLine("```$fenceLanguage")
                 appendLine(diagram.source.trimEnd('\n'))
                 appendLine("```")
             }

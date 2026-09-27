@@ -16,9 +16,9 @@ import com.indagium.ui.annotationClipboardTransferable
 import com.indagium.ui.imageBytesFromTransferable
 import com.indagium.ui.maskWordForCopy
 import com.indagium.ui.mkTab
+import com.indagium.utils.annotationMarkdownToJiraWiki
 import com.indagium.utils.buildAnnotationsHtml
 import com.indagium.utils.buildMd
-import com.indagium.utils.annotationMarkdownToJiraWiki
 import java.awt.Image
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.UnsupportedFlavorException

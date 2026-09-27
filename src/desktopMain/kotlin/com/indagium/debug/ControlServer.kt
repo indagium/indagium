@@ -36,7 +36,10 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -248,6 +251,13 @@ class ControlServer(
     private val allowBrowserClients: Boolean = false,
 ) {
     private var engine: EmbeddedServer<*, *>? = null
+
+    // CIO binds the socket on its own server coroutine, separate from start()'s wait for the
+    // resolved connector. A busy port therefore fails twice: start() rethrows it (AppState turns
+    // that into mcpControlError), and the server coroutine fails with the same BindException.
+    // Without a handler in its context that second copy reaches the global uncaught-exception
+    // handler, where it is logged as a crash and, in tests, blamed on whichever test runs next.
+    private var serverScope: CoroutineScope? = null
     private var mcpServer: Server? = null
 
     // The normal MCP server is shared by manual clients. Account-agent panel runs instead receive
@@ -341,10 +351,17 @@ class ControlServer(
         }
     }
 
+    @Suppress("TooGenericExceptionCaught")
     fun start() {
         val mcp = buildMcpServer()
         mcpServer = mcp
-        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
+        val scope = CoroutineScope(
+            SupervisorJob() + CoroutineExceptionHandler { _, failure ->
+                AppLogger.warn("control-server", "Control server stopped: ${failure.message}", failure)
+            },
+        )
+        serverScope = scope
+        val server = scope.embeddedServer(CIO, host = "127.0.0.1", port = port) {
             // (SEC-1) Browser-based MCP inspectors need CORS with the MCP-specific session/version
             // headers — but installing it unconditionally let any origin a browser had open issue
             // cross-origin requests to this loopback port (the intercept below still authenticates
@@ -406,7 +423,16 @@ class ControlServer(
             reapStaleMcpSessions(mcp)
         }
         server.start(wait = false)
-        resolvedPort = runBlocking { server.engine.resolvedConnectors().first().port }
+        resolvedPort = try {
+            runBlocking { server.engine.resolvedConnectors().first().port }
+        } catch (failure: Exception) {
+            // CIO reports a failed bind here as a cancellation of the connector wait, not the
+            // BindException itself, so any failure tears the half-started server down.
+            runCatching { server.stop() }
+            scope.cancel()
+            serverScope = null
+            throw failure
+        }
         engine = server
     }
 
@@ -414,6 +440,8 @@ class ControlServer(
         mcpServer?.sessions?.keys?.forEach(appState::revokeExternalDeviceAiApproval)
         engine?.stop()
         engine = null
+        serverScope?.cancel()
+        serverScope = null
         mcpServer = null
         managedMcpServers.values.forEach { server ->
             server.sessions.values.forEach { session -> runCatching { runBlocking { session.close() } } }

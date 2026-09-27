@@ -7780,8 +7780,13 @@ class AppStateBehaviorTest {
         // a real port could plausibly complete network-stack setup.
         val state =
             AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
+        // A real free port, not literal 0: setMcpControlEnabled clamps its port argument to at
+        // least MIN_PORT (1) — unlike ControlServer's own constructor, which treats 0 as "let the
+        // OS pick" — so passing 0 here would make the real bind below target the privileged port 1
+        // and reliably fail with Permission Denied instead of exercising a normal bind.
+        val port = java.net.ServerSocket(0).use { it.localPort }
         val elapsedMs = kotlin.system.measureTimeMillis {
-            state.setMcpControlEnabled(true, 0)
+            state.setMcpControlEnabled(true, port)
         }
         assertTrue(elapsedMs < 500, "setMcpControlEnabled took ${elapsedMs}ms — looks synchronous again")
         waitUntil { state.settings.mcpControlEnabled }
@@ -7919,13 +7924,22 @@ class AppStateBehaviorTest {
     @Test
     fun disableBeforeSlowStartCompletesLeavesNoServerPublished() {
         val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
-        state.setMcpControlEnabled(true, 0)
+        // A real free port, not literal 0 — see mcpControlEnableReturnsImmediatelyWithoutBlockingCaller's
+        // comment: setMcpControlEnabled clamps 0 up to port 1. Because disable races the delayed
+        // factory above, cancelling the outer job never stops the already-dispatched real bind once
+        // it is past delay()'s own cancellation check; binding port 1 as a non-root user reliably
+        // throws Permission Denied from Ktor's own internal accept coroutine — a genuinely
+        // uncaught, unstructured exception that previously surfaced as a random later test's
+        // failure instead of this one's.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
         // The 300ms bind above is still in flight here — disable must invalidate it, not just no-op
         // against a still-null controlServer field.
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
         // Give the delayed start's completion handler a chance to run; if the race regressed, this
-        // is exactly the window where a stale server would get published.
-        Thread.sleep(600)
+        // is exactly the window where a stale server would get published. 5x the delay, not 2x:
+        // in the full desktopTest run (3000+ tests, real FFmpeg subprocess work interleaved) this
+        // margin has to survive real scheduling contention, not just a quiet, isolated run.
+        Thread.sleep(1500)
         assertEquals(null, state.controlServerToken(), "a disabled-before-bind-completed start must never publish")
     }
 
@@ -7934,7 +7948,10 @@ class AppStateBehaviorTest {
         val state = AppState(
             controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } },
         )
-        state.setMcpControlEnabled(true, 0) // first start, still binding
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above for why 0 would instead bind the privileged port 1 and leak an uncaught
+        // Permission Denied once the delayed factory's real bind actually runs.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort }) // first start, still binding
         val secondPort = java.net.ServerSocket(0).use { it.localPort }
         state.setMcpControlEnabled(true, secondPort) // supersedes the first before it finishes
 
@@ -7942,17 +7959,28 @@ class AppStateBehaviorTest {
         // Only the second (latest) generation's server may ever become visible; the first must have
         // been stopped by its own stale completion handler rather than left listening unreferenced.
         assertTrue(state.settings.mcpControlPort == secondPort || state.mcpControlError != null)
+        // The first generation's own delay(200) + real bind/stop keeps running in the background
+        // regardless of the supersede above (see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment). Without this margin the test can return while that stale bind/stop is still in
+        // flight, leaking it into whatever the next test does — a generous margin, not just 2x the
+        // delay, since this has to hold up under real scheduling contention in the full desktopTest
+        // run, not just a quiet, isolated one.
+        Thread.sleep(1200)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
     }
 
     @Test
     fun disableDuringSlowStartIsIdempotentAndSafe() {
         val state = AppState(controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } })
-        state.setMcpControlEnabled(true, 0)
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
         // Repeated disable while a start is in flight must not throw and must not crash-loop.
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
-        Thread.sleep(400)
+        // Generous margin, not just 2x the delay — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment on why this has to survive real scheduling contention in the full run.
+        Thread.sleep(1200)
         assertEquals(null, state.controlServerToken())
     }
 
@@ -7961,9 +7989,13 @@ class AppStateBehaviorTest {
         // Main.kt's onDispose calls stopControlServerForShutdown() unconditionally on window close
         // — it must invalidate a still-binding start exactly like an explicit disable does.
         val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
-        state.startControlServerForThisSessionOnly(0)
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above (startControlServerForThisSessionOnly clamps 0 the same way setMcpControlEnabled does).
+        state.startControlServerForThisSessionOnly(java.net.ServerSocket(0).use { it.localPort })
         state.stopControlServerForShutdown()
-        Thread.sleep(600)
+        // Generous margin, not just 2x the delay — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment on why this has to survive real scheduling contention in the full run.
+        Thread.sleep(1500)
         assertEquals(null, state.controlServerToken(), "shutdown must invalidate an in-flight start")
     }
 

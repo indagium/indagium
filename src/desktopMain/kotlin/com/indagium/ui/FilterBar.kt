@@ -465,7 +465,9 @@ internal fun regexFilterSummary(filter: Filter): String {
         else -> items.take(3).joinToString(", ") { it.take(24) } + ", +${items.size - 3}"
     }
     val rules = filter.messageRules.filter { it.enabled && it.mode == FilterMode.TAGS && it.pattern.isNotBlank() }
-    val ruleSummary = if (rules.isEmpty()) "none" else {
+    val ruleSummary = if (rules.isEmpty()) {
+        "none"
+    } else {
         val included = rules.count { it.include }
         val excluded = rules.size - included
         "+$included/−$excluded (${values(rules.map { it.pattern }.distinct())})"

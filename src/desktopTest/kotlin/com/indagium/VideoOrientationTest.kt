@@ -14,6 +14,11 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
+// Synthetic fixture constants for syntheticRotatedVideo() below — not a @Test function itself, so
+// detekt's MagicNumber ignoreAnnotated("Test") doesn't cover it; name them instead.
+private const val SYNTHETIC_VIDEO_BITRATE = 300_000
+private const val SYNTHETIC_VIDEO_DISPLAY_ROTATION_DEGREES = 90.0
+
 class VideoOrientationTest {
     @Test
     fun displayMatrixClockwiseRotationIsNormalizedAndRotateTagIsFallback() {
@@ -64,8 +69,8 @@ class VideoOrientationTest {
             format = "mp4"
             frameRate = 1.0
             videoCodec = AV_CODEC_ID_MPEG4
-            videoBitrate = 300_000
-            setDisplayRotation(90.0)
+            videoBitrate = SYNTHETIC_VIDEO_BITRATE
+            setDisplayRotation(SYNTHETIC_VIDEO_DISPLAY_ROTATION_DEGREES)
         }
         try {
             recorder.start()

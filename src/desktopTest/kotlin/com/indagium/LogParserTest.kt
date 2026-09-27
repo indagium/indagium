@@ -1,16 +1,16 @@
 package com.indagium
 
-import com.indagium.model.LogLevel
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
+import com.indagium.model.LogLevel
 import com.indagium.model.MessageRule
+import com.indagium.ui.contextualMessageRuleCandidates
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isLikelyTextStream
 import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseMillisOfDay
 import com.indagium.utils.passesFilter
-import com.indagium.ui.contextualMessageRuleCandidates
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import kotlin.io.path.createTempFile

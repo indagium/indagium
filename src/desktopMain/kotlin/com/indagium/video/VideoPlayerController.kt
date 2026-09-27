@@ -43,6 +43,11 @@ private const val MAX_WAIT_SLEEP_MS = 20L
 // cost of the wait loop that calls it.
 private const val CLOCK_PUBLISH_MIN_INTERVAL_NANOS = 16_000_000L
 
+// Display-matrix/rotate-tag rotations only ever come in quarter turns; used to snap a
+// near-quarter-turn angle and then normalize it into [0, 360) — see ffmpegDisplayRotationDegrees.
+private const val DEGREES_PER_QUARTER_TURN = 90.0
+private const val FULL_CIRCLE_DEGREES = 360
+
 // javacv/FFmpeg timestamps (Frame.timestamp, getLengthInTime, setTimestamp) are always
 // microseconds; every positionMs/durationMs field this controller exposes is milliseconds.
 private const val MICROS_PER_MS = 1_000L
@@ -762,9 +767,9 @@ internal fun ffmpegDisplayRotationDegrees(
 ): Int {
     val matrixAngle = displayMatrixCounterclockwiseDegrees?.takeIf { it.isFinite() && abs(it) >= 1.0 }
     val clockwise = if (matrixAngle != null) -matrixAngle else rotateMetadata?.toDoubleOrNull() ?: 0.0
-    val quarterTurn = (clockwise / 90.0).roundToInt() * 90
+    val quarterTurn = (clockwise / DEGREES_PER_QUARTER_TURN).roundToInt() * DEGREES_PER_QUARTER_TURN.toInt()
     if (abs(clockwise - quarterTurn) > 1.0) return 0
-    return ((quarterTurn % 360) + 360) % 360
+    return ((quarterTurn % FULL_CIRCLE_DEGREES) + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES
 }
 
 private fun detectDisplayRotation(grabber: FFmpegFrameGrabber): Int = ffmpegDisplayRotationDegrees(
