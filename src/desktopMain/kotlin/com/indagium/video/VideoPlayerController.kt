@@ -8,6 +8,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toComposeImageBitmap
 import com.indagium.debug.AppLogger
 import org.bytedeco.ffmpeg.avcodec.AVPacket
+import org.bytedeco.ffmpeg.global.avcodec.avcodec_find_decoder_by_name
 import org.bytedeco.ffmpeg.global.avutil
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
@@ -55,6 +56,28 @@ private const val MICROS_PER_MS = 1_000L
 // scanDurationMs converts an AVStream time_base (rational seconds per tick) to microseconds, not
 // milliseconds — kept distinct from MICROS_PER_MS so that conversion's intent reads standalone.
 private const val MICROS_PER_SECOND = 1_000_000L
+
+/**
+ * Bundled FFmpeg ships both its native `opus` decoder and `libopus`. Android's scrcpy Opus encoder
+ * emits a compact 3-byte DTX packet for silence; the native decoder logs a parse error for those
+ * packets, while libopus accepts them. Indagium's raw capture MKVs always store complete Opus
+ * packets as Matroska blocks, so prefer libopus and disable FFmpeg's redundant packet parser for
+ * that known source before JavaCV opens it. Other video files retain FFmpeg's normal parsing and
+ * codec selection.
+ */
+internal fun configureCaptureMkvOpusDecoder(grabber: FFmpegFrameGrabber, path: String) {
+    val normalized = path.replace('\\', '/')
+    if (!normalized.endsWith("/video/screen.mkv")) return
+    val decoder = avcodec_find_decoder_by_name("libopus")
+    if (decoder != null && !decoder.isNull) {
+        grabber.audioCodecName = "libopus"
+        // FFmpeg 8's native Opus parser rejects scrcpy's valid 3-byte DTX packet even though the
+        // libopus decoder handles it. Matroska carries one complete access unit per block, so the
+        // parser is unnecessary for this capture format and otherwise logs a false corruption
+        // warning while probing/decoding the stream.
+        grabber.setOption("fflags", "noparse")
+    }
+}
 
 // resolveScannedDurationMs's packet-count/frame-rate fallback (step 3) converts a packets-per-
 // second rate straight into milliseconds — no microseconds step involved — so this is deliberately
@@ -139,6 +162,24 @@ private const val HARD_MAX_QUEUED_VIDEO_FRAMES = 64
 // writes under steady playback) — so a queue that stops refilling here has enough audio already
 // buffered to survive the next run of video-only packets without the line underrunning.
 private const val AUDIO_READ_AHEAD_TARGET_US = 250_000L
+
+// The audio-priority STOP ceiling: once real audio (never the Long.MAX_VALUE "no audio to wait on"
+// sentinel — see shouldReadAhead's KDoc) is buffered at or past this, refill stops regardless of the
+// video queue's own state, even an empty one. Without this, a scrcpy capture's multi-second
+// video-only stretch (the screen is static, so scrcpy sends no video packets at all) made refill
+// keep grabbing all the way to the next video frame, writing every audio frame it passed into the
+// line/pendingAudioTail — once that carry-over outgrew AUDIO_CARRYOVER_MAX_SECONDS,
+// boundAudioCarryover silently dropped the OLDEST buffered PCM, which is exactly what made
+// everything after that gap play audibly ahead of the video it was recorded against.
+//
+// 500ms sits with margin on both sides: comfortably above AUDIO_READ_AHEAD_TARGET_US (250ms) so the
+// two thresholds can't thrash against each other (refill resumes once buffered audio drops back
+// under the target, long before it would need to stop again), and comfortably below
+// AUDIO_CARRYOVER_MAX_SECONDS (1s) so pendingAudioTail's cap stays a pure safety net that normal
+// playback never actually reaches — the tail only ever needs to hold the difference between this
+// ceiling and whatever the line itself is already holding (its own ~300ms target, via
+// AUDIO_BUFFER_TARGET_SECONDS/computeAudioLineBufferSizeBytes).
+private const val AUDIO_READ_AHEAD_STOP_US = 500_000L
 
 // Below this linear gain, treat the line as silent rather than computing a (very large negative)
 // decibel value from log10(0..epsilon) — MASTER_GAIN's own minimum already represents "silent" for
@@ -342,20 +383,31 @@ internal fun audioBufferedAheadUs(bufferedBytes: Long, sampleRate: Int, frameByt
  * own comment for its memory-safety sizing.
  *
  * [audioBufferedAheadUs] (see that function above for the bytes-to-microseconds conversion) is
- * expected to already read as "fully satisfied" — a value at or above [AUDIO_READ_AHEAD_TARGET_US],
- * in practice [Long.MAX_VALUE] — from the caller whenever audio isn't actually being consumed: no
- * audio stream, a line that failed to open, or `rate != 1x` muting `presentAudioFrame` (see that
- * function's KDoc). Without that, the audio term would read as permanently empty and this function
- * would never stop reading ahead for a video-only file or during a rate change — see
+ * expected to already read as [Long.MAX_VALUE] — from the caller whenever audio isn't actually being
+ * consumed: no audio stream, a line that failed to open, or `rate != 1x` muting `presentAudioFrame`
+ * (see that function's KDoc). Without that, the audio term would read as permanently empty and this
+ * function would never stop reading ahead for a video-only file or during a rate change — see
  * [FfmpegVideoPlayerController.currentAudioBufferedAheadUs] for where that substitution happens. This
- * function itself only ever compares against the target, so the video-only/muted cases fall straight
- * through to exactly the same soft video bound as before this change.
+ * sentinel is checked explicitly below (never merely "a very large number"), so the video-only/muted
+ * cases fall straight through to exactly the same soft video bound as before this change, regardless
+ * of where [AUDIO_READ_AHEAD_STOP_US] sits.
+ *
+ * Below [AUDIO_READ_AHEAD_TARGET_US], audio need overrides the video queue's own state entirely (the
+ * paragraph above) — refill keeps going even past the soft bound. At or above
+ * [AUDIO_READ_AHEAD_STOP_US] (never the sentinel), the reverse override applies: refill stops
+ * regardless of the video queue's own state, even an EMPTY one — seeing enough real audio already
+ * buffered is reason enough on its own; the next video frame is simply later in the file and gets
+ * grabbed as that audio drains (see [AUDIO_READ_AHEAD_STOP_US]'s own comment for why this exists —
+ * a scrcpy capture's video-only stretch used to make refill grab audio all the way to the next video
+ * frame, overflowing pendingAudioTail's carry-over and silently dropping old PCM). Between the two
+ * thresholds, neither override applies and the plain video-only soft bound below governs, exactly as
+ * it always has.
  *
  * See MAX_QUEUED_VIDEO_FRAMES/MAX_QUEUED_VIDEO_DURATION_US above for why the soft bound itself needs
- * both a count and a duration term. An empty queue with audio already fully buffered
- * (`queuedFrameCount == 0`, `queuedDurationAheadUs == 0`, `audioBufferedAheadUs >=
- * AUDIO_READ_AHEAD_TARGET_US`) always reads ahead at least once, which is what lets the very first
- * frame after play()/seek() ever get queued at all.
+ * both a count and a duration term. An empty queue with audio not yet at [AUDIO_READ_AHEAD_STOP_US]
+ * (`queuedFrameCount == 0`, `queuedDurationAheadUs == 0`) always reads ahead at least once, which is
+ * what lets the very first frame after play()/seek() ever get queued at all — audio can't already be
+ * buffered past the stop ceiling before any read-ahead has ever run.
  *
  * Pure and FFmpeg-free, like [shouldDropLateFrame], so the bound itself — not just its constants —
  * is unit testable without native video libraries or a real decode thread.
@@ -363,7 +415,44 @@ internal fun audioBufferedAheadUs(bufferedBytes: Long, sampleRate: Int, frameByt
 internal fun shouldReadAhead(queuedFrameCount: Int, queuedDurationAheadUs: Long, audioBufferedAheadUs: Long): Boolean {
     if (queuedFrameCount >= HARD_MAX_QUEUED_VIDEO_FRAMES) return false
     if (audioBufferedAheadUs < AUDIO_READ_AHEAD_TARGET_US) return true
+    if (audioBufferedAheadUs != Long.MAX_VALUE && audioBufferedAheadUs >= AUDIO_READ_AHEAD_STOP_US) return false
     return queuedFrameCount < MAX_QUEUED_VIDEO_FRAMES && queuedDurationAheadUs < MAX_QUEUED_VIDEO_DURATION_US
+}
+
+/**
+ * Whether [FfmpegVideoPlayerController.presentQueuedVideoFrame] finding the read-ahead queue empty
+ * with the grabber at clean end of stream ([grabberExhausted] && [videoQueueEmpty]) actually means
+ * playback is over. It doesn't, on its own: a scrcpy capture sends no video packets while the screen
+ * is static, so its audio track routinely outlasts the last video packet by up to a second or more
+ * — reporting stopped the instant video runs out cut that trailing audio short and stalled the
+ * slider before the container's own declared duration. Keep going (return `false`) whenever either
+ * is still true:
+ *  - [remainingAudioBufferedUs] is still positive: real decoded audio (the SourceDataLine's own
+ *    contents plus any not-yet-offered carry-over — see
+ *    [FfmpegVideoPlayerController.remainingAudioBufferedUs]) is still waiting to be heard.
+ *  - [clockUs] has not yet reached [durationUs]: the video-only-tail case — a file whose last video
+ *    frame (or, for a file with no audio stream at all, whose last frame period) arrived before the
+ *    container's own declared length — where the slider should still visibly reach the end rather
+ *    than stall early.
+ *
+ * `durationUs <= 0` (no known duration — see [VideoSeekReadiness]) treats the clock term as already
+ * satisfied rather than waiting forever for an upper bound that will never arrive.
+ *
+ * `grabberExhausted`/`videoQueueEmpty` are taken as plain booleans (not re-derived here) purely so
+ * this stays independent of the queue's own data structure — like [shouldReadAhead]/
+ * [shouldDropLateFrame] above — so the decision itself is unit testable without a real decode
+ * thread or audio device.
+ */
+internal fun shouldReportPlaybackStopped(
+    grabberExhausted: Boolean,
+    videoQueueEmpty: Boolean,
+    remainingAudioBufferedUs: Long,
+    clockUs: Long,
+    durationUs: Long,
+): Boolean {
+    if (!grabberExhausted || !videoQueueEmpty) return false
+    if (remainingAudioBufferedUs > 0L) return false
+    return durationUs <= 0L || clockUs >= durationUs
 }
 
 /** A lifecycle event the decode loop reacts to that might or might not make already-decoded state
@@ -600,6 +689,7 @@ internal fun scanDurationMs(path: String, isCancelled: () -> Boolean = { false }
 internal fun scanDecodedTimestampDurationMs(path: String, isCancelled: () -> Boolean = { false }): Long {
     if (isCancelled()) return 0L
     FFmpegFrameGrabber(path).use { grabber ->
+        configureCaptureMkvOpusDecoder(grabber, path)
         grabber.start()
         var latestTimestampUs = 0L
         while (!isCancelled()) {
@@ -1052,6 +1142,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
 
     override fun grabFrameAt(ms: Long): ByteArray? = runCatching {
         FFmpegFrameGrabber(path).use { g ->
+            configureCaptureMkvOpusDecoder(g, path)
             g.start()
             publishUiState { sourceRotationDegreesState = detectDisplayRotation(g) }
             g.setTimestamp((ms * MICROS_PER_MS).coerceAtLeast(0))
@@ -1163,9 +1254,22 @@ private class FfmpegVideoPlayerController(private val path: String) :
     private fun presentQueuedVideoFrame() {
         val head = peekVideoQueueHead()
         if (head == null) {
-            // Nothing queued. If the grabber has also hit end of stream, there is nothing left to
-            // ever produce another frame — only now is it correct to report playback as stopped.
-            if (grabberExhausted) reportPlaybackStopped()
+            // Nothing queued. If the grabber has also hit end of stream, there might still be
+            // trailing audio (or an as-yet-unreached declared duration) to wait out — see
+            // finishOrKeepPlayingAtEndOfStream/shouldReportPlaybackStopped.
+            if (grabberExhausted) {
+                finishOrKeepPlayingAtEndOfStream()
+            } else {
+                // Not exhausted — refillReadAheadQueue simply chose not to grab this pass, which
+                // now includes shouldReadAhead's audio-priority STOP (real audio already buffered
+                // past AUDIO_READ_AHEAD_STOP_US — see its KDoc): the next video frame is later in
+                // the file and gets grabbed once that audio has drained enough to need more. There is
+                // nothing to wait ON here (no queued frame's timestamp), so keep the slider moving
+                // with the real wall clock and poll again shortly instead of spinning this decodeStep
+                // in a tight loop with no sleep at all.
+                publishClockPosition(currentClockUs(), seekEpoch.get())
+                sleepQuietly(IDLE_POLL_MS)
+            }
             return
         }
         if (!isCurrentEpoch(head.epoch)) {
@@ -1206,6 +1310,48 @@ private class FfmpegVideoPlayerController(private val path: String) :
             // long ago by subsequent refill iterations.
             runCatching { frame.close() }
         }
+    }
+
+    /**
+     * Reached once the read-ahead queue has fully drained AND the grabber has hit clean end of
+     * stream. Rather than reporting stopped immediately (which is what cut a capture's trailing
+     * audio short and stalled the slider before the container's declared duration — see
+     * [shouldReportPlaybackStopped]'s KDoc), this keeps the last shown frame on screen (nothing
+     * here touches [currentFrameState]), keeps draining [audioLine]/[pendingAudioTail] normally,
+     * and keeps the clock (and therefore the slider) advancing via [publishPosition] on every poll
+     * until [shouldReportPlaybackStopped] agrees there is nothing left to wait for.
+     */
+    private fun finishOrKeepPlayingAtEndOfStream() {
+        audioLine?.let { flushPendingAudio(it) }
+        val durationUs = durationMs * MICROS_PER_MS
+        val clockUs = currentClockUs()
+        val stopped = shouldReportPlaybackStopped(
+            grabberExhausted = grabberExhausted,
+            videoQueueEmpty = true,
+            remainingAudioBufferedUs = remainingAudioBufferedUs(),
+            clockUs = clockUs,
+            durationUs = durationUs,
+        )
+        if (stopped) {
+            reportPlaybackStopped()
+            return
+        }
+        val publishUs = if (durationUs > 0L) clockUs.coerceAtMost(durationUs) else clockUs
+        publishPosition(publishUs, seekEpoch.get())
+        sleepQuietly(IDLE_POLL_MS)
+    }
+
+    /** How much decoded PCM is still waiting to be heard — the [SourceDataLine]'s own contents plus
+     *  [pendingAudioTail] — as microseconds, via [audioBufferedAheadUs]'s bytes-to-microseconds
+     *  conversion. Unlike [currentAudioBufferedAheadUs] (which reads "no audio to wait on" as
+     *  [Long.MAX_VALUE] so [shouldReadAhead]'s override never latches on forever), this reads that
+     *  same case as plain `0`: [shouldReportPlaybackStopped] wants "nothing left to wait for", not
+     *  "infinitely under-buffered". */
+    private fun remainingAudioBufferedUs(): Long {
+        if (!hasAudioStream) return 0L
+        val line = audioLine ?: return 0L
+        val bufferedBytes = (line.bufferSize - line.available()).toLong().coerceAtLeast(0L) + pendingAudioTail.size
+        return audioBufferedAheadUs(bufferedBytes, grabber.sampleRate, audioFrameBytes)
     }
 
     private fun reportPlaybackStopped() {
@@ -1292,6 +1438,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
             "openGrabber: starting grabber.start() for $path (controller=${System.identityHashCode(this)})",
         )
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
+        configureCaptureMkvOpusDecoder(grabber, path)
         grabber.start()
         AppLogger.info("video", "openGrabber: grabber.start() returned")
         // FFmpegFrameGrabber's image conversion does not apply the stream Display Matrix; it
@@ -1459,7 +1606,9 @@ private class FfmpegVideoPlayerController(private val path: String) :
             return
         }
         if (closed || !isCurrentEpoch(epoch)) return
-
+        // Always the grabber's own reused buffer (grabImageAtOrAfter never clones — see its KDoc),
+        // so there is nothing to close here, same as before that function grew a seek-into-the-tail
+        // fallback.
         val image = runCatching { converter.convert(frame) }.getOrNull() ?: return
         publishFrame(image, frame.timestamp, epoch)
     }
@@ -1560,10 +1709,76 @@ private class FfmpegVideoPlayerController(private val path: String) :
         }
     }
 
-    /** Grabs past a keyframe before the requested timestamp, so a seek cannot publish backwards. */
+    /**
+     * Grabs past a keyframe before the requested timestamp, so a seek cannot publish backwards.
+     * With no minimum (the very first preview, before any seek) this is a single cheap
+     * `grabImage()`, exactly as before.
+     *
+     * With a minimum, this walks the full interleaved stream via the general `grab()` — not the
+     * video-only `grabImage()` a plain video-only search would use — so any audio it passes AT OR
+     * AFTER [minimumTimestampUs] is written out via [presentAudioFrame] instead of being silently
+     * discarded. Audio strictly BEFORE [minimumTimestampUs] is still discarded (it belongs to a
+     * moment already behind the seek target, same as before). This fixes two things:
+     *  - A seek landing shortly before a video frame used to throw away every audio packet between
+     *    the two.
+     *  - A seek landing in the audio-only tail PAST the last video frame (a capture can keep
+     *    recording audio after its last video packet — see [shouldReportPlaybackStopped]'s KDoc)
+     *    used to discard that tail's audio entirely; now it gets written to the line so play can
+     *    continue instead of stopping immediately once the (nonexistent) next video frame never
+     *    arrives.
+     *
+     * Only the LAST decoded video frame's timestamp is remembered while searching — a plain `Long`,
+     * never a [Frame.clone]: cloning every skipped frame "just in case" was measurably expensive
+     * (scrcpy's keyframe intervals can be long, so an ordinary seek decodes many frames before
+     * reaching its target, each paying for a full-resolution native alloc+memcpy that got thrown
+     * away the very next iteration) for a case — the tail seek below — that almost never happens.
+     * If the stream reaches a clean end of stream before a qualifying video frame turns up (the
+     * tail case above), [recoverLastFrameAtEndOfStream] re-fetches that exact frame directly from
+     * the grabber instead — no clone needed, since the result is used and converted immediately,
+     * never queued past the next `grab()`. `null` still means "no decodable frame at all"
+     * (empty/corrupt source, or a tail seek before any video frame was ever decoded).
+     */
     private fun grabImageAtOrAfter(minimumTimestampUs: Long?, epoch: Long): Frame? {
+        if (minimumTimestampUs == null) return grabber.grabImage()
+        var lastVideoTimestampUs: Long? = null
+        while (isCurrentEpoch(epoch)) {
+            val frame = grabber.grab() ?: return recoverLastFrameAtEndOfStream(lastVideoTimestampUs)
+            when {
+                !frame.image.isNullOrEmpty() -> {
+                    if (frame.timestamp >= minimumTimestampUs) return frame
+                    lastVideoTimestampUs = frame.timestamp
+                }
+                !frame.samples.isNullOrEmpty() && frame.timestamp >= minimumTimestampUs -> presentAudioFrame(frame)
+                else -> Unit
+            }
+        }
+        return null
+    }
+
+    /**
+     * Called once [grabImageAtOrAfter]'s search hits a clean end of stream without ever finding a
+     * video frame at or after the seek target — the search already walked every packet up to true
+     * EOF, writing the tail's audio along the way (see that function's KDoc), so there is nothing
+     * left to grab: this unconditionally marks [grabberExhausted] `true` so the next
+     * [refillReadAheadQueue] does not grab again and re-read (and re-write) that same trailing audio
+     * a second time — [presentQueuedVideoFrame] finding both the queue empty and this flag true is
+     * exactly what routes to [finishOrKeepPlayingAtEndOfStream].
+     *
+     * Re-fetches [lastVideoTimestampUs]'s frame video-only (`setTimestamp` + `grabImage()`, the same
+     * two calls [applyPendingSeek] itself uses to position the grabber) rather than from a held
+     * clone — `grabImage()` never touches audio, so this cannot re-emit any of the tail audio the
+     * search already wrote. Returns null (no picture recoverable) when no video frame was ever seen
+     * before EOF, or when the re-seek itself fails.
+     */
+    private fun recoverLastFrameAtEndOfStream(lastVideoTimestampUs: Long?): Frame? {
+        grabberExhausted = true
+        if (lastVideoTimestampUs == null) return null
+        val reseeked = runCatching { grabber.setTimestamp(lastVideoTimestampUs) }
+            .onFailure { AppLogger.warn("video", "could not re-seek to the last decoded frame before end of stream", it) }
+            .isSuccess
+        if (!reseeked) return null
         var frame = grabber.grabImage()
-        while (frame != null && minimumTimestampUs != null && frame.timestamp < minimumTimestampUs && isCurrentEpoch(epoch)) {
+        while (frame != null && frame.timestamp < lastVideoTimestampUs) {
             frame = grabber.grabImage()
         }
         return frame

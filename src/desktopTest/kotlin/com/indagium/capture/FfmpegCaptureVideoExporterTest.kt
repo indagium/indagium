@@ -135,7 +135,7 @@ class FfmpegCaptureVideoExporterTest {
     // (or within one frame of) the request instead.
     @Test
     fun exactStartReencodesWhenThePrecedingKeyframeIsFarBeforeTheRequest() {
-        val source = syntheticCapture(gopSize = TEST_FRAME_COUNT, sparseKeyframes = true)
+        val source = syntheticCapture(gopSize = TEST_FRAME_COUNT, sparseKeyframes = true, withAudio = false)
         val before = sha256(source)
         val destination = tempFile("exact-start-clip", ".mkv")
         val requestedStartMs = 2_000L
@@ -178,6 +178,21 @@ class FfmpegCaptureVideoExporterTest {
         }
     }
 
+    @Test
+    fun audioCaptureUsesKeyframeRemuxInsteadOfAudioDroppingExactStartReencode() {
+        val source = syntheticCapture(gopSize = TEST_FRAME_COUNT, sparseKeyframes = true)
+        val destination = tempFile("audio-exact-start-clip", ".mkv")
+
+        FfmpegCaptureVideoExporter().export(source, destination, 2_000, 3_500)
+
+        FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            assertTrue(grabber.audioStream >= 0, "an exact-start audio capture must retain its audio stream")
+            assertEquals("mpeg4", grabber.videoCodecName, "audio-bearing snapshots stay on stream-copy remux")
+            assertEquals(AV_CODEC_ID_PCM_S16LE, grabber.audioCodec)
+        }
+    }
+
     // A gap within tolerance must still use the cheap, lossless keyframe-aligned remux — re-encoding
     // is strictly a fallback for when that isn't good enough, not the default path.
     @Test
@@ -206,9 +221,11 @@ class FfmpegCaptureVideoExporterTest {
     // review flagged: whether FFmpeg's seek is trustworthy on exactly this file shape at all.
     @Test
     fun exactStartSeeksNearTheKeyframeInsteadOfDecodingALongTrailerlessRecordingFromItsStart() {
-        val frameCount = 600
+        // A video-only fixture has fewer bytes than the older audio-bearing fixture. Keep extra
+        // trailing frames so stripping the Matroska index still leaves coverage through 58s.
+        val frameCount = 700
         val gopSize = 100
-        val complete = syntheticCapture(gopSize = gopSize, sparseKeyframes = true, frameCount = frameCount)
+        val complete = syntheticCapture(gopSize = gopSize, sparseKeyframes = true, frameCount = frameCount, withAudio = false)
         val bytes = complete.readBytes()
         val source = tempFile("long-trailerless-capture", ".mkv").apply {
             writeBytes(bytes.copyOf(bytes.size - TRAILER_STRIP_BYTES))
@@ -217,7 +234,7 @@ class FfmpegCaptureVideoExporterTest {
         var diagnostics: ReencodeDiagnostics? = null
         val exporter = FfmpegCaptureVideoExporter(reencodeDiagnosticsHook = { diagnostics = it })
 
-        // 600 frames @ 10fps = 60s total; gopSize=100 puts keyframes at 0/10/20/30/40/50s. Request
+        // 700 frames @ 10fps = 70s total; gopSize=100 puts keyframes at 0/10/20/30/40/50/60s. Request
         // starting at 55s — well past the 500ms exact-start tolerance from the 50s keyframe, and
         // deep enough into the file (frame 550 of 600) that decoding from 0 would be obvious in
         // framesReadBeforeStart.
@@ -304,19 +321,22 @@ class FfmpegCaptureVideoExporterTest {
         // static device screen and actually respecting gopSize as the sole keyframe interval.
         sparseKeyframes: Boolean = false,
         frameCount: Int = TEST_FRAME_COUNT,
+        withAudio: Boolean = true,
     ): File {
         val output = tempFile("synthetic-capture", ".mkv")
         val width = 64
         val height = 48
         val pixels = ByteBuffer.allocate(width * height * 3)
-        val recorder = FFmpegFrameRecorder(output, width, height, 1).apply {
+        val recorder = FFmpegFrameRecorder(output, width, height, if (withAudio) 1 else 0).apply {
             format = "matroska"
             frameRate = TEST_FRAME_RATE
             this.gopSize = gopSize
             videoCodec = AV_CODEC_ID_MPEG4
             videoBitrate = 300_000
-            sampleRate = TEST_SAMPLE_RATE
-            audioCodec = AV_CODEC_ID_PCM_S16LE
+            if (withAudio) {
+                sampleRate = TEST_SAMPLE_RATE
+                audioCodec = AV_CODEC_ID_PCM_S16LE
+            }
             setDisplayRotation(90.0)
             setVideoMetadata("capture-test", "orientation-and-audio")
             if (sparseKeyframes) setVideoOption("sc_threshold", "1000000000")
@@ -340,11 +360,13 @@ class FfmpegCaptureVideoExporterTest {
                 }
                 pixels.flip()
                 recorder.recordImage(width, height, 8, 3, width * 3, AV_PIX_FMT_BGR24, pixels)
-                val samples = ShortArray(TEST_SAMPLES_PER_FRAME) { sampleIndex ->
-                    val position = frameIndex * TEST_SAMPLES_PER_FRAME + sampleIndex
-                    (sin(position * 2.0 * Math.PI * 440.0 / TEST_SAMPLE_RATE) * Short.MAX_VALUE / 8).toInt().toShort()
+                if (withAudio) {
+                    val samples = ShortArray(TEST_SAMPLES_PER_FRAME) { sampleIndex ->
+                        val position = frameIndex * TEST_SAMPLES_PER_FRAME + sampleIndex
+                        (sin(position * 2.0 * Math.PI * 440.0 / TEST_SAMPLE_RATE) * Short.MAX_VALUE / 8).toInt().toShort()
+                    }
+                    recorder.recordSamples(TEST_SAMPLE_RATE, 1, ShortBuffer.wrap(samples))
                 }
-                recorder.recordSamples(TEST_SAMPLE_RATE, 1, ShortBuffer.wrap(samples))
             }
             recorder.stop()
         } finally {

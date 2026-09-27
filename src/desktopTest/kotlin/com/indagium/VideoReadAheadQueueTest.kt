@@ -26,11 +26,15 @@ import kotlin.test.assertTrue
  * (400_000L), HARD_MAX_QUEUED_VIDEO_FRAMES (64), AUDIO_READ_AHEAD_TARGET_US (250_000L), and
  * AUDIO_BUFFER_CLAMP_WARNING_RATIO (0.9), which are private to VideoPlayerController.kt.
  *
- * `audioBufferedAheadUs` far above [AUDIO_READ_AHEAD_TARGET_US] (250_000L) below stands in for the
- * caller-side "fully satisfied" sentinel ([Long.MAX_VALUE], used for no-audio-stream/muted — see
- * their own section) without depending on that exact constant.
+ * `audioBufferedAheadUs` above [AUDIO_READ_AHEAD_TARGET_US] (250_000L) but below the newer
+ * AUDIO_READ_AHEAD_STOP_US (500_000L — see its own section further down) below stands in for
+ * "satisfied enough that the soft video bound alone governs, but not so satisfied that the new
+ * audio-priority STOP overrides it" — the video-only-soft-bound tests in this section are meant to
+ * exercise ONLY that bound in isolation, so this sits deliberately between the two thresholds rather
+ * than using [Long.MAX_VALUE] (the real "no audio to wait on" sentinel, covered in its own section)
+ * or a value at/past the new stop ceiling (also covered in its own section).
  */
-private const val AUDIO_FULLY_SATISFIED_US = 1_000_000L
+private const val AUDIO_FULLY_SATISFIED_US = 300_000L
 
 class VideoReadAheadQueueTest {
     // ── queuedVideoDurationAheadUs ────────────────────────────────────
@@ -142,6 +146,41 @@ class VideoReadAheadQueueTest {
     fun theOverrideCanPushTheQueueWellPastTheSoftBoundButNeverPastTheHardCap() {
         assertTrue(shouldReadAhead(queuedFrameCount = 40, queuedDurationAheadUs = 2_000_000L, audioBufferedAheadUs = 100_000L))
         assertFalse(shouldReadAhead(queuedFrameCount = 64, queuedDurationAheadUs = 2_000_000L, audioBufferedAheadUs = 100_000L))
+    }
+
+    // ── shouldReadAhead: the audio-priority STOP (the second regression case — see
+    // AUDIO_READ_AHEAD_STOP_US's own comment) ─────────────────────────────────────────────────────
+
+    // The bug this override fixes: refill used to keep grabbing through a scrcpy capture's
+    // multi-second video-only gap (a static screen) as long as the video queue was empty/short,
+    // regardless of how much real audio it had already written — eventually overflowing
+    // pendingAudioTail's carry-over cap and silently dropping old PCM, which is what made later
+    // audio play ahead of its video. An EMPTY queue must now stop once real audio is buffered at or
+    // past the ceiling, not just read ahead unconditionally.
+    @Test
+    fun emptyQueueStopsReadingAheadOnceRealAudioIsBufferedAtOrPastTheStopCeiling() {
+        assertFalse(shouldReadAhead(queuedFrameCount = 0, queuedDurationAheadUs = 0L, audioBufferedAheadUs = 500_000L))
+        assertFalse(shouldReadAhead(queuedFrameCount = 0, queuedDurationAheadUs = 0L, audioBufferedAheadUs = 900_000L))
+    }
+
+    @Test
+    fun emptyQueueStillReadsAheadWhileRealAudioIsJustBelowTheStopCeiling() {
+        assertTrue(shouldReadAhead(queuedFrameCount = 0, queuedDurationAheadUs = 0L, audioBufferedAheadUs = 499_999L))
+    }
+
+    // The override applies regardless of the video queue's own state, not only when it's empty —
+    // audio already comfortably ahead is reason enough on its own to stop.
+    @Test
+    fun theStopCeilingAlsoOverridesAPartiallyFilledQueueNotJustAnEmptyOne() {
+        assertFalse(shouldReadAhead(queuedFrameCount = 3, queuedDurationAheadUs = 50_000L, audioBufferedAheadUs = 600_000L))
+    }
+
+    // Long.MAX_VALUE means "no audio to wait on" (no stream, or muted by rate != 1x) — the new stop
+    // must never trigger for it even though it is, numerically, far past the ceiling: a video-only
+    // or rate-muted file must keep reading ahead exactly as before this change.
+    @Test
+    fun theStopCeilingNeverAppliesToTheFullySatisfiedSentinelDespiteBeingNumericallyPastIt() {
+        assertTrue(shouldReadAhead(queuedFrameCount = 0, queuedDurationAheadUs = 0L, audioBufferedAheadUs = Long.MAX_VALUE))
     }
 
     // ── audioBufferedAheadUs: the bytes-to-microseconds conversion ───────────────────────────────

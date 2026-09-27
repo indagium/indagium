@@ -196,7 +196,7 @@ internal fun CaptureLauncherContent(
                 onReclaimFocus = onReclaimFocus,
             )
         }
-        CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft)
+        CaptureBeforeStartRow(state = state, launcherTabId = launcherTabId, draft = draft, onReclaimFocus = onReclaimFocus)
         AppButton(
             "Start capture",
             { selectedDevice?.let { state.startCaptureTab(it) } },
@@ -204,9 +204,12 @@ internal fun CaptureLauncherContent(
             enabled = selectedDevice?.available == true && state.liveCaptureTabId == null && !state.captureStartInProgress,
             modifier = Modifier.fillMaxWidth(),
         )
-        val unfinishedCount = service.sessions.count { it.status != CaptureStatus.RECORDING }
-        LauncherPanel("Unfinished sessions · $unfinishedCount") {
-            UnfinishedSessionsSection(state = state, service = service)
+        // The header and its deferred content lambda must close over the same snapshot. If only the
+        // header observes service.sessions, Compose can recompose the count while skipping the
+        // stable content lambda and leave an empty-state body on screen.
+        val unfinishedSessions = service.sessions.filter { it.status != CaptureStatus.RECORDING }
+        UnfinishedCaptureSessionsPanel(unfinishedSessions) { retained ->
+            UnfinishedSessionsSection(state = state, retained = retained)
         }
     }
 }
@@ -274,9 +277,14 @@ private fun CaptureDeviceStatePill(device: CaptureDevice) {
  * would otherwise do if placed directly in a [Row]). Buffer mode and its custom-buffer picker stay
  * stacked below, since they don't fit the same one-line treatment. */
 @Composable
-private fun CaptureBeforeStartRow(state: AppState, launcherTabId: String, draft: CaptureSettings) {
+private fun CaptureBeforeStartRow(
+    state: AppState,
+    launcherTabId: String,
+    draft: CaptureSettings,
+    onReclaimFocus: () -> Unit,
+) {
     val edit: CaptureSettingsEdit = { transform -> state.updateCaptureLaunchSettings(launcherTabId, transform) }
-    LauncherPanel("Before start") { CaptureStartOptions(draft, edit) }
+    LauncherPanel("Before start") { CaptureStartOptions(draft, onReclaimFocus, edit) }
 }
 
 /** Fixes the inverted custom-buffer toggle (was: ticking an unticked buffer removed it, a no-op,
@@ -302,6 +310,18 @@ private fun LauncherPanel(header: @Composable () -> Unit, content: @Composable (
     ) {
         header()
         content()
+    }
+}
+
+/** Shared panel seam: keep the displayed count and deferred body tied to the same retained-list
+ * snapshot so Compose cannot update only the header while skipping a stable body lambda. */
+@Composable
+internal fun UnfinishedCaptureSessionsPanel(
+    retained: List<CaptureSession>,
+    content: @Composable (List<CaptureSession>) -> Unit,
+) {
+    LauncherPanel("Unfinished sessions · ${retained.size}") {
+        content(retained)
     }
 }
 
@@ -573,14 +593,13 @@ private fun DeviceLogDropdownItem(label: String, active: Boolean, onClick: () ->
  * retained-session list changes (a session can finish exporting, or be discarded from another
  * surface, out from under an open selection). */
 @Composable
-private fun UnfinishedSessionsSection(state: AppState, service: CaptureService) {
+internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSession>) {
     var discardId by remember { mutableStateOf<String?>(null) }
     var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
     var confirmDeleteSelected by remember { mutableStateOf(false) }
     var deleteSelectedError by remember { mutableStateOf<String?>(null) }
 
     state.captureExportError?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
-    val retained = service.sessions.filter { it.status != CaptureStatus.RECORDING }
     val retainedIds = retained.map { it.id }.toSet()
     LaunchedEffect(retainedIds) { selectedIds = selectedIds.intersect(retainedIds) }
 

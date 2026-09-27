@@ -18,6 +18,7 @@ import org.bytedeco.ffmpeg.global.avutil.av_channel_layout_default
 import org.bytedeco.ffmpeg.global.avutil.av_frame_alloc
 import org.bytedeco.ffmpeg.global.avutil.av_frame_free
 import org.bytedeco.ffmpeg.global.avutil.av_frame_get_buffer
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -34,6 +35,26 @@ import kotlin.math.sin
  * this FFmpeg build has no usable Opus encoder at all, per this feature's task doc.
  */
 class OpusPcmDecoderTest {
+    @Test
+    fun decodesScrcpySilencePacketWithDeviceOpusHead() {
+        // Android's Opus encoder emits this compact DTX/silence access unit while its input is
+        // silent. It appeared repeatedly in the user's mic-off capture; keep it as a packet-level
+        // regression so the live decoder handles it the same way as ordinary encoded speech.
+        val opusHead = byteArrayOf(
+            0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64, 0x01, 0x02,
+            0x38, 0x01, 0x80.toByte(), 0xbb.toByte(), 0x00, 0x00, 0x00, 0x00, 0x00,
+        )
+        val silencePacket = byteArrayOf(0xfc.toByte(), 0xff.toByte(), 0xfe.toByte())
+        val decoder = OpusPcmDecoder(onDiagnostic = {})
+        try {
+            decoder.configure(opusHead)
+            val decoded = decoder.decode(silencePacket)
+            assertNotNull("Android Opus DTX packet should decode instead of being treated as corrupt", decoded)
+        } finally {
+            decoder.close()
+        }
+    }
+
     @Test
     fun decodesASyntheticOpusStreamBackIntoNonSilentPcm() {
         val encoded = encodeTone()

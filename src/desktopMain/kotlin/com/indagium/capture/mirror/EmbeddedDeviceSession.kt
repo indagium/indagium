@@ -2,7 +2,13 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.capture.DesktopMicrophoneCapture
+import com.indagium.capture.DeviceAudioContinuityClock
+import com.indagium.capture.MICROPHONE_OFF_ID
+import com.indagium.capture.MicrophonePermissionDeniedException
 import com.indagium.capture.StreamingMkvWriter
+import com.indagium.capture.TimelineOpusAudio
+import com.indagium.capture.microphoneFailureIndicatesPermissionDenied
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
@@ -38,6 +44,7 @@ internal class EmbeddedDeviceSession(
     // packet bytes a unit test writes. See EmbeddedDeviceSessionTest.
     private val onVideoPacketWrittenHook: ((ptsUs: Long, keyFrame: Boolean) -> Unit)? = null,
     private val onAudioPacketWrittenHook: ((ptsUs: Long) -> Unit)? = null,
+    private val microphoneDeviceId: String = MICROPHONE_OFF_ID,
 ) : Closeable {
     private val lock = Any()
     private val generation = AtomicLong(0)
@@ -77,6 +84,20 @@ internal class EmbeddedDeviceSession(
     private var pendingWidth = 0
     private var pendingHeight = 0
     private var audioStarted = false
+    private val videoAnchorElapsedMs = AtomicLong(NO_VIDEO_ANCHOR)
+
+    @Volatile private var mixedAudio: TimelineOpusAudio? = null
+
+    @Volatile private var microphoneCapture: DesktopMicrophoneCapture? = null
+    private var deviceAudioDecoder: OpusPcmDecoder? = null
+
+    // Smooths scrcpy's own jittery per-packet audio pts into sample-count-continuous chunk starts
+    // before they reach the mixer — see DeviceAudioContinuityClock's KDoc for why the click this
+    // fixes happened and why it isn't just MonotonicMicrophoneSampleClock reused. Only used on the
+    // mixed (microphone + device audio) path; reset alongside deviceAudioDecoder whenever a fresh
+    // audio config arrives (pumpAudioPackets), since that decoder/stream restart has no sample-count
+    // relationship to whatever this clock was tracking before.
+    private val deviceAudioContinuity = DeviceAudioContinuityClock(OPUS_SAMPLE_RATE_HZ)
 
     /** The most recent video SPS/PPS config bytes seen — replayed to a decoder that
      * [attachDecoder]es after the original config packet already went by. See that function's doc. */
@@ -115,6 +136,9 @@ internal class EmbeddedDeviceSession(
      * here would risk the same cross-object deadlock that field's doc describes. */
     fun hasAudioStream(): Boolean = audioRequestedFlag
 
+    /** Adds mirror decode/presentation status to the active capture diagnostics drawer. */
+    fun reportMirrorDiagnostic(message: String) = onDiagnostic("Embedded mirror: $message")
+
     /**
      * Attaches a live audio player to this session's own audio stream. At most one is attached at a
      * time; attaching a new one detaches and closes any previous one first. Safe to call whether or
@@ -149,6 +173,7 @@ internal class EmbeddedDeviceSession(
         // CONNECTING publish ran, if both raced inside one lock scope.
         publishConnectionSnapshot(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
         audioRequestedFlag = options.audio
+        startMicrophoneIfRequested()
         synchronized(lock) {
             stopping = false
             val runId = generation.incrementAndGet()
@@ -174,6 +199,12 @@ internal class EmbeddedDeviceSession(
         if (threadToJoin !== Thread.currentThread()) threadToJoin?.join(STOP_JOIN_MS)
         detachDecoder()
         detachLiveAudio()
+        runCatching { microphoneCapture?.close() }
+        microphoneCapture = null
+        runCatching { mixedAudio?.close() }
+        mixedAudio = null
+        runCatching { deviceAudioDecoder?.close() }
+        deviceAudioDecoder = null
     }
 
     /**
@@ -528,7 +559,7 @@ internal class EmbeddedDeviceSession(
      * config, or a Disabled/Error outcome) before deciding.
      */
     private fun startMuxerCoordinatingWithAudio(videoExtradata: ByteArray, audioRequested: Boolean) {
-        if (audioRequested) {
+        if (audioRequested && mixedAudio == null) {
             val deadlineNanos = System.nanoTime() + AUDIO_CONFIG_GRACE_MS * NANOS_PER_MILLI
             while (System.nanoTime() < deadlineNanos && synchronized(lock) { !audioResolved && !muxerStarted }) {
                 Thread.sleep(AUDIO_CONFIG_POLL_MS)
@@ -538,24 +569,41 @@ internal class EmbeddedDeviceSession(
         // the deadlock this class was actually caught in) — compute what to report under the lock,
         // then fire it after releasing.
         var diagnosticToReport: String? = null
+        var pipelineToClose: TimelineOpusAudio? = null
+        var captureToClose: DesktopMicrophoneCapture? = null
         synchronized(lock) {
             if (muxerStarted) return
             muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), videoExtradata)
             muxerStarted = true
-            val audioExtradata = pendingAudioExtradata
-            when {
-                !audioRequested -> Unit
-                audioExtradata != null -> {
-                    val result = runCatching { muxer.addAudio(OPUS_SAMPLE_RATE_HZ, OPUS_CHANNELS, audioExtradata) }
-                    audioStarted = true
-                    result.onFailure { failure ->
-                        diagnosticToReport = "Embedded recording: could not add audio track (${failure.message}); recording video only."
+            val mixed = mixedAudio
+            if (mixed != null) {
+                runCatching { mixed.installTrack() }
+                    .onSuccess { audioStarted = true }
+                    .onFailure { failure ->
+                        diagnosticToReport = "Microphone audio track could not be added (${failure.message}); video and log capture continue."
+                        mixedAudio = null
+                        pipelineToClose = mixed
+                        captureToClose = microphoneCapture
+                        microphoneCapture = null
                     }
+            } else {
+                val audioExtradata = pendingAudioExtradata
+                when {
+                    !audioRequested -> Unit
+                    audioExtradata != null -> {
+                        val result = runCatching { muxer.addAudio(OPUS_SAMPLE_RATE_HZ, OPUS_CHANNELS, audioExtradata) }
+                        audioStarted = true
+                        result.onFailure { failure ->
+                            diagnosticToReport = "Embedded recording: could not add audio track (${failure.message}); recording video only."
+                        }
+                    }
+                    else -> diagnosticToReport =
+                        "Embedded recording: audio config had not arrived when recording started; recording video only."
                 }
-                else -> diagnosticToReport =
-                    "Embedded recording: audio config had not arrived when recording started; recording video only."
             }
         }
+        runCatching { captureToClose?.close() }
+        runCatching { pipelineToClose?.close() }
         diagnosticToReport?.let(onDiagnostic)
     }
 
@@ -573,17 +621,38 @@ internal class EmbeddedDeviceSession(
             }
             (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
         }
-        if (shouldReportVideoStart) onVideoStartElapsedMs(elapsedMillis())
+        if (shouldReportVideoStart) {
+            val elapsed = elapsedMillis()
+            videoAnchorElapsedMs.compareAndSet(NO_VIDEO_ANCHOR, elapsed)
+            onVideoStartElapsedMs(elapsed)
+        }
         val payload = if (event.keyFrame && pendingConfig != null) pendingConfig + event.data else event.data
         if (!muxerStarted) {
             // A device that never emits a leading config packet (shouldn't happen for H.264, but
             // don't silently drop video if it does) starts the muxer with empty extradata.
+            var diagnosticToReport: String? = null
+            var pipelineToClose: TimelineOpusAudio? = null
+            var captureToClose: DesktopMicrophoneCapture? = null
             synchronized(lock) {
                 if (!muxerStarted) {
                     muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), ByteArray(0))
                     muxerStarted = true
+                    mixedAudio?.let { mixed ->
+                        runCatching { mixed.installTrack() }
+                            .onSuccess { audioStarted = true }
+                            .onFailure { failure ->
+                                diagnosticToReport = "Microphone audio track could not be added (${failure.message}); video and log capture continue."
+                                mixedAudio = null
+                                pipelineToClose = mixed
+                                captureToClose = microphoneCapture
+                                microphoneCapture = null
+                            }
+                    }
                 }
             }
+            runCatching { captureToClose?.close() }
+            runCatching { pipelineToClose?.close() }
+            diagnosticToReport?.let(onDiagnostic)
         }
         muxer.writeVideoPacket(outputPts, event.keyFrame, payload)
         synchronized(lock) { lastOutputPtsUs = maxOf(lastOutputPtsUs, outputPts) }
@@ -656,6 +725,17 @@ internal class EmbeddedDeviceSession(
                     configPending = event.data
                     resolveAudio(event.data) // unblocks startMuxerCoordinatingWithAudio's wait, if still waiting
                     synchronized(lock) { lastAudioConfigBytes = event.data }
+                    if (mixedAudio != null) {
+                        runCatching {
+                            (deviceAudioDecoder ?: OpusPcmDecoder(onDiagnostic).also { deviceAudioDecoder = it })
+                                .configure(event.data)
+                        }.onFailure { failure ->
+                            onDiagnostic("Android audio could not be decoded for mixing (${failure.message}); microphone capture continues.")
+                        }
+                        // A fresh config means a fresh decoder/stream — see the field's own comment
+                        // for why the continuity clock's running expectation must not survive it.
+                        deviceAudioContinuity.reset()
+                    }
                     feedLiveAudio { it.onAudioConfig(event.data) }
                 }
                 else -> {
@@ -684,6 +764,21 @@ internal class EmbeddedDeviceSession(
      * stream has a config/extradata to start with; returns whether the audio stream is now started. */
     private fun writeAudioFrame(event: ScrcpyStreamEvent.Packet, configPending: ByteArray?, alreadyAdded: Boolean): Boolean {
         val anchor = synchronized(lock) { firstAnchorPtsUs } ?: return alreadyAdded // drop until video anchors the timeline
+        val mixed = mixedAudio
+        if (mixed != null) {
+            val outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
+            deviceAudioDecoder?.decode(event.data)?.let { pcm ->
+                if (pcm.isEmpty()) return@let
+                // Device pts jitter (AudioRecord timestamps) a few ms per 20ms packet; offering that
+                // raw to the mixer either sums the jittered overlap or leaves a tiny silent gap —
+                // either way, a click on every jittered boundary. Give it sample-count continuity
+                // first, exactly like the microphone path already has — see
+                // DeviceAudioContinuityClock's own KDoc.
+                val continuousPts = deviceAudioContinuity.continuousStartUs(outputPts, pcm.size / OPUS_CHANNELS)
+                mixed.offerDevice(continuousPts, pcm)
+            }
+            return true
+        }
         val started = alreadyAdded || (configPending?.let { startAudioStream(it); true } ?: false)
         if (!started) return false
         val outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
@@ -724,6 +819,51 @@ internal class EmbeddedDeviceSession(
         )
     }
 
+    /** Starts the optional host microphone before the Android stream so device permissions or a
+     * missing input can be reported without interrupting independent log/video capture. */
+    private fun startMicrophoneIfRequested() {
+        if (microphoneDeviceId == MICROPHONE_OFF_ID || mixedAudio != null || microphoneCapture != null) return
+        val pipeline = try {
+            TimelineOpusAudio(
+                muxer = muxer,
+                elapsedMillis = elapsedMillis,
+                videoAnchorElapsedMs = { videoAnchorElapsedMs.get().takeIf { it != NO_VIDEO_ANCHOR } },
+                onDiagnostic = onDiagnostic,
+            )
+        } catch (failure: Throwable) {
+            reportMicrophoneFailure(failure)
+            return
+        }
+        try {
+            val capture = DesktopMicrophoneCapture.open(
+                deviceId = microphoneDeviceId,
+                elapsedMillis = elapsedMillis,
+                onPcm = pipeline::offerMicrophone,
+                onFailure = ::reportMicrophoneFailure,
+                onDiagnostic = onDiagnostic,
+            )
+            mixedAudio = pipeline
+            microphoneCapture = capture
+        } catch (failure: Throwable) {
+            runCatching { pipeline.close() }
+            reportMicrophoneFailure(failure)
+        }
+    }
+
+    private fun reportMicrophoneFailure(failure: Throwable) {
+        val os = System.getProperty("os.name").lowercase()
+        val isPermissionFailure = microphoneFailureIndicatesPermissionDenied(failure)
+        val permissionHint = if (!isPermissionFailure) null else when {
+            failure is MicrophonePermissionDeniedException || os.contains("mac") ->
+                "Check System Settings → Privacy & Security → Microphone and allow Indagium."
+            os.contains("win") -> "Check Windows Settings → Privacy & security → Microphone and allow desktop apps."
+            os.contains("linux") -> "Check that PulseAudio/PipeWire exposes the microphone source to this app."
+            else -> "Check the operating system microphone privacy settings."
+        }
+        val guidance = permissionHint?.let { " $it" }.orEmpty()
+        onDiagnostic("Microphone capture unavailable: ${failure.message ?: failure::class.simpleName}.$guidance Video and log capture continue.")
+    }
+
     private fun sleepBeforeReconnect(runId: Long): Boolean = try {
         Thread.sleep(reconnectDelay.toMillis().coerceAtLeast(0))
         isCurrent(runId)
@@ -740,6 +880,7 @@ internal class EmbeddedDeviceSession(
         const val MICROS_PER_MILLI = 1_000L
         const val OPUS_SAMPLE_RATE_HZ = 48_000
         const val OPUS_CHANNELS = 2
+        const val NO_VIDEO_ANCHOR = Long.MIN_VALUE
 
         // Android's audio MediaCodec setup (AudioEncoder.encode()) goes through an extra async
         // callback-registration round trip that video's SurfaceEncoder doesn't, so audio's config

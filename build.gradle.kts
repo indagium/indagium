@@ -151,6 +151,51 @@ val compileMacMirrorNative by tasks.registering(Exec::class) {
     }
 }
 
+// Linux mirror decode stays in the FFmpeg version already bundled by JavaCPP. The JNI bridge does
+// not link to FFmpeg; it imports AVVAAPIDeviceContext from the pinned public 8.0.1 header, exports
+// the VA surface as DRM PRIME, and presents it through EGL without a CPU pixel transfer.
+val compileLinuxMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isLinuxHost }
+    val output = generatedNativeResourcesDir.get().file("native/linux/libindagium_mirror.so").asFile
+    inputs.files("native/linux/indagium_mirror.cpp", "native/linux/include/libavutil/hwcontext_vaapi.h")
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "c++", "-std=c++17", "-fPIC", "-shared",
+            "-I${file("native/linux/include").absolutePath}",
+            "-I$javaHome/include", "-I$javaHome/include/linux",
+            "-L$javaHome/lib", "-L$javaHome/lib/server", "-Wl,-rpath,$javaHome/lib",
+            "native/linux/indagium_mirror.cpp", "-o", output.absolutePath,
+            "-ljawt", "-lEGL", "-lGLESv2", "-lX11", "-lva",
+        )
+    }
+}
+
+// Windows uses the bundled FFmpeg D3D11VA decoder and a small D3D11 video-processor swapchain
+// presenter. The Visual Studio C++ tools and Windows SDK on windows-latest provide the headers and
+// import libraries; no native runtime dependency is added to the MSI.
+val compileWindowsMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isWindowsHost }
+    val output = generatedNativeResourcesDir.get().file("native/windows/indagium_mirror.dll").asFile
+    inputs.files("native/windows/indagium_mirror.cpp", "scripts/compile-windows-mirror.cmd")
+    outputs.file(output)
+    doFirst {
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        val script = file("scripts/compile-windows-mirror.cmd")
+        val source = file("native/windows/indagium_mirror.cpp")
+        commandLine(
+            "cmd.exe", "/d", "/c",
+            "\"${script.absolutePath}\" \"${javaHome.absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
+        )
+    }
+}
+
 // Focused host-native checks for the custom Annex-B parser and VideoToolbox session lifecycle.
 // These exercise the exact implementation compiled into the packaged dylib, including parameter
 // set reconfiguration and teardown, rather than a Kotlin model of that code.
@@ -398,7 +443,7 @@ compose.desktop {
                 infoPlist {
                     extraKeysRawXml = """
                         <key>NSMicrophoneUsageDescription</key>
-                        <string>Indagium uses the microphone only to turn your AI question into local text on this device.</string>
+                        <string>Indagium uses the microphone to record audio with a device capture or to turn your AI question into local text on this device.</string>
                         <key>NSSpeechRecognitionUsageDescription</key>
                         <string>Indagium uses Apple Speech only to turn your recorded AI question into text on this device.</string>
                     """.trimIndent()
@@ -428,6 +473,8 @@ tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.confi
         dependsOn(compileAppleSpeechNative)
         dependsOn(compileMacMirrorNative)
     }
+    if (isLinuxHost) dependsOn(compileLinuxMirrorNative)
+    if (isWindowsHost) dependsOn(compileWindowsMirrorNative)
 }
 
 // jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's

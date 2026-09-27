@@ -94,7 +94,13 @@ data class CaptureSettings(
     /** 0-100 volume applied to the live audio player above, appended last matching [playAudioLive].
      *  Default 80 rather than 100 so turning this on for the first time isn't jarringly loud. */
     val liveAudioVolume: Int = 80,
+    /** Optional host microphone input. [MICROPHONE_OFF_ID] disables it, [MICROPHONE_DEFAULT_ID]
+     * uses the operating system default, and any other value is a stable mixer identity. */
+    val microphoneDeviceId: String = MICROPHONE_OFF_ID,
 )
+
+const val MICROPHONE_OFF_ID = "off"
+const val MICROPHONE_DEFAULT_ID = "system-default"
 
 /** The active display choice after applying the pre-choice `mirror` compatibility switch. */
 val CaptureSettings.effectiveMirrorMode: CaptureMirrorMode

@@ -31,6 +31,20 @@ class CaptureStripTest {
     }
 
     @Test
+    fun microphoneFailureIsSelectedForTheVisibleCaptureWarning() {
+        assertEquals(
+            "Microphone capture unavailable: permission denied. Video and log capture continue.",
+            latestMicrophoneCaptureWarning(
+                listOf(
+                    "Embedded recording: Android audio could not be decoded; microphone capture continues.",
+                    "Microphone capture unavailable: permission denied. Video and log capture continue.",
+                ),
+            ),
+        )
+        assertNull(latestMicrophoneCaptureWarning(listOf("Audio mixer dropped late samples.")))
+    }
+
+    @Test
     fun videoStatusDistinguishesRecordingConfiguredAndDisabled() {
         assertEquals("Video off", captureVideoStatus(RecorderSnapshot()))
         val session = CaptureSession(
