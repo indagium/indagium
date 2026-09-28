@@ -431,9 +431,13 @@ class EmbeddedMirrorTest {
             assetResolver = resolver,
             localRoot = root,
             socketConnector = { _, port -> TestSocket(port).also(sockets::add) },
+            scidGenerator = { 0x1a2b3c },
         )
         try {
             val connection = transport.open("serial", MirrorStreamOptions())
+            // A bare `localabstract:scrcpy` collides with host scrcpy 1.x's hard-coded tunnel name.
+            assertTrue(runner.runSpecs.any { it.command.takeLast(2) == listOf("tcp:0", "localabstract:scrcpy_001a2b3c") })
+            assertTrue(runner.serverSpec.command.contains("scid=001a2b3c"))
             assertEquals(2, sockets.size)
             assertEquals(27_183, sockets[0].requestedPort)
             assertEquals(27_183, sockets[1].requestedPort)

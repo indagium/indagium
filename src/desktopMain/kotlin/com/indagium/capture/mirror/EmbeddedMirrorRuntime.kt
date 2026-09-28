@@ -24,6 +24,7 @@ import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
+import kotlin.random.Random
 
 internal enum class EmbeddedMirrorState { DISCONNECTED, CONNECTING, LIVE, RECONNECTING, FAILED }
 
@@ -535,6 +536,8 @@ internal class AdbScrcpyTransport(
     private val retryDelay: Duration = Duration.ofMillis(SOCKET_RETRY_DELAY_MS),
     private val serverStartupGrace: Duration = Duration.ofMillis(SERVER_STARTUP_GRACE_MS),
     private val assetIdGenerator: () -> String = { UUID.randomUUID().toString().replace("-", "") },
+    // scrcpy-server's session id: 31 non-negative bits, sent as 8 hex digits.
+    private val scidGenerator: () -> Int = { Random.nextInt(0, Int.MAX_VALUE) },
 ) : EmbeddedMirrorTransport {
     override fun open(deviceSerial: String, options: MirrorStreamOptions): EmbeddedMirrorConnection {
         val asset = assetResolver.resolve()
@@ -558,7 +561,12 @@ internal class AdbScrcpyTransport(
                 "Unable to deploy embedded scrcpy server: ${pushed.stderrText().trim().take(300)}"
             }
             verifyRemoteAsset(deviceSerial, remoteAsset, asset.descriptor.sha256)
-            val forwarded = runner.run(tools.adbSpec(deviceSerial, "forward", "tcp:0", "localabstract:scrcpy"))
+            // Without an scid the server listens on the bare `scrcpy` socket, which scrcpy 1.x on
+            // the host (Ubuntu 20.04's apt build is 1.12.1) hard-codes for its own adb tunnel. A
+            // running capture then squats that name, so the external "scrcpy window" exits before
+            // showing anything. A per-connection scid makes the socket `scrcpy_<scid>` instead.
+            val scid = "%08x".format(scidGenerator())
+            val forwarded = runner.run(tools.adbSpec(deviceSerial, "forward", "tcp:0", "localabstract:scrcpy_$scid"))
             check(!forwarded.timedOut && forwarded.exitCode == 0) {
                 "Unable to create embedded scrcpy tunnel: ${forwarded.stderrText().trim().take(300)}"
             }
@@ -566,6 +574,7 @@ internal class AdbScrcpyTransport(
             checkNotNull(localPort) { "adb did not return a local tunnel port" }
             val serverArguments = buildList {
                 add(asset.descriptor.version)
+                add("scid=$scid")
                 // We establish adb forward before launching the server. In forward mode the
                 // server accepts sockets in a fixed order: video, then audio (if requested), then
                 // control.
