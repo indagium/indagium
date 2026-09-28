@@ -582,6 +582,12 @@ class CaptureRecorder internal constructor(
 
     @Suppress("TooGenericExceptionCaught") // A pluggable process stream may fail with unchecked I/O wrappers.
     private fun consumeLogcat(process: RunningCaptureProcess) {
+        // Set when this reader itself stopped the capture (size limit, free-space reserve, write
+        // failure). interrupt() hands the stop to another thread, so `active` can still read true
+        // when the loop below returns; without this flag the "logcat ended" check after it raced
+        // that thread and, if it won, replaced the real reason with "the device may have
+        // disconnected".
+        var stoppedForStorage = false
         try {
             process.inputStream.use { input ->
                 forEachRawLine(input) { raw ->
@@ -613,6 +619,7 @@ class CaptureRecorder internal constructor(
                         }
                     }
                     if (storageFailure != null) {
+                        stoppedForStorage = true
                         interrupt(storageFailure)
                         false
                     } else {
@@ -620,9 +627,11 @@ class CaptureRecorder internal constructor(
                     }
                 }
             }
-            if (active.get()) interrupt("adb logcat ended; the device may have disconnected.")
+            if (!stoppedForStorage && active.get()) interrupt("adb logcat ended; the device may have disconnected.")
         } catch (failure: IOException) {
-            if (active.get()) interrupt("adb logcat failed: ${failure.message ?: failure::class.simpleName}")
+            if (!stoppedForStorage && active.get()) {
+                interrupt("adb logcat failed: ${failure.message ?: failure::class.simpleName}")
+            }
         } finally {
             process.close()
         }
