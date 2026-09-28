@@ -7631,7 +7631,11 @@ class AppState(
     // mid-close (A-01). One synchronized block makes "cancel this tab's resources" and "remove it
     // from tabs" atomic together; cancelActiveLoad's own nested synchronized(stateLock) call is
     // safe here since the monitor is reentrant.
-    private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
+    private fun closeTabsById(
+        tabIds: Set<String>,
+        preferredActiveId: String?,
+        loadsToFinishAfterClose: Set<String> = emptySet(),
+    ) {
         if (tabIds.isEmpty()) return
         // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
         // captured under stateLock, but stopped before entering the tab-removal lock below so a
@@ -7666,7 +7670,7 @@ class AppState(
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
-                cancelActiveLoad(tabId)
+                if (tabId !in loadsToFinishAfterClose) cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
@@ -11590,10 +11594,11 @@ class AppState(
                 val result = loadRestoredTab(source)
                 if (result is RestoredTabLoadResult.MissingArchiveEntry) {
                     ensureActive()
-                    // Remove this job before closeTab() so closing an unavailable shell does not
-                    // cancel the coroutine currently performing that cleanup.
+                    // Keep the load visible as in flight until the unavailable shell has been
+                    // removed. Otherwise observers can see the load finish while the stale tab
+                    // (including its saved video seek link) is still published.
+                    closeTabsById(setOf(tabId), preferredActiveId = null, loadsToFinishAfterClose = setOf(tabId))
                     finishActiveLoad(activeLoads.remove(tabId))
-                    closeTab(tabId)
                     showOpenError(
                         title = "Restored archive entry is unavailable",
                         path = "${result.archiveFile.absolutePath}!${result.entryPath}",
