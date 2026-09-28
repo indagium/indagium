@@ -15,7 +15,9 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
+import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -184,8 +186,10 @@ class CaptureAppRoundTripTest {
             waitLoaded(app, id)
             app.autosaveNow()
             app.close()
-            // An invalid archive must not inherit the prior session's synchronized timeline.
-            zip.writeText("not an archive")
+            // Keep the archived log readable while corrupting a referenced capture asset. Restore
+            // should retain the log tab but refuse to trust the mismatched video/link metadata.
+            alterVideoAsset(zip, root)
+            assertTrue(CaptureArchiveReader.isCaptureArchive(zip))
             val restored = AppState(autosaveFile = autosave, restoreOnCreate = true, autoExportNotes = false)
             try {
                 restored.startPendingRestoredTabLoads()
@@ -193,9 +197,16 @@ class CaptureAppRoundTripTest {
                 assertNull(restored.tab(id)?.captureTimeline)
                 // Archive v3 tabs have no CaptureTimeline to begin with, so the assertion above
                 // alone would be vacuous here — the real regression check for v3 is that a failed
-                // reopen also disables double-click seek (AppState.restoreCaptureLink's catch path),
-                // not that it silently keeps trusting a link it could no longer verify.
-                assertFalse(restored.isVideoDoubleClickSeekEnabled(id))
+                // asset verification disables double-click seek while preserving the restored log.
+                val restoredTab = assertNotNull(restored.tab(id))
+                val attachment = assertNotNull(restoredTab.attachedVideo)
+                assertFalse(attachment.doubleClickSeekEnabled)
+                assertFalse(
+                    restored.isVideoDoubleClickSeekEnabled(id),
+                    "A failed capture re-open must disable seeking; attachment=${restoredTab.attachedVideo}, " +
+                        "timeline=${restoredTab.captureTimeline}, openError=${restored.openError}",
+                )
+                assertEquals("Capture synchronization unavailable", restored.openError?.title)
             } finally {
                 restored.close()
             }
@@ -350,5 +361,31 @@ class CaptureAppRoundTripTest {
             session,
             CaptureExportRequest(File(root, "capture.zip"), cutoffElapsedMs = FIXTURE_DURATION_MS),
         ).file
+    }
+
+    private fun alterVideoAsset(archiveFile: File, workDirectory: File) {
+        val rewritten = File(workDirectory, "capture-altered.zip")
+        var alteredVideo = false
+        ZipFile(archiveFile).use { source ->
+            ZipOutputStream(rewritten.outputStream().buffered()).use { target ->
+                source.entries().asSequence().forEach { entry ->
+                    target.putNextEntry(ZipEntry(entry.name))
+                    if (!entry.isDirectory) {
+                        source.getInputStream(entry).use { input ->
+                            input.copyTo(target)
+                            if (!alteredVideo && entry.name.endsWith(".mp4", ignoreCase = true)) {
+                                // The descriptor keeps the original SHA-256, making this a focused
+                                // capture-asset integrity failure while the log entry stays intact.
+                                target.write(0x7f)
+                                alteredVideo = true
+                            }
+                        }
+                    }
+                    target.closeEntry()
+                }
+            }
+        }
+        check(alteredVideo) { "The exported fixture must contain an MP4 video asset" }
+        check(rewritten.copyTo(archiveFile, overwrite = true).length() > 0L)
     }
 }
