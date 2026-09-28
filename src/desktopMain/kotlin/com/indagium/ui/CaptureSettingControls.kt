@@ -33,6 +33,7 @@ import com.indagium.capture.CaptureSettings
 import com.indagium.capture.DesktopMicrophone
 import com.indagium.capture.MICROPHONE_DEFAULT_ID
 import com.indagium.capture.MICROPHONE_OFF_ID
+import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.enumerateDesktopMicrophones
 import com.indagium.capture.withMirrorMode
@@ -66,11 +67,16 @@ private const val CAPTURE_HINT_MAX_LINES = 3
 internal fun CaptureStartOptions(
     settings: CaptureSettings,
     onReclaimFocus: () -> Unit = {},
+    // Old-glibc Linux (see NativeMediaSupport.kt): available on every other system, and until the
+    // background probe in CaptureService's init publishes a real answer — see that field's own doc
+    // for why "available" is the right default to assume meanwhile.
+    nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
+    scrcpyAvailable: Boolean = true,
     edit: CaptureSettingsEdit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f)) { RecordVideoToFileCheck(settings, edit) }
+            Box(Modifier.weight(1f)) { RecordVideoToFileCheck(settings, edit, nativeMediaSupport) }
             Box(Modifier.weight(1f)) { CaptureAudioCheck(settings, edit) }
             Box(Modifier.weight(1f)) { IncludeEarlierDeviceLogsCheck(settings, edit) }
         }
@@ -80,7 +86,7 @@ internal fun CaptureStartOptions(
         EarlierDeviceLogsHint()
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                CaptureDeviceDisplayControl(settings, edit)
+                CaptureDeviceDisplayControl(settings, edit, nativeMediaSupport, scrcpyAvailable)
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 CaptureBufferModeControl(settings, edit)
@@ -244,14 +250,44 @@ private fun MicrophoneOption(label: String, active: Boolean, enabled: Boolean = 
     }
 }
 
+/** Unchecked and disabled (same greyed pattern as [KeepDeviceAudioCheck]) when this system's
+ *  glibc is too old for the bundled FFmpeg natives ([NativeMediaSupport.available] false) — the
+ *  actual start-time adaptation lives in [com.indagium.capture.adaptedToNativeMedia], this only
+ *  keeps the checkbox from promising something the launch can't deliver. The stored value is left
+ *  untouched, matching every other settings control here (see [CaptureStartOptions]'s own doc). */
 @Composable
-internal fun RecordVideoToFileCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
-    CheckRow(settings.recordVideo, { edit { it.copy(recordVideo = !it.recordVideo) } }) {
-        AppText(
-            "Record video to file", color = tc().tx, fontSize = 11.sp,
-            maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
-        )
+internal fun RecordVideoToFileCheck(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
+) {
+    val supported = nativeMediaSupport.available
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        CheckRow(
+            settings.recordVideo && supported,
+            { edit { it.copy(recordVideo = !it.recordVideo) } },
+            enabled = supported,
+        ) {
+            AppText(
+                "Record video to file",
+                color = if (supported) tc().tx else tc().td,
+                fontSize = 11.sp,
+                maxLines = CHECK_LABEL_MAX_LINES,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        if (!supported) NativeMediaUnsupportedHint(nativeMediaSupport)
     }
+}
+
+@Composable
+private fun NativeMediaUnsupportedHint(nativeMediaSupport: NativeMediaSupport) {
+    AppText(
+        nativeMediaSupport.reason ?: "Video recording isn't available on this system.",
+        color = tc().td,
+        fontSize = 10.sp,
+        maxLines = CAPTURE_HINT_MAX_LINES,
+    )
 }
 
 /** Device audio goes into the recorded file and the scrcpy window; the in-app mirror is silent.
@@ -323,13 +359,34 @@ internal fun EarlierDeviceLogsHint() {
     )
 }
 
+/**
+ * Keeps the same three segments regardless of [nativeMediaSupport] — clicking "In-app mirror"
+ * still stores that preference (so it takes effect again on a newer system, or once the user
+ * fixes their glibc) — but when this system can't actually run it, the *selected* segment shows
+ * what a launch will really use instead (see [com.indagium.capture.adaptedToNativeMedia]): EXTERNAL
+ * when a scrcpy is available, Off when it isn't. Showing EMBEDDED as selected while every capture
+ * silently opened a scrcpy window instead would be a control that lies about its own state; this
+ * is the simplest fix that doesn't restructure the three-segment control itself.
+ */
 @Composable
-internal fun CaptureDeviceDisplayControl(settings: CaptureSettings, edit: CaptureSettingsEdit) {
+internal fun CaptureDeviceDisplayControl(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
+    scrcpyAvailable: Boolean = true,
+) {
+    val storedMode = settings.effectiveMirrorMode
+    val embeddedUnsupported = !nativeMediaSupport.available && storedMode == CaptureMirrorMode.EMBEDDED
+    val effectiveMode = if (embeddedUnsupported) {
+        if (scrcpyAvailable) CaptureMirrorMode.EXTERNAL else CaptureMirrorMode.DISABLED
+    } else {
+        storedMode
+    }
     AppText("Device display", color = tc().td, fontSize = 10.sp)
     SegmentedControl(
         options = listOf("In-app mirror", "scrcpy window", "Off"),
         selectedIndices = setOf(
-            when (settings.effectiveMirrorMode) {
+            when (effectiveMode) {
                 CaptureMirrorMode.EMBEDDED -> 0
                 CaptureMirrorMode.EXTERNAL -> 1
                 CaptureMirrorMode.DISABLED -> 2
@@ -339,6 +396,18 @@ internal fun CaptureDeviceDisplayControl(settings: CaptureSettings, edit: Captur
         modifier = Modifier.fillMaxWidth(),
         fillWidth = true,
     )
+    if (embeddedUnsupported) {
+        AppText(
+            if (scrcpyAvailable) {
+                "In-app mirror isn't available on this system; the scrcpy window is used instead."
+            } else {
+                "In-app mirror isn't available on this system, and scrcpy isn't installed; no device display is shown."
+            },
+            color = tc().td,
+            fontSize = 10.sp,
+            maxLines = CAPTURE_HINT_MAX_LINES,
+        )
+    }
 }
 
 /** Mode selector, the Custom picker (three buffers per row) and one line saying what the mode does. */

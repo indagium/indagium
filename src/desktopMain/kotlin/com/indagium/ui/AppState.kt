@@ -26,11 +26,14 @@ import com.indagium.capture.CaptureTimeline
 import com.indagium.capture.CaptureTimelineIndex
 import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
+import com.indagium.capture.NativeMediaSupport
+import com.indagium.capture.adaptedToNativeMedia
 import com.indagium.capture.captureLogEntriesForOrdinals
 import com.indagium.capture.markerHeader
 import com.indagium.capture.markerHeadingLine
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
+import com.indagium.capture.nativeMediaAdaptationNotice
 import com.indagium.capture.ordinalRangeForElapsedWindow
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.cases.CaseIndexer
@@ -3411,6 +3414,11 @@ class AppState(
     internal val captureToolResolution: CaptureToolResolution?
         get() = captureService.toolResolutionFor(settings.captureSettings)
 
+    /** See NativeMediaSupport.kt — settings/launcher UI reads this to grey out and explain
+     *  controls the adaptation in [startCaptureTab] would otherwise silently override. */
+    internal val captureNativeMediaSupport: NativeMediaSupport
+        get() = captureService.nativeMediaSupport
+
     internal fun browseCaptureAdb() = captureService.browseAdbFromSettings()
 
     internal fun browseCaptureScrcpy() = captureService.browseScrcpyFromSettings()
@@ -3584,7 +3592,13 @@ class AppState(
             var published = false
             try {
                 val tools = captureService.toolsForStart(settings)
-                controller.start(device, settings, tools) { session ->
+                // Old-glibc Linux (see NativeMediaSupport.kt): adapt only the settings THIS launch
+                // uses, never the saved/draft settings above. tools.scrcpy is already resolved, so
+                // the EMBEDDED->EXTERNAL fallback below can tell whether one is actually installed.
+                val mediaSupport = captureService.nativeMediaSupportNow()
+                val adaptedSettings = settings.adaptedToNativeMedia(mediaSupport, tools.scrcpy != null)
+                val startupNotice = nativeMediaAdaptationNotice(settings, adaptedSettings, mediaSupport, tools.scrcpy != null)
+                controller.start(device, adaptedSettings, tools, startupNotice) { session ->
                     val liveTab = mkTab(
                         id = tabId,
                         filename = "Capture — ${device.model}",
@@ -3618,7 +3632,7 @@ class AppState(
                     // otherwise never auto-start its mirror and never surface a setup error either.
                     // Showing the panel here doesn't touch non-capture tabs: this callback only
                     // runs for a capture that is starting.
-                    when (settings.mirrorStartRoute()) {
+                    when (adaptedSettings.mirrorStartRoute()) {
                         CaptureMirrorStartRoute.EMBEDDED -> {
                             videoPanelVisible = true
                             ensureEmbeddedMirror(tabId, autoStart = true)

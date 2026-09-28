@@ -166,6 +166,10 @@ class CaptureRecorder internal constructor(
         device: CaptureDevice,
         settings: CaptureSettings,
         tools: CaptureTools,
+        // Old-glibc Linux (see NativeMediaSupport.kt): surfaced as one diagnostic line right after
+        // the session activates below, the same live-session channel every other capture-start
+        // diagnostic (audio plan, video-start failure) already uses. Null on every other system.
+        startupNotice: String? = null,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)? = null,
     ): CaptureSession {
         synchronized(lock) {
@@ -184,7 +188,7 @@ class CaptureRecorder internal constructor(
             startLatch = CountDownLatch(1)
         }
         return try {
-            startCapture(device, settings, tools, beforeLogcatLaunch)
+            startCapture(device, settings, tools, startupNotice, beforeLogcatLaunch)
         } finally {
             synchronized(lock) {
                 starting = false
@@ -202,6 +206,7 @@ class CaptureRecorder internal constructor(
         device: CaptureDevice,
         settings: CaptureSettings,
         tools: CaptureTools,
+        startupNotice: String?,
         beforeLogcatLaunch: ((CaptureSession) -> Unit)?,
     ): CaptureSession {
         recoverSessions()
@@ -277,6 +282,7 @@ class CaptureRecorder internal constructor(
             }
             return session
         }
+        startupNotice?.let(::addDiagnostic)
 
         try {
             beforeLogcatLaunch?.invoke(session)

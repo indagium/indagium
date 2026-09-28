@@ -88,7 +88,12 @@ internal fun CaptureSettingsSection(state: AppState) {
         Divider()
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             CaptureGroupLabel("Before start")
-            CaptureStartOptions(settings) { transform -> update(transform(settings)) }
+            CaptureStartOptions(
+                settings = settings,
+                nativeMediaSupport = state.captureNativeMediaSupport,
+                scrcpyAvailable = toolResolution?.scrcpyPath != null,
+                edit = { transform -> update(transform(settings)) },
+            )
         }
 
         Divider()
