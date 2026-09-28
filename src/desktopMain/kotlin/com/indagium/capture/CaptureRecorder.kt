@@ -464,6 +464,7 @@ class CaptureRecorder internal constructor(
             if (mirrorProcess?.isAlive == true) return true
             mirrorProcess = null
         }
+        if (session.settings.audio) tools.legacyScrcpyAudioWarning()?.let(::addDiagnostic)
         val audioPlan = resolveAudioPlan(tools, session.device.serial, session.settings)
         val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings, audioPlan.cliArgs))
         val accepted = synchronized(lock) {
@@ -635,6 +636,9 @@ class CaptureRecorder internal constructor(
     private fun monitorMirror(process: RunningCaptureProcess) {
         drainDiagnostics(process.errorStream, "scrcpy mirror")
         process.waitFor(Duration.ofDays(VIDEO_MONITOR_MAX_WAIT_DAYS))
+        process.exitCode()?.takeIf { it != 0 }?.let { exitCode ->
+            addDiagnostic("scrcpy mirror exited with status $exitCode; see the scrcpy mirror output above.")
+        }
         synchronized(lock) {
             if (mirrorProcess === process) mirrorProcess = null
             if (active.get()) publishLocked(RecorderState.RECORDING, force = true)

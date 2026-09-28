@@ -28,6 +28,9 @@ class CaptureTools(
     val scrcpy: CaptureExecutable?,
     private val runner: CaptureProcessRunner,
 ) {
+    @Volatile
+    private var validatedScrcpyVersion: ScrcpyVersion? = null
+
     fun adbSpec(serial: String?, vararg arguments: String): CaptureProcessSpec {
         return adbSpec(serial, arguments.toList())
     }
@@ -51,7 +54,10 @@ class CaptureTools(
             // An auxiliary mirror is explicitly visible even when recording was configured with
             // --no-window. It deliberately carries no --record flag, so it cannot overwrite or
             // race the canonical session MKV.
-            if (!settings.audio) add("--no-audio") else addAll(audioCliArgs)
+            val supportsAudioFlags = validatedScrcpyVersion?.let { it >= ScrcpyVersion(2, 0) } ?: true
+            if (supportsAudioFlags) {
+                if (!settings.audio) add("--no-audio") else addAll(audioCliArgs)
+            }
         }
         return if (executable.runOnHost) {
             CaptureProcessSpec(
@@ -62,24 +68,33 @@ class CaptureTools(
         }
     }
 
-    private fun scrcpyVideoArguments(serial: String, settings: CaptureSettings): List<String> = listOf(
-        "--serial", serial,
-        "--max-size=${settings.maxSize.coerceAtLeast(0)}",
-        "--max-fps=${settings.maxFps.coerceAtLeast(1)}",
-        "--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M",
-        "--video-codec=h264",
-        // Android's MediaCodec KEY_I_FRAME_INTERVAL is nominally seconds, but hardware/software
-        // encoders schedule it against their configured KEY_FRAME_RATE (commonly 60fps) rather than
-        // the real frame rate scrcpy delivers. On a mostly-static screen scrcpy repeats frames at a
-        // much lower real rate (observed ~10fps on the Android emulator's software encoder), so a
-        // "10s" interval measured in encoder-clock frames landed a keyframe every ~60s of wall time
-        // in practice — one keyframe for an entire recording. Since-last-save exports were therefore
-        // re-remuxed from the very start of the session every time (see CaptureArchiveExporter's
-        // checkpoint split). "float" here matches the type Android's software AVC encoder expects
-        // for this key; scrcpy's own --video-codec-options docs point at MediaFormat's
-        // KEY_I_FRAME_INTERVAL for the full key/type table.
-        "--video-codec-options=i-frame-interval:float=1",
-    )
+    fun legacyScrcpyAudioWarning(): String? = validatedScrcpyVersion
+        ?.takeIf { it < ScrcpyVersion(2, 0) }
+        ?.let { "Host scrcpy $it cannot forward Android audio; the visible mirror is video-only, while embedded recording keeps its audio track." }
+
+    private fun scrcpyVideoArguments(serial: String, settings: CaptureSettings): List<String> {
+        val version = validatedScrcpyVersion
+        val oldCli = version != null && version < ScrcpyVersion(2, 0)
+        val arguments = mutableListOf(
+            "--serial", serial,
+            "--max-size=${settings.maxSize.coerceAtLeast(0)}",
+            "--max-fps=${settings.maxFps.coerceAtLeast(1)}",
+            if (oldCli) {
+                "--bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M"
+            } else {
+                "--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M"
+            },
+        )
+        if (!oldCli) {
+            arguments += "--video-codec=h264"
+            // Android's MediaCodec KEY_I_FRAME_INTERVAL is nominally seconds, but hardware/software
+            // encoders schedule it against their configured KEY_FRAME_RATE (commonly 60fps) rather than
+            // the real frame rate scrcpy delivers. On a mostly-static screen scrcpy repeats frames at a
+            // much lower real rate, so short intervals keep its visible auxiliary mirror responsive.
+            arguments += "--video-codec-options=i-frame-interval:float=1"
+        }
+        return arguments
+    }
 
     // Identity only: `adb version` exits 0 and prints "Android Debug Bridge ..." for every
     // platform-tools release we care about, so that's the whole check. This function used to also
@@ -123,19 +138,22 @@ class CaptureTools(
         }.getOrDefault(true)
     }
 
-    // Identity only, same rationale as validateAdb() above: `scrcpy --help` was grepped for CLI
-    // flag names (--serial, --record, --max-fps, ...) that are reliably present in every scrcpy
-    // build we support, so that grep was never going to catch a real incompatibility -- and it
-    // added a second subprocess round-trip for no protective value. A genuinely unsupported option
-    // now surfaces as a runtime failure when scrcpy is actually launched (CaptureRecorder.kt already
-    // treats that as a diagnostic, not a reason to stop log capture -- see startCapture()).
+    // Record the reported version so the optional auxiliary window can use scrcpy 1.x flag names.
+    // The embedded recorder does not depend on this host executable.
     fun validateScrcpy(): CaptureToolValidation {
         val executable = scrcpy ?: return CaptureToolValidation(false, message = "scrcpy was not found")
         val version = runner.run(CaptureProcessSpec(executable.command(listOf("--version"))))
         val versionText = (version.stdoutText() + "\n" + version.stderrText())
             .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+        val parsedVersion = versionText?.let(::parseScrcpyVersion)
+        validatedScrcpyVersion = parsedVersion
         return if (!version.timedOut && version.exitCode == 0 && versionText?.contains("scrcpy", ignoreCase = true) == true) {
-            CaptureToolValidation(true, versionText, "scrcpy is ready")
+            val compatibility = if (parsedVersion != null && parsedVersion < ScrcpyVersion(2, 0)) {
+                "scrcpy $parsedVersion is supported with legacy video flags; audio forwarding is unavailable on this host version."
+            } else {
+                "scrcpy is ready"
+            }
+            CaptureToolValidation(true, versionText, compatibility)
         } else {
             CaptureToolValidation(false, versionText, boundedDiagnostic("scrcpy version failed", version))
         }
@@ -173,6 +191,23 @@ class CaptureTools(
     }
 
     private val screenshotSupport = ConcurrentHashMap<String, Boolean>()
+}
+
+/** Numeric version tuple for the CLI behavior split at scrcpy 2.0 (audio/codec flags changed). */
+internal data class ScrcpyVersion(val major: Int, val minor: Int, val patch: Int = 0) : Comparable<ScrcpyVersion> {
+    override fun compareTo(other: ScrcpyVersion): Int =
+        compareValuesBy(this, other, ScrcpyVersion::major, ScrcpyVersion::minor, ScrcpyVersion::patch)
+
+    override fun toString(): String = "$major.$minor.$patch"
+}
+
+internal fun parseScrcpyVersion(output: String): ScrcpyVersion? {
+    val match = SCRCPY_VERSION_REGEX.find(output) ?: return null
+    return ScrcpyVersion(
+        major = match.groupValues[1].toInt(),
+        minor = match.groupValues[2].toInt(),
+        patch = match.groupValues[3].toIntOrNull() ?: 0,
+    )
 }
 
 class CaptureToolResolver(
@@ -358,3 +393,4 @@ private const val SCREENSHOT_PROBE_TIMEOUT_SECONDS = 3L
 private const val LOGIN_SHELL_TIMEOUT_SECONDS = 3L
 private const val LOGIN_SHELL_OUTPUT_LIMIT_BYTES = 4 * 1024
 private const val DEFAULT_LOGIN_SHELL = "/bin/zsh"
+private val SCRCPY_VERSION_REGEX = Regex("\\bscrcpy\\s+v?(\\d+)\\.(\\d+)(?:\\.(\\d+))?", RegexOption.IGNORE_CASE)

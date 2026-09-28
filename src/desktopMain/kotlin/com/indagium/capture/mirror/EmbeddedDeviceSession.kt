@@ -8,6 +8,8 @@ import com.indagium.capture.MICROPHONE_OFF_ID
 import com.indagium.capture.MicrophonePermissionDeniedException
 import com.indagium.capture.StreamingMkvWriter
 import com.indagium.capture.TimelineOpusAudio
+import com.indagium.capture.captureNativeFailureDiagnostic
+import com.indagium.capture.hasNativeLinkageFailure
 import com.indagium.capture.microphoneFailureIndicatesPermissionDenied
 import java.io.Closeable
 import java.io.IOException
@@ -413,7 +415,8 @@ internal class EmbeddedDeviceSession(
 
     private fun runSession(runId: Long, serial: String, options: MirrorStreamOptions) {
         var attempt = 0
-        while (isCurrent(runId)) {
+        var nativeFailure = false
+        while (isCurrent(runId) && !nativeFailure) {
             if (attempt > 0) {
                 onDiagnostic("Embedded recording: reconnecting (attempt $attempt of $maxReconnectAttempts)…")
                 if (!sleepBeforeReconnect(runId)) return
@@ -474,13 +477,28 @@ internal class EmbeddedDeviceSession(
                 attempt++
             } catch (failure: Throwable) {
                 if (!isCurrent(runId)) return
-                attempt++
-                val diagnostic = "Embedded recording transport failed: ${failure.message ?: failure::class.simpleName}"
-                onDiagnostic(diagnostic)
-                publishConnectionSnapshotIfCurrent(
-                    runId,
-                    EmbeddedMirrorSnapshot(EmbeddedMirrorState.RECONNECTING, deviceSerial = serial, reconnectAttempt = attempt, error = diagnostic),
-                )
+                if (hasNativeLinkageFailure(failure)) {
+                    val diagnostic = captureNativeFailureDiagnostic(failure)
+                    onDiagnostic(diagnostic)
+                    publishConnectionSnapshotIfCurrent(
+                        runId,
+                        EmbeddedMirrorSnapshot(
+                            EmbeddedMirrorState.FAILED,
+                            deviceSerial = serial,
+                            reconnectAttempt = attempt,
+                            error = diagnostic,
+                        ),
+                    )
+                    nativeFailure = true
+                } else {
+                    attempt++
+                    val diagnostic = "Embedded recording transport failed: ${failure.message ?: failure::class.simpleName}"
+                    onDiagnostic(diagnostic)
+                    publishConnectionSnapshotIfCurrent(
+                        runId,
+                        EmbeddedMirrorSnapshot(EmbeddedMirrorState.RECONNECTING, deviceSerial = serial, reconnectAttempt = attempt, error = diagnostic),
+                    )
+                }
             } finally {
                 // A stop can time out waiting for a blocked old worker, then start a new run on
                 // this same session. That old worker must never clear or close the new run's

@@ -39,11 +39,12 @@ for command in flatpak flatpak-builder; do
 done
 
 if ! flatpak remote-info --user --arch="$arch" flathub "$RUNTIME" >/dev/null 2>&1; then
-    echo "Missing $RUNTIME for $arch. Add Flathub and install the runtime before packaging." >&2
+    echo "Missing $RUNTIME for $arch. Run: flatpak remote-add --user --if-not-exists flathub $FLATHUB_REPO" >&2
+    echo "Then install packaging requirements: flatpak install --user flathub $RUNTIME $SDK" >&2
     exit 1
 fi
 if ! flatpak remote-info --user --arch="$arch" flathub "$SDK" >/dev/null 2>&1; then
-    echo "Missing $SDK for $arch. Add Flathub and install the SDK before packaging." >&2
+    echo "Missing $SDK for $arch. Run: flatpak install --user flathub $SDK" >&2
     exit 1
 fi
 
