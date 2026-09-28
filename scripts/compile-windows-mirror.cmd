@@ -22,6 +22,6 @@ if errorlevel 1 exit /b %errorlevel%
 for %%i in ("%OUTPUT_DLL%") do if not exist "%%~dpi" mkdir "%%~dpi"
 cl.exe /nologo /std:c++17 /EHsc /MD /LD ^
   /I"%JDK_HOME%\include" /I"%JDK_HOME%\include\win32" ^
-  "%SOURCE_FILE%" /link /LIBPATH:"%JDK_HOME%\lib" jawt.lib d3d11.lib dxgi.lib ^
+  "%SOURCE_FILE%" /link /LIBPATH:"%JDK_HOME%\lib" jawt.lib d3d11.lib dxgi.lib user32.lib ^
   /OUT:"%OUTPUT_DLL%"
 exit /b %errorlevel%
