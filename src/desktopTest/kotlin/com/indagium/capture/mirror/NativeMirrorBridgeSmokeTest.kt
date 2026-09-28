@@ -1,6 +1,5 @@
 package com.indagium.capture.mirror
 
-import java.awt.Canvas
 import kotlin.test.Test
 
 class NativeMirrorBridgeSmokeTest {
@@ -8,8 +7,8 @@ class NativeMirrorBridgeSmokeTest {
     fun platformNativeBridgeLoadsAndCreatesCanvasHandle() {
         val osName = System.getProperty("os.name").orEmpty()
         when {
-            osName.contains("win", ignoreCase = true) -> WindowsD3D11MirrorNative(Canvas()).use { }
-            osName.contains("linux", ignoreCase = true) -> LinuxVaapiEglMirrorNative(Canvas()).use { }
+            osName.contains("win", ignoreCase = true) -> WindowsD3D11MirrorNative(NativeMirrorCanvas()).use { }
+            osName.contains("linux", ignoreCase = true) -> LinuxVaapiEglMirrorNative(NativeMirrorCanvas()).use { }
             else -> return
         }
     }

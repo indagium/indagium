@@ -40,7 +40,18 @@ struct MirrorSurface {
         ID3D11Texture2D* texture = nullptr;
     };
     std::vector<PendingGpuRead> pendingGpuReads;
+    // The NativeMirrorCanvas generation for which [window]'s HWND was last resolved through JAWT.
+    // -1 never matches a real generation (NativeMirrorCanvas.generation starts at 0 and only ever
+    // increases), so the very first frame always takes the slow path once.
+    jint cachedWindowGeneration = -1;
 };
+
+// Bounds pendingGpuReads: presentTexture()'s collectCompletedGpuReads() reaps whatever the GPU has
+// actually finished by the next frame, so this only matters when the GPU falls behind — waitForGpu
+// then blocks (briefly, bounded) on the single oldest entry instead of letting the list grow
+// forever.
+constexpr size_t kMaxPendingGpuReads = 8;
+constexpr auto kGpuReadWaitBudget = std::chrono::milliseconds(50);
 
 bool canvasWindow(JNIEnv* env, jobject canvas, HWND* window, UINT* width, UINT* height) {
     JAWT awt{};
@@ -69,6 +80,25 @@ bool canvasWindow(JNIEnv* env, jobject canvas, HWND* window, UINT* width, UINT* 
     drawing->Unlock(drawing);
     awt.FreeDrawingSurface(drawing);
     return result;
+}
+
+// canvasWindow() above re-runs the full JAWT GetAWT/GetDrawingSurface/Lock/GetDrawingSurfaceInfo/
+// Unlock/FreeDrawingSurface dance on every call — needed only when the platform window could have
+// changed. [generation] (bumped by the Kotlin NativeMirrorCanvas on addNotify/removeNotify) says
+// exactly when that happened: unchanged plus a still-valid cached HWND means this frame only needs
+// a GetClientRect on it.
+bool resolveCanvasWindow(MirrorSurface* mirror, JNIEnv* env, jint generation, HWND* window, UINT* width, UINT* height) {
+    if (mirror->window && mirror->cachedWindowGeneration == generation && IsWindow(mirror->window)) {
+        RECT bounds{};
+        if (!GetClientRect(mirror->window, &bounds)) return false;
+        *window = mirror->window;
+        *width = static_cast<UINT>(bounds.right - bounds.left);
+        *height = static_cast<UINT>(bounds.bottom - bounds.top);
+        return true;
+    }
+    if (!canvasWindow(env, mirror->canvas, window, width, height)) return false;
+    mirror->cachedWindowGeneration = generation;
+    return true;
 }
 
 void destroyProcessor(MirrorSurface* mirror) {
@@ -166,6 +196,19 @@ bool ensureVideoProcessor(MirrorSurface* mirror, UINT width, UINT height) {
     return true;
 }
 
+// Never blocks on the frame just submitted: End()+Flush() the completion fence and queue it, then
+// return immediately. GPU ordering is already guaranteed (decoder submissions and this blit share
+// the same immediate D3D11 context), so the retained COM reference below exists only to protect
+// the allocation until the GPU is actually done reading it, not to order anything — the busy-wait
+// this used to do here on every single blit bought nothing.
+//
+// collectCompletedGpuReads() (called at the top of every presentTexture()) reaps whatever the GPU
+// has actually finished by the next frame. Bounding [pendingGpuReads] to kMaxPendingGpuReads keeps
+// that list from growing forever if the GPU falls behind: only once it is full do we wait (briefly,
+// bounded by kGpuReadWaitBudget) for the single oldest entry. D3D11 keeps a resource alive as long
+// as submitted GPU commands still reference it (see destroyDevice's own comment), so releasing our
+// extra reference here — even if that bounded wait times out — cannot free the texture out from
+// under the GPU; it only bounds how many extra references this presenter itself is holding.
 bool waitForGpu(MirrorSurface* mirror, ID3D11Texture2D* texture) {
     D3D11_QUERY_DESC description{};
     description.Query = D3D11_QUERY_EVENT;
@@ -179,27 +222,20 @@ bool waitForGpu(MirrorSurface* mirror, ID3D11Texture2D* texture) {
     texture->AddRef();
     mirror->context->End(completed);
     mirror->context->Flush();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
-    HRESULT result = S_FALSE;
-    while (result == S_FALSE && std::chrono::steady_clock::now() < deadline) {
-        result = mirror->context->GetData(completed, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
-        if (result == S_FALSE) Sleep(0);
+    if (mirror->pendingGpuReads.size() >= kMaxPendingGpuReads) {
+        auto& oldest = mirror->pendingGpuReads.front();
+        const auto deadline = std::chrono::steady_clock::now() + kGpuReadWaitBudget;
+        HRESULT oldestResult = S_FALSE;
+        while (oldestResult == S_FALSE && std::chrono::steady_clock::now() < deadline) {
+            oldestResult = mirror->context->GetData(oldest.completed, nullptr, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH);
+            if (oldestResult == S_FALSE) Sleep(0);
+        }
+        release(oldest.completed);
+        release(oldest.texture);
+        mirror->pendingGpuReads.erase(mirror->pendingGpuReads.begin());
     }
-    if (result == S_OK) {
-        release(completed);
-        texture->Release();
-        return true;
-    }
-    if (result == S_FALSE) {
-        // Keep both the completion fence and source texture alive while the GPU finishes its
-        // video-processor read. Decoder submissions use this same immediate context, so later
-        // reuse is ordered after the blit; the retained COM reference protects the allocation.
-        mirror->pendingGpuReads.push_back({completed, texture});
-        return true;
-    }
-    release(completed);
-    texture->Release();
-    return false;
+    mirror->pendingGpuReads.push_back({completed, texture});
+    return true;
 }
 
 void collectCompletedGpuReads(MirrorSurface* mirror) {
@@ -316,13 +352,14 @@ Java_com_indagium_capture_mirror_WindowsD3D11MirrorNative_nativeCreate(JNIEnv* e
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_indagium_capture_mirror_WindowsD3D11MirrorNative_nativePresent(
-    JNIEnv* env, jclass, jlong handle, jlong textureAddress, jint subresource, jint width, jint height) {
+    JNIEnv* env, jclass, jlong handle, jlong textureAddress, jint subresource, jint width, jint height,
+    jint generation) {
     auto* mirror = fromHandle(handle);
     if (!mirror || !textureAddress || subresource < 0 || width <= 0 || height <= 0) return -1;
     HWND window = nullptr;
     UINT targetWidth = 0;
     UINT targetHeight = 0;
-    if (!canvasWindow(env, mirror->canvas, &window, &targetWidth, &targetHeight)) return -2;
+    if (!resolveCanvasWindow(mirror, env, generation, &window, &targetWidth, &targetHeight)) return -2;
     if (targetWidth == 0 || targetHeight == 0) return 1;
     if (mirror->window != window) {
         destroyDevice(mirror);

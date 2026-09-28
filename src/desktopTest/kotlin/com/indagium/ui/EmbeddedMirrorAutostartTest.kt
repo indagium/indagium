@@ -67,7 +67,7 @@ class EmbeddedMirrorAutostartTest {
             ) {}
             awaitCondition(5_000) { controller.activeEmbeddedSession()?.hasStartedVideo() == true }
 
-            app.embeddedMirrorHandleFactory = { _, _, sharedSession ->
+            app.embeddedMirrorHandleFactory = { _, _, sharedSession, _ ->
                 EmbeddedMirrorHandle.createShared(
                     session = requireNotNull(sharedSession),
                     decoder = object : H264Decoder {
@@ -137,7 +137,7 @@ class EmbeddedMirrorAutostartTest {
                     while (!Thread.currentThread().isInterrupted) Thread.sleep(20)
                 }
             }
-            app.embeddedMirrorHandleFactory = { _, _, _ ->
+            app.embeddedMirrorHandleFactory = { _, _, _, _ ->
                 createStarted.countDown()
                 assertTrue(releaseCreate.await(5, TimeUnit.SECONDS), "test setup: releaseCreate was never signalled")
                 createCalls++
@@ -204,7 +204,7 @@ class EmbeddedMirrorAutostartTest {
             assertEquals(1, transportOpenCalls, "recording must have opened exactly one embedded session")
 
             var passedSharedSession: Any? = "not called"
-            app.embeddedMirrorHandleFactory = { tools, mirrorRoot, sharedSession ->
+            app.embeddedMirrorHandleFactory = { tools, mirrorRoot, sharedSession, _ ->
                 passedSharedSession = sharedSession
                 EmbeddedMirrorHandle.create(tools, mirrorRoot, sharedSession)
             }
@@ -246,7 +246,7 @@ class EmbeddedMirrorAutostartTest {
         val app = AppState(autosaveFile = Files.createTempFile("embedded-mirror-disconnect-autosave", "").toFile(), autoExportNotes = false)
         val decoderStarts = AtomicInteger()
         val decoderCloses = AtomicInteger()
-        app.embeddedMirrorHandleFactory = { _, _, sharedSession ->
+        app.embeddedMirrorHandleFactory = { _, _, sharedSession, _ ->
             EmbeddedMirrorHandle.createShared(
                 session = requireNotNull(sharedSession),
                 decoder = object : H264Decoder {
@@ -330,7 +330,7 @@ class EmbeddedMirrorAutostartTest {
 
             var standaloneFactoryCalls = 0
             var capturedSharedSession: Any? = "not called yet"
-            app.embeddedMirrorHandleFactory = { tools, mirrorRoot, sharedSession ->
+            app.embeddedMirrorHandleFactory = { tools, mirrorRoot, sharedSession, _ ->
                 capturedSharedSession = sharedSession
                 if (sharedSession == null) standaloneFactoryCalls++
                 EmbeddedMirrorHandle.create(tools, mirrorRoot, sharedSession)

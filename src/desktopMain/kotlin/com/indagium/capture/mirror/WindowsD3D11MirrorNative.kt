@@ -3,11 +3,10 @@
 package com.indagium.capture.mirror
 
 import org.bytedeco.ffmpeg.avutil.AVFrame
-import java.awt.Canvas
 import java.nio.file.Files
 
 /** Native D3D11 swapchain presenter for D3D11VA decoder textures. */
-internal class WindowsD3D11MirrorNative(private val canvas: Canvas) : HardwareMirrorFramePresenter {
+internal class WindowsD3D11MirrorNative(private val canvas: NativeMirrorCanvas) : HardwareMirrorFramePresenter {
     private var handle: Long
 
     init {
@@ -29,7 +28,9 @@ internal class WindowsD3D11MirrorNative(private val canvas: Canvas) : HardwareMi
         val subresource = frame.data(1)?.address()?.toInt() ?: 0
         // Positive statuses mean the Canvas is minimized or DXGI dropped this frame because the
         // swapchain was busy. Keep the native stream active; negative statuses indicate failure.
-        check(nativePresent(handle, texture, subresource, frame.width(), frame.height()) >= 0) {
+        // [canvas.generation] lets the native side skip re-resolving the HWND through JAWT on every
+        // frame — it only does that when this counter has moved (see NativeMirrorCanvas's doc).
+        check(nativePresent(handle, texture, subresource, frame.width(), frame.height(), canvas.generation) >= 0) {
             "D3D11 mirror presentation failed"
         }
     }
@@ -64,9 +65,16 @@ internal class WindowsD3D11MirrorNative(private val canvas: Canvas) : HardwareMi
             }
         }
 
-        @JvmStatic private external fun nativeCreate(canvas: Canvas): Long
+        @JvmStatic private external fun nativeCreate(canvas: NativeMirrorCanvas): Long
 
-        @JvmStatic private external fun nativePresent(handle: Long, texture: Long, subresource: Int, width: Int, height: Int): Int
+        @JvmStatic private external fun nativePresent(
+            handle: Long,
+            texture: Long,
+            subresource: Int,
+            width: Int,
+            height: Int,
+            generation: Int,
+        ): Int
 
         @JvmStatic private external fun nativeClose(handle: Long)
     }

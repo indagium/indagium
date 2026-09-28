@@ -4,15 +4,21 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
+import com.indagium.capture.StreamingMkvWriter
+import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorConnection
 import com.indagium.capture.mirror.EmbeddedMirrorRuntime
 import com.indagium.capture.mirror.EmbeddedMirrorState
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.H264Decoder
 import com.indagium.capture.mirror.MirrorFrame
+import com.indagium.capture.mirror.MirrorStreamOptions
 import org.jetbrains.skiko.GraphicsApi
 import java.io.ByteArrayInputStream
 import java.io.InputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -25,6 +31,18 @@ class MacMirrorSelectionTest {
         assertTrue(shouldUseMacNativeMirror("macOS"))
         assertFalse(shouldUseMacNativeMirror("Linux"))
         assertFalse(shouldUseMacNativeMirror("Windows 11"))
+    }
+
+    // The D3D11/VAAPI paths have never worked on real hardware yet (Windows black+crash, Linux VM
+    // VAAPI unavailable) — shouldUseDesktopGpuMirror only selects them when the persisted
+    // CaptureSettings.hardwareMirror opt-in is also on, regardless of OS.
+    @Test
+    fun desktopGpuMirrorRequiresBothTheRightOsAndTheExplicitOptIn() {
+        assertTrue(shouldUseDesktopGpuMirror("Windows 11", enabled = true))
+        assertTrue(shouldUseDesktopGpuMirror("Linux", enabled = true))
+        assertFalse(shouldUseDesktopGpuMirror("Windows 11", enabled = false))
+        assertFalse(shouldUseDesktopGpuMirror("Linux", enabled = false))
+        assertFalse(shouldUseDesktopGpuMirror("Mac OS X", enabled = true))
     }
 
     @Test
@@ -40,6 +58,81 @@ class MacMirrorSelectionTest {
             assertTrue(backend.macSurface == null)
         } finally {
             backend.close()
+        }
+    }
+
+    // Regression test for the Disconnect bug: SharedRecordingSession.stop()/close() only detach
+    // this mirror's own decoder from the shared recording session (see that class's own doc) — the
+    // recording's connection itself stays LIVE the whole time, exactly as CaptureRecorder's own
+    // reconnect lifecycle owns it. Before the fix, composeLocked() reported that still-LIVE
+    // connectionSnapshot regardless of whether this mirror was attached, so the control bar kept
+    // saying "Live" and the surface stayed black (a fresh SwingPanel surface, never presented to)
+    // after Disconnect.
+    @Test
+    fun sharedRecordingSessionReportsDisconnectedAfterStopWhileTheRecordingConnectionStaysLive() {
+        val videoInput = PipedInputStream(4 * 1024)
+        val videoOutput = PipedOutputStream(videoInput)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = videoInput
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() {
+                    runCatching { videoInput.close() }
+                    runCatching { videoOutput.close() }
+                }
+            }
+        }
+        val mkvFile = Files.createTempFile("shared-recording-session-disconnect-test", ".mkv").toFile()
+        mkvFile.deleteOnExit()
+        val session = EmbeddedDeviceSession(transport, StreamingMkvWriter(mkvFile), elapsedMillis = { 0L })
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                // Never writes to videoOutput above, so the session's own packet pump blocks
+                // reading the stream header forever (bounded only by this test's own timeouts) —
+                // exactly a live device connection that just hasn't sent anything new yet. This
+                // fake decoder mirrors that: it blocks on its bounded feed until detachDecoder()
+                // closes it (read() returns -1), like EmbeddedMirrorTest's own fakes.
+                while (!Thread.currentThread().isInterrupted) {
+                    if (input.read() < 0) return
+                }
+            }
+        }
+        try {
+            session.start("serial", MirrorStreamOptions())
+            await { session.connectionSnapshot().state == EmbeddedMirrorState.LIVE }
+
+            val backend = MirrorBackend.SharedRecordingSession(
+                session = session,
+                decoder = decoder,
+                onSnapshotChanged = {},
+            )
+            try {
+                backend.start("ignored", MirrorStreamOptions())
+                await { backend.snapshot().state == EmbeddedMirrorState.LIVE }
+
+                backend.stop()
+                assertEquals(
+                    EmbeddedMirrorState.DISCONNECTED,
+                    backend.snapshot().state,
+                    "stop() must report DISCONNECTED even though the recording connection stays LIVE",
+                )
+                assertEquals(
+                    EmbeddedMirrorState.LIVE,
+                    session.connectionSnapshot().state,
+                    "the recording's own connection must never be touched by the mirror's stop()",
+                )
+
+                backend.start("ignored", MirrorStreamOptions())
+                await { backend.snapshot().state == EmbeddedMirrorState.LIVE }
+            } finally {
+                backend.close()
+            }
+        } finally {
+            session.close()
+            mkvFile.delete()
         }
     }
 
