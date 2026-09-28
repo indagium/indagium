@@ -154,7 +154,7 @@ bool ensureVideoProcessor(MirrorSurface* mirror, UINT width, UINT height) {
     description.OutputFrameRate = {60, 1};
     description.OutputWidth = mirror->backbufferWidth;
     description.OutputHeight = mirror->backbufferHeight;
-    description.Usage = D3D11_VIDEO_PROCESSOR_USAGE_PLAYBACK_NORMAL;
+    description.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
     HRESULT result = mirror->videoDevice->CreateVideoProcessorEnumerator(&description, &mirror->processorEnumerator);
     if (SUCCEEDED(result)) result = mirror->videoDevice->CreateVideoProcessor(mirror->processorEnumerator, 0, &mirror->processor);
     if (FAILED(result)) {
