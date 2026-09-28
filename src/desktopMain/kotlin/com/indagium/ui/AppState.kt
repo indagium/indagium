@@ -857,6 +857,10 @@ internal const val LARGE_FILE_MODE_ROWS = 500_000
 // whole-list filter pass on every half-second default tail tick.
 private const val CAPTURE_TAIL_POLL_INTERVAL_MS = 1_000L
 
+// How long a Screenshot / Mark issue result stays on the capture strip (see captureScreenshotStatus).
+private const val CAPTURE_STATUS_VISIBLE_MS = 4_000L
+private const val CAPTURE_STATUS_FAILURE_VISIBLE_MS = 8_000L
+
 // Keep the debounce below the recorder's 250ms publish cadence so a preview eventually lands
 // while a capture is still running. The per-tab cancellation/generation guard means a new tick
 // replaces the old work instead of queueing a 250ms job storm.
@@ -2083,8 +2087,31 @@ class AppState(
     /** Last asynchronous screenshot result shown by the active capture tab's strip. Also reused by
      * [markIssue] — see CaptureStrip.kt's status-row comment: Screenshot and Mark issue share the
      * one truncating feedback line under the strip. */
-    internal var captureScreenshotStatus by mutableStateOf<String?>(null)
-        private set
+    internal var captureScreenshotStatus: String?
+        get() = captureScreenshotStatusState
+        private set(value) {
+            captureScreenshotStatusState = value
+            // Short-lived by design: a persistent line stayed on the strip across Stop and the next
+            // capture, and kept the strip one row taller. An in-progress line ("Taking screenshot…")
+            // stays until its result replaces it; results fade after a few seconds, failures later.
+            captureScreenshotStatusClearJob?.cancel()
+            captureScreenshotStatusClearJob = if (value == null || value.endsWith("…")) {
+                null
+            } else {
+                ioScope.launch {
+                    delay(
+                        if (value.contains("fail", ignoreCase = true)) {
+                            CAPTURE_STATUS_FAILURE_VISIBLE_MS
+                        } else {
+                            CAPTURE_STATUS_VISIBLE_MS
+                        },
+                    )
+                    if (captureScreenshotStatusState == value) captureScreenshotStatusState = null
+                }
+            }
+        }
+    private var captureScreenshotStatusState by mutableStateOf<String?>(null)
+    private var captureScreenshotStatusClearJob: Job? = null
     private val captureScreenshotCapabilities = mutableStateMapOf<String, CaptureScreenshotCapability>()
 
     /** One undoable "Mark issue" press per tab, live for [MARKER_UNDO_WINDOW_MS]. A second press
@@ -3582,6 +3609,7 @@ class AppState(
             }
             captureStartInProgress = true
         }
+        captureScreenshotStatus = null
         val settings = synchronized(stateLock) {
             val launcher = tabs.firstOrNull { it.isCaptureLauncher && it.id == activeTabId }
             val base = launcher?.let { captureLaunchDrafts[it.id] } ?: this.settings.captureSettings
@@ -3728,6 +3756,7 @@ class AppState(
         // session afterward — the raw session directory and logs/logcat.log survive independently
         // of finalization, so export should too.
         val sourceSessionId = tab(tabId)?.captureSessionId
+        captureScreenshotStatus = null
         // Stop the presentation transport immediately; finalization may take time, and mirror
         // sockets must not outlive the recorder/tab that owns their device session.
         returnEmbeddedMirrorToSidebar(tabId, revealCaptureTab = false)
@@ -8468,6 +8497,13 @@ class AppState(
             )
             return
         }
+        // A capture session folder, or an exported capture ZIP unpacked by hand, carries the same
+        // descriptor the ZIP does: open it as a capture (video, notes, log sync) exactly like the
+        // ZIP, instead of the generic scan below that only offers its loose log files.
+        captureDescriptorInFolder(folder)?.let { descriptor ->
+            openCaptureFile(descriptor)
+            return
+        }
         ioScope.launch {
             val scan = runCatching { scanFolderForLogs(folder) }.getOrElse { error ->
                 AppLogger.error("folder", "Folder scan failed", error)
@@ -8488,6 +8524,15 @@ class AppState(
                 )
             }
         }
+    }
+
+    /** The capture descriptor at [folder]'s top level, or inside its only subfolder (unzip tools
+     *  that wrap an archive's contents in one extra directory). */
+    private fun captureDescriptorInFolder(folder: File): File? {
+        File(folder, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME).takeIf { it.isFile }?.let { return it }
+        val onlySubfolder = folder.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.singleOrNull()
+            ?: return null
+        return File(onlySubfolder, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME).takeIf { it.isFile }
     }
 
     // Returns the tabId allocated for each selected candidate that actually started loading, in
