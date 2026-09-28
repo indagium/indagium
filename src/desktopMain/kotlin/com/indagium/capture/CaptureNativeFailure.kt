@@ -17,12 +17,14 @@ internal fun captureNativeFailureDiagnostic(failure: Throwable, osName: String =
         .maxWithOrNull(compareBy<List<Int>> { it[0] }.thenBy { it[1] })
     if (osName.contains("linux", ignoreCase = true) && glibcRequirement != null) {
         val required = "${glibcRequirement[0]}.${glibcRequirement[1]}"
-        return "Bundled FFmpeg could not load: $detail. This Linux package needs glibc $required or newer; " +
-            "Ubuntu 20.04 has glibc 2.31. Use Ubuntu 22.04 or newer with the AppImage/.deb, or use Flatpak " +
-            "after installing org.freedesktop.Platform//24.08."
+        return "Bundled FFmpeg could not load: $detail. This Linux package needs glibc $required or newer " +
+            "for in-app video (in-app mirror, video recording, playback, export) — Ubuntu 22.04 or newer has " +
+            "it, Ubuntu 20.04 (glibc 2.31) does not. Capturing logs and the scrcpy window still work here."
     }
     val ubuntuHint = if (osName.contains("linux", ignoreCase = true)) {
-        ". On Ubuntu 20.04, use Flatpak with org.freedesktop.Platform//24.08 for embedded capture."
+        ". On an older Linux distribution (e.g. Ubuntu 20.04) this is usually the glibc 2.35 requirement " +
+            "for in-app video; Ubuntu 22.04 or newer resolves it. Capturing logs and the scrcpy window " +
+            "still work here."
     } else {
         ""
     }
@@ -32,14 +34,30 @@ internal fun captureNativeFailureDiagnostic(failure: Throwable, osName: String =
 internal fun hasNativeLinkageFailure(failure: Throwable): Boolean =
     throwableCauseChain(failure).any { it is LinkageError }
 
+/**
+ * Walks both `cause` and `suppressed` — JavaCPP often keeps the actually informative
+ * `UnsatisfiedLinkError` ("... version `GLIBC_2.34' not found") in a suppressed exception or
+ * deeper in the chain rather than as the direct cause, so a `cause`-only walk (the original
+ * implementation) could miss it and leave only a generic "no jniavutil in java.library.path".
+ * Depth-first through each throwable's own cause chain before its suppressed exceptions, so the
+ * primary chain still reads first in the joined diagnostic; identity-deduplicated (a suppressed
+ * exception can legitimately equal something already seen via `cause`) and bounded by the same
+ * [MAX_NATIVE_FAILURE_CAUSES] cap regardless of which edge contributed each throwable.
+ */
 private fun throwableCauseChain(failure: Throwable): List<Throwable> {
     val seen = Collections.newSetFromMap(IdentityHashMap<Throwable, Boolean>())
     val result = mutableListOf<Throwable>()
-    var current: Throwable? = failure
-    while (current != null && seen.add(current) && result.size < MAX_NATIVE_FAILURE_CAUSES) {
-        result += current
-        current = current.cause
+
+    fun visit(candidate: Throwable?) {
+        if (candidate == null || result.size >= MAX_NATIVE_FAILURE_CAUSES || !seen.add(candidate)) return
+        result += candidate
+        visit(candidate.cause)
+        for (suppressed in candidate.suppressed) {
+            if (result.size >= MAX_NATIVE_FAILURE_CAUSES) break
+            visit(suppressed)
+        }
     }
+    visit(failure)
     return result
 }
 

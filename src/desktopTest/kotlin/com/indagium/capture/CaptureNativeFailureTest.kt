@@ -15,7 +15,24 @@ class CaptureNativeFailureTest {
         assertTrue(diagnostic.contains("GLIBC_2.35"))
         assertTrue(diagnostic.contains("glibc 2.35 or newer"))
         assertTrue(diagnostic.contains("Ubuntu 20.04"))
-        assertTrue(diagnostic.contains("org.freedesktop.Platform//24.08"))
+        assertTrue(diagnostic.contains("Ubuntu 22.04"))
+        // No more Flatpak workaround for 20.04 — its bundled flatpak 1.6 can't read Flathub's
+        // current summary (see docs); logs/scrcpy staying usable is the actual guidance now.
+        assertFalse(diagnostic.contains("org.freedesktop.Platform"))
+        assertTrue(diagnostic.contains("scrcpy window still work"))
+    }
+
+    @Test
+    fun nativeLoaderDiagnosticFindsGlibcMessageOnlyInASuppressedException() {
+        // JavaCPP's real UnsatisfiedLinkError often ends up suppressed rather than as the direct
+        // cause once it re-throws a cached NoClassDefFoundError on a later attempt.
+        val noClassDef = NoClassDefFoundError("Could not initialize class org.bytedeco.ffmpeg.global.avutil")
+        val initializerFailure = ExceptionInInitializerError(noClassDef)
+        initializerFailure.addSuppressed(UnsatisfiedLinkError("/tmp/libavutil.so: version `GLIBC_2.34' not found"))
+
+        val diagnostic = captureNativeFailureDiagnostic(initializerFailure, osName = "Linux")
+        assertTrue(diagnostic.contains("GLIBC_2.34"))
+        assertTrue(diagnostic.contains("glibc 2.34 or newer"))
     }
 
     @Test

@@ -117,6 +117,53 @@ fun CaptureSettings.mirrorStartRoute(): CaptureMirrorStartRoute = when (effectiv
     CaptureMirrorMode.DISABLED -> CaptureMirrorStartRoute.NONE
 }
 
+/**
+ * Adapts one launch's settings to this system's native media capability (see NativeMediaSupport.kt
+ * — Linux with a too-old glibc). Never touches saved settings; a caller applies this once, right
+ * before a single capture actually starts (see AppState.startCaptureTab), to the settings that one
+ * launch uses. Available -> unchanged. Unavailable -> video recording is forced off (it needs the
+ * same bundled natives), and an in-app mirror request falls back to the external scrcpy window when
+ * one is installed, or to no display at all when it isn't; a request for the external window or no
+ * display was never going to touch the bundled natives, so it stays exactly as chosen.
+ */
+fun CaptureSettings.adaptedToNativeMedia(support: NativeMediaSupport, scrcpyAvailable: Boolean): CaptureSettings {
+    if (support.available) return this
+    val videoOff = copy(recordVideo = false)
+    return if (videoOff.effectiveMirrorMode == CaptureMirrorMode.EMBEDDED) {
+        videoOff.withMirrorMode(if (scrcpyAvailable) CaptureMirrorMode.EXTERNAL else CaptureMirrorMode.DISABLED)
+    } else {
+        videoOff
+    }
+}
+
+/**
+ * One plain, non-fatal notice for a single capture whose settings [adaptedToNativeMedia] actually
+ * changed — null when nothing changed (an available system, or a launch that was never going to
+ * touch the bundled natives anyway). Meant for a live-session diagnostic (CaptureRecorder's
+ * `addDiagnostic`/snapshot.diagnostics — see the capture strip's Diagnostics drawer), not an error:
+ * the capture still works, just without native video.
+ */
+fun nativeMediaAdaptationNotice(
+    original: CaptureSettings,
+    adapted: CaptureSettings,
+    support: NativeMediaSupport,
+    scrcpyAvailable: Boolean,
+): String? {
+    if (original == adapted) return null
+    val glibcClause = support.detectedGlibc?.let { "glibc $it" } ?: "an old glibc"
+    // Describe the display this launch will actually use: a launch whose display was already
+    // Off (or already the scrcpy window) only lost video recording, so don't claim a fallback.
+    val displayTail = when {
+        adapted.effectiveMirrorMode == CaptureMirrorMode.EXTERNAL -> "the device is shown in a scrcpy window."
+        original.effectiveMirrorMode == CaptureMirrorMode.EMBEDDED && !scrcpyAvailable ->
+            "no device display is shown (scrcpy isn't installed)."
+        else -> "the device display is off."
+    }
+    return "Video recording and the in-app mirror aren't available on this system " +
+        "($glibcClause; needs ${REQUIRED_GLIBC.first}.${REQUIRED_GLIBC.second}+, Ubuntu 22.04 or newer). " +
+        "Capturing logs only; $displayTail"
+}
+
 /** The `-b` arguments for this configuration. Empty for DEFAULT — passing no -b at all is what
  *  plain `adb logcat` does, and tracks whatever adb's own default is rather than re-encoding
  *  today's list (which silently omitted `kernel`). */

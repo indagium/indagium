@@ -170,9 +170,17 @@ flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
 flatpak run com.indagium.Indagium
 ```
 
-The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer for
-embedded video capture and media playback/export (Ubuntu 22.04+). On Ubuntu 20.04, install the
-Flatpak runtime above and use the Flatpak package; its runtime supplies a newer glibc.
+The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer
+(Ubuntu 22.04+) for the in-app mirror, video recording, playback and export. On an older system
+(e.g. Ubuntu 20.04, glibc 2.31) Indagium detects this at startup and adapts automatically: it still
+captures and views logs, "Record video to file" is greyed out, and the device is shown in a host
+`scrcpy` window instead of the in-app mirror (install `scrcpy`; scrcpy 1.x windows are video-only,
+without audio). The Settings/New-tab capture controls explain this in place.
+
+Flatpak is **not** a workaround on Ubuntu 20.04: its bundled flatpak 1.6 cannot read Flathub's
+current summary ("summary exceeded maximum size of 10485760 bytes"), so
+`org.freedesktop.Platform//24.08` cannot be installed there without first adding a newer flatpak,
+e.g. from `ppa:alexlarsson/flatpak`.
 
 All three Linux packages register Indagium as a candidate handler for
 `.log`/`.txt`/`.logcat`/`.trace`/`.out` files, but do **not** make themselves the system default —

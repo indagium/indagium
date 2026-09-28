@@ -26,6 +26,8 @@ import com.indagium.capture.DeviceLogState
 import com.indagium.capture.ImportedCapture
 import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
+import com.indagium.capture.NativeMediaSupport
+import com.indagium.capture.NativeMediaSupportProbe
 import com.indagium.capture.classifyAdbRootOutput
 import com.indagium.capture.isPermissionFailure
 import com.indagium.capture.parseLogcatBufferSizes
@@ -88,6 +90,15 @@ internal class CaptureService(
     var toolResolution by mutableStateOf<CaptureToolResolution?>(null)
         private set
     var error by mutableStateOf<String?>(null)
+        private set
+
+    private val nativeMediaProbe = NativeMediaSupportProbe()
+
+    /** Whether the bundled native media stack (in-app mirror, video recording, playback, export)
+     *  can load on this system — see NativeMediaSupport.kt. Until the background probe in [init]
+     *  below publishes a real answer, treated as available: the common case, and consistent with
+     *  [NativeMediaSupport]'s own "never block a launch on doubt" rule. */
+    var nativeMediaSupport by mutableStateOf(NativeMediaSupport(available = true))
         private set
 
     /** Whether the last-resolved adb (see [resolveTools]) validated successfully — the Devices
@@ -341,7 +352,16 @@ internal class CaptureService(
             runCatching { recoverSessions() }
                 .onFailure { error = it.message ?: "Capture sessions could not be recovered" }
         }
+        // Bounded (~2s) and off the Compose thread; see NativeMediaSupportProbe's own doc for why
+        // this only ever runs once per process.
+        scope.launch { runInterruptible { nativeMediaSupportNow() } }
     }
+
+    /** Blocking and memoized: the start path calls this on its IO coroutine so a capture started
+     *  before the background probe above has published still sees the real answer, never the
+     *  optimistic "available" placeholder. */
+    fun nativeMediaSupportNow(): NativeMediaSupport =
+        nativeMediaProbe.detect().also { nativeMediaSupport = it }
 
     /**
      * Refreshes tool validation and device discovery without touching any live controller.
@@ -576,8 +596,12 @@ internal class TabCaptureController(
         device: CaptureDevice,
         settings: CaptureSettings,
         tools: CaptureTools,
+        // Old-glibc Linux (see NativeMediaSupport.kt): one plain diagnostic line surfaced through
+        // the recorder's own live-session channel (CaptureStrip's Diagnostics drawer) when
+        // AppState.startCaptureTab adapted this launch's settings. Null on every other system.
+        startupNotice: String? = null,
         beforeLogcatLaunch: (CaptureSession) -> Unit,
-    ): CaptureSession = recorder.start(device, settings, tools, beforeLogcatLaunch)
+    ): CaptureSession = recorder.start(device, settings, tools, startupNotice, beforeLogcatLaunch)
 
     fun stop(): CaptureSession? = recorder.stop()
 

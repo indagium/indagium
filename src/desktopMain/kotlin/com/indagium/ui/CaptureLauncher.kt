@@ -284,7 +284,15 @@ private fun CaptureBeforeStartRow(
     onReclaimFocus: () -> Unit,
 ) {
     val edit: CaptureSettingsEdit = { transform -> state.updateCaptureLaunchSettings(launcherTabId, transform) }
-    LauncherPanel("Before start") { CaptureStartOptions(draft, onReclaimFocus, edit) }
+    LauncherPanel("Before start") {
+        CaptureStartOptions(
+            settings = draft,
+            onReclaimFocus = onReclaimFocus,
+            nativeMediaSupport = state.captureNativeMediaSupport,
+            scrcpyAvailable = state.captureToolResolution?.scrcpyPath != null,
+            edit = edit,
+        )
+    }
 }
 
 /** Fixes the inverted custom-buffer toggle (was: ticking an unticked buffer removed it, a no-op,
