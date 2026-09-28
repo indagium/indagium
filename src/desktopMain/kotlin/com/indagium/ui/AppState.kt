@@ -1567,6 +1567,10 @@ class AppState(
     // restarts. Injectable for the same reason as autosaveFile/controlTokenFile — tests shouldn't
     // touch the real ~/.openlog2-equivalent location.
     private val sourceIndexFile: File = DesktopStorage.sourceIndexFile(),
+    // Test seam: AppStateStartupRaceTest passes Dispatchers.Unconfined so every coroutine the
+    // constructor launches runs inline at its launch site, turning a construction-order race into a
+    // deterministic check. Production always uses Dispatchers.IO.
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     // Where confirmed v3 sequence diagrams are persisted across restarts (DiagramLibraryStore),
     // threaded into Seq3Session below. Injectable for the same reason as autosaveFile/
     // controlTokenFile/sourceIndexFile — tests shouldn't touch the real appDataDir() store.
@@ -1967,7 +1971,7 @@ class AppState(
     var searchFocusTabId: String? by mutableStateOf(null)
 
     private val ioJob = SupervisorJob()
-    private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
+    private val ioScope = CoroutineScope(ioJob + ioDispatcher)
     private val retraceService = RetraceService()
     private val closed = AtomicBoolean(false)
 
@@ -4071,15 +4075,7 @@ class AppState(
     private var searchNavigationCounter = 0L
 
     init {
-        // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
-        // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
-        // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
-        // snapshot-safe to publish from off the UI thread like every other ioScope write in this
-        // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
-        // synchronous — that one is already user-initiated from an explicit click, not startup.
-        ioScope.launch { refreshStorageSizeInfo() }
         if (restoreOnCreate) restoreAutosave()
-        loadPersistedSourceIndex()
         loadCustomAiCommands()
         AppLogger.setFailureReporter { reason -> debugLoggingError = reason }
         debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, settings.debugLogFilePath)
@@ -11757,5 +11753,23 @@ class AppState(
         appendLine("tabOrder\t${tabOrderToken().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
+    }
+
+    // Startup background work, deliberately in the LAST init block of the class. Kotlin runs
+    // property initializers and init blocks in declaration order, so a coroutine launched from an
+    // earlier init block can run before later fields exist: loadPersistedSourceIndex ->
+    // publishSourceIndex -> refreshChangedFileCounts read changedFileCountRefreshInFlight (declared
+    // thousands of lines below the first init block) while it was still null, an intermittent NPE
+    // at startup that CI surfaced as UncaughtExceptionsBeforeTest in whichever runTest came next.
+    // Everything launched here starts only after the whole object is constructed.
+    init {
+        // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
+        // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
+        // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
+        // snapshot-safe to publish from off the UI thread like every other ioScope write in this
+        // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
+        // synchronous — that one is already user-initiated from an explicit click, not startup.
+        ioScope.launch { refreshStorageSizeInfo() }
+        loadPersistedSourceIndex()
     }
 }
