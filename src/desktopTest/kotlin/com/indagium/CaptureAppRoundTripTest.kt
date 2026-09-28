@@ -111,6 +111,49 @@ class CaptureAppRoundTripTest {
         }
     }
 
+    // Opening the FOLDER of an unpacked capture export (or a capture session folder) must behave
+    // like opening its ZIP — video attached, log synced — not show the generic folder log picker.
+    // Covers the descriptor at the folder's top level and inside a single wrapping subfolder.
+    @Test
+    fun openingAnUnpackedCaptureFolderOpensItAsACapture() = runBlocking {
+        val root = createTempDirectory("capture-folder-open").toFile()
+        try {
+            val zip = exportFixture(root)
+            val flat = File(root, "flat").also { it.mkdirs() }
+            val nested = File(root, "nested").also { File(it, "capture").mkdirs() }
+            for (target in listOf(flat, File(nested, "capture"))) {
+                ZipFile(zip).use { archive ->
+                    archive.entries().asSequence().filterNot { it.isDirectory }.forEach { entry ->
+                        File(target, entry.name).also { it.parentFile.mkdirs() }.outputStream().use { output ->
+                            archive.getInputStream(entry).use { it.copyTo(output) }
+                        }
+                    }
+                }
+            }
+            for ((index, folder) in listOf(flat, nested).withIndex()) {
+                val app = AppState(autosaveFile = File(root, "folder-autosave-$index"), autoExportNotes = false,
+                    archiveCacheDir = File(root, "folder-cache-$index"))
+                try {
+                    app.openFolder(folder)
+                    val id = withTimeout(WAIT_TIMEOUT_MS) {
+                        while (app.tabs.isEmpty()) delay(POLL_INTERVAL_MS)
+                        app.tabs.single().id
+                    }
+                    waitLoaded(app, id)
+                    assertNull(app.pendingFolderPicker)
+                    val tab = assertNotNull(app.tab(id))
+                    assertEquals(FIXTURE_ROW_COUNT, tab.logData.size)
+                    assertNotNull(tab.attachedVideo)
+                    assertEquals(EXPECTED_VIDEO_MS, app.logIdToVideoMs(tab, tab.logData[SECOND_ROW_INDEX].id))
+                } finally {
+                    app.close()
+                }
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     // Regression test for the "Save + open" bug: CaptureStrip.kt's export-result LaunchedEffect
     // used to call state.openFile(file) directly on the just-exported ZIP, which parses the
     // archive's raw bytes as a plain text log instead of opening it as a capture archive. The fix
