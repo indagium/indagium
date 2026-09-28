@@ -2,6 +2,7 @@ package com.indagium.capture
 
 import java.io.ByteArrayOutputStream
 import java.io.Closeable
+import java.io.File
 import java.io.InputStream
 import java.time.Duration
 import java.util.concurrent.TimeUnit
@@ -76,10 +77,41 @@ class ProcessBuilderCaptureRunner : CaptureProcessRunner {
         require(spec.command.isNotEmpty()) { "Capture command cannot be empty" }
         val builder = ProcessBuilder(spec.command)
             .redirectErrorStream(spec.redirectErrorStream)
+        sanitizeAppImageRuntimeForChild(builder.environment())
         builder.environment().putAll(spec.environment)
         return JvmRunningCaptureProcess(builder.start())
     }
 }
+
+/** AppImage prepends its private usr/lib directory to LD_LIBRARY_PATH. That is needed by the
+ * packaged JVM process, but must not leak into separately launched host tools such as adb/scrcpy:
+ * private bundled libraries can prevent a host binary from opening its own window. */
+internal fun sanitizeAppImageRuntimeForChild(environment: MutableMap<String, String>) {
+    val appDir = environment[APPIMAGE_APPDIR_ENV]?.takeIf(String::isNotBlank) ?: return
+    val normalizedAppDir = normalizePath(appDir)
+    val remainingLibraryPaths = environment[APPIMAGE_LIBRARY_PATH_ENV]
+        ?.split(File.pathSeparatorChar)
+        .orEmpty()
+        .filter(String::isNotBlank)
+        .filterNot { entry ->
+            val normalizedEntry = normalizePath(entry)
+            normalizedEntry == normalizedAppDir || normalizedEntry.startsWith("$normalizedAppDir/")
+        }
+    if (remainingLibraryPaths.isEmpty()) {
+        environment.remove(APPIMAGE_LIBRARY_PATH_ENV)
+    } else {
+        environment[APPIMAGE_LIBRARY_PATH_ENV] = remainingLibraryPaths.joinToString(File.pathSeparator)
+    }
+    environment.remove(APPIMAGE_APPDIR_ENV)
+    environment.remove(APPIMAGE_EXECUTABLE_ENV)
+    environment.remove(APPIMAGE_ORIGINAL_WORKDIR_ENV)
+    environment.remove(APPIMAGE_ARGV0_ENV)
+}
+
+private fun normalizePath(path: String): String =
+    runCatching { File(path).canonicalFile.path }
+        .getOrDefault(File(path).absoluteFile.toPath().normalize().toString())
+        .trimEnd('/')
 
 private class JvmRunningCaptureProcess(private val process: Process) : RunningCaptureProcess {
     override val inputStream: InputStream get() = process.inputStream
@@ -136,3 +168,8 @@ const val DEFAULT_CAPTURE_COMMAND_OUTPUT_LIMIT: Int = 256 * 1024
 
 private const val BOUNDED_OUTPUT_INITIAL_CAPACITY_BYTES = 8 * 1024
 private const val PROCESS_OUTPUT_JOIN_TIMEOUT_MS = 1_000L
+private const val APPIMAGE_APPDIR_ENV = "APPDIR"
+private const val APPIMAGE_EXECUTABLE_ENV = "APPIMAGE"
+private const val APPIMAGE_ORIGINAL_WORKDIR_ENV = "OWD"
+private const val APPIMAGE_ARGV0_ENV = "ARGV0"
+private const val APPIMAGE_LIBRARY_PATH_ENV = "LD_LIBRARY_PATH"

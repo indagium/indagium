@@ -87,6 +87,38 @@ class CaptureToolsTest {
     }
 
     @Test
+    fun scrcpy112UsesLegacyFlagsAndDoesNotPassUnsupportedAudioOptions() {
+        val runner = FakeCaptureRunner().apply { enqueue(CompletedFakeProcess("scrcpy 1.12.1\n")) }
+        val tools = CaptureTools(
+            adb = CaptureExecutable("/usr/bin/adb"),
+            scrcpy = CaptureExecutable("/usr/bin/scrcpy"),
+            runner = runner,
+        )
+        assertTrue(tools.validateScrcpy().available)
+        assertTrue(tools.legacyScrcpyAudioWarning().orEmpty().contains("video-only"))
+
+        val spec = tools.scrcpyMirrorSpec(
+            serial = "PHONE",
+            settings = CaptureSettings(audio = true, bitrateMbps = 12),
+            audioCliArgs = listOf("--audio-source=playback", "--audio-dup"),
+        )
+        assertTrue(spec.command.containsAll(listOf("--serial", "PHONE", "--max-size=1080", "--max-fps=30", "--bit-rate=12M")))
+        assertFalse(spec.command.any { it.startsWith("--video-bit-rate") })
+        assertFalse(spec.command.any { it.startsWith("--video-codec") })
+        assertFalse(spec.command.any { it.startsWith("--audio-") || it == "--no-audio" })
+
+        val audioOff = tools.scrcpyMirrorSpec("PHONE", CaptureSettings(audio = false))
+        assertFalse(audioOff.command.contains("--no-audio"))
+    }
+
+    @Test
+    fun scrcpyVersionParserReadsUbuntuOneTwelveVersion() {
+        assertEquals(ScrcpyVersion(1, 12, 1), parseScrcpyVersion("scrcpy 1.12.1+ds-1\n"))
+        assertEquals(ScrcpyVersion(2, 0, 0), parseScrcpyVersion("scrcpy v2.0"))
+        assertNull(parseScrcpyVersion("not scrcpy"))
+    }
+
+    @Test
     fun readDeviceSdkLevelParsesABarePropertyReply() {
         val runner = FakeCaptureRunner().apply { enqueue(CompletedFakeProcess("33\n")) }
         val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)

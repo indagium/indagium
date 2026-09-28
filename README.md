@@ -165,9 +165,14 @@ chmod +x Indagium-x.y.z-x86_64.AppImage
 
 # Flatpak bundle (replace x86_64 with aarch64 on ARM64)
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.freedesktop.Platform//24.08
 flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
 flatpak run com.indagium.Indagium
 ```
+
+The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer for
+embedded video capture and media playback/export (Ubuntu 22.04+). On Ubuntu 20.04, install the
+Flatpak runtime above and use the Flatpak package; its runtime supplies a newer glibc.
 
 All three Linux packages register Indagium as a candidate handler for
 `.log`/`.txt`/`.logcat`/`.trace`/`.out` files, but do **not** make themselves the system default —

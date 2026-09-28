@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -93,6 +94,34 @@ class EmbeddedDeviceSessionTest {
                 diagnostics.any { it.contains("video gap", ignoreCase = true) },
                 "a reconnect must record an interruption diagnostic: $diagnostics",
             )
+        } finally {
+            session.close()
+        }
+    }
+
+    @org.junit.Test(timeout = 20_000)
+    fun nativeLibraryInitializationFailureIsReportedWithoutRepeatedReconnects() {
+        val attempts = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            attempts.incrementAndGet()
+            throw ExceptionInInitializerError(UnsatisfiedLinkError("version `GLIBC_2.35' not found"))
+        }
+        val diagnostics = CopyOnWriteArrayList<String>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 0 },
+            reconnectDelay = Duration.ZERO,
+            onDiagnostic = { diagnostics += it },
+        )
+        val snapshots = CopyOnWriteArrayList<EmbeddedMirrorSnapshot>()
+        session.addConnectionListener { snapshot, _ -> snapshots += snapshot }
+        try {
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue { snapshots.any { it.state == EmbeddedMirrorState.FAILED } }
+
+            assertEquals(1, attempts.get(), "a cached native-library initialization failure must not retry")
+            assertTrue(diagnostics.any { it.contains("GLIBC_2.35") })
         } finally {
             session.close()
         }
