@@ -13,10 +13,12 @@ on:
         options:
           - all
           - linux-portable
+          - windows-only
 
 # `linux-portable` lets us prove the two Linux portable formats on both supported architectures
-# without reserving Windows or macOS runners.  Tag-triggered builds (and the default manual
-# dispatch) keep the complete release matrix below.
+# without reserving Windows or macOS runners. `windows-only` runs the Windows MSI row after the
+# same verification gate. Tag-triggered builds (and the default manual dispatch) keep the complete
+# release matrix below.
 jobs:
   select-build-matrix:
     runs-on: ubuntu-latest
@@ -35,6 +37,11 @@ jobs:
               matrix='{"include":[
                 {"os":"ubuntu-latest","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-x64","linux":true,"include_deb":false,"portable_arch":"x86_64"},
                 {"os":"ubuntu-24.04-arm","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-arm64","linux":true,"include_deb":false,"portable_arch":"aarch64"}
+              ]}'
+              ;;
+            windows-only)
+              matrix='{"include":[
+                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false}
               ]}'
               ;;
             all)
