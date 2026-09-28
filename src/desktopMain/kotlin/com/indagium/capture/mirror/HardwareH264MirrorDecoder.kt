@@ -64,7 +64,6 @@ internal class HardwareH264MirrorDecoder(
         val frame = av_frame_alloc() ?: throw IOException("FFmpeg could not allocate a video frame")
         var previousWidth = 0
         var previousHeight = 0
-        var hardwareRef: AVBufferRef? = null
         val formatSelector = object : AVCodecContext.Get_format_AVCodecContext_IntPointer() {
             override fun call(context: AVCodecContext, formats: IntPointer): Int {
                 var index = 0L
@@ -78,8 +77,8 @@ internal class HardwareH264MirrorDecoder(
         try {
             val created = av_hwdevice_ctx_create(devicePointer, hardwareDeviceType, null as BytePointer?, null, 0)
             if (created < 0) throw IOException("FFmpeg could not create hardware device context (error $created)")
-            hardwareRef = AVBufferRef(devicePointer.get())
-            codecContext.hw_device_ctx(av_buffer_ref(hardwareRef))
+            // The codec takes its own reference; devicePointer keeps ownership of the original.
+            codecContext.hw_device_ctx(av_buffer_ref(AVBufferRef(devicePointer.get())))
             codecContext.get_format(formatSelector)
             val timeBase = AVRational().num(MIRROR_TIME_BASE_NUMERATOR).den(MIRROR_TIMESTAMP_TICKS_PER_SECOND)
             codecContext.time_base(timeBase)
@@ -123,11 +122,10 @@ internal class HardwareH264MirrorDecoder(
             av_frame_free(frame)
             val contextPointer = PointerPointer<AVCodecContext>(1).put(codecContext)
             avcodec_free_context(contextPointer)
-            hardwareRef?.let { ref ->
-                val refPointer = PointerPointer<AVBufferRef>(1).put(ref)
-                av_buffer_unref(refPointer)
-                refPointer.close()
-            }
+            // Unref the device exactly once, through the slot av_hwdevice_ctx_create filled (this
+            // also nulls it). A second Java wrapper around the same address used to be unreffed
+            // too, freeing one AVBufferRef twice on every decoder teardown — native heap
+            // corruption on disconnect/stop/fallback.
             av_buffer_unref(devicePointer)
             devicePointer.close()
             formatSelector.close()
