@@ -191,7 +191,7 @@ val compileWindowsMirrorNative by tasks.registering(Exec::class) {
         val source = file("native/windows/indagium_mirror.cpp")
         commandLine(
             "cmd.exe", "/d", "/c",
-            "\"${script.absolutePath}\" \"${javaHome.absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
+            "call \"${script.absolutePath}\" \"${javaHome.absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
         )
     }
 }
