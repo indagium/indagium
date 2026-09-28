@@ -6,6 +6,7 @@ import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureProcessSpec
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.RunningCaptureProcess
+import org.bytedeco.javacv.Frame
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
@@ -14,6 +15,7 @@ import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.net.ConnectException
 import java.net.Socket
+import java.nio.ByteBuffer
 import java.time.Duration
 import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArrayList
@@ -124,6 +126,73 @@ class EmbeddedMirrorTest {
         }
         assertFalse(worker.isAlive, "decoder did not stop after the live stream closed")
         assertNull(failure.get())
+    }
+
+    // JavaCvH264Decoder asks the grabber for BGRA output and bulk-copies each row straight into
+    // MirrorFrame.pixelsArgb (see Frame.toMirrorFrame()) instead of Java2DFrameConverter's
+    // BufferedImage + getRGB — BGRA bytes read back as little-endian ints are ARGB. Exercises a
+    // stride wider than width*4 (swscale pads rows for alignment), so the padding bytes at the end
+    // of each row must be skipped rather than folded into the next row's pixels.
+    @Test
+    fun bgraFrameConvertsToArgbPixelsRespectingRowStridePadding() {
+        val width = 2
+        val height = 2
+        val stride = width * 4 + 4 // 4 bytes of row padding beyond width*4
+        val bytes = ByteArray(stride * height)
+
+        fun putBgra(rowIndex: Int, columnIndex: Int, b: Int, g: Int, r: Int, a: Int) {
+            val offset = rowIndex * stride + columnIndex * 4
+            bytes[offset] = b.toByte()
+            bytes[offset + 1] = g.toByte()
+            bytes[offset + 2] = r.toByte()
+            bytes[offset + 3] = a.toByte()
+        }
+        putBgra(0, 0, b = 0x11, g = 0x22, r = 0x33, a = 0xFF)
+        putBgra(0, 1, b = 0x44, g = 0x55, r = 0x66, a = 0xFF)
+        putBgra(1, 0, b = 0x77, g = 0x88, r = 0x99, a = 0xFF)
+        putBgra(1, 1, b = 0xAA, g = 0xBB, r = 0xCC, a = 0xFF)
+        // Row padding: garbage bytes that must never leak into a decoded pixel.
+        bytes[width * 4] = 0x7F.toByte()
+        bytes[stride + width * 4] = 0x7F.toByte()
+
+        val frame = Frame().apply {
+            imageWidth = width
+            imageHeight = height
+            imageStride = stride
+            image = arrayOf<java.nio.Buffer>(ByteBuffer.wrap(bytes))
+            timestamp = 42L
+        }
+
+        val mirrorFrame = assertNotNull(frame.toMirrorFrame())
+        assertEquals(width, mirrorFrame.width)
+        assertEquals(height, mirrorFrame.height)
+        assertEquals(42L, mirrorFrame.presentationTimeUs)
+        assertContentEquals(
+            intArrayOf(
+                0xFF332211L.toInt(), 0xFF665544L.toInt(),
+                0xFF998877L.toInt(), 0xFFCCBBAAL.toInt(),
+            ),
+            mirrorFrame.pixelsArgb,
+        )
+    }
+
+    @Test
+    fun bgraFrameWithNoImageDataOrNonPositiveDimensionsConvertsToNull() {
+        val emptyImage = Frame().apply {
+            imageWidth = 4
+            imageHeight = 4
+            imageStride = 16
+            image = null
+        }
+        assertNull(emptyImage.toMirrorFrame())
+
+        val zeroSized = Frame().apply {
+            imageWidth = 0
+            imageHeight = 4
+            imageStride = 0
+            image = arrayOf<java.nio.Buffer>(ByteBuffer.allocate(0))
+        }
+        assertNull(zeroSized.toMirrorFrame())
     }
 
     @Test

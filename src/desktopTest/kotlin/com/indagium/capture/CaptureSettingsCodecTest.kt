@@ -167,6 +167,21 @@ class CaptureSettingsCodecTest {
         assertEquals(true, decoded.keepDeviceAudio)
     }
 
+    // Windows/Linux hardware mirror opt-in (CaptureSettings.hardwareMirror): off by default, and
+    // absent on any settings JSON written before this feature existed decodes to that same default —
+    // same "appended last, defaults on absence" contract as keepDeviceAudio above.
+    @Test
+    fun hardwareMirrorDefaultsToFalseWhenAbsent() {
+        val decoded = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
+        assertEquals(false, decoded.hardwareMirror)
+    }
+
+    @Test
+    fun hardwareMirrorRoundTrips() {
+        val decoded = assertNotNull(captureSettingsFromJson(captureSettingsToJson(CaptureSettings(hardwareMirror = true))))
+        assertEquals(true, decoded.hardwareMirror)
+    }
+
     @Test
     fun logcatBufferArgsForEachMode() {
         assertEquals(emptyList(), CaptureSettings(bufferMode = CaptureBufferMode.DEFAULT).logcatBufferArgs())

@@ -97,6 +97,12 @@ data class CaptureSettings(
     /** Optional host microphone input. [MICROPHONE_OFF_ID] disables it, [MICROPHONE_DEFAULT_ID]
      * uses the operating system default, and any other value is a stable mixer identity. */
     val microphoneDeviceId: String = MICROPHONE_OFF_ID,
+    /** Opt-in for the Windows D3D11 / Linux VAAPI+EGL direct-decode in-app mirror, appended last
+     *  matching this class's own convention comment above. Off by default: neither path has proven
+     *  itself on real hardware yet (see EmbeddedMirrorPanel.kt's `shouldUseDesktopGpuMirror`), so
+     *  Windows/Linux default to the Compose/JavaCV mirror until a user explicitly turns this on in
+     *  Settings → Capture. Irrelevant on macOS, which always uses its own VideoToolbox/Metal path. */
+    val hardwareMirror: Boolean = false,
 )
 
 const val MICROPHONE_OFF_ID = "off"

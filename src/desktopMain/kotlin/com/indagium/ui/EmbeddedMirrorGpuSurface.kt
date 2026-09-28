@@ -6,13 +6,13 @@ import com.indagium.capture.mirror.DirectH264Decoder
 import com.indagium.capture.mirror.HardwareH264MirrorDecoder
 import com.indagium.capture.mirror.HardwareMirrorFramePresenter
 import com.indagium.capture.mirror.LinuxVaapiEglMirrorNative
+import com.indagium.capture.mirror.NativeMirrorCanvas
 import com.indagium.capture.mirror.WindowsD3D11MirrorNative
 import org.bytedeco.ffmpeg.global.avutil.AV_HWDEVICE_TYPE_D3D11VA
 import org.bytedeco.ffmpeg.global.avutil.AV_HWDEVICE_TYPE_VAAPI
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_D3D11
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_VAAPI
 import java.awt.Canvas
-import java.awt.Color
 import java.awt.GraphicsEnvironment
 import java.io.Closeable
 
@@ -35,10 +35,7 @@ internal class EmbeddedMirrorGpuSurface private constructor(
     companion object {
         fun create(): EmbeddedMirrorGpuSurface {
             check(!GraphicsEnvironment.isHeadless()) { "Native GPU mirror requires an AWT display" }
-            val canvas = Canvas().apply {
-                background = Color.BLACK
-                isFocusable = true
-            }
+            val canvas = NativeMirrorCanvas()
             val os = System.getProperty("os.name").orEmpty()
             return if (os.contains("win", ignoreCase = true)) {
                 EmbeddedMirrorGpuSurface(

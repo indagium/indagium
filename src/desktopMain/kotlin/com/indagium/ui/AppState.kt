@@ -2053,7 +2053,8 @@ class AppState(
     // (the whole capture.mirror stack deliberately is), and AppState's own constructor is public,
     // so a constructor parameter of this type would fail the "public declaration exposes internal
     // type" check that a property setter of the same visibility does not.
-    internal var embeddedMirrorHandleFactory: (CaptureTools, File, com.indagium.capture.mirror.EmbeddedDeviceSession?) -> EmbeddedMirrorHandle =
+    internal var embeddedMirrorHandleFactory:
+        (CaptureTools, File, com.indagium.capture.mirror.EmbeddedDeviceSession?, Boolean) -> EmbeddedMirrorHandle =
         EmbeddedMirrorHandle::create
 
     /** Setup failures (tool resolution, asset deploy, handle creation) that happened before any
@@ -3098,6 +3099,7 @@ class AppState(
                         tools,
                         File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
                         sharedDeviceSession,
+                        session.settings.hardwareMirror,
                     )
                     val startRequest = synchronized(stateLock) {
                         if (captureControllersByTab[tabId] !== controller) {

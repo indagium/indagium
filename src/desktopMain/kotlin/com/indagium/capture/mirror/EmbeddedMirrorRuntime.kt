@@ -4,10 +4,9 @@ package com.indagium.capture.mirror
 
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureTools
+import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGRA
 import org.bytedeco.javacv.FFmpegFrameGrabber
 import org.bytedeco.javacv.Frame
-import org.bytedeco.javacv.Java2DFrameConverter
-import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.EOFException
 import java.io.File
@@ -18,6 +17,8 @@ import java.io.PushbackInputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.time.Duration
 import java.util.ArrayDeque
 import java.util.UUID
@@ -504,23 +505,41 @@ internal class JavaCvH264Decoder : H264Decoder {
         FFmpegFrameGrabber(input, 0).use { grabber ->
             grabber.format = "h264"
             grabber.setOption("fflags", "nobuffer")
+            // 32-bit output lets grabImage()'s Frame be bulk-copied straight into pixelsArgb below
+            // (see Frame.toMirrorFrame()) instead of via Java2DFrameConverter's BufferedImage +
+            // getRGB, which is what made this the hot path on arm64: swscale already logs "No
+            // accelerated colorspace conversion" for the default BGR24 output there, and that
+            // second, pixel-by-pixel conversion only added more unaccelerated work on top.
+            grabber.pixelFormat = AV_PIX_FMT_BGRA
             grabber.start(false)
-            Java2DFrameConverter().use { converter ->
-                while (true) {
-                    val frame = grabber.grabImage() ?: break
-                    val image = converter.convert(frame) ?: continue
-                    onFrame(image.toMirrorFrame(frame))
-                }
+            while (true) {
+                val frame = grabber.grabImage() ?: break
+                val mirrorFrame = frame.toMirrorFrame() ?: continue
+                onFrame(mirrorFrame)
             }
             grabber.stop()
         }
     }
+}
 
-    private fun BufferedImage.toMirrorFrame(frame: Frame): MirrorFrame {
-        val pixels = IntArray(width * height)
-        getRGB(0, 0, width, height, pixels, 0, width)
-        return MirrorFrame(width, height, pixels, frame.timestamp)
+/** Bulk-copies a BGRA [Frame] (see [JavaCvH264Decoder]'s `pixelFormat`) into [MirrorFrame]'s ARGB
+ * `pixelsArgb`: read back as little-endian ints, BGRA bytes are ARGB, so each row is one
+ * [java.nio.IntBuffer] bulk `get()` rather than a per-pixel conversion. Copies row by row because
+ * [Frame.imageStride] can be wider than `imageWidth * 4` (swscale pads rows for alignment — see
+ * FFmpegFrameGrabber.initPictureRGB's own comment); null when this frame carries no image data or
+ * has non-positive dimensions (grabImage() can return either between calls). Top-level and
+ * internal (not private/a decoder member) so it can be unit-tested against a hand-built [Frame]
+ * without decoding real H.264. */
+internal fun Frame.toMirrorFrame(): MirrorFrame? {
+    val buffer = image?.getOrNull(0) as? ByteBuffer ?: return null
+    if (imageWidth <= 0 || imageHeight <= 0) return null
+    val pixels = IntArray(imageWidth * imageHeight)
+    val bytes = buffer.duplicate().order(ByteOrder.LITTLE_ENDIAN)
+    for (row in 0 until imageHeight) {
+        bytes.position(row * imageStride)
+        bytes.asIntBuffer().get(pixels, row * imageWidth, imageWidth)
     }
+    return MirrorFrame(imageWidth, imageHeight, pixels, timestamp)
 }
 
 /** A connection around the ADB-forwarded scrcpy socket. All subprocesses are stopped together. */

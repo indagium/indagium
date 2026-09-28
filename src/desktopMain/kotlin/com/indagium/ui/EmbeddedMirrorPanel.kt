@@ -60,7 +60,7 @@ import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.toComposeImageBitmap
+import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
@@ -118,9 +118,10 @@ import java.awt.event.KeyAdapter
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelListener
-import java.awt.image.BufferedImage
 import java.io.Closeable
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.concurrent.atomic.AtomicBoolean
 import java.awt.event.KeyEvent as AwtKeyEvent
 
@@ -211,19 +212,24 @@ internal class EmbeddedMirrorHandle private constructor(
          * a session wires [MirrorBackend.SharedRecordingSession] instead of opening a second
          * embedded scrcpy server — see that class's doc.
          */
-        fun create(tools: CaptureTools, root: File, sharedSession: EmbeddedDeviceSession? = null): EmbeddedMirrorHandle =
+        fun create(
+            tools: CaptureTools,
+            root: File,
+            sharedSession: EmbeddedDeviceSession? = null,
+            hardwareMirrorEnabled: Boolean = false,
+        ): EmbeddedMirrorHandle =
             if (sharedSession != null) {
                 // Recording video already owns the device session. On macOS its packet pump can
                 // feed VideoToolbox/Metal directly too, without a second scrcpy encoder or the
                 // JavaCV -> BufferedImage -> Compose copy that made the shared path feel delayed.
                 when {
                     shouldUseMacNativeMirror() -> createSharedMacNativeOrCompose(sharedSession)
-                    shouldUseDesktopGpuMirror() -> createSharedGpuNativeOrCompose(sharedSession)
+                    shouldUseDesktopGpuMirror(enabled = hardwareMirrorEnabled) -> createSharedGpuNativeOrCompose(sharedSession)
                     else -> createShared(sharedSession)
                 }
             } else if (shouldUseMacNativeMirror()) {
                 createMacNativeOrCompose(tools, root)
-            } else if (shouldUseDesktopGpuMirror()) {
+            } else if (shouldUseDesktopGpuMirror(enabled = hardwareMirrorEnabled)) {
                 createGpuNativeOrCompose(tools, root)
             } else {
                 createComposeStandalone(tools, root)
@@ -472,8 +478,13 @@ internal class EmbeddedMirrorHandle private constructor(
 internal fun shouldUseMacNativeMirror(osName: String = System.getProperty("os.name").orEmpty()): Boolean =
     osName.contains("mac", ignoreCase = true)
 
-internal fun shouldUseDesktopGpuMirror(osName: String = System.getProperty("os.name").orEmpty()): Boolean =
-    osName.contains("win", ignoreCase = true) || osName.contains("linux", ignoreCase = true)
+/** [enabled] is the persisted `CaptureSettings.hardwareMirror` opt-in (default false — see that
+ * field's doc): neither the D3D11 nor the VAAPI/EGL path has proven itself on real hardware yet, so
+ * Windows/Linux only take this route when a user has explicitly turned it on in Settings → Capture. */
+internal fun shouldUseDesktopGpuMirror(
+    osName: String = System.getProperty("os.name").orEmpty(),
+    enabled: Boolean,
+): Boolean = enabled && (osName.contains("win", ignoreCase = true) || osName.contains("linux", ignoreCase = true))
 
 /** What [EmbeddedMirrorHandle] drives — either its own standalone transport, or a shared view onto
  * a live recording's device stream. See each implementation's doc. */
@@ -661,7 +672,18 @@ internal sealed interface MirrorBackend : Closeable {
             surface?.setOverlayOccluded(occluded)
         }
 
-        private fun composeLocked(): EmbeddedMirrorSnapshot = connectionSnapshot.copy(frame = lastFrame, frameInfo = lastFrameInfo)
+        /** While [attached], mirrors the recording's own connection (LIVE/RECONNECTING/FAILED all
+         * pass through unchanged) plus whatever this decoder has produced. While detached — after
+         * [stop] — the recording connection itself stays LIVE (see the class doc), but this mirror
+         * is no longer decoding it, so reporting [connectionSnapshot] here regardless of [attached]
+         * left the control bar saying "Live" and the surface black after Disconnect. Report
+         * DISCONNECTED with no error/frame instead; [start] (Connect) re-attaches. */
+        private fun composeLocked(): EmbeddedMirrorSnapshot =
+            if (attached) {
+                connectionSnapshot.copy(frame = lastFrame, frameInfo = lastFrameInfo)
+            } else {
+                EmbeddedMirrorSnapshot()
+            }
 
         /** Ignores [serial] — the shared session's own connection state (already LIVE, well before
          * any decoder ever attaches) says nothing about whether a decoder is attached; only
@@ -679,6 +701,10 @@ internal sealed interface MirrorBackend : Closeable {
             synchronized(lifecycleLock) {
                 if (synchronized(lock) { attached }) return
                 synchronized(lock) { attached = true }
+                // Publish immediately: composeLocked() now depends on [attached], so Connect must
+                // report the recording's current state (LIVE, most commonly) right away rather than
+                // waiting for this decoder's first frame — see the class doc's Disconnect fix.
+                onSnapshotChanged(snapshot())
                 val direct = try {
                     synchronized(lock) {
                         when {
@@ -800,6 +826,10 @@ internal sealed interface MirrorBackend : Closeable {
                         (gpuDirectDecoderFactory != null && gpuSurface != null)
                 )
             }
+            // Publish DISCONNECTED immediately rather than waiting for detachDecoder()/native
+            // surface recreation below (which can take real time) — see the class doc's Disconnect
+            // fix and composeLocked()'s own doc.
+            onSnapshotChanged(snapshot())
             session.detachDecoder()
             // detachDecoder closes the per-attachment VideoToolbox decoder and its surface. A
             // later Connect must get a new native handle; reusing the old one would retain the
@@ -893,10 +923,22 @@ private fun clipboardString(): String? = runCatching {
     else clipboard.getData(DataFlavor.stringFlavor) as? String
 }.getOrNull()
 
-private fun MirrorFrame.toComposeBitmap(): androidx.compose.ui.graphics.ImageBitmap =
-    BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB).also {
-        it.setRGB(0, 0, width, height, pixelsArgb, 0, width)
-    }.toComposeImageBitmap()
+// One copy (IntArray -> the ByteArray Skia installs) instead of the previous two BufferedImage
+// round-trips (setRGB into a TYPE_INT_ARGB raster, then toComposeImageBitmap()'s own Java2D-based
+// conversion into a Skia bitmap). ColorType.N32 is BGRA_8888 on every little-endian desktop this
+// runs on, so a little-endian int view of the bytes is exactly pixelsArgb's ARGB packed format —
+// no per-pixel channel shuffling needed, just a bulk IntBuffer.put(). OPAQUE (not PREMUL): every
+// MirrorFrame pixel is fully opaque device video, matching pixelsArgb's own documented meaning.
+private fun MirrorFrame.toComposeBitmap(): androidx.compose.ui.graphics.ImageBitmap {
+    val rowBytes = width * Int.SIZE_BYTES
+    val bytes = ByteArray(rowBytes * height)
+    ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asIntBuffer().put(pixelsArgb)
+    val bitmap = org.jetbrains.skia.Bitmap()
+    check(
+        bitmap.installPixels(org.jetbrains.skia.ImageInfo.makeN32(width, height, org.jetbrains.skia.ColorAlphaType.OPAQUE), bytes, rowBytes),
+    ) { "could not install mirror frame pixels into a Skia bitmap" }
+    return bitmap.asComposeImageBitmap()
+}
 
 /** A tall portrait device can grow within the scrollable sidebar without artificial 420dp cap. */
 internal val MIRROR_SIDEBAR_MAX_HEIGHT = 900.dp
@@ -973,11 +1015,18 @@ internal fun EmbeddedMirrorPanel(
     } else {
         snapshot.state
     }
+    // Gates mounting the Windows/Linux native SwingPanel below: LIVE or RECONNECTING only — never
+    // CONNECTING/DISCONNECTED/FAILED, even though frameInfo can still hold a previous connection's
+    // last dimensions (composeLocked()/publishLocked() don't clear it just because the state moved
+    // to FAILED). Without this a FAILED connection kept showing the native surface's last frame
+    // frozen on screen instead of the error text below.
+    val mirrorConnected = displayedState == EmbeddedMirrorState.LIVE || displayedState == EmbeddedMirrorState.RECONNECTING
     // Recompute the ImageBitmap only when a genuinely new frame arrives, not on every
-    // recomposition — frame.toComposeBitmap() allocates a fresh BufferedImage, copies every pixel
-    // via setRGB, then re-encodes it as a Compose ImageBitmap, and this composable previously ran
-    // that on every recomposition (dropped-frame count changing, a button's enabled state, etc.),
-    // not just once per decoded frame.
+    // recomposition — frame.toComposeBitmap() used to allocate a fresh BufferedImage, copy every
+    // pixel via setRGB, then re-encode it as a Compose ImageBitmap, and this composable previously
+    // ran that on every recomposition (dropped-frame count changing, a button's enabled state,
+    // etc.), not just once per decoded frame. It now installs the frame's pixels straight into a
+    // Skia Bitmap, but the memoization still matters for the same reason.
     val bitmap = remember(frame) { frame?.toComposeBitmap() }
     val frameWidth = frame?.width ?: frameInfo?.width
     val frameHeight = frame?.height ?: frameInfo?.height
@@ -1211,7 +1260,14 @@ internal fun EmbeddedMirrorPanel(
                                         update = { macSurface.requestDisplay() },
                                     )
                                 }
-                            } else if (gpuSurface != null) {
+                            } else if (gpuSurface != null && frameInfo != null && mirrorConnected) {
+                                // Mounted only once the direct decoder has actually presented a
+                                // frame (frameInfo becomes non-null there — see
+                                // HardwareH264MirrorDecoder.decode) and the connection is live:
+                                // mounting this heavyweight Canvas any earlier showed a black box
+                                // before the first frame and, since stop() recreates a fresh
+                                // surface, after every Disconnect too. Otherwise this falls through
+                                // to the placeholder text below, same as the macSurface branch above.
                                 SwingPanel(
                                     background = Color.Transparent,
                                     factory = { gpuSurface.canvas },
