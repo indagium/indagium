@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -31,13 +32,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.ProfileSpec
 
 // Workspace-profile picker (Settings → General; the first-run setup assistant reuses the same
 // card). The card itself is preview-agnostic so a caller can pass its own wireframe, e.g. a
@@ -53,6 +62,8 @@ internal fun WorkspaceProfileCard(
     selected: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    // A "⋯" menu at the preview's top-left (custom profiles: rename, update, export, delete).
+    menuActions: List<ProfileMenuAction> = emptyList(),
     preview: @Composable BoxScope.() -> Unit,
 ) {
     val tc = tc()
@@ -75,6 +86,9 @@ internal fun WorkspaceProfileCard(
     ) {
         Box(Modifier.fillMaxWidth().height(WIREFRAME_HEIGHT)) {
             preview()
+            if (menuActions.isNotEmpty()) {
+                ProfileCardMenu(menuActions, Modifier.align(Alignment.TopStart).padding(3.dp))
+            }
             if (selected) {
                 Box(
                     Modifier.align(Alignment.TopEnd).padding(3.dp).size(14.dp).background(tc.ac, CircleShape),
@@ -92,23 +106,119 @@ internal fun WorkspaceProfileCard(
     }
 }
 
-/** The five built-in profiles in one evenly split row; equal heights regardless of text wrapping. */
+/** One entry of a card's "⋯" menu. */
+internal data class ProfileMenuAction(val label: String, val danger: Boolean = false, val onClick: () -> Unit)
+
 @Composable
-internal fun WorkspaceProfileCards(selectedId: String?, onSelect: (WorkspaceProfile) -> Unit, modifier: Modifier = Modifier) {
-    Row(
-        modifier.fillMaxWidth().height(IntrinsicSize.Max),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        WorkspaceProfile.entries.forEach { profile ->
-            WorkspaceProfileCard(
-                title = profile.title,
-                description = profile.description,
-                selected = profile.id == selectedId,
-                onClick = { onSelect(profile) },
-                modifier = Modifier.weight(1f).fillMaxHeight(),
-            ) { ProfileWireframe(profile.spec) }
+private fun ProfileCardMenu(actions: List<ProfileMenuAction>, modifier: Modifier = Modifier) {
+    val tc = tc()
+    var open by remember { mutableStateOf(false) }
+    val density = LocalDensity.current
+    Box(modifier) {
+        Box(
+            Modifier.size(18.dp).background(tc.p.copy(alpha = .85f), CircleShape).border(0.5.dp, tc.br, CircleShape)
+                .clip(CircleShape).clickable { open = !open }
+                .testTag("profile-card-menu"),
+            contentAlignment = Alignment.Center,
+        ) {
+            AppText("⋯", color = tc.ts, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+        if (open) {
+            Popup(
+                alignment = Alignment.TopStart,
+                offset = IntOffset(0, with(density) { 22.dp.roundToPx() }),
+                onDismissRequest = { open = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(190.dp).shadow(8.dp, RoundedCornerShape(8.dp))
+                        .background(tc.p, RoundedCornerShape(8.dp)).border(1.dp, tc.br, RoundedCornerShape(8.dp)).padding(4.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    actions.forEach { action ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                            onClick = {
+                                open = false
+                                action.onClick()
+                            },
+                        ) {
+                            AppText(
+                                action.label,
+                                color = if (action.danger) DANGER_RED else tc.tx,
+                                fontSize = 11.sp,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+/** Cards in a grid of [columns] equal columns; every row has equal-height cards and short rows keep the column width. */
+@Composable
+internal fun WorkspaceCardGrid(
+    cards: List<@Composable (Modifier) -> Unit>,
+    columns: Int,
+    spacing: Dp,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(spacing)) {
+        cards.chunked(columns).forEach { rowCards ->
+            Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(spacing)) {
+                rowCards.forEach { card -> card(Modifier.weight(1f).fillMaxHeight()) }
+                repeat(columns - rowCards.size) { Spacer(Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+/** A card for [profile] (built-in or custom) in the shared style. */
+@Composable
+internal fun ResolvedProfileCard(
+    profile: ResolvedProfile,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    menuActions: List<ProfileMenuAction> = emptyList(),
+) {
+    WorkspaceProfileCard(
+        title = profile.title,
+        description = profile.description,
+        selected = selected,
+        onClick = onClick,
+        modifier = modifier,
+        menuActions = menuActions,
+    ) { ProfileWireframe(profile.spec) }
+}
+
+/** The built-in profiles followed by the custom ones, five per row. [menuFor] gives a custom card its "⋯" menu. */
+@Composable
+internal fun WorkspaceProfileCards(
+    profiles: List<ResolvedProfile>,
+    selectedId: String?,
+    onSelect: (ResolvedProfile) -> Unit,
+    menuFor: (ResolvedProfile) -> List<ProfileMenuAction>,
+    modifier: Modifier = Modifier,
+) {
+    WorkspaceCardGrid(
+        cards = profiles.map { profile ->
+            { cardModifier: Modifier ->
+                ResolvedProfileCard(
+                    profile = profile,
+                    selected = profile.id == selectedId,
+                    onClick = { onSelect(profile) },
+                    modifier = cardModifier,
+                    menuActions = if (profile.custom) menuFor(profile) else emptyList(),
+                )
+            }
+        },
+        columns = 5,
+        spacing = 8.dp,
+        modifier = modifier,
+    )
 }
 
 /** A miniature window drawn in the profile's own theme: sidebar, inline filter bar, split or single

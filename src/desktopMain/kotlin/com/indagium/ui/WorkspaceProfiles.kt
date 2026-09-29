@@ -1,25 +1,12 @@
 package com.indagium.ui
 
 import com.indagium.model.AppSettings
+import com.indagium.model.ProfileSpec
 import com.indagium.model.ThemePreset
 
 // Built-in workspace profiles (Settings → General): one click sets the theme, log font size and
 // the panel layout together. Every value is still individually editable afterwards; the
 // "Customized" strip in the General section is driven by [profileDifferences].
-
-/** The settings and layout values a [WorkspaceProfile] applies. */
-internal data class ProfileSpec(
-    val theme: ThemePreset,
-    val fontSize: Int,
-    val showMinimap: Boolean,
-    val toolbarIconOnlyButtons: Boolean,
-    val openNewFilesWithUnfiltered: Boolean,
-    val filterVisible: Boolean,
-    val filterBarVisible: Boolean,
-    val annotationVisible: Boolean,
-    val videoPanelVisible: Boolean,
-    val aiPanelVisible: Boolean,
-)
 
 /** The panel-visibility fields that live on AppState (not AppSettings) and that a profile sets. */
 internal data class LayoutSnapshot(

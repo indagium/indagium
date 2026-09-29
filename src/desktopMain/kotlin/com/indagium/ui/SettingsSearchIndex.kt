@@ -35,6 +35,21 @@ private fun general() = listOf(
         listOf("profile", "layout", "classic", "focused", "compare", "minimal", "logcat query", "workspace"),
     ),
     entry(
+        SettingsSection.General, "Save as new profile",
+        "Save the current theme, font size and panel layout as your own workspace profile.",
+        listOf("workspace", "preset", "layout", "custom", "save profile", "my profile"),
+    ),
+    entry(
+        SettingsSection.General, "Import profile",
+        "Load a workspace profile from a .json file someone shared.",
+        listOf("workspace", "preset", "layout", "share", "json", "open"),
+    ),
+    entry(
+        SettingsSection.General, "Export profile",
+        "Save your current setup, or one of your profiles, as a shareable .json file.",
+        listOf("workspace", "preset", "layout", "share", "json", "save"),
+    ),
+    entry(
         SettingsSection.General, "Default save folder",
         "Parent folder every other save location defaults under. Defaults to your Documents folder.",
         listOf("documents", "root"),
