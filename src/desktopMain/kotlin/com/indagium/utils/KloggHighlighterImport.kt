@@ -24,6 +24,8 @@ import com.indagium.model.SavedFilter
 private const val COLLECTION = "HighlighterSetCollection"
 private const val LEGACY_SET = "FilterSet"
 private const val MAX_ARRAY = 10_000
+private const val MAX_TOTAL_HIGHLIGHTERS = 5_000
+private const val MAX_NOTES = 200
 private const val KLOGG_DEFAULT_VARIANCE = 15
 private const val PATTERN_PREVIEW = 40
 
@@ -50,40 +52,74 @@ internal fun importKloggHighlighters(text: String, fileName: String): KloggImpor
     if (!hasCollection && !hasLegacy) return null
     val active = ini.stringList("$COLLECTION/active_sets").orEmpty().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     val sets = mutableListOf<KloggImportedSet>()
-    for (n in 1..arraySize(ini, "$COLLECTION/sets")) {
+    val budget = ImportBudget()
+    for (n in arrayIndices(ini, "$COLLECTION/sets")) {
+        if (budget.truncated) break
         val base = "$COLLECTION/sets/$n/HighlighterSet"
         val setId = ini.string("$base/id")?.trim().orEmpty()
         val name = ini.string("$base/name")?.trim().orEmpty().ifEmpty { "klogg set $n" }
         val key = setId.ifEmpty { "n$n" }
-        sets += convertSet(ini, "klogg:$key", name, "$base/highlighters", isActive = setId.isNotEmpty() && setId in active)
+        sets += budget.limitNotes(
+            convertSet(ini, "klogg:$key", name, "$base/highlighters", isActive = setId.isNotEmpty() && setId in active, budget),
+        )
     }
-    if (hasLegacy && ini.hasGroup("$LEGACY_SET/filters")) {
+    if (!budget.truncated && hasLegacy && ini.hasGroup("$LEGACY_SET/filters")) {
         val name = fileName.substringBeforeLast('.').trim().ifEmpty { "klogg filters" }
-        sets += convertSet(ini, "klogg:legacy", name, "$LEGACY_SET/filters", isActive = false)
+        sets += budget.limitNotes(convertSet(ini, "klogg:legacy", name, "$LEGACY_SET/filters", isActive = false, budget))
     }
-    val notes = if (ini.undecodedKeys.isEmpty()) {
-        emptyList()
-    } else {
-        listOf("${ini.undecodedKeys.size} setting(s) are stored as binary values (@Variant/@ByteArray), which are not read; highlighter rules are unaffected.")
+    val notes = mutableListOf<String>()
+    if (ini.undecodedKeys.isNotEmpty()) {
+        notes += "${ini.undecodedKeys.size} setting(s) are stored as binary values (@Variant/@ByteArray), which are not read; highlighter rules are unaffected."
     }
+    if (budget.truncated) notes += "The file has more than $MAX_TOTAL_HIGHLIGHTERS highlighters; the rest were not imported."
+    if (budget.droppedNotes > 0) notes += "…and ${budget.droppedNotes} more note(s) not shown."
     return KloggImport(sets, notes)
 }
 
-// QSettings arrays record their length in "<prefix>/size"; fall back to counting consecutive indices.
-private fun arraySize(ini: QSettingsIni, prefix: String): Int {
-    ini.int("$prefix/size")?.let { return it.coerceIn(0, MAX_ARRAY) }
-    var n = 0
-    while (n < MAX_ARRAY && ini.hasGroup("$prefix/${n + 1}")) n++
-    return n
+/** Caps what one import may produce, so a crafted file cannot exhaust memory or the review dialog. */
+private class ImportBudget {
+    var highlighters = 0
+    var truncated = false
+    private var shownNotes = 0
+    var droppedNotes = 0
+        private set
+
+    /** [set] with its notes cut to what is left of the shared [MAX_NOTES] allowance. */
+    fun limitNotes(set: KloggImportedSet): KloggImportedSet {
+        val room = (MAX_NOTES - shownNotes).coerceAtLeast(0)
+        val kept = set.notes.take(room)
+        shownNotes += kept.size
+        droppedNotes += set.notes.size - kept.size
+        return if (kept.size == set.notes.size) set else set.copy(notes = kept)
+    }
 }
 
-private fun convertSet(ini: QSettingsIni, filterId: String, name: String, hlPrefix: String, isActive: Boolean): KloggImportedSet {
+// The array slots that actually hold keys, in order. klogg always writes "<prefix>/size", which stays
+// an upper bound; without it every present slot counts. Empty slots are never visited.
+private fun arrayIndices(ini: QSettingsIni, prefix: String): List<Int> {
+    val limit = ini.int("$prefix/size")?.coerceIn(0, MAX_ARRAY) ?: MAX_ARRAY
+    return ini.arrayIndices(prefix).filter { it <= limit }.take(MAX_ARRAY)
+}
+
+private fun convertSet(
+    ini: QSettingsIni,
+    filterId: String,
+    name: String,
+    hlPrefix: String,
+    isActive: Boolean,
+    budget: ImportBudget,
+): KloggImportedSet {
     val notes = mutableListOf<String>()
     val layoutNotes = mutableListOf<String>()
     val highlighters = mutableListOf<Highlighter>()
-    for (m in 1..arraySize(ini, hlPrefix)) {
+    for (m in arrayIndices(ini, hlPrefix)) {
+        if (budget.highlighters >= MAX_TOTAL_HIGHLIGHTERS) {
+            budget.truncated = true
+            break
+        }
         val hl = convertHighlighter(ini, "$hlPrefix/$m", "$filterId:$m", m, notes, layoutNotes) ?: continue
         highlighters += hl
+        budget.highlighters++
     }
     notes += layoutNotes
     if (isActive) notes += "active in klogg"

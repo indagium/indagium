@@ -454,6 +454,10 @@ internal const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
 private val FILTER_IMPORT_EXTENSIONS = setOf("json", "conf", "ini")
 
+/** Splits a sidebar drop into (existing filter-import files, everything else, which the app handles as a normal drop). */
+internal fun partitionFilterDrop(dropped: List<File>): Pair<List<File>, List<File>> =
+    dropped.partition { it.exists() && it.extension.lowercase() in FILTER_IMPORT_EXTENSIONS }
+
 internal fun sequenceOrderDuringDrag(
     visibleIds: List<String>,
     draggedId: String?,
@@ -1041,16 +1045,14 @@ internal fun FilterPanel(
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 val dropped = runCatching { localFilesFromDropData(event.dragData()) }.getOrDefault(emptyList())
                 // Filter .json, or a klogg export (.conf / .ini); the importer tells them apart by content.
-                val filterFiles = dropped.filter { it.exists() && it.extension.lowercase() in FILTER_IMPORT_EXTENSIONS }
+                val (filterFiles, otherFiles) = partitionFilterDrop(dropped)
                 // Compose hands a drop to the innermost target that accepted the drag and does NOT
                 // retry the ancestor when this returns false — so without an explicit hand-off, a
-                // log or video dropped on this sidebar would vanish with no feedback at all.
-                if (filterFiles.isEmpty()) {
-                    if (dropped.isEmpty()) return false
-                    onUnhandledFileDrop(dropped)
-                    return true
-                }
-                onImportFiltersFromFiles(filterFiles)
+                // log or video dropped on this sidebar would vanish with no feedback at all. That
+                // holds for the rest of a mixed drop too: import the filters, forward the remainder.
+                if (dropped.isEmpty()) return false
+                if (filterFiles.isNotEmpty()) onImportFiltersFromFiles(filterFiles)
+                if (otherFiles.isNotEmpty()) onUnhandledFileDrop(otherFiles)
                 return true
             }
         }

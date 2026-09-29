@@ -6,11 +6,14 @@ import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.LogSearchState
 import com.indagium.model.SearchScope
+import com.indagium.utils.CancellationCheck
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeSearchMatches
+import kotlin.coroutines.cancellation.CancellationException
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -167,5 +170,17 @@ class LogSearchTest {
         assertEquals(filtered.hashCode(), sameFiltered.hashCode())
         assertFalse(filtered == unfiltered)
         assertFalse(filtered.hashCode() == unfiltered.hashCode())
+    }
+
+    @Test
+    fun aThrowingCancellationCheckStopsTheScan() {
+        val items = (1..20_000).map { row(it, msg = "line $it") }
+        var polls = 0
+        assertFailsWith<CancellationException> {
+            computeSearchMatches(items, "line", caseSensitive = false, RegexEvaluationContext(), CancellationCheck {
+                if (++polls == 2) throw CancellationException("superseded")
+            })
+        }
+        assertEquals(2, polls)
     }
 }

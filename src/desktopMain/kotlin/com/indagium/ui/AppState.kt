@@ -73,6 +73,7 @@ import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.CONTENT_SNIFF_BYTES
+import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
 import com.indagium.utils.LogContentKind
@@ -4527,7 +4528,11 @@ class AppState(
 
     /** Reads a profile file, adds it as a custom profile (de-duplicating its name) and applies it. */
     internal fun importWorkspaceProfileFrom(file: File): Result<CustomWorkspaceProfile> = runCatching {
-        val text = runCatching { file.readText() }.getOrElse { error("Could not read ${file.name}.") }
+        // The size cap's IllegalArgumentException carries the user-facing message; any other failure is a plain read error.
+        val text = runCatching { readFilterImportText(file) }.getOrElse {
+            if (it is IllegalArgumentException) throw it
+            error("Could not read ${file.name}.")
+        }
         val decoded = decodeWorkspaceProfileFile(text).getOrThrow()
         val profile = CustomWorkspaceProfile(
             id = newCustomProfileId(),
@@ -7671,14 +7676,16 @@ class AppState(
             // storeInCache = false: `t` carries the search-only effectiveSearchFilter and a
             // fully-expanded fold state, neither of which is what's actually rendered — see the
             // doc above computeItems' storeInCache parameter.
+            val cancellationCheck = CancellationCheck { ensureActive() }
             val searchItems = computeItems(
                 t.copy(expanded = fullyExpanded),
-                applyFilter = stored.search.scope == SearchScope.FILTERED || compareMode,
+                stored.search.scope == SearchScope.FILTERED || compareMode,
+                cancellationCheck,
                 regexContext,
                 storeInCache = false,
             )
             ensureActive()
-            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext)
+            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext, cancellationCheck)
             ensureActive()
             applySearchResult(tabId, result)
         }

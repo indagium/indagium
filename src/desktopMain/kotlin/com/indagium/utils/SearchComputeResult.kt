@@ -49,6 +49,7 @@ internal fun computeSearchMatches(
     query: String,
     caseSensitive: Boolean,
     ctx: RegexEvaluationContext,
+    cancellationCheck: CancellationCheck = CancellationCheck {},
 ): SearchComputeResult {
     if (query.isEmpty()) return EMPTY_SEARCH_RESULT
     val ignoreCase = !caseSensitive
@@ -56,7 +57,12 @@ internal fun computeSearchMatches(
         return SearchComputeResult(IntArray(0), invalidPattern = true, timedOut = false)
     }
     val ids = ArrayList<Int>()
+    var sinceCheck = 0
     for (item in items) {
+        if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCheck = 0
+            cancellationCheck()
+        }
         val entry = item.entry
         val ranges = regexRanges(visibleLogLineText(entry), query, ignoreCase = ignoreCase, regexContext = ctx)
         if (ranges.isNotEmpty()) ids.add(entry.id)
