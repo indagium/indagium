@@ -89,6 +89,9 @@ import kotlin.math.roundToInt
  *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
  *  section's entire edit-draft state up to the dialog. */
 private const val ANCHOR_WAIT_FRAMES = 30
+
+// Width of the "Temporary data · size" / "App data · size" texts, so their buttons line up right after them.
+private val STORAGE_TEXT_WIDTH = 210.dp
 private val ANCHOR_SCROLL_MARGIN = 16.dp
 private const val FLASH_MS = 1200
 
@@ -769,7 +772,7 @@ private fun GeneralSettingsSection(state: AppState) {
                         "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
                     )
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.width(STORAGE_TEXT_WIDTH),
             ) {
                 AppText(
                     "Temporary data · ${formatByteSize(state.temporaryDataSizeBytes)}  ⓘ",
@@ -792,7 +795,7 @@ private fun GeneralSettingsSection(state: AppState) {
                             "saved filters, source and case indexes, diagnostics, and integration data.",
                     )
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.width(STORAGE_TEXT_WIDTH),
             ) {
                 AppText(
                     "App data · ${formatByteSize(state.appDataSizeBytes)}  ⓘ",
@@ -954,13 +957,13 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Four rows of four on one four-column grid (SettingsControlRow): no row is short, cells
-        // line up as columns, and every row's last control sits on the right content edge.
+        // Four rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
+        // so cells line up as columns and the last column ends on the right content edge.
         // Reserve an identical two-line label area in every cell of the last row so its controls
         // align even though one label wraps.
         val finalRowLabelAreaHeight = 28.dp
 
-        SettingsControlRow(columns = 4) {
+        SettingsGrid(columns = 4, rowSpacing = 16.dp) {
             CompactSetting("Visible tabs") {
                 val tabLimits = listOf(4, 6, 8, 10, 12, 16)
                 ListStepper(
@@ -993,9 +996,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
                 )
             }
-        }
-
-        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Row wrapping",
                 // AWT has no horizontal mouse-wheel axis at all (confirmed via
@@ -1050,9 +1050,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
                 )
             }
-        }
-
-        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Follow live logs",
                 tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
@@ -1093,7 +1090,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
                     "different logs with two different sets of processes. Per-tab picks reset every session " +
                     "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-                horizontalAlignment = Alignment.End,
             ) {
                 SegmentedControl(
                     options = listOf("On", "Off"),
@@ -1101,9 +1097,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
                 )
             }
-        }
-
-        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Ctrl+F opens",
                 tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
@@ -1223,7 +1216,6 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     "independently from its header; this does not affect existing links or Follow.",
                 labelMaxLines = 2,
                 labelAreaHeight = finalRowLabelAreaHeight,
-                horizontalAlignment = Alignment.End,
             ) {
                 SegmentedControl(
                     options = listOf("On", "Off"),
@@ -1236,39 +1228,52 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
 }
 
 /**
- * A row of compact settings spread across the full content width: the first cell starts on the
- * left edge and the last ends on the right edge, so a row never leaves a ragged gap on the right.
- *
- * Without [columns] the cells are spaced evenly between the edges and wrap onto a second line if
- * they cannot fit. With [columns], the row sits on a grid of that many equal columns: each cell
- * starts at its column's left x (the last column is end-aligned instead), so consecutive rows given
- * the same [columns] line up as real columns. [placements] maps cells to columns when a row has
- * fewer cells than the grid has columns (default: cell i in column i).
+ * A row of compact settings spread across the full content width: cells keep their natural width,
+ * the first starts on the left edge, the last ends on the right edge, the space between is even,
+ * and the row wraps onto a second line if the cells cannot fit. For several rows that should line
+ * up as columns use [SettingsGrid] instead.
  */
 @Composable
-internal fun SettingsControlRow(
+internal fun SettingsControlRow(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    FlowRow(
+        modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) { content() }
+}
+
+/**
+ * Compact settings on a grid with [columns] columns; the children fill it row by row. Each column is
+ * exactly as wide as its widest cell (label or control) and the width left over is split into equal
+ * gaps between columns, so the first column starts on the left edge, the last column's widest cell
+ * ends on the right edge, and every column reads as one clean left edge. Cells are top-aligned
+ * and start-aligned in their column.
+ */
+@Composable
+internal fun SettingsGrid(
+    columns: Int,
     modifier: Modifier = Modifier,
-    columns: Int? = null,
-    placements: List<Int>? = null,
+    rowSpacing: Dp = 10.dp,
     content: @Composable () -> Unit,
 ) {
-    if (columns == null) {
-        FlowRow(
-            modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) { content() }
-        return
-    }
     Layout(content, modifier.fillMaxWidth()) { measurables, constraints ->
         val width = constraints.maxWidth
         val placeables = measurables.map { it.measure(Constraints(maxWidth = width)) }
-        val columnWidth = width / columns.toFloat()
-        layout(width, placeables.maxOfOrNull { it.height } ?: 0) {
-            placeables.forEachIndexed { index, placeable ->
-                val column = placements?.getOrNull(index) ?: index
-                val x = if (column >= columns - 1) width - placeable.width else (column * columnWidth).roundToInt()
-                placeable.placeRelative(x, 0)
+        val rows = placeables.chunked(columns)
+        val columnWidths = List(columns) { column -> rows.maxOfOrNull { it.getOrNull(column)?.width ?: 0 } ?: 0 }
+        val gap = if (columns > 1) ((width - columnWidths.sum()) / (columns - 1).toFloat()).coerceAtLeast(0f) else 0f
+        val spacing = rowSpacing.roundToPx()
+        val rowHeights = rows.map { row -> row.maxOfOrNull { it.height } ?: 0 }
+        val height = rowHeights.sum() + spacing * (rows.size - 1).coerceAtLeast(0)
+        layout(width, height) {
+            var y = 0
+            rows.forEachIndexed { rowIndex, row ->
+                var x = 0f
+                row.forEachIndexed { column, placeable ->
+                    placeable.placeRelative(x.roundToInt(), y)
+                    x += columnWidths[column] + gap
+                }
+                y += rowHeights[rowIndex] + spacing
             }
         }
     }
@@ -1367,59 +1372,215 @@ private fun IssuesSettingsSection(state: AppState) {
     }
 }
 
+/**
+ * The twelve note and copy settings on one four-column grid (content-sized columns, equal gaps —
+ * SettingsGrid). Rows group them by purpose: note behaviour, what copying includes, and the
+ * formats. The three wide format controls use tighter segments so all four columns fit with
+ * comfortable gaps.
+ */
+@Composable
+private fun ExportSettingsGrid(state: AppState) {
+    SettingsGrid(columns = 4, rowSpacing = 10.dp) {
+        AutoSaveSetting(state)
+        FilterBackupsSetting(state)
+        InlineMarkdownSetting(state)
+        NumberBlocksSetting(state)
+        PidTidCopySetting(state)
+        PidCopyAsNameSetting(state)
+        RowNumberCopySetting(state)
+        TimeDeltaCopySetting(state)
+        LogBlocksSetting(state)
+        CopyDefaultSetting(state)
+        DiagramNoteActionSetting(state)
+        DiagramExportSetting(state)
+    }
+}
+
+@Composable
+private fun AutoSaveSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Auto-save",
+        tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun FilterBackupsSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Filter backups",
+        tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun NumberBlocksSetting(state: AppState) {
+    CompactSetting("Number blocks") {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun LogBlocksSetting(state: AppState) {
+    CompactSetting("Log blocks") {
+        val styles = AnnotationLogBlockStyle.entries
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Indented", "Wiki", "Cloud"),
+            selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
+            onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
+        )
+    }
+}
+
+@Composable
+private fun InlineMarkdownSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Inline Markdown",
+        tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun PidTidCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Pid/Tid copy",
+        tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyPidTid) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyPidTid = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun PidCopyAsNameSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Pid copy as name",
+        tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyPidAsName) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyPidAsName = index == 0) } },
+            enabled = state.settings.copyPidTid,
+        )
+    }
+}
+
+@Composable
+private fun RowNumberCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Row number copy",
+        tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyRowNumber) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyRowNumber = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun TimeDeltaCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Time delta copy",
+        tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyTimeDelta) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyTimeDelta = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun CopyDefaultSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Copy default",
+        tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
+    ) {
+        val formats = AnnotationCopyFormat.entries
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
+            selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
+            onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
+        )
+    }
+}
+
+@Composable
+private fun DiagramNoteActionSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Diagram note action",
+        tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
+            "This chooses which half of the split action is primary.",
+    ) {
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Snapshot", "Link"),
+            selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+            onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
+        )
+    }
+}
+
+@Composable
+private fun DiagramExportSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Diagram export",
+        tooltip = "Sets the representation for newly added sequence-diagram notes. " +
+            "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
+            "Src keeps the editable diagram text. Existing notes keep their own choice.",
+    ) {
+        SegmentedControl(
+            options = listOf("Img", "Src"),
+            selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
+            onToggle = { index ->
+                state.updateSettings {
+                    it.copy(
+                        diagramDefaultExportMode = if (index == 0) {
+                            DiagramExportMode.IMAGE
+                        } else {
+                            DiagramExportMode.SOURCE
+                        },
+                    )
+                }
+            },
+        )
+    }
+}
+
 @Composable
 private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
-    AnnotationSettingsRow(state)
-    CopyMetadataSettingsRow(state)
-    // Copy format and the two diagram defaults share one full-width row (natural-width cells,
-    // last one on the right edge) rather than one control per half-empty row.
-    SettingsControlRow(columns = 5, placements = listOf(0, 2, 4)) {
-        CompactSettingWithTooltip(
-            label = "Copy default",
-            tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
-        ) {
-            val formats = AnnotationCopyFormat.entries
-            SegmentedControl(
-                options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
-                selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
-                onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Diagram note action",
-            tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
-                "This chooses which half of the split action is primary.",
-        ) {
-            SegmentedControl(
-                options = listOf("Snapshot", "Link"),
-                selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
-                onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Diagram export",
-            tooltip = "Sets the representation for newly added sequence-diagram notes. " +
-                "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
-                "Src keeps the editable diagram text. Existing notes keep their own choice.",
-        ) {
-            SegmentedControl(
-                options = listOf("Img", "Src"),
-                selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
-                onToggle = { index ->
-                    state.updateSettings {
-                        it.copy(
-                            diagramDefaultExportMode = if (index == 0) {
-                                DiagramExportMode.IMAGE
-                            } else {
-                                DiagramExportMode.SOURCE
-                            },
-                        )
-                    }
-                },
-            )
-        }
-    }
+    ExportSettingsGrid(state)
     Column(Modifier.settingsAnchor("Annotation file prefix"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",
@@ -1438,13 +1599,8 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
         val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
         AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
     }
-    Column(Modifier.settingsAnchor("Mask word on copy"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText("Mask word on copy", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        CompactSetting("Mask word on copy") {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.maskWordOnCopy) 0 else 1),
@@ -1520,65 +1676,6 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     }
 }
 
-/** Copy settings share one five-column row and the same hover help as the annotation controls above.
- * The dependent name choice remains remembered while PID/TID copying is switched off. */
-@Composable
-internal fun CopyMetadataSettingsRow(state: AppState) {
-    SettingsControlRow(columns = 5) {
-        CompactSettingWithTooltip(
-            label = "Inline Markdown",
-            tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Pid/Tid copy",
-            tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyPidTid) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyPidTid = index == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Pid copy as name",
-            tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyPidAsName) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyPidAsName = index == 0) } },
-                enabled = state.settings.copyPidTid,
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Row number copy",
-            tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyRowNumber) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyRowNumber = index == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Time delta copy",
-            tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyTimeDelta) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyTimeDelta = index == 0) } },
-            )
-        }
-    }
-}
-
 @Composable
 private fun AutomationSettingsSection(state: AppState) {
     val tc = tc()
@@ -1624,28 +1721,17 @@ private fun AutomationSettingsSection(state: AppState) {
     state.mcpControlError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
-    Row(
-        Modifier.fillMaxWidth().settingsAnchor("Connection info"),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+    CompactSetting("Connection info") {
         // Deliberately doesn't close Settings first — stacks on top instead, so closing
         // this popup returns you to Settings rather than to the main window.
         AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSetting("Debug logging") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
-                onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
-            )
-        }
+    CompactSetting("Debug logging") {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
+            onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
+        )
     }
     Row(
         Modifier.settingsAnchor("Debug log file"),
@@ -1671,10 +1757,10 @@ private fun AutomationSettingsSection(state: AppState) {
                         AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f, fill = false),
             ) { pathText() }
         } else {
-            Box(Modifier.weight(1f)) { pathText() }
+            Box(Modifier.weight(1f, fill = false)) { pathText() }
         }
         AppButton("Browse", onClick = { state.pickDebugLogFile() })
         AppButton(
@@ -1690,19 +1776,15 @@ private fun AutomationSettingsSection(state: AppState) {
             AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
         }
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSetting("Check for updates automatically") {
+    CompactSetting("Check for updates automatically") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
             )
+            AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
         }
-        AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
     }
     // availableUpdate is checked first: once a release is known, that fact takes priority over
     // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
@@ -2001,7 +2083,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(
             Modifier.fillMaxWidth().settingsAnchor("Logging configurations"),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -2092,7 +2174,7 @@ private fun SourceLoggingConfigurationEditor(
         Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Edit logging configuration", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             AppButton("Cancel", onClick = onClose)
         }
@@ -2121,7 +2203,7 @@ private fun SourceLoggingConfigurationEditor(
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Wrapper rules", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             AppButton(
                 "Add rule",
@@ -3258,47 +3340,6 @@ internal fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boole
             overflow = TextOverflow.Ellipsis,
             maxLines = 1,
         )
-    }
-}
-
-@Composable
-internal fun AnnotationSettingsRow(state: AppState) {
-    SettingsControlRow(columns = 5, placements = listOf(0, 1, 2, 4)) {
-        CompactSettingWithTooltip(
-            label = "Auto-save",
-            tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Filter backups",
-            tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
-            )
-        }
-        CompactSetting("Number blocks") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
-            )
-        }
-        CompactSetting("Log blocks") {
-            val styles = AnnotationLogBlockStyle.entries
-            SegmentedControl(
-                options = listOf("Indented", "Wiki", "Cloud"),
-                selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
-                onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
-            )
-        }
     }
 }
 
