@@ -128,7 +128,10 @@ private fun CapturePairedGroupRow(first: @Composable () -> Unit, second: @Compos
  * "Connection info" in SettingsDialog.kt) rather than a bordered panel title. */
 @Composable
 private fun CaptureGroupLabel(text: String) {
-    AppText(text, color = tc().td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+    AppText(
+        text, color = tc().td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.settingsAnchor(text),
+    )
 }
 
 @Composable
@@ -206,7 +209,7 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
     CaptureNumericField("Bitrate Mbps", settings.bitrateMbps.toString(), MIN_CAPTURE_BITRATE_MBPS..MAX_CAPTURE_BITRATE_MBPS) {
         update(settings.copy(bitrateMbps = it))
     }
-    AppText("Saved video format", color = tc().td, fontSize = 10.sp)
+    AppText("Saved video format", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Saved video format"))
     SegmentedControl(
         options = listOf("MP4", "MKV"),
         selectedIndices = setOf(CaptureVideoContainer.entries.indexOf(settings.videoContainer)),
@@ -285,10 +288,18 @@ private fun CaptureMarkerGroup(settings: CaptureSettings, update: (CaptureSettin
         CaptureMarkerWindowField("Before, seconds", settings.markerPreMs) { update(settings.copy(markerPreMs = it)) }
         CaptureMarkerWindowField("After, seconds", settings.markerPostMs) { update(settings.copy(markerPostMs = it)) }
     }
-    CheckRow(settings.markerScreenshot, { update(settings.copy(markerScreenshot = !settings.markerScreenshot)) }) {
+    CheckRow(
+        settings.markerScreenshot,
+        { update(settings.copy(markerScreenshot = !settings.markerScreenshot)) },
+        modifier = Modifier.settingsAnchor("Take a screenshot on Mark issue"),
+    ) {
         AppText("Take a screenshot on Mark issue", fontSize = 11.sp)
     }
-    CheckRow(settings.markerNotesInSnapshot, { update(settings.copy(markerNotesInSnapshot = !settings.markerNotesInSnapshot)) }) {
+    CheckRow(
+        settings.markerNotesInSnapshot,
+        { update(settings.copy(markerNotesInSnapshot = !settings.markerNotesInSnapshot)) },
+        modifier = Modifier.settingsAnchor("Include markers in saved snapshots"),
+    ) {
         AppText("Include markers in saved snapshots", fontSize = 11.sp)
     }
     // markerNotesInSnapshot has no reader yet — Phase 4 (snapshot archive export/import) is the
@@ -324,7 +335,7 @@ private fun CapturePathField(
     effectiveMessage: String? = null,
 ) {
     val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         AppText(
             label + if (invalid) " — $invalidMessage" else "",
             color = if (invalid) DANGER_RED else tc.td,

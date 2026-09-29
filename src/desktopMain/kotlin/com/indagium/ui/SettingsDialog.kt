@@ -7,6 +7,8 @@
 
 package com.indagium.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -21,6 +23,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
@@ -29,12 +32,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -72,6 +85,19 @@ import java.util.UUID
 /** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
  *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
  *  section's entire edit-draft state up to the dialog. */
+private const val ANCHOR_WAIT_FRAMES = 30
+private val ANCHOR_SCROLL_MARGIN = 16.dp
+private const val FLASH_MS = 1200
+
+/** Keeps the content composed (so its state survives) but neither placed, drawn, hit-testable nor
+ *  exposed to accessibility. */
+private fun Modifier.composedButHidden(): Modifier = this
+    .clearAndSetSemantics {}
+    .layout { measurable, constraints ->
+        measurable.measure(constraints)
+        layout(0, 0) {}
+    }
+
 private class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
 
 internal enum class SettingsSection(val title: String, val icon: ImageVector) {
@@ -111,13 +137,40 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     var pendingClose by remember { mutableStateOf(false) }
     var guardSaveError by remember { mutableStateOf<String?>(null) }
 
-    fun requestSectionSwitch(target: SettingsSection) {
+    // Returns false when the switch was deferred behind the unsaved-changes prompt.
+    fun requestSectionSwitch(target: SettingsSection): Boolean {
         if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
             guardSaveError = null
             pendingSectionSwitch = target
-        } else {
-            selectedSection = target
+            return false
         }
+        selectedSection = target
+        return true
+    }
+
+    // ── Settings search (ui/SettingsSearchIndex.kt, ui/SettingsSearchUi.kt) ──────────────────
+    val visibleSections = remember { SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.toSet() }
+    var query by remember { mutableStateOf("") }
+    val searching = query.isNotBlank()
+    val results = remember(query) { searchSettings(query, visibleSections) }
+    val anchors = remember { SettingsAnchors() }
+    var pendingAnchor by remember { mutableStateOf<String?>(null) }
+    val searchFocus = remember { FocusRequester() }
+    // Keeps the dialog's own key handling (Cmd/Ctrl+F, Esc) alive: a clicked nav item, result row
+    // or dismissed popup would otherwise take keyboard focus with it and leave nothing focused.
+    val rootFocus = remember { FocusRequester() }
+
+    fun reclaimFocus() { runCatching { rootFocus.requestFocus() } }
+    LaunchedEffect(Unit) { reclaimFocus() }
+
+    fun openResult(entry: SettingsSearchEntry) {
+        val reached = entry.section == selectedSection || requestSectionSwitch(entry.section)
+        // A switch deferred behind the AI-provider prompt keeps the results on screen instead, so
+        // the user can simply pick again once they've answered it.
+        if (!reached) return
+        query = ""
+        pendingAnchor = entry.anchor
+        reclaimFocus()
     }
 
     fun requestClose() {
@@ -132,6 +185,34 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     // there), so it must go through the same unsaved-changes guard rather than closing unconditionally.
     SideEffect { onRequestCloseChanged(::requestClose) }
 
+    val contentScroll = rememberScrollState()
+    val density = LocalDensity.current
+    // After a result click the section is composed again (and, for another section, for the first
+    // time), so give it two frames to lay out before reading the anchor, then scroll and flash.
+    LaunchedEffect(pendingAnchor) {
+        val key = pendingAnchor ?: return@LaunchedEffect
+        repeat(2) { withFrameNanos { } }
+        var y: Float? = null
+        var waited = 0
+        while (y == null && waited < ANCHOR_WAIT_FRAMES) {
+            y = anchors.yInContent(key)
+            if (y == null) {
+                withFrameNanos { }
+                waited++
+            }
+        }
+        // Cleared only at the end: the key of this very effect, so clearing it earlier would
+        // cancel the scroll below. A newer result click changes the key and restarts it instead.
+        val target = y
+        if (target != null) {
+            contentScroll.animateScrollTo((target - with(density) { ANCHOR_SCROLL_MARGIN.toPx() }).toInt().coerceAtLeast(0))
+            anchors.flashKey = key
+            anchors.flash.snapTo(1f)
+            anchors.flash.animateTo(0f, tween(FLASH_MS, easing = LinearEasing))
+        }
+        pendingAnchor = null
+    }
+
     Box(
         // 190 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
         // the 8dp scrollbar gutter leaves 637dp, tuned tight against ThemeGallery's FlowRow math
@@ -140,7 +221,25 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
         Modifier.width(884.dp).height(620.dp)
             .clip(shape)
             .background(tc.p)
-            .border(1.dp, tc.br, shape),
+            .border(1.dp, tc.br, shape)
+            .onPreviewKeyEvent { ev ->
+                when {
+                    ev.type != KeyEventType.KeyDown -> false
+                    ev.isActionKey && !ev.isShiftPressed && ev.key == Key.F -> {
+                        runCatching { searchFocus.requestFocus() }
+                        true
+                    }
+                    // Esc first clears an active search; with no query it falls through to the
+                    // dialog's own dismiss handling (and its unsaved-changes guard) unchanged.
+                    ev.key == Key.Escape && query.isNotEmpty() -> {
+                        query = ""
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .focusRequester(rootFocus)
+            .focusable(),
     ) {
         Column(Modifier.fillMaxSize()) {
             Row(
@@ -155,18 +254,48 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
                     Modifier.width(190.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.forEach { section ->
-                        SettingsMenuItem(
-                            section = section,
-                            selected = section == selectedSection,
-                            onClick = { requestSectionSwitch(section) },
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
+                    SettingsSearchField(
+                        query = query,
+                        onQueryChange = { query = it },
+                        focusRequester = searchFocus,
+                        onSubmit = { results.firstOrNull()?.let(::openResult) },
+                    )
+                    // Scrolls only if the section list ever outgrows the space between the search
+                    // field and the shortcuts block below.
                     Column(
-                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp),
+                        Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (searching) {
+                            SettingsMenuItem(
+                                title = "All results",
+                                icon = Icons.Outlined.Search,
+                                selected = true,
+                                onClick = { runCatching { searchFocus.requestFocus() } },
+                                badge = results.size,
+                            )
+                        }
+                        val counts = results.groupingBy { it.section }.eachCount()
+                        SettingsSection.entries.filter { it in visibleSections }.forEach { section ->
+                            SettingsMenuItem(
+                                title = section.title,
+                                icon = section.icon,
+                                selected = !searching && section == selectedSection,
+                                onClick = {
+                                    // Leaving the results for a section is a plain section switch.
+                                    query = ""
+                                    if (section != selectedSection) requestSectionSwitch(section)
+                                    reclaimFocus()
+                                },
+                                badge = if (searching) counts[section] else null,
+                                dimmed = searching && section !in counts,
+                            )
+                        }
+                    }
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         AppText(
@@ -187,31 +316,42 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                     }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                val contentScroll = rememberScrollState()
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    Column(
-                        Modifier.fillMaxSize().verticalScroll(contentScroll).padding(24.dp).padding(end = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
-                    ) {
-                        when (selectedSection) {
-                            SettingsSection.General -> GeneralSettingsSection(state)
-                            SettingsSection.Appearance -> AppearanceSettingsSection(state)
-                            SettingsSection.Capture -> CaptureSettingsSection(state)
-                            SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
-                            SettingsSection.Issues -> IssuesSettingsSection(state)
-                            SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
-                            SettingsSection.Automation -> AutomationSettingsSection(state)
-                            SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
-                            SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
-                            SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
-                            SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                    if (searching) SettingsSearchResults(query, results, ::openResult, Modifier.fillMaxSize())
+                    CompositionLocalProvider(LocalSettingsAnchors provides anchors) {
+                        Column(
+                            Modifier.fillMaxSize()
+                                // While results are showing, the selected section stays composed but is
+                                // neither placed nor drawn: leaving it out of the tree would drop its
+                                // unsaved AI-provider edits, which the section-switch guard relies on.
+                                .then(if (searching) Modifier.composedButHidden() else Modifier)
+                                .verticalScroll(contentScroll)
+                                .onGloballyPositioned { anchors.content = it }
+                                .padding(24.dp).padding(end = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            when (selectedSection) {
+                                SettingsSection.General -> GeneralSettingsSection(state)
+                                SettingsSection.Appearance -> AppearanceSettingsSection(state)
+                                SettingsSection.Capture -> CaptureSettingsSection(state)
+                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                                SettingsSection.Issues -> IssuesSettingsSection(state)
+                                SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
+                                SettingsSection.Automation -> AutomationSettingsSection(state)
+                                SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
+                                SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
+                                SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
+                                SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                            }
                         }
                     }
-                    VerticalScrollbar(
-                        adapter = rememberScrollbarAdapter(contentScroll),
-                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                        style = appScrollbarStyle(tc),
-                    )
+                    if (!searching) {
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(contentScroll),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                            style = appScrollbarStyle(tc),
+                        )
+                    }
                 }
             }
             Divider()
@@ -355,7 +495,15 @@ private fun SettingsConfirmDialog(
 }
 
 @Composable
-private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClick: () -> Unit) {
+private fun SettingsMenuItem(
+    title: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+    // Search-result count for this nav row (shown as a small pill), and dimming for sections with none.
+    badge: Int? = null,
+    dimmed: Boolean = false,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(8.dp)
@@ -376,24 +524,36 @@ private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClic
             )
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            section.icon,
+            icon,
             contentDescription = null,
             modifier = Modifier.size(16.dp),
             tint = if (selected) tc.ac else tc.td,
         )
         AppText(
-            section.title,
-            color = if (selected) tc.tx else tc.ts,
+            title,
+            color = when {
+                selected -> tc.tx
+                dimmed -> tc.td
+                else -> tc.ts
+            },
             fontSize = 12.sp,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
+        if (badge != null) {
+            Box(
+                Modifier.background(tc.ac.copy(alpha = .16f), RoundedCornerShape(50)).padding(horizontal = 6.dp, vertical = 1.dp),
+            ) {
+                AppText(badge.toString(), color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -432,7 +592,7 @@ private fun SettingsScrollableRows(
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         ThemeGallery(
             settings = state.settings,
@@ -511,7 +671,7 @@ private fun AppearanceSettingsSection(state: AppState) {
 private fun GeneralSettingsSection(state: AppState) {
     val tc = tc()
     val selectedProfile = WorkspaceProfile.fromId(state.settings.workspaceProfileId)
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor("Workspace profile"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         AppText(
             "Sets panels, filter placement, theme and font size in one step. Every setting stays editable afterwards.",
@@ -591,7 +751,7 @@ private fun GeneralSettingsSection(state: AppState) {
             onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
         )
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor("Storage"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Storage",
             color = tc.td,
@@ -620,7 +780,11 @@ private fun GeneralSettingsSection(state: AppState) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.settingsAnchor("Temporary data"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TooltipArea(
                 tooltip = {
                     StorageInfoTooltip(
@@ -638,7 +802,11 @@ private fun GeneralSettingsSection(state: AppState) {
             }
             AppButton("Clear temporary data", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.settingsAnchor("App data"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TooltipArea(
                 tooltip = {
                     StorageInfoTooltip(
@@ -680,7 +848,7 @@ private fun SaveFolderRow(
     onReset: () -> Unit,
 ) {
     val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         TooltipArea(
             tooltip = {
                 Box(
@@ -1116,7 +1284,7 @@ private fun IssuesSettingsSection(state: AppState) {
     val validation = customIssueRulesValidation(drafts)
     val dirty = drafts != state.settings.customIssueRules
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.settingsAnchor("Custom issue categories"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Custom issue categories", color = tc().tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             AppText(
                 "Each enabled regex is matched against a log tag or message and adds a clickable anchor to Issues. " +
@@ -1247,7 +1415,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
             )
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor("Annotation file prefix"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",
             color = tc.td,
@@ -1265,7 +1433,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
         val previewLabel = state.settings.annotationPrefixLabel.trim().ifBlank { "From" }
         AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.settingsAnchor("Mask word on copy"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1467,7 +1635,7 @@ private fun AutomationSettingsSection(state: AppState) {
         }
     }
     Row(
-        Modifier.fillMaxWidth(),
+        Modifier.fillMaxWidth().settingsAnchor("Connection info"),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1489,7 +1657,11 @@ private fun AutomationSettingsSection(state: AppState) {
             )
         }
     }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.settingsAnchor("Debug log file"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         val fullPath = state.settings.debugLogFilePath
         val pathText: @Composable () -> Unit = {
             AppText(
@@ -1580,7 +1752,11 @@ private fun SourceCodeSettingsSection(state: AppState) {
             }
         },
     ) {
-        AppButton("Register source code", onClick = { state.pickSourceFolder() })
+        AppButton(
+            "Register source code",
+            onClick = { state.pickSourceFolder() },
+            modifier = Modifier.settingsAnchor("Register source code"),
+        )
     }
     // The "N files changed — reindex recommended" hint stats every indexed file, so it is computed
     // off the UI thread (see AppState.refreshChangedFileCounts) and only re-checked when this
@@ -1649,6 +1825,7 @@ private fun SourceCodeSettingsSection(state: AppState) {
         },
     ) {
         CheckRow(
+            modifier = Modifier.settingsAnchor("Discover simple custom log wrappers"),
             checked = state.settings.sourceAutoDiscoveryEnabled,
             onToggle = {
                 state.updateSettings {
@@ -1833,7 +2010,7 @@ private fun SourceLoggingConfigurations(state: AppState) {
 
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(
-            Modifier.fillMaxWidth(),
+            Modifier.fillMaxWidth().settingsAnchor("Logging configurations"),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -2165,7 +2342,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
             fontSize = 12.sp,
             maxLines = 4,
         )
-        AppText("Recognition engine", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Recognition engine", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+            modifier = Modifier.settingsAnchor("Recognition engine"),
+        )
         val engineChoices = VoiceRecognitionEngines.availableChoices()
         SegmentedControl(
             options = engineChoices.map { it.label },
@@ -2181,6 +2361,7 @@ private fun VoiceInputSettingsSection(state: AppState) {
         AppText(VoiceRecognitionEngines.description(voiceSettings.recognitionEngine), color = tc.td, fontSize = 10.sp, maxLines = 3)
         if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine)) {
             CheckRow(
+                modifier = Modifier.settingsAnchor("Translate dictated speech to English"),
                 checked = voiceSettings.translateToEnglish,
                 onToggle = {
                     state.updateSettings { settings ->
@@ -2213,7 +2394,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
             )
         }
         Divider()
-        AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+            modifier = Modifier.settingsAnchor("Recognition language"),
+        )
         AppText(
             if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
                 "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
@@ -2308,7 +2492,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
         }
         Divider()
         if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
-            AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Local model"),
+            )
             SegmentedControl(
                 options = VoiceModelCatalog.all.map { model ->
                     if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
@@ -2472,7 +2659,7 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AppText("Providers", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText("Providers", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.settingsAnchor("Providers"))
         // Same dropdown-plus-"+" treatment as the AI panel's own provider switcher
         // (AiProviderControls in AiSidebar.kt), for a consistent look and so both places share one
         // battle-tested selection path instead of a second, subtly different one.
@@ -2496,7 +2683,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AppText("Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Provider type"),
+            )
             SegmentedControl(
                 options = com.indagium.model.AiProviderKind.entries.map { it.label },
                 selectedIndices = setOf(com.indagium.model.AiProviderKind.entries.indexOf(kind)),
@@ -2514,10 +2704,16 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                     }
                 },
             )
-            AppText("Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Profile name"),
+            )
             InlineField(name, { name = it }, "LM Studio (local)", Modifier.fillMaxWidth(), fontSize = 12.sp)
             if (kind.usesHttpEndpoint) {
-                AppText("Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("Endpoint"),
+                )
                 InlineField(endpoint, { endpoint = it }, "https://api.example.com/v1", Modifier.fillMaxWidth(), fontSize = 12.sp)
             } else {
                 AppText(
@@ -2525,7 +2721,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                     color = tc.td,
                     fontSize = 10.sp,
                 )
-                AppText("CLI executable (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "CLI executable (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("CLI executable (optional)"),
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     InlineField(
                         executablePath,
@@ -2584,10 +2783,13 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                 AppText(
                     if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)",
                     color = tc.td, fontSize = 10.sp, fontFamily = UI,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).settingsAnchor("Model"),
                 )
                 if (showReasoningDropdown) {
-                    AppText("Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                    AppText(
+                        "Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                        modifier = Modifier.weight(1f).settingsAnchor("Reasoning effort"),
+                    )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2638,7 +2840,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                 )
             }
             if (kind.usesApiKey) {
-                AppText("API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("API key"),
+                )
                 InlineField(
                     apiKey,
                     { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
@@ -2801,6 +3006,7 @@ private fun CustomAiCommandsSettingsSection(state: AppState) {
             "Add command",
             onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
             variant = ButtonVariant.Secondary,
+            modifier = Modifier.settingsAnchor("Add command"),
         )
         SettingsScrollableRows {
             if (state.customAiCommands.isEmpty()) {
@@ -3108,7 +3314,11 @@ internal fun CompactSettingWithTooltip(
     content: @Composable () -> Unit,
 ) {
     val tc = tc()
-    Column(modifier, horizontalAlignment = horizontalAlignment, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier.settingsAnchor(label),
+        horizontalAlignment = horizontalAlignment,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         val labelContent: @Composable () -> Unit = {
             TooltipArea(
                 tooltip = {
@@ -3149,7 +3359,11 @@ internal fun CompactSetting(
     content: @Composable () -> Unit,
 ) {
     val tc = tc()
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = horizontalAlignment) {
+    Column(
+        modifier.settingsAnchor(label),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = horizontalAlignment,
+    ) {
         AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         content()
     }
