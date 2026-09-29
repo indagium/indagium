@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
@@ -80,7 +81,16 @@ internal fun CaptureStartOptions(
             Box(Modifier.weight(1f)) { CaptureAudioCheck(settings, edit) }
             Box(Modifier.weight(1f)) { IncludeEarlierDeviceLogsCheck(settings, edit) }
         }
-        KeepDeviceAudioCheck(settings, edit)
+        if (isMacOs) {
+            KeepDeviceAudioCheck(settings, edit)
+        } else {
+            // Same three-column grid as the row above, so the opt-in sits under "Capture audio".
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.weight(1f)) { KeepDeviceAudioCheck(settings, edit) }
+                Box(Modifier.weight(1f)) { HardwareMirrorCheck(settings, edit, nativeMediaSupport) }
+                Spacer(Modifier.weight(1f))
+            }
+        }
         if (settings.audio) DeviceAudioMutingNotice()
         CaptureMicrophoneControl(settings, edit, onReclaimFocus)
         EarlierDeviceLogsHint()
@@ -288,6 +298,32 @@ private fun NativeMediaUnsupportedHint(nativeMediaSupport: NativeMediaSupport) {
         fontSize = 10.sp,
         maxLines = CAPTURE_HINT_MAX_LINES,
     )
+}
+
+/** Windows/Linux opt-in for the D3D11 / VAAPI+EGL hardware in-app mirror (see
+ *  `CaptureSettings.hardwareMirror`). Greyed out when Device display isn't the in-app mirror, which
+ *  is the only thing it affects, or when this system can't load the bundled media libraries at all
+ *  (old-glibc Linux, see NativeMediaSupport.kt). Not shown on macOS, whose native mirror is always on. */
+@Composable
+internal fun HardwareMirrorCheck(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    nativeMediaSupport: NativeMediaSupport = NativeMediaSupport(available = true),
+) {
+    val enabled = nativeMediaSupport.available && settings.effectiveMirrorMode == CaptureMirrorMode.EMBEDDED
+    CheckRow(
+        settings.hardwareMirror && enabled,
+        { edit { it.copy(hardwareMirror = !it.hardwareMirror) } },
+        enabled = enabled,
+    ) {
+        AppText(
+            "Hardware-accelerated mirror (experimental)",
+            color = if (enabled) tc().tx else tc().td,
+            fontSize = 11.sp,
+            maxLines = CHECK_LABEL_MAX_LINES,
+            modifier = Modifier.weight(1f),
+        )
+    }
 }
 
 /** Device audio goes into the recorded file and the scrcpy window; the in-app mirror is silent.

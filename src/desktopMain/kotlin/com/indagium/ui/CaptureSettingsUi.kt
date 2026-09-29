@@ -238,21 +238,6 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
         fontSize = 10.sp,
         maxLines = 2,
     )
-    // Windows/Linux only — macOS always uses its own VideoToolbox/Metal path (shouldUseMacNativeMirror),
-    // so this opt-in would be a no-op there. Neither the D3D11 nor the VAAPI/EGL path has proven
-    // itself on real hardware yet (see EmbeddedMirrorPanel.kt's shouldUseDesktopGpuMirror), hence
-    // "experimental" and off by default.
-    if (!isMacOs) {
-        CheckRow(settings.hardwareMirror, { update(settings.copy(hardwareMirror = !settings.hardwareMirror)) }) {
-            AppText("Hardware-accelerated in-app mirror (experimental)", fontSize = 11.sp)
-        }
-        AppText(
-            "Takes effect from the next capture. Falls back to the standard mirror automatically if unavailable.",
-            color = tc().td,
-            fontSize = 10.sp,
-            maxLines = 2,
-        )
-    }
 }
 
 @Composable

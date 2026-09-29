@@ -2071,11 +2071,6 @@ class AppState(
     private var embeddedMirrorVersion by mutableStateOf(0)
     private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
 
-    // The launcher reads a per-tab draft during composition. This must be Compose-observable:
-    // a plain mutableMap accepted clicks but did not invalidate CaptureLauncher, leaving a stale
-    // unchecked checkbox on screen while Start capture used the hidden updated value.
-    private val captureLaunchDrafts = mutableStateMapOf<String, com.indagium.capture.CaptureSettings>()
-
     /** Flips the New tab launcher's "Device logging" section, persisted as
      *  [AppSettings.deviceLoggingPanelExpanded] (expanded by default). The panel also force-expands
      *  on an error or the small-buffer warning regardless — see CaptureLauncher.kt's
@@ -3552,7 +3547,6 @@ class AppState(
                 processNameMode = newTabProcessNameMode(),
             ).copy(isCaptureLauncher = true)
             tabs = tabs + launcher
-            captureLaunchDrafts[launcherId] = settings.captureSettings
             setActiveSurfaceToTab(launcherId)
         }
     }
@@ -3572,17 +3566,21 @@ class AppState(
         openHomeTab()
     }
 
-    internal fun captureLaunchSettings(tabId: String): com.indagium.capture.CaptureSettings =
-        synchronized(stateLock) { captureLaunchDrafts[tabId] ?: settings.captureSettings }
+    // The New tab's "Before start" choices ARE the saved capture settings (the same values the
+    // Settings dialog's own "Before start" block edits), so whatever a user picked for the last
+    // capture is what the next one — and the next app start — begins with. They used to live in a
+    // per-launcher draft copied from the saved settings, which reset every choice on the next New
+    // tab. [tabId] is kept so call sites stay launcher-scoped; per-launch overrides (AI/MCP
+    // startCaptureForAi, the old-glibc adaptation) are still applied in startCaptureTab only.
+    @Suppress("UnusedParameter")
+    internal fun captureLaunchSettings(tabId: String): com.indagium.capture.CaptureSettings = settings.captureSettings
 
+    @Suppress("UnusedParameter")
     internal fun updateCaptureLaunchSettings(
         tabId: String,
         transform: (com.indagium.capture.CaptureSettings) -> com.indagium.capture.CaptureSettings,
     ) {
-        synchronized(stateLock) {
-            val current = captureLaunchDrafts[tabId] ?: settings.captureSettings
-            captureLaunchDrafts[tabId] = transform(current)
-        }
+        updateSettings { it.copy(captureSettings = transform(it.captureSettings)) }
     }
 
     /**
@@ -3592,7 +3590,7 @@ class AppState(
      * tab/tailer ordering without a race.
      *
      * [settingsOverride], when given, transforms the settings this one launch actually uses
-     * (launcher draft, or the saved default) without writing anything back — see
+     * (the saved capture settings) without writing anything back — see
      * [startCaptureForAi]'s `recordVideo`/`includeEarlierDeviceLogs` per-launch overrides, the only
      * current caller that passes one.
      */
@@ -3614,11 +3612,7 @@ class AppState(
             captureStartInProgress = true
         }
         captureScreenshotStatus = null
-        val settings = synchronized(stateLock) {
-            val launcher = tabs.firstOrNull { it.isCaptureLauncher && it.id == activeTabId }
-            val base = launcher?.let { captureLaunchDrafts[it.id] } ?: this.settings.captureSettings
-            settingsOverride?.invoke(base) ?: base
-        }
+        val settings = this.settings.captureSettings.let { base -> settingsOverride?.invoke(base) ?: base }
         val controller = captureService.newController()
         val tabId = "t${tabCounter.getAndIncrement()}"
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
@@ -7725,7 +7719,6 @@ class AppState(
                 // log for the lifetime of the app.
                 captureIndexByTab.remove(tabId)
                 captureFollowFloorIndexByTab.remove(tabId)
-                captureLaunchDrafts.remove(tabId)
                 captureScreenshotCapabilities.remove(tabId)
                 capturePreviewGenerationByTab.remove(tabId)
                 capturePreviewJobsByTab.remove(tabId)?.cancel()
