@@ -44,6 +44,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -52,6 +53,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -75,6 +77,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import kotlin.math.roundToInt
 
 // ── Settings dialog ───────────────────────────────────────────────────
 // Left-hand nav lists every section; only the selected section's content renders on the
@@ -951,13 +954,13 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Four rows of four, each spread across the full content width (SettingsControlRow): no row
-        // is short, and every row's last control sits on the right content edge.
+        // Four rows of four on one four-column grid (SettingsControlRow): no row is short, cells
+        // line up as columns, and every row's last control sits on the right content edge.
         // Reserve an identical two-line label area in every cell of the last row so its controls
         // align even though one label wraps.
         val finalRowLabelAreaHeight = 28.dp
 
-        SettingsControlRow {
+        SettingsControlRow(columns = 4) {
             CompactSetting("Visible tabs") {
                 val tabLimits = listOf(4, 6, 8, 10, 12, 16)
                 ListStepper(
@@ -992,7 +995,7 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             }
         }
 
-        SettingsControlRow {
+        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Row wrapping",
                 // AWT has no horizontal mouse-wheel axis at all (confirmed via
@@ -1049,7 +1052,7 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             }
         }
 
-        SettingsControlRow {
+        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Follow live logs",
                 tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
@@ -1100,7 +1103,7 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
             }
         }
 
-        SettingsControlRow {
+        SettingsControlRow(columns = 4) {
             CompactSettingWithTooltip(
                 label = "Ctrl+F opens",
                 tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
@@ -1234,18 +1237,41 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
 
 /**
  * A row of compact settings spread across the full content width: the first cell starts on the
- * left edge, the last ends on the right edge and the space between is even, so a row never leaves a
- * ragged gap on the right. Cells keep their natural width; if they ever cannot fit, the row wraps
- * onto a second line instead of clipping.
+ * left edge and the last ends on the right edge, so a row never leaves a ragged gap on the right.
+ *
+ * Without [columns] the cells are spaced evenly between the edges and wrap onto a second line if
+ * they cannot fit. With [columns], the row sits on a grid of that many equal columns: each cell
+ * starts at its column's left x (the last column is end-aligned instead), so consecutive rows given
+ * the same [columns] line up as real columns. [placements] maps cells to columns when a row has
+ * fewer cells than the grid has columns (default: cell i in column i).
  */
 @Composable
-internal fun SettingsControlRow(modifier: Modifier = Modifier, content: @Composable FlowRowScope.() -> Unit) {
-    FlowRow(
-        modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-        content = content,
-    )
+internal fun SettingsControlRow(
+    modifier: Modifier = Modifier,
+    columns: Int? = null,
+    placements: List<Int>? = null,
+    content: @Composable () -> Unit,
+) {
+    if (columns == null) {
+        FlowRow(
+            modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) { content() }
+        return
+    }
+    Layout(content, modifier.fillMaxWidth()) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val placeables = measurables.map { it.measure(Constraints(maxWidth = width)) }
+        val columnWidth = width / columns.toFloat()
+        layout(width, placeables.maxOfOrNull { it.height } ?: 0) {
+            placeables.forEachIndexed { index, placeable ->
+                val column = placements?.getOrNull(index) ?: index
+                val x = if (column >= columns - 1) width - placeable.width else (column * columnWidth).roundToInt()
+                placeable.placeRelative(x, 0)
+            }
+        }
+    }
 }
 
 private fun customIssueRulesValidation(rules: List<CustomIssueRule>): String? {
@@ -1348,7 +1374,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     CopyMetadataSettingsRow(state)
     // Copy format and the two diagram defaults share one full-width row (natural-width cells,
     // last one on the right edge) rather than one control per half-empty row.
-    SettingsControlRow {
+    SettingsControlRow(columns = 5, placements = listOf(0, 2, 4)) {
         CompactSettingWithTooltip(
             label = "Copy default",
             tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
@@ -1498,7 +1524,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
  * The dependent name choice remains remembered while PID/TID copying is switched off. */
 @Composable
 internal fun CopyMetadataSettingsRow(state: AppState) {
-    SettingsControlRow {
+    SettingsControlRow(columns = 5) {
         CompactSettingWithTooltip(
             label = "Inline Markdown",
             tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
@@ -3237,7 +3263,7 @@ internal fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boole
 
 @Composable
 internal fun AnnotationSettingsRow(state: AppState) {
-    SettingsControlRow {
+    SettingsControlRow(columns = 5, placements = listOf(0, 1, 2, 4)) {
         CompactSettingWithTooltip(
             label = "Auto-save",
             tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
