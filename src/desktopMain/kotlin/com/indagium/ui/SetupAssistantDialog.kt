@@ -55,7 +55,8 @@ import androidx.compose.ui.unit.sp
 // the same AppState functions (applyWorkspaceProfile, updateSettings, pickSaveFolder, ...), so there
 // is no draft to keep in sync. Skipping (button, Esc, closing) and finishing both mark it done —
 // AppState.finishSetupAssistant/skipSetupAssistant. Existing users see it once too, with a "Keep my
-// current setup" choice preselected so simply clicking through changes nothing.
+// current setup" choice preselected so simply clicking through changes nothing. It is as wide as
+// Settings (884dp) so the theme gallery fits five cards per row.
 
 private enum class SetupStep(val title: String) {
     Workspace("Workspace"),
@@ -121,7 +122,7 @@ internal fun SetupAssistantDialog(state: AppState) {
     LaunchedEffect(Unit) { reclaimFocus() }
 
     Box(
-        Modifier.width(840.dp).height(600.dp)
+        Modifier.width(884.dp).height(600.dp)
             .clip(shape).background(tc.p).border(1.dp, tc.br, shape)
             .onPreviewKeyEvent { ev ->
                 if (ev.type == KeyEventType.KeyDown && ev.key == Key.Escape) {
@@ -318,9 +319,9 @@ private fun LookStep(state: AppState) {
         settings = state.settings,
         selected = state.settings.theme,
         onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
-        height = 250.dp,
+        height = null,
     )
-    LogFontSizeSetting(state)
+    AppearanceBasicsRow(state)
 }
 
 @Composable
