@@ -308,7 +308,7 @@ fun App(
                         ev = ev,
                         state = state,
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
-                        onFocusFilterSearch = {
+                        onFocusFilterSearch = { scope ->
                             state.keyboardFocusVisible = true
                             // Settings.ctrlFTarget (FIND_BAR by default) routes Ctrl/Cmd+F to the
                             // non-destructive in-view Find bar instead of focusing a filter input —
@@ -317,8 +317,9 @@ fun App(
                             // exactly the pre-existing filter-focus path below. openUnfilteredOnCtrlF
                             // applies to BOTH branches now — it means "Ctrl+F reveals the Original
                             // split", independent of which of the two things Ctrl+F then does with
-                            // that revealed panel.
-                            if (state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
+                            // that revealed panel. Ctrl/Cmd+Alt+F (scope UNFILTERED) is always the
+                            // Find bar, whatever ctrlFTarget says: it exists to search all lines.
+                            if (scope == SearchScope.UNFILTERED || state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
                                 // Single-tab mode only: ensureActiveTabUnfiltered operates on
                                 // activeTabId, and compare mode has no Original/Filtered split to
                                 // reveal in the first place (its left/right panels are two whole
@@ -351,7 +352,7 @@ fun App(
                                 } else {
                                     state.activeTab()?.id
                                 }
-                                targetTabId?.let { tabId -> state.openSearch(tabId) }
+                                targetTabId?.let { tabId -> state.openSearch(tabId, scope) }
                             } else {
                                 if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                                 state.updateFilterVisible(true)
@@ -2643,7 +2644,7 @@ private fun handleGlobalKey(
     ev: KeyEvent,
     state: AppState,
     onFocusPanel: (KeyboardPanel) -> Unit,
-    onFocusFilterSearch: () -> Unit,
+    onFocusFilterSearch: (SearchScope) -> Unit,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     if (ev.isCtrlPressed && ev.key == Key.Tab) {
@@ -2658,7 +2659,8 @@ private fun handleGlobalKey(
         // Corpus-wide, not tab-scoped like AnnotationPanel's own plain ⌘O ("Open Note") — a
         // distinct chord so the two never collide (checked against Shortcuts.kt's whole catalogue).
         ev.isShiftPressed && ev.key == Key.O  -> { state.activeTab()?.id?.let(state::openCaseLibrary); true }
-        ev.key == Key.F                      -> { onFocusFilterSearch(); true }
+        ev.isAltPressed && ev.key == Key.F   -> { onFocusFilterSearch(SearchScope.UNFILTERED); true }
+        ev.key == Key.F                      -> { onFocusFilterSearch(SearchScope.FILTERED); true }
         ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
         ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
         ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }

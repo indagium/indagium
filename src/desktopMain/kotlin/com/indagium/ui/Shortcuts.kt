@@ -214,6 +214,7 @@ private fun shortcutSpecs(): List<ShortcutSpec> = listOf(
     ShortcutSpec("⌘ ⇧ A", "Ctrl Shift A", "Toggle notes panel", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ ⇧ D", "Ctrl Shift D", "Toggle compare mode", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ F", "Ctrl F", "Find in filtered log", KeyboardPanel.GLOBAL),
+    ShortcutSpec("⌘ ⌥ F", "Ctrl Alt F", "Find in all lines (Original panel)", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ 1 / ⌘ 2 / ⌘ 3", "Ctrl 1 / Ctrl 2 / Ctrl 3", "Focus Filters / Log / Notes", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ ]", "Ctrl ]", "Next tab", KeyboardPanel.GLOBAL),
     ShortcutSpec("⌘ [", "Ctrl [", "Previous tab", KeyboardPanel.GLOBAL),

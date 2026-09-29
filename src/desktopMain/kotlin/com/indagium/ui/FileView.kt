@@ -336,6 +336,11 @@ internal fun FileView(
                 onSearchNext = { state.searchNext(tab.id) },
                 onSearchPrev = { state.searchPrev(tab.id) },
                 onSearchClose = { state.closeSearch(tab.id) },
+                showSearchScopeChip = true,
+                onSearchToggleScope = {
+                    val next = if (tab.search.scope == SearchScope.FILTERED) SearchScope.UNFILTERED else SearchScope.FILTERED
+                    state.setSearchScope(tab.id, next)
+                },
                 filterBar = filterBarModel,
                 filterBarActions = filterBarActions,
                 filterBarVisible = state.filterBarVisible,

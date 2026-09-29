@@ -700,14 +700,14 @@ fun ToolbarBtn(
  * time, and its clicks still pass straight through to the device either way — left unregistered
  * on purpose. */
 @Composable
-internal fun ToolbarTooltip(text: String) {
+internal fun ToolbarTooltip(text: String, maxLines: Int = 2) {
     val tc = tc()
     Box(
         Modifier.background(tc.p2, RoundedCornerShape(4.dp))
             .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = 2)
+        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = maxLines)
     }
 }
 

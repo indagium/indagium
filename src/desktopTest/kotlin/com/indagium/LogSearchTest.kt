@@ -4,6 +4,8 @@ import androidx.compose.ui.graphics.Color
 import com.indagium.model.LogEntry
 import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
+import com.indagium.model.LogSearchState
+import com.indagium.model.SearchScope
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeSearchMatches
 import kotlin.test.Test
@@ -153,5 +155,17 @@ class LogSearchTest {
         val b = computeSearchMatches(items, "needle", caseSensitive = false, RegexEvaluationContext())
         assertEquals(a, b)
         assertEquals(a.hashCode(), b.hashCode())
+    }
+
+    @Test
+    fun searchStateEqualityAndHashCodeIncludeScope() {
+        val filtered = LogSearchState(query = "needle", matchIds = intArrayOf(1, 2))
+        val sameFiltered = LogSearchState(query = "needle", matchIds = intArrayOf(1, 2))
+        val unfiltered = filtered.copy(scope = SearchScope.UNFILTERED)
+
+        assertEquals(filtered, sameFiltered)
+        assertEquals(filtered.hashCode(), sameFiltered.hashCode())
+        assertFalse(filtered == unfiltered)
+        assertFalse(filtered.hashCode() == unfiltered.hashCode())
     }
 }
