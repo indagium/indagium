@@ -1,6 +1,7 @@
 package com.indagium.utils
 
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.MessageRule
@@ -811,6 +812,9 @@ internal fun matchingHighlighter(
     val spec = messageRuleSpecForTemplate(template)
     val tag = template.tag.trim().takeIf { it.isNotBlank() }
     return highlighters.firstOrNull {
-        it.pattern == spec.pattern && it.regex == spec.regex && (it.tag == null || it.tag == tag)
+        // A TAG-target highlighter matches the tag column, not the message, so it is never what
+        // a message Highlight press would toggle; tag-less ANY ones are the legacy shape.
+        val messageScoped = it.target == HighlightTarget.MESSAGE || (it.target == HighlightTarget.ANY && it.tag == null)
+        messageScoped && it.pattern == spec.pattern && it.regex == spec.regex && (it.tag == null || it.tag == tag)
     }
 }

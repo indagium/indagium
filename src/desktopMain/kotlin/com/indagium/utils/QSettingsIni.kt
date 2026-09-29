@@ -34,8 +34,30 @@ internal class QSettingsIni private constructor(
         else -> null
     }
 
+    // Sorted view of the keys, so everything under one prefix is a contiguous range: '0' is the
+    // character right after '/', so [prefix/, prefix0) is exactly the keys starting with "prefix/".
+    private val sortedKeys: java.util.TreeSet<String> by lazy { java.util.TreeSet(values.keys) }
+
+    private fun keysUnder(prefix: String): Set<String> = sortedKeys.subSet("$prefix/", "${prefix}0")
+
     /** Whether any key lives under [prefix] + "/". */
-    fun hasGroup(prefix: String): Boolean = values.keys.any { it.startsWith("$prefix/") }
+    fun hasGroup(prefix: String): Boolean = keysUnder(prefix).isNotEmpty()
+
+    /**
+     * The QSettings array indices that actually have at least one key under "[prefix]/<n>/", ascending.
+     * One pass over that prefix's keys, so it costs what is there, not what a "size" key claims.
+     */
+    fun arrayIndices(prefix: String): List<Int> {
+        val found = java.util.TreeSet<Int>()
+        val skip = prefix.length + 1
+        for (key in keysUnder(prefix)) {
+            val slash = key.indexOf('/', skip)
+            if (slash < 0) continue
+            val n = key.substring(skip, slash).toIntOrNull() ?: continue
+            if (n >= 1 && n.toString() == key.substring(skip, slash)) found += n
+        }
+        return found.toList()
+    }
 
     val keys: Set<String> get() = values.keys
 

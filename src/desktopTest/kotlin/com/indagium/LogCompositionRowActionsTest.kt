@@ -120,6 +120,18 @@ class LogCompositionRowActionsTest {
     }
 
     @Test
+    fun aTagTargetHighlighterWithTheSamePatternIsNotTreatedAsThisTemplatesHighlight() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val spec = messageRuleSpecForTemplate(template)
+        val tagTarget = Highlighter("t", spec.pattern, spec.regex, Color.Yellow, true, target = HighlightTarget.TAG)
+        val messageTarget = Highlighter("m", spec.pattern, spec.regex, Color.Yellow, true, target = HighlightTarget.MESSAGE)
+
+        assertNull(matchingHighlighter(listOf(tagTarget), template))
+        assertEquals(messageTarget, matchingHighlighter(listOf(tagTarget, messageTarget), template))
+    }
+
+    @Test
     fun highlightingATemplateCreatesAHighlighterAndPressingItAgainRemovesIt() {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")

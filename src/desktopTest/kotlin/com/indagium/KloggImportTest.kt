@@ -1,10 +1,13 @@
 package com.indagium
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.model.Highlighter
 import com.indagium.ui.ImportFilterAction
 import com.indagium.ui.buildImportRows
 import com.indagium.ui.decodeFilterImport
 import com.indagium.ui.exportFiltersList
+import com.indagium.ui.newHighlightersFor
+import com.indagium.ui.partitionFilterDrop
 import com.indagium.utils.importKloggHighlighters
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -205,5 +208,124 @@ class KloggImportTest {
         assertEquals("Could not read filter file.", decodeFilterImport("bad.json", "{not json").exceptionOrNull()!!.message)
         val empty = decodeFilterImport("k.conf", "[HighlighterSetCollection]\nversion=2\nsets\\size=0\n")
         assertTrue(empty.exceptionOrNull()!!.message!!.contains("No highlighter sets"))
+    }
+
+    @Test
+    fun hugeDeclaredSizesWithFewRealEntriesImportFastWithoutSpamNotes() {
+        val text = """
+            [HighlighterSetCollection]
+            sets\size=9999
+            sets\1\HighlighterSet\name=A
+            sets\1\HighlighterSet\highlighters\size=9999
+            sets\1\HighlighterSet\highlighters\1\regexp=foo
+            sets\1\HighlighterSet\highlighters\9000\regexp=bar
+            sets\7\HighlighterSet\name=B
+            sets\7\HighlighterSet\highlighters\size=9999
+            sets\7\HighlighterSet\highlighters\3\regexp=baz
+        """.trimIndent()
+        val started = System.nanoTime()
+        val imported = importKloggHighlighters(text, "k.conf")!!
+        assertTrue((System.nanoTime() - started) < 2_000_000_000L)
+        assertEquals(listOf(listOf("foo", "bar"), listOf("baz")), imported.sets.map { s -> s.filter.highlighters.map { it.pattern } })
+        assertTrue(imported.sets.all { it.notes.isEmpty() })
+        assertTrue(imported.notes.isEmpty())
+    }
+
+    @Test
+    fun aSlotWithKeysButNoPatternStillGetsTheEmptyPatternNote() {
+        val text = """
+            [HighlighterSetCollection]
+            sets\size=1
+            sets\1\HighlighterSet\highlighters\size=3
+            sets\1\HighlighterSet\highlighters\1\regexp=foo
+            sets\1\HighlighterSet\highlighters\2\use_regex=true
+        """.trimIndent()
+        val set = importKloggHighlighters(text, "k.conf")!!.sets.single()
+        assertEquals(listOf("foo"), set.filter.highlighters.map { it.pattern })
+        assertEquals(listOf("Highlighter 2: skipped, it has an empty pattern."), set.notes)
+    }
+
+    @Test
+    fun sizeLessArraysStillImport() {
+        val text = """
+            [HighlighterSetCollection]
+            sets\1\HighlighterSet\name=A
+            sets\1\HighlighterSet\highlighters\1\regexp=one
+            sets\1\HighlighterSet\highlighters\2\regexp=two
+            sets\2\HighlighterSet\name=B
+            sets\2\HighlighterSet\highlighters\1\regexp=three
+        """.trimIndent()
+        val imported = importKloggHighlighters(text, "k.conf")!!
+        assertEquals(listOf(listOf("one", "two"), listOf("three")), imported.sets.map { s -> s.filter.highlighters.map { it.pattern } })
+    }
+
+    @Test
+    fun aDeclaredSizeStaysAnUpperBound() {
+        val text = """
+            [HighlighterSetCollection]
+            sets\size=1
+            sets\1\HighlighterSet\highlighters\size=1
+            sets\1\HighlighterSet\highlighters\1\regexp=in
+            sets\1\HighlighterSet\highlighters\2\regexp=out
+        """.trimIndent()
+        val set = importKloggHighlighters(text, "k.conf")!!.sets.single()
+        assertEquals(listOf("in"), set.filter.highlighters.map { it.pattern })
+    }
+
+    @Test
+    fun theTotalHighlighterCapDropsTheRestWithOneImportLevelNote() {
+        val text = buildString {
+            appendLine("[HighlighterSetCollection]")
+            appendLine("sets\\size=2")
+            for (set in 1..2) {
+                appendLine("sets\\$set\\HighlighterSet\\highlighters\\size=3000")
+                for (m in 1..3000) appendLine("sets\\$set\\HighlighterSet\\highlighters\\$m\\regexp=p$set-$m")
+            }
+        }
+        val imported = importKloggHighlighters(text, "k.conf")!!
+        assertEquals(5000, imported.sets.sumOf { it.filter.highlighters.size })
+        assertEquals(1, imported.notes.count { "more than 5000 highlighters" in it })
+    }
+
+    @Test
+    fun notesAreCappedWithAMoreNote() {
+        val text = buildString {
+            appendLine("[HighlighterSetCollection]")
+            appendLine("sets\\size=1")
+            appendLine("sets\\1\\HighlighterSet\\highlighters\\size=500")
+            for (m in 1..500) appendLine("sets\\1\\HighlighterSet\\highlighters\\$m\\use_regex=true")
+        }
+        val imported = importKloggHighlighters(text, "k.conf")!!
+        assertEquals(200, imported.sets.single().notes.size)
+        assertTrue(imported.notes.any { it.contains("300 more note(s)") })
+    }
+
+    @Test
+    fun addModeKeepsRulesThatDifferOnlyInColourOrCaptureGroups() {
+        fun hl(color: Color, captureGroupsOnly: Boolean = false, variance: Int = 0) =
+            Highlighter("x", "p", true, color, true, textColor = Color.Black, captureGroupsOnly = captureGroupsOnly, colorVariance = variance)
+        val existing = listOf(hl(Color.Red))
+        assertEquals(1, newHighlightersFor(existing, listOf(hl(Color.Blue))).size)
+        assertEquals(1, newHighlightersFor(existing, listOf(hl(Color.Red, captureGroupsOnly = true))).size)
+        assertEquals(1, newHighlightersFor(existing, listOf(hl(Color.Red, variance = 20))).size)
+        assertTrue(newHighlightersFor(existing, listOf(hl(Color.Red))).isEmpty())
+    }
+
+    @Test
+    fun aMixedSidebarDropSplitsIntoImportFilesAndTheRest() {
+        val dir = kotlin.io.path.createTempDirectory("filter-drop").toFile()
+        try {
+            val conf = java.io.File(dir, "klogg.CONF").apply { writeText("x") }
+            val json = java.io.File(dir, "filters.json").apply { writeText("[]") }
+            val log = java.io.File(dir, "a.log").apply { writeText("x") }
+            val missing = java.io.File(dir, "gone.ini")
+
+            val (imports, others) = partitionFilterDrop(listOf(conf, log, json, missing))
+
+            assertEquals(listOf(conf, json), imports)
+            assertEquals(listOf(log, missing), others)
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 }

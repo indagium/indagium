@@ -248,6 +248,24 @@ class CustomWorkspaceProfileTest {
     }
 
     @Test
+    fun importingAnOversizedProfileFileFailsWithTheSizeMessage() {
+        val dir = createTempDirectory("profile-import").toFile()
+        try {
+            val file = File(dir, "huge.json")
+            java.io.RandomAccessFile(file, "rw").use { it.setLength(9L * 1024 * 1024) }
+            val state = AppState()
+            val before = state.settings
+
+            val result = state.importWorkspaceProfileFrom(file)
+
+            assertEquals("huge.json is larger than 8 MB.", result.exceptionOrNull()?.message)
+            assertEquals(before, state.settings)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun customCardDescriptionListsTheThemeAndPanels() {
         assertEquals("Dark (GitHub) · filter bar", describeProfileSpec(WorkspaceProfile.LOGCAT_QUERY.spec))
         assertEquals("Graphite Dim · log only", describeProfileSpec(WorkspaceProfile.MINIMAL.spec))

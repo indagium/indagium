@@ -298,9 +298,13 @@ private data class HighlighterShape(
     val caseSensitive: Boolean,
     val wholeLine: Boolean,
     val textColor: Color?,
+    val color: Color,
+    val captureGroupsOnly: Boolean,
+    val colorVariance: Int,
 )
 
-private fun Highlighter.shape() = HighlighterShape(pattern, regex, target, tag, caseSensitive, wholeLine, textColor)
+private fun Highlighter.shape() =
+    HighlighterShape(pattern, regex, target, tag, caseSensitive, wholeLine, textColor, color, captureGroupsOnly, colorVariance)
 
 /** [incoming] with fresh ids, minus any whose shape is already in [existing] (or repeats earlier in [incoming]). */
 internal fun newHighlightersFor(existing: List<Highlighter>, incoming: List<Highlighter>): List<Highlighter> {
