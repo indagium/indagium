@@ -211,6 +211,7 @@ right-click options popup.
 | **Select a row** | Click. Shift-click or `⇧↑`/`⇧↓` extends. Drag to select a range |
 | **Copy** | `⌘C` / `Ctrl+C` copies the selected rows |
 | **Select all visible** | `⌘A` / `Ctrl+A` |
+| **Add annotation** | `⌘⇧N` / `Ctrl+Shift+N` annotates the selected rows (or the cursor row), like the context menu's first item |
 | **Time delta (Δt)** | Toggle in the log toolbar. Shows the gap between adjacent rows, or the offset from the first selected row when you have a selection — the fastest way to spot a stall |
 | **Wrapping** | Long messages wrap above a configurable character count; automatic wrapping can be turned off in Settings |
 | **Original / Filtered split** | The **Unfiltered** toolbar button splits the view vertically so you can see the same log with and without your filter |
@@ -848,6 +849,7 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 | `Home` / `End` | Jump to first / last row |
 | `⇧↑` / `⇧↓` | Extend row selection |
 | `⌘A` / `⌘C` | Select all visible rows / copy selected rows |
+| `⌘⇧N` | Add annotation for selected rows |
 | `Enter` / `⇧F10` | Open context menu for selected row |
 | `Space` | Toggle current row selection |
 | `Enter` / `⇧Enter` | Jump to next / previous Find match |

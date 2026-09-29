@@ -326,6 +326,7 @@ internal fun FileView(
                 onSelectAll = { state.selectAll(tab.id) },
                 onClearSelection = { state.clearSelection(tab.id) },
                 onCopySelection = { selectedIds -> state.copySelectedLines(tab.id, selectedIds) },
+                onAddAnnotation = { ids -> state.requestAddAnn(tab.id, ids) },
                 onCopyText = { text -> state.copyToClipboard(text) },
                 onLogRowDoubleClick = { id -> state.seekVideoToLogRow(tab.id, id) },
                 onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(tab.id) },

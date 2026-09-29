@@ -1103,6 +1103,7 @@ fun LogViewer(
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
+    onAddAnnotation: ((List<Int>) -> Unit)? = null,
     onCopyText: (String) -> Unit = {},
     // A one-shot, non-selection action for an unmodified primary-button double-click on a plain
     // row. The caller owns the tab binding and any video mapping; nullable keeps previews/tests
@@ -1343,6 +1344,7 @@ fun LogViewer(
             itemOnSelectAll: (() -> Unit)? = onSelectAll,
             itemOnClearSelection: (() -> Unit)? = onClearSelection,
             itemOnCopySelection: ((Set<Int>?) -> Unit)? = onCopySelection,
+            itemOnAddAnnotation: ((List<Int>) -> Unit)? = onAddAnnotation,
             itemsLoading: Boolean = computedItems.loading,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
@@ -1612,6 +1614,7 @@ fun LogViewer(
                                 itemOnSelectAll,
                                 itemOnClearSelection,
                                 itemOnCopySelection,
+                                itemOnAddAnnotation,
                             ))
                     }
                     .border(1.dp, if (isFocused && keyboardFocusVisible) tc.ac else Color.Transparent)
@@ -2262,6 +2265,7 @@ fun LogViewer(
                         itemOnSelectAll = allOnSelectAll,
                         itemOnClearSelection = allOnClearSelection,
                         itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
+                        itemOnAddAnnotation = onAddAnnotation,
                         itemsLoading = computedAllItems.loading,
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
@@ -2866,9 +2870,15 @@ private data class SelKeyActions(
     val onSelectAll: (() -> Unit)?,
     val onClearSelection: (() -> Unit)?,
     val onCopySelection: ((Set<Int>?) -> Unit)?,
+    val onAddAnnotation: ((List<Int>) -> Unit)?,
 )
 
 internal fun panelCopySelectionIds(tab: LogTab): Set<Int> = tab.selected
+
+// Same targets as the row context menu's first item: the panel's selection (sorted), else the
+// cursor row; null when neither exists so the shortcut does nothing.
+internal fun annotationTargetIds(selected: Set<Int>, cursorId: Int?): List<Int>? =
+    if (selected.isNotEmpty()) selected.sorted() else cursorId?.let { listOf(it) }
 
 private fun handleSelKey(
     ev: KeyEvent,
@@ -2908,6 +2918,11 @@ private fun handleSelKey(
         ev.isShiftPressed && ev.key == Key.DirectionDown -> { extendTo(cursorIdx() + 1); true }
         ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - PAGE_JUMP_ROWS); true }
         ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + PAGE_JUMP_ROWS); true }
+        isAction && ev.isShiftPressed && ev.key == Key.N -> {
+            val ids = annotationTargetIds(panelCopySelectionIds(tab), cursor.effectiveCursorId(tab))
+            if (ids != null) actions.onAddAnnotation?.invoke(ids)
+            ids != null
+        }
         isAction && ev.key == Key.A -> { cursor.reset(); actions.onSelectAll?.invoke(); true }
         isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(panelCopySelectionIds(tab)); true }
         ev.key == Key.Escape        -> { cursor.reset(); actions.onClearSelection?.invoke(); true }

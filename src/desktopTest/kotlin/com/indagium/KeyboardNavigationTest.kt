@@ -6,6 +6,7 @@ import com.indagium.ui.KeyboardTargetKind
 import com.indagium.ui.RovingItem
 import com.indagium.ui.annotationKeyboardTargets
 import com.indagium.ui.annotationPreviewCopyShortcutHandled
+import com.indagium.ui.annotationTargetIds
 import com.indagium.ui.filterKeyboardTargets
 import com.indagium.ui.inputValueAfterEscape
 import com.indagium.ui.keyboardShortcutHelpGroups
@@ -62,6 +63,24 @@ class KeyboardNavigationTest {
                 .flatMap { it.rows }
                 .any { it.description.contains("click to focus", ignoreCase = true) },
         )
+    }
+
+    @Test
+    fun addAnnotationShortcutIsListedForLogViewOnBothPlatforms() {
+        fun logViewLabels(mac: Boolean) = keyboardShortcutHelpGroups(mac)
+            .flatMap { it.rows }
+            .filter { it.panel == KeyboardPanel.LOG_VIEW }
+            .map { it.label }
+
+        assertTrue("⌘ ⇧ N" in logViewLabels(mac = true))
+        assertTrue("Ctrl Shift N" in logViewLabels(mac = false))
+    }
+
+    @Test
+    fun addAnnotationTargetsSortedSelectionElseCursorRowElseNothing() {
+        assertEquals(listOf(2, 5, 9), annotationTargetIds(setOf(9, 2, 5), cursorId = 5))
+        assertEquals(listOf(7), annotationTargetIds(emptySet(), cursorId = 7))
+        assertEquals(null, annotationTargetIds(emptySet(), cursorId = null))
     }
 
     @Test
