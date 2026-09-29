@@ -150,7 +150,11 @@ private fun CaptureMicrophoneControl(
     }
     val colors = tc()
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier.settingsAnchor("Microphone"),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             AppText("Microphone", color = colors.td, fontSize = 10.sp)
             Box(Modifier.widthIn(max = 250.dp).fillMaxWidth()) {
                 Row(
@@ -276,6 +280,7 @@ internal fun RecordVideoToFileCheck(
         CheckRow(
             settings.recordVideo && supported,
             { edit { it.copy(recordVideo = !it.recordVideo) } },
+            modifier = Modifier.settingsAnchor("Record video to file"),
             enabled = supported,
         ) {
             AppText(
@@ -314,6 +319,7 @@ internal fun HardwareMirrorCheck(
     CheckRow(
         settings.hardwareMirror && enabled,
         { edit { it.copy(hardwareMirror = !it.hardwareMirror) } },
+        modifier = Modifier.settingsAnchor("Hardware-accelerated mirror (experimental)"),
         enabled = enabled,
     ) {
         AppText(
@@ -331,7 +337,7 @@ internal fun HardwareMirrorCheck(
  *  [KeepDeviceAudioCheck] is also on and the device qualifies — see [DeviceAudioMutingNotice]. */
 @Composable
 internal fun CaptureAudioCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
-    CheckRow(settings.audio, { edit { it.copy(audio = !it.audio) } }) {
+    CheckRow(settings.audio, { edit { it.copy(audio = !it.audio) } }, modifier = Modifier.settingsAnchor("Capture audio")) {
         AppText(
             "Capture audio", color = tc().tx, fontSize = 11.sp,
             maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
@@ -349,6 +355,7 @@ internal fun KeepDeviceAudioCheck(settings: CaptureSettings, edit: CaptureSettin
     CheckRow(
         settings.keepDeviceAudio,
         { edit { it.copy(keepDeviceAudio = !it.keepDeviceAudio) } },
+        modifier = Modifier.settingsAnchor("Keep sound on the device (Android 13+)"),
         enabled = settings.audio,
     ) {
         AppText(
@@ -376,7 +383,11 @@ internal fun DeviceAudioMutingNotice() {
  * what the device's ring buffers already hold before streaming — see [EarlierDeviceLogsHint]. */
 @Composable
 internal fun IncludeEarlierDeviceLogsCheck(settings: CaptureSettings, edit: CaptureSettingsEdit) {
-    CheckRow(settings.includeBufferedLogs, { edit { it.copy(includeBufferedLogs = !it.includeBufferedLogs) } }) {
+    CheckRow(
+        settings.includeBufferedLogs,
+        { edit { it.copy(includeBufferedLogs = !it.includeBufferedLogs) } },
+        modifier = Modifier.settingsAnchor("Include earlier device logs"),
+    ) {
         AppText(
             "Include earlier device logs", color = tc().tx, fontSize = 11.sp,
             maxLines = CHECK_LABEL_MAX_LINES, modifier = Modifier.weight(1f),
@@ -418,7 +429,7 @@ internal fun CaptureDeviceDisplayControl(
     } else {
         storedMode
     }
-    AppText("Device display", color = tc().td, fontSize = 10.sp)
+    AppText("Device display", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Device display"))
     SegmentedControl(
         options = listOf("In-app mirror", "scrcpy window", "Off"),
         selectedIndices = setOf(
@@ -450,7 +461,7 @@ internal fun CaptureDeviceDisplayControl(
 @Composable
 internal fun CaptureBufferModeControl(settings: CaptureSettings, edit: CaptureSettingsEdit) {
     val colors = tc()
-    AppText("Buffer mode", color = colors.td, fontSize = 10.sp)
+    AppText("Buffer mode", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Buffer mode"))
     SegmentedControl(
         options = listOf("Default", "All", "Custom"),
         selectedIndices = setOf(CaptureBufferMode.entries.indexOf(settings.bufferMode)),
@@ -475,7 +486,7 @@ internal fun CaptureBufferModeControl(settings: CaptureSettings, edit: CaptureSe
  * `includeBufferedLogs` — hence "Buffers to capture" rather than tying them to that toggle. */
 @Composable
 private fun CaptureCustomBufferPicker(settings: CaptureSettings, edit: CaptureSettingsEdit) {
-    AppText("Buffers to capture", color = tc().td, fontSize = 10.sp)
+    AppText("Buffers to capture", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Buffers to capture"))
     CAPTURE_BUFFER_NAMES.chunked(CAPTURE_BUFFER_GRID_COLUMNS).forEach { rowNames ->
         Row(Modifier.fillMaxWidth()) {
             rowNames.forEach { name ->
