@@ -1758,6 +1758,15 @@ The review dialog (`ImportFilterReviewRow.notes`, `PendingImportReview.notes`) l
 row plus "+N more", and marks klogg's active sets. The dropped-files path also keeps folders and reports
 unreadable files through `importError` rather than skipping them silently.
 
+`PendingImportReview.mode` (`ImportReviewMode`) picks what confirming does. `SAVE_FILTERS` is the original
+flow. `ADD_TO_CURRENT` appends the highlighters of the rows in `highlightRowIds` (a selection kept apart
+from the rows' saved-filter actions, so flipping modes loses neither) to `activeTabId`'s filter through
+`upFlt`, with fresh `newId("hl")` ids and skipping any whose match shape (`newHighlightersFor`,
+`ui/FilterCodec.kt`) is already on the tab. It writes no saved filters and no filter backup. The default is
+`ADD_TO_CURRENT` when `DecodedFilterLibrary.fromKlogg` (set by `decodeFilterImport`'s klogg branch, not the
+file name) and a log tab is active; the mode is unavailable without an active tab or any row that has
+highlighters.
+
 ## 14. External integrations
 
 ### 14.1 Control server: MCP and REST

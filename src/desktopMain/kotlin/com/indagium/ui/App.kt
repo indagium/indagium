@@ -76,6 +76,7 @@ private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
 
 // Import review rows show this many importer notes, then "+N more".
 private const val IMPORT_ROW_NOTES_SHOWN = 3
+private const val IMPORT_TARGET_NAME_MAX = 28
 
 private fun appHasOpenFilterDialog(state: AppState): Boolean =
     state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingClearFilterTabId != null ||
@@ -1932,6 +1933,20 @@ fun App(
                             Spacer(Modifier.height(4.dp))
                             AppText(note, color = tc2.td, fontSize = 10.sp, maxLines = 3)
                         }
+                        val addMode = review.mode == ImportReviewMode.ADD_TO_CURRENT
+                        if (state.canAddImportToCurrentFilter()) {
+                            Spacer(Modifier.height(8.dp))
+                            val targetName = state.tab(state.activeTabId)?.filename?.ifBlank { null }?.take(IMPORT_TARGET_NAME_MAX) ?: "current tab"
+                            SegmentedControl(
+                                options = listOf("Save as saved filters", "Add to current filter ($targetName)"),
+                                selectedIndices = setOf(if (addMode) 1 else 0),
+                                onToggle = { state.setImportReviewMode(if (it == 1) ImportReviewMode.ADD_TO_CURRENT else ImportReviewMode.SAVE_FILTERS) },
+                                modifier = Modifier.fillMaxWidth(),
+                                fillWidth = true,
+                                weightByLabel = true,
+                                segmentFontSize = 11.sp,
+                            )
+                        }
                         Spacer(Modifier.height(8.dp))
                         val folderNameFor: (String?) -> String = { folderId ->
                             folderId?.let { id ->
@@ -1940,7 +1955,10 @@ fun App(
                             } ?: "Ungrouped"
                         }
                         val toggleableIds: (List<ImportFilterReviewRow>) -> Set<String> = { rows ->
-                            rows.filter { it.skippedReason == null }.map { it.rowId }.toSet()
+                            rows.filter { if (addMode) it.hasHighlighters() else it.skippedReason == null }.map { it.rowId }.toSet()
+                        }
+                        val rowChecked: (ImportFilterReviewRow) -> Boolean = { row ->
+                            if (addMode) row.rowId in review.highlightRowIds else row.action != ImportFilterAction.SKIP
                         }
                         val grouped = review.rows.groupBy { folderNameFor(it.incoming.folderId) }.toList()
                             .sortedWith(compareBy { (name, _) -> name == "Ungrouped" })
@@ -1970,7 +1988,7 @@ fun App(
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     val groupToggleableIds = toggleableIds(rowsInFolder)
                                     val allChecked = groupToggleableIds.isNotEmpty() &&
-                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all { it.action != ImportFilterAction.SKIP }
+                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all(rowChecked)
                                     Row(
                                         Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -1997,9 +2015,9 @@ fun App(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             ) {
-                                                if (row.skippedReason == null) {
+                                                if (row.rowId in allToggleableIds) {
                                                     Checkbox(
-                                                        checked = row.action != ImportFilterAction.SKIP,
+                                                        checked = rowChecked(row),
                                                         onCheckedChange = { state.setImportRowsChecked(setOf(row.rowId), it) },
                                                         colors = CheckboxDefaults.colors(
                                                             checkedColor = tc2.ac,
@@ -2017,18 +2035,35 @@ fun App(
                                                     overflow = TextOverflow.Ellipsis,
                                                 )
                                                 AppText(
-                                                    when (row.action) {
-                                                        ImportFilterAction.ADD -> "add"
-                                                        ImportFilterAction.RENAME -> "rename"
-                                                        ImportFilterAction.REPLACE -> "replace"
-                                                        ImportFilterAction.SKIP -> "skip"
+                                                    if (addMode) {
+                                                        if (rowChecked(row)) "add" else "skip"
+                                                    } else {
+                                                        when (row.action) {
+                                                            ImportFilterAction.ADD -> "add"
+                                                            ImportFilterAction.RENAME -> "rename"
+                                                            ImportFilterAction.REPLACE -> "replace"
+                                                            ImportFilterAction.SKIP -> "skip"
+                                                        }
                                                     },
-                                                    color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                                    color = if (rowChecked(row)) tc2.ac else tc2.td,
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.SemiBold,
                                                 )
                                             }
-                                            if (row.action == ImportFilterAction.RENAME) {
+                                            if (addMode) {
+                                                AppText(
+                                                    if (!row.hasHighlighters()) {
+                                                        row.skippedReason?.let { "Skipped: $it" } ?: "No highlighters."
+                                                    } else if (rowChecked(row)) {
+                                                        "Adds ${row.incoming.highlighters.size} highlighter(s)."
+                                                    } else {
+                                                        "Not added."
+                                                    },
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 2,
+                                                )
+                                            } else if (row.action == ImportFilterAction.RENAME) {
                                                 InlineField(
                                                     row.resolvedName,
                                                     { state.setImportFilterRename(row.rowId, it) },
@@ -2059,7 +2094,7 @@ fun App(
                                                     fontWeight = FontWeight.SemiBold,
                                                 )
                                             }
-                                            if (row.targetId != null && row.skippedReason == null) {
+                                            if (!addMode && row.targetId != null && row.skippedReason == null) {
                                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                                     AppButton("Rename", onClick = {
                                                         state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
@@ -2091,7 +2126,7 @@ fun App(
                             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            DialogActionButton("Import", active = true) { state.confirmImportFilters() }
+                            DialogActionButton(if (addMode) "Add highlighters" else "Import", active = true) { state.confirmImportFilters() }
                             DialogActionButton("Cancel", active = false) { state.cancelImportFilters() }
                         }
                     }
