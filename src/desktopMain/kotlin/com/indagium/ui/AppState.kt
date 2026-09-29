@@ -1186,12 +1186,16 @@ data class ImportFilterReviewRow(
     val resolvedName: String,
     val targetId: String? = null,
     val skippedReason: String? = null,
+    // Per-row remarks from the importer (e.g. a klogg pattern that may not match exactly).
+    val notes: List<String> = emptyList(),
 )
 
 data class PendingImportReview(
     val rows: List<ImportFilterReviewRow>,
     val stagedFolders: List<SavedFilterFolder> = emptyList(),
     val sourceName: String? = null,
+    // Import-level remarks, shown under the dialog's subtitle.
+    val notes: List<String> = emptyList(),
 )
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
@@ -5810,28 +5814,24 @@ class AppState(
         savedFilters = savedFilters + prepared.filters
     }
 
-    fun beginImportFilters(json: String, sourceName: String? = null) {
-        val library = decodeFilterLibrary(json).getOrElse {
-            importError = "Could not read filter file."
+    /** Stages [text] (Indagium filter JSON or a klogg highlighter export, decided by content) for review. */
+    fun beginImportFilters(text: String, sourceName: String? = null) {
+        val library = decodeFilterImport(sourceName.orEmpty(), text).getOrElse { e ->
+            importError = e.message ?: "Could not read filter file."
             pendingImportReview = null
             return
         }
-        val prepared = prepareImportedLibrary(library)
-        beginImportFilterList(prepared.filters, prepared.folders, sourceName)
+        beginImportFilterList(prepareImportedLibrary(library), sourceName)
     }
 
-    private fun beginImportFilterList(
-        imported: List<SavedFilter>,
-        stagedFolders: List<SavedFilterFolder> = emptyList(),
-        sourceName: String? = null,
-    ) {
-        if (imported.isEmpty()) {
+    private fun beginImportFilterList(library: DecodedFilterLibrary, sourceName: String? = null) {
+        if (library.filters.isEmpty()) {
             importError = "No saved filters found."
             pendingImportReview = null
             return
         }
-        val rows = buildImportRows(savedFilters, imported)
-        pendingImportReview = PendingImportReview(rows, stagedFolders, sourceName)
+        val rows = buildImportRows(savedFilters, library.filters, library.rowInfo)
+        pendingImportReview = PendingImportReview(rows, library.folders, sourceName, library.notes)
         importError = null
     }
 
@@ -5912,7 +5912,7 @@ class AppState(
             }
             mappedIds[imported.id] = target.id
         }
-        return DecodedFilterLibrary(
+        return library.copy(
             filters = library.filters.map { it.copy(folderId = it.folderId?.let(mappedIds::get)) },
             folders = additions,
         )
@@ -11698,7 +11698,8 @@ class AppState(
 
     fun importFiltersFromFile() {
         val dlg = FileDialog(null as Frame?, "Import Filters", FileDialog.LOAD).apply {
-            setFilenameFilter { _, n -> n.endsWith(".json") }; isVisible = true
+            setFilenameFilter { _, n -> n.lowercase().let { it.endsWith(".json") || it.endsWith(".conf") || it.endsWith(".ini") } }
+            isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
@@ -11706,11 +11707,11 @@ class AppState(
     }
 
     fun importFiltersFromFile(file: File) {
-        runCatching { beginImportFilters(file.readText(), file.name) }
+        runCatching { beginImportFilters(readFilterImportText(file), file.name) }
             .fold(
                 onSuccess = { AppLogger.info("filters", "Imported filters from ${file.absolutePath}") },
                 onFailure = { e ->
-                    importError = "Could not read filter file."
+                    importError = (e as? IllegalArgumentException)?.message ?: "Could not read filter file."
                     pendingImportReview = null
                     AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
                 },
@@ -11722,11 +11723,30 @@ class AppState(
     }
 
     fun importFiltersFromFilesAsync(files: List<File>) {
-        ioScope.launch {
-            val decoded = files.mapNotNull { file -> runCatching { decodeFilters(file.readText()).getOrNull() }.getOrNull() }
-            val imported = decoded.flatten()
-            beginImportFilterList(imported, sourceName = files.joinToString(", ") { it.name })
+        ioScope.launch { importFiltersFromFiles(files) }
+    }
+
+    /** Stages every readable file (filter JSON or klogg export) in one review; files that cannot be read are reported via [importError]. */
+    fun importFiltersFromFiles(files: List<File>) {
+        val libraries = mutableListOf<DecodedFilterLibrary>()
+        val failures = mutableListOf<String>()
+        for (file in files) {
+            runCatching { decodeFilterImport(file.name, readFilterImportText(file)).getOrThrow() }.fold(
+                onSuccess = { libraries += it },
+                onFailure = { e ->
+                    failures += "${file.name}: ${e.message ?: "could not be read."}"
+                    AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
+                },
+            )
         }
+        val merged = DecodedFilterLibrary(
+            filters = libraries.flatMap { it.filters },
+            folders = libraries.flatMap { it.folders },
+            rowInfo = libraries.fold(emptyMap()) { acc, lib -> acc + lib.rowInfo },
+            notes = libraries.flatMap { it.notes }.distinct(),
+        )
+        beginImportFilterList(prepareImportedLibrary(merged), files.joinToString(", ") { it.name })
+        if (failures.isNotEmpty()) importError = failures.joinToString("\n")
     }
 
     // ── App data / clearable cache ────────────────────────────────────

@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
+import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.cachedSeqGroupsFor
 import com.indagium.utils.computeItems
@@ -58,6 +59,7 @@ import com.indagium.utils.deltaMillis
 import com.indagium.utils.formatDelta
 import com.indagium.utils.formatSignedDelta
 import com.indagium.utils.isKloggStyle
+import com.indagium.utils.kloggVariedColors
 import com.indagium.utils.passesFilter
 import com.indagium.utils.regexRanges
 import com.indagium.utils.resolveLineHighlight
@@ -905,7 +907,7 @@ internal fun buildLogLineRender(
         lineTextColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
         for (span in lineHighlight.spans) {
             val (s, e) = remap(span.start to span.end)
-            if (s < e && e <= renderedLength) addStyle(highlightSpanStyle(span.hl), s, e)
+            if (s < e && e <= renderedLength) addStyle(highlightSpanStyle(span, lineText), s, e)
         }
         keywordRegexFilter?.let { filter ->
             addRemappedRanges(
@@ -946,9 +948,14 @@ private fun AnnotatedString.Builder.addRemappedRanges(
 
 // Indagium match spans stay the translucent, semi-bold wash they always were; a klogg rule paints
 // its own opaque back/fore pair at normal weight, exactly as klogg does.
-private fun highlightSpanStyle(hl: Highlighter): SpanStyle {
+// A klogg rule with variate_colors shades both colours per matched text (utils/KloggColor.kt).
+private fun highlightSpanStyle(span: HlSpan, lineText: String): SpanStyle {
+    val hl = span.hl
     val fore = hl.textColor ?: return SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold)
-    return SpanStyle(color = fore, background = hl.color)
+    if (hl.colorVariance <= 0) return SpanStyle(color = fore, background = hl.color)
+    val matched = lineText.substring(span.start.coerceIn(0, lineText.length), span.end.coerceIn(0, lineText.length))
+    val (variedFore, variedBack) = kloggVariedColors(fore, hl.color, hl.colorVariance, matched)
+    return SpanStyle(color = variedFore, background = variedBack)
 }
 
 // Start offset of each wrapped visual line (always begins with 0; count == number of lines).
