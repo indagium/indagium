@@ -183,6 +183,7 @@ internal fun SetupAssistantDialog(state: AppState) {
                         SetupStep.Workspace -> WorkspaceStep(
                             state, offerKeep, choice,
                             onChoice = { choice = it },
+                            onReclaimFocus = ::reclaimFocus,
                             // An imported profile is already added and applied; just select it.
                             onImported = { imported ->
                                 choice = WorkspaceChoice.Profile(imported)
@@ -271,6 +272,7 @@ private fun WorkspaceStep(
     choice: WorkspaceChoice,
     onChoice: (WorkspaceChoice) -> Unit,
     onImported: (ResolvedProfile) -> Unit,
+    onReclaimFocus: () -> Unit,
 ) {
     StepHeading(
         "How do you like to read logs?",
@@ -321,7 +323,10 @@ private fun WorkspaceStep(
                 title = "Import a profile",
                 description = "Load a .json profile someone shared with you",
                 selected = false,
-                onClick = { state.importWorkspaceProfile(onImported = { onImported(it.resolved()) }) },
+                onClick = {
+                    state.importWorkspaceProfile(onImported = { onImported(it.resolved()) })
+                    onReclaimFocus()
+                },
                 modifier = modifier,
             ) {
                 val shape = RoundedCornerShape(5.dp)
