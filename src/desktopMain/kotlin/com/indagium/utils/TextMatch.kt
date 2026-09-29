@@ -261,3 +261,77 @@ internal fun regexRanges(
             .toList()
     }
 }
+
+// Highlighter variant of regexRanges: same cache/budget wrapping, plus klogg's capture-group mode.
+// With [groupsOnly] and a pattern that has capture groups, a match contributes only its groups
+// 1..lastCapturedIndex (the highest group that took part), exactly like klogg's
+// Highlighter::matchLine — a match where no group took part paints nothing (klogg has no
+// whole-match fallback either). A pattern without groups always paints the whole match. Without
+// [groupsOnly] this is exactly regexRanges. Empty ranges are never returned (nothing to paint).
+internal fun regexHighlightRanges(
+    haystack: String,
+    pattern: String,
+    ignoreCase: Boolean,
+    groupsOnly: Boolean,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): List<Pair<Int, Int>> {
+    val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+    val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
+        runCatching { Regex(pattern, options) }
+    }.getOrNull() ?: return emptyList()
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = emptyList()) {
+        buildList {
+            for (match in compiled.findAll(deadlineWrap(haystack, regexContext))) {
+                val groups = match.groups
+                val lastCaptured = (groups.size - 1 downTo 1).firstOrNull { groups[it] != null } ?: 0
+                if (!groupsOnly || groups.size == 1) {
+                    if (match.range.last >= match.range.first) add(match.range.first to match.range.last + 1)
+                } else {
+                    for (i in 1..lastCaptured) {
+                        val r = groups[i]?.range ?: continue
+                        if (r.last >= r.first) add(r.first to r.last + 1)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// klogg's "does this highlighter match the line" for a capture-group highlighter: some match must
+// have at least one group that took part (even an empty one) — Highlighter::matchLine returns
+// false otherwise, so a whole-line klogg rule like `foo(bar)?|(baz)` does not own a row that only
+// has `foo`... unless the pattern has no groups at all, where any match counts.
+internal fun regexHighlightHits(
+    haystack: String,
+    pattern: String,
+    ignoreCase: Boolean,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): Boolean {
+    val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+    val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
+        runCatching { Regex(pattern, options) }
+    }.getOrNull() ?: return false
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = false) {
+        compiled.findAll(deadlineWrap(haystack, regexContext)).any { m ->
+            m.groups.size == 1 || (1 until m.groups.size).any { m.groups[it] != null }
+        }
+    }
+}
+
+// Whole-string match (the pattern must consume all of [text]) through the shared regex cache and
+// backtracking budget — AppState uses it to ask "is this selection an exact instance of a
+// highlighter's regex" without compiling a throwaway Regex per call.
+internal fun regexFullyMatches(
+    text: String,
+    pattern: String,
+    ignoreCase: Boolean = true,
+    regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+): Boolean {
+    val options = if (ignoreCase) setOf(RegexOption.IGNORE_CASE) else emptySet()
+    val compiled = regexCache.getOrPut(RegexKey(pattern, ignoreCase)) {
+        runCatching { Regex(pattern, options) }
+    }.getOrNull() ?: return false
+    return regexContext.evaluate(pattern, ignoreCase, timedOutResult = false) {
+        compiled.matches(deadlineWrap(text, regexContext))
+    }
+}

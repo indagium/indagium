@@ -305,6 +305,39 @@ class ProcessNameRenderingTest {
     }
 
     @Test
+    fun messageTargetHighlighterIsRemappedPastAWidenedPidField() {
+        // A MESSAGE-scoped highlighter matches against entry.msg, offset back into line coordinates
+        // before the pid remap, so it must land exactly on the rendered message text either way.
+        val pattern = "hello"
+        val hl = Highlighter(
+            "m1", pattern, false, Color.Yellow, true, target = com.indagium.model.HighlightTarget.MESSAGE,
+        )
+        for (display in listOf("com.usbmon", null)) {
+            val annotation = buildFullLineAnnotation(
+                entry, listOf(hl), Color.Gray, Color.Gray, Color.Gray, Color.Gray,
+                keywordRegexFilter = null, regexContext = com.indagium.utils.RegexEvaluationContext(),
+                processDisplay = display, pidFieldWidth = pidFieldWidth,
+            )
+            val span = spanFor(annotation, Color.Yellow)
+            assertEquals(annotation.text.indexOf(pattern), span?.start, "display=$display")
+            assertEquals(annotation.text.indexOf(pattern) + pattern.length, span?.end, "display=$display")
+        }
+    }
+
+    @Test
+    fun tagTargetHighlighterIsRemappedPastAWidenedPidField() {
+        val hl = Highlighter("t1", "Tag", false, Color.Yellow, true, target = com.indagium.model.HighlightTarget.TAG)
+        val annotation = buildFullLineAnnotation(
+            entry, listOf(hl), Color.Gray, Color.Gray, Color.Gray, Color.Gray,
+            keywordRegexFilter = null, regexContext = com.indagium.utils.RegexEvaluationContext(),
+            processDisplay = "com.usbmon", pidFieldWidth = pidFieldWidth,
+        )
+        val span = spanFor(annotation, Color.Yellow)
+        assertEquals(annotation.text.indexOf("Tag"), span?.start)
+        assertEquals(annotation.text.indexOf("Tag") + 3, span?.end)
+    }
+
+    @Test
     fun numericFallbackRowRemapsTheSameThreeRangesIdenticallyToTheNamedRow() {
         // No processDisplay (numeric fallback), but the SAME widened pidFieldWidth a mode-on tab
         // would still apply to a row whose own pid isn't (yet) known — the offset math must not

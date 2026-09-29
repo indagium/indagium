@@ -131,6 +131,7 @@ import com.indagium.utils.presentLogLine
 import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.pruneUnreferencedArchiveVideos
 import com.indagium.utils.recoverLogRefRows
+import com.indagium.utils.regexFullyMatches
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
@@ -5173,12 +5174,31 @@ class AppState(
             removeHl(tabId, existing.id)
         } else {
             val spec = messageRuleSpecForTemplate(template)
-            addHl(tabId, spec.pattern, spec.regex, nextAvailableHighlighterColor(tabId))
+            addHl(
+                tabId,
+                spec.pattern,
+                spec.regex,
+                nextAvailableHighlighterColor(tabId),
+                target = HighlightTarget.MESSAGE,
+                tag = template.tag.trim().takeIf { it.isNotBlank() },
+            )
         }
     }
 
     // ── Highlighters ────────────────────────────────────────────────
-    fun addHl(tabId: String, pat: String, rx: Boolean, color: Color) {
+    // Only pattern/regex/color are needed for the classic match-text highlighter; the optional spec
+    // parameters default to exactly that (match-only, matched anywhere on the line, case-insensitive).
+    @Suppress("LongParameterList")
+    fun addHl(
+        tabId: String,
+        pat: String,
+        rx: Boolean,
+        color: Color,
+        wholeLine: Boolean = false,
+        target: HighlightTarget = HighlightTarget.ANY,
+        tag: String? = null,
+        caseSensitive: Boolean = false,
+    ) {
         if (pat.isBlank()) return
         upFlt(tabId) { f ->
             f.copy(
@@ -5187,12 +5207,26 @@ class AppState(
                     pat,
                     rx,
                     color,
-                    true
+                    true,
+                    wholeLine = wholeLine,
+                    target = target,
+                    tag = tag,
+                    caseSensitive = caseSensitive,
                 )
             )
         }
         newHlPat = ""
         newHlColor = HL_COLORS[(HL_COLORS.indexOf(color) + 1) % HL_COLORS.size]
+    }
+
+    // Edits one highlighter in place (same id, same list position). A transform that changes the id
+    // is ignored so callers can't accidentally detach the row from its id-keyed UI state.
+    fun updateHighlighter(tabId: String, id: String, transform: (Highlighter) -> Highlighter) = upFlt(tabId) { f ->
+        f.copy(
+            highlighters = f.highlighters.map { hl ->
+                if (hl.id == id) transform(hl).copy(id = id) else hl
+            },
+        )
     }
 
     /**
@@ -5221,9 +5255,9 @@ class AppState(
         if (sel.isBlank()) return null
         return highlighters.filter { it.on }.firstOrNull { hl ->
             if (hl.regex) {
-                runCatching { Regex(hl.pattern, RegexOption.IGNORE_CASE).matches(sel) }.getOrDefault(false)
+                regexFullyMatches(sel, hl.pattern, ignoreCase = !hl.caseSensitive)
             } else {
-                hl.pattern.equals(sel, ignoreCase = true)
+                hl.pattern.equals(sel, ignoreCase = !hl.caseSensitive)
             }
         }
     }
@@ -7648,7 +7682,15 @@ class AppState(
     fun addHlTagFromCtx(color: Color? = null) {
         val c = ctx ?: return
         val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
-        addHl(c.tabId, tag, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
+        addHl(
+            c.tabId,
+            tag,
+            false,
+            color ?: nextAvailableHighlighterColor(c.tabId),
+            target = HighlightTarget.TAG,
+            tag = tag,
+        )
+        ctx = null
     }
 
     fun addSeqFromCtx() {

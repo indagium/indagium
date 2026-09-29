@@ -17,6 +17,7 @@ import com.indagium.model.CustomIssueRule
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.IssueCategorySelection
 import com.indagium.model.LogAnalysis
@@ -7037,6 +7038,104 @@ class AppStateBehaviorTest {
         state.removeHlFromCtx()
 
         assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun addHlDefaultsToAMatchOnlyHighlighterAnywhereOnTheLine() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+
+        state.addHl("t1", "msg", false, Color.Yellow)
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertFalse(hl.wholeLine)
+        assertEquals(HighlightTarget.ANY, hl.target)
+        assertEquals(null, hl.tag)
+        assertFalse(hl.caseSensitive)
+        assertEquals(null, hl.textColor)
+        assertFalse(hl.captureGroupsOnly)
+        assertEquals(0, hl.colorVariance)
+    }
+
+    @Test
+    fun addHlAcceptsTheOptionalSpec() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+
+        state.addHl(
+            "t1", "msg", false, Color.Yellow,
+            wholeLine = true, target = HighlightTarget.MESSAGE, tag = "MyTag", caseSensitive = true,
+        )
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertTrue(hl.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, hl.target)
+        assertEquals("MyTag", hl.tag)
+        assertTrue(hl.caseSensitive)
+    }
+
+    @Test
+    fun addHlTagFromCtxCreatesATagScopedMatchOnlyHighlighter() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx()
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals("MyTag", hl.pattern)
+        assertEquals(HighlightTarget.TAG, hl.target)
+        assertEquals("MyTag", hl.tag)
+        assertFalse(hl.wholeLine)
+        assertFalse(hl.regex)
+    }
+
+    @Test
+    fun addHlFromCtxStaysMatchOnlyAnywhere() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "full message")
+
+        state.addHlFromCtx()
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertFalse(hl.wholeLine)
+        assertEquals(HighlightTarget.ANY, hl.target)
+        assertEquals(null, hl.tag)
+    }
+
+    @Test
+    fun updateHighlighterKeepsIdAndPosition() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.addHl("t1", "one", false, Color.Yellow)
+        state.addHl("t1", "two", false, Color.Cyan)
+        state.addHl("t1", "three", false, Color.Red)
+        val before = state.tabs.single().filter.highlighters
+        val middleId = before[1].id
+
+        // A transform that tries to change the id must not detach the row from it.
+        state.updateHighlighter("t1", middleId) { it.copy(id = "other", wholeLine = true, pattern = "2") }
+
+        val after = state.tabs.single().filter.highlighters
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertTrue(after[1].wholeLine)
+        assertEquals("2", after[1].pattern)
+        assertEquals(before[0], after[0])
+        assertEquals(before[2], after[2])
+    }
+
+    @Test
+    fun matchingHighlighterIdHonoursCaseSensitivity() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "Full Message"))))
+        state.addHl("t1", "Full Message", false, Color.Yellow, caseSensitive = true)
+        state.addHl("t1", "err(or)?", true, Color.Cyan, caseSensitive = true)
+
+        assertEquals(null, state.matchingHighlighterId("t1", "full message"))
+        assertEquals(state.tabs.single().filter.highlighters[0].id, state.matchingHighlighterId("t1", "Full Message"))
+        assertEquals(null, state.matchingHighlighterId("t1", "ERROR"))
+        assertEquals(state.tabs.single().filter.highlighters[1].id, state.matchingHighlighterId("t1", "error"))
     }
 
     // ── maskWordForCopy ───────────────────────────────────────────────────────
