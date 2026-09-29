@@ -274,6 +274,20 @@ need to spot while still seeing their surroundings.
 Add one from the filter panel, or right-click a row → **Highlight**. Each highlighter has a pattern
 (substring or regex), a colour, and an on/off toggle.
 
+In the filter panel, type into the search field to get suggestions grouped as **TEXT** (what you
+typed), **TAGS** and **MESSAGES** (repeated messages from Log composition), each with its match count.
+Every suggestion has a **Match** and a **Line** button: *Match* colours just the matching text (the
+default), *Line* tints the whole row. Use ↑↓ to pick, ←→ to switch Match / Line, Enter to add. Press
+Tab on a tag suggestion, or type `tag:Name text`, to limit the highlighter to that tag. A row's
+**Match / Line** chip flips an existing highlighter, and clicking its pattern opens an editor for the
+pattern, case, where to match (tag, message or anywhere), tag limit and colour. Right-click a row →
+**Highlight lines with this tag** tints every line of that tag.
+
+Highlighters from **klogg** can be imported: drop the klogg `.conf` on the filter panel, or use
+**Import** in Saved filters. Each klogg highlighter set arrives as a saved filter that keeps klogg's
+own behaviour (first whole-line match wins, capture groups, colours); the review dialog lists any
+patterns that could not be carried over.
+
 Keyword-search matches can also be highlighted in their own colour — a separate toggle in the panel.
 
 ---

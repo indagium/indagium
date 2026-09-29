@@ -424,6 +424,8 @@ internal data class LogCompositionActions(
     val onHide: (MessageTemplate) -> Unit,
     val onShowOnly: (MessageTemplate) -> Unit,
     val onHighlight: (MessageTemplate) -> Unit,
+    // The Highlight split button's menu: Match text (false) / Whole line (true).
+    val onHighlightMode: (MessageTemplate, Boolean) -> Unit,
     val onGoToFirst: (MessageTemplate) -> Unit,
 )
 
@@ -448,7 +450,7 @@ internal fun LogCompositionFreshnessEffect(
     }
 }
 
-private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
+internal const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
 private val FILTER_IMPORT_EXTENSIONS = setOf("json", "conf", "ini")
 
@@ -567,8 +569,6 @@ internal fun FilterPanel(
     onToggleExcludeTag: (String) -> Unit,
     onSetKw: (String) -> Unit,
     onStartRegexSearch: () -> Unit,
-    onSetKwHighlightEnabled: (Boolean) -> Unit,
-    onSetKwHighlightColor: (Color) -> Unit,
     onToggleSeq: () -> Unit,
     onAddSeq: (String, Boolean, Color, String?, String?, Boolean, String?) -> Unit,
     onRemoveSeq: (String) -> Unit,
@@ -599,13 +599,7 @@ internal fun FilterPanel(
     onSetNewSeqStartTag: (String) -> Unit,
     onSetNewSeqEndTag: (String) -> Unit,
     onSetNewSeqColor: (Color) -> Unit,
-    onAddHl: (String, Boolean, Color) -> Unit,
-    onRemoveHl: (String) -> Unit,
-    onToggleHl: (String) -> Unit,
-    onSetHlColor: (String, Color) -> Unit,
-    onSetNewHlPat: (String) -> Unit,
-    onSetNewHlRx: (Boolean) -> Unit,
-    onSetNewHlColor: (Color) -> Unit,
+    highlighterActions: HighlighterActions,
     onLoadFilter: (SavedFilter) -> Unit,
     onDeleteSF: (String) -> Unit,
     onRenameSF: (String) -> Unit,
@@ -693,8 +687,6 @@ internal fun FilterPanel(
     // Not persisted anywhere — purely a one-shot explanation for the click that just happened,
     // cleared on the next click of ANY scope toggle (see its own onClick below) or a tab switch.
     var seqScopeToggleFailedId by remember(tab.id) { mutableStateOf<String?>(null) }
-    var colorPickerHlId by remember { mutableStateOf<String?>(null) }
-    var kwHighlightColorPickerOpen by remember { mutableStateOf(false) }
     var regexEditorOpen by remember { mutableStateOf(false) }
     var regexEditorText by remember { mutableStateOf("") }
     var colorPickerManualId by remember { mutableStateOf<String?>(null) }
@@ -787,7 +779,7 @@ internal fun FilterPanel(
             showMsgRuleCandidates = true
         } else { kotlinx.coroutines.delay(100); if (!msgRuleFieldFocused && !msgCandidatesHovered) showMsgRuleCandidates = false }
     }
-    var hlColorPickerOpen   by remember { mutableStateOf(false) }
+    val hlSection = remember { HighlighterSectionState() }
     var hlFieldFocused by remember { mutableStateOf(false) }
     var seqAddOpen          by remember { mutableStateOf(false) }
     var seqColorPickerOpen  by remember { mutableStateOf(false) }
@@ -1081,14 +1073,16 @@ internal fun FilterPanel(
                 val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
                 if (fieldFocused) {
                     if (ev.key == Key.Escape) {
+                        // The Highlighters add field and inline editor handle their own Escape (cancel /
+                        // clear); a panel-level clear here would run before they ever saw the key.
+                        val otherFieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || kwFieldFocused
+                        if (hlFieldFocused && !otherFieldFocused) return@onPreviewKeyEvent false
                         if (tagFieldFocused) {
                             clearTagSearch()
                         } else if (msgRuleFieldFocused || msgRuleScopeFieldFocused) {
                             cancelPendingMessageRule()
                         } else if (kwFieldFocused) {
                             kwDisplay = ""; onSetKw("")
-                        } else if (hlFieldFocused) {
-                            onSetNewHlPat("")
                         } else {
                             runCatching { focusRequester?.requestFocus() }
                         }
@@ -1111,9 +1105,8 @@ internal fun FilterPanel(
                         ev.key == Key.Delete || ev.key == Key.Backspace -> deleteFilterTarget()
                         ev.key == Key.Escape -> {
                             colorPickerSeqId = null
-                            colorPickerHlId = null
+                            hlSection.closeColorPickers()
                             colorPickerManualId = null
-                            hlColorPickerOpen = false
                             seqColorPickerOpen = false
                             editingSeqId = null
                             true
@@ -1864,155 +1857,26 @@ internal fun FilterPanel(
         Divider()
 
         // ── Highlighters ──────────────────────────────────────────
-        // Trailing shows colored dots for each highlighter; clicking collapses/expands the list.
-        // The add form is always visible, matching the TAGS section pattern.
-        val regexHighlightAvailable =
-            filter.mode == FilterMode.KEYWORD && filter.kwRegex && filter.kwText.isNotBlank()
-        val displayedHighlighterCount = filter.highlighters.size + if (regexHighlightAvailable) 1 else 0
-        val enabledHighlighterCount = filter.highlighters.count { it.on } +
-            if (regexHighlightAvailable && filter.kwHighlightEnabled) 1 else 0
-        SectionHeader(
-            "Highlighters",
-            trailing = if (displayedHighlighterCount > 0) ({
-                Row(
-                    Modifier.hoverPill().clickable {
-                        fpState.hlListExpanded = !fpState.hlListExpanded
-                        onUiStateChanged()
-                    }
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    if (enabledHighlighterCount > 0)
-                        AppText("$enabledHighlighterCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-                    val offCount = displayedHighlighterCount - enabledHighlighterCount
-                    if (offCount > 0)
-                        AppText("$offCount off", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                    AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
-                }
-            }) else null,
+        // List + search-to-add form live in HighlighterSection.kt; the panel keeps only what has to
+        // outlive it (the add field's FocusRequester, its focus flag for the key handler above).
+        HighlighterSection(
+            tab = tab,
+            fpState = fpState,
+            sectionState = hlSection,
+            actions = highlighterActions,
+            sortedTags = sortedTags,
+            tagUsage = tagUsage,
+            mostUsedTagLimit = mostUsedTagLimit,
+            filterListRows = filterListRows,
+            newHlPat = newHlPat,
+            newHlRx = newHlRx,
+            newHlColor = newHlColor,
+            inputFocusRequester = hlFr,
+            onInputFocusedChange = { hlFieldFocused = it },
+            onTabOut = { runCatching { tagFr.requestFocus() } },
+            onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
+            onUiStateChanged = onUiStateChanged,
         )
-        if (displayedHighlighterCount > 0 && fpState.hlListExpanded) {
-            BoundedScrollBox(minOf(displayedHighlighterCount, filterListRows), rowDp = 30) {
-                if (regexHighlightAvailable) {
-                    Column {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            ColorPickerSwatch(
-                                color = filter.kwHighlightColor,
-                                pickerOpen = kwHighlightColorPickerOpen,
-                                onClick = { kwHighlightColorPickerOpen = !kwHighlightColorPickerOpen },
-                            )
-                            AppText(
-                                "/${filter.kwText}/i",
-                                color = if (filter.kwHighlightEnabled) tc.tx else tc.td,
-                                fontSize = 11.sp,
-                                fontFamily = MONO,
-                                modifier = Modifier.weight(1f),
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                            RoundIndicator(
-                                active = filter.kwHighlightEnabled,
-                                color = filter.kwHighlightColor,
-                                onClick = { onSetKwHighlightEnabled(!filter.kwHighlightEnabled) },
-                            )
-                        }
-                        if (kwHighlightColorPickerOpen) {
-                            FlowRow(
-                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp),
-                            ) {
-                                HL_COLORS.forEach { color ->
-                                    ColorSwatch(color, color == filter.kwHighlightColor) {
-                                        onSetKwHighlightColor(color)
-                                        kwHighlightColorPickerOpen = false
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                filter.highlighters.forEach { hl ->
-                    Column {
-                        Row(
-                            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            ColorPickerSwatch(
-                                color = hl.color, pickerOpen = colorPickerHlId == hl.id,
-                                onClick = { colorPickerHlId = if (colorPickerHlId == hl.id) null else hl.id },
-                            )
-                            AppText((if (hl.regex) "/" else "") + hl.pattern + (if (hl.regex) "/i" else ""),
-                                color = if (hl.on) tc.tx else tc.td, fontSize = 11.sp, fontFamily = MONO,
-                                modifier = Modifier.weight(1f), overflow = TextOverflow.Ellipsis)
-                            RoundIndicator(active = hl.on, color = hl.color, onClick = { onToggleHl(hl.id) })
-                            SquareIconButton("×", fontSize = 14.sp, onClick = { onRemoveHl(hl.id) })
-                        }
-                        if (colorPickerHlId == hl.id) {
-                            FlowRow(
-                                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                                verticalArrangement = Arrangement.spacedBy(3.dp),
-                            ) {
-                                HL_COLORS.forEach { c -> ColorSwatch(c, c == hl.color) { onSetHlColor(hl.id, c); colorPickerHlId = null } }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            val doAddHl = {
-                if (newHlPat.isNotBlank()) {
-                    onAddHl(newHlPat, newHlRx, newHlColor)
-                    onSetNewHlPat("")
-                    val usedColors = (filter.highlighters.map { it.color } + newHlColor).toSet()
-                    val idx = HL_COLORS.indexOf(newHlColor)
-                    val next = (HL_COLORS.drop(idx + 1) + HL_COLORS).firstOrNull { it !in usedColors }
-                        ?: HL_COLORS[(idx + 1) % HL_COLORS.size]
-                    onSetNewHlColor(next)
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    Modifier.size(20.dp)
-                        .background(newHlColor, CORNER_SM)
-                        .border(1.dp, if (hlColorPickerOpen) tc.tx else tc.br, CORNER_SM)
-                        .clickable { hlColorPickerOpen = !hlColorPickerOpen },
-                )
-                InlineField(
-                    newHlPat, onSetNewHlPat, "text or /regex/…",
-                    Modifier.weight(1f)
-                        .focusRequester(hlFr)
-                        .onFocusChanged { hlFieldFocused = it.isFocused }
-                        .onPreviewKeyEvent { ev ->
-                            if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            when (ev.key) {
-                                Key.Enter -> { doAddHl(); true }
-                                Key.Tab -> { runCatching { tagFr.requestFocus() }; true }
-                                else -> false
-                            }
-                        },
-                    onClear = { onSetNewHlPat("") },
-                )
-                PillBtn(".*", active = newHlRx, onClick = { onSetNewHlRx(!newHlRx) })
-                AppButton("+ Add", onClick = doAddHl, variant = ButtonVariant.Ghost, enabled = newHlPat.isNotBlank())
-            }
-            if (hlColorPickerOpen) {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp),
-                ) {
-                    HL_COLORS.forEach { c ->
-                        ColorSwatch(c, c == newHlColor) { onSetNewHlColor(c); hlColorPickerOpen = false }
-                    }
-                }
-            }
-        }
         Divider()
 
         // ── Log Level ─────────────────────────────────────────────
@@ -3688,10 +3552,11 @@ private fun LogCompositionHint(glyph: String, text: String, tc: ThemeColors, gly
 // on message rules.
 //
 // Hide/Show only/Highlight (Stage 2c) reflect applied state via PillBtn's established active
-// treatment — same widget SequenceEditor's ".*" toggle uses, label held constant while only the
+// treatment (Highlight is a split button drawn the same way, see HighlightSplitButton) — same widget
+// SequenceEditor's ".*" toggle uses, label held constant while only the
 // border/fill communicates state, per this panel's own convention (see the tag row's +/- boxes for
 // the same "label stays, only state changes" idea). [hideApplied]/[showOnlyApplied]/
-// [highlightApplied] are computed by the caller via utils/MessageTemplates.matchingMessageRule /
+// [highlightWholeLine] (non-null = applied) are computed by the caller via utils/MessageTemplates.matchingMessageRule /
 // matchingHighlighter — see FilterPanel's call site and AppState.toggleMessageRuleForTemplate for
 // why that's the one place "applied" is decided.
 @Composable
@@ -3702,11 +3567,13 @@ private fun LogCompositionRow(
     showRuleActions: Boolean,
     hideApplied: Boolean,
     showOnlyApplied: Boolean,
-    highlightApplied: Boolean,
+    // Mode of the highlighter this row already has; null = none.
+    highlightWholeLine: Boolean?,
     tc: ThemeColors,
     onHide: () -> Unit,
     onShowOnly: () -> Unit,
     onHighlight: () -> Unit,
+    onHighlightMode: (Boolean) -> Unit,
     onGoToFirst: () -> Unit,
 ) {
     Column(
@@ -3745,7 +3612,7 @@ private fun LogCompositionRow(
                 PillBtn("Hide", active = hideApplied, onClick = onHide)
                 PillBtn("Show only", active = showOnlyApplied, onClick = onShowOnly)
             }
-            PillBtn("Highlight", active = highlightApplied, onClick = onHighlight)
+            HighlightSplitButton(highlightWholeLine, onToggle = onHighlight, onChooseMode = onHighlightMode)
             LabelIconButton("First", 9.sp, onGoToFirst)
         }
     }
@@ -3822,11 +3689,12 @@ private fun LogCompositionResults(
                         showRuleActions = filter.mode == FilterMode.TAGS,
                         hideApplied = matchingMessageRule(filter.messageRules, t, include = false, filter.mode) != null,
                         showOnlyApplied = matchingMessageRule(filter.messageRules, t, include = true, filter.mode) != null,
-                        highlightApplied = matchingHighlighter(filter.highlighters, t) != null,
+                        highlightWholeLine = matchingHighlighter(filter.highlighters, t)?.wholeLine,
                         tc = tc,
                         onHide = { actions.onHide(t) },
                         onShowOnly = { actions.onShowOnly(t) },
                         onHighlight = { actions.onHighlight(t) },
+                        onHighlightMode = { wholeLine -> actions.onHighlightMode(t, wholeLine) },
                         onGoToFirst = { actions.onGoToFirst(t) },
                     )
                 }
@@ -4034,7 +3902,7 @@ internal fun messageRuleInputConsumesKey(key: Key, hasActionCandidate: Boolean =
         key == Key.Enter ||
         key == Key.NumPadEnter
 
-private fun slashWrappedRegex(input: String): String? {
+internal fun slashWrappedRegex(input: String): String? {
     if (!input.startsWith("/") || input.length < 2) return null
     val end = input.lastIndexOf('/')
     if (end <= 0) return null

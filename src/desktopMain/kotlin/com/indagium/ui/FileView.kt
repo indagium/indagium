@@ -71,7 +71,25 @@ internal fun BoundFilterPanel(
                 state.requestMessageComposition(tab.id)
             },
             onHighlight = { template -> state.toggleHighlightForTemplate(tab.id, template) },
+            onHighlightMode = { template, wholeLine -> state.toggleHighlightForTemplate(tab.id, template, wholeLine) },
             onGoToFirst = { template -> state.requestLineNavigation(tab.id, template.firstEntryId) },
+        )
+    }
+    val highlighterActions = remember(state, tab.id) {
+        HighlighterActions(
+            onAdd = { pattern, regex, color, wholeLine, target, tag ->
+                state.addHl(tab.id, pattern, regex, color, wholeLine = wholeLine, target = target, tag = tag)
+            },
+            onRemove = { state.removeHl(tab.id, it) },
+            onToggle = { state.toggleHl(tab.id, it) },
+            onSetColor = { id, c -> state.setHighlighterColor(tab.id, id, c) },
+            onUpdate = { id, transform -> state.updateHighlighter(tab.id, id, transform) },
+            onSetNewPattern = { state.newHlPat = it },
+            onSetNewRegex = { state.newHlRx = it },
+            onSetNewColor = { state.newHlColor = it },
+            onSetKwHighlightEnabled = { state.setKwHighlightEnabled(tab.id, it) },
+            onSetKwHighlightColor = { state.setKwHighlightColor(tab.id, it) },
+            onRequestMessageComposition = { state.requestMessageComposition(tab.id) },
         )
     }
     FilterPanel(
@@ -90,8 +108,6 @@ internal fun BoundFilterPanel(
         onToggleExcludeTag = { state.toggleExcludeTag(tab.id, it) },
         onSetKw = { state.setKw(tab.id, it) },
         onStartRegexSearch = { state.startRegexSearch(tab.id) },
-        onSetKwHighlightEnabled = { state.setKwHighlightEnabled(tab.id, it) },
-        onSetKwHighlightColor = { state.setKwHighlightColor(tab.id, it) },
         onToggleSeq = { state.toggleSeq(tab.id) },
         onAddSeq = { t, r, c, st, et, er, eg -> state.addSequence(tab.id, t, r, c, st, et, er, eg) },
         onRemoveSeq = { state.removeSequence(tab.id, it) },
@@ -120,13 +136,7 @@ internal fun BoundFilterPanel(
         onSetNewSeqStartTag = { state.newSeqTag = it },
         onSetNewSeqEndTag = { state.newSeqEndTag = it },
         onSetNewSeqColor = { state.newSeqColor = it },
-        onAddHl = { p, r, c -> state.addHl(tab.id, p, r, c) },
-        onRemoveHl = { state.removeHl(tab.id, it) },
-        onToggleHl = { state.toggleHl(tab.id, it) },
-        onSetHlColor = { id, c -> state.setHighlighterColor(tab.id, id, c) },
-        onSetNewHlPat = { state.newHlPat = it },
-        onSetNewHlRx = { state.newHlRx = it },
-        onSetNewHlColor = { state.newHlColor = it },
+        highlighterActions = highlighterActions,
         onLoadFilter = { state.requestLoadFilter(tab.id, it) },
         onDeleteSF = { state.requestDeleteSF(it) },
         onRenameSF = { state.beginRenameFilter(it) },

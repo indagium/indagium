@@ -689,6 +689,13 @@ classDiagram
         +Boolean regex
         +Color color
         +Boolean on
+        +Boolean wholeLine
+        +HighlightTarget target
+        +String tag
+        +Boolean caseSensitive
+        +Color textColor
+        +Boolean captureGroupsOnly
+        +Int colorVariance
     }
 
     class MessageRule {
@@ -1026,6 +1033,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `SeqComputer.kt` | `computeSeqGroups` (`:79`) — O(n·d) sequence detection with one level of nesting |
 | `StackTraceComputer.kt` | Always-on stack folding (`:115`), crash sites (`:189`), custom issue sites (`:212`) |
 | `TextMatch.kt` | Shared regex infrastructure: bounded LRU cache, backtracking deadline, `visibleLogLineText` as the single definition of "what the row shows" |
+| `HighlightMatch.kt` | The one highlighter matcher: `highlighterMatches` (boolean), `resolveLineHighlight` (whole-line owner plus paint-ordered spans) and `countHighlighterRows` (per-highlighter row counts for the filter panel). Row rendering, the minimap and the panel counts all go through it, so "which highlighter owns this row" cannot drift between them. See [§10.1](#103-highlighters) |
+| `QSettingsIni.kt` / `KloggHighlighterImport.kt` / `KloggColor.kt` / `QtColorParse.kt` | Manual import of klogg highlighter sets: Qt `QSettings` INI reader, klogg field mapping to `Highlighter`, `QColor::darker` + `minstd_rand0` colour variance, Qt/SVG colour parsing. See [§13.8](#138-klogg-highlighter-import) |
 | `EntryIdMap.kt` | Memory-free id → entry lookup view |
 | `LogTime.kt` | Allocation-free `HH:MM:SS.mmm` parsing, delta formatting, midnight-rollover correction |
 | `TidMap.kt` | Pure core of the thread-map gutter overlay |
@@ -1045,7 +1054,8 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `App.kt` | Root composable: layout routing, all dialogs, drag-and-drop, global key handling, the autosave debounce |
 | `FileView.kt` / `CompareView.kt` | Single-tab and two-tab layouts; the `Bound*` adapters |
 | `LogViewer.kt` | The log list: `LazyColumn`, horizontal scroll, selection, drag-select, the Original/Filtered split |
-| `FilterPanel.kt` | Left sidebar: levels, tags, message rules, highlighters, sequences, collapsed ranges, saved filters |
+| `FilterPanel.kt` | Left sidebar: levels, tags, message rules, sequences, collapsed ranges, saved filters |
+| `HighlighterSection.kt` / `HighlighterCandidates.kt` | The panel's Highlighters section: rows with a Match/Line chip, badges and match counts, the inline editor, and the search-to-add field with its TEXT / TAGS / MESSAGES dropdown. `HighlighterCandidates.kt` is the pure half (query parsing incl. `tag:Name rest`, candidate ranking, row labels/badges) so tests can pin it without composing |
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
@@ -1223,6 +1233,52 @@ document into a `Seq3RegenReview` (new/changed/removed/edited-kept rows), and le
 itself untouched until `applyRegenReview` routes the accepted decisions through the same
 `applyCommand`/`applySeq3Command` path every other mutation uses — so "Apply N changes" is one undo
 step, not N.
+
+### 10.3 Highlighters
+
+A `Highlighter` (`model/Model.kt`) began as `(id, pattern, regex, color, on)` and always coloured the
+matched text on the rendered line. Seven optional fields now sit after `on`, all defaulting to that
+original behaviour, so an old autosave, a saved filter, the MCP tool, the context menu and Log
+composition keep producing exactly what they always did:
+
+| Field | Meaning | Default |
+|---|---|---|
+| `wholeLine` | Tint the whole row, not just the match | `false` |
+| `target` | Match against the whole rendered line (`ANY`), only `entry.tag` (`TAG`) or only `entry.msg` (`MESSAGE`) | `ANY` |
+| `tag` | Exact-tag limit, the same rule as a message rule's tag (`ruleScopeMatches`) | `null` |
+| `caseSensitive` | Case-sensitive matching | `false` (ignore case) |
+| `textColor` | Non-null marks a **klogg-style** highlighter: opaque `color` background plus this foreground | `null` |
+| `captureGroupsOnly` | A regex with capture groups colours only the groups (klogg) | `false` |
+| `colorVariance` | klogg `variate_colors` shade spread (match-only), 0 = off | `0` |
+
+**`utils/HighlightMatch.kt` is the one matcher.** `highlighterMatches` answers "does this enabled
+highlighter find its pattern on this row" (tag limit and target honoured); `resolveLineHighlight`
+turns a row plus the tab's highlighters into a `LineHighlight(wholeLine, spans)`; `countHighlighterRows`
+runs `highlighterMatches` over a log for the panel's per-highlighter counts. Row painting
+(`buildLogLineRender` in `ui/LogViewer.kt`), the minimap and the counts all call these, so what is
+painted, what the overview strip shows and what the panel counts cannot disagree. Rules, in order:
+
+1. A tag limit skips rows of other tags; `MESSAGE` and `TAG` match against `entry.msg` / `entry.tag`
+   and their offsets are shifted into rendered-line coordinates, so the pid-field remapping keeps working.
+2. The first enabled whole-line highlighter, in list order, that matches owns the row.
+3. If that owner is klogg-style, only match highlighters listed **above** it contribute spans (klogg
+   stops at the first whole-line hit); if it is Indagium's own, every match highlighter still paints.
+4. Paint order: Indagium spans in list order (as before), klogg spans reversed so the first in the
+   list ends up on top. Plain text scans overlap for Indagium highlighters and never for klogg ones
+   (klogg's escaped `globalMatch`).
+
+**The filter panel side** (`ui/HighlighterSection.kt`, `ui/HighlighterCandidates.kt`). The search-to-add
+field builds its dropdown from pure functions: `parseHighlighterQuery` (a `/re/` regex, or
+`tag:Name rest` which limits the highlighter to that exact tag) and `highlighterCandidates`, ranked
+TEXT (what was typed), then TAGS (`tagCandidates` / `packagePrefixCandidates`; an exact tag becomes
+`target = TAG, tag = <tag>`), then MESSAGES (Log composition templates through
+`messageRuleSpecForTemplate`, `target = MESSAGE, tag = template.tag`). Templates are requested with
+`requestMessageComposition` the first time they are wanted. Every candidate is added match-only by
+default; whole-line is an explicit choice (a row's Line button, `←/→`, or the Match text | Whole line
+control). Adding a shape that already exists switches that highlighter's mode instead of duplicating it.
+Row match counts run on `Dispatchers.Default`, keyed only on match-relevant fields (`matchKey()`:
+never colour, on/off or whole-line), cancel-and-relaunch like the message-rule candidates, and in
+large-file mode stop at `LARGE_FILE_CANDIDATE_SCAN_LIMIT` entries and are shown as "≥N".
 
 ---
 
@@ -1671,6 +1727,36 @@ callback bodies are stored with stable IDs and async registration edges; only as
 branch operations, and synchronous call/return proof remains straight-line and conservative.
 
 ---
+
+### 13.8 klogg highlighter import
+
+A klogg highlighter export can be imported **manually**: dropped on the filter sidebar or picked with
+the Saved filters **Import** button. There is no autodetection of an installed klogg, and a `.conf`
+dropped on the log area still opens as a log. `decodeFilterImport(fileName, text)` (`ui/FilterCodec.kt`)
+routes by content: `{` or `[` is the JSON filter library, a `[HighlighterSetCollection]` (klogg 22+) or
+`[FilterSet]` (legacy glogg) section is klogg, anything else is an error.
+
+- `utils/QSettingsIni.kt` reads the Qt `QSettings` INI dialect: sections and comments, `%XX` / `%UXXXX`
+  key escapes, quoted values with `\\ \" \x…` escapes, unquoted comma lists, `@@`. `@Variant(…)` and
+  `@ByteArray(…)` values are not decoded; the keys that carry them are reported as a note.
+- `utils/KloggHighlighterImport.kt` turns each set into one `SavedFilter` (name = set name, every other
+  filter field default). Mapping: `regex = use_regex`, `caseSensitive = !ignore_case`, `wholeLine =
+  !match_only`, `color = back_colour`, `textColor = fore_colour`, `captureGroupsOnly = true`,
+  `colorVariance = variate_colors && match_only ? color_variance : 0`. Missing keys take klogg's own
+  defaults; colours are `#AARRGGBB`, `#RRGGBB` or SVG names (`utils/QtColorParse.kt`). The `quick\…`
+  entries are colour presets and are ignored. Ids come from the set id (or name) plus the index, so
+  re-importing the same file shows as identical and is skipped.
+- Patterns are compiled with Java regex (`isValidRegexPattern`). PCRE-only syntax (`(?P<n>)`, `\K`,
+  `(?|`) cannot compile and that highlighter is skipped with a note; a pattern that depends on the raw
+  logcat layout (a leading `^`, a date, a `L/Tag` shape) is flagged, because the rendered line text
+  drops the date and spaces fields differently. A set with no valid highlighter is shown as skipped.
+- `utils/KloggColor.kt` ports `QColor::darker` / `lighter` and seeds `minstd_rand0` with the CRC32 of
+  the matched text (libstdc++ downscaling), so colour-variance shades are deterministic but not
+  guaranteed bit-identical to klogg on every platform.
+
+The review dialog (`ImportFilterReviewRow.notes`, `PendingImportReview.notes`) lists up to three notes per
+row plus "+N more", and marks klogg's active sets. The dropped-files path also keeps folders and reports
+unreadable files through `importError` rather than skipping them silently.
 
 ## 14. External integrations
 
@@ -2308,6 +2394,16 @@ control (`xattr -cr`), which is a habit that generalises badly. Signing is the f
 
 ---
 
+### 18.9 Untrusted import files
+
+Filter imports (the JSON library and klogg configs) come from outside the app, often from a colleague.
+They are treated as untrusted data: parsed, never executed. Reads are refused past about **8 MB**
+(`readFilterImportText`, `ui/FilterCodec.kt`; a real export is a few KB), klogg array sizes are clamped
+(`MAX_ARRAY`), unreadable or malformed files surface as an import error instead of a crash, and every
+imported regex is compiled through `TextMatch`'s bounded cache and evaluated under the same 100 ms
+per-match deadline as any other user regex (§18.3), so a pathological pattern in a shared config
+cannot stall the log view.
+
 ## 19. Performance and scalability
 
 Performance is an architectural concern here, not a tuning detail: the target file sizes are large
@@ -2649,7 +2745,7 @@ habit. **Mitigation:** an Apple Developer certificate in CI.
 | **Case** | A previously written analysis note, indexed for similarity search so an engineer can find "have we seen this before?" |
 | **Compute cache** | The per-tab memoisation of `computeItems` output, keyed by tab id and filter-applied flag. |
 | **Confirmation-required tool** | One of thirteen automation tools that pauses for explicit user approval before executing. |
-| **Highlighter** | A pattern that colours matching lines without filtering them out. |
+| **Highlighter** | A pattern that colours matching text, or the whole line, without filtering anything out. Optionally limited to a tag, and matched against the tag, the message or the whole rendered line. |
 | **Large-file mode** | A per-tab flag set above a size threshold that routes item computation onto the cancellable async path. |
 | **Managed MCP lease** | A short-lived, run-scoped MCP endpoint on an OS-assigned port, created so a subprocess AI agent can call Indagium's tools. |
 | **Manual collapse block** | A user-created folded range: to start, to end, or an explicit range. |
@@ -2678,6 +2774,8 @@ Where to read about a given source file.
 | `utils/Filter.kt` | [10](#10-data-flow-the-render-pipeline), [12.3](#123-cancellation-of-computeitems), [19](#19-performance-and-scalability) |
 | `utils/SeqComputer.kt`, `StackTraceComputer.kt` | [9.2](#92-utils--the-log-engine), [10](#10-data-flow-the-render-pipeline) |
 | `utils/TextMatch.kt` | [18.3](#183-regular-expression-denial-of-service) |
+| `utils/HighlightMatch.kt` | [9.2](#92-utils--the-log-engine), [10.3](#103-highlighters) |
+| `utils/QSettingsIni.kt`, `KloggHighlighterImport.kt`, `KloggColor.kt` | [13.8](#138-klogg-highlighter-import), [18.9](#189-untrusted-import-files) |
 | `utils/EntryIdMap.kt`, `ImageDownscale.kt`, `FileTailer.kt` | [19.1](#191-memory-strategy) |
 | `utils/AtomicFileWrite.kt` | [13.3](#133-atomicity) |
 | `utils/BugReportZip.kt` | [14.6](#146-archives), [18.7](#187-archive-handling) |

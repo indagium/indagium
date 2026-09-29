@@ -5171,21 +5171,28 @@ class AppState(
         }
     }
 
-    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate) {
+    // [wholeLine] null is the row's main Highlight button: today's toggle, always match-only. The
+    // split button's menu passes an explicit mode: pressing the mode a highlighter already has
+    // removes it, pressing the other one switches it in place, and no highlighter creates one.
+    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate, wholeLine: Boolean? = null) {
         val f = tab(tabId)?.filter ?: return
         val existing = matchingHighlighter(f.highlighters, template)
-        if (existing != null) {
-            removeHl(tabId, existing.id)
-        } else {
-            val spec = messageRuleSpecForTemplate(template)
-            addHl(
-                tabId,
-                spec.pattern,
-                spec.regex,
-                nextAvailableHighlighterColor(tabId),
-                target = HighlightTarget.MESSAGE,
-                tag = template.tag.trim().takeIf { it.isNotBlank() },
-            )
+        when {
+            existing == null -> {
+                val spec = messageRuleSpecForTemplate(template)
+                addHl(
+                    tabId,
+                    spec.pattern,
+                    spec.regex,
+                    nextAvailableHighlighterColor(tabId),
+                    wholeLine = wholeLine == true,
+                    target = HighlightTarget.MESSAGE,
+                    tag = template.tag.trim().takeIf { it.isNotBlank() },
+                )
+            }
+            wholeLine != null && existing.wholeLine != wholeLine ->
+                updateHighlighter(tabId, existing.id) { it.copy(wholeLine = wholeLine, on = true) }
+            else -> removeHl(tabId, existing.id)
         }
     }
 
@@ -7679,7 +7686,8 @@ class AppState(
         addHl(c.tabId, text, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
-    fun addHlTagFromCtx(color: Color? = null) {
+    // wholeLine = true is the "Highlight lines with this tag" item; the default stays match-only.
+    fun addHlTagFromCtx(color: Color? = null, wholeLine: Boolean = false) {
         val c = ctx ?: return
         val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
         addHl(
@@ -7687,6 +7695,7 @@ class AppState(
             tag,
             false,
             color ?: nextAvailableHighlighterColor(c.tabId),
+            wholeLine = wholeLine,
             target = HighlightTarget.TAG,
             tag = tag,
         )
