@@ -64,6 +64,7 @@ internal fun WorkspaceProfileCard(
     modifier: Modifier = Modifier,
     // A "⋯" menu at the preview's top-left (custom profiles: rename, update, export, delete).
     menuActions: List<ProfileMenuAction> = emptyList(),
+    onMenuClosed: () -> Unit = {},
     preview: @Composable BoxScope.() -> Unit,
 ) {
     val tc = tc()
@@ -87,7 +88,7 @@ internal fun WorkspaceProfileCard(
         Box(Modifier.fillMaxWidth().height(WIREFRAME_HEIGHT)) {
             preview()
             if (menuActions.isNotEmpty()) {
-                ProfileCardMenu(menuActions, Modifier.align(Alignment.TopStart).padding(3.dp))
+                ProfileCardMenu(menuActions, onMenuClosed, Modifier.align(Alignment.TopStart).padding(3.dp))
             }
             if (selected) {
                 Box(
@@ -110,7 +111,7 @@ internal fun WorkspaceProfileCard(
 internal data class ProfileMenuAction(val label: String, val danger: Boolean = false, val onClick: () -> Unit)
 
 @Composable
-private fun ProfileCardMenu(actions: List<ProfileMenuAction>, modifier: Modifier = Modifier) {
+private fun ProfileCardMenu(actions: List<ProfileMenuAction>, onClosed: () -> Unit, modifier: Modifier = Modifier) {
     val tc = tc()
     var open by remember { mutableStateOf(false) }
     val density = LocalDensity.current
@@ -127,7 +128,10 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, modifier: Modifier
             Popup(
                 alignment = Alignment.TopStart,
                 offset = IntOffset(0, with(density) { 22.dp.roundToPx() }),
-                onDismissRequest = { open = false },
+                onDismissRequest = {
+                    open = false
+                    onClosed()
+                },
                 properties = PopupProperties(focusable = true),
             ) {
                 Column(
@@ -140,6 +144,8 @@ private fun ProfileCardMenu(actions: List<ProfileMenuAction>, modifier: Modifier
                             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
                             onClick = {
                                 open = false
+                                // A dismissed popup takes keyboard focus with it, so hand it back first.
+                                onClosed()
                                 action.onClick()
                             },
                         ) {
@@ -183,6 +189,7 @@ internal fun ResolvedProfileCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     menuActions: List<ProfileMenuAction> = emptyList(),
+    onMenuClosed: () -> Unit = {},
 ) {
     WorkspaceProfileCard(
         title = profile.title,
@@ -191,6 +198,7 @@ internal fun ResolvedProfileCard(
         onClick = onClick,
         modifier = modifier,
         menuActions = menuActions,
+        onMenuClosed = onMenuClosed,
     ) { ProfileWireframe(profile.spec) }
 }
 
@@ -202,6 +210,7 @@ internal fun WorkspaceProfileCards(
     onSelect: (ResolvedProfile) -> Unit,
     menuFor: (ResolvedProfile) -> List<ProfileMenuAction>,
     modifier: Modifier = Modifier,
+    onMenuClosed: () -> Unit = {},
 ) {
     WorkspaceCardGrid(
         cards = profiles.map { profile ->
@@ -212,6 +221,7 @@ internal fun WorkspaceProfileCards(
                     onClick = { onSelect(profile) },
                     modifier = cardModifier,
                     menuActions = if (profile.custom) menuFor(profile) else emptyList(),
+                    onMenuClosed = onMenuClosed,
                 )
             }
         },

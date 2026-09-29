@@ -358,7 +358,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             verticalArrangement = Arrangement.spacedBy(14.dp),
                         ) {
                             when (selectedSection) {
-                                SettingsSection.General -> GeneralSettingsSection(state)
+                                SettingsSection.General -> GeneralSettingsSection(state, ::reclaimFocus)
                                 SettingsSection.Appearance -> AppearanceSettingsSection(state)
                                 SettingsSection.Capture -> CaptureSettingsSection(state)
                                 SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
@@ -616,6 +616,17 @@ private fun SettingsScrollableRows(
     }
 }
 
+/** A text link in the accent colour with the hover highlight the footer's "GitHub repository" link uses. */
+@Composable
+internal fun AccentLink(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val tc = tc()
+    HoverBox(modifier = modifier.clip(RoundedCornerShape(4.dp)), onClick = onClick) {
+        Box(Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
+            AppText(label, color = tc.ac, fontSize = 11.sp, fontFamily = UI)
+        }
+    }
+}
+
 /**
  * The font, size, scale and toolbar-label controls of Settings → Appearance; the setup assistant's
  * Look step shows this same row so the two can't drift. Controls take their natural width (the
@@ -698,7 +709,7 @@ private fun AppearanceSettingsSection(state: AppState) {
 }
 
 @Composable
-private fun GeneralSettingsSection(state: AppState) {
+private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     val tc = tc()
     val selectedProfile = state.selectedWorkspaceProfile
     var nameRequest by remember { mutableStateOf<ProfileNameRequest?>(null) }
@@ -717,6 +728,7 @@ private fun GeneralSettingsSection(state: AppState) {
             profiles = profiles,
             selectedId = selectedProfile?.id,
             onSelect = state::applyResolvedProfile,
+            onMenuClosed = reclaimFocus,
             menuFor = { profile ->
                 listOf(
                     ProfileMenuAction("Rename…") { nameRequest = ProfileNameRequest.Rename(profile) },
@@ -769,22 +781,22 @@ private fun GeneralSettingsSection(state: AppState) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (!customized) {
-                AppButton(
-                    "Save current setup as profile…",
-                    onClick = { nameRequest = ProfileNameRequest.New },
-                    variant = ButtonVariant.Ghost,
-                )
+                AccentLink("Save current setup as profile…", onClick = { nameRequest = ProfileNameRequest.New })
             }
-            AppButton(
+            AccentLink(
                 "Import profile…",
-                onClick = { state.importWorkspaceProfile() },
-                variant = ButtonVariant.Ghost,
+                onClick = {
+                    state.importWorkspaceProfile()
+                    reclaimFocus()
+                },
                 modifier = Modifier.settingsAnchor("Import profile"),
             )
-            AppButton(
+            AccentLink(
                 "Export current setup as .json",
-                onClick = { state.exportWorkspaceProfile(null) },
-                variant = ButtonVariant.Ghost,
+                onClick = {
+                    state.exportWorkspaceProfile(null)
+                    reclaimFocus()
+                },
                 modifier = Modifier.settingsAnchor("Export profile"),
             )
         }
@@ -806,21 +818,32 @@ private fun GeneralSettingsSection(state: AppState) {
                     is ProfileNameRequest.Rename -> state.renameWorkspaceProfile(request.profile.id, name)
                 }
                 nameRequest = null
+                reclaimFocus()
             },
-            onDismiss = { nameRequest = null },
+            onDismiss = {
+                nameRequest = null
+                reclaimFocus()
+            },
         )
     }
     deleteRequest?.let { profile ->
         SettingsConfirmDialog(
             title = "Delete profile?",
             message = "Delete “${profile.title}”? The theme and panels you have now stay as they are. This can't be undone.",
-            onDismissRequest = { deleteRequest = null },
+            onDismissRequest = {
+                deleteRequest = null
+                reclaimFocus()
+            },
         ) {
             DialogActionButton("Delete", active = true, danger = true) {
                 state.deleteWorkspaceProfile(profile.id)
                 deleteRequest = null
+                reclaimFocus()
             }
-            DialogActionButton("Cancel", active = false) { deleteRequest = null }
+            DialogActionButton("Cancel", active = false) {
+                deleteRequest = null
+                reclaimFocus()
+            }
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
