@@ -1130,6 +1130,9 @@ internal fun casePreviewCopyText(preview: CaseLibraryPreview): String = buildStr
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
+/** What confirming the import review does: add saved filters, or add the highlighters to the active tab's filter. */
+enum class ImportReviewMode { SAVE_FILTERS, ADD_TO_CURRENT }
+
 private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
     fun Filter.withoutTransientRegexSearch() = copy(
         mode = FilterMode.TAGS,
@@ -1196,6 +1199,10 @@ data class PendingImportReview(
     val sourceName: String? = null,
     // Import-level remarks, shown under the dialog's subtitle.
     val notes: List<String> = emptyList(),
+    val mode: ImportReviewMode = ImportReviewMode.SAVE_FILTERS,
+    // Rows whose highlighters ADD_TO_CURRENT will append; kept apart from the rows' saved-filter actions
+    // so flipping modes never loses either choice.
+    val highlightRowIds: Set<String> = emptySet(),
 )
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
@@ -5838,8 +5845,25 @@ class AppState(
             return
         }
         val rows = buildImportRows(savedFilters, library.filters, library.rowInfo)
-        pendingImportReview = PendingImportReview(rows, library.folders, sourceName, library.notes)
+        val highlightRowIds = rows.filter { it.hasHighlighters() }.mapTo(linkedSetOf()) { it.rowId }
+        val canAdd = highlightRowIds.isNotEmpty() && hasActiveLogTab()
+        val mode = if (library.fromKlogg && canAdd) ImportReviewMode.ADD_TO_CURRENT else ImportReviewMode.SAVE_FILTERS
+        pendingImportReview = PendingImportReview(rows, library.folders, sourceName, library.notes, mode, highlightRowIds)
         importError = null
+    }
+
+    private fun hasActiveLogTab(): Boolean = tabs.any { it.id == activeTabId }
+
+    /** True when the open import review can add highlighters to the active tab (there is one, and some row has highlighters). */
+    fun canAddImportToCurrentFilter(): Boolean {
+        val review = pendingImportReview ?: return false
+        return hasActiveLogTab() && review.rows.any { it.hasHighlighters() }
+    }
+
+    fun setImportReviewMode(mode: ImportReviewMode) {
+        val review = pendingImportReview ?: return
+        if (mode == ImportReviewMode.ADD_TO_CURRENT && !canAddImportToCurrentFilter()) return
+        pendingImportReview = review.copy(mode = mode)
     }
 
     fun cancelImportFilters() {
@@ -5865,6 +5889,14 @@ class AppState(
      * and per-folder/dialog-level "select all" checkboxes in the import review dialog. */
     fun setImportRowsChecked(rowIds: Set<String>, checked: Boolean) {
         val review = pendingImportReview ?: return
+        if (review.mode == ImportReviewMode.ADD_TO_CURRENT) {
+            // Here a checked row means "include its highlighters"; the saved-filter actions stay as they were.
+            val selectable = review.rows.filter { it.rowId in rowIds && it.hasHighlighters() }.map { it.rowId }
+            pendingImportReview = review.copy(
+                highlightRowIds = if (checked) review.highlightRowIds + selectable else review.highlightRowIds - selectable.toSet(),
+            )
+            return
+        }
         pendingImportReview = review.copy(rows = review.rows.map { row ->
             if (row.rowId !in rowIds) row
             else if (checked) row.withImportAction(savedFilters, if (row.targetId == null) ImportFilterAction.ADD else ImportFilterAction.RENAME)
@@ -5874,6 +5906,10 @@ class AppState(
 
     fun confirmImportFilters() {
         val review = pendingImportReview ?: return
+        if (review.mode == ImportReviewMode.ADD_TO_CURRENT) {
+            addImportedHighlightersToActiveTab(review)
+            return
+        }
         var next = savedFilters
         var changed = false
         val survivingFolderIds = mutableSetOf<String>()
@@ -5904,6 +5940,19 @@ class AppState(
         }
         pendingImportReview = null
         if (changed) writeFilterBackup()
+    }
+
+    /** Appends the checked rows' highlighters (row order, then highlighter order) to the active tab's filter and closes the review. */
+    private fun addImportedHighlightersToActiveTab(review: PendingImportReview) {
+        val tabId = activeTabId
+        val incoming = review.rows.filter { it.rowId in review.highlightRowIds }.flatMap { it.incoming.highlighters }
+        if (incoming.isNotEmpty() && hasActiveLogTab()) {
+            upFlt(tabId) { f ->
+                val added = newHighlightersFor(f.highlighters, incoming)
+                if (added.isEmpty()) f else f.copy(highlighters = f.highlighters + added)
+            }
+        }
+        pendingImportReview = null
     }
 
     /** Maps imported folder ids onto this library by folder name, adding non-conflicting folders. */
@@ -11753,6 +11802,7 @@ class AppState(
             folders = libraries.flatMap { it.folders },
             rowInfo = libraries.fold(emptyMap()) { acc, lib -> acc + lib.rowInfo },
             notes = libraries.flatMap { it.notes }.distinct(),
+            fromKlogg = libraries.any { it.fromKlogg },
         )
         beginImportFilterList(prepareImportedLibrary(merged), files.joinToString(", ") { it.name })
         if (failures.isNotEmpty()) importError = failures.joinToString("\n")

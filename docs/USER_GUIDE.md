@@ -288,6 +288,11 @@ Highlighters from **klogg** can be imported: drop the klogg `.conf` on the filte
 own behaviour (first whole-line match wins, capture groups, colours); the review dialog lists any
 patterns that could not be carried over.
 
+The review dialog has a switch at the top. **Save as saved filters** adds the sets to your library.
+**Add to current filter (tab name)** instead appends the ticked sets' highlighters to the filter of the
+tab you are looking at, leaving its tags, levels and rules alone and skipping highlighters it already
+has. A klogg import opens in the second mode when a log tab is open; the two modes keep separate ticks.
+
 Keyword-search matches can also be highlighted in their own colour — a separate toggle in the panel.
 
 ---

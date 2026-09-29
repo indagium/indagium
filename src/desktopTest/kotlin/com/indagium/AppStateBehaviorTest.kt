@@ -43,6 +43,7 @@ import com.indagium.ui.DesktopStorage
 import com.indagium.ui.FilterSearchRequest
 import com.indagium.ui.HL_COLORS
 import com.indagium.ui.ImportFilterAction
+import com.indagium.ui.ImportReviewMode
 import com.indagium.ui.ManualCollapseAvailability
 import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SettingsSection
@@ -1178,6 +1179,126 @@ class AppStateBehaviorTest {
         target.importFiltersFromFile(file)
 
         assertEquals(listOf("old_glogg"), target.pendingImportReview!!.rows.map { it.incoming.name })
+    }
+
+    private fun stateWithTab(): AppState = AppState(File(createTempDirectory("openlog-hlimport").toFile(), "s.cache")).also { it.addTab() }
+
+    @Test
+    fun importReviewDefaultsToAddingToTheCurrentFilterOnlyForKlogg() {
+        val withTab = stateWithTab()
+        withTab.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        assertEquals(ImportReviewMode.ADD_TO_CURRENT, withTab.pendingImportReview!!.mode)
+        assertTrue(withTab.canAddImportToCurrentFilter())
+
+        val source = stateWithTab()
+        source.addHl(source.tabs.single().id, "abc", false, Color.Red)
+        source.saveFilter(source.tabs.single().id, "mine")
+        val json = source.exportFilters()
+        val other = stateWithTab()
+        other.beginImportFilters(json, "filters.json")
+        assertEquals(ImportReviewMode.SAVE_FILTERS, other.pendingImportReview!!.mode)
+        assertTrue(other.canAddImportToCurrentFilter())
+
+        val noTab = AppState(File(createTempDirectory("openlog-hlimport").toFile(), "n.cache"))
+        noTab.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        assertEquals(ImportReviewMode.SAVE_FILTERS, noTab.pendingImportReview!!.mode)
+        assertFalse(noTab.canAddImportToCurrentFilter())
+        noTab.setImportReviewMode(ImportReviewMode.ADD_TO_CURRENT)
+        assertEquals(ImportReviewMode.SAVE_FILTERS, noTab.pendingImportReview!!.mode)
+    }
+
+    @Test
+    fun confirmingInAddModeAppendsKloggHighlightersAndTouchesNothingElse() {
+        val target = stateWithTab()
+        val tabId = target.tabs.single().id
+        target.addPkgPrefix(tabId, "com.keep")
+        target.toggleLevel(tabId, LogLevel.D)
+        target.addHl(tabId, "existing", false, Color.Green)
+        val before = target.tabs.single().filter
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+
+        assertNull(target.pendingImportReview)
+        assertTrue(target.savedFilters.isEmpty())
+        val after = target.tabs.single().filter
+        assertEquals(before.copy(highlighters = emptyList()), after.copy(highlighters = emptyList()))
+        assertEquals(listOf("existing", "ERROR (\\d+)", "timeout", "foo"), after.highlighters.map { it.pattern })
+        val imported = after.highlighters.drop(1)
+        val errorHl = imported.first()
+        assertEquals(Color.White, errorHl.textColor)
+        assertEquals(Color(0xFFCC0000.toInt()), errorHl.color)
+        assertTrue(errorHl.wholeLine && errorHl.captureGroupsOnly && errorHl.regex)
+        assertEquals(20, imported[1].colorVariance)
+        assertEquals(imported.size, imported.map { it.id }.toSet().size)
+        assertTrue(imported.none { hl -> before.highlighters.any { it.id == hl.id } })
+    }
+
+    @Test
+    fun addModeSkipsShapesAlreadyOnTheTabSoReconfirmingAddsNothing() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+        val afterFirst = target.tabs.single().filter.highlighters
+        assertEquals(3, afterFirst.size)
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+        assertNull(target.pendingImportReview)
+        assertNull(target.importError)
+        assertEquals(afterFirst, target.tabs.single().filter.highlighters)
+
+        // a plain highlighter with the same pattern is a different shape (no klogg text colour) and is added
+        val other = stateWithTab()
+        val otherId = other.tabs.single().id
+        other.addHl(otherId, "foo", true, Color.Red, caseSensitive = true, wholeLine = true)
+        other.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        other.confirmImportFilters()
+        assertEquals(4, other.tabs.single().filter.highlighters.size)
+    }
+
+    @Test
+    fun addModeSelectionIgnoresSavedFilterIdentityButNotMissingHighlighters() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+        target.confirmImportFilters() // saves "Errors" and "Defaults"
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        val review = target.pendingImportReview!!
+        assertEquals(listOf("identical", "no valid highlighters", "identical"), review.rows.map { it.skippedReason })
+        assertEquals(ImportReviewMode.ADD_TO_CURRENT, review.mode)
+        val (errors, broken, defaults) = review.rows.map { it.rowId }
+        assertEquals(setOf(errors, defaults), review.highlightRowIds)
+
+        // the unselectable row cannot be ticked, an identical one can be unticked and re-ticked
+        target.setImportRowsChecked(setOf(broken), true)
+        assertEquals(setOf(errors, defaults), target.pendingImportReview!!.highlightRowIds)
+        target.setImportRowsChecked(setOf(defaults), false)
+        assertEquals(setOf(errors), target.pendingImportReview!!.highlightRowIds)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("ERROR (\\d+)", "timeout"), target.tabs.single().filter.highlighters.map { it.pattern })
+        assertEquals(2, target.savedFilters.size)
+    }
+
+    @Test
+    fun switchingBackToSaveModeKeepsTheSavedFilterChoices() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        val rows = target.pendingImportReview!!.rows
+        target.setImportRowsChecked(setOf(rows[2].rowId), false) // add mode: exclude "Defaults"
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+        // the saved-filter actions were never touched by the add-mode edit
+        assertEquals(listOf(ImportFilterAction.ADD, ImportFilterAction.SKIP, ImportFilterAction.ADD), target.pendingImportReview!!.rows.map { it.action })
+        target.setImportRowsChecked(setOf(rows[0].rowId), false)
+        target.setImportReviewMode(ImportReviewMode.ADD_TO_CURRENT)
+        assertEquals(setOf(rows[0].rowId), target.pendingImportReview!!.highlightRowIds)
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("Defaults"), target.savedFilters.map { it.name })
+        assertTrue(target.tabs.single().filter.highlighters.isEmpty())
     }
 
     @Test

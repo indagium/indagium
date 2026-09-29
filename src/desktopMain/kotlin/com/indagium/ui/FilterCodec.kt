@@ -3,11 +3,14 @@ package com.indagium.ui
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
+import com.indagium.model.Highlighter
 import com.indagium.model.LogLevel
 import com.indagium.model.SavedFilter
 import com.indagium.model.SavedFilterFolder
 import com.indagium.utils.importKloggHighlighters
 import com.indagium.utils.looksLikeKloggSettings
+import com.indagium.utils.newId
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -43,6 +46,8 @@ internal data class DecodedFilterLibrary(
     val rowInfo: Map<String, ImportRowInfo> = emptyMap(),
     // Import-level notes shown under the review dialog's subtitle.
     val notes: List<String> = emptyList(),
+    // True when decoded from a klogg export (decided by content, not file name); drives the review's default mode.
+    val fromKlogg: Boolean = false,
 )
 
 internal fun exportFiltersList(
@@ -205,6 +210,7 @@ internal fun decodeFilterImport(fileName: String, text: String): Result<DecodedF
                 filters = klogg.sets.map { it.filter },
                 rowInfo = klogg.sets.associate { it.filter.id to ImportRowInfo(it.notes, it.skippedReason) },
                 notes = klogg.notes,
+                fromKlogg = true,
             )
         }
         body.startsWith("[") -> decodeFilterLibrary(body).recoverCatching { throw readError }
@@ -279,6 +285,28 @@ internal fun ImportFilterReviewRow.withImportAction(savedFilters: List<SavedFilt
             copy(action = action, resolvedName = uniqueFilterName(savedFilters, incoming.name + " (imported)", targetId))
         ImportFilterAction.ADD -> if (targetId == null) copy(action = action) else this
     }
+
+/** A row can contribute highlighters to the current filter iff it has some (identity to a saved filter is irrelevant there). */
+internal fun ImportFilterReviewRow.hasHighlighters(): Boolean = incoming.highlighters.isNotEmpty()
+
+/** The fields that make two highlighters "the same" when adding imported ones to a tab (id and on/off excluded). */
+private data class HighlighterShape(
+    val pattern: String,
+    val regex: Boolean,
+    val target: HighlightTarget,
+    val tag: String?,
+    val caseSensitive: Boolean,
+    val wholeLine: Boolean,
+    val textColor: Color?,
+)
+
+private fun Highlighter.shape() = HighlighterShape(pattern, regex, target, tag, caseSensitive, wholeLine, textColor)
+
+/** [incoming] with fresh ids, minus any whose shape is already in [existing] (or repeats earlier in [incoming]). */
+internal fun newHighlightersFor(existing: List<Highlighter>, incoming: List<Highlighter>): List<Highlighter> {
+    val seen = existing.mapTo(HashSet()) { it.shape() }
+    return incoming.filter { seen.add(it.shape()) }.map { it.copy(id = newId("hl")) }
+}
 
 internal fun uniqueFilterName(savedFilters: List<SavedFilter>, baseName: String, targetId: String? = null): String {
     val used = savedFilters
