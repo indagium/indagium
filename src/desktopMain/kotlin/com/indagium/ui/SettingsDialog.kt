@@ -90,6 +90,13 @@ import kotlin.math.roundToInt
  *  section's entire edit-draft state up to the dialog. */
 private const val ANCHOR_WAIT_FRAMES = 30
 
+/** Which name dialog Settings › General has open. */
+private sealed interface ProfileNameRequest {
+    data object New : ProfileNameRequest
+
+    data class Rename(val profile: ResolvedProfile) : ProfileNameRequest
+}
+
 // Width of the "Temporary data · size" / "App data · size" texts, so their buttons line up right after them.
 private val STORAGE_TEXT_WIDTH = 210.dp
 private val ANCHOR_SCROLL_MARGIN = 16.dp
@@ -693,7 +700,10 @@ private fun AppearanceSettingsSection(state: AppState) {
 @Composable
 private fun GeneralSettingsSection(state: AppState) {
     val tc = tc()
-    val selectedProfile = WorkspaceProfile.fromId(state.settings.workspaceProfileId)
+    val selectedProfile = state.selectedWorkspaceProfile
+    var nameRequest by remember { mutableStateOf<ProfileNameRequest?>(null) }
+    var deleteRequest by remember { mutableStateOf<ResolvedProfile?>(null) }
+    val profiles = WorkspaceProfile.entries.map { it.resolved() } + state.settings.customWorkspaceProfiles.map { it.resolved() }
     Column(Modifier.settingsAnchor("Workspace profile"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         AppText(
@@ -703,17 +713,29 @@ private fun GeneralSettingsSection(state: AppState) {
             fontFamily = UI,
         )
         Spacer(Modifier.height(2.dp))
-        WorkspaceProfileCards(selectedId = selectedProfile?.id, onSelect = state::applyWorkspaceProfile)
+        WorkspaceProfileCards(
+            profiles = profiles,
+            selectedId = selectedProfile?.id,
+            onSelect = state::applyResolvedProfile,
+            menuFor = { profile ->
+                listOf(
+                    ProfileMenuAction("Rename…") { nameRequest = ProfileNameRequest.Rename(profile) },
+                    ProfileMenuAction("Update from current setup") { state.updateWorkspaceProfileFromCurrent(profile.id) },
+                    ProfileMenuAction("Export…") { state.exportWorkspaceProfile(profile) },
+                    ProfileMenuAction("Delete…", danger = true) { deleteRequest = profile },
+                )
+            },
+        )
         // Read straight from state on every recomposition: theme/font/layout edits made elsewhere
         // (Appearance, the panel toggles) all show up here without any extra plumbing.
         val differences = state.workspaceProfileDifferences()
-        if (selectedProfile != null && differences.isNotEmpty()) {
+        val customized = selectedProfile != null && differences.isNotEmpty()
+        if (selectedProfile != null && customized) {
             val shape = RoundedCornerShape(6.dp)
-            Row(
+            Column(
                 Modifier.fillMaxWidth().background(tc.warnBg, shape).border(0.5.dp, tc.br, shape)
                     .padding(horizontal = 10.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 AppText(
                     "Customized — ${differences.size} ${if (differences.size == 1) "setting differs" else "settings differ"} " +
@@ -723,10 +745,82 @@ private fun GeneralSettingsSection(state: AppState) {
                     fontSize = 11.sp,
                     fontFamily = UI,
                     maxLines = 3,
-                    modifier = Modifier.weight(1f),
                 )
-                AppButton("Reset to profile", onClick = { state.applyWorkspaceProfile(selectedProfile) })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppButton("Reset to profile", onClick = { state.applyResolvedProfile(selectedProfile) })
+                    AppButton(
+                        "Save as new profile…",
+                        onClick = { nameRequest = ProfileNameRequest.New },
+                        variant = ButtonVariant.Secondary,
+                    )
+                    if (selectedProfile.custom) {
+                        AppButton(
+                            "Update “${selectedProfile.title}”",
+                            onClick = { state.updateWorkspaceProfileFromCurrent(selectedProfile.id) },
+                            variant = ButtonVariant.Secondary,
+                        )
+                    }
+                }
             }
+        }
+        Row(
+            Modifier.settingsAnchor("Save as new profile"),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!customized) {
+                AppButton(
+                    "Save current setup as profile…",
+                    onClick = { nameRequest = ProfileNameRequest.New },
+                    variant = ButtonVariant.Ghost,
+                )
+            }
+            AppButton(
+                "Import profile…",
+                onClick = { state.importWorkspaceProfile() },
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.settingsAnchor("Import profile"),
+            )
+            AppButton(
+                "Export current setup as .json",
+                onClick = { state.exportWorkspaceProfile(null) },
+                variant = ButtonVariant.Ghost,
+                modifier = Modifier.settingsAnchor("Export profile"),
+            )
+        }
+    }
+    nameRequest?.let { request ->
+        val taken = when (request) {
+            ProfileNameRequest.New -> state.workspaceProfileNames()
+            is ProfileNameRequest.Rename -> state.workspaceProfileNames() - request.profile.title
+        }
+        WorkspaceProfileNameDialog(
+            title = if (request is ProfileNameRequest.Rename) "Rename profile" else "Save current setup as a profile",
+            confirmLabel = if (request is ProfileNameRequest.Rename) "Rename" else "Save",
+            initialName = (request as? ProfileNameRequest.Rename)?.profile?.title
+                ?: uniqueProfileName("My profile", state.workspaceProfileNames()),
+            takenNames = taken,
+            onConfirm = { name ->
+                when (request) {
+                    ProfileNameRequest.New -> state.saveCurrentAsWorkspaceProfile(name)
+                    is ProfileNameRequest.Rename -> state.renameWorkspaceProfile(request.profile.id, name)
+                }
+                nameRequest = null
+            },
+            onDismiss = { nameRequest = null },
+        )
+    }
+    deleteRequest?.let { profile ->
+        SettingsConfirmDialog(
+            title = "Delete profile?",
+            message = "Delete “${profile.title}”? The theme and panels you have now stay as they are. This can't be undone.",
+            onDismissRequest = { deleteRequest = null },
+        ) {
+            DialogActionButton("Delete", active = true, danger = true) {
+                state.deleteWorkspaceProfile(profile.id)
+                deleteRequest = null
+            }
+            DialogActionButton("Cancel", active = false) { deleteRequest = null }
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {

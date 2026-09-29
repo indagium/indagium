@@ -10,9 +10,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -50,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.ProfileSpec
 
 // First-run setup assistant: four short steps that apply the same choices Settings offers, through
 // the same AppState functions (applyWorkspaceProfile, updateSettings, pickSaveFolder, ...), so there
@@ -69,7 +68,7 @@ private enum class SetupStep(val title: String) {
 private sealed interface WorkspaceChoice {
     data object KeepCurrent : WorkspaceChoice
 
-    data class Profile(val profile: WorkspaceProfile) : WorkspaceChoice
+    data class Profile(val profile: ResolvedProfile) : WorkspaceChoice
 }
 
 private const val PROFILE_GRID_COLUMNS = 3
@@ -85,9 +84,9 @@ internal fun SetupAssistantDialog(state: AppState) {
     // after finishing this assistant once.
     val offerKeep = state.startedWithExistingData || state.settings.setupAssistantDone
     var choice by remember {
-        mutableStateOf<WorkspaceChoice>(if (offerKeep) WorkspaceChoice.KeepCurrent else WorkspaceChoice.Profile(WorkspaceProfile.CLASSIC))
+        mutableStateOf<WorkspaceChoice>(if (offerKeep) WorkspaceChoice.KeepCurrent else WorkspaceChoice.Profile(WorkspaceProfile.CLASSIC.resolved()))
     }
-    var applied by remember { mutableStateOf<WorkspaceProfile?>(null) }
+    var applied by remember { mutableStateOf<String?>(null) } // id of the profile last applied
     val rootFocus = remember { FocusRequester() }
 
     fun reclaimFocus() {
@@ -97,9 +96,9 @@ internal fun SetupAssistantDialog(state: AppState) {
     // Applied when leaving step 1, so the Look step opens with the profile's theme already chosen.
     fun applyChoiceIfNeeded() {
         val picked = (choice as? WorkspaceChoice.Profile)?.profile ?: return
-        if (picked != applied) {
-            state.applyWorkspaceProfile(picked)
-            applied = picked
+        if (picked.id != applied) {
+            state.applyResolvedProfile(picked)
+            applied = picked.id
         }
     }
 
@@ -181,7 +180,15 @@ internal fun SetupAssistantDialog(state: AppState) {
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     when (steps[step]) {
-                        SetupStep.Workspace -> WorkspaceStep(state, offerKeep, choice) { choice = it }
+                        SetupStep.Workspace -> WorkspaceStep(
+                            state, offerKeep, choice,
+                            onChoice = { choice = it },
+                            // An imported profile is already added and applied; just select it.
+                            onImported = { imported ->
+                                choice = WorkspaceChoice.Profile(imported)
+                                applied = imported.id
+                            },
+                        )
                         SetupStep.Look -> LookStep(state)
                         SetupStep.Folders -> FoldersStep(state)
                         SetupStep.Capture -> CaptureStep(state, ::reclaimFocus)
@@ -258,7 +265,13 @@ private fun StepHeading(title: String, subtitle: String) {
 }
 
 @Composable
-private fun WorkspaceStep(state: AppState, offerKeep: Boolean, choice: WorkspaceChoice, onChoice: (WorkspaceChoice) -> Unit) {
+private fun WorkspaceStep(
+    state: AppState,
+    offerKeep: Boolean,
+    choice: WorkspaceChoice,
+    onChoice: (WorkspaceChoice) -> Unit,
+    onImported: (ResolvedProfile) -> Unit,
+) {
     StepHeading(
         "How do you like to read logs?",
         "Pick a starting layout. It sets panels, filter placement, theme and font size.",
@@ -292,24 +305,34 @@ private fun WorkspaceStep(state: AppState, offerKeep: Boolean, choice: Workspace
                 }
             }
         }
-        WorkspaceProfile.entries.forEach { profile ->
+        (WorkspaceProfile.entries.map { it.resolved() } + settings.customWorkspaceProfiles.map { it.resolved() }).forEach { profile ->
             add { modifier ->
-                WorkspaceProfileCard(
-                    title = profile.title,
-                    description = profile.description,
-                    selected = choice == WorkspaceChoice.Profile(profile),
+                ResolvedProfileCard(
+                    profile = profile,
+                    selected = (choice as? WorkspaceChoice.Profile)?.profile?.id == profile.id,
                     onClick = { onChoice(WorkspaceChoice.Profile(profile)) },
                     modifier = modifier,
-                ) { ProfileWireframe(profile.spec) }
+                )
+            }
+        }
+        add { modifier ->
+            val tc = tc()
+            WorkspaceProfileCard(
+                title = "Import a profile",
+                description = "Load a .json profile someone shared with you",
+                selected = false,
+                onClick = { state.importWorkspaceProfile(onImported = { onImported(it.resolved()) }) },
+                modifier = modifier,
+            ) {
+                val shape = RoundedCornerShape(5.dp)
+                Box(
+                    Modifier.fillMaxSize().background(tc.p, shape).border(1.dp, tc.br, shape),
+                    contentAlignment = Alignment.Center,
+                ) { AppText("+", color = tc.td, fontSize = 22.sp) }
             }
         }
     }
-    cards.chunked(PROFILE_GRID_COLUMNS).forEach { rowCards ->
-        Row(Modifier.fillMaxWidth().height(IntrinsicSize.Max), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            rowCards.forEach { card -> card(Modifier.weight(1f).fillMaxHeight()) }
-            repeat(PROFILE_GRID_COLUMNS - rowCards.size) { Spacer(Modifier.weight(1f)) }
-        }
-    }
+    WorkspaceCardGrid(cards, PROFILE_GRID_COLUMNS, 10.dp)
 }
 
 @Composable

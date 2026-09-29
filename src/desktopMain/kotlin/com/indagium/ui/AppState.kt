@@ -4386,7 +4386,9 @@ class AppState(
     // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
     // The five panel toggles live on AppState rather than AppSettings, so a profile is applied as
     // one updateSettings plus the existing layout setters (each persists via autosaveNow).
-    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) {
+    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved())
+
+    internal fun applyResolvedProfile(profile: ResolvedProfile) {
         val spec = profile.spec
         updateSettings {
             it.copy(
@@ -4413,10 +4415,139 @@ class AppState(
         aiPanelVisible = aiPanelVisible,
     )
 
+    /** A built-in or custom profile by id; null for no id or one that no longer exists. */
+    internal fun resolveWorkspaceProfile(id: String?): ResolvedProfile? =
+        WorkspaceProfile.fromId(id)?.resolved()
+            ?: settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.resolved()
+
+    internal val selectedWorkspaceProfile: ResolvedProfile?
+        get() = resolveWorkspaceProfile(settings.workspaceProfileId)
+
     /** Labels of the profile values that no longer match; empty when no (known) profile is selected. */
     fun workspaceProfileDifferences(): List<String> {
-        val profile = WorkspaceProfile.fromId(settings.workspaceProfileId) ?: return emptyList()
+        val profile = selectedWorkspaceProfile ?: return emptyList()
         return profileDifferences(profile.spec, settings, layoutSnapshot())
+    }
+
+    /** Every profile name in use, built-in and custom, for keeping new names unique. */
+    internal fun workspaceProfileNames(): List<String> =
+        WorkspaceProfile.entries.map { it.title } + settings.customWorkspaceProfiles.map { it.name }
+
+    /** Set when saving, importing or exporting a workspace profile fails (App.kt shows it). */
+    var workspaceProfileError by mutableStateOf<String?>(null)
+
+    /** Saves the current settings and panel layout as a new custom profile and selects it. */
+    internal fun saveCurrentAsWorkspaceProfile(name: String): CustomWorkspaceProfile {
+        val profile = CustomWorkspaceProfile(
+            id = newCustomProfileId(),
+            name = uniqueProfileName(name, workspaceProfileNames()),
+            spec = currentProfileSpec(settings, layoutSnapshot()),
+        )
+        addCustomWorkspaceProfile(profile)
+        return profile
+    }
+
+    private fun addCustomWorkspaceProfile(profile: CustomWorkspaceProfile) {
+        updateSettings {
+            it.copy(
+                customWorkspaceProfiles = it.customWorkspaceProfiles + profile,
+                workspaceProfileId = profile.id,
+            )
+        }
+    }
+
+    internal fun renameWorkspaceProfile(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        val others = workspaceProfileNames().toMutableList()
+        settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.let { others.remove(it.name) }
+        val unique = uniqueProfileName(trimmed, others)
+        updateSettings { s ->
+            s.copy(customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(name = unique) else it })
+        }
+    }
+
+    /** Deleting the selected profile leaves no profile selected (the panels and theme stay as they are). */
+    internal fun deleteWorkspaceProfile(id: String) {
+        updateSettings { s ->
+            s.copy(
+                customWorkspaceProfiles = s.customWorkspaceProfiles.filterNot { it.id == id },
+                workspaceProfileId = s.workspaceProfileId.takeUnless { it == id },
+            )
+        }
+    }
+
+    /** Overwrites a custom profile with the current settings and layout, and selects it. */
+    internal fun updateWorkspaceProfileFromCurrent(id: String) {
+        val spec = currentProfileSpec(settings, layoutSnapshot())
+        updateSettings { s ->
+            s.copy(
+                customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(spec = spec) else it },
+                workspaceProfileId = id,
+            )
+        }
+    }
+
+    internal fun writeWorkspaceProfileFile(file: File, name: String, spec: ProfileSpec): Result<Unit> =
+        runCatching { file.writeText(encodeWorkspaceProfileFile(name, spec)) }
+
+    /** Save dialog + write. A null [profile] exports the current setup, named after the selected profile if any. */
+    internal fun exportWorkspaceProfile(profile: ResolvedProfile?) {
+        val name = profile?.title ?: selectedWorkspaceProfile?.title ?: "My setup"
+        val spec = profile?.spec ?: currentProfileSpec(settings, layoutSnapshot())
+        val dlg = FileDialog(null as Frame?, "Export workspace profile", FileDialog.SAVE).apply {
+            file = "indagium_profile_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "profile" }}.json"
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val target = File(dir, path)
+        ioScope.launch {
+            writeWorkspaceProfileFile(target, name, spec).fold(
+                onSuccess = { AppLogger.info("profiles", "Exported workspace profile to ${target.absolutePath}") },
+                onFailure = { e ->
+                    workspaceProfileError = "Could not save the profile file: ${e.message ?: "unknown error"}"
+                    AppLogger.error("profiles", "Failed to export workspace profile to ${target.absolutePath}", e)
+                },
+            )
+        }
+    }
+
+    /** Reads a profile file, adds it as a custom profile (de-duplicating its name) and applies it. */
+    internal fun importWorkspaceProfileFrom(file: File): Result<CustomWorkspaceProfile> = runCatching {
+        val text = runCatching { file.readText() }.getOrElse { error("Could not read ${file.name}.") }
+        val decoded = decodeWorkspaceProfileFile(text).getOrThrow()
+        val profile = CustomWorkspaceProfile(
+            id = newCustomProfileId(),
+            name = uniqueProfileName(decoded.name, workspaceProfileNames()),
+            spec = decoded.spec,
+        )
+        addCustomWorkspaceProfile(profile)
+        applyResolvedProfile(profile.resolved())
+        profile
+    }
+
+    /** Open dialog + import; [onImported] runs after a successful import (off the UI thread). */
+    internal fun importWorkspaceProfile(onImported: (CustomWorkspaceProfile) -> Unit = {}) {
+        val dlg = FileDialog(null as Frame?, "Import workspace profile", FileDialog.LOAD).apply {
+            setFilenameFilter { _, n -> n.endsWith(".json") }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val file = File(dir, path)
+        ioScope.launch {
+            importWorkspaceProfileFrom(file).fold(
+                onSuccess = {
+                    AppLogger.info("profiles", "Imported workspace profile from ${file.absolutePath}")
+                    onImported(it)
+                },
+                onFailure = { e ->
+                    workspaceProfileError = e.message ?: "Could not import that profile."
+                    AppLogger.error("profiles", "Failed to import workspace profile from ${file.absolutePath}", e)
+                },
+            )
+        }
     }
 
     fun updateSettings(transform: (AppSettings) -> AppSettings) {

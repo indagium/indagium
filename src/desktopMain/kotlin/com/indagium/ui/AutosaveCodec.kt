@@ -660,6 +660,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("deviceLoggingPanelExpanded", deviceLoggingPanelExpanded)
     workspaceProfileId?.let { put("workspaceProfileId", it) }
     put("setupAssistantDone", setupAssistantDone)
+    put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -979,6 +980,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
         setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
+        customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
     )
 }.getOrNull()
 

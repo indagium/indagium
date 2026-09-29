@@ -1287,7 +1287,27 @@ data class AppSettings(
     // skipped. A missing key decodes to false on purpose: settings written before the assistant
     // existed show it once, with their current values prefilled. JSON-only, same rule as above.
     val setupAssistantDone: Boolean = false,
+    // Workspace profiles the user saved or imported (Settings → General); `workspaceProfileId` may
+    // point at one of these as well as at a built-in profile. JSON-only, same rule as above.
+    val customWorkspaceProfiles: List<CustomWorkspaceProfile> = emptyList(),
 )
+
+/** The settings and layout values a workspace profile applies (ui/WorkspaceProfiles.kt). */
+data class ProfileSpec(
+    val theme: ThemePreset,
+    val fontSize: Int,
+    val showMinimap: Boolean,
+    val toolbarIconOnlyButtons: Boolean,
+    val openNewFilesWithUnfiltered: Boolean,
+    val filterVisible: Boolean,
+    val filterBarVisible: Boolean,
+    val annotationVisible: Boolean,
+    val videoPanelVisible: Boolean,
+    val aiPanelVisible: Boolean,
+)
+
+/** A user-made workspace profile. [id] is `custom-<uuid>`, so it can never collide with a built-in id. */
+data class CustomWorkspaceProfile(val id: String, val name: String, val spec: ProfileSpec)
 
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4
 const val MIN_HOME_RECENT_GRID_COLUMNS: Int = 3
