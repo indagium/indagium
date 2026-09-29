@@ -15,6 +15,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
@@ -74,6 +75,7 @@ import java.util.UUID
 private class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
 
 internal enum class SettingsSection(val title: String, val icon: ImageVector) {
+    General("General", Icons.Outlined.Dashboard),
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
@@ -91,7 +93,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     var selectedSection by remember {
-        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
+        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.General)
     }
     val voiceInputSupported = true
     LaunchedEffect(Unit) {
@@ -131,10 +133,11 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     SideEffect { onRequestCloseChanged(::requestClose) }
 
     Box(
-        // 190 (sidebar) + 1 (divider) + 572 (content). 572 is tuned tight against ThemeGallery's
-        // FlowRow math (118dp cards, 8dp gaps: 4 cards = 496dp) plus just enough slack (~8dp) that
-        // the scrollbar sits close against the 4th card instead of floating in leftover width.
-        Modifier.width(763.dp).height(560.dp)
+        // 190 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
+        // the 8dp scrollbar gutter leaves 637dp, tuned tight against ThemeGallery's FlowRow math
+        // (118dp cards, 8dp gaps: 5 cards = 622dp) so five fit per row with the scrollbar close
+        // against the 5th card, and the five workspace-profile cards split the same width evenly.
+        Modifier.width(884.dp).height(620.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape),
@@ -191,6 +194,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                         verticalArrangement = Arrangement.spacedBy(14.dp),
                     ) {
                         when (selectedSection) {
+                            SettingsSection.General -> GeneralSettingsSection(state)
                             SettingsSection.Appearance -> AppearanceSettingsSection(state)
                             SettingsSection.Capture -> CaptureSettingsSection(state)
                             SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
@@ -479,6 +483,69 @@ private fun AppearanceSettingsSection(state: AppState) {
             )
         }
     }
+    if (isLinuxOs) {
+        CompactSettingWithTooltip(
+            label = "File picker",
+            tooltip = "Automatic uses Compatibility X11 on Debian, Arch, Manjaro, and Fedora; " +
+                "it uses Native GTK on Ubuntu and unrecognized distributions.",
+        ) {
+            val modes = LinuxFilePickerMode.entries
+            SegmentedControl(
+                options = modes.map(LinuxFilePickerMode::label),
+                selectedIndices = setOf(modes.indexOf(state.settings.linuxFilePickerMode)),
+                onToggle = { index -> state.updateSettings { it.copy(linuxFilePickerMode = modes[index]) } },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+            )
+        }
+        AppText(
+            "Restart Indagium to apply file picker changes.",
+            color = tc.td,
+            fontSize = 10.sp,
+            fontFamily = UI,
+        )
+    }
+}
+
+@Composable
+private fun GeneralSettingsSection(state: AppState) {
+    val tc = tc()
+    val selectedProfile = WorkspaceProfile.fromId(state.settings.workspaceProfileId)
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        AppText(
+            "Sets panels, filter placement, theme and font size in one step. Every setting stays editable afterwards.",
+            color = tc.ts,
+            fontSize = 11.sp,
+            fontFamily = UI,
+        )
+        Spacer(Modifier.height(2.dp))
+        WorkspaceProfileCards(selectedId = selectedProfile?.id, onSelect = state::applyWorkspaceProfile)
+        // Read straight from state on every recomposition: theme/font/layout edits made elsewhere
+        // (Appearance, the panel toggles) all show up here without any extra plumbing.
+        val differences = state.workspaceProfileDifferences()
+        if (selectedProfile != null && differences.isNotEmpty()) {
+            val shape = RoundedCornerShape(6.dp)
+            Row(
+                Modifier.fillMaxWidth().background(tc.warnBg, shape).border(0.5.dp, tc.br, shape)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppText(
+                    "Customized — ${differences.size} ${if (differences.size == 1) "setting differs" else "settings differ"} " +
+                        "from ${selectedProfile.title}: " +
+                        differences.joinToString(", "),
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    fontFamily = UI,
+                    maxLines = 3,
+                    modifier = Modifier.weight(1f),
+                )
+                AppButton("Reset to profile", onClick = { state.applyWorkspaceProfile(selectedProfile) })
+            }
+        }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         SaveFolderRow(
             label = "Default save folder",
@@ -522,28 +589,6 @@ private fun AppearanceSettingsSection(state: AppState) {
             effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
             onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
-        )
-    }
-    if (isLinuxOs) {
-        CompactSettingWithTooltip(
-            label = "File picker",
-            tooltip = "Automatic uses Compatibility X11 on Debian, Arch, Manjaro, and Fedora; " +
-                "it uses Native GTK on Ubuntu and unrecognized distributions.",
-        ) {
-            val modes = LinuxFilePickerMode.entries
-            SegmentedControl(
-                options = modes.map(LinuxFilePickerMode::label),
-                selectedIndices = setOf(modes.indexOf(state.settings.linuxFilePickerMode)),
-                onToggle = { index -> state.updateSettings { it.copy(linuxFilePickerMode = modes[index]) } },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
-            )
-        }
-        AppText(
-            "Restart Indagium to apply file picker changes.",
-            color = tc.td,
-            fontSize = 10.sp,
-            fontFamily = UI,
         )
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -620,7 +665,7 @@ private fun AppearanceSettingsSection(state: AppState) {
 }
 
 /**
- * One row of the five-folder Save folders group (AppearanceSettingsSection above): a labeled
+ * One row of the five-folder Save folders group (GeneralSettingsSection above): a labeled
  * tooltip, the effective path (dimmer with a "(default)" suffix when nothing is explicitly set —
  * [explicitValue] is null), a Browse button, and a Reset button that only shows once the folder
  * has actually been set to something other than its computed default.
