@@ -114,7 +114,7 @@ internal fun CaptureSettingsSection(state: AppState) {
 }
 
 /** Two equal-width tracks, top-aligned so a taller left group (e.g. Custom buffer checkboxes)
- * doesn't shove the right group's content down — matches the top alignment EditorBehaviorGridRow
+ * doesn't shove the right group's content down — matches the top alignment SettingsControlRow
  * uses for its own multi-column rows in SettingsDialog.kt. */
 @Composable
 private fun CapturePairedGroupRow(first: @Composable () -> Unit, second: @Composable () -> Unit) {
@@ -284,9 +284,14 @@ private fun CaptureMarkerGroup(settings: CaptureSettings, update: (CaptureSettin
         fontSize = 10.sp,
         maxLines = 3,
     )
-    Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-        CaptureMarkerWindowField("Before, seconds", settings.markerPreMs) { update(settings.copy(markerPreMs = it)) }
-        CaptureMarkerWindowField("After, seconds", settings.markerPostMs) { update(settings.copy(markerPostMs = it)) }
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        // Equal halves: an unweighted field would take the whole row and squeeze the second to nothing.
+        CaptureMarkerWindowField("Before, seconds", settings.markerPreMs, Modifier.weight(1f)) {
+            update(settings.copy(markerPreMs = it))
+        }
+        CaptureMarkerWindowField("After, seconds", settings.markerPostMs, Modifier.weight(1f)) {
+            update(settings.copy(markerPostMs = it))
+        }
     }
     CheckRow(
         settings.markerScreenshot,
@@ -313,8 +318,13 @@ private fun CaptureMarkerGroup(settings: CaptureSettings, update: (CaptureSettin
 }
 
 @Composable
-private fun CaptureMarkerWindowField(label: String, valueMs: Long, onValue: (Long) -> Unit) {
-    CaptureNumericField(label, (valueMs / CAPTURE_MARKER_MS_PER_SECOND).toString(), MIN_MARKER_WINDOW_SECONDS..MAX_MARKER_WINDOW_SECONDS) {
+private fun CaptureMarkerWindowField(label: String, valueMs: Long, modifier: Modifier = Modifier, onValue: (Long) -> Unit) {
+    CaptureNumericField(
+        label,
+        (valueMs / CAPTURE_MARKER_MS_PER_SECOND).toString(),
+        MIN_MARKER_WINDOW_SECONDS..MAX_MARKER_WINDOW_SECONDS,
+        modifier,
+    ) {
         onValue(it * CAPTURE_MARKER_MS_PER_SECOND)
     }
 }
@@ -333,9 +343,10 @@ private fun CapturePathField(
     invalidMessage: String = "value is invalid",
     effectivePath: String? = null,
     effectiveMessage: String? = null,
+    modifier: Modifier = Modifier,
 ) {
     val tc = tc()
-    Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Column(modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(3.dp)) {
         AppText(
             label + if (invalid) " — $invalidMessage" else "",
             color = if (invalid) DANGER_RED else tc.td,
@@ -355,14 +366,20 @@ private fun CapturePathField(
 }
 
 @Composable
-private fun CaptureNumericField(label: String, value: String, range: IntRange, onValue: (Int) -> Unit) {
+private fun CaptureNumericField(
+    label: String,
+    value: String,
+    range: IntRange,
+    modifier: Modifier = Modifier,
+    onValue: (Int) -> Unit,
+) {
     var text by remember(value) { mutableStateOf(value) }
     val parsed = text.toIntOrNull()
     val valid = parsed != null && parsed in range
     CapturePathField(label, text, { next ->
         text = next.filter(Char::isDigit)
         text.toIntOrNull()?.let(onValue)
-    }, invalid = !valid, invalidMessage = "out of range")
+    }, invalid = !valid, invalidMessage = "out of range", modifier = modifier)
 }
 
 @Composable

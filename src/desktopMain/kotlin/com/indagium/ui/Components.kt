@@ -1277,6 +1277,9 @@ fun SegmentedControl(
     segmentHeight: Dp = 28.dp,
     segmentFontSize: TextUnit = 12.sp,
     segmentHorizontalPadding: Dp = 10.dp,
+    // With [fillWidth], sizes each segment in proportion to its label instead of equally, so a
+    // control mixing long and short labels spans the full width without truncating the long ones.
+    weightByLabel: Boolean = false,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
@@ -1299,7 +1302,7 @@ fun SegmentedControl(
             }
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
+                modifier = (if (fillWidth) Modifier.weight(if (weightByLabel) label.length + 4f else 1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(segmentHeight)
                     .clip(segmentShape)
                     .background(

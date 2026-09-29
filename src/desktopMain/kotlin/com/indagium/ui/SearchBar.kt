@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
@@ -156,10 +157,14 @@ fun SearchBar(
                 )
             }
         }
-        AppText(
-            counterText, color = counterColor, fontSize = 11.sp, fontFamily = MONO,
-            modifier = Modifier.widthIn(min = 40.dp),
-        )
+        // Only takes space while there is something to show, so the scope chip (at the field's
+        // right end) sits right beside the Aa button when no query is typed.
+        if (counterText.isNotEmpty()) {
+            AppText(
+                counterText, color = counterColor, fontSize = 11.sp, fontFamily = MONO,
+                modifier = Modifier.widthIn(min = 40.dp),
+            )
+        }
         PillBtn("Aa", active = search.caseSensitive, onClick = onToggleCase)
         SquareIconButton("↑", fontSize = 12.sp, onClick = onPrev, size = 20.dp)
         SquareIconButton("↓", fontSize = 12.sp, onClick = onNext, size = 20.dp)
@@ -192,8 +197,11 @@ private fun SearchScopeChip(scope: SearchScope, onClick: () -> Unit, modifier: M
         Row(
             Modifier
                 .height(20.dp)
+                // Clipped to the pill first so the hover/press highlight follows its rounded shape
+                // instead of the default square indication.
+                .clip(shape)
+                .background(bg)
                 .border(0.5.dp, if (unfiltered) tc.warn.copy(alpha = .6f) else tc.br, shape)
-                .background(bg, shape)
                 .clickable(onClick = onClick)
                 .onPointerEvent(PointerEventType.Enter) { hovered = true }
                 .onPointerEvent(PointerEventType.Exit) { hovered = false }

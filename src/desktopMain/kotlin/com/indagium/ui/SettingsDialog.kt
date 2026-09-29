@@ -214,11 +214,11 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     }
 
     Box(
-        // 190 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
+        // 200 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
         // the 8dp scrollbar gutter leaves 637dp, tuned tight against ThemeGallery's FlowRow math
         // (118dp cards, 8dp gaps: 5 cards = 622dp) so five fit per row with the scrollbar close
         // against the 5th card, and the five workspace-profile cards split the same width evenly.
-        Modifier.width(884.dp).height(620.dp)
+        Modifier.width(894.dp).height(620.dp)
             .clip(shape)
             .background(tc.p)
             .border(1.dp, tc.br, shape)
@@ -253,7 +253,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
             Divider()
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
-                    Modifier.width(190.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
+                    Modifier.width(200.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     SettingsSearchField(
@@ -538,8 +538,8 @@ private fun SettingsMenuItem(
             )
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
@@ -611,11 +611,7 @@ private fun SettingsScrollableRows(
  */
 @Composable
 internal fun AppearanceBasicsRow(state: AppState) {
-    FlowRow(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
+    SettingsControlRow {
         CompactSetting("Font family") {
             SegmentedControl(
                 options = listOf("Monospace", "Proportional"),
@@ -955,65 +951,117 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Natural-width controls preserve the requested row groupings at the dialog's content width.
-        EditorBehaviorGridRow(
-            first = {
-                CompactSetting("Visible tabs") {
-                    val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-                    ListStepper(
-                        options = tabLimits,
-                        value = state.settings.visibleTabLimit,
-                        onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
-                    )
-                }
-            },
-            second = {
-                CompactSetting("Keyboard scroll margin") {
-                    val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-                    ListStepper(
-                        options = scrollMargins,
-                        value = state.settings.navScrollMargin,
-                        onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
-                    )
-                }
-            },
-            third = {
-                CompactSetting("Most-used tags") {
-                    val tagLimits = listOf(0, 3, 5, 10, 20)
-                    ListStepper(
-                        options = tagLimits,
-                        value = state.settings.mostUsedTagLimit,
-                        onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
-                    )
-                }
-            },
-            fourth = {
-                CompactSetting("Filter list rows") {
-                    val rowLimits = listOf(3, 5, 8, 10, 15)
-                    ListStepper(
-                        options = rowLimits,
-                        value = state.settings.filterListRows,
-                        onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
-                    )
-                }
-            },
-            fifth = {
-                CompactSettingWithTooltip(
-                    label = "Follow live logs",
-                    tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
-                        "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
-                        "scrolling back down to the last line resumes it.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
-                    )
-                }
-            },
-        )
+        // Four rows of four, each spread across the full content width (SettingsControlRow): no row
+        // is short, and every row's last control sits on the right content edge.
+        // Reserve an identical two-line label area in every cell of the last row so its controls
+        // align even though one label wraps.
+        val finalRowLabelAreaHeight = 28.dp
 
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        SettingsControlRow {
+            CompactSetting("Visible tabs") {
+                val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+                ListStepper(
+                    options = tabLimits,
+                    value = state.settings.visibleTabLimit,
+                    onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+                )
+            }
+            CompactSetting("Keyboard scroll margin") {
+                val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+                ListStepper(
+                    options = scrollMargins,
+                    value = state.settings.navScrollMargin,
+                    onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
+                )
+            }
+            CompactSetting("Most-used tags") {
+                val tagLimits = listOf(0, 3, 5, 10, 20)
+                ListStepper(
+                    options = tagLimits,
+                    value = state.settings.mostUsedTagLimit,
+                    onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+                )
+            }
+            CompactSetting("Filter list rows") {
+                val rowLimits = listOf(3, 5, 8, 10, 15)
+                ListStepper(
+                    options = rowLimits,
+                    value = state.settings.filterListRows,
+                    onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+                )
+            }
+        }
+
+        SettingsControlRow {
+            CompactSettingWithTooltip(
+                label = "Row wrapping",
+                // AWT has no horizontal mouse-wheel axis at all (confirmed via
+                // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+                // equivalent), so Compose Desktop only ever produces a horizontal scroll
+                // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+                // Offset.x specifically for that case). A genuine two-finger trackpad
+                // horizontal swipe never reaches Compose as a horizontal delta at all on
+                // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+                // targets that gap directly. Shift+wheel works everywhere regardless, hence
+                // the tooltip below.
+                tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                    "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                    "two-finger trackpad swipe doesn't scroll horizontally.",
+            ) {
+                RowWrapControl(
+                    auto = state.settings.autoLogRowWrap,
+                    wrapChars = state.settings.logRowWrapLimitChars,
+                    onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                    onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Crash rows",
+                tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Row number",
+                tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
+                    "you filter or fold rows, so it always points back to the same spot in the full log.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Minimap",
+                tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
+                    "colored by level. Click or drag on it to jump to that part of the file.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
+                )
+            }
+        }
+
+        SettingsControlRow {
+            CompactSettingWithTooltip(
+                label = "Follow live logs",
+                tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
+                    "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
+                    "scrolling back down to the last line resumes it.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
+                )
+            }
             CompactSettingWithTooltip(
                 label = "Regex summary",
                 tooltip = "Shows retained Tags-mode selectors above the Regex field. This summary is informational and does not change filtering.",
@@ -1024,178 +1072,114 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     onToggle = { index -> state.updateSettings { it.copy(showRegexFilterSummary = index == 1) } },
                 )
             }
+            CompactSettingWithTooltip(
+                label = "Original panel",
+                tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Process names in new tabs",
+                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                    "different logs with two different sets of processes. Per-tab picks reset every session " +
+                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+                horizontalAlignment = Alignment.End,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                )
+            }
         }
 
-        EditorBehaviorGridRow(
-            first = {
-                CompactSettingWithTooltip(
-                    label = "Row wrapping",
-                    // AWT has no horizontal mouse-wheel axis at all (confirmed via
-                    // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
-                    // equivalent), so Compose Desktop only ever produces a horizontal scroll
-                    // delta when Shift is held down (its AWT bridge maps the wheel rotation into
-                    // Offset.x specifically for that case). A genuine two-finger trackpad
-                    // horizontal swipe never reaches Compose as a horizontal delta at all on
-                    // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
-                    // targets that gap directly. Shift+wheel works everywhere regardless, hence
-                    // the tooltip below.
-                    tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
-                        "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
-                        "two-finger trackpad swipe doesn't scroll horizontally.",
-                ) {
-                    RowWrapControl(
-                        auto = state.settings.autoLogRowWrap,
-                        wrapChars = state.settings.logRowWrapLimitChars,
-                        onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                        onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
-                    )
-                }
-            },
-            second = {
-                CompactSettingWithTooltip(
-                    label = "Crash rows",
-                    tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
-                    )
-                }
-            },
-            third = {
-                CompactSettingWithTooltip(
-                    label = "Original panel",
-                    tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                    )
-                }
-            },
-            fourth = {
-                CompactSettingWithTooltip(
-                    label = "Row number",
-                    tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
-                        "you filter or fold rows, so it always points back to the same spot in the full log.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
-                    )
-                }
-            },
-            fifth = {
-                CompactSettingWithTooltip(
-                    label = "Minimap",
-                    tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
-                        "colored by level. Click or drag on it to jump to that part of the file.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
-                    )
-                }
-            },
-        )
-
-        // Reserve an identical two-line label area in every track.  This keeps the controls
-        // aligned while allowing the Ctrl+F label itself to remain a single line at the top.
-        val finalRowLabelAreaHeight = 36.dp
-
-        // Keep the Ctrl+F controls and the related per-tab/video defaults together: they form
-        // the requested final five-column row beneath the denser editor-view preferences.
-        Row(
-            Modifier.fillMaxWidth(),
-            // Five equal tracks ensure a long label cannot push a later control out of view.
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Ctrl+F opens",
-                    tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
-                        "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                        "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 1,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
-                    // an old token can still hold it. It remains valid for the shortcut, while the
-                    // dropdown falls back to its current Find bar label until the user selects one
-                    // of the three supported destinations.
-                    val tc = tc()
-                    val density = LocalDensity.current
-                    val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
-                    val labels = listOf("Find bar", "Tags", "Regex")
-                    var open by remember { mutableStateOf(false) }
-                    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
-                    val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
-                    Box(Modifier.fillMaxWidth()) {
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth().height(26.dp)
-                                .clip(CORNER_SM)
-                                .background(tc.p2, CORNER_SM)
-                                .border(1.dp, tc.br, CORNER_SM),
-                            onClick = {
-                                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
-                            },
+        SettingsControlRow {
+            CompactSettingWithTooltip(
+                label = "Ctrl+F opens",
+                tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                    "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                    "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
+                modifier = Modifier.width(112.dp),
+                labelMaxLines = 1,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+                // an old token can still hold it. It remains valid for the shortcut, while the
+                // dropdown falls back to its current Find bar label until the user selects one
+                // of the three supported destinations.
+                val tc = tc()
+                val density = LocalDensity.current
+                val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+                val labels = listOf("Find bar", "Tags", "Regex")
+                var open by remember { mutableStateOf(false) }
+                var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+                val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
+                Box(Modifier.fillMaxWidth()) {
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().height(26.dp)
+                            .clip(CORNER_SM)
+                            .background(tc.p2, CORNER_SM)
+                            .border(1.dp, tc.br, CORNER_SM),
+                        onClick = {
+                            if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+                        },
+                    ) {
+                        Row(
+                            Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                AppText(
-                                    labels.getOrElse(selectedIndex) { labels.first() },
-                                    color = tc.tx,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
-                            }
+                            AppText(
+                                labels.getOrElse(selectedIndex) { labels.first() },
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
                         }
-                        if (open) {
-                            Popup(
-                                alignment = Alignment.TopStart,
-                                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
-                                onDismissRequest = {
-                                    open = false
-                                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                                },
-                                properties = PopupProperties(focusable = false),
+                    }
+                    if (open) {
+                        Popup(
+                            alignment = Alignment.TopStart,
+                            offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                            onDismissRequest = {
+                                open = false
+                                suppressToggleUntilMs = System.currentTimeMillis() + 200
+                            },
+                            properties = PopupProperties(focusable = false),
+                        ) {
+                            Column(
+                                Modifier.width(104.dp)
+                                    .shadow(8.dp, RoundedCornerShape(8.dp))
+                                    .background(tc.p, RoundedCornerShape(8.dp))
+                                    .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                                    .padding(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Column(
-                                    Modifier.width(104.dp)
-                                        .shadow(8.dp, RoundedCornerShape(8.dp))
-                                        .background(tc.p, RoundedCornerShape(8.dp))
-                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                                        .padding(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    targets.forEachIndexed { index, target ->
-                                        val active = index == selectedIndex
-                                        HoverBox(
-                                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                            baseBg = if (active) tc.abg else Color.Transparent,
-                                            onClick = {
-                                                open = false
-                                                state.updateSettings { it.copy(ctrlFTarget = target) }
-                                            },
-                                        ) {
-                                            AppText(
-                                                labels[index],
-                                                color = if (active) tc.ac else tc.tx,
-                                                fontSize = 11.sp,
-                                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                            )
-                                        }
+                                targets.forEachIndexed { index, target ->
+                                    val active = index == selectedIndex
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                        baseBg = if (active) tc.abg else Color.Transparent,
+                                        onClick = {
+                                            open = false
+                                            state.updateSettings { it.copy(ctrlFTarget = target) }
+                                        },
+                                    ) {
+                                        AppText(
+                                            labels[index],
+                                            color = if (active) tc.ac else tc.tx,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        )
                                     }
                                 }
                             }
@@ -1203,107 +1187,65 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     }
                 }
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Ctrl+F opens Original",
-                    tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-                        "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
-                        "Original/Filtered split to reveal.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Ctrl+F opens Original",
+                tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+                    "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
+                    "Original/Filtered split to reveal.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                )
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Process names in new tabs",
-                    tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                        "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                        "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                        "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                        "different logs with two different sets of processes. Per-tab picks reset every session " +
-                        "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Video follow readout",
+                tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+                    "bar, explaining exactly what Follow is doing at the current playhead position.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+                )
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Video follow readout",
-                    tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-                        "bar, explaining exactly what Follow is doing at the current playhead position.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
-            }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "New video links:\ndouble-click seeks",
-                    tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
-                        "independently from its header; this does not affect existing links or Follow.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "New video links:\ndouble-click seeks",
+                tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
+                    "independently from its header; this does not affect existing links or Follow.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+                horizontalAlignment = Alignment.End,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+                )
             }
         }
     }
 }
 
-/** Natural-width tracks preserve the requested settings rows at the dialog's content width. */
+/**
+ * A row of compact settings spread across the full content width: the first cell starts on the
+ * left edge, the last ends on the right edge and the space between is even, so a row never leaves a
+ * ragged gap on the right. Cells keep their natural width; if they ever cannot fit, the row wraps
+ * onto a second line instead of clipping.
+ */
 @Composable
-private fun EditorBehaviorGridRow(
-    first: @Composable () -> Unit,
-    second: @Composable () -> Unit,
-    third: @Composable () -> Unit,
-    fourth: @Composable () -> Unit,
-    fifth: (@Composable () -> Unit)? = null,
-) {
-    Row(
-        Modifier.fillMaxWidth(),
+internal fun SettingsControlRow(modifier: Modifier = Modifier, content: @Composable FlowRowScope.() -> Unit) {
+    FlowRow(
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top,
-    ) {
-        first()
-        second()
-        third()
-        fourth()
-        fifth?.invoke()
-    }
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        content = content,
+    )
 }
 
 private fun customIssueRulesValidation(rules: List<CustomIssueRule>): String? {
@@ -1404,26 +1346,20 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
     AnnotationSettingsRow(state)
     CopyMetadataSettingsRow(state)
-    CompactSettingWithTooltip(
-        label = "Copy default",
-        tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
-    ) {
-        val formats = AnnotationCopyFormat.entries
-        SegmentedControl(
-            options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
-            selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
-            onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
-        )
-    }
-    // The two diagram defaults used to sit one-per-row, each spending a full row on a single
-    // control and leaving the section's last row's worth of space empty below. They share one
-    // row instead, natural-width like the rest of this section's rows — NOT stretched into equal
-    // fifths like CopyMetadataSettingsRow's tracks, which squeezed "Snapshot" down to a couple of
-    // clipped letters.
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
-    ) {
+    // Copy format and the two diagram defaults share one full-width row (natural-width cells,
+    // last one on the right edge) rather than one control per half-empty row.
+    SettingsControlRow {
+        CompactSettingWithTooltip(
+            label = "Copy default",
+            tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
+        ) {
+            val formats = AnnotationCopyFormat.entries
+            SegmentedControl(
+                options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
+                selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
+                onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
+            )
+        }
         CompactSettingWithTooltip(
             label = "Diagram note action",
             tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
@@ -1562,9 +1498,8 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
  * The dependent name choice remains remembered while PID/TID copying is switched off. */
 @Composable
 internal fun CopyMetadataSettingsRow(state: AppState) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+    SettingsControlRow {
         CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
             label = "Inline Markdown",
             tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
         ) {
@@ -1575,7 +1510,6 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
             label = "Pid/Tid copy",
             tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
         ) {
@@ -1586,7 +1520,6 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
             label = "Pid copy as name",
             tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
         ) {
@@ -1598,7 +1531,6 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
             label = "Row number copy",
             tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
         ) {
@@ -1609,7 +1541,6 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
             )
         }
         CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
             label = "Time delta copy",
             tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
         ) {
@@ -1625,11 +1556,7 @@ internal fun CopyMetadataSettingsRow(state: AppState) {
 @Composable
 private fun AutomationSettingsSection(state: AppState) {
     val tc = tc()
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    SettingsControlRow {
         CompactSetting("MCP control server") {
             SegmentedControl(
                 options = listOf("On", "Off"),
@@ -1637,7 +1564,18 @@ private fun AutomationSettingsSection(state: AppState) {
                 onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
             )
         }
-        CompactSetting("Port", horizontalAlignment = Alignment.End) {
+        // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests
+        // to this loopback server. Bearer-token auth still gates every request either way — this only
+        // controls whether a browser is additionally allowed to do that at all. Opt-in for the
+        // uncommon case of a browser-based MCP inspector.
+        CompactSetting("Allow browser-based MCP clients (CORS)") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.mcpAllowBrowserClients) 0 else 1),
+                onToggle = { idx -> state.setMcpAllowBrowserClients(idx == 0) },
+            )
+        }
+        CompactSetting("Port") {
             var portText by remember(state.settings.mcpControlPort) {
                 mutableStateOf(state.settings.mcpControlPort.toString())
             }
@@ -1659,23 +1597,6 @@ private fun AutomationSettingsSection(state: AppState) {
     }
     state.mcpControlError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
-    }
-    // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests
-    // to this loopback server. Bearer-token auth still gates every request either way — this only
-    // controls whether a browser is additionally allowed to do that at all. Opt-in for the
-    // uncommon case of a browser-based MCP inspector.
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSetting("Allow browser-based MCP clients (CORS)") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.mcpAllowBrowserClients) 0 else 1),
-                onToggle = { idx -> state.setMcpAllowBrowserClients(idx == 0) },
-            )
-        }
     }
     Row(
         Modifier.fillMaxWidth().settingsAnchor("Connection info"),
@@ -2746,6 +2667,9 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                         ackState = endpoint.trim() to false
                     }
                 },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+                weightByLabel = true,
             )
             AppText(
                 "Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI,
@@ -3228,8 +3152,10 @@ internal fun ThemeGallery(
     val themeScroll = rememberScrollState()
     Box(Modifier.fillMaxWidth().then(if (height != null) Modifier.height(height) else Modifier)) {
         FlowRow(
-            Modifier.fillMaxWidth().then(if (height != null) Modifier.verticalScroll(themeScroll) else Modifier).padding(end = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.fillMaxWidth().then(if (height != null) Modifier.verticalScroll(themeScroll).padding(end = 12.dp) else Modifier),
+            // Natural height: no scrollbar to leave room for, and the cards spread edge to edge so
+            // the controls below line up with the gallery's right edge.
+            horizontalArrangement = if (height != null) Arrangement.spacedBy(8.dp) else Arrangement.SpaceBetween,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (followAppTheme) {
@@ -3311,7 +3237,7 @@ internal fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boole
 
 @Composable
 internal fun AnnotationSettingsRow(state: AppState) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+    SettingsControlRow {
         CompactSettingWithTooltip(
             label = "Auto-save",
             tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
