@@ -73,6 +73,9 @@ private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
         state.customCommandEditorTarget != null || state.sourceFolderInfoEditorTarget != null ||
         state.recentNotesMenuOpen || (state.recentMenuOpen && state.recentFiles.isNotEmpty())
 
+// Import review rows show this many importer notes, then "+N more".
+private const val IMPORT_ROW_NOTES_SHOWN = 3
+
 private fun appHasOpenFilterDialog(state: AppState): Boolean =
     state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingClearFilterTabId != null ||
         state.pendingTagPrefixConflict != null || state.pendingDeleteFilterId != null ||
@@ -1919,6 +1922,10 @@ fun App(
                             fontSize = 11.sp,
                             maxLines = 2,
                         )
+                        review.notes.forEach { note ->
+                            Spacer(Modifier.height(4.dp))
+                            AppText(note, color = tc2.td, fontSize = 10.sp, maxLines = 3)
+                        }
                         Spacer(Modifier.height(8.dp))
                         val folderNameFor: (String?) -> String = { folderId ->
                             folderId?.let { id ->
@@ -2033,6 +2040,17 @@ fun App(
                                                     color = tc2.td,
                                                     fontSize = 10.sp,
                                                     maxLines = 2,
+                                                )
+                                            }
+                                            row.notes.take(IMPORT_ROW_NOTES_SHOWN).forEach { note ->
+                                                AppText(note, color = tc2.td, fontSize = 10.sp, maxLines = 3)
+                                            }
+                                            if (row.notes.size > IMPORT_ROW_NOTES_SHOWN) {
+                                                AppText(
+                                                    "+${row.notes.size - IMPORT_ROW_NOTES_SHOWN} more",
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
                                                 )
                                             }
                                             if (row.targetId != null && row.skippedReason == null) {

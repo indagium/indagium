@@ -1144,6 +1144,87 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun droppedKloggConfGivesOneReviewRowPerSet() {
+        val dir = createTempDirectory("openlog-klogg").toFile()
+        val file = File(dir, "klogg.conf").apply { writeText(KloggFixtures.V2) }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(file))
+
+        val review = target.pendingImportReview!!
+        assertEquals("klogg.conf", review.sourceName)
+        assertEquals(listOf("Errors", "Broken", "Defaults"), review.rows.map { it.incoming.name })
+        assertEquals("no valid highlighters", review.rows[1].skippedReason)
+        assertTrue("active in klogg" in review.rows[0].notes)
+        assertNull(target.importError)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("Errors", "Defaults"), target.savedFilters.map { it.name })
+        val errors = target.savedFilters.first().highlighters
+        assertEquals(listOf("ERROR (\\d+)", "timeout"), errors.map { it.pattern })
+        assertTrue(errors.all { it.textColor != null && it.captureGroupsOnly })
+
+        // importing it again shows every importable set as identical
+        target.importFiltersFromFiles(listOf(file))
+        assertEquals(listOf("identical", "no valid highlighters", "identical"), target.pendingImportReview!!.rows.map { it.skippedReason })
+    }
+
+    @Test
+    fun theImportButtonPathReadsAKloggConfToo() {
+        val dir = createTempDirectory("openlog-klogg").toFile()
+        val file = File(dir, "old_glogg.ini").apply { writeText(KloggFixtures.LEGACY) }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFile(file)
+
+        assertEquals(listOf("old_glogg"), target.pendingImportReview!!.rows.map { it.incoming.name })
+    }
+
+    @Test
+    fun droppedJsonFilesKeepTheirFolders() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val source = AppState(File(dir, "source.cache"))
+        source.addTab()
+        source.createSavedFilterFolder("Release")
+        source.saveFilter(source.tabs.single().id, "production", source.savedFilterFolders.single().id)
+        val file = File(dir, "filters.json").apply { writeText(source.exportFilters()) }
+
+        val target = AppState(File(dir, "target.cache"))
+        target.importFiltersFromFiles(listOf(file))
+        target.confirmImportFilters()
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        assertEquals(target.savedFilterFolders.single().id, target.savedFilters.single().folderId)
+    }
+
+    @Test
+    fun droppedFilesThatAreNotFilterFilesSetImportError() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val notes = File(dir, "notes.ini").apply { writeText("just some text\n") }
+        val bad = File(dir, "bad.json").apply { writeText("{not json") }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(notes, bad))
+
+        assertNull(target.pendingImportReview)
+        val error = target.importError!!
+        assertTrue(error.contains("notes.ini") && error.contains("bad.json"))
+    }
+
+    @Test
+    fun anUnreadableDropAlongsideAGoodOneStillStagesTheGoodOne() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val good = File(dir, "klogg.conf").apply { writeText(KloggFixtures.LEGACY) }
+        val notes = File(dir, "notes.ini").apply { writeText("just some text\n") }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(good, notes))
+
+        assertEquals(1, target.pendingImportReview!!.rows.size)
+        assertTrue(target.importError!!.contains("notes.ini"))
+    }
+
+    @Test
     fun confirmedClearFilterClearsActiveSavedFilter() {
         val state = AppState()
         state.addTab()

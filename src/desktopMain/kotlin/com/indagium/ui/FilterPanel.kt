@@ -450,6 +450,7 @@ internal fun LogCompositionFreshnessEffect(
 
 private const val LARGE_FILE_CANDIDATE_SCAN_LIMIT = 50_000
 private const val SEQUENCE_DRAG_SNAP_BIAS = 0.25f
+private val FILTER_IMPORT_EXTENSIONS = setOf("json", "conf", "ini")
 
 internal fun sequenceOrderDuringDrag(
     visibleIds: List<String>,
@@ -1047,7 +1048,8 @@ internal fun FilterPanel(
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
                 val dropped = runCatching { localFilesFromDropData(event.dragData()) }.getOrDefault(emptyList())
-                val filterFiles = dropped.filter { it.exists() && it.extension.equals("json", ignoreCase = true) }
+                // Filter .json, or a klogg export (.conf / .ini); the importer tells them apart by content.
+                val filterFiles = dropped.filter { it.exists() && it.extension.lowercase() in FILTER_IMPORT_EXTENSIONS }
                 // Compose hands a drop to the innermost target that accepted the drag and does NOT
                 // retry the ancestor when this returns false — so without an explicit hand-off, a
                 // log or video dropped on this sidebar would vanish with no feedback at all.
@@ -2600,7 +2602,7 @@ internal fun FilterPanel(
                     AppButton("Import", onClick = onImportFilters)
                 }
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    AppText("Drop filter .json here to import", color = tc.td, fontSize = 10.sp)
+                    AppText("Drop filter .json or klogg .conf here to import", color = tc.td, fontSize = 10.sp)
                 }
             }
         }
