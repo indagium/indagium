@@ -97,8 +97,6 @@ private sealed interface ProfileNameRequest {
     data class Rename(val profile: ResolvedProfile) : ProfileNameRequest
 }
 
-// Width of the "Temporary data · size" / "App data · size" texts, so their buttons line up right after them.
-private val STORAGE_TEXT_WIDTH = 210.dp
 private val ANCHOR_SCROLL_MARGIN = 16.dp
 private const val FLASH_MS = 1200
 
@@ -889,7 +887,7 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                         "Downloaded archive cache and app-managed notes. Clear temporary data removes these items.",
                     )
                 },
-                modifier = Modifier.width(STORAGE_TEXT_WIDTH),
+                modifier = Modifier.weight(1f),
             ) {
                 AppText(
                     "Temporary data · ${formatByteSize(state.temporaryDataSizeBytes)}  ⓘ",
@@ -912,7 +910,7 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
                             "saved filters, source and case indexes, diagnostics, and integration data.",
                     )
                 },
-                modifier = Modifier.width(STORAGE_TEXT_WIDTH),
+                modifier = Modifier.weight(1f),
             ) {
                 AppText(
                     "App data · ${formatByteSize(state.appDataSizeBytes)}  ⓘ",
