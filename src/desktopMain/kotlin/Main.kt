@@ -181,6 +181,7 @@ fun main(args: Array<String>) {
             // Indagium?" popup can be exercised with desktopRun too — the sponsor fetch it may
             // trigger only happens once the dialog actually opens.
             appState.maybeShowSupportPromptOnStartup()
+            appState.maybeShowSetupAssistantOnStartup()
             onDispose {}
         }
         Window(

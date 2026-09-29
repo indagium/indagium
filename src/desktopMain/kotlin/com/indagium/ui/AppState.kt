@@ -3447,6 +3447,13 @@ class AppState(
     internal val captureNativeMediaSupport: NativeMediaSupport
         get() = captureService.nativeMediaSupport
 
+    internal val captureAdbAvailable: Boolean
+        get() = captureService.adbAvailable
+
+    /** False until the first tool check (see [recheckCaptureTools]) has finished. */
+    internal val captureToolsChecked: Boolean
+        get() = captureService.hasCheckedDevicesOnce && !captureService.discovering
+
     internal fun browseCaptureAdb() = captureService.browseAdbFromSettings()
 
     internal fun browseCaptureScrcpy() = captureService.browseScrcpyFromSettings()
@@ -4068,6 +4075,11 @@ class AppState(
     private var annotationNavigationCounter = 0L
     private var searchNavigationCounter = 0L
 
+    /** Whether an autosave from an earlier session was there to restore when this instance was
+     *  created (read before [restoreAutosave] runs). The setup assistant uses it to offer "Keep my
+     *  current setup" to existing users. False whenever restoring is off, as in tests. */
+    val startedWithExistingData: Boolean = restoreOnCreate && autosaveFile.exists()
+
     init {
         if (restoreOnCreate) restoreAutosave()
         loadCustomAiCommands()
@@ -4579,6 +4591,32 @@ class AppState(
             openSupportDialog()
             updateSettings { it.copy(lastSupportPromptAt = now) }
         }
+    }
+
+    // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────
+    var setupAssistantOpen by mutableStateOf(false)
+        private set
+
+    /** Called once at startup (see Main.kt). App.kt holds the dialog back until the license and
+     *  update dialogs are out of the way. */
+    fun maybeShowSetupAssistantOnStartup() {
+        if (!settings.setupAssistantDone) setupAssistantOpen = true
+    }
+
+    /** Finishing and skipping both count as done, so the assistant never comes back on its own. */
+    fun finishSetupAssistant() = closeSetupAssistant()
+
+    fun skipSetupAssistant() = closeSetupAssistant()
+
+    private fun closeSetupAssistant() {
+        setupAssistantOpen = false
+        updateSettings { it.copy(setupAssistantDone = true) }
+    }
+
+    /** "Run setup again" from Settings: works whether or not it was done before. */
+    fun rerunSetupAssistant() {
+        settingsOpen = false
+        setupAssistantOpen = true
     }
 
     /** Opens the popup. Used both by the startup auto-prompt and by the manual "Support project"

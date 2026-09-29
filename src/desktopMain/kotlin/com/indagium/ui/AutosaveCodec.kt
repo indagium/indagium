@@ -659,6 +659,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("showRegexFilterSummary", showRegexFilterSummary)
     put("deviceLoggingPanelExpanded", deviceLoggingPanelExpanded)
     workspaceProfileId?.let { put("workspaceProfileId", it) }
+    put("setupAssistantDone", setupAssistantDone)
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -977,6 +978,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
         deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
+        setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
     )
 }.getOrNull()
 
