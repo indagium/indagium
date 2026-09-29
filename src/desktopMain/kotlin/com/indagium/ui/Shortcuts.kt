@@ -232,6 +232,7 @@ private fun shortcutSpecs(): List<ShortcutSpec> = listOf(
     ShortcutSpec("Home / End", "Home / End", "Jump to first / last row", KeyboardPanel.LOG_VIEW),
     ShortcutSpec("⇧ ↑ / ⇧ ↓", "Shift Up / Shift Down", "Extend row selection", KeyboardPanel.LOG_VIEW),
     ShortcutSpec("⌘ A / ⌘ C", "Ctrl A / Ctrl C", "Select all visible rows / copy selected rows", KeyboardPanel.LOG_VIEW),
+    ShortcutSpec("⌘ ⇧ N", "Ctrl Shift N", "Add annotation for selected rows", KeyboardPanel.LOG_VIEW),
     ShortcutSpec("Enter / ⇧ F10", "Enter / Shift F10", "Open context menu for selected row", KeyboardPanel.LOG_VIEW),
     ShortcutSpec("Space", "Space", "Toggle current row selection", KeyboardPanel.LOG_VIEW),
     ShortcutSpec("Enter / ⇧ Enter", "Enter / Shift Enter", "Jump to next / previous Find match", KeyboardPanel.LOG_VIEW),
