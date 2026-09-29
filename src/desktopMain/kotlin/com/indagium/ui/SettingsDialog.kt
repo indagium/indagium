@@ -1796,7 +1796,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
 @Composable
 private fun AutomationSettingsSection(state: AppState) {
     val tc = tc()
-    SettingsGrid(columns = 3, rowSpacing = 16.dp) {
+    SettingsControlRow {
         CompactSetting("MCP control server") {
             SegmentedControl(
                 options = listOf("On", "Off"),
@@ -1834,31 +1834,21 @@ private fun AutomationSettingsSection(state: AppState) {
                 fontSize = 12.sp,
             )
         }
-        CompactSetting("Connection info") {
-            // Deliberately doesn't close Settings first — stacks on top instead, so closing
-            // this popup returns you to Settings rather than to the main window.
-            AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
-        }
-        CompactSetting("Debug logging") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
-                onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
-            )
-        }
-        CompactSetting("Check for updates automatically") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                SegmentedControl(
-                    options = listOf("On", "Off"),
-                    selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
-                    onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
-                )
-                AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
-            }
-        }
     }
     state.mcpControlError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
+    }
+    CompactSetting("Connection info") {
+        // Deliberately doesn't close Settings first — stacks on top instead, so closing
+        // this popup returns you to Settings rather than to the main window.
+        AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
+    }
+    CompactSetting("Debug logging") {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
+            onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
+        )
     }
     Row(
         Modifier.settingsAnchor("Debug log file"),
@@ -1901,6 +1891,16 @@ private fun AutomationSettingsSection(state: AppState) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Diagnostic logging unavailable: $message", color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
             AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
+        }
+    }
+    CompactSetting("Check for updates automatically") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
+            )
+            AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
         }
     }
     // availableUpdate is checked first: once a release is known, that fact takes priority over
