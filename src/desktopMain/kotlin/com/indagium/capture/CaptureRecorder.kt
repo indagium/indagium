@@ -4,6 +4,7 @@ import com.indagium.capture.mirror.AdbScrcpyTransport
 import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.MirrorStreamOptions
+import com.indagium.debug.AppLogger
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -640,6 +641,7 @@ class CaptureRecorder internal constructor(
     /** [EmbeddedDeviceSession.onVideoStartElapsedMs]: fires once, from the recording pump thread,
      * the first time a video packet actually reaches the muxer. */
     private fun recordVideoStartElapsedMs(startElapsedMs: Long) {
+        AppLogger.info("capture", "Video recording received its first packet $startElapsedMs ms after capture start")
         synchronized(lock) {
             val updated = (currentSession ?: return@synchronized).copy(videoStartElapsedMs = startElapsedMs)
             currentSession = updated
@@ -801,6 +803,10 @@ class CaptureRecorder internal constructor(
     private fun addDiagnosticLocked(message: String) {
         if (diagnostics.size == MAX_DIAGNOSTICS) diagnostics.removeFirst()
         diagnostics.addLast(message.take(MAX_DIAGNOSTIC_CHARS))
+        // The strip's Diagnostics list is in-memory only and gone once the capture closes, so a
+        // "video never started" report had nothing to go on. Mirror each line into the opt-in
+        // debug log (a no-op unless enabled); AppLogger.safeText redacts paths and secrets.
+        AppLogger.info("capture", message.take(MAX_DIAGNOSTIC_CHARS))
     }
 
     private fun drainDiagnostics(input: InputStream, source: String) {
