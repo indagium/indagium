@@ -459,6 +459,23 @@ screenshots, disk guards, ZIP range export, timing records, and the versioned
 dependency. Capture Settings are part of the normal Settings dialog and apply immediately; they
 cover tool paths, adb buffer mode, video limits, naming, storage, and diagnostics.
 
+**Wi-Fi pairing** (`capture/WirelessAdb.kt`, `capture/WirelessPairingFlow.kt`,
+`ui/WirelessPairingDialogs.kt`) attaches an Android 11+ phone over Wireless debugging. It depends on
+adb's mDNS backend (`adb mdns check`/`services`): `CaptureService.refreshDevices` piggybacks one
+best-effort mDNS listing on its existing poll, and a phone on its pairing screen appears as an inline
+"Ready to pair" row (never an automatic modal). mDNS failure is logged only; it never sets `error` or
+clears `devices`, since networks with AP isolation block mDNS while USB capture is unaffected. Pairing
+is either a typed 6-digit code (`adb pair host:port code`; the address is editable, which is the manual
+fallback when mDNS is blocked) or a QR code (ZXing `core`, Android Studio's `WIFI:T:ADB;S:name;P:pw;;`
+payload) whose per-dialog random name the phone advertises once it scans. After a successful pair
+adb's own mDNS auto-connect normally attaches the phone, so `WirelessPairingFlow` watches the device
+list first and only then falls back to `adb connect` (connecting explicitly while auto-connect also
+runs creates a duplicate `ip:port` entry). Neither `adb pair` nor `adb connect` is trusted on exit
+code; success is judged on their output. The pairing code and QR password travel only as argv of the
+one adb process (there is no runner-level or capture-diagnostics logging of argv) and
+`QrPairingCredentials.toString` redacts the password. A wireless device is recognised purely from its
+serial (`CaptureDevice.wireless`), so no persisted format changed.
+
 The descriptor is the stable hand-off between capture and review. Its versioned metadata points to
 `logs/logcat.log`, `mapping/log-video.jsonl`, and optional video/screenshots inside a portable ZIP;
 opening a ZIP or an extracted descriptor verifies the assets and auto-links the available log,

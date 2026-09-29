@@ -3,6 +3,7 @@ package com.indagium.ui
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.indagium.capture.AdbMdnsService
 import com.indagium.capture.AdbRootOutcome
 import com.indagium.capture.CaptureArchiveExporter
 import com.indagium.capture.CaptureArchiveReader
@@ -28,13 +29,19 @@ import com.indagium.capture.LogBufferSizeChoice
 import com.indagium.capture.LogTagLevel
 import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.NativeMediaSupportProbe
+import com.indagium.capture.QrPairingCredentials
+import com.indagium.capture.WirelessPairingFlow
+import com.indagium.capture.WirelessPairingStage
 import com.indagium.capture.classifyAdbRootOutput
+import com.indagium.capture.codePairingCandidates
 import com.indagium.capture.isPermissionFailure
 import com.indagium.capture.parseLogcatBufferSizes
 import com.indagium.capture.perTagLogLevelOverrides
+import com.indagium.debug.AppLogger
 import com.indagium.model.Annotations
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
@@ -125,6 +132,28 @@ internal class CaptureService(
      *  the real "No devices discovered" empty state) — see [refreshDevices]'s own doc. */
     var hasCheckedDevicesOnce by mutableStateOf(false)
         private set
+
+    /** Phones currently showing a "Pair device with pairing code" screen, as seen through adb's
+     *  mDNS backend on the last [refreshDevices]. Empty when mDNS is unavailable or nothing is
+     *  advertising. The Devices panel turns each into a "Ready to pair" row. */
+    internal var pairingCandidates by mutableStateOf(emptyList<AdbMdnsService>())
+        private set
+
+    /** Whether adb's mDNS backend works here: null until the first check, then true/false. Only a
+     *  definite false shows the "Wi-Fi discovery unavailable" hint; it is never an error, because
+     *  USB capture does not depend on it. */
+    var mdnsAvailable by mutableStateOf<Boolean?>(null)
+        private set
+
+    /** Progress of the current (or last) Wi-Fi pairing attempt, for the pairing dialogs. Null when
+     *  none is running. */
+    internal var pairingStage by mutableStateOf<WirelessPairingStage?>(null)
+        private set
+
+    private var pairingJob: Job? = null
+
+    @Volatile
+    private var mdnsChecked = false
 
     // Device logging (New tab's "Device logging" panel): buffer sizes + log.tag/log.tag.<TAG>,
     // keyed by serial so it survives the launcher's 3s device-refresh poll and a device switch
@@ -393,6 +422,7 @@ internal class CaptureService(
                 if (app.settings.captureSettings != settings) return@launch
                 devices = runInterruptible { found.listDevices() }.map { it.device }
                 error = null
+                refreshWirelessDiscovery(found)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (failure: Exception) {
@@ -403,6 +433,73 @@ internal class CaptureService(
                 discoveryLock.unlock()
             }
         }
+    }
+
+    /**
+     * Wi-Fi pairing discovery piggybacks on [refreshDevices]'s poll rather than running its own
+     * loop. Strictly best-effort: a failure here is logged and clears [pairingCandidates] but never
+     * touches [devices] or [error], since a network that blocks mDNS must not look like a broken adb.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private suspend fun refreshWirelessDiscovery(found: CaptureTools) {
+        try {
+            if (!mdnsChecked) {
+                mdnsAvailable = runInterruptible { found.mdnsCheck() }
+                mdnsChecked = true
+            }
+            pairingCandidates = if (mdnsAvailable == true) {
+                codePairingCandidates(runInterruptible { found.mdnsServices() })
+            } else {
+                emptyList()
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            pairingCandidates = emptyList()
+            AppLogger.warn("capture", "Wi-Fi discovery failed: ${failure.message}")
+        }
+    }
+
+    /** Pairs with the phone at [address] using the 6-digit [code] from its pairing screen. */
+    internal fun startCodePairing(address: String, code: String): Job =
+        startPairing { flow, onStage -> flow.pairWithCode(address, code, onStage) }
+
+    /** Waits for a phone to scan [credentials]' QR code, then pairs with it. */
+    internal fun startQrPairing(credentials: QrPairingCredentials): Job =
+        startPairing { flow, onStage -> flow.pairWithQr(credentials.name, credentials.password, onStage = onStage) }
+
+    /** Called by a pairing dialog on close, after it has cancelled its job. */
+    internal fun clearPairingStage() {
+        pairingStage = null
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun startPairing(
+        run: suspend (WirelessPairingFlow, (WirelessPairingStage) -> Unit) -> WirelessPairingStage,
+    ): Job {
+        pairingJob?.cancel()
+        pairingStage = null
+        return scope.launch {
+            try {
+                val settings = app.settings.captureSettings
+                val found = runInterruptible { resolveTools(settings, force = false) }
+                val flow = WirelessPairingFlow(
+                    listDevices = { runInterruptible { found.listDevices().map { it.device } } },
+                    mdnsServices = { runInterruptible { found.mdnsServices() } },
+                    pair = { address, code -> runInterruptible { found.pair(address, code) } },
+                    connect = { address -> runInterruptible { found.connect(address) } },
+                )
+                run(flow) { pairingStage = it }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                pairingStage = WirelessPairingStage.Failed(failure.message ?: "Pairing failed")
+            } finally {
+                // Tools are already resolved; a plain refresh picks up the new device without
+                // re-validating adb/scrcpy.
+                refreshDevices()
+            }
+        }.also { pairingJob = it }
     }
 
     /** Resolves and validates adb for the synchronous start path. */
@@ -424,6 +521,7 @@ internal class CaptureService(
         adbAvailable = adb.available
         tools = found
         resolvedSettings = settings
+        mdnsChecked = false
         if (app.settings.captureSettings == settings) {
             toolResolution = CaptureToolResolution(found.adb.path, found.scrcpy?.path)
         }
