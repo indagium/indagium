@@ -4457,20 +4457,24 @@ class AppStateBehaviorTest {
     fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
         val dir = createTempDirectory("openlog-merge").toFile()
         val state = AppState(autosaveFile = File(dir, "state.cache"))
+        // Not "t1"/"t2": mergeTabs names its tab "t<n>" from a counter shared by every AppState in
+        // the JVM, so when this test ran first (or alone) the merged tab collided with a hand-made
+        // "t1" and upTab("t1") then rewrote both.
         state.tabs = listOf(
             mkTab(
-                "t1", "main.log",
+                "m1", "main.log",
                 listOf(
                     LogEntry(1, "10:00:00.000", LogLevel.I, "App", "main first"),
                     LogEntry(2, "10:00:02.000", LogLevel.I, "App", "main second"),
                 ),
             ),
-            mkTab("t2", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
+            mkTab("s1", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
         )
 
-        state.mergeTabs(listOf("t1", "t2"), "Merged Session")
+        state.mergeTabs(listOf("m1", "s1"), "Merged Session")
 
-        waitUntil { state.tabs.size == 3 }
+        // The tab is published and then made active in two steps; wait for both, not just the size.
+        waitUntil { state.tabs.size == 3 && state.activeTabId == state.tabs.last().id }
         val merged = state.tabs.last()
         assertEquals("Merged Session", merged.filename)
         assertEquals(listOf("main first", "system first", "main second"), merged.logData.map { it.msg })
