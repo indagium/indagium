@@ -603,15 +603,51 @@ private fun SettingsScrollableRows(
     }
 }
 
-/** The log font-size stepper, shared by Settings → Appearance and the setup assistant. */
+/**
+ * The font, size, scale and toolbar-label controls of Settings → Appearance; the setup assistant's
+ * Look step shows this same row so the two can't drift. Controls take their natural width (the
+ * font-family labels were truncated when four equal columns squeezed them) and wrap onto a second
+ * line only when the window is too narrow for all four.
+ */
 @Composable
-internal fun LogFontSizeSetting(state: AppState, modifier: Modifier = Modifier) {
-    CompactSetting("Log font size", modifier, horizontalAlignment = Alignment.Start) {
-        ListStepper(
-            options = (10..24).toList(),
-            value = state.settings.fontSize,
-            onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
-        )
+internal fun AppearanceBasicsRow(state: AppState) {
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        CompactSetting("Font family") {
+            SegmentedControl(
+                options = listOf("Monospace", "Proportional"),
+                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
+                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
+            )
+        }
+        CompactSetting("Log font size", horizontalAlignment = Alignment.Start) {
+            ListStepper(
+                options = (10..24).toList(),
+                value = state.settings.fontSize,
+                onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+            )
+        }
+        CompactSetting("Interface scale", horizontalAlignment = Alignment.Start) {
+            ListStepper(
+                options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
+                value = state.settings.interfaceScalePercent,
+                onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
+            )
+        }
+        CompactSettingWithTooltip(
+            label = "Toolbar labels",
+            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
+            horizontalAlignment = Alignment.Start,
+        ) {
+            SegmentedControl(
+                options = listOf("Show", "Icons only"),
+                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
+                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
+            )
+        }
     }
 }
 
@@ -624,45 +660,10 @@ private fun AppearanceSettingsSection(state: AppState) {
             settings = state.settings,
             selected = state.settings.theme,
             onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
+            height = null,
         )
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        CompactSetting("Font family", Modifier.weight(1f)) {
-            SegmentedControl(
-                options = listOf("Monospace", "Proportional"),
-                selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
-            )
-        }
-        LogFontSizeSetting(state, Modifier.weight(1f))
-        CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            ListStepper(
-                options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
-                value = state.settings.interfaceScalePercent,
-                onChange = { v -> state.updateSettings { it.copy(interfaceScalePercent = v) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Toolbar labels",
-            tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
-            modifier = Modifier.weight(1f),
-            horizontalAlignment = Alignment.Start,
-        ) {
-            SegmentedControl(
-                options = listOf("Show", "Icons only"),
-                selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
-                onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
-            )
-        }
-    }
+    AppearanceBasicsRow(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",
@@ -3218,14 +3219,16 @@ internal fun ThemeGallery(
     settings: AppSettings,
     selected: ThemePreset?,
     onSelect: (ThemePreset?) -> Unit,
-    height: Dp = 148.dp,
+    // Null shows every theme at natural height with no inner scroll (Settings, setup assistant);
+    // a fixed height keeps the compact scrolling gallery of the diagram theme picker.
+    height: Dp? = 148.dp,
     followAppTheme: Boolean = false,
 ) {
     val tc = tc()
     val themeScroll = rememberScrollState()
-    Box(Modifier.fillMaxWidth().height(height)) {
+    Box(Modifier.fillMaxWidth().then(if (height != null) Modifier.height(height) else Modifier)) {
         FlowRow(
-            Modifier.fillMaxWidth().verticalScroll(themeScroll).padding(end = 12.dp),
+            Modifier.fillMaxWidth().then(if (height != null) Modifier.verticalScroll(themeScroll) else Modifier).padding(end = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -3246,11 +3249,13 @@ internal fun ThemeGallery(
                 )
             }
         }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(themeScroll),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc),
-        )
+        if (height != null) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(themeScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc),
+            )
+        }
     }
 }
 
