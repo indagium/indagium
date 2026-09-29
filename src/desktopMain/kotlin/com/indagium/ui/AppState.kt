@@ -5873,7 +5873,22 @@ class AppState(
 
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
 
-    fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
+    // Hiding Original while Find is scoped to all lines would leave matches the user can no longer
+    // see, so it drops the scope back to FILTERED. upTab's searchNeedsRecompute doesn't watch
+    // showUnfiltered, hence the explicit recompute.
+    fun toggleUnfiltered(tabId: String) {
+        var scopeReset = false
+        upTab(tabId) { t ->
+            val show = !t.showUnfiltered
+            if (!show && t.search.scope == SearchScope.UNFILTERED) {
+                scopeReset = true
+                t.copy(showUnfiltered = false, search = t.search.copy(scope = SearchScope.FILTERED))
+            } else {
+                t.copy(showUnfiltered = show)
+            }
+        }
+        if (scopeReset) scheduleSearchRecompute(tabId)
+    }
 
     // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
     // doc comment for why this lives on the tab rather than in AppSettings.
@@ -7228,8 +7243,41 @@ class AppState(
     // Reopening an already-open bar (a repeat Ctrl/Cmd+F) deliberately keeps the existing
     // query/matches — only `active` and `focusNonce` change — so ui/SearchBar.kt's
     // LaunchedEffect(focusNonce) can refocus + select-all without losing what was already found.
-    fun openSearch(tabId: String) = upTab(tabId) { t ->
-        t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+    //
+    // [scope] non-null switches what the bar searches (see setSearchScope); null keeps the tab's
+    // last scope, which is what the toolbar Find button and a plain reopen want.
+    fun openSearch(tabId: String, scope: SearchScope? = null) {
+        val scopeChanged = applySearchScope(tabId, scope)
+        upTab(tabId) { t ->
+            t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+        }
+        if (scopeChanged) scheduleSearchRecompute(tabId)
+    }
+
+    /** Switches the Find bar between the filtered view and every line. UNFILTERED also reveals the
+     *  Original panel (LogTab.showUnfiltered) — the panel that actually displays those extra
+     *  matches — and leaves it open after Find closes. Compare mode has no Original panel, so it
+     *  always stays FILTERED. */
+    fun setSearchScope(tabId: String, scope: SearchScope) {
+        if (applySearchScope(tabId, scope)) scheduleSearchRecompute(tabId)
+    }
+
+    // Returns true when the scope actually changed (the caller then recomputes matches). The scope
+    // and showUnfiltered are written in one upTab so a recompute never sees one without the other.
+    private fun applySearchScope(tabId: String, requested: SearchScope?): Boolean {
+        if (requested == null) return false
+        val scope = if (compareMode) SearchScope.FILTERED else requested
+        var changed = false
+        upTab(tabId) { t ->
+            val revealOriginal = scope == SearchScope.UNFILTERED && !t.showUnfiltered
+            if (t.search.scope == scope && !revealOriginal) return@upTab t
+            changed = t.search.scope != scope
+            t.copy(
+                showUnfiltered = t.showUnfiltered || scope == SearchScope.UNFILTERED,
+                search = t.search.copy(scope = scope),
+            )
+        }
+        return changed
     }
 
     // Deliberately keeps query/matchIds (only flips `active` off) rather than resetting to
@@ -7328,7 +7376,12 @@ class AppState(
             // storeInCache = false: `t` carries the search-only effectiveSearchFilter and a
             // fully-expanded fold state, neither of which is what's actually rendered — see the
             // doc above computeItems' storeInCache parameter.
-            val searchItems = computeItems(t.copy(expanded = fullyExpanded), applyFilter = true, regexContext, storeInCache = false)
+            val searchItems = computeItems(
+                t.copy(expanded = fullyExpanded),
+                applyFilter = stored.search.scope == SearchScope.FILTERED || compareMode,
+                regexContext,
+                storeInCache = false,
+            )
             ensureActive()
             val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext)
             ensureActive()

@@ -1091,6 +1091,10 @@ fun LogViewer(
     onSearchNext: () -> Unit = {},
     onSearchPrev: () -> Unit = {},
     onSearchClose: () -> Unit = {},
+    // Filtered | Unfiltered scope chip inside the Find field — only FileView.kt turns it on
+    // (compare mode has no Original panel to search).
+    showSearchScopeChip: Boolean = false,
+    onSearchToggleScope: () -> Unit = {},
     // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
     // and single-panel layouts below. `null` (the default) keeps CompareView, previews, and every
     // other existing LogViewer call site unchanged: FileView.kt is the only real caller that wires
@@ -2256,6 +2260,8 @@ fun LogViewer(
                             onToggleCase = onSearchToggleCase,
                             onNext = onSearchNext,
                             onPrev = onSearchPrev,
+                            showScopeChip = showSearchScopeChip,
+                            onToggleScope = onSearchToggleScope,
                             // Same fix as the single-view branch below: Escape removes the
                             // focused find field entirely, so without an explicit refocus here
                             // keyboard focus falls off the tree and App.kt's root
@@ -2443,6 +2449,8 @@ fun LogViewer(
                     onToggleCase = onSearchToggleCase,
                     onNext = onSearchNext,
                     onPrev = onSearchPrev,
+                    showScopeChip = showSearchScopeChip,
+                    onToggleScope = onSearchToggleScope,
                     // Escape (SearchBar's own key handler) closes and returns focus to the log
                     // row list — reusing this view's own externalFr rather than a second
                     // FocusRequester the caller would otherwise need to hoist and manage.

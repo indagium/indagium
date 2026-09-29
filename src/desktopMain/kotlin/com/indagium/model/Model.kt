@@ -479,6 +479,10 @@ data class Annotations(
     val fingerprint: String? = null,
 )
 
+/** Which item list the Find bar searches: only rows the filter shows, or every line (which is
+ *  what the Original split panel — LogTab.showUnfiltered — displays). */
+enum class SearchScope { FILTERED, UNFILTERED }
+
 // ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────
 // Non-destructive: unlike Filter's kwText/kwRegex (which removes non-matching rows), this only
 // highlights matches within whatever's already visible and moves the row selection between them.
@@ -499,6 +503,7 @@ data class LogSearchState(
     /** Bumped on every openSearch() call (including while already open) so ui/SearchBar.kt's
      *  LaunchedEffect can refocus + select-all on a repeat Ctrl/Cmd+F, not just the first open. */
     val focusNonce: Int = 0,
+    val scope: SearchScope = SearchScope.FILTERED,
 ) {
     val matchCount: Int get() = matchIds.size
 
@@ -517,6 +522,7 @@ data class LogSearchState(
             invalidPattern == other.invalidPattern &&
             timedOut == other.timedOut &&
             focusNonce == other.focusNonce &&
+            scope == other.scope &&
             matchIds.contentEquals(other.matchIds)
     }
 
@@ -528,6 +534,7 @@ data class LogSearchState(
         result = 31 * result + invalidPattern.hashCode()
         result = 31 * result + timedOut.hashCode()
         result = 31 * result + focusNonce
+        result = 31 * result + scope.hashCode()
         result = 31 * result + matchIds.contentHashCode()
         return result
     }

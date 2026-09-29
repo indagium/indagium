@@ -29,6 +29,7 @@ import com.indagium.model.MIN_INTERFACE_SCALE_PERCENT
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.ProcessNameMode
+import com.indagium.model.SearchScope
 import com.indagium.model.SequenceDef
 import com.indagium.model.SourceFolderInfo
 import com.indagium.model.SourceLogConfiguration
@@ -8539,6 +8540,116 @@ class AppStateBehaviorTest {
         assertFalse(closed.active)
         assertEquals("needle", closed.query)
         assertEquals(listOf(1), closed.matchIds.toList())
+    }
+
+    // ── Find scope (Filtered | Unfiltered) ─────────────────────────────────────
+
+    // Warn-level entry 2 is hidden once the W level is toggled off, so it is only reachable by an
+    // all-lines search.
+    private fun scopeTestTabs(): List<com.indagium.model.LogTab> = listOf(
+        mkTab(
+            "log", "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle shown"),
+                LogEntry(2, "10:00:00.100", LogLevel.W, "App", "needle hidden by filter"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "needle also shown"),
+            ),
+        ),
+    )
+
+    @Test
+    fun filteredScopeSearchSkipsRowsHiddenByTheFilter() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.isNotEmpty() }
+
+        assertEquals(listOf(1, 3), state.tab("log")!!.search.matchIds.toList())
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun unfilteredScopeSearchFindsHiddenRowsAndOpensOriginal() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+
+        state.openSearch("log", SearchScope.UNFILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+
+        val tab = state.tab("log")!!
+        assertEquals(listOf(1, 2, 3), tab.search.matchIds.toList())
+        assertEquals(SearchScope.UNFILTERED, tab.search.scope)
+        assertTrue(tab.showUnfiltered)
+    }
+
+    @Test
+    fun switchingScopeWhileOpenRecomputesMatches() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+
+        state.setSearchScope("log", SearchScope.UNFILTERED)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+        assertTrue(state.tab("log")!!.showUnfiltered)
+
+        state.setSearchScope("log", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+        // Going back to Filtered leaves the Original panel the user may still want open.
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun hidingOriginalWhileUnfilteredResetsScopeAndRecomputes() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.openSearch("log", SearchScope.UNFILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+
+        state.toggleUnfiltered("log")
+
+        assertFalse(state.tab("log")!!.showUnfiltered)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+        assertEquals(listOf(1, 3), state.tab("log")!!.search.matchIds.toList())
+    }
+
+    @Test
+    fun closeSearchKeepsOriginalOpenAfterAnUnfilteredSearch() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.UNFILTERED)
+
+        state.closeSearch("log")
+
+        assertFalse(state.tab("log")!!.search.active)
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun compareModeForcesFilteredScope() {
+        val state = AppState()
+        state.tabs = scopeTestTabs() + mkTab("other", "other.log", emptyList())
+        state.updateCompareMode(true)
+        assertTrue(state.compareMode)
+
+        state.openSearch("log", SearchScope.UNFILTERED)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
+
+        state.setSearchScope("log", SearchScope.UNFILTERED)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
     }
 
     @Test
