@@ -75,7 +75,6 @@ import androidx.compose.ui.input.pointer.*
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -84,7 +83,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
@@ -1179,7 +1177,7 @@ internal fun EmbeddedMirrorPanel(
             // width, which for a 1080x2400 phone made the surface ~2.2x the sidebar's width tall. The
             // computed box width can end up narrower than the sidebar for a capped portrait frame — the
             // outer Center alignment below keeps it centered rather than stuck to one edge; the touch
-            // mapper (mirrorSurfaceModifier) reads the box's real measured size via onSizeChanged, so it
+            // mapper (mirrorTouchInput) reads the box's current measured size on every event, so it
             // stays correct for whatever size this computes, capped or not.
             // `flexible` = size the surface from the height this panel was actually given, instead of
             // a caller-supplied number. The detached window has always worked this way; the sidebar
@@ -1646,18 +1644,32 @@ private fun mirrorSurfaceModifier(
     frameHeight: Int?,
     focusRequester: FocusRequester,
 ): Modifier {
-    var size = IntSize.Zero
     val interaction = Modifier
         .focusRequester(focusRequester)
         .focusable()
-        .onSizeChanged { size = it }
         .onPreviewKeyEvent { event -> handleMirrorKeyEvent(handle, event) }
     if (handle == null || frameWidth == null || frameHeight == null) return interaction
-    return interaction.pointerInput(handle, frameWidth, frameHeight, size) {
-        if (size.width <= 0 || size.height <= 0) return@pointerInput
-        val mapper = MirrorCoordinateMapper(size.width, size.height, frameWidth, frameHeight)
-        trackMirrorTouchGestures(handle, mapper)
+    return interaction.mirrorTouchInput(handle, frameWidth, frameHeight) { mapper, action, pointerId, x, y ->
+        handle.sendTouch(mapper, action, pointerId, x, y)
     }
+}
+
+/**
+ * Turns pointer input on this element into mirror touches. The viewport is the element's CURRENT
+ * size, read from [PointerInputScope.size] on every event: the surface box resizes whenever the
+ * frame's aspect ratio arrives or changes (a landscape device), the window or sidebar is resized,
+ * or the device rotates. This used to build one mapper from a size captured by a plain local
+ * variable when the gesture handler started, so after any resize taps were converted against the
+ * old dimensions and landed shifted or scaled toward a corner (and a handler restarted after a
+ * recomposition saw a zero size and dropped touches entirely).
+ */
+internal fun Modifier.mirrorTouchInput(
+    key: Any?,
+    frameWidth: Int,
+    frameHeight: Int,
+    onTouch: (mapper: MirrorCoordinateMapper, action: MirrorTouchAction, pointerId: Long, x: Float, y: Float) -> Unit,
+): Modifier = pointerInput(key, frameWidth, frameHeight) {
+    trackMirrorTouchGestures(frameWidth, frameHeight, onTouch)
 }
 
 /** Maps a keydown to the Android keycode scrcpy expects and forwards a DOWN+UP pair. Split out
@@ -1685,34 +1697,51 @@ private fun handleMirrorKeyEvent(handle: EmbeddedMirrorHandle?, event: KeyEvent)
 }
 
 /** Pumps raw pointer events into scrcpy touch commands for the lifetime of the enclosing
- * pointerInput block. Split out of [mirrorSurfaceModifier] to keep it under detekt's cyclomatic-
+ * pointerInput block. Split out of [mirrorTouchInput] to keep it under detekt's cyclomatic-
  * complexity threshold; same DOWN/MOVE/UP/CANCEL sequencing as before. */
-private suspend fun PointerInputScope.trackMirrorTouchGestures(handle: EmbeddedMirrorHandle, mapper: MirrorCoordinateMapper) {
+private suspend fun PointerInputScope.trackMirrorTouchGestures(
+    frameWidth: Int,
+    frameHeight: Int,
+    onTouch: (mapper: MirrorCoordinateMapper, action: MirrorTouchAction, pointerId: Long, x: Float, y: Float) -> Unit,
+) {
     awaitPointerEventScope {
+        // `size` is this element's current measured size; a fresh mapper per event keeps the
+        // conversion right across any resize (see mirrorTouchInput's doc).
+        fun currentMapper(): MirrorCoordinateMapper? = size.takeIf { it.width > 0 && it.height > 0 }
+            ?.let { MirrorCoordinateMapper(it.width, it.height, frameWidth, frameHeight) }
         var pointer: PointerId? = null
         var downX = 0f
         var downY = 0f
         try {
             while (true) {
                 val event = awaitPointerEvent()
-                if (pointer == null) {
-                    val down = event.changes.firstOrNull { it.changedToDown() } ?: continue
-                    pointer = down.id
-                    downX = down.position.x
-                    downY = down.position.y
-                    handle.sendTouch(mapper, MirrorTouchAction.DOWN, down.id.value, downX, downY)
+                // Null only before the element has been measured; nothing to map yet.
+                val mapper = currentMapper()
+                val active = pointer
+                if (mapper == null) {
+                    Unit
+                } else if (active == null) {
+                    event.changes.firstOrNull { it.changedToDown() }?.let { down ->
+                        pointer = down.id
+                        downX = down.position.x
+                        downY = down.position.y
+                        onTouch(mapper, MirrorTouchAction.DOWN, down.id.value, downX, downY)
+                    }
                 } else {
-                    val change = event.changes.firstOrNull { it.id == pointer } ?: continue
-                    if (change.pressed && event.type == PointerEventType.Move) {
-                        handle.sendTouch(mapper, MirrorTouchAction.MOVE, change.id.value, change.position.x, change.position.y)
-                    } else if (!change.pressed) {
-                        handle.sendTouch(mapper, MirrorTouchAction.UP, change.id.value, change.position.x, change.position.y)
-                        pointer = null
+                    event.changes.firstOrNull { it.id == active }?.let { change ->
+                        if (change.pressed && event.type == PointerEventType.Move) {
+                            onTouch(mapper, MirrorTouchAction.MOVE, change.id.value, change.position.x, change.position.y)
+                        } else if (!change.pressed) {
+                            onTouch(mapper, MirrorTouchAction.UP, change.id.value, change.position.x, change.position.y)
+                            pointer = null
+                        }
                     }
                 }
             }
         } finally {
-            pointer?.let { handle.sendTouch(mapper, MirrorTouchAction.CANCEL, it.value, downX, downY) }
+            val active = pointer
+            val mapper = currentMapper()
+            if (active != null && mapper != null) onTouch(mapper, MirrorTouchAction.CANCEL, active.value, downX, downY)
         }
     }
 }
