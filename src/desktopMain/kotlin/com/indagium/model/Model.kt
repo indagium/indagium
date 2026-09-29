@@ -1279,6 +1279,10 @@ data class AppSettings(
     // New tab launcher's "Device logging" section: expanded by default; collapsing it is remembered.
     // JSON-only, same rule as the settings-JSON-only fields above.
     val deviceLoggingPanelExpanded: Boolean = true,
+    // Id of the WorkspaceProfile (ui/WorkspaceProfiles.kt) last applied from Settings → General;
+    // drives the "Customized — N settings differ" strip. Null until one is chosen, and an unknown
+    // id is treated the same. JSON-only, same rule as the settings-JSON-only fields above.
+    val workspaceProfileId: String? = null,
 )
 
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4

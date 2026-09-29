@@ -4371,6 +4371,42 @@ class AppState(
         autosaveInBackground()
     }
 
+    // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
+    // The five panel toggles live on AppState rather than AppSettings, so a profile is applied as
+    // one updateSettings plus the existing layout setters (each persists via autosaveNow).
+    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) {
+        val spec = profile.spec
+        updateSettings {
+            it.copy(
+                theme = spec.theme,
+                fontSize = spec.fontSize,
+                showMinimap = spec.showMinimap,
+                toolbarIconOnlyButtons = spec.toolbarIconOnlyButtons,
+                openNewFilesWithUnfiltered = spec.openNewFilesWithUnfiltered,
+                workspaceProfileId = profile.id,
+            )
+        }
+        updateFilterVisible(spec.filterVisible)
+        updateFilterBarVisible(spec.filterBarVisible)
+        updateAnnotationVisible(spec.annotationVisible)
+        updateVideoPanelVisible(spec.videoPanelVisible)
+        updateAiPanelVisible(spec.aiPanelVisible)
+    }
+
+    internal fun layoutSnapshot() = LayoutSnapshot(
+        filterVisible = filterVisible,
+        filterBarVisible = filterBarVisible,
+        annotationVisible = annotationVisible,
+        videoPanelVisible = videoPanelVisible,
+        aiPanelVisible = aiPanelVisible,
+    )
+
+    /** Labels of the profile values that no longer match; empty when no (known) profile is selected. */
+    fun workspaceProfileDifferences(): List<String> {
+        val profile = WorkspaceProfile.fromId(settings.workspaceProfileId) ?: return emptyList()
+        return profileDifferences(profile.spec, settings, layoutSnapshot())
+    }
+
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val prev = settings
         val next = transform(settings)
