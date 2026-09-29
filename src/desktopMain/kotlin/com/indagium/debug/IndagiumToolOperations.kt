@@ -15,6 +15,7 @@ import com.indagium.model.AnnBlock
 import com.indagium.model.CrashSite
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogFormat
@@ -997,20 +998,42 @@ internal class IndagiumToolOperations(
             val color = m.str("color")?.takeIf { it.isNotBlank() }?.let {
                 parseHexColor(it) ?: error("highlighters[$idx]: invalid hex color '$it' (expected #RRGGBB or #AARRGGBB)")
             } ?: HL_COLORS[idx % HL_COLORS.size]
+            val target = m.str("target")?.takeIf { it.isNotBlank() }?.let { name ->
+                HighlightTarget.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                    ?: error("highlighters[$idx]: invalid target '$name' (expected any, tag or message)")
+            } ?: HighlightTarget.ANY
+            val textColor = m.str("textColor")?.takeIf { it.isNotBlank() }?.let {
+                parseHexColor(it) ?: error("highlighters[$idx]: invalid hex textColor '$it' (expected #RRGGBB or #AARRGGBB)")
+            }
             Highlighter(
                 id = m.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("hl")}_$idx",
                 pattern = pattern,
                 regex = m.bool("regex") ?: false,
                 color = color,
                 on = m.bool("enabled") ?: true,
+                wholeLine = m.bool("wholeLine") ?: false,
+                target = target,
+                tag = m.str("tag")?.takeIf { it.isNotBlank() },
+                caseSensitive = m.bool("caseSensitive") ?: false,
+                textColor = textColor,
             )
         }
     }
 
-    private fun highlighterToMap(h: Highlighter): Map<String, Any?> = mapOf(
-        "id" to h.id, "pattern" to h.pattern, "regex" to h.regex,
-        "color" to colorToHex(h.color), "enabled" to h.on,
-    )
+    // The klogg-only fields (captureGroupsOnly, colorVariance) come from the import path, never from
+    // MCP clients, so they are not echoed here; textColor is, and only when set.
+    private fun highlighterToMap(h: Highlighter): Map<String, Any?> = buildMap {
+        put("id", h.id)
+        put("pattern", h.pattern)
+        put("regex", h.regex)
+        put("color", colorToHex(h.color))
+        put("enabled", h.on)
+        put("wholeLine", h.wholeLine)
+        put("target", h.target.name.lowercase())
+        put("tag", h.tag)
+        put("caseSensitive", h.caseSensitive)
+        h.textColor?.let { put("textColor", colorToHex(it)) }
+    }
 
     // Kick off a (background) source-index rebuild. Non-destructive but I/O-heavy, so it is
     // classified CONFIRMATION_REQUIRED. reindexSources is async — this returns the folders it

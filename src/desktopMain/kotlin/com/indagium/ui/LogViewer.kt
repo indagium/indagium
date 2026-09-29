@@ -57,8 +57,10 @@ import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
 import com.indagium.utils.formatDelta
 import com.indagium.utils.formatSignedDelta
+import com.indagium.utils.isKloggStyle
 import com.indagium.utils.passesFilter
 import com.indagium.utils.regexRanges
+import com.indagium.utils.resolveLineHighlight
 import com.indagium.utils.resolveProcessDisplayName
 import com.indagium.utils.visibleLogLineText
 import kotlinx.coroutines.CoroutineScope
@@ -92,6 +94,12 @@ private const val EXPANSION_AWAIT_TIMEOUT_MS = 5000L
 // (see the plan's "Out of scope" list).
 private const val DELTA_WARN_THRESHOLD_MS = 1000L
 
+// Alpha of an Indagium whole-line highlight's row background (klogg rules paint their colour opaque).
+private const val WHOLE_LINE_WASH_ALPHA = 0.16f
+
+// Added to that wash while hovered, so a washed row still shows hover like every other row.
+private const val WHOLE_LINE_HOVER_EXTRA_ALPHA = 0.06f
+
 // DANGER_RED is only ever assigned as a LogItem.Row's groupColor for expanded crash/stack-trace
 // group members (see Filter.kt's computeItems — sequence/manual-collapse groupColors always come
 // from a different palette). By default those rows only get a thin left-edge stripe, while the
@@ -99,27 +107,6 @@ private const val DELTA_WARN_THRESHOLD_MS = 1000L
 // extends that full tint to every row in the group, not just the header.
 internal fun isCrashGroupRow(groupColor: Color?, highlightEntireCrashGroup: Boolean): Boolean =
     highlightEntireCrashGroup && groupColor == DANGER_RED
-
-// internal (not private): reused by ui/Minimap.kt's off-thread color resolution so the minimap's
-// "does this row match a highlighter" check is the exact same logic LogRow itself uses, not a
-// second matcher that could silently drift from it.
-internal fun hlRanges(
-    msg: String,
-    hl: Highlighter,
-    regexContext: RegexEvaluationContext,
-): List<Pair<Int, Int>> =
-    if (hl.regex) {
-        regexRanges(msg, hl.pattern, regexContext = regexContext)
-    } else {
-        buildList {
-            var i = 0
-            while (true) {
-                val idx = msg.indexOf(hl.pattern, i, ignoreCase = true)
-                if (idx < 0) break
-                add(idx to idx + hl.pattern.length); i = idx + 1
-            }
-        }
-    }
 
 internal fun keywordRegexHighlightRanges(
     lineText: String,
@@ -847,71 +834,121 @@ internal fun buildFullLineAnnotation(
     // See appendTsPidTid's own doc — null (every pre-existing caller) reproduces the pre-feature
     // render byte-for-byte.
     cellBg: Color? = null,
-): AnnotatedString = buildAnnotatedString {
-    appendTsPidTid(entry, tsColor, pidColor, processDisplay, pidFieldWidth, cellBg)
-    append("  ")
-    withStyle(SpanStyle(color = entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
-        append(entry.level.key.toString())
-    }
-    append("  ")
-    withStyle(SpanStyle(color = tagColor)) { append(entry.tag); append(":") }
-    append(" ")
-    withStyle(SpanStyle(color = msgColor)) { append(entry.msg) }
+): AnnotatedString = buildLogLineRender(
+    entry, highlighters, tsColor, pidColor, tagColor, msgColor, keywordRegexFilter, regexContext,
+    searchHighlight, processDisplay, pidFieldWidth, cellBg,
+).text
+
+/** A row's rendered text plus the whole-line [Highlighter] that owns its tint (null when none
+ *  does) — LogRow paints the row background/stripe from it. */
+internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?)
+
+// Same rendering as buildFullLineAnnotation, but also reports the whole-line highlighter so LogRow
+// can tint the row. [suppressLineTextColor] drops a klogg whole-line rule's foreground colour (LogRow
+// passes it for selected and crash rows, whose own backgrounds must stay readable); the tint itself
+// is LogRow's business.
+@Suppress("LongParameterList")
+internal fun buildLogLineRender(
+    entry: LogEntry,
+    highlighters: List<Highlighter>,
+    tsColor: Color,
+    pidColor: Color,
+    tagColor: Color,
+    msgColor: Color,
+    keywordRegexFilter: Filter?,
+    regexContext: RegexEvaluationContext,
+    searchHighlight: SearchHighlight? = null,
+    processDisplay: String? = null,
+    pidFieldWidth: Int = 5,
+    cellBg: Color? = null,
+    suppressLineTextColor: Boolean = false,
+): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
-    // source of truth (utils/TextMatch.kt) — never against what's actually rendered above, which
+    // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
     // (once a process name, or a numeric pid padded to a wider uniform column, replaces
     // visibleLogLineText's own fixed 5-char pid field) can differ from it — in LENGTH whenever
     // pidFieldWidth != 5, but potentially in CONTENT even when pidFieldWidth == 5 (a resolved name
     // no wider than 5 chars still replaces the digits at that same width). Every offset pair
-    // hlRanges/keywordRegexHighlightRanges/regexRanges hand back is therefore always passed through
-    // remapPidFieldRange (whenever this row even HAS a pid field — entry.pid <= 0 rows never do, on
-    // either side, so those skip straight to identity) before being applied to the text actually
-    // built above — see that function's own doc for the exact rule, including how it widens a range
-    // overlapping the pid field to the field's full rendered span regardless of whether delta is
-    // zero, precisely because content (not just width) can differ there. Mode OFF never resolves a
-    // name at all (LogRow's resolveProcessDisplayName), so this is a no-op there in practice, not
-    // just in the common case — see the OFF-byte-identical test coverage in
+    // resolveLineHighlight/keywordRegexHighlightRanges/regexRanges hand back is therefore always
+    // passed through remapPidFieldRange (whenever this row even HAS a pid field — entry.pid <= 0
+    // rows never do, on either side, so those skip straight to identity) before being applied to
+    // the text actually built below — see that function's own doc for the exact rule, including
+    // how it widens a range overlapping the pid field to the field's full rendered span regardless
+    // of whether delta is zero, precisely because content (not just width) can differ there. Mode
+    // OFF never resolves a name at all (LogRow's resolveProcessDisplayName), so this is a no-op
+    // there in practice, not just in the common case — see the OFF-byte-identical test coverage in
     // ProcessNameRenderingTest.
     val lineText = visibleLogLineText(entry)
-    val pidFieldDelta = pidFieldWidth - 5
-    val pidFieldStart = entry.ts.length + 2
-    val pidFieldEndVisible = pidFieldStart + 5
-
-    fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
-        if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
-    val renderedLength = length
-    for (hl in highlighters.filter { it.on && it.pattern.isNotBlank() }) {
-        hlRanges(lineText, hl, regexContext).forEach { rawRange ->
-            val (s, e) = remap(rawRange)
-            if (s < e && e <= renderedLength)
-                addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), s, e)
+    val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext)
+    // A klogg whole-line rule recolours every character of the row through the base colours below,
+    // so it survives wrapping (visualLogLineForWrapLimit rebuilds lines from these same spans).
+    val lineTextColor = lineHighlight.wholeLine?.textColor?.takeUnless { suppressLineTextColor }
+    val text = buildAnnotatedString {
+        appendTsPidTid(entry, lineTextColor ?: tsColor, lineTextColor ?: pidColor, processDisplay, pidFieldWidth, cellBg)
+        append("  ")
+        withStyle(SpanStyle(color = lineTextColor ?: entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
+            append(entry.level.key.toString())
         }
-    }
-    keywordRegexFilter?.let { filter ->
-        keywordRegexHighlightRanges(lineText, filter, regexContext).forEach { rawRange ->
-            val (s, e) = remap(rawRange)
-            if (s < e && e <= renderedLength) {
-                addStyle(
-                    SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
-                    s,
-                    e,
+        append("  ")
+        withStyle(SpanStyle(color = lineTextColor ?: tagColor)) { append(entry.tag); append(":") }
+        append(" ")
+        withStyle(SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
+        val pidFieldDelta = pidFieldWidth - 5
+        val pidFieldStart = entry.ts.length + 2
+        val pidFieldEndVisible = pidFieldStart + 5
+
+        fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
+            if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+        val renderedLength = length
+        // The two-space gaps between fields carry no span of their own; cover them too so the whole
+        // line, every character, reads as the rule's text colour.
+        lineTextColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
+        for (span in lineHighlight.spans) {
+            val (s, e) = remap(span.start to span.end)
+            if (s < e && e <= renderedLength) addStyle(highlightSpanStyle(span.hl), s, e)
+        }
+        keywordRegexFilter?.let { filter ->
+            addRemappedRanges(
+                keywordRegexHighlightRanges(lineText, filter, regexContext),
+                ::remap,
+                SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
+            )
+        }
+        // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
+        // visually — addStyle layers are painted in the order added, later spans on top.
+        searchHighlight?.let { sh ->
+            if (sh.query.isNotEmpty()) {
+                val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
+                addRemappedRanges(
+                    regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext),
+                    ::remap,
+                    SpanStyle(background = bg, fontWeight = FontWeight.SemiBold),
                 )
             }
         }
     }
-    // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
-    // visually — addStyle layers are painted in the order added, later spans on top.
-    searchHighlight?.let { sh ->
-        if (sh.query.isNotEmpty()) {
-            val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
-            regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { rawRange ->
-                val (s, e) = remap(rawRange)
-                if (s < e && e <= renderedLength) {
-                    addStyle(SpanStyle(background = bg, fontWeight = FontWeight.SemiBold), s, e)
-                }
-            }
-        }
+    return LogLineRender(text, lineHighlight.wholeLine)
+}
+
+// Applies [style] to each raw (visibleLogLineText-coordinate) range once [remap]ped onto the text
+// built so far; a range that ends up empty or past the end is dropped.
+private fun AnnotatedString.Builder.addRemappedRanges(
+    ranges: List<Pair<Int, Int>>,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+    style: SpanStyle,
+) {
+    val renderedLength = length
+    for (rawRange in ranges) {
+        val (s, e) = remap(rawRange)
+        if (s < e && e <= renderedLength) addStyle(style, s, e)
     }
+}
+
+// Indagium match spans stay the translucent, semi-bold wash they always were; a klogg rule paints
+// its own opaque back/fore pair at normal weight, exactly as klogg does.
+private fun highlightSpanStyle(hl: Highlighter): SpanStyle {
+    val fore = hl.textColor ?: return SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold)
+    return SpanStyle(color = fore, background = hl.color)
 }
 
 // Start offset of each wrapped visual line (always begins with 0; count == number of lines).
@@ -955,7 +992,7 @@ fun stripVisualWrapBreaks(text: String): String = text.replace("\n", "")
 fun keyboardCopyTextForLogPanel(selectedText: String?, selectedRowsText: () -> String): String =
     selectedText?.takeIf { it.isNotBlank() } ?: selectedRowsText()
 
-private fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
+internal fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
     val limit = limitChars.coerceAtLeast(1)
     if (line.length <= limit) return line
     val starts = wrapBreakStarts(line.text, limit)
@@ -3029,13 +3066,16 @@ private fun LogRow(
     // added). See appendTsPidTid's own doc for why this is two separate per-field washes rather
     // than one spanning the "  " gap between them.
     val cellBg = item.scopedSeqColor?.copy(alpha = tc.seqCellBgAlpha)
-    val annoLine = remember(
+    // isSel is a key because a klogg whole-line rule's text colour is dropped on selected rows
+    // (see buildLogLineRender's suppressLineTextColor) — the row's selection background must stay
+    // readable — so the text has to be rebuilt when selection toggles.
+    val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars,
+        searchHighlight, processDisplay, pidFieldChars, isSel,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
-        val built = buildFullLineAnnotation(
+        val built = buildLogLineRender(
             entry,
             tab.filter.highlighters,
             tsColor,
@@ -3051,17 +3091,30 @@ private fun LogRow(
             processDisplay = processDisplay,
             pidFieldWidth = pidFieldChars,
             cellBg = cellBg,
+            suppressLineTextColor = isSel || isCrashGroupRow,
         )
-        if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
+        if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
     }
+    val annoLine = lineRender.text
+    val wholeLineHl = lineRender.wholeLine
 
     val levelColor = entry.level.defaultColor
+    // selection > crash group > whole-line highlight > hover. A klogg rule paints its opaque back
+    // colour; an Indagium one is a light wash (its stripe below carries the colour at full strength).
     val bg = when {
         isSel -> tc.sl
         isCrashGroupRow -> DANGER_RED.copy(alpha = if (hov) 0.15f else 0.07f)
+        wholeLineHl != null ->
+            if (wholeLineHl.isKloggStyle()) {
+                wholeLineHl.color
+            } else {
+                wholeLineHl.color.copy(alpha = WHOLE_LINE_WASH_ALPHA + if (hov) WHOLE_LINE_HOVER_EXTRA_ALPHA else 0f)
+            }
         hov -> tc.hv
         else -> Color.Transparent
     }
+    // An Indagium whole-line highlight swaps the level stripe for one in its own colour.
+    val stripeHl = wholeLineHl?.takeUnless { it.isKloggStyle() }
     val groupColor = item.groupColor
 
     Row(
@@ -3224,7 +3277,11 @@ private fun LogRow(
             }
             // Level-coloured left edge stripe
             .drawBehind {
-                drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                if (stripeHl != null) {
+                    drawRect(stripeHl.color, topLeft = Offset.Zero, size = Size(3.dp.toPx(), size.height))
+                } else {
+                    drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                }
                 if (groupColor != null && item.indent > 0) {
                     val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * INDENT_STEP.toPx())
                     drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))

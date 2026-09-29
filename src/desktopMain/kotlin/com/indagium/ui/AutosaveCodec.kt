@@ -1273,12 +1273,22 @@ internal fun activeFilterMapFromToken(token: String): Map<String, String> =
         if (p.size >= 2) p[0] to p[1] else null
     }.toMap()
 
+// Fields 0-4 are the original token; the rest were appended for whole-line/scoped/klogg-style
+// highlighters (append-last versioning) and decode with getOrNull, so a five-field token from an
+// older build restores as a plain match-only highlighter.
 internal fun Highlighter.highlighterToken(): String = tokenFields(
     id,
     pattern,
     regex.toString(),
     color.value.toString(),
     on.toString(),
+    wholeLine.toString(),
+    target.name,
+    tag.orEmpty(),
+    caseSensitive.toString(),
+    textColor?.value?.toString().orEmpty(),
+    captureGroupsOnly.toString(),
+    colorVariance.toString(),
 )
 
 internal fun String.highlighterFromToken(): Highlighter? = runCatching {
@@ -1290,6 +1300,14 @@ internal fun String.highlighterFromToken(): Highlighter? = runCatching {
         regex = p[2].toBoolean(),
         color = Color(p[3].toULong()),
         on = p[4].toBoolean(),
+        wholeLine = p.getOrNull(5)?.toBoolean() ?: false,
+        target = p.getOrNull(6)?.let { name -> HighlightTarget.entries.firstOrNull { it.name == name } }
+            ?: HighlightTarget.ANY,
+        tag = p.getOrNull(7)?.takeIf { it.isNotBlank() },
+        caseSensitive = p.getOrNull(8)?.toBoolean() ?: false,
+        textColor = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.toULongOrNull()?.let { Color(it) },
+        captureGroupsOnly = p.getOrNull(10)?.toBoolean() ?: false,
+        colorVariance = p.getOrNull(11)?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
     )
 }.getOrNull()
 

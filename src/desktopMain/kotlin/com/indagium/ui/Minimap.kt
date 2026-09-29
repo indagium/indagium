@@ -39,6 +39,7 @@ import com.indagium.model.LogItem
 import com.indagium.model.LogLevel
 import com.indagium.model.entry
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.highlighterMatches
 import com.indagium.utils.visibleLogLineText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -111,17 +112,20 @@ private fun isCrashItem(item: LogItem, crashIds: BitSet): Boolean =
 // Mirrors LogRow's own color precedence exactly, so the strip's colors correspond to what's
 // actually on screen instead of a separate, invented palette:
 //   1. Crash / StackTraceHeader — unmissable, overrides everything else.
-//   2. Level E/A (error) / W (warn) — the same colors the row's own level badge uses.
-//   3. The first enabled, matching highlighter from `highlighters` (tab.filter.highlighters) —
-//      reuses hlRanges (LogViewer.kt), the SAME matcher LogRow itself calls from
-//      buildFullLineAnnotation, rather than a second one that could drift from it.
-//   4. A group/collapse HEADER's own color — SeqHeader.color / ManualHeader.color (StackTraceHeader
+//   2. A whole-line highlighter that owns the row (the first matching one in list order — the same
+//      winner LogRow tints the row with) — the user asked for the entire line to stand out.
+//   3. Level E/A (error) / W (warn) — the same colors the row's own level badge uses.
+//   4. The first enabled, matching match-text highlighter from `highlighters`
+//      (tab.filter.highlighters) — via highlighterMatches (utils/HighlightMatch.kt), the SAME
+//      matcher LogRow itself calls through buildLogLineRender, rather than a second one that could
+//      drift from it.
+//   5. A group/collapse HEADER's own color — SeqHeader.color / ManualHeader.color (StackTraceHeader
 //      has none, but it's already handled by crash precedence above). Deliberately NOT
 //      LogItem.Row.groupColor: that field is set on every MEMBER row of an expanded sequence/
 //      manual-collapse block too, and painting every member the group color made the whole block
 //      read as one solid slab on the strip. Only the block's HEADER gets the color; a member row
 //      falls through to its own level color or the muted default like any other line.
-//   5. Otherwise, [mutedColor] — the same treatment V/D/plain-Info rows get, so the noise floor
+//   6. Otherwise, [mutedColor] — the same treatment V/D/plain-Info rows get, so the noise floor
 //      stays quiet and an actually-colored row means something.
 private fun resolveMinimapColor(
     item: LogItem,
@@ -131,18 +135,18 @@ private fun resolveMinimapColor(
     mutedColor: Color,
 ): Color {
     if (isCrash) return CRASH_COLOR
+    val lineText by lazy(LazyThreadSafetyMode.NONE) { visibleLogLineText(item.entry) }
+    val wholeLine = highlighters.firstOrNull {
+        it.wholeLine && highlighterMatches(it, item.entry, lineText, regexContext)
+    }
+    if (wholeLine != null) return wholeLine.color
     when (item.entry.level) {
         LogLevel.E, LogLevel.A -> return LogLevel.E.defaultColor
         LogLevel.W -> return LogLevel.W.defaultColor
         else -> {}
     }
-    if (highlighters.isNotEmpty()) {
-        val lineText = visibleLogLineText(item.entry)
-        for (hl in highlighters) {
-            if (!hl.on || hl.pattern.isBlank()) continue
-            if (hlRanges(lineText, hl, regexContext).isNotEmpty()) return hl.color
-        }
-    }
+    highlighters.firstOrNull { !it.wholeLine && highlighterMatches(it, item.entry, lineText, regexContext) }
+        ?.let { return it.color }
     val headerColor = when (item) {
         is LogItem.Row -> null
         is LogItem.SeqHeader -> item.color

@@ -1,6 +1,8 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.Color
 import com.indagium.debug.ControlServer
+import com.indagium.model.HighlightTarget
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.source.SourceIndexStore
@@ -16,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 private const val INITIALIZE_REQUEST =
@@ -374,6 +377,59 @@ class ControlServerMcpTest {
         assertTrue(body.contains("\\\"ok\\\":true"), body)
         assertEquals(1, state.tab("t1")!!.filter.sequences.size)
         assertEquals("boot", state.tab("t1")!!.filter.sequences.single().matchText)
+    }
+
+    @Test
+    fun setHighlightersAcceptsWholeLineScopeAndCaseAndEchoesThemBack() {
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_highlighters","arguments":{"tabId":"t1",""" +
+                """"highlighters":[{"pattern":"boot","wholeLine":true,"target":"message","tag":"App","caseSensitive":true,""" +
+                """"color":"#FF8800","textColor":"#000000"},{"pattern":"plain"}]}}}""",
+            session,
+        ).body()
+
+        assertTrue(body.contains("\\\"ok\\\":true"), body)
+        val (scoped, plain) = state.tab("t1")!!.filter.highlighters
+        assertTrue(scoped.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, scoped.target)
+        assertEquals("App", scoped.tag)
+        assertTrue(scoped.caseSensitive)
+        assertEquals(Color(0xFF000000), scoped.textColor)
+        // Everything omitted stays what highlighters always were: match-only, anywhere, insensitive.
+        assertFalse(plain.wholeLine)
+        assertEquals(HighlightTarget.ANY, plain.target)
+        assertEquals(null, plain.tag)
+        assertFalse(plain.caseSensitive)
+        assertEquals(null, plain.textColor)
+        // The echo carries the new fields.
+        assertTrue(body.contains("wholeLine"), body)
+        assertTrue(body.contains("caseSensitive"), body)
+        assertTrue(body.contains("textColor"), body)
+    }
+
+    @Test
+    fun setHighlightersRejectsAnUnknownTarget() {
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_highlighters","arguments":{"tabId":"t1",""" +
+                """"highlighters":[{"pattern":"boot","target":"nowhere"}]}}}""",
+            session,
+        ).body()
+
+        assertTrue(body.contains("invalid target"), body)
+        assertTrue(state.tab("t1")!!.filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun setHighlightersDescriptionDocumentsTheNewFields() {
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+        listOf("wholeLine", "target", "caseSensitive", "textColor").forEach {
+            assertTrue(body.contains(it), "set_highlighters description missing $it")
+        }
     }
 
     @Test

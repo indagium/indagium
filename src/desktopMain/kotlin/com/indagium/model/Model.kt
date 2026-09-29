@@ -332,7 +332,34 @@ data class Filter(
     val sequences: List<SequenceDef> = emptyList(),
 )
 
-data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
+/** Which part of a row a [Highlighter] pattern is matched against. */
+enum class HighlightTarget { ANY, TAG, MESSAGE }
+
+/**
+ * A highlight rule. Everything after [on] is optional and defaults to what highlighters always
+ * were: colour the matched text only ([wholeLine] = false), matched anywhere on the rendered line,
+ * case-insensitively. A non-null [textColor] marks a klogg-imported rule, which keeps klogg's own
+ * behaviour (opaque background + this foreground colour, case per [caseSensitive], capture groups).
+ */
+data class Highlighter(
+    val id: String,
+    val pattern: String,
+    val regex: Boolean,
+    val color: Color,
+    val on: Boolean,
+    // true = the whole row is tinted, not just the matched text
+    val wholeLine: Boolean = false,
+    val target: HighlightTarget = HighlightTarget.ANY,
+    // exact-tag scope, same rule as a message rule's tag (utils/Filter.kt ruleScopeMatches)
+    val tag: String? = null,
+    val caseSensitive: Boolean = false,
+    // non-null = klogg style: opaque [color] background + this foreground colour
+    val textColor: Color? = null,
+    // klogg: a regex with capture groups colours only the groups
+    val captureGroupsOnly: Boolean = false,
+    // klogg variate_colors (match-only); 0 = off
+    val colorVariance: Int = 0,
+)
 
 enum class RuleTarget { MESSAGE, PID_TID }
 

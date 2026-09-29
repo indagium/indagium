@@ -801,12 +801,16 @@ internal fun matchingMessageRule(
 }
 
 /** The existing highlighter (if any) that a Highlight press for [template] would remove — or null
- *  if pressing it would create a new one instead. Highlighters carry no tag/scope, so the shape is
- *  just pattern+regex, unlike [matchingMessageRule]. */
+ *  if pressing it would create a new one instead. Highlight presses now create a message-scoped
+ *  highlighter carrying the template's tag, so the shape is pattern+regex+tag; older highlighters
+ *  that have no tag at all (created before highlighters could be scoped) still count as a match. */
 internal fun matchingHighlighter(
     highlighters: List<Highlighter>,
     template: MessageTemplate,
 ): Highlighter? {
     val spec = messageRuleSpecForTemplate(template)
-    return highlighters.firstOrNull { it.pattern == spec.pattern && it.regex == spec.regex }
+    val tag = template.tag.trim().takeIf { it.isNotBlank() }
+    return highlighters.firstOrNull {
+        it.pattern == spec.pattern && it.regex == spec.regex && (it.tag == null || it.tag == tag)
+    }
 }

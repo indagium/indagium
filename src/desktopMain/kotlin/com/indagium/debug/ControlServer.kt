@@ -1283,18 +1283,27 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "set_highlighters",
         "Replace a tab's highlighter list — the patterns whose matches are color-marked in the log " +
-            "view. Highlighters do NOT hide or fold rows; they only tint matching text, so they are " +
-            "safe to add freely while investigating. A supplied highlighters list replaces the " +
-            "current one wholesale; clearHighlighters removes all of them. Each highlighters item is " +
-            "an object: { pattern (required), regex (default false), color (optional hex like " +
-            "\"#FF8800\" — omit to auto-assign from the palette), enabled (default true) }.",
+            "view. Highlighters do NOT hide or fold rows; they only tint matching text (or, with " +
+            "wholeLine, the whole row), so they are safe to add freely while investigating. A supplied " +
+            "highlighters list replaces the current one wholesale; clearHighlighters removes all of " +
+            "them. Each highlighters item is an object: { pattern (required), regex (default false), " +
+            "color (optional hex like \"#FF8800\" — omit to auto-assign from the palette), enabled " +
+            "(default true), wholeLine (default false — true tints the entire row instead of only the " +
+            "matched text), target (\"any\" (default, the whole rendered line), \"tag\" or " +
+            "\"message\" — which part of the row the pattern is matched against), tag (optional exact " +
+            "tag; the highlighter only applies to rows with that tag), caseSensitive (default false), " +
+            "textColor (optional hex foreground colour for the highlighted text) }. The result echoes " +
+            "every highlighter back with these fields.",
         schema(
             "tabId" to "string", "highlighters" to "array", "clearHighlighters" to "boolean",
             required = listOf("tabId"),
             descriptions = mapOf(
                 "highlighters" to "Highlighters to set (replaces the current list). Each item is an " +
                     "object: pattern (string, required), regex (boolean, default false), color " +
-                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true).",
+                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true), " +
+                    "wholeLine (boolean, default false), target (string: any, tag or message; default any), " +
+                    "tag (string, optional exact tag scope), caseSensitive (boolean, default false), " +
+                    "textColor (string, optional hex foreground colour).",
                 "clearHighlighters" to "If true, remove every highlighter from the tab.",
             ),
         ),
