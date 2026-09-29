@@ -297,6 +297,9 @@ kotlin {
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
                 implementation("org.tukaani:xz:1.10")
+                // capture/WirelessAdb.kt: the Wi-Fi pairing dialog draws a QR code (ui/WirelessPairingDialogs.kt).
+                // Only the encoder in `core` is used; there is no camera or image-IO dependency.
+                implementation("com.google.zxing:core:3.5.3")
                 // Official R8 Retrace API. Keep this pinned: mapping metadata and the in-process
                 // retrace contract are versioned together, so a moving dependency can silently
                 // change deobfuscation behavior between desktop releases.

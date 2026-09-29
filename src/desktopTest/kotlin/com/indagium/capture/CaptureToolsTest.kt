@@ -292,4 +292,38 @@ class CaptureToolsTest {
         assertEquals(1, result.exitCode)
         assertTrue(result.stderrText().contains("Permission denied"))
     }
+
+    @Test
+    fun wirelessCommandsUseTheExpectedArgv() {
+        val runner = FakeCaptureRunner()
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+        runner.enqueue(CompletedFakeProcess("mdns daemon version [Openscreen discovery 0.0.0]\n"))
+        runner.enqueue(CompletedFakeProcess("List of discovered mdns services\nadb-X\t_adb-tls-pairing._tcp\t10.0.0.5:4000\n"))
+        runner.enqueue(CompletedFakeProcess("Successfully paired to 10.0.0.5:4000 [guid=adb-X]"))
+        runner.enqueue(CompletedFakeProcess("connected to 10.0.0.5:4100"))
+
+        assertTrue(tools.mdnsCheck())
+        assertEquals("10.0.0.5:4000", tools.mdnsServices().single().address)
+        assertTrue(tools.pair("10.0.0.5:4000", "123456") is WirelessAdbOutcome.Success)
+        assertTrue(tools.connect("10.0.0.5:4100") is WirelessAdbOutcome.Success)
+
+        assertEquals(
+            listOf(
+                listOf("/sdk/adb", "mdns", "check"),
+                listOf("/sdk/adb", "mdns", "services"),
+                listOf("/sdk/adb", "pair", "10.0.0.5:4000", "123456"),
+                listOf("/sdk/adb", "connect", "10.0.0.5:4100"),
+            ),
+            runner.specs.map { it.command },
+        )
+    }
+
+    @Test
+    fun mdnsCheckIsFalseWhenTheBackendIsUnavailable() {
+        val runner = FakeCaptureRunner()
+        val tools = CaptureTools(CaptureExecutable("/sdk/adb"), null, runner)
+        runner.enqueue(CompletedFakeProcess("ERROR: mdns unavailable", code = 1))
+
+        assertFalse(tools.mdnsCheck())
+    }
 }

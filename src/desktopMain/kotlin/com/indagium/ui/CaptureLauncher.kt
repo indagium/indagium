@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.capture.AdbMdnsService
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
@@ -97,6 +98,10 @@ internal fun CaptureLauncherContent(
     // recomposition so a 3s background refresh (below) never silently resets it.
     var selectedSerial by remember { mutableStateOf<String?>(null) }
     val liveSelectedDevice = service.devices.firstOrNull { it.serial == selectedSerial }
+    // Wi-Fi pairing dialogs: the QR one, and the code one (null = closed, "" = manual address entry,
+    // otherwise prefilled from a "Ready to pair" row). Presentation-only, like selectedSerial.
+    var qrPairingOpen by remember { mutableStateOf(false) }
+    var codePairingAddress by remember { mutableStateOf<String?>(null) }
     // "Restart adb as root" (DeviceLoggingPanelContent below) restarts adbd, which briefly drops the
     // device off `adb devices` while it reconnects. Without this, the plain `?: service.devices.
     // firstOrNull()` fallback below would silently swap the Device logging panel to a different
@@ -172,6 +177,9 @@ internal fun CaptureLauncherContent(
                         onSelect = { selectedSerial = device.serial },
                     )
                 }
+                // Phones on a pairing screen are listed below the (empty) device rows, so say so
+                // instead of the more discouraging "No devices discovered".
+                service.pairingCandidates.isNotEmpty() -> AppText("No connected devices", color = tc().td)
                 // Never discovered yet (the launcher's own first refresh hasn't landed): a same-
                 // height placeholder instead of "No devices discovered", so a device that shows up a
                 // moment later doesn't read as if the panel first claimed there was nothing there —
@@ -186,6 +194,45 @@ internal fun CaptureLauncherContent(
                     AppButton("Refresh devices", { service.refreshDevices(force = true) }, ButtonVariant.Ghost, enabled = !service.discovering)
                 }
             }
+            service.pairingCandidates.forEach { candidate ->
+                PairingCandidateRow(candidate, onPair = { codePairingAddress = candidate.address })
+            }
+            if (service.adbAvailable) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    AppButton("Pair over Wi-Fi…", { qrPairingOpen = true }, ButtonVariant.Ghost)
+                    if (service.mdnsAvailable == false) {
+                        AppButton("Pair with code…", { codePairingAddress = "" }, ButtonVariant.Ghost)
+                    }
+                }
+                if (service.mdnsAvailable == false) {
+                    AppText("Wi-Fi discovery unavailable (network may block mDNS)", color = tc().td, fontSize = 10.sp)
+                }
+            }
+        }
+        if (qrPairingOpen) {
+            QrPairingDialog(
+                service = service,
+                onConnected = { serial -> selectedSerial = serial },
+                onUseCode = {
+                    qrPairingOpen = false
+                    codePairingAddress = ""
+                },
+                onDismiss = {
+                    qrPairingOpen = false
+                    onReclaimFocus()
+                },
+            )
+        }
+        codePairingAddress?.let { address ->
+            CodePairingDialog(
+                service = service,
+                initialAddress = address,
+                onConnected = { serial -> selectedSerial = serial },
+                onDismiss = {
+                    codePairingAddress = null
+                    onReclaimFocus()
+                },
+            )
         }
         selectedDevice?.let { device ->
             DeviceLoggingPanel(
@@ -241,14 +288,48 @@ private fun CaptureDeviceRow(device: CaptureDevice, selected: Boolean, onSelect:
                 AppText(device.serial, color = colors.td, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            if (device.wireless) WifiTag()
             CaptureDeviceStatePill(device)
         }
-        deviceStateGuidance(device.state)?.let { hint ->
+        deviceStateGuidance(device.state, device.wireless)?.let { hint ->
             AppText(
                 hint, color = DANGER_RED, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 4.dp),
             )
         }
+    }
+}
+
+/** Small neutral "Wi-Fi" tag on a device row for a phone attached over Wireless debugging. */
+@Composable
+private fun WifiTag() {
+    val colors = tc()
+    Box(
+        Modifier.border(1.dp, colors.br, RoundedCornerShape(50)).padding(horizontal = 8.dp, vertical = 2.dp),
+    ) {
+        AppText("Wi-Fi", color = colors.td, fontSize = 10.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** An inline "Ready to pair" row for a phone showing its pairing screen. Deliberately a row the
+ * user opts into rather than a popup, so another person's phone on the same network can never put
+ * a modal on this screen. */
+@Composable
+private fun PairingCandidateRow(candidate: AdbMdnsService, onPair: () -> Unit) {
+    val colors = tc()
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            AppText("Ready to pair over Wi-Fi", color = colors.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            AppText(
+                candidate.address, color = colors.td, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        AppButton("Pair…", onPair, ButtonVariant.Ghost)
     }
 }
 

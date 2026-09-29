@@ -183,6 +183,30 @@ class CaptureTools(
         return parseAndroidSdkLevel(result.stdoutText())
     }
 
+    /** Whether adb's mDNS backend is usable here (`adb mdns check`); false on any failure, since
+     *  Wi-Fi discovery is an optional extra and must never look like an adb problem. */
+    fun mdnsCheck(): Boolean {
+        val result = runAdb(null, listOf("mdns", "check"))
+        if (result.timedOut) return false
+        val text = (result.stdoutText() + "\n" + result.stderrText()).lowercase()
+        return "mdns daemon version" in text && "unavailable" !in text
+    }
+
+    /** Services adb's mDNS backend currently sees (phones on pairing screens, paired phones). */
+    internal fun mdnsServices(): List<AdbMdnsService> {
+        val result = runAdb(null, listOf("mdns", "services"))
+        check(!result.timedOut) { "adb mdns services timed out" }
+        check(result.exitCode == 0) { boundedDiagnostic("adb mdns services failed", result) }
+        return parseAdbMdnsServices(result.stdoutText())
+    }
+
+    /** `adb pair`. The pairing [code] is an argv element here, so nothing may log this spec's command. */
+    internal fun pair(address: String, code: String): WirelessAdbOutcome =
+        parseAdbPairResult(runAdb(null, listOf("pair", address, code), PAIR_TIMEOUT), secret = code)
+
+    internal fun connect(address: String): WirelessAdbOutcome =
+        parseAdbConnectResult(runAdb(null, listOf("connect", address), CONNECT_TIMEOUT))
+
     fun listDevices(): List<CaptureDeviceResult> {
         val result = runner.run(CaptureProcessSpec(adb.command(listOf("devices", "-l"))))
         check(!result.timedOut) { "adb devices timed out" }
@@ -363,14 +387,24 @@ fun parseAdbDevices(output: String): List<CaptureDeviceResult> = output.lineSequ
         }.toMap()
         val model = attributes["model"]?.replace('_', ' ') ?: serial
         val device = CaptureDevice(serial = serial, state = state, model = model)
-        CaptureDeviceResult(device, deviceStateGuidance(state))
+        CaptureDeviceResult(device, deviceStateGuidance(state, wireless = device.wireless))
     }
     .toList()
 
-fun deviceStateGuidance(state: String): String? = when (state.lowercase()) {
+fun deviceStateGuidance(state: String, wireless: Boolean = false): String? = when (state.lowercase()) {
     "device" -> null
-    "unauthorized" -> "Unlock the device and accept its USB debugging authorization prompt."
-    "offline" -> "Reconnect the device, then toggle USB debugging if it remains offline."
+    "unauthorized" ->
+        if (wireless) {
+            "Unlock the phone and accept the debugging prompt, or pair it again."
+        } else {
+            "Unlock the device and accept its USB debugging authorization prompt."
+        }
+    "offline" ->
+        if (wireless) {
+            "Check the phone is on the same Wi-Fi and Wireless debugging is still on."
+        } else {
+            "Reconnect the device, then toggle USB debugging if it remains offline."
+        }
     "no permissions" -> "Grant this user USB access (usually with an Android udev rule), then reconnect the device."
     "recovery", "sideload", "bootloader" -> "Boot Android normally before starting log capture."
     else -> "The device is not ready for capture (adb state: $state)."
@@ -384,6 +418,8 @@ private fun boundedDiagnostic(prefix: String, result: CaptureCommandResult): Str
     return if (detail.isEmpty()) "$prefix (exit ${result.exitCode})" else "$prefix: $detail"
 }
 
+private val PAIR_TIMEOUT: Duration = Duration.ofSeconds(20)
+private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(15)
 private const val HOST_PROBE_OUTPUT_LIMIT_BYTES = 4 * 1024
 private const val MAX_TOOL_DIAGNOSTIC_CHARS = 4_096
 private const val MIN_ADB_DEVICE_FIELDS = 2

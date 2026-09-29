@@ -174,7 +174,7 @@ class CaptureRecorder internal constructor(
         beforeLogcatLaunch: ((CaptureSession) -> Unit)? = null,
     ): CaptureSession {
         synchronized(lock) {
-            require(device.available) { deviceStateGuidance(device.state) ?: "Device is not available" }
+            require(device.available) { deviceStateGuidance(device.state, device.wireless) ?: "Device is not available" }
             check(!active.get()) { "A capture session is already recording" }
             check(!starting) { "A capture session is already starting" }
             // Only CUSTOM depends on `buffers` being non-empty (DEFAULT/ALL never read it — see

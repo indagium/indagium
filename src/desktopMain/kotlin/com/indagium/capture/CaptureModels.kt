@@ -181,6 +181,10 @@ fun CaptureSettings.logcatBufferArgs(): List<String> = when (bufferMode) {
 
 data class CaptureDevice(val serial: String, val state: String, val model: String = serial, val emulator: Boolean = serial.startsWith("emulator-")) {
     val available: Boolean get() = state == "device"
+
+    /** Attached over Wi-Fi (Wireless debugging) rather than USB. Computed from the serial, so
+     *  nothing about it is persisted. */
+    val wireless: Boolean get() = isWirelessSerial(serial)
 }
 
 enum class CaptureStatus { RECORDING, STOPPED, INTERRUPTED }
