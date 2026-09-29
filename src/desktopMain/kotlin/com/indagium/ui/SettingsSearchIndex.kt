@@ -74,6 +74,11 @@ private fun general() = listOf(
         "Everything Indagium stores: settings, session, saved filters, indexes and diagnostics. Reset app data wipes it.",
         listOf("reset", "wipe", "delete", "clear", "factory"),
     ),
+    entry(
+        SettingsSection.General, "Setup assistant",
+        "Walk through profile, theme, folders and capture again (Run setup again).",
+        listOf("setup", "wizard", "onboarding", "first run", "assistant", "welcome", "run setup"),
+    ),
 )
 
 private fun appearance() = buildList {

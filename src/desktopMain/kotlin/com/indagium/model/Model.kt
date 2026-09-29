@@ -1283,6 +1283,10 @@ data class AppSettings(
     // drives the "Customized — N settings differ" strip. Null until one is chosen, and an unknown
     // id is treated the same. JSON-only, same rule as the settings-JSON-only fields above.
     val workspaceProfileId: String? = null,
+    // True once the first-run setup assistant (ui/SetupAssistantDialog.kt) has been finished or
+    // skipped. A missing key decodes to false on purpose: settings written before the assistant
+    // existed show it once, with their current values prefilled. JSON-only, same rule as above.
+    val setupAssistantDone: Boolean = false,
 )
 
 const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4

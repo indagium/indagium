@@ -86,7 +86,8 @@ private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
 
 private fun appHasOpenAppLevelDialog(state: AppState): Boolean =
     state.isLoading || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
-        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.updateDialogVisible || state.cacheClearConfirmOpen ||
+        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.setupAssistantOpen ||
+        state.updateDialogVisible || state.cacheClearConfirmOpen ||
         state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen
 
 /** Root-owned overlays can cover the embedded mirror's elevated native layer. */
@@ -2346,7 +2347,20 @@ fun App(
                 )
             }
 
-            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible) {
+            // The setup assistant waits behind the license and update dialogs; the support popup
+            // in turn waits for the assistant so a first run isn't greeted by two dialogs at once.
+            if (state.setupAssistantOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible) {
+                Dialog(
+                    onDismissRequest = { state.skipSetupAssistant() },
+                    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+                ) {
+                    SetupAssistantDialog(state)
+                }
+            }
+
+            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible &&
+                !state.setupAssistantOpen
+            ) {
                 SupportDialog(state)
             }
 

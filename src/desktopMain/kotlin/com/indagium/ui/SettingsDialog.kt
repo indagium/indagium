@@ -313,6 +313,20 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        // Closes Settings first (unlike the shortcuts popup): the assistant is a dialog of
+                        // its own. Unsaved AI-provider edits get the usual close prompt instead.
+                        AppButton(
+                            "Run setup assistant…",
+                            onClick = {
+                                if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+                                    requestClose()
+                                } else {
+                                    state.rerunSetupAssistant()
+                                }
+                            },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
@@ -589,6 +603,18 @@ private fun SettingsScrollableRows(
     }
 }
 
+/** The log font-size stepper, shared by Settings → Appearance and the setup assistant. */
+@Composable
+internal fun LogFontSizeSetting(state: AppState, modifier: Modifier = Modifier) {
+    CompactSetting("Log font size", modifier, horizontalAlignment = Alignment.Start) {
+        ListStepper(
+            options = (10..24).toList(),
+            value = state.settings.fontSize,
+            onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
+        )
+    }
+}
+
 @Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
@@ -614,13 +640,7 @@ private fun AppearanceSettingsSection(state: AppState) {
                 fillWidth = true,
             )
         }
-        CompactSetting("Log font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
-            ListStepper(
-                options = (10..24).toList(),
-                value = state.settings.fontSize,
-                onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
-            )
-        }
+        LogFontSizeSetting(state, Modifier.weight(1f))
         CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
             ListStepper(
                 options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
@@ -707,49 +727,7 @@ private fun GeneralSettingsSection(state: AppState) {
         }
     }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        SaveFolderRow(
-            label = "Default save folder",
-            tooltip = "Parent folder every other save location below defaults under when it isn't " +
-                "set on its own. Defaults to your Documents folder.",
-            explicitValue = state.settings.saveRootDir,
-            effectivePath = state.effectiveSaveRootDir.absolutePath,
-            onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
-            onReset = { state.resetSaveFolder(SaveFolderKind.ROOT) },
-        )
-        SaveFolderRow(
-            label = "Analysis artifacts folder",
-            tooltip = "Where analysis notes, filtered exports and split logs are saved. Auto-saved " +
-                "notes are written here, created on first save.",
-            explicitValue = state.settings.defaultSaveDir,
-            effectivePath = state.effectiveAnalysisDirForDisplay().absolutePath,
-            onBrowse = { state.pickSaveFolder(SaveFolderKind.ANALYSIS) },
-            onReset = { state.resetSaveFolder(SaveFolderKind.ANALYSIS) },
-        )
-        SaveFolderRow(
-            label = "Capture sessions folder",
-            tooltip = "Where new device captures are recorded. A change applies from the next " +
-                "Start; sessions already recorded stay exactly where they are.",
-            explicitValue = state.settings.captureSessionsDir,
-            effectivePath = state.effectiveCaptureSessionsDir().absolutePath,
-            onBrowse = { state.pickSaveFolder(SaveFolderKind.SESSIONS) },
-            onReset = { state.resetSaveFolder(SaveFolderKind.SESSIONS) },
-        )
-        SaveFolderRow(
-            label = "Snapshots folder",
-            tooltip = "Destination for \"Save snapshot\" while a capture is recording.",
-            explicitValue = state.settings.captureSnapshotsDir,
-            effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
-            onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
-            onReset = { state.resetSaveFolder(SaveFolderKind.SNAPSHOTS) },
-        )
-        SaveFolderRow(
-            label = "Saved captures folder (Save ZIP)",
-            tooltip = "Destination for \"Save ZIP\" on a stopped or retained capture.",
-            explicitValue = state.settings.captureZipDir,
-            effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
-            onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
-            onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
-        )
+        SaveFolderKind.entries.forEach { kind -> SaveFolderSetting(state, kind) }
     }
     Column(Modifier.settingsAnchor("Storage"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
@@ -830,6 +808,70 @@ private fun GeneralSettingsSection(state: AppState) {
     state.autosaveError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
+    val cardShape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier.fillMaxWidth().settingsAnchor("Setup assistant")
+            .background(tc.p2, cardShape).border(1.dp, tc.br, cardShape).padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            AppText("Setup assistant", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Walk through profile, theme, folders and capture again.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+        }
+        AppButton("Run setup again", onClick = { state.rerunSetupAssistant() }, variant = ButtonVariant.Secondary)
+    }
+}
+
+/** The row for one of the save folders, wired exactly as Settings → General shows it; the setup
+ *  assistant reuses it for the folders it offers. */
+@Composable
+internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind) {
+    when (kind) {
+        SaveFolderKind.ROOT -> SaveFolderRow(
+            label = "Default save folder",
+            tooltip = "Parent folder every other save location below defaults under when it isn't " +
+                "set on its own. Defaults to your Documents folder.",
+            explicitValue = state.settings.saveRootDir,
+            effectivePath = state.effectiveSaveRootDir.absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ROOT) },
+        )
+        SaveFolderKind.ANALYSIS -> SaveFolderRow(
+            label = "Analysis artifacts folder",
+            tooltip = "Where analysis notes, filtered exports and split logs are saved. Auto-saved " +
+                "notes are written here, created on first save.",
+            explicitValue = state.settings.defaultSaveDir,
+            effectivePath = state.effectiveAnalysisDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ANALYSIS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ANALYSIS) },
+        )
+        SaveFolderKind.SESSIONS -> SaveFolderRow(
+            label = "Capture sessions folder",
+            tooltip = "Where new device captures are recorded. A change applies from the next " +
+                "Start; sessions already recorded stay exactly where they are.",
+            explicitValue = state.settings.captureSessionsDir,
+            effectivePath = state.effectiveCaptureSessionsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SESSIONS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SESSIONS) },
+        )
+        SaveFolderKind.SNAPSHOTS -> SaveFolderRow(
+            label = "Snapshots folder",
+            tooltip = "Destination for \"Save snapshot\" while a capture is recording.",
+            explicitValue = state.settings.captureSnapshotsDir,
+            effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SNAPSHOTS) },
+        )
+        SaveFolderKind.ZIP -> SaveFolderRow(
+            label = "Saved captures folder (Save ZIP)",
+            tooltip = "Destination for \"Save ZIP\" on a stopped or retained capture.",
+            explicitValue = state.settings.captureZipDir,
+            effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
+        )
+    }
 }
 
 /**
@@ -839,7 +881,7 @@ private fun GeneralSettingsSection(state: AppState) {
  * has actually been set to something other than its computed default.
  */
 @Composable
-private fun SaveFolderRow(
+internal fun SaveFolderRow(
     label: String,
     tooltip: String,
     explicitValue: String?,
