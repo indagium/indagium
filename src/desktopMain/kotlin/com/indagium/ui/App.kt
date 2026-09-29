@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FormatColorFill
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Schema
@@ -639,6 +640,11 @@ fun App(
                                     highlightAutoColor = state.nextAvailableHighlighterColor(ctx.tabId),
                                     preferPickerLeft = submenuOpensLeft,
                                 ),
+                            )
+                            add(
+                                CtxMenuEntry.Action(Icons.Outlined.FormatColorFill, "Highlight lines with this tag") {
+                                    state.addHlTagFromCtx(wholeLine = true)
+                                },
                             )
                             add(CtxMenuEntry.Divider)
                             // Sequence actions — own block, "Add as sequence" pulled out of the

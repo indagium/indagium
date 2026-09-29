@@ -124,3 +124,51 @@ internal fun resolveLineHighlight(
     val spans = (indagium + klogg).flatMap { highlighterSpans(it, entry, lineText, regexContext) }
     return LineHighlight(winner, spans)
 }
+
+/**
+ * How many rows each highlighter's pattern finds, as shown next to a highlighter in the filter
+ * panel. [counts] is keyed by highlighter id; [capped] means only the first [scanned] entries were
+ * looked at (large-file mode), so every count is a lower bound ("≥N").
+ */
+internal data class HighlightRowCounts(
+    val counts: Map<String, Int> = emptyMap(),
+    val scanned: Int = 0,
+    val capped: Boolean = false,
+)
+
+/**
+ * Counts, per highlighter, the entries its pattern matches, through the same [highlighterMatches]
+ * the renderer and the minimap use, so the number next to a highlighter can never disagree with
+ * what gets painted. The `on` switch is ignored (an off highlighter still shows how many rows it
+ * would colour), as is [Highlighter.wholeLine] (it changes what is painted, not what matches).
+ *
+ * At most [scanLimit] entries are examined. [cancellationCheck] is polled every
+ * CANCELLATION_CHECK_INTERVAL entries, so a superseded scan stops instead of finishing for nobody.
+ */
+internal fun countHighlighterRows(
+    entries: List<LogEntry>,
+    highlighters: List<Highlighter>,
+    cancellationCheck: CancellationCheck,
+    scanLimit: Int = Int.MAX_VALUE,
+): HighlightRowCounts {
+    val active = highlighters.filter { it.pattern.isNotBlank() }.map { it.copy(on = true) }
+    val scanned = minOf(entries.size, scanLimit)
+    val capped = entries.size > scanLimit
+    if (active.isEmpty()) return HighlightRowCounts(emptyMap(), scanned, capped)
+    val needsLineText = active.any { it.target == HighlightTarget.ANY }
+    val regexContext = RegexEvaluationContext()
+    val counts = IntArray(active.size)
+    var sinceCheck = 0
+    for (i in 0 until scanned) {
+        if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+            sinceCheck = 0
+            cancellationCheck()
+        }
+        val entry = entries[i]
+        val lineText = if (needsLineText) visibleLogLineText(entry) else ""
+        active.forEachIndexed { idx, hl ->
+            if (highlighterMatches(hl, entry, lineText, regexContext)) counts[idx]++
+        }
+    }
+    return HighlightRowCounts(active.indices.associate { active[it].id to counts[it] }, scanned, capped)
+}

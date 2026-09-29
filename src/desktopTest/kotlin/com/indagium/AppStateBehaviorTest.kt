@@ -7172,6 +7172,55 @@ class AppStateBehaviorTest {
     }
 
     @Test
+    fun addHlTagFromCtxCanCreateAWholeLineTagHighlighter() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx(wholeLine = true)
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertTrue(hl.wholeLine)
+        assertEquals(HighlightTarget.TAG, hl.target)
+        assertEquals("MyTag", hl.tag)
+    }
+
+    @Test
+    fun updateHighlighterKeepsTheIdAndTheListPosition() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "T", "msg"))))
+        state.addHl("t1", "first", false, Color.Yellow)
+        state.addHl("t1", "second", false, Color.Red)
+        state.addHl("t1", "third", false, Color.Blue)
+        val before = state.tabs.single().filter.highlighters
+        val middle = before[1]
+
+        state.updateHighlighter("t1", middle.id) { it.copy(wholeLine = true, pattern = "edited", caseSensitive = true) }
+
+        val after = state.tabs.single().filter.highlighters
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertEquals("edited", after[1].pattern)
+        assertTrue(after[1].wholeLine)
+        assertTrue(after[1].caseSensitive)
+        assertEquals(before[0], after[0])
+        assertEquals(before[2], after[2])
+    }
+
+    @Test
+    fun updateHighlighterIgnoresATransformThatChangesTheId() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "T", "msg"))))
+        state.addHl("t1", "first", false, Color.Yellow)
+        val id = state.tabs.single().filter.highlighters.single().id
+
+        state.updateHighlighter("t1", id) { it.copy(id = "other", on = false) }
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals(id, hl.id)
+        assertFalse(hl.on)
+    }
+
+    @Test
     fun addHlFromCtxStaysMatchOnlyAnywhere() {
         val state = AppState()
         state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message"))))

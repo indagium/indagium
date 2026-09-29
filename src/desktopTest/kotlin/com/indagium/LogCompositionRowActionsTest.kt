@@ -136,6 +136,47 @@ class LogCompositionRowActionsTest {
         assertNull(matchingHighlighter(afterSecondPress, template))
     }
 
+    @Test
+    fun theHighlightMenuCreatesAWholeLineHighlighterAndPressingTheOtherModeSwitchesItInPlace() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        val created = state.tabs.single().filter.highlighters.single()
+        assertTrue(created.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, created.target)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = false)
+        val switched = state.tabs.single().filter.highlighters.single()
+        assertEquals(created.id, switched.id, "switching the mode edits the highlighter, it does not replace it")
+        assertEquals(false, switched.wholeLine)
+    }
+
+    @Test
+    fun pressingTheModeAHighlighterAlreadyHasRemovesIt() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun theMainHighlightButtonStillRemovesAWholeLineHighlighterInsteadOfConvertingIt() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        state.toggleHighlightForTemplate(id, template)
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
     // ── A hand-authored rule counts as applied too ──────────────────────────────────────────
 
     @Test
