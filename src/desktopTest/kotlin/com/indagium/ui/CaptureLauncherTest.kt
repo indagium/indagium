@@ -1,6 +1,9 @@
 package com.indagium.ui
 
 import androidx.compose.runtime.snapshots.Snapshot
+import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.effectiveMirrorMode
+import com.indagium.capture.withMirrorMode
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -43,6 +46,44 @@ class CaptureLauncherTest {
             assertFalse(app.captureLaunchSettings(launcherId).recordVideo)
         } finally {
             app.close()
+        }
+    }
+
+    // The New tab's "Before start" choices are the saved capture settings: what a user picked for
+    // the last capture is what the next New tab, and the next app start, begin with.
+    @Test
+    fun beforeStartChoicesCarryOverToTheNextNewTabAndAcrossRestart() {
+        val autosave = Files.createTempFile("capture-launcher-persist", ".json").toFile()
+        val app = AppState(autosaveFile = autosave, autoExportNotes = false)
+        try {
+            app.openHomeTab()
+            val first = requireNotNull(app.activeTab()).id
+            app.updateCaptureLaunchSettings(first) {
+                it.copy(recordVideo = false, audio = true, hardwareMirror = true).withMirrorMode(CaptureMirrorMode.EXTERNAL)
+            }
+            app.closeTab(first)
+
+            app.openHomeTab()
+            val second = requireNotNull(app.activeTab()).id
+            val carried = app.captureLaunchSettings(second)
+            assertFalse(carried.recordVideo)
+            assertTrue(carried.audio)
+            assertTrue(carried.hardwareMirror)
+            assertEquals(CaptureMirrorMode.EXTERNAL, carried.effectiveMirrorMode)
+            app.autosaveNow()
+        } finally {
+            app.close()
+        }
+
+        val restored = AppState(autosaveFile = autosave, restoreOnCreate = true, autoExportNotes = false)
+        try {
+            val saved = restored.settings.captureSettings
+            assertFalse(saved.recordVideo)
+            assertTrue(saved.audio)
+            assertTrue(saved.hardwareMirror)
+            assertEquals(CaptureMirrorMode.EXTERNAL, saved.effectiveMirrorMode)
+        } finally {
+            restored.close()
         }
     }
 
