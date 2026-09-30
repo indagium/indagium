@@ -101,6 +101,28 @@ class FfmpegCaptureVideoExporter(
         destination: File,
         requestedStartMs: Long,
         requestedEndMs: Long,
+    ): CaptureVideoClip = exportFrom(source, destination, requestedStartMs, requestedEndMs, snapshot = true)
+
+    /**
+     * [source] is final (a stopped or interrupted session never grows again), so it is scanned and
+     * remuxed in place — no [withPrefixSnapshot] copy of what can be a multi-GB file. An
+     * interrupted recording may lack its Matroska trailer, but [readPackets] already tolerates a
+     * truncated tail (INVALIDDATA exactly at the physical EOF, which for a file that no longer
+     * grows is the real length), so the result matches what a snapshot of it would have given.
+     */
+    override fun exportFinal(
+        source: File,
+        destination: File,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+    ): CaptureVideoClip = exportFrom(source, destination, requestedStartMs, requestedEndMs, snapshot = false)
+
+    private fun exportFrom(
+        source: File,
+        destination: File,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+        snapshot: Boolean,
     ): CaptureVideoClip {
         require(requestedStartMs >= 0L) { "Video export start must be non-negative" }
         require(requestedEndMs > requestedStartMs) { "Video export end must be after its start" }
@@ -119,43 +141,55 @@ class FfmpegCaptureVideoExporter(
         destinationParent.mkdirs()
         val staging = Files.createTempFile(destinationParent.toPath(), ".capture-export-", if (mp4) ".mp4" else ".mkv").toFile()
         try {
-            // One shared snapshot for both the scan and the remux (unlike coverageEndMs(), which
+            // One shared input for both the scan and the remux (unlike coverageEndMs(), which
             // only ever needs the scan): scanWindow()'s window bounds must be valid against exactly
-            // the bytes remux() reads, and a single copy is also half the I/O of taking two.
-            val clip = withPrefixSnapshot(source) { snapshot ->
-                val window = scanWindow(snapshot, requestedStartMs, requestedEndMs)
-                val keyframeGapMs = requestedStartMs - window.actualStartUs / MILLIS_PER_SECOND
-                // The exact-start path decodes/re-encodes video only. Keep audio-bearing captures
-                // on the stream-copy path so their Opus track remains in snapshot exports.
-                val exact = if (!window.hasAudio && keyframeGapMs > EXACT_START_TOLERANCE_MS) {
-                    reencodeFromRequestedStart(
-                        snapshot,
-                        staging,
-                        requestedStartMs,
-                        window.actualStartUs,
-                        window.coveredEndUs,
-                        mp4,
-                        reencodeDiagnosticsHook,
-                    )
-                } else {
-                    null
-                }
-                if (exact != null) {
-                    exact
-                } else {
-                    remux(snapshot, staging, window, mp4)
-                    CaptureVideoClip(
-                        actualStartMs = window.actualStartUs / MILLIS_PER_SECOND,
-                        coveredEndMs = window.coveredEndUs / MILLIS_PER_SECOND,
-                        durationMs = (window.coveredEndUs - window.actualStartUs) / MILLIS_PER_SECOND,
-                    )
-                }
+            // the bytes remux() reads. For a growing source that means one frozen copy (also half
+            // the I/O of taking two); for a final source the file itself is that frozen input.
+            val clip = if (snapshot) {
+                withPrefixSnapshot(source) { copy -> exportWindow(copy, staging, requestedStartMs, requestedEndMs, mp4) }
+            } else {
+                // Same guard copyCurrentPrefix applies to the snapshot path.
+                if (source.length() <= 0L) throw IOException("Capture video has no readable bytes: ${source.absolutePath}")
+                exportWindow(source, staging, requestedStartMs, requestedEndMs, mp4)
             }
             replaceDestination(staging, destination)
             return clip
         } finally {
             staging.delete()
         }
+    }
+
+    private fun exportWindow(
+        input: File,
+        staging: File,
+        requestedStartMs: Long,
+        requestedEndMs: Long,
+        mp4: Boolean,
+    ): CaptureVideoClip {
+        val window = scanWindow(input, requestedStartMs, requestedEndMs)
+        val keyframeGapMs = requestedStartMs - window.actualStartUs / MILLIS_PER_SECOND
+        // The exact-start path decodes/re-encodes video only. Keep audio-bearing captures
+        // on the stream-copy path so their Opus track remains in snapshot exports.
+        val exact = if (!window.hasAudio && keyframeGapMs > EXACT_START_TOLERANCE_MS) {
+            reencodeFromRequestedStart(
+                input,
+                staging,
+                requestedStartMs,
+                window.actualStartUs,
+                window.coveredEndUs,
+                mp4,
+                reencodeDiagnosticsHook,
+            )
+        } else {
+            null
+        }
+        if (exact != null) return exact
+        remux(input, staging, window, mp4)
+        return CaptureVideoClip(
+            actualStartMs = window.actualStartUs / MILLIS_PER_SECOND,
+            coveredEndMs = window.coveredEndUs / MILLIS_PER_SECOND,
+            durationMs = (window.coveredEndUs - window.actualStartUs) / MILLIS_PER_SECOND,
+        )
     }
 
     /**

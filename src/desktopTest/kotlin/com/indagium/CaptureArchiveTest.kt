@@ -852,6 +852,81 @@ class CaptureArchiveTest {
         assertNull(imported.videoFile)
     }
 
+    @Test
+    fun stoppedSessionExportReadsTheFinalVideoDirectlyAndRecordingSessionSnapshotsIt() {
+        val calls = mutableListOf<String>()
+        val recordingVideo = CallRecordingVideoExporter(calls)
+
+        listOf(
+            com.indagium.capture.CaptureStatus.RECORDING to "export",
+            com.indagium.capture.CaptureStatus.STOPPED to "exportFinal",
+            com.indagium.capture.CaptureStatus.INTERRUPTED to "exportFinal",
+        ).forEach { (status, expectedCall) ->
+            val root = createTempDirectory("capture-archive-final-$status").toFile()
+            val session = session(root, recordVideo = true).copy(status = status)
+            writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 10_000, 1)))
+            session.videoFile.parentFile.mkdirs()
+            session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+            calls.clear()
+
+            val destination = File(root, "export.zip")
+            CaptureArchiveExporter(recordingVideo).export(
+                session,
+                CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 400_000),
+            )
+
+            assertEquals(listOf(expectedCall), calls, "status $status")
+            // Either path still produces an archive the reader opens, video included.
+            assertTrue(CaptureArchiveReader.open(destination, File(root, "cache")).videoFile?.isFile == true)
+        }
+    }
+
+    @Test
+    fun zipStoresAlreadyCompressedMediaAndStillDeflatesText() {
+        val root = createTempDirectory("capture-archive-zip-levels").toFile()
+        val session = session(root, recordVideo = true).copy(status = com.indagium.capture.CaptureStatus.STOPPED)
+        val repetitiveRow = "01-01 10:00:00.000  1  1 I Tag: the same repetitive logcat line again and again\n"
+        writeCaptureInput(session, List(2_000) { RawRow(repetitiveRow, 10_000L + it, it + 1) })
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1))
+        // Random bytes stand in for H.264/Opus: DEFLATE cannot shrink them, it can only cost CPU.
+        val videoBytes = ByteArray(300_000).also { java.util.Random(7).nextBytes(it) }
+        val fakeVideo = CaptureVideoExporter { _, target, start, end ->
+            target.writeBytes(videoBytes)
+            CaptureVideoClip(start, end, end - start)
+        }
+        val destination = File(root, "levels.zip")
+
+        CaptureArchiveExporter(fakeVideo).export(
+            session,
+            CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 400_000),
+        )
+
+        ZipFile(destination).use { zip ->
+            val video = zip.getEntry("screen.mp4")
+            assertEquals(videoBytes.size.toLong(), video.size)
+            assertTrue(video.compressedSize >= video.size * 99 / 100, "video must not be re-deflated: ${video.compressedSize}/${video.size}")
+            val log = zip.getEntry("logcat.log")
+            assertTrue(log.compressedSize < log.size / 4, "text must still be deflated: ${log.compressedSize}/${log.size}")
+        }
+        // The archive still round-trips through the reader (hash-verified assets).
+        assertTrue(CaptureArchiveReader.open(destination, File(root, "cache")).videoFile?.isFile == true)
+    }
+
+    private class CallRecordingVideoExporter(private val calls: MutableList<String>) : CaptureVideoExporter {
+        override fun export(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip {
+            calls += "export"
+            destination.writeText("video")
+            return CaptureVideoClip(requestedStartMs, requestedEndMs, requestedEndMs - requestedStartMs)
+        }
+
+        override fun exportFinal(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip {
+            calls += "exportFinal"
+            destination.writeText("video")
+            return CaptureVideoClip(requestedStartMs, requestedEndMs, requestedEndMs - requestedStartMs)
+        }
+    }
+
     private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 

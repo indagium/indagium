@@ -302,6 +302,15 @@ data class CaptureVideoClip(val actualStartMs: Long, val coveredEndMs: Long, val
 fun interface CaptureVideoExporter {
     /** Snapshot a growing MKV and remux without modifying the source. Times are source video PTS. */
     fun export(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip
+
+    /**
+     * Like [export], but [source] is final: the session is stopped or interrupted, so the file will
+     * never grow again and implementations may read it directly instead of snapshotting a prefix
+     * first (a multi-GB copy for a long capture). Defaults to [export] so simple implementations
+     * and SAM-lambda test fakes need not care.
+     */
+    fun exportFinal(source: File, destination: File, requestedStartMs: Long, requestedEndMs: Long): CaptureVideoClip =
+        export(source, destination, requestedStartMs, requestedEndMs)
 }
 
 /**
