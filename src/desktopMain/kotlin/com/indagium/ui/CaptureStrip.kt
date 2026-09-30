@@ -209,6 +209,34 @@ internal fun captureVideoCoverageLine(preview: CaptureExportPreview?): String {
     }
 }
 
+/** How long a capture that records video may run without a single video packet before the strip
+ * says so. The device normally delivers its first packet within a second or two. */
+internal const val CAPTURE_NO_VIDEO_WARNING_AFTER_MS = 8_000L
+
+internal const val CAPTURE_NO_VIDEO_WARNING =
+    "No video from the device yet — is its screen on and unlocked?"
+
+/**
+ * Non-null while a live capture that records video has run for [afterMs] without the recorder
+ * having received its first video packet (`RecorderSnapshot.videoRecording` flips once the
+ * `EmbeddedDeviceSession` muxer has one — the same moment CaptureRecorder logs "Video recording
+ * received its first packet"). An Android screen that is off or locked produces no frames, so the
+ * mirror stays black and the log alone gives no hint why. Clears itself the moment the first
+ * packet arrives; never shown for video-off captures or a stopped/finished recorder. Driven purely
+ * by the snapshot's own capture-clock elapsed time, so it needs no timer of its own.
+ */
+internal fun captureNoVideoWarning(
+    snapshot: RecorderSnapshot,
+    afterMs: Long = CAPTURE_NO_VIDEO_WARNING_AFTER_MS,
+): String? {
+    val session = snapshot.session ?: return null
+    val waitingForVideo = snapshot.state == RecorderState.RECORDING &&
+        session.settings.recordVideo &&
+        !snapshot.videoRecording &&
+        session.videoStartElapsedMs == null
+    return if (waitingForVideo && session.elapsedMs >= afterMs) CAPTURE_NO_VIDEO_WARNING else null
+}
+
 internal fun captureVideoStatus(snapshot: RecorderSnapshot): String = when {
     snapshot.videoRecording -> "Video REC"
     snapshot.session?.settings?.recordVideo == true -> "Video idle"
@@ -676,11 +704,15 @@ internal fun CaptureStrip(
         val mirrorError = state.captureService.error
             ?.takeIf { it.startsWith("External scrcpy mirror could not open:") }
         val microphoneWarning = latestMicrophoneCaptureWarning(snapshot.diagnostics)
-        val statusLine = mirrorError ?: microphoneWarning ?: state.captureScreenshotStatus
+        // A persistent condition (nothing is being recorded), so it outranks the transient
+        // screenshot status but not the two real failures above.
+        val noVideoWarning = captureNoVideoWarning(snapshot)
+        val warning = mirrorError ?: microphoneWarning ?: noVideoWarning
+        val statusLine = warning ?: state.captureScreenshotStatus
         if (statusLine != null) {
             AppText(
                 statusLine,
-                color = if (mirrorError != null || microphoneWarning != null) DANGER_RED else colors.ts,
+                color = if (warning != null) DANGER_RED else colors.ts,
                 fontSize = 11.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

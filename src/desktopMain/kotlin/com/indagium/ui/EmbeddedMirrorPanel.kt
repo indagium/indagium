@@ -120,7 +120,15 @@ import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import java.awt.event.KeyEvent as AwtKeyEvent
 
 /** Only a live capture tab may keep its detached mirror window after navigation. */
@@ -134,12 +142,43 @@ internal fun activeDetachedEmbeddedMirrorTabs(tabs: List<LogTab>, detachedTabIds
  * see [MirrorBackend.SharedRecordingSession]) so mirroring never opens a second device encoder.
  * Either way this class turns connection/frame state into one StateFlow and keeps the device/
  * control API out of CaptureStrip's layout code.
+ *
+ * **Threading invariant (the Disconnect -> Connect freeze).** The EDT/UI thread must never wait on
+ * a mirror lifecycle lock, and no mirror lifecycle lock may be held while waiting for the EDT.
+ * Tearing a native surface down needs the EDT (see [EmbeddedMirrorMacSurface.close]); when a
+ * Disconnect on an IO thread held `SharedRecordingSession.lifecycleLock` across that, a Connect
+ * clicked on the EDT blocked on the same lock — each waited for the other, permanently. Therefore:
+ *  - [start]/[stop]/[close] are blocking and only for non-UI threads (IO pool, tests).
+ *  - UI-reachable code uses [requestStart]/[requestStop]/[requestClose]: they return immediately
+ *    and run, strictly in order, on this handle's own single-thread lifecycle lane, so a slow
+ *    Disconnect can never overlap a Connect and the caller never blocks. Rapid click sequences
+ *    collapse: a superseded start/stop is skipped and the state of the LAST request wins.
+ *  - A native surface close waits for the EDT only for a bounded time ([runOnEdtBounded]).
  */
 internal class EmbeddedMirrorHandle private constructor(
     private val backend: MirrorBackend,
 ) : Closeable {
     private val _snapshot = MutableStateFlow(backend.snapshot())
     val snapshot: StateFlow<EmbeddedMirrorSnapshot> = _snapshot
+
+    // One worker per handle, created lazily on first use and released after LIFECYCLE_IDLE_MS (a
+    // handle that never sees a lifecycle call never owns a thread). FIFO + a single thread is what
+    // serializes start/stop/close for this tab without any lock the UI thread could wait on.
+    private val lifecycleLane = ThreadPoolExecutor(
+        1,
+        1,
+        LIFECYCLE_IDLE_MS,
+        TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+    ) { task -> Thread(task, "embedded-mirror-lifecycle").apply { isDaemon = true } }
+        .apply { allowCoreThreadTimeOut(true) }
+
+    // Bumped by every request*; a queued start/stop only runs when no later request superseded it.
+    private val lifecycleRequestSeq = AtomicLong()
+
+    @Volatile private var closeRequested = false
+    private val closeLock = Any()
+    private var closeDone = false
 
     /** Non-null only for the macOS mirror-only VideoToolbox/Metal path. */
     internal val macSurface: EmbeddedMirrorMacSurface? get() = backend.macSurface
@@ -150,6 +189,55 @@ internal class EmbeddedMirrorHandle private constructor(
     /** Keeps same-window Compose popups above the heavyweight native Metal layer. */
     fun setOverlayOccluded(occluded: Boolean) = backend.setOverlayOccluded(occluded)
 
+    /**
+     * Non-blocking Connect for UI callers: queues [start] on the lifecycle lane and, if it actually
+     * runs (not superseded by a later [requestStop]/[requestStart], not closed), then [afterStart].
+     * The future completes when the job ran or was skipped; it fails if [start] threw.
+     */
+    fun requestStart(
+        serial: String,
+        options: MirrorStreamOptions,
+        afterStart: () -> Unit = {},
+    ): CompletableFuture<Unit> = enqueueLifecycle(supersedable = true) {
+        start(serial, options)
+        afterStart()
+    }
+
+    /** Non-blocking Disconnect for UI callers — see [requestStart]. */
+    fun requestStop(): CompletableFuture<Unit> = enqueueLifecycle(supersedable = true) { stop() }
+
+    /**
+     * Non-blocking terminal close for UI callers. Supersedes (skips) every queued start/stop, runs
+     * after whatever job is executing right now, then retires the lane. Never skipped itself.
+     */
+    fun requestClose(): CompletableFuture<Unit> {
+        closeRequested = true
+        return enqueueLifecycle(supersedable = false) { close() }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun enqueueLifecycle(supersedable: Boolean, action: () -> Unit): CompletableFuture<Unit> {
+        val seq = if (supersedable) lifecycleRequestSeq.incrementAndGet() else lifecycleRequestSeq.get()
+        val done = CompletableFuture<Unit>()
+        try {
+            lifecycleLane.execute {
+                try {
+                    val superseded = supersedable && (closeRequested || lifecycleRequestSeq.get() != seq)
+                    if (!superseded) action()
+                    done.complete(Unit)
+                } catch (failure: Throwable) {
+                    AppLogger.warn("embedded-mirror", "mirror lifecycle request failed", failure)
+                    done.completeExceptionally(failure)
+                }
+            }
+        } catch (_: RejectedExecutionException) {
+            // The lane is shut down: the handle is already closed, so there is nothing left to do.
+            done.complete(Unit)
+        }
+        return done
+    }
+
+    /** Blocking; never call from the UI thread — use [requestStart]. */
     fun start(serial: String, options: MirrorStreamOptions) {
         // Idempotency is backend-specific: a standalone runtime's own connection state (device
         // serial + CONNECTING/LIVE/RECONNECTING) tells us whether calling start() again would be
@@ -162,7 +250,8 @@ internal class EmbeddedMirrorHandle private constructor(
     }
 
     /** For a shared backend this only detaches the mirror decoder — the recording session itself
-     * is never stopped or disturbed (see [MirrorBackend.SharedRecordingSession.stop]). */
+     * is never stopped or disturbed (see [MirrorBackend.SharedRecordingSession.stop]). Blocking;
+     * never call from the UI thread — use [requestStop]. */
     fun stop() {
         backend.stop()
         _snapshot.value = backend.snapshot()
@@ -199,12 +288,31 @@ internal class EmbeddedMirrorHandle private constructor(
         )
     }
 
+    /** Blocking and idempotent (a second caller waits for the first to finish); never call from
+     * the UI thread — use [requestClose]. */
     override fun close() {
-        backend.close()
-        _snapshot.value = backend.snapshot()
+        closeRequested = true
+        synchronized(closeLock) {
+            if (closeDone) return
+            try {
+                backend.close()
+                _snapshot.value = backend.snapshot()
+            } finally {
+                closeDone = true
+                lifecycleLane.shutdown()
+            }
+        }
     }
 
     companion object {
+        private const val LIFECYCLE_IDLE_MS = 10_000L
+
+        /**
+         * Test seam: a handle around a caller-supplied [backend]. The constructor stays private so
+         * production code only builds handles through [create]/[createShared]/[createAroundRuntime].
+         */
+        internal fun forBackend(backend: MirrorBackend): EmbeddedMirrorHandle = EmbeddedMirrorHandle(backend)
+
         /**
          * [sharedSession] is the *recording's* own [EmbeddedDeviceSession], when video recording
          * is currently running for this tab (`TabCaptureController.activeEmbeddedSession()`); null
@@ -487,8 +595,12 @@ internal fun shouldUseDesktopGpuMirror(
 ): Boolean = enabled && (osName.contains("win", ignoreCase = true) || osName.contains("linux", ignoreCase = true))
 
 /** What [EmbeddedMirrorHandle] drives — either its own standalone transport, or a shared view onto
- * a live recording's device stream. See each implementation's doc. */
-internal sealed interface MirrorBackend : Closeable {
+ * a live recording's device stream. See each implementation's doc. Deliberately not `sealed` so
+ * tests can drive [EmbeddedMirrorHandle.forBackend] with a fake.
+ *
+ * Every member here is blocking and must be called from a non-UI thread — see the threading
+ * invariant on [EmbeddedMirrorHandle]; UI code goes through its `request*` methods instead. */
+internal interface MirrorBackend : Closeable {
     val macSurface: EmbeddedMirrorMacSurface? get() = null
     val gpuSurface: EmbeddedMirrorGpuSurface? get() = null
 
@@ -641,7 +753,27 @@ internal sealed interface MirrorBackend : Closeable {
         // Serializes start/stop/fallback transitions without holding [lock] while a session call
         // can join a decoder worker or invoke native teardown callbacks. The state lock remains
         // for short snapshot updates made by those callbacks.
-        private val lifecycleLock = Any()
+        //
+        // Invariant: the EDT/UI thread never waits on this lock (UI code goes through
+        // EmbeddedMirrorHandle.request*, which run on a non-UI lane), and the native surface
+        // close/recreate — the work that needs the EDT — happens OUTSIDE it (see [stop]). The
+        // only EDT-bound call still reachable under it is the detached decoder's own surface close
+        // inside session.detachDecoder(), and that waits for the EDT for a bounded time only
+        // (runOnEdtBounded), so even a caller that violated the first rule cannot deadlock.
+        private val lifecycleLock = ReentrantLock()
+
+        // Set (under [lifecycleLock]) while [stop] swaps the native surface outside the lock, so a
+        // concurrent start/stop/close waits for the replacement instead of racing it.
+        private var surfaceSwapInFlight = false
+        private val surfaceSwapDone = lifecycleLock.newCondition()
+
+        @Volatile private var closed = false
+
+        private companion object {
+            /** Generous: a native surface close waits at most [EDT_CLOSE_WAIT_MS] for the EDT. */
+            const val SURFACE_SWAP_WAIT_NANOS = 5_000_000_000L
+        }
+
         private var connectionSnapshot = session.connectionSnapshot()
         private var connectionSnapshotVersion = Long.MIN_VALUE
         private var lastFrame: MirrorFrame? = null
@@ -698,8 +830,9 @@ internal sealed interface MirrorBackend : Closeable {
          * Throwable is intentional (see the inline comments at each catch site). */
         @Suppress("TooGenericExceptionCaught")
         override fun start(serial: String, options: MirrorStreamOptions) {
-            synchronized(lifecycleLock) {
-                if (synchronized(lock) { attached }) return
+            lifecycleLock.withLock {
+                awaitSurfaceSwapLocked()
+                if (closed || synchronized(lock) { attached }) return
                 synchronized(lock) { attached = true }
                 // Publish immediately: composeLocked() now depends on [attached], so Connect must
                 // report the recording's current state (LIVE, most commonly) right away rather than
@@ -794,70 +927,129 @@ internal sealed interface MirrorBackend : Closeable {
 
         /** Keeps the recorder's one device connection and switches only its local presentation. */
         private fun switchToComposeFallback(failure: Throwable) {
-            synchronized(lifecycleLock) {
-                val retiredSurfaces = synchronized(lock) {
+            val retiredSurfaces = lifecycleLock.withLock {
+                awaitSurfaceSwapLocked()
+                synchronized(lock) {
                     if (!attached || (directDecoderFactory == null && gpuDirectDecoderFactory == null)) return
                     directDecoderFactory = null
                     gpuDirectDecoderFactory = null
                     lastFrameInfo = null
                     listOfNotNull(macSurface.also { macSurface = null }, gpuSurface.also { gpuSurface = null })
                 }
-                // attachDecoder detaches and closes the failing direct decoder/feed first. Closing the
-                // Swing surface here is idempotent, and makes the next Compose snapshot remove it.
-                retiredSurfaces.forEach { runCatching { it.close() } }
-                AppLogger.warn(
-                    "embedded-mirror",
-                    "mode=native-gpu status=failed; switching shared recording mirror to Compose",
-                    failure,
-                )
-                attachComposeDecoder()
+            }
+            // Closing the Swing surface may need the EDT, so it happens outside [lifecycleLock]. It
+            // is idempotent, and makes the next Compose snapshot remove it.
+            retiredSurfaces.forEach { runCatching { it.close() } }
+            AppLogger.warn(
+                "embedded-mirror",
+                "mode=native-gpu status=failed; switching shared recording mirror to Compose",
+                failure,
+            )
+            lifecycleLock.withLock {
+                // A Disconnect may have slipped in while the lock was released: then there is
+                // nothing to attach (the session holds one decoder slot, so a Connect that also
+                // slipped in cannot end up with two either — attachDecoder replaces).
+                if (!closed && synchronized(lock) { attached }) attachComposeDecoder()
             }
         }
 
-        override fun stop() = synchronized(lifecycleLock) { stop(recreateNativeSurface = true) }
+        override fun stop() = stop(recreateNativeSurface = true)
+
+        /** What [stop] retired under [lifecycleLock] and still has to close + replace outside it. */
+        private sealed interface RetiredSurface {
+            class Gpu(val previous: EmbeddedMirrorGpuSurface?) : RetiredSurface
+
+            class Mac(val previous: EmbeddedMirrorMacSurface?) : RetiredSurface
+        }
 
         private fun stop(recreateNativeSurface: Boolean) {
-            val shouldRecreateNativeSurface = synchronized(lock) {
-                attached = false
-                lastFrame = null
-                lastFrameInfo = null
-                recreateNativeSurface && (
-                    (directDecoderFactory != null && macSurface != null) ||
-                        (gpuDirectDecoderFactory != null && gpuSurface != null)
-                )
+            val retired = lifecycleLock.withLock {
+                awaitSurfaceSwapLocked()
+                val shouldRecreateNativeSurface = synchronized(lock) {
+                    attached = false
+                    lastFrame = null
+                    lastFrameInfo = null
+                    recreateNativeSurface && !closed && (
+                        (directDecoderFactory != null && macSurface != null) ||
+                            (gpuDirectDecoderFactory != null && gpuSurface != null)
+                    )
+                }
+                // Publish DISCONNECTED immediately rather than waiting for detachDecoder()/native
+                // surface recreation below (which can take real time) — see the class doc's
+                // Disconnect fix and composeLocked()'s own doc.
+                onSnapshotChanged(snapshot())
+                session.detachDecoder()
+                if (shouldRecreateNativeSurface) retireSurfaceForRecreationLocked() else null
+            } ?: return
+            // detachDecoder closes the per-attachment VideoToolbox decoder and its surface. A later
+            // Connect must get a new native handle; reusing the old one would retain the decoder's
+            // closed flag and leave the mirror permanently blank. The close/recreate needs the EDT,
+            // so it runs here, outside [lifecycleLock] — see the invariant on that field.
+            try {
+                when (retired) {
+                    is RetiredSurface.Gpu -> recreateGpuSurface(retired.previous)
+                    is RetiredSurface.Mac -> recreateMacSurface(retired.previous)
+                }
+            } finally {
+                lifecycleLock.withLock {
+                    surfaceSwapInFlight = false
+                    surfaceSwapDone.signalAll()
+                }
             }
-            // Publish DISCONNECTED immediately rather than waiting for detachDecoder()/native
-            // surface recreation below (which can take real time) — see the class doc's Disconnect
-            // fix and composeLocked()'s own doc.
-            onSnapshotChanged(snapshot())
-            session.detachDecoder()
-            // detachDecoder closes the per-attachment VideoToolbox decoder and its surface. A
-            // later Connect must get a new native handle; reusing the old one would retain the
-            // decoder's closed flag and leave the mirror permanently blank.
-            if (shouldRecreateNativeSurface && synchronized(lock) { gpuDirectDecoderFactory != null }) {
-                val previous = synchronized(lock) { gpuSurface.also { gpuSurface = null } }
-                runCatching { previous?.close() }
-                val replacement = runCatching { gpuSurfaceFactory?.invoke() }.getOrNull()
-                if (replacement == null) {
-                    synchronized(lock) { gpuDirectDecoderFactory = null }
-                    AppLogger.warn("embedded-mirror", "GPU recording mirror could not be recreated; using Compose on the next connect")
+        }
+
+        /** Under [lifecycleLock]: detaches the surface [stop] is about to replace and flags the swap. */
+        private fun retireSurfaceForRecreationLocked(): RetiredSurface {
+            surfaceSwapInFlight = true
+            return synchronized(lock) {
+                if (gpuDirectDecoderFactory != null) {
+                    RetiredSurface.Gpu(gpuSurface.also { gpuSurface = null })
                 } else {
-                    synchronized(lock) { gpuSurface = replacement }
+                    RetiredSurface.Mac(macSurface.also { macSurface = null })
                 }
-            } else if (shouldRecreateNativeSurface) {
-                val previous = synchronized(lock) { macSurface.also { macSurface = null } }
-                runCatching { previous?.close() }
-                val replacement = runCatching { macSurfaceFactory?.invoke() }.getOrNull()
-                if (replacement == null) {
-                    synchronized(lock) { directDecoderFactory = null }
-                    AppLogger.warn("embedded-mirror", "VideoToolbox recording mirror could not be recreated; using Compose on the next connect")
-                } else {
-                    val occluded = synchronized(lock) {
-                        macSurface = replacement
-                        overlayOccluded
-                    }
-                    replacement.setOverlayOccluded(occluded)
+            }
+        }
+
+        private fun recreateGpuSurface(previous: EmbeddedMirrorGpuSurface?) {
+            runCatching { previous?.close() }
+            val replacement = runCatching { gpuSurfaceFactory?.invoke() }.getOrNull()
+            if (replacement == null) {
+                synchronized(lock) { gpuDirectDecoderFactory = null }
+                AppLogger.warn("embedded-mirror", "GPU recording mirror could not be recreated; using Compose on the next connect")
+            } else if (closed) {
+                runCatching { replacement.close() }
+            } else {
+                synchronized(lock) { gpuSurface = replacement }
+            }
+        }
+
+        private fun recreateMacSurface(previous: EmbeddedMirrorMacSurface?) {
+            runCatching { previous?.close() }
+            val replacement = runCatching { macSurfaceFactory?.invoke() }.getOrNull()
+            if (replacement == null) {
+                synchronized(lock) { directDecoderFactory = null }
+                AppLogger.warn("embedded-mirror", "VideoToolbox recording mirror could not be recreated; using Compose on the next connect")
+            } else if (closed) {
+                runCatching { replacement.close() }
+            } else {
+                val occluded = synchronized(lock) {
+                    macSurface = replacement
+                    overlayOccluded
                 }
+                replacement.setOverlayOccluded(occluded)
+            }
+        }
+
+        /** Under [lifecycleLock]: waits (releasing it while waiting) for an in-flight surface swap
+         * by another thread. Bounded, so a wedged native close can delay but never hang a caller. */
+        private fun awaitSurfaceSwapLocked() {
+            var remainingNanos = SURFACE_SWAP_WAIT_NANOS
+            while (surfaceSwapInFlight) {
+                if (remainingNanos <= 0L) {
+                    AppLogger.warn("embedded-mirror", "native surface swap is taking long; continuing without waiting for it")
+                    return
+                }
+                remainingNanos = surfaceSwapDone.awaitNanos(remainingNanos)
             }
         }
 
@@ -898,7 +1090,8 @@ internal sealed interface MirrorBackend : Closeable {
         override fun close() {
             // Closing a handle is terminal. Do not create a fresh native surface only to close it
             // immediately: that briefly creates an unattached Canvas and can race window teardown.
-            synchronized(lifecycleLock) { stop(recreateNativeSurface = false) }
+            closed = true
+            stop(recreateNativeSurface = false)
             setLiveAudioEnabled(false, volume = { 1f }, onDiagnostic = {})
             connectionListener.close()
             runCatching { macSurface?.close() }

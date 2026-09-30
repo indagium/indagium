@@ -1434,10 +1434,23 @@ rows, so an early count can only mean the loop genuinely stopped.
 | `schedulingLock` | `ui/AutosaveScheduler.kt:46` | Replacing or invalidating the debounce job |
 | `writerLock` (fair `ReentrantLock`) | `ui/AutosaveScheduler.kt:47` | Serialise + disk write, so all callers observe one total write order |
 | `lifecycleLock` | `ui/ControlServerManager.kt` | Server start/stop |
+| `lifecycleLock` (`ReentrantLock`) | `ui/EmbeddedMirrorPanel.kt` (`SharedRecordingSession`) | Mirror Connect/Disconnect/fallback transitions; **never taken by the EDT** — see below |
 | `ReentrantLock` | `debug/AppLogger.kt:23` | Writer configure/append/close |
 | `presentationLock` | `video/VideoPlayerController.kt:472` | Frame presentation between decode and UI threads |
 | `writeLock` | `ai/CodexAppServerClient.kt:302` | stdio JSON-RPC framing — two writers would interleave lines |
 | `lock` | `cases/CaseSearch.kt:45` | The cached case index and its inverted indexes |
+
+**Mirror lifecycle invariant.** The EDT/UI thread must never wait on a mirror lifecycle lock, and no
+mirror lifecycle lock may be held while waiting for the EDT. Native surface teardown needs the EDT
+(`EmbeddedMirrorMacSurface.close`); a Disconnect on an IO thread used to hold
+`SharedRecordingSession.lifecycleLock` across it while a Connect on the EDT waited for that lock — a
+permanent app freeze (seen when no video packet ever arrived, because the decoder-thread join then
+runs its full timeout inside the window). The design: UI callers use `EmbeddedMirrorHandle.requestStart/
+requestStop/requestClose`, which return immediately and run in order on the handle's single-thread
+lifecycle lane (a superseded start/stop is skipped, so the last click wins, and `AppState.closeTabsById`/
+`stopEmbeddedMirror`/`startEmbeddedMirror` never block); `SharedRecordingSession.stop` replaces the
+native surface outside `lifecycleLock`; and a non-EDT caller waits for an EDT teardown at most
+`EDT_CLOSE_WAIT_MS` (`runOnEdtBounded`, never `invokeAndWait`). Pinned by `EmbeddedMirrorLifecycleTest`.
 
 Plus atomics and concurrent collections: `AtomicLong` for id generation (`utils/Ids.kt:7`),
 `AtomicInteger` generation counters, `ConcurrentHashMap` for the compute memo, the AI credential

@@ -22,6 +22,9 @@ import java.awt.event.MouseWheelEvent
 import java.io.Closeable
 import java.util.Collections
 import java.util.IdentityHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.SwingUtilities
 import kotlin.math.roundToInt
 import java.awt.event.KeyEvent as AwtKeyEvent
@@ -116,6 +119,42 @@ internal class MirrorSurfaceHostOwners {
  * reports resize events; neither the packet reader nor VideoToolbox decode waits on it.
  */
 private const val ATTACH_WATCHDOG_INTERVAL_MS = 1_000
+
+/** Upper bound a non-EDT caller waits for the EDT to run [EmbeddedMirrorMacSurface.close]. */
+internal const val EDT_CLOSE_WAIT_MS = 1_500L
+
+/**
+ * Runs [task] on the EDT. Already on the EDT: runs inline. Otherwise queues it with
+ * [EventQueue.invokeLater] and waits at most [timeoutMs] for it to finish; returns false if the
+ * wait timed out (the task is still queued and will run later) or the task failed. Unlike
+ * [EventQueue.invokeAndWait] this can never hang the calling thread forever, so a thread holding a
+ * lock the EDT is itself blocked on degrades to a bounded stall instead of a permanent deadlock.
+ */
+@Suppress("TooGenericExceptionCaught")
+internal fun runOnEdtBounded(timeoutMs: Long, task: () -> Unit): Boolean {
+    if (EventQueue.isDispatchThread()) {
+        task()
+        return true
+    }
+    val done = CountDownLatch(1)
+    val succeeded = AtomicBoolean(false)
+    EventQueue.invokeLater {
+        try {
+            task()
+            succeeded.set(true)
+        } catch (_: Throwable) {
+            // Teardown failures must not reach the EDT's uncaught-exception handler.
+        } finally {
+            done.countDown()
+        }
+    }
+    return try {
+        done.await(timeoutMs, TimeUnit.MILLISECONDS) && succeeded.get()
+    } catch (_: InterruptedException) {
+        Thread.currentThread().interrupt()
+        false
+    }
+}
 
 internal class EmbeddedMirrorMacSurface(
     private val diagnosticSink: (String) -> Unit = {},
@@ -463,11 +502,18 @@ internal class EmbeddedMirrorMacSurface(
             .onFailure { onDiagnostic("Metal mirror resize failed: ${it.message ?: it::class.simpleName}") }
     }
 
+    /**
+     * Native teardown must run on the EDT (it detaches the JAWT layer from Swing's hierarchy), but a
+     * non-EDT caller waits for it only for a bounded time ([runOnEdtBounded]) — never the unbounded
+     * `invokeAndWait` this used to be. That wait was the second half of the Disconnect->Connect
+     * deadlock: a mirror lifecycle lock holder waiting here for the EDT while the EDT waited for
+     * that same lock. The teardown itself is always still queued and runs once the EDT is free, so
+     * a timeout only costs the caller's ordering guarantee (logged), never a leaked surface.
+     */
     override fun close() {
-        if (EventQueue.isDispatchThread()) {
-            closeOnEdt()
-        } else {
-            EventQueue.invokeAndWait { closeOnEdt() }
+        val completed = runOnEdtBounded(EDT_CLOSE_WAIT_MS) { closeOnEdt() }
+        if (!completed) {
+            onDiagnostic("Metal mirror close is queued behind a busy UI thread; continuing without waiting for it")
         }
     }
 
