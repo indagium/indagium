@@ -76,6 +76,19 @@ class FileTailer(
     // FileTailerTest until fixed this way.
     fun start(scope: CoroutineScope): Job {
         offset = startOffset ?: if (file.exists()) file.length() else 0L
+        return launchPollLoop(scope)
+    }
+
+    // Restarts the poll loop from the offset this tailer already reached, instead of re-deriving it
+    // like start() does (which would replay from [startOffset], or skip to the current end-of-file,
+    // and so duplicate or lose rows). For a tailer whose Job was cancelled on purpose (the capture
+    // log view's pause at critical heap pressure, see ui/TailCoordinator.kt pauseTailing): the file
+    // kept growing meanwhile, and the first poll after resuming catches up from where it stopped,
+    // in bounded chunks. The caller must have fully stopped the previous Job (cancelAndJoin) so two
+    // loops never advance [offset] at once.
+    fun resume(scope: CoroutineScope): Job = launchPollLoop(scope)
+
+    private fun launchPollLoop(scope: CoroutineScope): Job {
         val parentPath = file.parentFile?.toPath()
         return scope.launch {
             if (!file.exists() || parentPath == null) return@launch

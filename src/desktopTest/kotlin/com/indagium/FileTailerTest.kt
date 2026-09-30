@@ -44,6 +44,37 @@ class FileTailerTest {
         }
     }
 
+    // resume() is what makes a pause lossless: start() would re-derive the offset (replaying a
+    // startOffset = 0 tailer from the top), resume() must continue from where the tailer stopped.
+    @Test
+    fun resumeContinuesFromTheSavedOffsetInsteadOfReplayingOrSkipping() {
+        val dir = createTempDirectory("openlog-tail-resume").toFile()
+        val file = File(dir, "out.log").apply { writeText("one\ntwo\n") }
+        val received = CopyOnWriteArrayList<String>()
+        val tailer = FileTailer(file, onNewLines = { received.addAll(it) }, pollIntervalMs = 50, startOffset = 0L)
+        val scope = newScope()
+        try {
+            val first = tailer.start(scope)
+            waitUntil { received.size >= 2 }
+            runBlocking { first.cancelAndJoin() }
+            val offsetAtPause = tailer.currentOffset
+
+            // Written while no poll loop runs: must not be read until resume, and read exactly once.
+            file.appendText("three\nfour\n")
+            Thread.sleep(200)
+            assertEquals(listOf("one", "two"), received.toList())
+            assertEquals(offsetAtPause, tailer.currentOffset)
+
+            val second = tailer.resume(scope)
+            waitUntil { received.size >= 4 }
+            Thread.sleep(200)
+            assertEquals(listOf("one", "two", "three", "four"), received.toList())
+            second.cancel()
+        } finally {
+            scope.cancel()
+        }
+    }
+
     @Test
     fun readToEndOfFileEmitsTheTrailingPartialLineOnlyWhenAskedTo() {
         val dir = createTempDirectory("openlog-tail").toFile()

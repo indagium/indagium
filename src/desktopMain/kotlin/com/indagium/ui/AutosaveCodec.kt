@@ -1611,6 +1611,9 @@ private fun String.manualBlockFromToken(): ManualCollapseBlock? = runCatching {
 // `rmap`/`largeFileMode` are NOT here (and never end up in tabToken() either), so a row click —
 // which only flips `selected` — no longer identity-changes the effect's key and no longer triggers
 // a serialize+write. Keep this in sync if tabToken()'s field list changes.
+// Session-only fields like tailPausedAtRow (the capture log view paused at critical heap pressure)
+// are deliberately absent from this snapshot, from tabToken() and from tabShellFromToken(): a
+// restored tab reopens its sourcePath and so shows the whole log.
 internal fun LogTab.persistedSnapshot(): List<Any?> = listOf(
     id, filename, sourcePath, filter, annotations, showAnnMd, showUnfiltered, expanded, manualBlocks, archiveCandidate,
     showTimeDelta, attachedVideo, noteTargetName, retraceMappingPath, logFormat,

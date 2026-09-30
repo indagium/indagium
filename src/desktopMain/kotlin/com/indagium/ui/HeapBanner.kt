@@ -50,14 +50,19 @@ internal fun heapUsageLabel(snapshot: HeapSnapshot): String {
     }
 }
 
-/** Banner text for [level], or null at NORMAL. Falls back to a figure-less sentence without a [snapshot]. */
-internal fun heapBannerText(level: HeapPressure, snapshot: HeapSnapshot?): String? {
+/**
+ * Banner text for [level], or null at NORMAL. Falls back to a figure-less sentence without a [snapshot].
+ * [captureLogPaused] (some live capture tab's log view is paused, see TailCoordinator.pauseTailing) adds
+ * the sentence saying so at CRITICAL; without a paused tab the banner makes no such claim.
+ */
+internal fun heapBannerText(level: HeapPressure, snapshot: HeapSnapshot?, captureLogPaused: Boolean = false): String? {
     // The figure is the whole heap after GC, not just log rows — hence "Indagium uses", not "logs use".
     val usage = snapshot?.let { "Indagium uses ${heapUsageLabel(it)}" } ?: "Indagium is using most of its available memory"
     return when (level) {
         HeapPressure.NORMAL -> null
         HeapPressure.WARNING -> "Memory is running low — $usage. Close tabs you don't need."
-        HeapPressure.CRITICAL -> "Memory is almost full — $usage. Close tabs you don't need."
+        HeapPressure.CRITICAL -> "Memory is almost full — $usage. Close tabs you don't need." +
+            if (captureLogPaused) " Live capture log view is paused; recording continues." else ""
     }
 }
 
@@ -86,7 +91,10 @@ internal fun HeapPressureBanner(state: AppState, onReclaimFocus: () -> Unit) {
     var dismissed by remember { mutableStateOf<HeapPressure?>(null) }
     LaunchedEffect(level) { dismissed = nextDismissedHeapLevel(level, dismissed) }
     if (!heapBannerVisible(level, dismissed)) return
-    val text = heapBannerText(level, state.heapSnapshot) ?: return
+    // Read here (not in a LaunchedEffect) so the sentence tracks the tab list: the tab copy made by
+    // pauseTailing/resumeTailing is a snapshot-state write the banner recomposes from.
+    val captureLogPaused = state.tabs.any { it.tailPausedAtRow != null && it.captureSessionId != null }
+    val text = heapBannerText(level, state.heapSnapshot, captureLogPaused) ?: return
     val colors = tc()
     val accent = if (level == HeapPressure.CRITICAL) DANGER_RED else colors.warn
     Row(

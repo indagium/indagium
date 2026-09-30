@@ -94,6 +94,7 @@ import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.renderCaptureFilename
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
+import com.indagium.utils.HeapPressure
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
@@ -177,6 +178,19 @@ internal fun captureStoppedSummary(tab: LogTab, logBytes: Long): String {
     val rows = "${tab.logData.size} rows · ${formatCaptureBytes(logBytes)}"
     return if (markers > 0) "$markers marker${if (markers == 1) "" else "s"} · $rows" else rows
 }
+
+/** Live capture strip message while the log view is paused at critical heap pressure. */
+internal fun captureLogPausedMessage(pausedAtRow: Int): String =
+    "Log view paused at row $pausedAtRow to save memory — recording continues on disk"
+
+/** Stopped capture strip note for a tab that stayed a prefix of the recording. */
+internal fun captureLogTruncatedNote(shownRows: Int): String =
+    "Showing the first $shownRows rows — the full log is in the saved capture / ZIP"
+
+/** Resume only makes sense once catching up cannot push the heap straight back to critical. */
+internal fun captureLogResumeEnabled(level: HeapPressure): Boolean = level <= HeapPressure.WARNING
+
+internal const val CAPTURE_LOG_RESUME_BLOCKED_HINT = "Free memory first (close other tabs)"
 
 internal fun captureLogCoverageLine(preview: CaptureExportPreview?): String = when {
     preview == null -> "Log …"
@@ -673,6 +687,38 @@ internal fun CaptureStrip(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
+        // Its own row rather than a status-line candidate: the paused state is persistent and carries a
+        // button, so it must not be hidden by (or hide) the transient screenshot status, and a real
+        // failure (mirror error / microphone warning) above it stays visible alongside it.
+        tab.tailPausedAtRow?.let { pausedAt ->
+            val resumeEnabled = captureLogResumeEnabled(state.heapPressure)
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText(
+                    captureLogPausedMessage(pausedAt),
+                    color = if (state.heapPressure == HeapPressure.CRITICAL) DANGER_RED else colors.warn,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                ToolbarBtn(
+                    label = "Resume",
+                    tooltip = if (resumeEnabled) "Load the rows recorded while paused" else CAPTURE_LOG_RESUME_BLOCKED_HINT,
+                    enabled = resumeEnabled,
+                    modifier = Modifier.height(24.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    onClick = {
+                        state.resumeCaptureLogView(tab.id)
+                        // The clickable took keyboard focus; hand it back (CLAUDE.md focus gotcha).
+                        onReturnFocus()
+                    },
+                )
+            }
+        }
         if (diagnosticsOpen) {
             CaptureDiagnosticsDrawer(
                 state = state,
@@ -863,6 +909,18 @@ private fun CaptureStoppedStrip(
                     state.openRetainedCaptureFolder(sessionId)
                     onReturnFocus()
                 },
+            )
+        }
+        // The tab's log view was paused at critical heap pressure and never caught up: it shows only a
+        // prefix, while Save ZIP / the archive read the session files and hold the whole recording.
+        tab.tailPausedAtRow?.let { shown ->
+            AppText(
+                captureLogTruncatedNote(shown),
+                color = colors.warn,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
         if (session == null || state.captureExportError != null || state.captureExportResult != null) {
