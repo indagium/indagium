@@ -1,10 +1,14 @@
 package com.indagium.ui
 
 import com.indagium.debug.AppLogger
+import com.indagium.model.LogAnalysis
+import com.indagium.model.LogEntry
+import com.indagium.model.LogTab
 import com.indagium.model.MessageCompositionState
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.FileTailer
 import com.indagium.utils.RegexEvaluationContext
+import com.indagium.utils.appendLogEntries
 import com.indagium.utils.computeMessageTemplates
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.computeStackTraceGroups
@@ -17,19 +21,11 @@ import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
-
-// Debounce for the tailing-triggered full analysis refresh (P-04) — buildLogAnalysis costs as
-// much as the initial parse on a large file, so re-running it on every ~500ms FileTailer batch
-// would make a long tail session progressively more expensive. 1.5s comfortably outlasts
-// FileTailer's default 500ms poll interval, so a sustained burst of batches collapses into one
-// refresh shortly after the burst quiets down instead of one per batch.
-private const val TAIL_ANALYSIS_DEBOUNCE_MS = 1_500L
 
 // Extracted from AppState (Task 12 slice 2, mechanical — no behavior change): owns live file
 // tailing — starting/stopping a FileTailer per tab, appending newly tailed lines into the owning
@@ -44,11 +40,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // ControlServer/Ktor threads) and read/written by FileTailer's own scope flush coroutine.
     private val activeTails = ConcurrentHashMap<String, ActiveTail>()
 
-    // Debounce jobs backing appendTailedLines' throttled analysis refresh — keyed by tabId, same
-    // cancel-and-relaunch shape as AppState's autosaveInBackground. ConcurrentHashMap for the same
-    // cross-thread reason as activeTails: written from the scope flush coroutine, removed via
-    // cancelTailingFor from whichever thread closes/stops the tab.
-    private val tailAnalysisJobs = ConcurrentHashMap<String, Job>()
+    // Per-tab debounce (with a max-wait so a continuous stream cannot postpone it forever) backing
+    // appendTailedLines' throttled analysis refresh. Same cancel-and-relaunch shape as AppState's
+    // autosaveInBackground; see TailAnalysisDebouncer.
+    private val analysisDebouncer = TailAnalysisDebouncer(scope) { tabId -> refreshAnalysis(tabId) }
 
     // Session-only (confirmed): tailing state never persists across a restart — tab.tailing
     // simply isn't written to the autosave token, so it always comes back false. Only tabs backed
@@ -56,9 +51,10 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // startOffset/pollIntervalMs are a pass-through to FileTailer, added for a capture tab (Phase
     // 2b, not this change): a capture starts empty and must replay from byte 0 rather than the v1
     // default of "only new growth" (see FileTailer's own class doc), and a chatty live capture
-    // wants a longer poll than the menu-driven default so each batch's full-list copy
-    // (appendTailedLines' `cur.logData + newEntries`) and computeItems memo invalidation
-    // (Filter.kt) don't fire twice as often as necessary. Defaults preserve every existing
+    // wants a longer poll than the menu-driven default so each batch's computeItems memo
+    // invalidation (Filter.kt) and rmap/tab rebuild don't fire twice as often as necessary. (The
+    // batch append itself is O(batch): appendTailedLines shares logData's backing array via
+    // appendLogEntries instead of copying it.) Defaults preserve every existing
     // caller's behavior unchanged (AppState.startTailing, the context menu, the MCP tools).
     @Suppress("ReturnCount") // Each early return is a separate, side-effect-free tailing precondition.
     fun startTailing(tabId: String, startOffset: Long? = null, pollIntervalMs: Long = 500) {
@@ -148,12 +144,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // ConcurrentHashMap removals, safe whether or not the caller already holds the lock.
     fun cancelTailingFor(tabId: String) {
         activeTails.remove(tabId)?.job?.cancel()
-        tailAnalysisJobs.remove(tabId)?.cancel()
+        analysisDebouncer.cancel(tabId)
     }
 
     fun clear() {
         activeTails.clear()
-        tailAnalysisJobs.clear()
+        analysisDebouncer.clear()
     }
 
     // Runs on whichever thread FileTailer's coroutine flushes from, unlike most upTab callers
@@ -175,7 +171,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
             val newEntries = parseLogcatLines(newRawLines.asSequence(), startId = nextId)
             appState.tabs = appState.tabs.map { cur ->
                 if (cur.id == tabId) {
-                    val nextData = cur.logData + newEntries
+                    // appendLogEntries shares logData's backing array with the previous list when
+                    // it can, so this is O(batch) instead of copying every existing row (a 5 MB
+                    // humongous array per batch at 1.3M rows). The returned list is a NEW object
+                    // each batch, so every `===` cache keyed on logData invalidates exactly as it
+                    // did with the old `cur.logData + newEntries` copy.
+                    val nextData = appendLogEntries(cur.logData, newEntries)
                     // logData/rmap/tagCounts stay immediate — cheap, and needed right away for
                     // correct display. The expensive crash/stack-trace scan is debounced below
                     // instead of re-running on every single tail batch (P-04); pending = true
@@ -270,22 +271,61 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         scheduleTailAnalysisRefresh(tabId)
     }
 
-    // Cancel-and-relaunch, same shape as AppState's autosaveInBackground: every new batch
-    // supersedes the previous refresh before it runs, so a sustained burst collapses into one
-    // full buildLogAnalysis() shortly after it quiets down rather than one per batch. Reads
-    // logData fresh (not a captured snapshot) so it reflects everything appended by the time this
-    // job actually runs, even across several superseded batches.
-    private fun scheduleTailAnalysisRefresh(tabId: String) {
-        tailAnalysisJobs[tabId]?.cancel()
-        tailAnalysisJobs[tabId] = scope.launch {
-            delay(TAIL_ANALYSIS_DEBOUNCE_MS)
-            val logData = synchronized(appState.stateLock) { appState.tab(tabId)?.logData } ?: return@launch
-            val issueRules = appState.settings.customIssueRules
-            val full = buildLogAnalysis(logData, issueRules)
-            ensureActive()
-            appState.upTab(tabId) { current ->
-                if (appState.settings.customIssueRules == issueRules && current.logData == logData) current.copy(analysis = full) else current
+    // The debounce lives in TailAnalysisDebouncer (cancel-and-relaunch per batch, with a max-wait
+    // so a continuous capture stream cannot starve it). Reads logData fresh (not a captured
+    // snapshot) so it reflects everything appended by the time this job actually runs, even across
+    // several superseded batches.
+    private fun scheduleTailAnalysisRefresh(tabId: String) = analysisDebouncer.onBatch(tabId)
+
+    private suspend fun refreshAnalysis(tabId: String) {
+        val logData = synchronized(appState.stateLock) { appState.tab(tabId)?.logData } ?: return
+        val issueRules = appState.settings.customIssueRules
+        val full = buildLogAnalysis(logData, issueRules)
+        currentCoroutineContext().ensureActive()
+        appState.upTab(tabId) { current ->
+            // A live capture appends a batch every second and buildLogAnalysis takes longer than
+            // that on a large tab, so requiring "nothing appended since the snapshot" would discard
+            // nearly every refresh. mergeTailAnalysis also accepts a result computed for a prefix
+            // (append-only tailing keeps entry ids stable) and keeps the incrementally maintained
+            // per-batch fields, so the refresh lands during a live capture. Its checks are O(1):
+            // upTab runs this under stateLock and logData is a million-row list.
+            val merged = if (appState.settings.customIssueRules == issueRules) {
+                mergeTailAnalysis(current, logData, full)
+            } else {
+                null
             }
+            if (merged != null) current.copy(analysis = merged) else current
         }
     }
+}
+
+/**
+ * True when [current] is [snapshot] with rows appended (identical, or a strictly longer append-only
+ * continuation), in O(1). Tailing only ever appends and entry ids strictly increase, so comparing
+ * the snapshot's last row by identity with the same index of [current] is sufficient; it also works
+ * across backing-store regrowth, where the two lists no longer share a store. An empty [snapshot]
+ * is never considered extended.
+ */
+internal fun extendsSnapshot(current: List<LogEntry>, snapshot: List<LogEntry>): Boolean =
+    snapshot.isNotEmpty() && current.size >= snapshot.size &&
+        current[snapshot.size - 1] === snapshot[snapshot.size - 1]
+
+/**
+ * Decides what a full [buildLogAnalysis] result computed for [snapshot] does to [current]'s
+ * analysis, or null to discard it.
+ * - [current] still holds exactly the snapshot list: [full] as-is (complete, `pending = false`).
+ * - [current] is the snapshot plus appended rows: [full]'s stack/crash/custom-issue data (valid for
+ *   the prefix, ids are stable), but the incrementally maintained `tagCounts`/`processNames` (they
+ *   already cover every current row) and `pending = true`, since the appended rows are not yet
+ *   analysed.
+ * - Anything else (logData replaced, or an empty snapshot): null, keep [current] untouched.
+ */
+internal fun mergeTailAnalysis(current: LogTab, snapshot: List<LogEntry>, full: LogAnalysis): LogAnalysis? = when {
+    current.logData === snapshot -> full
+    extendsSnapshot(current.logData, snapshot) && current.logData.size > snapshot.size -> full.copy(
+        tagCounts = current.analysis.tagCounts,
+        processNames = current.analysis.processNames,
+        pending = true,
+    )
+    else -> null
 }
