@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Capture Android logcat and screen video together in Indagium over USB or wireless debugging. Save synchronized logs and video to a ZIP you can reopen for analysis." />
+    <link rel="canonical" href="https://indagium.com/android-logcat-capture/" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content="Capture Android Logcat and Screen Video Together | Indagium" />
+    <meta property="og:description" content="Record Android logs and screen video together over USB or Wi-Fi, mark important moments, and reopen the ZIP with video synchronized to the log." />
+    <meta property="og:url" content="https://indagium.com/android-logcat-capture/" />
+    <meta property="og:image" content="https://indagium.com/assets/media/posters/demo-device-capture.webp" />
+    <meta property="og:image:alt" content="Indagium capturing Android logcat beside a live device screen, with Mark issue and Save snapshot controls." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Capture Android Logcat and Screen Video Together | Indagium" />
+    <meta name="twitter:description" content="Record Android logs and screen video together over USB or Wi-Fi, mark important moments, and reopen the ZIP with video synchronized to the log." />
+    <meta name="twitter:image" content="https://indagium.com/assets/media/posters/demo-device-capture.webp" />
+    <meta name="twitter:image:alt" content="Indagium capturing Android logcat beside a live device screen, with Mark issue and Save snapshot controls." />
+    <title>Capture Android Logcat and Screen Video Together | Indagium</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/zoom.js" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://indagium.com/" },
+          { "@type": "ListItem", "position": 2, "name": "Guides", "item": "https://indagium.com/guides/" },
+          { "@type": "ListItem", "position": 3, "name": "Android Logcat Capture", "item": "https://indagium.com/android-logcat-capture/" }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "VideoObject",
+        "name": "Capture Android Logcat and Screen Video Together in Indagium",
+        "description": "A 32.57-second walkthrough of a live Android device capture in Indagium, showing logcat beside the embedded screen mirror, marking an issue, and saving a snapshot while the recording continues.",
+        "thumbnailUrl": ["https://indagium.com/assets/media/posters/demo-device-capture.webp"],
+        "uploadDate": "2026-09-30",
+        "duration": "PT32.57S",
+        "contentUrl": "https://indagium.com/assets/media/web/demo-device-capture.mp4",
+        "encodingFormat": "video/mp4",
+        "inLanguage": "en",
+        "publisher": {
+          "@type": "Organization",
+          "name": "Indagium",
+          "url": "https://indagium.com/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav><a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a></header>
+    <main id="main">
+      <section class="page-hero capture-page-hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Android device capture <span>/</span> USB and wireless logcat</p>
+          <h1 id="page-title">Capture Android logs and screen video together.</h1>
+          <p class="page-lede">Indagium records live Android logcat and the device screen in one session, so you can reproduce an issue, mark what happened, and review the log and video together. Connect over USB or Android wireless debugging, then save a portable ZIP snapshot for a synchronized investigation.</p>
+          <div class="hero-actions"><a class="button" href="https://github.com/indagium/indagium/releases/latest">Download Indagium <span aria-hidden="true">↗</span></a><a class="text-link" href="/guides/analyze-android-logcat/">See the analysis workflow <span aria-hidden="true">→</span></a></div>
+        </div>
+      </section>
+
+      <section class="section capture-video-section" aria-labelledby="capture-demo-title">
+        <p class="eyebrow">Live Android logcat capture <span>/</span> 32-second walkthrough</p>
+        <h2 id="capture-demo-title">Record Android logs and screen video in the same session.</h2>
+        <p class="section-lede">See a connected device stream logcat beside its live screen, mark an issue with a screenshot, and save a snapshot while capture continues.</p>
+        <figure class="capture-demo">
+          <video controls muted playsinline preload="metadata" poster="/assets/media/posters/demo-device-capture.webp" aria-label="Walkthrough showing live Android logcat and screen video capture in Indagium, issue marking, and snapshot saving">
+            <source src="/assets/media/web/demo-device-capture.mp4" type="video/mp4" />
+            Your browser does not support HTML video. The written walkthrough below describes the capture workflow.
+          </video>
+        </figure>
+        <div class="capture-walkthrough-copy">
+          <p class="exhibit-label">THE WRITTEN WALKTHROUGH</p>
+          <ol class="capture-walkthrough">
+            <li><b>Connect a device.</b> Choose an authorized USB device or pair an Android 11+ phone using wireless debugging.</li>
+            <li><b>Start capture.</b> Indagium streams logcat and, by default, records screen video with an embedded live mirror.</li>
+            <li><b>Investigate live.</b> Filter, search, and inspect new rows while reproducing the issue on the device.</li>
+            <li><b>Mark the moment.</b> Use Mark issue to save a time-bounded log marker and, when available, a screenshot; add a note in Notes.</li>
+            <li><b>Save a snapshot.</b> Export a ZIP without stopping the live capture, then reopen that ZIP to review its log and video in sync.</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="capture-workflow-title">
+        <p class="eyebrow">From connection to evidence</p>
+        <h2 id="capture-workflow-title">A repeatable Android capture workflow.</h2>
+        <div class="feature-matrix">
+          <article class="evidence-card"><span>01</span><h3>Connect by USB or Wi-Fi</h3><p>Use an authorized USB debugging connection, or pair on Android 11+ with Wireless debugging by QR code or pairing code. Indagium uses installed Android platform-tools (<code>adb</code>).</p></article>
+          <article class="evidence-card"><span>02</span><h3>Capture logcat and the screen</h3><p>Log streaming starts with the session; screen video recording is on by default. The live device mirror is embedded in the capture workspace. A host <code>scrcpy</code> installation is only needed if you choose its separate external mirror window.</p></article>
+          <article class="evidence-card"><span>03</span><h3>Analyze while reproducing</h3><p>Use Indagium's normal log viewer, filters, search, highlighters, and Notes while new rows arrive. Mark issue records a log time window and can take a screenshot for context.</p></article>
+          <article class="evidence-card"><span>04</span><h3>Review synchronized logs and video</h3><p>Open the saved ZIP in Indagium. The archive descriptor links the included log and video and stores a synchronization anchor, so log rows and video seek together without a manual attachment step.</p></article>
+        </div>
+      </section>
+
+      <section class="section split-callout" aria-labelledby="capture-transport-title">
+        <div>
+          <p class="eyebrow">Choose your connection</p>
+          <h2 id="capture-transport-title">USB logcat capture or <em>wireless logcat.</em></h2>
+          <p class="section-lede">Both connection methods use adb from Android platform-tools. Install platform-tools on the computer and select its <code>adb</code> executable in Capture Settings if it is not already on PATH.</p>
+          <p><b>USB:</b> enable Developer options and USB debugging on the Android device, connect its cable, and accept the computer's authorization prompt. The New capture launcher shows whether adb sees the device and whether it is authorized.</p>
+          <p><b>Wireless:</b> on Android 11 or later, enable Wireless debugging in Developer options while the computer and phone are on a reachable network. In Indagium choose the pairing option shown for the device and scan the QR code or enter the pairing code from Android's Wireless debugging screen. If network discovery is blocked, enter the address and code manually.</p>
+          <p>The host <code>scrcpy</code> application is optional. Indagium's default embedded mirror and video recorder use its bundled device-side server over adb; install host scrcpy only to open the distinct external mirror window.</p>
+        </div>
+        <figure class="evidence-card image-card"><img src="/assets/media/posters/demo-device-capture-launcher.webp" alt="The New capture launcher in Indagium, showing an available Android device, Wi-Fi pairing, device logging, recording options, and Start capture." /><figcaption>Choose a connected device or pair over Wi-Fi, review the logging and recording options, then start capture.</figcaption></figure>
+      </section>
+
+      <section class="section" aria-labelledby="capture-snapshots-title">
+        <p class="eyebrow">Snapshots and saved sessions</p>
+        <h2 id="capture-snapshots-title">Save a ZIP snapshot without ending capture.</h2>
+        <p class="section-lede">Save snapshot exports a point-in-time selection while the device recorder keeps running. Choose all available history, a recent time range, rows since the last successful snapshot, or the interval between the first and last selected capture rows. Include video when the recording covers that range; the export reports actual video coverage when it starts later or ends before the logs.</p>
+        <div class="feature-matrix">
+          <article class="evidence-card"><span>SNAPSHOT</span><h3>Save ZIP keeps capture running</h3><p>A ZIP is a portable copy for sharing or reopening. By default it includes the captured log and video, plus the archive descriptor that records device/session details and one log-to-video synchronization anchor. Screenshots, marker details, and note content can be included where available and selected.</p></article>
+          <article class="evidence-card"><span>STOP</span><h3>Stop finalizes the retained session</h3><p>Stop ends live log and video recording, drains the log stream, and finalizes the capture in its session folder. Use Save ZIP afterward to export the stopped session as a portable archive. The retained session folder is working/recovery data; it is distinct from the flat assets in an exported ZIP.</p></article>
+          <article class="evidence-card"><span>SYNC</span><h3>Reopen the ZIP to investigate</h3><p>Open the capture ZIP in Indagium. It verifies the descriptor and included assets, loads the log, and links the available video automatically. Select a log row to seek video, or move the video to inspect the corresponding log time.</p></article>
+          <article class="evidence-card"><span>RECOVERY</span><h3>Recover an interrupted session</h3><p>If Indagium closes before Stop, the recorder cannot resume the device stream after restart. The New capture launcher lists the retained interrupted session so you can open its available log/video data and save what was captured.</p></article>
+        </div>
+      </section>
+
+      <section class="section" aria-labelledby="capture-options-title">
+        <p class="eyebrow">Settings and compatibility</p>
+        <h2 id="capture-options-title">Choose how much to capture.</h2>
+        <p class="section-lede">Recording choices such as video, buffers, audio, microphone, and video limits are saved as you change settings and are used when the next capture starts. They do not reconfigure an active recording. While the mirror is running, its display interaction and live playback controls remain available separately.</p>
+        <ol class="guide-steps">
+          <li><div class="step-number">01</div><div><h3>Earlier log buffers are optional</h3><p>By default, logcat streaming begins when you start the capture; earlier device buffer contents are excluded. Turn on the option to include earlier buffered logs if you need events from before reproduction began. Video recording is on by default. Audio recording is off by default.</p></div></li>
+          <li><div class="step-number">02</div><div><h3>Audio and microphone are opt-in</h3><p><b>Capture audio</b> requires Android 11+ and records supported device playback; apps can block it. While it is captured, the phone speaker is muted by default. On Android 13+, enable <b>Keep sound on the device</b> to request playback through the phone speaker too; older devices cannot honor that option. Audio in an exported capture is retained in MKV. The embedded mirror's live playback on the computer is a separate speaker toggle and starts muted. A computer microphone is another separate input, off by default.</p></div></li>
+          <li><div class="step-number">03</div><div><h3>Timing may need calibration</h3><p>Indagium estimates the initial relation between log and video time and can apply a manual millisecond offset. The ZIP stores one synchronization anchor. When video starts late, reconnects, or does not cover the whole selected log range, Indagium reports that coverage rather than claiming full overlap.</p></div></li>
+          <li><div class="step-number">04</div><div><h3>Storage limits protect the session</h3><p>Capture settings include a session size limit and a minimum free-space reserve. Choose separate folders for retained sessions, snapshots, and saved ZIP archives in Settings. On older Linux systems without the required glibc/native media support, video recording and the in-app mirror are unavailable; log capture continues, with an optional host scrcpy window when installed.</p></div></li>
+        </ol>
+      </section>
+
+      <section class="section" id="faq" aria-labelledby="capture-faq-title">
+        <p class="eyebrow">Questions</p>
+        <h2 id="capture-faq-title">Android logcat capture, <em>answered.</em></h2>
+        <div class="faq-list">
+          <div><h3>Can Indagium record Android logs and screen video together?</h3><p>Yes. Start a device capture to stream logcat and record the screen in the same session. Screen video is on by default and can be turned off in Capture Settings.</p></div>
+          <div><h3>Can I capture over USB and Wi-Fi?</h3><p>Yes. Connect an authorized USB-debugging device, or use Android 11+ Wireless debugging and pair by QR code or pairing code. Both routes require Android platform-tools with adb installed on the computer.</p></div>
+          <div><h3>Do I need to install scrcpy on my computer?</h3><p>Usually no. The default embedded mirror and screen recording use Indagium's bundled device-side scrcpy server. Install host scrcpy only if you want the separate external mirror window.</p></div>
+          <div><h3>Does Save snapshot stop a live capture?</h3><p>No. It exports a point-in-time ZIP while log and video recording continue. Stop ends and finalizes the session; Save ZIP exports the retained session afterward.</p></div>
+          <div><h3>Will the log and video synchronize when I reopen the ZIP?</h3><p>Yes. The archive descriptor stores a synchronization anchor and references the included log and video. Indagium verifies those files and automatically links them when the capture ZIP is opened.</p></div>
+        </div>
+      </section>
+
+      <section class="section guide-band" aria-labelledby="capture-next-title">
+        <p class="eyebrow">Keep investigating</p>
+        <h2 id="capture-next-title">From capture to <em>explanation.</em></h2>
+        <div class="guide-links"><a href="/android-logcat-viewer/"><span>Viewer</span><b>Explore the Android logcat viewer →</b></a><a href="/logcat-analyzer/"><span>Analysis</span><b>Filter, search, and explain the evidence →</b></a><a href="/guides/analyze-android-logcat/"><span>Guide</span><b>Follow a repeatable log analysis workflow →</b></a></div>
+      </section>
+    </main>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-logcat-capture/">Capture</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+  </body>
+</html>

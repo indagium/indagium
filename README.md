@@ -1,6 +1,6 @@
 # Indagium
 
-Android log viewer and logcat analyzer for Windows, macOS and Linux — investigate crashes, ANRs, adb bug reports, and supported DLT captures, built with Kotlin and Compose Multiplatform.
+Android log viewer and logcat analyzer for Windows, macOS and Linux — investigate crashes, ANRs, adb bug reports, and supported DLT captures, with optional synchronized device logcat and screen-video capture. Built with Kotlin and Compose Multiplatform.
 
 ![Version](https://img.shields.io/badge/version-1.8.7-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
@@ -31,6 +31,7 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 - **Time deltas** — per-row gaps, or offsets from a selected anchor row, to find stalls
 - **Compare view** — two tabs side by side, each with its own filter or mirroring the other's
 - **Live tailing** — watch a file as it's written, with your filter already applied
+- **Device capture** — stream Android logcat and record screen video over USB or Android 11+ wireless debugging, then reopen them synchronized from one ZIP
 - **Large-file support** — multi-gigabyte logs, with an optional split-on-open for the biggest
 - **Bug reports** — open `.zip` and `.7z` Android bug reports directly and pick what to load
 
@@ -66,45 +67,53 @@ streams are not supported and cannot be split. DLT tabs do not support live UTF-
 
 Capture is part of the normal tab workflow. Click **Capture** in the toolbar to focus the current
 live capture, or to open a session-only **New capture** launcher when no capture is active. The
-launcher checks the installed `adb` and optional `scrcpy`, lists physical devices and emulators with
-their authorization/connection state, and shows retained interrupted sessions. Indagium does not
-bundle host `adb`; install it through the platform's normal Android SDK setup. Video recording and
-the in-app embedded mirror stream the device over `adb` directly, using a bundled, checksum-pinned
-scrcpy *server* asset — a host `scrcpy` install is only needed for the separate, explicitly visible
-native mirror window (see below). Only one live capture can run at a time.
+launcher checks installed `adb` and optional host `scrcpy`, lists devices with their connection and
+authorization state, offers Android 11+ wireless pairing by QR or code, and shows retained
+interrupted sessions. Indagium does not bundle host `adb`; install Android platform-tools through
+the normal Android SDK setup. Log streaming, video recording, and the default in-app embedded mirror
+use `adb` with a bundled, checksum-pinned scrcpy *server* asset. A host `scrcpy` installation is
+only needed if you choose the separate external mirror window. Only one live capture can run at a
+time.
 
 Starting a device opens a normal streaming log tab. Its log can use the same filters, selection,
 folding, search, and Notes workflow as any other tab while `adb logcat` appends new rows. A 46dp
 capture strip shows the device, REC/elapsed time, storage usage, video state, and actions for Stop,
-Screenshot, Snapshot, Capture Settings, and diagnostics. The right sidebar's live capture card is
-status-only: when mirroring is enabled, `scrcpy` displays the live device in its own native window;
-Indagium does not embed the growing live video in the app window.
+Mark issue, Screenshot, Save snapshot, Capture Settings, and diagnostics. The right-sidebar capture
+card embeds the live device screen and its display controls when the embedded mirror is enabled; the
+optional host-scrcpy window is a separate display route.
 
 On Linux Flatpak, host-installed tools will be invoked through
 `flatpak-spawn --host --watch-bus`; the package therefore needs the narrowly scoped
 `org.freedesktop.Flatpak` D-Bus talk permission. Diagnostics will show actionable setup and device
 errors inside Indagium rather than asking the user to operate a terminal.
 
-A capture keeps all log history and can optionally record the scrcpy stream as H.264 MKV at the
-configured size, frame rate, and bitrate (1080p/30 fps/8 Mbps by default), with audio disabled by
-default. Capture Settings apply immediately and cover tool paths, adb buffer mode, video/limits,
-filename and label templates, the default save folder, and diagnostics. The default storage guard
-stops at 10 GiB and preserves a 1 GiB reserve.
+By default, logcat streaming starts at capture time; earlier device ring-buffer contents are
+excluded unless **Include earlier device logs** is enabled. Screen video recording is on by default
+(1080p/30 fps/8 Mbps); device audio capture (Android 11+) and host microphone capture are opt-in.
+Live recording is MKV.
+Capture Settings cover tool paths, adb buffers, mirror mode, audio, video limits, filename and label
+templates, and separate session, snapshot, and saved-ZIP folders. Updated recording and buffer
+options are used when a capture starts; live mirror/display controls can be adjusted during capture.
+The default storage guard stops at 10 GiB and preserves a 1 GiB reserve.
 
-The strip's **Snapshot** action exports a point-in-time ZIP without stopping the recorder. It can
+The strip's **Save snapshot** action exports a point-in-time ZIP without stopping the recorder. It can
 include all history, the last N minutes, rows since the previous successful save, or the current
 selection (the contiguous interval between the first and last selected capture rows), with optional
 video. The destination and generated filename are shown before export. Cancellation or failure
 leaves the live capture running; when video ends before the selected log range, the result reports
-the actual video coverage. The portable ZIP contains `capture.indagium.json`,
-`logs/logcat.log`, `mapping/log-video.jsonl`, and any selected video and screenshots. Opening either
-the ZIP or an extracted descriptor verifies the assets and auto-links the available log, mapping,
-and video artifacts.
+the actual video coverage. The exported v3 ZIP has a flat layout: `capture.indagium.json`,
+`logcat.log`, optional `screen.mp4` (or `screen.mkv` when needed to retain audio), and optional notes,
+markers, and screenshots, plus `captured_with_indagium.txt`. Its descriptor stores checksums and a
+single log/video synchronization anchor; v3 does not export a row-by-row mapping file. Opening the
+ZIP verifies the assets, loads the log, and automatically links the available video for synchronized
+review. The retained working session folder uses its own paths and index files; it is not the same
+layout as the portable ZIP.
 
 **Screenshot** runs `adb screencap`, stores the image in the session, and adds it to the active tab's
-Notes with capture/video provenance when a video timestamp is available. **Stop** drains the tail,
-finalizes the descriptor and log-to-video mapping in place, and keeps the same tab; the finalized
-video becomes an ordinary attached video that can be played and sought against log rows.
+Notes with capture/video provenance when a video timestamp is available. **Stop** ends capture,
+drains the log stream, and finalizes the descriptor in the retained session folder. Use **Save ZIP**
+to export that stopped session as a portable archive; its video is also playable and seekable against
+log rows in the current tab.
 
 Live capture and the empty launcher are session-only and are not restored as active capture state.
 Capture directories are retained under app data. If the application exits before Stop, the next
@@ -112,13 +121,7 @@ launcher marks the recording interrupted and lists it under **Retained sessions*
 be recovered. A stopped/finalized capture tab remains an ordinary durable tab and can be restored
 through its capture descriptor.
 
-Timing starts as an estimate and can be calibrated with a millisecond offset. Video export snapshots
-the growing recording and starts at the preceding readable keyframe when one is available. Saving
-live capture data does not require restarting the session. Automated coverage exercises process,
-archive, persistence, settings, selection bounds, cancellation, and mapping behavior. Automated
-tests do not prove Compose layout fidelity, and live device/scrcpy testing across macOS, Windows,
-and Linux is unavailable in the current environment; the four redesign states still require manual
-verification with `./gradlew desktopRun` and a real device.
+Live capture timing begins from a synchronization estimate and can be calibrated with a millisecond offset. A saved snapshot may cover less video than log time when the recorder has not produced frames for the entire selected interval; the ZIP records actual coverage so the viewer does not imply a match outside it. Video export starts at a preceding readable keyframe when available. For the capture workflow and recovery details, see the [device capture guide](https://indagium.com/android-logcat-capture/) and [User Guide §29](docs/USER_GUIDE.md#29-device-capture).
 
 ## Documentation
 
@@ -129,6 +132,7 @@ verification with `./gradlew desktopRun` and a real device.
 | [MCP guide](docs/mcp/README.md) | Connecting an external MCP client |
 | [MCP methods](docs/mcp/AVAILABLE_METHODS.md) | The automation tool reference |
 | [Analysis playbook](docs/mcp/ANALYSIS_PLAYBOOK.md) | Prompt patterns for log analysis |
+| [Release 1.8.7](docs/releases/1.8.7.md) | Device capture, analysis improvements, onboarding, and other user-facing changes |
 
 ## Installation
 
@@ -173,9 +177,11 @@ flatpak run com.indagium.Indagium
 The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer
 (Ubuntu 22.04+) for the in-app mirror, video recording, playback and export. On an older system
 (e.g. Ubuntu 20.04, glibc 2.31) Indagium detects this at startup and adapts automatically: it still
-captures and views logs, "Record video to file" is greyed out, and the device is shown in a host
-`scrcpy` window instead of the in-app mirror (install `scrcpy`; scrcpy 1.x windows are video-only,
-without audio). The Settings/New-tab capture controls explain this in place.
+captures and views logs, but video recording and in-app video features are unavailable. If the
+selected display is the in-app mirror, Indagium uses the external host `scrcpy` window when host
+scrcpy is installed; otherwise that capture has no device display. Installing host `scrcpy` is only
+needed for that separate external mirror path. The Settings/New capture controls report the active
+capabilities.
 
 Flatpak is **not** a workaround on Ubuntu 20.04: its bundled flatpak 1.6 cannot read Flathub's
 current summary ("summary exceeded maximum size of 10485760 bytes"), so

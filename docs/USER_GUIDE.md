@@ -30,7 +30,8 @@ This guide is task-oriented. If you want the architecture instead, see [SAAD.md]
 
 **Reference** — [24. Settings](#24-settings) · [25. Keyboard shortcuts](#25-keyboard-shortcuts) ·
 [26. Where your data lives](#26-where-your-data-lives) ·
-[27. Troubleshooting](#27-troubleshooting) · [28. Recipes](#28-recipes)
+[27. Troubleshooting](#27-troubleshooting) · [28. Recipes](#28-recipes) ·
+[29. Device capture](#29-device-capture)
 
 ---
 
@@ -77,9 +78,11 @@ flatpak run com.indagium.Indagium
 The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer
 (Ubuntu 22.04+) for the in-app mirror, video recording, playback and export. On an older system
 (e.g. Ubuntu 20.04, glibc 2.31) Indagium detects this at startup and adapts automatically: it still
-captures and views logs, "Record video to file" is greyed out, and the device is shown in a host
-`scrcpy` window instead of the in-app mirror (install `scrcpy`; scrcpy 1.x windows are video-only,
-without audio). The Settings/New-tab capture controls explain this in place.
+captures and views logs, but video recording and in-app video features are unavailable. If the
+selected display is the in-app mirror, Indagium uses the external host `scrcpy` window when host
+scrcpy is installed; otherwise that capture has no device display. Installing host `scrcpy` is only
+needed for that separate external mirror path. The Settings/New capture controls report the active
+capabilities.
 
 Flatpak is **not** a workaround on Ubuntu 20.04: its bundled flatpak 1.6 cannot read Flathub's
 current summary ("summary exceeded maximum size of 10485760 bytes"), so
@@ -180,6 +183,10 @@ between the log and the sidebar to resize.
 
 Opening a file while Indagium is already running reuses the running instance rather than starting a
 second one (except on macOS, where the system handles it).
+
+The **New** tab is a home screen for opening files and returning to work. Its **Recent files** section
+can be filtered and switched between a grid and list layout; quick filters help narrow the list. The
+layout preference is saved. The toolbar's **▾** menu remains a compact list of the last 30 files.
 
 ### Bug-report archives
 
@@ -339,11 +346,14 @@ on/off toggle. They survive a restart.
 `⌘F` / `Ctrl+F` opens the **Find bar** over the filtered log. `Enter` and `⇧Enter` jump between
 matches; `Escape` closes it. Case sensitivity is a toggle in the bar.
 
-Find searches the **fully expanded** log, so a match inside a collapsed group is still found.
+By default Find searches the **fully expanded filtered view**, so a match inside a collapsed group is
+still found. Use the scope toggle in the Find bar to search **all lines** in the Original panel,
+including rows hidden by filters; this opens or reveals the unfiltered split as needed. The scope is
+shown in the bar so it is clear whether a match is outside the current filtered view.
 
-Settings → Editor behavior lets you retarget `⌘F` if you use a different one most: the tag box, a
-message rule, the keyword/regex box, or the Find bar. There is also an option to reveal the
-unfiltered split automatically when you press it.
+`⌘F` / `Ctrl+F` finds within the filtered view. `⌘⌥F` / `Ctrl+Alt+F` opens Find in all lines
+(the Original panel). Settings → Editor behavior lets you retarget `⌘F` to the tag box, a message rule,
+the keyword/regex box, or Find, and choose whether Find reveals the unfiltered split automatically.
 
 ---
 
@@ -456,6 +466,15 @@ Beyond blocks, a note has:
 
 The `.ann` sidecar is what makes a saved note fully reversible — it preserves block structure, image
 bytes, and log references that plain Markdown cannot carry. Keep the two files together.
+
+**Copy formats and masking.** **Copy** uses the selected default format; its menu offers Jira Cloud,
+Jira wiki, Markdown, or HTML. **Copy rich preview** copies HTML with inline images so one paste can
+reproduce the note and its pictures in a rich-text editor. Ordered text-replacement rules in Settings
+→ Export & annotations apply to copied notes (including rich preview), so you can mask identifiers
+before sharing. The rules affect copied output; they do not rewrite the stored note. The optional
+block-numbering setting is reflected in the rendered note and its copied/exported representation.
+`Ctrl+Enter` adds a text block below the selected block, `Alt+↑` / `Alt+↓` reorders blocks, and
+`⌘C` / `Ctrl+C` copies the annotation in its chosen format.
 
 ### Sequence-diagram workspaces
 
@@ -645,8 +664,10 @@ Stop from the same menu.
 **Merge** (tab right-click → **Merge…**). Combines several open tabs into one, ordered by timestamp,
 with each row badged by the file it came from. Use it to interleave a main log with a system log.
 
-> Merging orders by **time of day**. Because logcat timestamps carry no date, a merge across midnight
-> or across multiple days will not be ordered correctly.
+> Merge orders rows by **time of day**, so date-less timestamps spanning midnight or multiple days
+> cannot be reliably ordered. For formats that include a calendar date, Indagium retains the month/day
+> alongside the displayed time and uses it for timeline deltas and log/video timing. Date-less rows
+> still use an estimated day rollover.
 
 **Split** (tab right-click → **Split…**, or accept the prompt when opening a very large file).
 Divides the file into N parts on line boundaries. Concatenating the parts reproduces the original
@@ -665,7 +686,10 @@ collapsed or scrolled into view. CSV columns are `ts,level,tag,pid,tid,msg`.
 
 ## 20. Video sync
 
-Attach a screen recording to a log and scrub one from the other.
+Attach a screen recording to an existing log and scrub one from the other. This manual workflow is
+useful when the video already exists separately. For a new reproduction, [device capture](#29-device-capture)
+records logcat and screen video together and writes the synchronization details into a ZIP that links
+automatically when reopened.
 
 **Attach.** Drop a video file (`.mp4`, `.mkv`, `.webm`, `.mov`, `.m4v`, `.avi`) onto the tab, or pick
 it from a bug-report archive when opening one. The **Video** toolbar button appears once a tab has
@@ -796,6 +820,8 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 
 | Section | Covers |
 |---|---|
+| **General** | Workspace profile, first-run/setup assistant, and the default parent plus separate analysis, capture-session, snapshot, and saved-ZIP folders |
+| **Capture** | adb and optional scrcpy paths, log buffers, mirror mode, recording/audio options, video limits, naming, storage guard, and capture troubleshooting |
 | **Appearance** | Theme (20 built in), font size and family, interface scale, row numbers, minimap, icon-only toolbar |
 | **Editor behavior** | What `⌘F` targets, whether new files open with the unfiltered split, row wrapping limits, navigation scroll margin, tag list sizes |
 | **Export & annotations** | Default save directory, Markdown vs Jira log-block style, block numbering, prefix label, auto-export, copy-masking rules |
@@ -805,6 +831,17 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **AI commands** | Custom `/command` prompt library |
 | **Source code** | Source folders, log wrapper rules, auto-discovery, index status and reindex, editor command |
 | **Issues** | Custom issue rules (name + regex) |
+
+Use the Settings search field to find a setting by name or task; activate a result to jump to its
+section and control. `⌘F` / `Ctrl+F` focuses the Settings search while Settings is open. Workspace
+profiles can be applied, customized and saved under a new name, renamed, updated from the current
+layout, or exported/imported as JSON. The setup assistant offers four guided steps—Workspace, Look,
+Folders, and Capture—and keeps the current setup by default for an existing workspace. Run it again
+from Settings → General.
+
+Save folders are independent: the default parent folder, analysis artifacts, retained capture sessions,
+live snapshots, and portable ZIP exports. Changing the capture-session folder affects new sessions;
+existing session data stays in its original location.
 
 Also here: **clear temporary data** (archive cache and similar) and **reset all app data**, which
 returns Indagium to a first-run state.
@@ -822,7 +859,8 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 | `⌘⇧F` / `Ctrl+Shift+F` | Toggle filter panel |
 | `⌘⇧A` / `Ctrl+Shift+A` | Toggle notes panel |
 | `⌘⇧D` / `Ctrl+Shift+D` | Toggle compare mode |
-| `⌘F` / `Ctrl+F` | Find in filtered log |
+| `⌘F` / `Ctrl+F` | Find in filtered log (or focus Settings search when Settings is open) |
+| `⌘⌥F` / `Ctrl+Alt+F` | Find in all lines in the Original panel |
 | `⌘1` / `⌘2` / `⌘3` | Focus Filters / Log / Notes |
 | `⌘]` / `Ctrl+]` | Next tab |
 | `⌘[` / `Ctrl+[` | Previous tab |
@@ -1020,6 +1058,88 @@ The workflows Indagium was built for.
 3. Right-click the log row that corresponds to it → **Video: Link to \<time\>**.
 4. Turn on **Follow log**. Now scrolling the log moves the video, and you can grab any frame straight
    into your notes.
+
+---
+
+## 29. Device capture
+
+Device capture records live Android logcat and screen video in the same session. Use it when you can
+reproduce the problem on a connected device; for a log and recording that already exist separately,
+use [manual video sync](#20-video-sync). For the website walkthrough, see
+[Capture Android Logcat and Screen Video Together](https://indagium.com/android-logcat-capture/).
+
+### Before you start
+
+Install Android **platform-tools** so `adb` is available on the computer. Indagium does not bundle
+host adb. Connect the phone by USB and accept Android's debugging authorization prompt. For wireless
+logcat capture, turn on **Wireless debugging** in Developer options (Android 11 or later), then use
+Indagium's **Pair device** flow: scan its QR code or enter the pairing code/address shown by Android.
+The phone and computer must be able to reach one another on the local network; some guest Wi-Fi or
+access-point isolation settings block discovery. If the device was paired but does not connect, use
+the displayed address or connect it over USB.
+
+The default embedded mirror and recorder use Indagium's bundled device-side scrcpy server over adb.
+Installing the host `scrcpy` app is only necessary for its separate external mirror window. On older
+Linux systems where the bundled FFmpeg native libraries cannot load (glibc older than 2.35), video
+recording and the in-app mirror are unavailable. If the in-app mirror was selected, Indagium uses the
+external host `scrcpy` window when it is installed; otherwise the capture continues without a device
+display. Log capture remains available, and the Capture screen reports active capabilities.
+
+### Start and investigate live
+
+1. Choose **Capture** in the toolbar and select an authorized device. If there is no active capture,
+   Indagium opens the **New capture** launcher with connection status and setup guidance.
+2. Start capture. A normal log tab opens and new logcat rows stream into the viewer while the device
+   screen appears in the capture card when embedded mirroring is enabled.
+3. Use the same filters, Find, highlighters, folding, selection, Notes and AI investigation tools as
+   with a saved log. Mark an issue when it happens; Indagium records a bounded log window and, when
+   supported, a screenshot. Add explanatory text in Notes. You can also save a screenshot directly to
+   Notes.
+4. Use **Save snapshot** to export evidence so far without ending capture. Choose all history, the
+   last N minutes, rows since the last successful save, or the range between the first and last
+   selected capture rows. The selected rows must belong to the live capture. Video is optional.
+5. Reopen the exported ZIP. Indagium verifies the archive, opens the included log and automatically
+   attaches its video using the saved timing anchor. The log and screen video are ready to investigate
+   together.
+
+### What is saved
+
+The portable capture ZIP uses archive version 3 and a flat layout: `capture.indagium.json`,
+`logcat.log`, optional `screen.mp4` (or `screen.mkv` when needed to preserve audio), and optional
+marker/note data and screenshots, plus a small `captured_with_indagium.txt` file. The descriptor
+contains checksums, capture/timing metadata, and one synchronization anchor; the archive does not
+contain a per-row timing map. When reopened, that anchor links the log and video for synchronized
+review. The retained working session directory has a separate layout with its raw log, growing video,
+session metadata and capture index; it is not the portable ZIP layout.
+
+By default video recording is on and the log stream begins at capture start, so earlier Android
+ring-buffer messages are excluded. **Include earlier device logs** opts into those buffered messages.
+Device audio and computer microphone are separate options and both are off by default. **Capture
+audio** requires Android 11+ and records supported device playback; apps can block it. During audio
+capture the phone speaker is muted by default. The optional **Keep sound on the device** setting
+requests speaker playback as well and requires Android 13+; if a device cannot honor it, Indagium
+reports that limitation. Audio is exported in MKV. Playing captured audio through the embedded mirror
+on the computer is separate and starts muted; it can be enabled from the live mirror's speaker
+control. The microphone records the computer's selected input, not device audio.
+
+A snapshot does not stop or restart the capture. **Stop** ends the current recording and finalizes the
+retained session. **Save ZIP** exports a portable archive from a stopped or recovered session. A
+snapshot or archive can cover less video than log time when recording began late, stalled, or has not
+yet flushed a readable keyframe. The saved metadata describes actual coverage, and the viewer may
+show that recording begins later than the log. Capture starts with an estimated log/video offset. After reopening the archive, play the video to a
+known moment, then right-click the corresponding log row and choose **Video: Link to \<time\>** to set
+or correct the synchronization anchor (see [§20](#20-video-sync)).
+
+Settings changed under Capture configure the next recording: video, buffers, device audio, microphone,
+encoding limits and saved-video format are read when a capture starts. They persist as
+you edit them, but changing them does not reconfigure an active recorder. Use the running mirror's
+display interaction and playback controls while the session is live.
+
+The storage guard stops capture before disk use exceeds its configured limit or reserved free space.
+Capture sessions, live snapshots, and Save ZIP exports can each use their own folder in Settings →
+General → Storage. Live capture itself is not resumed after restart. If Indagium closes unexpectedly,
+the New capture launcher lists the interrupted session so you can recover or export its files. A
+stopped capture tab remains a normal tab and can be restored from its descriptor.
 
 ---
 
