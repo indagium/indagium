@@ -397,24 +397,24 @@ private fun rememberTimeDeltaChars(tab: LogTab, visibleItems: List<LogItem>): In
 }
 
 private fun widestVisibleTimeDeltaMagnitudeMs(items: List<LogItem>): Long {
-    var firstTs: String? = null
-    var previousTs: String? = null
+    var firstEntry: LogEntry? = null
+    var previousEntry: LogEntry? = null
     var widest = 0L
     items.forEach { item ->
-        val ts = when (item) {
-            is LogItem.Row -> item.entry.ts
-            is LogItem.SeqHeader -> item.entry.ts
-            is LogItem.ManualHeader -> item.entry.ts
-            is LogItem.StackTraceHeader -> item.entry.ts
+        val entry = when (item) {
+            is LogItem.Row -> item.entry
+            is LogItem.SeqHeader -> item.entry
+            is LogItem.ManualHeader -> item.entry
+            is LogItem.StackTraceHeader -> item.entry
         }
-        if (firstTs == null) firstTs = ts
-        previousTs?.let { previous ->
-            deltaMillis(previous, ts)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
+        if (firstEntry == null) firstEntry = entry
+        previousEntry?.let { previous ->
+            deltaMillis(previous, entry)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
         }
-        previousTs = ts
+        previousEntry = entry
     }
-    firstTs?.let { first ->
-        previousTs?.let { last ->
+    firstEntry?.let { first ->
+        previousEntry?.let { last ->
             deltaMillis(first, last)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
         }
     }
@@ -1738,8 +1738,8 @@ fun LogViewer(
                                     val deltaMs = when {
                                         !effectiveTab.showTimeDelta -> null
                                         deltaAnchorEntryId != null ->
-                                            effectiveTab.rmap[deltaAnchorEntryId]?.ts?.let { anchorTs -> deltaMillis(anchorTs, item.entry.ts) }
-                                        index > 0 -> deltaMillis(listItems[index - 1].entry.ts, item.entry.ts)
+                                            effectiveTab.rmap[deltaAnchorEntryId]?.let { anchor -> deltaMillis(anchor, item.entry) }
+                                        index > 0 -> deltaMillis(listItems[index - 1].entry, item.entry)
                                         else -> null
                                     }
                                     when (item) {
