@@ -76,6 +76,9 @@ import com.indagium.utils.CONTENT_SNIFF_BYTES
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.HeapPressure
+import com.indagium.utils.HeapPressureMonitor
+import com.indagium.utils.HeapSnapshot
 import com.indagium.utils.HeapTrim
 import com.indagium.utils.LogContentKind
 import com.indagium.utils.LogLinePresentationContext
@@ -2646,6 +2649,46 @@ class AppState(
         if (!recording) heapTrimRequester(reason)
     }
 
+    /** JVM heap pressure (occupancy after GC) as last reported by [heapPressureMonitor]; drives the
+     *  global memory banner. Written from the JMX notification thread, which is fine for snapshot state. */
+    internal var heapPressure by mutableStateOf(HeapPressure.NORMAL)
+        private set
+
+    /** The after-GC reading behind [heapPressure] (for display); null until a level change has been reported. */
+    internal var heapSnapshot by mutableStateOf<HeapSnapshot?>(null)
+        private set
+
+    /**
+     * The heap watchdog. Constructing it is inert; nothing is listening until [startHeapPressureMonitoring]
+     * (hundreds of tests build an AppState and must not each register JMX listeners). Replaced in tests
+     * with one built on fake seams, before monitoring starts.
+     */
+    internal var heapPressureMonitor: HeapPressureMonitor = HeapPressureMonitor()
+    private val heapMonitoringStarted = AtomicBoolean(false)
+
+    /**
+     * Starts the heap watchdog once per process (idempotent); called from Main.kt's startup effect, never
+     * from `init`. The JMX listener lives until [close] stops it.
+     */
+    fun startHeapPressureMonitoring() {
+        if (!heapMonitoringStarted.compareAndSet(false, true)) return
+        heapPressureMonitor.start(::onHeapPressureChanged)
+    }
+
+    /** Monitor callback; may arrive on a JMX notification thread. */
+    internal fun onHeapPressureChanged(level: HeapPressure, snapshot: HeapSnapshot) {
+        val previous = heapPressure
+        heapSnapshot = snapshot
+        heapPressure = level
+        AppLogger.info(
+            "memory",
+            "Heap pressure $previous -> $level (${heapUsageLabel(snapshot)} after GC)",
+        )
+    }
+
+    /** Estimated free heap bytes (max minus occupancy after the last GC); used by the pre-open memory check. */
+    internal fun heapFreeBytesEstimate(): Long = heapPressureMonitor.estimatedFreeBytes()
+
     internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
 
     internal fun screenshotCapability(tabId: String): CaptureScreenshotCapability =
@@ -4146,6 +4189,7 @@ class AppState(
     fun close(forAppDataReset: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
         if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
+        heapPressureMonitor.stop()
         autosaveScheduler.cancelPending()
         cancelAllCapturePreviews()
         aiProviderApiKeys.clear()

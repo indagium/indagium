@@ -581,6 +581,9 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     }
     System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
     System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
+    // Test aid for the memory watchdog: ./gradlew desktopRun -Dindagium.run.xmx=768m forces a small
+    // heap so the WARNING/CRITICAL limits are reached quickly. -Xmx wins over MaxRAMPercentage above.
+    System.getProperty("indagium.run.xmx")?.let { jvmArgs("-Xmx$it") }
     // macOS mirror bisect switches: the underlay ordering (on by default — see
     // EmbeddedMirrorMacSurface.underlayRequested), its stderr diagnostics, Compose interop blending
     // and the skiko render API all change how the native mirror layer composes with Compose.

@@ -142,6 +142,9 @@ internal class HeapPressureMonitor(
         }
     }
 
+    /** Number of JMX listeners currently registered (0 before [start] / after [stop]); for tests. */
+    internal val registeredListenerCount: Int get() = synchronized(lock) { registered.size }
+
     /** Test seam: sets the change callback without touching JMX. */
     internal fun setOnChange(callback: ((HeapPressure, HeapSnapshot) -> Unit)?) {
         synchronized(lock) { onChange = callback }

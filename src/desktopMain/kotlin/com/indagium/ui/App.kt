@@ -379,6 +379,7 @@ fun App(
         ) {
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
+                HeapPressureBanner(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {

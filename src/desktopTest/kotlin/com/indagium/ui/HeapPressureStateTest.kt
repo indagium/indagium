@@ -1,0 +1,75 @@
+package com.indagium.ui
+
+import com.indagium.utils.HeapPressure
+import com.indagium.utils.HeapPressureMonitor
+import com.indagium.utils.HeapSnapshot
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+class HeapPressureStateTest {
+    private val gb = 1024L * 1024L * 1024L
+
+    private fun newApp() =
+        AppState(autosaveFile = Files.createTempFile("heap-pressure-state", "").toFile(), autoExportNotes = false)
+
+    @Test
+    fun aFreshAppStateIsNormalAndHasNotStartedMonitoring() {
+        val app = newApp()
+        try {
+            assertEquals(HeapPressure.NORMAL, app.heapPressure)
+            assertNull(app.heapSnapshot)
+            assertEquals(0, app.heapPressureMonitor.registeredListenerCount)
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
+    fun monitorChangesUpdateStateThroughTheInjectedMonitor() {
+        val app = newApp()
+        try {
+            val monitor = HeapPressureMonitor(maxBytes = { 10 * gb }, requestFullGc = {}, currentHeapUsedBytes = { 0L })
+            app.heapPressureMonitor = monitor
+            // Drive the monitor's own callback seam (no JMX): the same wiring start() installs.
+            monitor.setOnChange(app::onHeapPressureChanged)
+
+            monitor.onGc(usedAfterGcBytes = 8 * gb, isFullGc = false)
+            assertEquals(HeapPressure.WARNING, app.heapPressure)
+            assertEquals(HeapSnapshot(8 * gb, 10 * gb), app.heapSnapshot)
+
+            monitor.onGc(usedAfterGcBytes = 9 * gb, isFullGc = true)
+            assertEquals(HeapPressure.CRITICAL, app.heapPressure)
+            assertEquals(9 * gb, app.heapSnapshot?.usedAfterGcBytes)
+
+            monitor.onGc(usedAfterGcBytes = 1 * gb, isFullGc = true)
+            assertEquals(HeapPressure.NORMAL, app.heapPressure)
+            assertEquals(9 * gb, app.heapFreeBytesEstimate())
+        } finally {
+            app.close()
+        }
+    }
+
+    @Test
+    fun startHeapPressureMonitoringIsIdempotent() {
+        val app = newApp()
+        try {
+            val monitor = HeapPressureMonitor(maxBytes = { 10 * gb }, requestFullGc = {}, currentHeapUsedBytes = { 0L })
+            app.heapPressureMonitor = monitor
+            app.startHeapPressureMonitoring()
+            val afterFirst = monitor.registeredListenerCount
+            assertTrue(afterFirst > 0, "start registers JMX listeners")
+            app.startHeapPressureMonitoring()
+            assertEquals(afterFirst, monitor.registeredListenerCount, "second start adds nothing")
+            // start() on the real monitor installed the AppState callback; a level change reaches the state.
+            monitor.onGc(usedAfterGcBytes = 8 * gb, isFullGc = false)
+            assertEquals(HeapPressure.WARNING, app.heapPressure)
+            app.close()
+            assertEquals(0, monitor.registeredListenerCount, "close stops the monitor")
+        } finally {
+            app.close()
+        }
+    }
+}
