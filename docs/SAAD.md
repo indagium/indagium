@@ -1,6 +1,6 @@
 # Indagium — Software Architecture & Design Document (SAAD)
 
-> **Status:** reverse-engineered from the source tree at app version **1.8.0**.
+> **Status:** reverse-engineered from the source tree at app version **1.8.7**.
 > Every structural claim below is followed by the file (and where useful the line) that supports it.
 
 ---
@@ -73,11 +73,7 @@ constants — are the stable part of a citation; treat the line number as a hint
 
 ## 2. System overview
 
-Indagium is a **desktop log viewer for Android logcat files**. It opens logcat captures — including
-multi-gigabyte ones and Android bug-report archives — and gives an engineer the tools to reduce them
-to the handful of lines that explain a defect: filters, pattern-based folding, crash detection,
-annotations that export as a ticket-ready Markdown document, and an optional AI assistant that can
-drive all of those tools itself.
+Indagium is a **desktop Android log analysis workspace**. It opens saved logcat captures and Android bug-report archives, and can capture live device logcat together with screen video over USB or Android wireless debugging. Engineers use filters, pattern-based folding, crash detection, synchronized playback, annotations, and an optional AI assistant to reduce evidence to the lines that explain a defect.
 
 ### 2.1 Runtime shape
 
@@ -103,11 +99,12 @@ target.
 
 | Metric | Value |
 |---|---|
-| Production Kotlin | ~46,800 lines in `src/desktopMain` |
-| Test Kotlin | ~26,000 lines in `src/desktopTest` |
+| Production source files | 215 Kotlin files in `src/desktopMain` |
+| Production Kotlin lines | 127,283 |
+| Test source files | 275 Kotlin files in `src/desktopTest` (271 `*Test.kt` files) |
+| Test Kotlin lines | 77,719 |
 | Packages | 13 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`) |
-| Test classes | ~90 |
-| MCP/automation tools exposed | 75 |
+| MCP/automation tools exposed | See the current catalogue in `debug/ControlServer.kt`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -175,7 +172,7 @@ same machine, which is why §12's cancellation and debounce machinery exists at 
 
 `AppState` takes every external dependency as a constructor parameter — parser function, storage
 directories, control-server factory, directory picker, update checker, video-controller factory
-(`ui/AppState.kt:892-953`). This is the seam that lets ~90 test classes exercise application logic
+(`ui/AppState.kt:892-953`). This is the seam that lets the desktop test suite exercise application logic
 with no UI running, and it is why the project has no DI framework: the constructor *is* the
 injection point.
 
@@ -307,7 +304,7 @@ flowchart TB
 
     subgraph media["Media & platform"]
         video["video/ FFmpeg player"]
-        capture["capture/ adb + scrcpy recorder<br/>archive + timing index"]
+        capture["capture/ adb log + video recorder<br/>archive + timing index"]
         voice["voice/ Whisper · Apple · Windows"]
         update["update/ UpdateChecker"]
         single["singleinstance/"]
@@ -347,7 +344,7 @@ Three things in this diagram are the load-bearing structural decisions:
 1. **`AppState` is the hub.** Everything the user can change lives there, and every subsystem either
    reads it or is owned by it. There is no second source of truth.
 2. **`IndagiumToolGateway` is a chokepoint.** MCP clients, REST clients, the in-app AI agent, and
-   subprocess agents all reach application behaviour through the same 55-entry catalogue. See
+   subprocess agents all reach application behaviour through the same versioned tool catalogue. See
    [§14.1](#141-control-server-mcp-and-rest).
 3. **`AiToolExecutionCoordinator` sits below the model loop, not beside it.** Both the direct-API
    path and the subprocess-agent path pass through it, so the safety policy is enforced once
@@ -413,51 +410,29 @@ ephemeral launcher. Both are intentionally excluded from autosave. A live tab re
 capture strip and, when mirroring is enabled, an embedded device mirror in the right-sidebar capture
 card (`ui/EmbeddedMirrorPanel.kt`, `capture/mirror/EmbeddedMirrorRuntime.kt`).
 
-**Recording no longer spawns host `scrcpy` at all.** `CaptureRecorder` owns the device video stream
-directly through `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the same bundled,
-checksum-pinned scrcpy *server* jar (v4.1) over `adb forward` that the embedded mirror uses, but
-speaks its frame-meta wire protocol (`send_frame_meta=true send_stream_meta=true
-send_device_meta=false` — deliberately not `raw_stream=true`, which strips the PTS/config/key-frame
-metadata a durable recording needs) rather than a raw byte stream. `capture/mirror/
-ScrcpyPacketReader.kt` parses that protocol (verified against the pinned server's own
-`device/Streamer.java`/`device/DesktopConnection.java` source, not against older scrcpy protocol
-docs — its bit layout differs: bit 63 is a periodic width/height "session-meta" marker, bit 62 is the
-config/non-media flag, bit 61 is key-frame); `capture/StreamingMkvWriter.kt` writes the parsed
-H.264 (+ optional Opus, when `CaptureSettings.audio` is set) packets straight into
-`session.videoFile` via the bundled FFmpeg's `avformat` API, using a short `cluster_time_limit`
-(~750ms) so the file stays readable by ffprobe/JavaCV within about a second of the last packet
-written — replacing host `scrcpy --record`'s own Matroska muxer, whose in-memory cluster buffering
-could leave the growing file **0 bytes behind for tens of seconds** on a quiet screen. A dropped
-device connection reconnects with a bounded retry, offsets the new connection's PTS to continue the
-output timeline (recording it as a "video gap Xs" interruption), and keeps the same MKV open; a
-resize/rotation's fresh SPS/PPS is merged in-band ahead of the next key frame rather than restarting
-the container. `EmbeddedDeviceSession.attachDecoder`/`detachDecoder` let a live mirror decoder
-subscribe to the same parsed packet stream without ever blocking the muxer — a stalled decoder is
-fed through a bounded queue (`capture/mirror/ScrcpyStreamAdapters.kt`'s `BoundedAnnexBFeed`) that
-drops packets until the next key frame instead of backing up the socket reader — but
-`EmbeddedMirrorRuntime`'s own connection (below) does **not** currently attach to it: recording and
-the in-app mirror each still open an independent embedded scrcpy session (a scoped-down piece of a
-larger "one session for both" redesign; see this file's git history/PR for what was left for a
-follow-up). The host `scrcpy` executable is now used only by the separate, explicitly visible
-native mirror window (`CaptureTools.scrcpyMirrorSpec`/`CaptureRecorder.openMirror`) — recording works
-with `adb` alone.
+**Recording uses the embedded device transport, not host `scrcpy --record`.** When video is enabled,
+`CaptureRecorder` owns `capture/mirror/EmbeddedDeviceSession.kt`, which deploys the checksum-pinned
+scrcpy server over `adb forward` and parses its frame-meta stream. `ScrcpyPacketReader` preserves
+presentation timestamps, configuration packets, and key-frame boundaries; `StreamingMkvWriter`
+remuxes H.264 and optional Opus packets into the growing session MKV using FFmpeg. A bounded reconnect
+path maintains the video timeline across device interruptions, while resize/rotation parameter sets
+are inserted before the next key frame.
 
-The embedded mirror (`EmbeddedMirrorRuntime`) opens its own transport the same way, but re-flattens
-the frame-meta protocol back into a plain decodable Annex-B byte stream
-(`ScrcpyStreamAdapters.kt`'s `ScrcpyToAnnexBInputStream`) before handing it to the unchanged
-`JavaCvH264Decoder`, so it decodes into a Compose `ImageBitmap` exactly as before and a mirror
-failure still cannot affect log recording (`EmbeddedMirrorRuntime` owns only the transport/decoder,
-never the recorder). `AppState.ensureEmbeddedMirror` creates/starts it per tab, coalescing a race
-between the capture card's own `LaunchedEffect` and the tab-start callback so a late `autoStart`
-request is not dropped while a create job is already in flight; `EmbeddedMirrorHandle.stop()/close()`
-run on `ioScope`, not the Compose thread, because closing a real connection runs synchronous `adb
-forward --remove`/`adb shell rm` cleanup.
-
+When recording is active, `EmbeddedMirrorHandle.create(sharedSession=...)` attaches the mirror decoder
+to that same packet stream; it does not open a second device transport. A bounded decoder feed drops
+frames until the next key frame rather than blocking the recorder if rendering stalls. If video
+recording is disabled, mirror-only mode opens its own embedded session. The host `scrcpy` executable
+is only used for the separate external mirror window. The embedded preview uses VideoToolbox/Metal
+on macOS. On Windows and Linux, the optional D3D11 or VAAPI/EGL native mirror is behind the
+`hardwareMirror` preference (off by default); surface/decoder failures fall back to the Compose
+renderer. These display paths do not own the recording session.
 The `capture` package owns process adapters, session metadata and recovery, raw log/index writing,
 screenshots, disk guards, ZIP range export, timing records, and the versioned
 `capture.indagium.json` codec. It has no Compose rendering, viewer state, AI, or diagnostics UI
-dependency. Capture Settings are part of the normal Settings dialog and apply immediately; they
-cover tool paths, adb buffer mode, video limits, naming, storage, and diagnostics.
+dependency. Capture settings are persisted as the user changes them; recorder configuration is read
+when a new capture starts, while mirror display controls such as live volume remain available during
+a session. The settings surface covers tool paths, adb buffer mode, video/audio options, limits,
+naming, storage, and diagnostics.
 
 **Wi-Fi pairing** (`capture/WirelessAdb.kt`, `capture/WirelessPairingFlow.kt`,
 `ui/WirelessPairingDialogs.kt`) attaches an Android 11+ phone over Wireless debugging. It depends on
@@ -476,17 +451,24 @@ one adb process (there is no runner-level or capture-diagnostics logging of argv
 `QrPairingCredentials.toString` redacts the password. A wireless device is recognised purely from its
 serial (`CaptureDevice.wireless`), so no persisted format changed.
 
-The descriptor is the stable hand-off between capture and review. Its versioned metadata points to
-`logs/logcat.log`, `mapping/log-video.jsonl`, and optional video/screenshots inside a portable ZIP;
-opening a ZIP or an extracted descriptor verifies the assets and auto-links the available log,
-mapping, and video artifacts. A live Snapshot freezes the current log/index byte boundary and exports
-without stopping the recorder; it supports all history, a time range, since the last successful
-save, or a contiguous interval bounded by the first and last selected capture rows. Export runs on
-`ioScope`, and cancellation or failure leaves the recorder active. Video snapshots the growing MKV
-and chooses a readable preceding keyframe when available; descriptor coverage records the actual
-video end instead of implying that video spans the entire log range. Screenshots are stored in the
-session and added to Notes with video-frame provenance when available.
+The descriptor is the hand-off between capture and review. Portable archive v3 uses a flat ZIP
+layout: `capture.indagium.json`, `logcat.log`, optional `screen.mp4` (or MKV when needed to retain
+audio), optional notes/markers and screenshots, and `captured_with_indagium.txt`. The descriptor
+stores checksums, actual video coverage, and a single log-row/video-time synchronization anchor; v3
+does not export the older row-by-row mapping file. Opening a ZIP verifies its assets and creates an
+ordinary log tab with the available video automatically linked using that anchor. The reader still
+accepts legacy v1/v2 archives, whose nested asset layout and row-mapping metadata are distinct.
 
+A retained working session directory has a different layout: `logs/logcat.log`,
+`mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, session metadata, and the finalized
+portable descriptor. The append-only capture index supplies per-row elapsed-time data while recording
+and is used to build a portable snapshot's selected log range and synchronization anchor. A live
+snapshot freezes the current log/index byte boundary, exports all history, a time range, since the last
+successful save, or the contiguous interval between the first and last selected capture rows, and
+leaves the recorder running. Cancellation or failure leaves the capture active. Video export chooses
+a readable preceding keyframe where available; the descriptor reports actual coverage instead of
+implying video spans the full log interval. Screenshots are stored in the session and added to Notes
+with video-frame provenance when available.
 Since-last-save keeps **two independent cursors** on `CaptureSession`, not one:
 `snapshotCheckpointMs` (log coverage end, always advances on any successful export) and
 `videoCheckpointMs` (video coverage end, advances only when that export actually produced video). The
@@ -508,9 +490,9 @@ session's video to catch up to the requested end before snapshotting it, and its
 cheap copy+scan probe (`CaptureVideoCoverageProbe`, cached by source file length) instead of a full
 copy+remux so the snapshot popover's debounced polling stays lightweight.
 
-Stop drains tailing and finalizes the descriptor/mapping in place on the same tab. The resulting
-attached video is then handled by the ordinary video player, so log rows and video can seek one
-another. If the application exits before Stop, the recorder marks its directory interrupted; the
+Stop drains tailing and finalizes the v3 descriptor in the retained session directory; the session
+index remains beside the raw log and video. The ordinary player then lets log rows and video seek one
+another, while a later Save ZIP writes the separate flat portable layout. If the application exits before Stop, the recorder marks its directory interrupted; the
 next launcher lists it for recovery. Live recorder/launcher markers are not restored as active
 state, while a finalized descriptor link is durable and reopens as a normal capture-backed tab.
 
@@ -1050,7 +1032,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 
 | File | Role |
 |---|---|
-| `AppState.kt` | 6,137 lines. The application's entire mutable state and most of its behaviour. See [§11](#11-state-management) |
+| `AppState.kt` | 12,214 lines. The application's entire mutable state and most of its behaviour. See [§11](#11-state-management) |
 | `App.kt` | Root composable: layout routing, all dialogs, drag-and-drop, global key handling, the autosave debounce |
 | `FileView.kt` / `CompareView.kt` | Single-tab and two-tab layouts; the `Bound*` adapters |
 | `LogViewer.kt` | The log list: `LazyColumn`, horizontal scroll, selection, drag-select, the Original/Filtered split |
@@ -1059,7 +1041,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `AnnotationPanel.kt` / `AnnotationManager.kt` | Notes UI and the block-model mutations behind it |
 | `AiSidebar.kt` | AI panel plus the right-sidebar container that stacks Video / Notes / AI |
 | `CaptureCoordinator.kt` | `CaptureService` tool/device discovery and recovery; one `TabCaptureController` recorder/export lane per live tab |
-| `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | Session-only device launcher, live-tab capture chrome/snapshot/diagnostics, and immediate Capture Settings surface |
+| `CaptureLauncher.kt` / `CaptureStrip.kt` / `CaptureSettingsUi.kt` | Session-only device launcher, live-tab capture chrome/snapshot/diagnostics, and Capture Settings (session recorder options are read at next start) |
 | `AutosaveCodec.kt` / `AutosaveScheduler.kt` / `FilterCodec.kt` / `DesktopStorage.kt` | Persistence: encoding, scheduling, the saved-filter library format, path resolution |
 | `ControlServerManager.kt` | Control-server lifecycle with a generation-counter race guard |
 | `TailCoordinator.kt` | Per-tab live tailing and debounced re-analysis |
@@ -1069,9 +1051,9 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 
 | File | Role |
 |---|---|
-| `ControlServer.kt` | Ktor CIO server; the 55-entry `MCP_TOOLS` catalogue (`:666`); 50 `REST_ROUTES` (`:1240`); auth, CORS, session reaping |
+| `ControlServer.kt` | Ktor CIO server; `MCP_TOOLS` and `REST_ROUTES` catalogues; auth, CORS, device-tool approval, session reaping |
 | `IndagiumToolGateway.kt` | Joins catalogue to handlers, enforces parity, defines the confirmation policy, derives OpenAI function definitions |
-| `IndagiumToolOperations.kt` | The 55 handler lambdas (`:66-195`) — the actual behaviour behind every tool |
+| `IndagiumToolOperations.kt` | Tool handler map — the actual behaviour behind each catalogue entry |
 | `Json.kt` | Hand-rolled JSON encode/decode for flat DTOs |
 | `AppLogger.kt` | Opt-in diagnostic log, written in Android threadtime grammar so Indagium can open its own log |
 
@@ -1103,7 +1085,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
 | `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
 | `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta protocol parser, the recording-side packet pump/reconnect/PTS-continuity owner, and the bounded decoder fan-out + mirror-side Annex-B re-flattening |
-| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and log↔video timing/index mapping |
+| `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and index-assisted range/synchronization-anchor generation |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
 | `update/UpdateChecker.kt` | GitHub Releases API, per-OS asset selection, streamed download to a `.part` file |
@@ -1562,7 +1544,7 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `voice-models/` | Downloaded Whisper models | GGML binary |
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
-| `captures/` | Live capture session directories: raw log, append-only capture index, MKV, screenshots, session metadata, finalized descriptor/mapping | Session files and portable-capture source data; interrupted sessions are recoverable from the launcher |
+| `captures/` | Retained session directories: `logs/logcat.log`, `mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Session data and portable-capture source; interrupted sessions are recoverable from the launcher. Exported v3 ZIPs use a separate flat layout and a single sync anchor, not the session index |
 | `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
 
 #### 13.1.1 The pre-rename directory and the one-time migration
@@ -1780,7 +1762,7 @@ highlighters.
 | Default port | 8991, clamped to 1..65535 | `model/Model.kt` `mcpControlPort`; `ui/AppState.kt:210-211` |
 | Enabled | **Off by default** | `model/Model.kt` `mcpControlEnabled = false` |
 | MCP transport | Streamable HTTP at `/mcp` | `debug/ControlServer.kt` `mcpStreamableHttp` |
-| REST | 51 routes | `debug/ControlServer.kt:1240` `REST_ROUTES` |
+| REST | Local JSON/REST routes | `debug/ControlServer.kt` `REST_ROUTES` |
 | Auth | `Authorization: Bearer <32 hex>`, constant-time compare | `debug/ControlServer.kt:126-173` |
 | CORS | Installed **only** when `mcpAllowBrowserClients` is on | `debug/ControlServer.kt:336-345` |
 
@@ -1806,21 +1788,18 @@ generated state remains inside the empty debug directory. This is a test-safety 
 general-purpose sandbox: normal file-open authorization still belongs to the caller and MCP tool
 policy.
 
-**The single tool contract.** This is the structural idea worth understanding. There is one
-catalogue, `MCP_TOOLS` (`debug/ControlServer.kt:666`, 56 entries), and one handler map,
-`operationHandlers` (`debug/IndagiumToolOperations.kt:66-195`, 56 entries). `IndagiumToolGateway`
-joins them and its `init` block **fails fast if they disagree** (`debug/IndagiumToolGateway.kt:22-25`).
+**The single tool contract.** There is one catalogue, `MCP_TOOLS` (`debug/ControlServer.kt`), and one handler map, `operationHandlers` (`debug/IndagiumToolOperations.kt`). `IndagiumToolGateway` joins them and its `init` block **fails fast if they disagree** (`debug/IndagiumToolGateway.kt`).
 
 Four consumers are then derived from that single pair:
 
 ```mermaid
 flowchart TB
-    catalog["MCP_TOOLS<br/>55 descriptors + JSON schemas"]
-    handlers["operationHandlers<br/>55 lambdas"]
+    catalog["MCP_TOOLS<br/>descriptors + JSON schemas"]
+    handlers["operationHandlers<br/>handler map"]
     gw["IndagiumToolGateway<br/>init enforces parity"]
 
     mcp["Shared MCP Server<br/>external clients"]
-    rest["REST routes<br/>51 of 57 tools"]
+    rest["REST routes<br/>supported subset"]
     managed["Per-run managed MCP Server<br/>Codex / Claude Code"]
     fns["openAiFunctions()<br/>in-app agent, no HTTP"]
 
@@ -1838,19 +1817,19 @@ flowchart TB
     fns --> state
 ```
 
-Five tools are MCP-only and have no REST route: `get_sequence_summary`, `get_project_info`,
-`search_similar_cases`, `get_case`, `reindex_cases`. This is a real gap, not a rounding — REST has 51
-routes against 57 tools.
+REST intentionally exposes a subset of the shared tool contract; availability is defined by each route and tool descriptor rather than by matching catalogue counts. Device-capture operations are available through the MCP catalogue and are described in [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md).
 
 Because `openAiFunctions()` serialises the *same* `ToolSchema` into OpenAI function definitions
 (`debug/IndagiumToolGateway.kt:42-48`), there is no second hand-written tool catalogue anywhere. A
 tool added in one place is available to every consumer, or the build fails.
 
-**Confirmation policy** lives on the gateway, not in the UI: thirteen tools that touch files or tab
-lifecycle are marked `CONFIRMATION_REQUIRED` (`debug/IndagiumToolGateway.kt:53-61`) — `open_log_file`,
-`split_log_file`, `close_tab`, `export_analysis`, `export_filtered_log`, `save_annotations`,
-`load_annotations`, `merge_tabs`, `start_tailing`, `stop_tailing`, `clear_all_notes`,
-`reindex_sources`, `save_filter_preset`.
+**Gateway action policy** covers confirmation-sensitive file and workspace operations and is defined
+in `IndagiumToolGateway.kt`. The MCP server has a separate per-session approval gate for external
+clients before device-changing operations or live-screen reads. Read-only device discovery and status
+calls do not need that gate. The in-app AI path is authorized through the user's prompt. This device
+gate covers start/stop capture, screen inspection, input/navigation, screenshots, issue marking,
+snapshots, and changing device log settings. See [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md#device-capture)
+for the current live tool policy and operation list.
 
 **Session hygiene.** MCP sessions are pinged every 120 s with a 5 s timeout, and non-responders are
 closed (`debug/ControlServer.kt:312-324`) — without this, an abandoned client would hold a session
@@ -2265,7 +2244,7 @@ chosen by how much it should interrupt the user:
 | Update check failed | `updateCheckStatus = Failed` | Text in Settings; **silent** for the automatic startup check |
 | Video decode failed | `VideoPlayerController.error`, `FailedVideoPlayerController` | Message in the video panel |
 | Capture tools/device unavailable | `CaptureService.toolStatus`, `devices`, `error` | Inline in the New capture launcher or Settings → Capture, with recheck/install guidance |
-| Live recorder/storage/video diagnostic | `RecorderSnapshot.diagnostics` | Capture strip's diagnostics drawer and status-only live capture card |
+| Live recorder/storage/video diagnostic | `RecorderSnapshot.diagnostics` | Capture strip's diagnostics drawer and live capture card beside the embedded mirror |
 | Snapshot export failed/cancelled | `captureExportError` / job cancellation | Snapshot popover; the live recorder remains active and no partial destination is published |
 | Stop/finalization failed | `captureFinalizationStatusByTab` | Same tab's finalization banner; raw log remains visible as a stopped ordinary log |
 | Load appears hung | `isLoading` + `loadingStatus` | `StuckLoadingDialog` after a delay, offering Cancel loading / Close all tabs / Clear cache / Keep waiting |
@@ -2523,7 +2502,7 @@ and both `git tag` examples must change in the same commit.
 
 ## 21. Testing architecture
 
-~90 test classes, ~26,000 lines, in `src/desktopTest`.
+275 test Kotlin files (271 `*Test.kt` files), 77,719 lines, in `src/desktopTest`.
 
 ### 21.1 The seam
 
@@ -2629,9 +2608,10 @@ Add a value to `ThemePreset` (`model/Model.kt:835`) with its label, and extend `
 
 Ranked by the cost of leaving them unaddressed. Each is a real, located issue — not a style opinion.
 
-### R1 — `AppState` is a 6,137-line god object
+<a id="r1--appstate-is-a-6137-line-god-object"></a>
+### R1 — `AppState` is a 12,214-line god object
 
-`ui/AppState.kt` holds tab management, file loading, filtering, saved filters, annotations, source
+`ui/AppState.kt` is currently 12,214 lines and holds tab management, file loading, filtering, saved filters, annotations, source
 indexing, video mapping, AI wiring, update checking, storage accounting, and every dialog's transient
 state. It is by far the most likely file to produce a merge conflict, and the hardest to reason
 about.
@@ -2762,8 +2742,8 @@ habit. **Mitigation:** an Apple Developer certificate in CI.
 | **RAW** | The tag given to a line that matched none of the four logcat formats. Such lines are kept, never dropped. |
 | **Sequence** | A user-defined start (and optional end) pattern that folds a recurring region of the log into a collapsible group. |
 | **Capture launcher** | Session-only New capture tab that discovers tools/devices and lists retained interrupted sessions before a live capture starts. |
-| **Capture strip** | The 46dp live-tab toolbar showing device, elapsed time, storage, video status, Stop, Screenshot, Snapshot, Settings, and diagnostics. |
-| **Capture snapshot** | A point-in-time ZIP export of a live session; it freezes the current byte boundary and does not stop the recorder. |
+| **Capture strip** | The live-tab toolbar showing device, elapsed time, storage, video status, Stop, Screenshot, Save snapshot, Settings, and diagnostics. |
+| **Capture snapshot** | A point-in-time v3 flat ZIP export of a live session; it freezes the current log/index boundary, stores one sync anchor, and does not stop the recorder. |
 | **Session-only state** | State intentionally excluded from the autosave: selection, tailing, search, TID map, video-follow, capture timeline/session/launcher markers, and all AI conversations. |
 | **Splice fast path** | An optimisation that mutates a cached item list in place for a single stack-group expand/collapse instead of rebuilding it. |
 | **Threadtime** | The default Android logcat format: `MM-DD HH:MM:SS.mmm PID TID L Tag: message`. Also the format Indagium writes its own diagnostic log in. |
@@ -2788,7 +2768,7 @@ Where to read about a given source file.
 | `utils/EntryIdMap.kt`, `ImageDownscale.kt`, `FileTailer.kt` | [19.1](#191-memory-strategy) |
 | `utils/AtomicFileWrite.kt` | [13.3](#133-atomicity) |
 | `utils/BugReportZip.kt` | [14.6](#146-archives), [18.7](#187-archive-handling) |
-| `ui/AppState.kt` | [11](#11-state-management), [12](#12-threading-and-concurrency-model), [R1](#r1--appstate-is-a-6137-line-god-object) |
+| `ui/AppState.kt` | [11](#11-state-management), [12](#12-threading-and-concurrency-model), [R1](#r1--appstate-is-a-12214-line-god-object) |
 | `ui/App.kt`, `FileView.kt`, `CompareView.kt` | [5](#5-high-level-component-architecture), [11.4](#114-the-bound-adapter-pattern) |
 | `ui/AutosaveCodec.kt`, `AutosaveScheduler.kt`, `DesktopStorage.kt` | [13](#13-persistence-architecture), [15.4](#154-autosave-and-session-restore), [22.4](#224-add-a-persisted-setting) |
 | `ui/ControlServerManager.kt`, `TailCoordinator.kt`, `AnnotationManager.kt` | [11.3](#113-delegation-to-coordinators) |
