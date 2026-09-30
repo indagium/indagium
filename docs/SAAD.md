@@ -2410,6 +2410,7 @@ enough that a naive implementation does not merely run slowly, it exhausts heap.
 | Heap return to the OS + JVM flags | `utils/HeapTrim.kt`, `build.gradle.kts` (`-XX:G1PeriodicGCInterval`, `-XX:+ExplicitGCInvokesConcurrent`, `-XX:MaxRAMPercentage`) | A coalesced concurrent `System.gc()` after a big tab, capture or export is released, so G1 uncommits freed gigabytes instead of holding them while idle |
 | `AppendOnlyLogList` (tail path) | `utils/AppendOnlyLogList.kt` | Tail/live-capture appends share one growable backing array: O(batch) per append instead of copying every row each second, which had inflated committed heap ~20x over live data |
 | Allocation-free capture-index parser | `capture/CaptureArchive.kt` `parseIndexRecord` | Canonical index lines are parsed without a JSON tree per line; any deviation falls back to `parseIndexRecordJson` |
+| Heap-pressure watchdog | `utils/HeapPressure.kt` (`HeapPressureMonitor`), `ui/HeapBanner.kt`, `ui/TailCoordinator.kt` (`pauseTailing`/`resumeTailing`), `utils/LogMemoryEstimate.kt` | Turns "freeze then `OutOfMemoryError`" into a message: GC-notification occupancy after GC (NORMAL / WARNING at 70% / CRITICAL at 85%, CRITICAL confirmed by one rate-limited full GC) drives a banner; CRITICAL pauses live capture log views (recording continues on disk; Resume once pressure drops; Stop while paused keeps the full log in the session files and archive, the tab stays a prefix); a pre-open estimate (~3.5x file size vs. free heap) adds a memory line to the split prompt. Exposed read-only via the `get_memory_status` tool |
 
 ### 19.2 CPU strategy
 
@@ -2467,6 +2468,13 @@ installer.
 JavaCV's POM declares eleven unused native libraries (OpenCV, Tesseract, OpenBLAS, RealSense,
 FlyCapture and others) as non-optional dependencies; all are excluded, and FFmpeg is re-added as an
 explicit classifier pair.
+
+**Bundled JDK modules.** jpackage's jlink runtime contains only the modules `jdeps` detects, so two
+are added explicitly (`modules(...)` in `build.gradle.kts`): `jdk.httpserver`
+(`com.sun.net.httpserver`) and `jdk.management` (`com.sun.management.GarbageCollectionNotificationInfo`, read by the
+heap-pressure watchdog, §19.1). `jdeps` cannot see either usage, and without them the packaged app
+fails at first use (`NoClassDefFoundError`) even though `desktopRun` works on the full local JDK.
+Windows additionally adds `jdk.crypto.mscapi`.
 
 ### 20.3 Dependency locking
 
@@ -2726,6 +2734,20 @@ no user-visible explanation and no diagnostic record (unless opt-in logging happ
 
 Covered in [§18.8](#188-distribution). Users are instructed to run `xattr -cr`, which trains a bad
 habit. **Mitigation:** an Apple Developer certificate in CI.
+
+### R13 — Log rows are memory-resident by design
+
+Every parsed `LogEntry` of every open tab lives in the JVM heap (about 243 bytes per entry, about 550
+bytes per row with derived lists and indexes), and the heap is capped at `MaxRAMPercentage=50`. A
+large file, several tabs, or a long live capture can fill it; G1 then thrashes (UI stalls for seconds
+to minutes) and finally an `OutOfMemoryError` hits whichever thread allocates next.
+
+**Impact:** high on small machines (about 7M rows on an 8 GB Mac), but recording data is never lost:
+the capture session files on disk are authoritative. **Mitigations in place:** the heap-pressure
+watchdog and banner (§19.1), pausing live capture log views at CRITICAL, and the pre-open estimate in
+the split prompt. **Follow-ups:** a compact `LogEntry` (numeric `ts`, DLT/source fields in a side
+table, roughly 2x more rows per GB) and disk-backed rows (an offset index plus lazy parsing, which
+removes the limit but reworks the engine).
 
 ---
 

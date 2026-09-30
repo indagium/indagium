@@ -14,7 +14,12 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 ## Read logs and narrow evidence
 
 - `list_tabs` — open tabs and ids; `open_log_file`, `preview_split_log_file`, and
-  `split_log_file` — open or prepare a file/archive; `close_tab` — close a tab.
+  `split_log_file` — open or prepare a file/archive; `close_tab` — close a tab. A live capture
+  tab whose log view was paused at critical heap pressure carries `captureLogPausedAtRow`; its
+  `entryCount` is then only the first N rows of the recording (the full log is on disk).
+- `get_memory_status` — JVM heap health: `heapPressure` (`NORMAL`/`WARNING`/`CRITICAL`),
+  `heapUsedAfterGcBytes`, `heapMaxBytes`, `heapFreeBytesEstimate`, and `pausedCaptureTabs`. Every
+  parsed row lives in memory, so check it before opening another large log.
 - `get_visible_lines` — rendered, filtered/folded rows; use `limit`, `offset`, `fields`, and
   `compact` to keep responses small. `get_line_context` — raw surrounding rows for one `lineId`,
   independent of filters/folding.

@@ -174,6 +174,19 @@ class ControlServerTest {
     }
 
     @Test
+    fun memoryRouteReportsHeapStateAndPausedTabs() {
+        state.tabs = listOf(
+            mkTab("t1", "cap.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))).copy(tailPausedAtRow = 1),
+        )
+        val body = get("/memory")
+        assertTrue(body.contains("\"heapPressure\":\"NORMAL\""), body)
+        assertTrue(body.contains("\"heapMaxBytes\":"), body)
+        assertTrue(body.contains("\"heapFreeBytesEstimate\":"), body)
+        assertTrue(body.contains("\"pausedCaptureTabs\":[{"), body)
+        assertTrue(get("/tabs").contains("\"captureLogPausedAtRow\":1"))
+    }
+
+    @Test
     fun mcpAndVisibleRowsExposeAuthoritativeDltFormatAndMetadata() {
         val entry = LogEntry(
             1,

@@ -206,6 +206,46 @@ Above a size threshold Indagium offers to **split** the file into parts before o
 *large file mode*, shown in the row-count label, which computes the visible rows in the background
 and stays responsive while you filter.
 
+### Memory
+
+Indagium keeps every parsed row of every open tab in memory, about 550 bytes per row in practice
+(the row itself plus the indexes built on top of it). The app's memory cap is half of your computer's
+RAM, and all open tabs share it. Roughly, at that rate:
+
+| Computer RAM | Memory cap | Rows that fit across all tabs |
+|---|---|---|
+| 8 GB | about 4 GB | about 7 million |
+| 16 GB | about 8 GB | about 15 million |
+| 24 GB | about 12 GB | about 22 million |
+
+These are estimates; real figures vary with line length and with how many filters, notes and
+sequences you have. A live device capture adds roughly 2.4 million rows an hour, so a long recording on
+a small machine can reach the cap.
+
+When the memory in use (measured after the JVM has cleaned up unused objects) gets close to the cap,
+a banner appears under the tab bar:
+
+- **Warning** (about 70% full): "Memory is running low". Close tabs you don't need. You can dismiss
+  the banner; it returns if memory use rises further.
+- **Critical** (about 85% full, confirmed after a full cleanup): "Memory is almost full". Indagium
+  **pauses the log view of live captures** so it cannot run out of memory. Recording is not affected;
+  the log and video keep being written to disk.
+
+A paused capture's strip says "Log view paused at row N to save memory". Close other tabs, then press
+**Resume** once memory is no longer critical (the button is disabled, with a tooltip, until then). The
+view catches up with everything recorded meanwhile.
+
+If you press **Stop** while the view is paused, the recording is finalized normally and the saved
+capture and **Save ZIP** contain the **full** log. The tab itself keeps showing only the first N rows,
+and the strip says so. Reopen the saved capture to see every row.
+
+When you open a file that probably will not fit in the memory that is currently free, the split
+prompt ([§18](#18-merging-and-splitting)) adds a line such as "Needs about 3.1 GB of memory; about
+2.0 GB is free." Split it, close other tabs, or choose **Open as is** to try anyway.
+
+Closing a tab frees its rows; the app hands the freed memory back to the operating system shortly
+after, so the memory use shown by your system monitor drops too.
+
 ---
 
 ## 5. Reading the log
