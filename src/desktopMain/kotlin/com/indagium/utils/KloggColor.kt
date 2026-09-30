@@ -132,6 +132,9 @@ internal fun MinstdRand0.uniformInt(a: Int, b: Int): Int {
     val urngRange = MinstdRand0.MAX - MinstdRand0.MIN
     val uerange = urange + 1
     val scaling = urngRange / uerange
+    // A range wider than the generator's own would make `past` 0 and the loop below spin forever;
+    // libstdc++ upscales there, which no caller of ours needs — just stay bounded.
+    if (scaling == 0L) return a + ((next() - MinstdRand0.MIN) % uerange).toInt()
     val past = uerange * scaling
     var ret: Long
     do {
@@ -140,10 +143,14 @@ internal fun MinstdRand0.uniformInt(a: Int, b: Int): Int {
     return a + (ret / scaling).toInt()
 }
 
+/** klogg's own colour-variance ceiling; anything larger (a crafted token) is clamped to it. */
+internal const val MAX_COLOR_VARIANCE = 100
+
 /** The (fore, back) pair klogg paints a match of [matched] with when variate_colors is on. */
 internal fun kloggVariedColors(fore: Color, back: Color, variance: Int, matched: String): Pair<Color, Color> {
     if (variance <= 0) return fore to back
+    val spread = minOf(variance, MAX_COLOR_VARIANCE)
     val crc = CRC32().apply { update(matched.toByteArray(Charsets.UTF_8)) }.value
-    val factor = MinstdRand0(crc).uniformInt(100 - variance, 100 + variance)
+    val factor = MinstdRand0(crc).uniformInt(100 - spread, 100 + spread)
     return qtDarker(fore, factor) to qtDarker(back, factor)
 }

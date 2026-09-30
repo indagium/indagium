@@ -1341,8 +1341,11 @@ class AppStateBehaviorTest {
 
         target.importFiltersFromFiles(listOf(good, notes))
 
-        assertEquals(1, target.pendingImportReview!!.rows.size)
-        assertTrue(target.importError!!.contains("notes.ini"))
+        val review = target.pendingImportReview!!
+        assertEquals(1, review.rows.size)
+        assertTrue(review.notes.any { it.startsWith("Not imported: notes.ini") })
+        // One modal only: the failure rides on the review instead of opening the error dialog too.
+        assertNull(target.importError)
     }
 
     @Test

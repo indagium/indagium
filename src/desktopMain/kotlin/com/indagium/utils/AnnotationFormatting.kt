@@ -4,6 +4,7 @@ private val HEADING_REGEX = Regex("^(#{1,6})\\s+(.+)$")
 private val LIST_ITEM_REGEX = Regex("^(?:([-+*])\\s+|(\\d+)\\.\\s+)(.*)$")
 private val QUOTE_REGEX = Regex("^>\\s?(.*)$")
 private val HORIZONTAL_RULE_REGEX = Regex("(?:-{3,}|_{3,}|\\*{3,})")
+private const val MAX_LIST_START = 1_000_000
 
 /** Block-level Markdown -> HTML conversion state for [annotationMarkdownToHtml]. Broken out of
  *  that function (rather than left as one big loop body) purely to keep each line type's handling
@@ -82,7 +83,10 @@ private class MarkdownBlockState(private val out: StringBuilder) {
         if (listTag != tag) {
             closeList()
             listTag = tag
-            out.append("<$tag>")
+            // A list that opens above 1 (user-authored, or a copied block's "2. " number prefix)
+            // needs an explicit start, or HTML renumbers it from 1.
+            val start = list.groupValues[2].toIntOrNull()?.takeIf { it in 2..MAX_LIST_START }
+            out.append(if (start != null) "<$tag start=\"$start\">" else "<$tag>")
         }
         out.append("<li>").append(annotationInlineMarkdownToHtml(list.groupValues[3])).append("</li>")
         return true

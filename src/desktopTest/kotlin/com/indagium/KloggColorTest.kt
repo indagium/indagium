@@ -8,6 +8,8 @@ import com.indagium.utils.parseQtColor
 import com.indagium.utils.qtDarker
 import com.indagium.utils.qtLighter
 import com.indagium.utils.uniformInt
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -88,6 +90,35 @@ class KloggColorTest {
         assertTrue(shades.size > 1, "different matches should get different shades")
         // factor is in [85, 115]: white's value lands between 100/115 and 100/85 of full (clamped to 255)
         shades.forEach { assertTrue(rgb(it).first in 221..255) }
+    }
+
+    // A regression here is an infinite loop, so run the body on a daemon thread and bound the wait.
+    private fun completesPromptly(body: () -> Unit) {
+        val executor = Executors.newSingleThreadExecutor { r -> Thread(r).apply { isDaemon = true } }
+        try {
+            executor.submit(body).get(5, TimeUnit.SECONDS)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun anAbsurdVarianceTerminatesAndBehavesLikeTheMaximum() {
+        completesPromptly {
+            val huge = kloggVariedColors(Color.Black, Color.White, 1_100_000_000, "match")
+            assertEquals(kloggVariedColors(Color.Black, Color.White, 100, "match"), huge)
+        }
+    }
+
+    @Test
+    fun uniformIntOverARangeWiderThanTheGeneratorTerminatesWithinBounds() {
+        completesPromptly {
+            val rng = MinstdRand0(7)
+            repeat(100) {
+                val n = rng.uniformInt(-1_100_000_000, 1_100_000_000)
+                assertTrue(n in -1_100_000_000..1_100_000_000)
+            }
+        }
     }
 
     @Test

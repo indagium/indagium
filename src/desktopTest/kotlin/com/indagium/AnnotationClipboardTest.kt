@@ -174,6 +174,99 @@ class AnnotationClipboardTest {
         assertFalse(html.contains("<p><strong><strong>Screenshot"))
     }
 
+    // ── copy masking reaches the HTML flavors ────────────────────────────
+
+    private fun maskingSettings(format: AnnotationCopyFormat, enabled: Boolean = true) = AppSettings(
+        annotationCopyFormat = format,
+        maskWordOnCopy = enabled,
+        copyMaskRules = listOf(CopyMaskRule("java", "j*ava")),
+    )
+
+    private fun maskingTab(imageBytes: ByteArray = jpegBytes()) = mkTab(
+        "log",
+        "LOGCAT_example.log",
+        listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "java crashed")),
+    ).copy(
+        annotations = Annotations(
+            prefix = "java prefix",
+            suffix = "java suffix",
+            blocks = listOf(
+                AnnBlock.Note("n1", "java note"),
+                AnnBlock.LogRef("l1", listOf(1), "java caption", sourceFilename = "java.log"),
+                AnnBlock.Image("i1", "java image", "pasted", "jpeg", imageBytes),
+            ),
+        ),
+    )
+
+    @Test
+    fun maskedHtmlHidesTheWordInBothHtmlCopyFormatsButNeverTouchesImageBytes() {
+        val tab = maskingTab()
+        for (format in listOf(AnnotationCopyFormat.JIRA_CLOUD, AnnotationCopyFormat.HTML)) {
+            val settings = maskingSettings(format)
+            val html = buildAnnotationsHtml(tab, settings, { maskWordForCopy(it, settings) })
+            val transferable = annotationClipboardTransferable(tab, settings, format, html)
+            val copied = if (format == AnnotationCopyFormat.JIRA_CLOUD) {
+                transferable.getTransferData(HtmlTransferable.HTML_FLAVOR) as String
+            } else {
+                transferable.getTransferData(DataFlavor.stringFlavor) as String
+            }
+            assertFalse(copied.contains("java"), "$format leaked the masked word: $copied")
+            for (masked in listOf("j*ava prefix", "j*ava suffix", "j*ava note", "j*ava caption", "j*ava image", "From j*ava.log", "j*ava crashed")) {
+                assertTrue(copied.contains(masked), "$format is missing '$masked'")
+            }
+        }
+    }
+
+    @Test
+    fun maskingLeavesImageBase64IdenticalAndDisabledMaskingLeavesHtmlUnchanged() {
+        // Bytes whose base64 contains the masked word on its own as a whole word are implausible, so
+        // use a rule that WOULD match a base64 run if it were applied to the assembled HTML.
+        val bytes = byteArrayOf(0x69, 0x1B, 0x6A, 0x5A) // base64 "aRtqWg=="
+        val tab = maskingTab(bytes)
+        val enabled = AppSettings(maskWordOnCopy = true, copyMaskRules = listOf(CopyMaskRule("aRtqWg", "XXXX")))
+        val plain = buildAnnotationsHtml(tab, enabled)
+        val masked = buildAnnotationsHtml(tab, enabled, { maskWordForCopy(it, enabled) })
+        val payload = java.util.Base64.getEncoder().encodeToString(bytes)
+        assertTrue(plain.contains(payload))
+        assertTrue(masked.contains(payload))
+
+        val off = maskingSettings(AnnotationCopyFormat.JIRA_CLOUD, enabled = false)
+        assertEquals(buildAnnotationsHtml(tab, off), buildAnnotationsHtml(tab, off, { maskWordForCopy(it, off) }))
+    }
+
+    // ── numbered lists keep their number ─────────────────────────────────
+
+    @Test
+    fun numberedBlocksKeepTheirNumberInTheHtmlOrderedList() {
+        val tab = mkTab("log", "LOGCAT_example.log", emptyList()).copy(
+            annotations = Annotations(
+                blocks = listOf(
+                    AnnBlock.Note("n1", "first"),
+                    AnnBlock.LogRef("l1", emptyList(), "second"),
+                    AnnBlock.Note("n2", "third"),
+                ),
+            ),
+        )
+
+        val html = buildAnnotationsHtml(tab, AppSettings(numberAnnotationBlocks = true))
+
+        assertTrue(html.contains("<ol><li>first</li></ol>"))
+        assertTrue(html.contains("<ol start=\"2\"><li>second</li></ol>"))
+        assertTrue(html.contains("<ol start=\"3\"><li>third</li></ol>"))
+    }
+
+    @Test
+    fun userAuthoredListsStartWhereTheyStartAndBulletsAreUntouched() {
+        fun render(text: String) = buildAnnotationsHtml(
+            mkTab("log", "LOGCAT_example.log", emptyList()).copy(annotations = Annotations(blocks = listOf(AnnBlock.Note("n", text)))),
+        )
+
+        assertTrue(render("1. a\n2. b").contains("<ol><li>a</li><li>b</li></ol>"))
+        assertTrue(render("5. a\n6. b").contains("<ol start=\"5\"><li>a</li><li>b</li></ol>"))
+        assertTrue(render("- a\n- b").contains("<ul><li>a</li><li>b</li></ul>"))
+        assertTrue(render("99999999999. a").contains("<ol><li>a</li></ol>"))
+    }
+
     // ── maskWordForCopy: [screenshot: ...] marker skip ──────────────────
 
     @Test
