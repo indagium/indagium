@@ -1307,7 +1307,7 @@ internal fun String.highlighterFromToken(): Highlighter? = runCatching {
         caseSensitive = p.getOrNull(8)?.toBoolean() ?: false,
         textColor = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.toULongOrNull()?.let { Color(it) },
         captureGroupsOnly = p.getOrNull(10)?.toBoolean() ?: false,
-        colorVariance = p.getOrNull(11)?.toIntOrNull()?.coerceAtLeast(0) ?: 0,
+        colorVariance = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 100) ?: 0,
     )
 }.getOrNull()
 

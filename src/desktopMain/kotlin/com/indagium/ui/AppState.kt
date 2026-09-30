@@ -9386,7 +9386,11 @@ class AppState(
         val t = tab(tabId) ?: return
         val currentSettings = settings
         val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML) {
-            buildAnnotationsHtml(t, currentSettings) { document ->
+            buildAnnotationsHtml(
+                t,
+                currentSettings,
+                maskText = { maskWordForCopy(it, currentSettings) },
+            ) { document ->
                 Seq3RenderCache.brandedPngBytes(
                     Seq3RenderCache.layout(document),
                     resolveSeq3ThemeColors(document, currentSettings).toSeq3RasterTheme(),
@@ -9430,8 +9434,9 @@ class AppState(
 
     // "Copy rich preview" (AnnotationPanel header / MdPreviewDialog) — the whole annotation, as
     // buildAnnotationsHtml() renders it, on the clipboard as text/html with inline <img> data
-    // URIs, so a single paste reproduces text *and* pictures. Falls back to the same masked
-    // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
+    // URIs, so a single paste reproduces text *and* pictures. Text is copy-masked before it becomes
+    // HTML; falls back to the same masked buildMd() text copyAnn() writes for editors that don't
+    // accept the HTML flavor.
     fun copyRichPreview(tabId: String) {
         copyAnnotationFormat(tabId, AnnotationCopyFormat.JIRA_CLOUD)
     }
@@ -11842,15 +11847,16 @@ class AppState(
         ioScope.launch { importFiltersFromFiles(files) }
     }
 
-    /** Stages every readable file (filter JSON or klogg export) in one review; files that cannot be read are reported via [importError]. */
+    /** Stages every readable file (filter JSON or klogg export) in one review; files that cannot be read are
+     *  listed in that review's notes, or in [importError] when nothing could be staged (never both dialogs). */
     fun importFiltersFromFiles(files: List<File>) {
         val libraries = mutableListOf<DecodedFilterLibrary>()
-        val failures = mutableListOf<String>()
+        val failures = mutableListOf<Pair<String, String>>()
         for (file in files) {
             runCatching { decodeFilterImport(file.name, readFilterImportText(file)).getOrThrow() }.fold(
                 onSuccess = { libraries += it },
                 onFailure = { e ->
-                    failures += "${file.name}: ${e.message ?: "could not be read."}"
+                    failures += file.name to (e.message ?: "could not be read.")
                     AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
                 },
             )
@@ -11859,11 +11865,14 @@ class AppState(
             filters = libraries.flatMap { it.filters },
             folders = libraries.flatMap { it.folders },
             rowInfo = libraries.fold(emptyMap()) { acc, lib -> acc + lib.rowInfo },
-            notes = libraries.flatMap { it.notes }.distinct(),
+            notes = libraries.flatMap { it.notes }.distinct() + failures.map { (name, reason) -> "Not imported: $name — $reason" },
             fromKlogg = libraries.any { it.fromKlogg },
         )
         beginImportFilterList(prepareImportedLibrary(merged), files.joinToString(", ") { it.name })
-        if (failures.isNotEmpty()) importError = failures.joinToString("\n")
+        // No review was staged (nothing decoded, or only empty libraries): the error dialog is the only surface.
+        if (pendingImportReview == null && failures.isNotEmpty()) {
+            importError = failures.joinToString("\n") { (name, reason) -> "$name: $reason" }
+        }
     }
 
     // ── App data / clearable cache ────────────────────────────────────

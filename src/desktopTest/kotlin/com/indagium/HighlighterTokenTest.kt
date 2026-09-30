@@ -71,6 +71,16 @@ class HighlighterTokenTest {
     }
 
     @Test
+    fun aCraftedColorVarianceIsClampedToKloggsRange() {
+        val h = Highlighter("h5", "p", regex = false, color = Color.Red, on = true, colorVariance = 1)
+        val fields = h.highlighterToken().split("|").toMutableList()
+        fields[11] = b64("1100000000")
+        assertEquals(100, fields.joinToString("|").highlighterFromToken()?.colorVariance)
+        fields[11] = b64("-7")
+        assertEquals(0, fields.joinToString("|").highlighterFromToken()?.colorVariance)
+    }
+
+    @Test
     fun aTooShortTokenIsRejected() {
         assertNull("aGk=|cA==".highlighterFromToken())
     }
