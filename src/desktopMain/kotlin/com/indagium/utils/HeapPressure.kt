@@ -4,6 +4,7 @@ import com.indagium.debug.AppLogger
 import com.sun.management.GarbageCollectionNotificationInfo
 import java.lang.management.ManagementFactory
 import java.lang.management.MemoryType
+import java.util.concurrent.atomic.AtomicLong
 import javax.management.Notification
 import javax.management.NotificationEmitter
 import javax.management.NotificationListener
@@ -110,6 +111,10 @@ internal class HeapPressureMonitor(
     private var onChange: ((HeapPressure, HeapSnapshot) -> Unit)? = null
     private val registered = mutableListOf<Pair<NotificationEmitter, NotificationListener>>()
 
+    // Lock-free evidence for diagnostics (see [diagnosticSummary]): were GC notifications arriving at all?
+    private val gcNotificationCount = AtomicLong(0)
+    private val lastGcNotificationNanos = AtomicLong(0)
+
     /** Current level. */
     val pressure: HeapPressure get() = synchronized(lock) { level }
 
@@ -137,6 +142,7 @@ internal class HeapPressureMonitor(
                     emitter to listener
                 }
             synchronized(lock) { registered += added }
+            activeMonitor = this
         } catch (t: Throwable) {
             log("heap pressure monitor failed to start: $t")
         }
@@ -152,6 +158,7 @@ internal class HeapPressureMonitor(
 
     /** Removes the listeners added by [start]. Safe to call repeatedly or without [start]. */
     fun stop() {
+        if (activeMonitor === this) activeMonitor = null
         val toRemove = synchronized(lock) {
             onChange = null
             registered.toList().also { registered.clear() }
@@ -215,6 +222,8 @@ internal class HeapPressureMonitor(
     private fun handleNotification(notification: Notification, heapPools: Set<String>) {
         try {
             if (notification.type != GarbageCollectionNotificationInfo.GARBAGE_COLLECTION_NOTIFICATION) return
+            gcNotificationCount.incrementAndGet()
+            lastGcNotificationNanos.set(System.nanoTime())
             val info = GarbageCollectionNotificationInfo.from(notification.userData as CompositeData)
             val used = info.gcInfo.memoryUsageAfterGc
                 .filterKeys { it in heapPools }
@@ -226,12 +235,29 @@ internal class HeapPressureMonitor(
         }
     }
 
+    /**
+     * One line of watchdog state for the "no video" capture diagnostic: pressure, last after-GC
+     * reading, registered listener count and how many GC notifications were received (and how long
+     * ago). Takes this monitor's lock, so callers that must not hang run it on a throwaway thread.
+     */
+    internal fun diagnosticSummary(): String {
+        val (pressureLevel, snap, listeners) = synchronized(lock) { Triple(level, snapshot, registered.size) }
+        val lastNotification = lastGcNotificationNanos.get()
+        val ago = if (lastNotification == 0L) "never" else "${(System.nanoTime() - lastNotification) / NANOS_PER_MS}ms ago"
+        val afterGc = snap?.let {
+            "${it.usedAfterGcBytes / BYTES_PER_MB}MB/${it.maxBytes / BYTES_PER_MB}MB occupancy=${"%.2f".format(it.occupancy)}"
+        } ?: "none"
+        return "pressure=$pressureLevel lastAfterGcUsed=$afterGc registeredListeners=$listeners " +
+            "gcNotifications=${gcNotificationCount.get()} lastGcNotification=$ago"
+    }
+
     private fun log(message: String) {
         runCatching { AppLogger.debug("memory", message) }
     }
 
     private companion object {
         const val NANOS_PER_MS = 1_000_000L
+        const val BYTES_PER_MB = 1024L * 1024L
 
         /** Runs the GC off the caller's thread: the caller is the GC-notification thread and must not block. */
         fun requestFullGcOnDaemonThread() {
@@ -239,3 +265,23 @@ internal class HeapPressureMonitor(
         }
     }
 }
+
+/** The monitor most recently [HeapPressureMonitor.start]ed (AppState's); for diagnostics only. */
+@Volatile
+private var activeMonitor: HeapPressureMonitor? = null
+
+/**
+ * Watchdog state for the diagnostics log: the started monitor's [HeapPressureMonitor.diagnosticSummary]
+ * plus the plain JVM heap numbers, or a note that no monitor is running. May block briefly if the
+ * monitor's lock is contended; call it off any thread that must stay responsive.
+ */
+internal fun heapPressureDiagnosticSummary(): String {
+    val runtime = Runtime.getRuntime()
+    val mb = BYTES_PER_MB_TOP_LEVEL
+    val heap = "heapUsed=${(runtime.totalMemory() - runtime.freeMemory()) / mb}MB " +
+        "heapCommitted=${runtime.totalMemory() / mb}MB heapMax=${runtime.maxMemory() / mb}MB"
+    val monitor = activeMonitor
+    return (monitor?.diagnosticSummary() ?: "no heap pressure monitor started") + " " + heap
+}
+
+private const val BYTES_PER_MB_TOP_LEVEL = 1_048_576L

@@ -63,6 +63,44 @@ class EmbeddedDeviceSessionTest {
     }
 
     @org.junit.Test(timeout = 20_000)
+    fun pathStatsTrackHeaderBytesConfigKeyFrameAndMuxedPackets() {
+        val stream = videoStream(
+            width = 100,
+            height = 200,
+            config = H264_FIXTURE.config,
+            packets = listOf(Packet(5_000, true, H264_FIXTURE.key), Packet(38_000, false, H264_FIXTURE.delta)),
+        )
+        val transport = EmbeddedMirrorTransport { _, _ -> fakeConnection(stream) }
+        val muxed = CopyOnWriteArrayList<Long>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(tempFile()),
+            elapsedMillis = { 1_000 },
+            onVideoPacketWrittenHook = { pts, _ -> muxed += pts },
+        )
+        try {
+            assertFalse(session.hasReceivedFirstVideoPacket())
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue { muxed.size >= 2 }
+            val video = session.pathStats.video
+            assertTrue(session.hasReceivedFirstVideoPacket())
+            assertEquals(ScrcpyCodecIds.H264.toLong(), video.codecId.get())
+            assertTrue(video.sessionMetaRecords.get() >= 1L)
+            assertTrue(video.configPackets.get() >= 1L)
+            assertTrue(video.keyFrames.get() >= 1L)
+            assertTrue(video.packets.get() >= 3L)
+            assertTrue(video.bytesRead.get() >= stream.size, "every stream byte must be counted")
+            assertTrue(session.pathStats.muxedVideoPackets.get() >= 2L)
+            assertTrue(session.pathStats.muxerStartedAtMs.get() != StreamPathCounters.NEVER)
+            assertTrue(video.firstBytesAtMs.get() != StreamPathCounters.NEVER)
+            assertTrue(session.pathStats.describe().contains("video{"), session.pathStats.describe())
+        } finally {
+            session.close()
+        }
+        assertTrue(session.isStopped)
+    }
+
+    @org.junit.Test(timeout = 20_000)
     fun reconnectContinuesThePtsTimelineForwardAndReportsAVideoGap() {
         val oneConnectionStream = videoStream(
             width = 64,

@@ -82,6 +82,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.capture.CAPTURE_NO_VIDEO_AFTER_MS
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
@@ -210,8 +211,9 @@ internal fun captureVideoCoverageLine(preview: CaptureExportPreview?): String {
 }
 
 /** How long a capture that records video may run without a single video packet before the strip
- * says so. The device normally delivers its first packet within a second or two. */
-internal const val CAPTURE_NO_VIDEO_WARNING_AFTER_MS = 8_000L
+ * says so. The device normally delivers its first packet within a second or two. Shared with the
+ * capture-side one-shot diagnostic (`CAPTURE_NO_VIDEO_AFTER_MS`) so both fire at the same moment. */
+internal const val CAPTURE_NO_VIDEO_WARNING_AFTER_MS = CAPTURE_NO_VIDEO_AFTER_MS
 
 internal const val CAPTURE_NO_VIDEO_WARNING =
     "No video from the device yet — is its screen on and unlocked?"

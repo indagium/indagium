@@ -105,6 +105,10 @@ internal interface EmbeddedMirrorConnection : Closeable {
 
 internal fun interface EmbeddedMirrorTransport {
     fun open(deviceSerial: String, options: MirrorStreamOptions): EmbeddedMirrorConnection
+
+    /** Optional: lets the owning session hand the transport its [MirrorPathStats] so socket-level
+     * progress (connect attempts, readiness probe) shows up in the same counters. Default: ignored. */
+    fun attachStats(stats: MirrorPathStats) = Unit
 }
 
 internal fun interface H264Decoder : Closeable {
@@ -560,6 +564,12 @@ internal class AdbScrcpyTransport(
     // scrcpy-server's session id: 31 non-negative bits, sent as 8 hex digits.
     private val scidGenerator: () -> Int = { Random.nextInt(0, Int.MAX_VALUE) },
 ) : EmbeddedMirrorTransport {
+    @Volatile private var pathStats: MirrorPathStats? = null
+
+    override fun attachStats(stats: MirrorPathStats) {
+        pathStats = stats
+    }
+
     override fun open(deviceSerial: String, options: MirrorStreamOptions): EmbeddedMirrorConnection {
         val asset = assetResolver.resolve()
         // Isolate every deploy. A reconnect or a second runtime can still be tearing down its old
@@ -726,15 +736,17 @@ internal class AdbScrcpyTransport(
         prepare: (Socket) -> PreparedSocket,
     ): PreparedSocket {
         val deadline = System.nanoTime() + connectTimeout.toNanos().coerceAtLeast(0)
+        val counters = pathStats?.countersFor(role)
         while (true) {
             if (Thread.currentThread().isInterrupted) {
                 throw MirrorTransportCancelled("Embedded mirror $role socket connection was cancelled")
             }
             try {
+                counters?.socketAttempts?.incrementAndGet()
                 val socket = socketConnector("127.0.0.1", localPort)
                 return try {
                     if (socket.isClosed) throw EOFException("socket closed before $role became ready")
-                    prepare(socket)
+                    prepare(socket).also { counters?.socketConnected() }
                 } catch (failure: IOException) {
                     runCatching { socket.close() }
                     throw failure
@@ -788,8 +800,11 @@ internal class AdbScrcpyTransport(
                 VIDEO_READINESS_TIMEOUT
             }) {
                 -1 -> throw EOFException("video socket reached EOF before scrcpy became ready")
-                VIDEO_READINESS_TIMEOUT -> Unit
-                else -> pushback.unread(firstByte)
+                VIDEO_READINESS_TIMEOUT -> pathStats?.video?.probeOutcome?.set(PROBE_TIMEOUT)
+                else -> {
+                    pushback.unread(firstByte)
+                    pathStats?.video?.probeOutcome?.set(PROBE_BYTE)
+                }
             }
             return PreparedSocket(socket, pushback)
         } finally {
@@ -837,3 +852,5 @@ private class AdbScrcpyConnection(
 
 private const val VIDEO_READINESS_PROBE_TIMEOUT_MS = 250
 private const val VIDEO_READINESS_TIMEOUT = -2
+private const val PROBE_BYTE = 1
+private const val PROBE_TIMEOUT = 2
