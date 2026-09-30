@@ -437,6 +437,9 @@ compose.desktop {
             // the MCP control server in a packaged .dmg/.deb/.msi. desktopRun never surfaces
             // this because it runs on your full local JDK, not the trimmed runtime image.
             modules("jdk.httpserver")
+            // HeapPressureMonitor reads GC notifications via com.sun.management.* (jdk.management);
+            // declared explicitly so the trimmed runtime never lacks it, same jdeps caveat as above.
+            modules("jdk.management")
             // Windows-ROOT is implemented by the SunMSCAPI provider. It is dynamically chosen
             // from the JVM trust-store properties above, so jdeps cannot discover it on its own.
             // Keep it Windows-only: the module does not exist in macOS/Linux JDKs.
