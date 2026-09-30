@@ -40,6 +40,12 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // ControlServer/Ktor threads) and read/written by FileTailer's own scope flush coroutine.
     private val activeTails = ConcurrentHashMap<String, ActiveTail>()
 
+    // Tailers whose job was cancelled on purpose by pauseTailing (live capture log view paused at
+    // critical heap pressure). The FileTailer instance is kept because it owns the read offset:
+    // resumeTailing restarts that same instance, so the file's growth while paused is read exactly
+    // once, with no duplicate and no gap. A tab is in at most one of activeTails/pausedTails.
+    private val pausedTails = ConcurrentHashMap<String, FileTailer>()
+
     // Per-tab debounce (with a max-wait so a continuous stream cannot postpone it forever) backing
     // appendTailedLines' throttled analysis refresh. Same cancel-and-relaunch shape as AppState's
     // autosaveInBackground; see TailAnalysisDebouncer.
@@ -58,7 +64,9 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // caller's behavior unchanged (AppState.startTailing, the context menu, the MCP tools).
     @Suppress("ReturnCount") // Each early return is a separate, side-effect-free tailing precondition.
     fun startTailing(tabId: String, startOffset: Long? = null, pollIntervalMs: Long = 500) {
-        if (activeTails.containsKey(tabId)) return
+        // A paused tab resumes through resumeTailing (from its saved offset); starting a fresh tailer
+        // here would replay or skip rows.
+        if (activeTails.containsKey(tabId) || pausedTails.containsKey(tabId)) return
         val t = appState.tab(tabId) ?: return
         // DLT is a framed binary stream; FileTailer intentionally emits UTF-8 lines and cannot
         // preserve partial frames across polls. Until a framed incremental tailer exists, refuse
@@ -88,6 +96,8 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         AppLogger.info("tail", "Started tailing tab")
     }
 
+    // A paused tab (see pauseTailing) is left paused: it is already not tailing, and its saved
+    // tailer and truncation marker are what Resume and the capture strip rely on.
     fun stopTailing(tabId: String) {
         activeTails.remove(tabId)?.job?.cancel()
         appState.upTab(tabId) { it.copy(tailing = false) }
@@ -96,6 +106,45 @@ internal class TailCoordinator(private val appState: AppState, private val scope
         // LaunchedEffect in App.kt) to avoid rewriting a fast-growing logData every ~400ms —
         // explicitly save now that this tab has settled.
         appState.autosaveNow()
+    }
+
+    /** Whether [tabId]'s tailing is currently paused by [pauseTailing] (and can be resumed). */
+    fun isPaused(tabId: String): Boolean = pausedTails.containsKey(tabId)
+
+    // Stops appending rows to [tabId] WITHOUT reading anything further, keeping the FileTailer (and so
+    // its offset) for resumeTailing. Used at CRITICAL heap pressure for a live capture: the recorder
+    // keeps writing to disk, only the in-memory row view stops growing. Returns whether the tab was
+    // actively tailing (false = nothing to pause, nothing changed).
+    //
+    // BLOCKS the calling thread for cancelAndJoin (see drainAndStopTailing for why a bare cancel is
+    // not enough: an in-flight append must land, in order, before the tab is marked paused), so call
+    // it from ioScope, never the UI thread, and never while holding stateLock (the in-flight append
+    // takes it). tailPausedAtRow records the row count at the moment the tailer is quiescent.
+    //
+    // A pending debounced analysis refresh is deliberately NOT cancelled: it only reads the rows
+    // already in memory, and letting it finish clears the "analyzing" state the last batch set
+    // (appendTailedLines marks analysis pending). Cancelling it would leave that stuck.
+    fun pauseTailing(tabId: String): Boolean {
+        // remove() claims the tab: a concurrent stop/drain no longer sees an active tailer.
+        val active = activeTails.remove(tabId) ?: return false
+        runBlocking { active.job.cancelAndJoin() }
+        pausedTails[tabId] = active.tailer
+        appState.upTab(tabId) { it.copy(tailing = false, tailPausedAtRow = it.logData.size) }
+        AppLogger.info("tail", "Paused tailing tab at heap pressure")
+        return true
+    }
+
+    // Restarts a tab paused by pauseTailing from the saved offset (FileTailer.resume, NOT start, which
+    // would replay from startOffset or skip to end-of-file). The file kept growing meanwhile; the first
+    // poll catches up in bounded chunks. Returns whether the tab was paused. Does not block.
+    fun resumeTailing(tabId: String): Boolean {
+        val tailer = pausedTails.remove(tabId) ?: return false
+        if (appState.tab(tabId) == null) return false
+        val job = tailer.resume(scope)
+        activeTails[tabId] = ActiveTail(tailer, job)
+        appState.upTab(tabId) { it.copy(tailing = true, tailPausedAtRow = null) }
+        AppLogger.info("tail", "Resumed tailing tab")
+        return true
     }
 
     // Reads everything appended since the tailer's last poll and appends it synchronously, then
@@ -132,7 +181,18 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // stopped writing: its final line may have no trailing newline, yet the recorder indexes it as
     // a row, so the tab must show it too. The remaining lines are appended chunk by chunk (bounded
     // by FileTailer's chunk cap) rather than as one list.
+    //
+    // A tab PAUSED by pauseTailing is the one exception: it is stopped WITHOUT draining. Its unread
+    // backlog is exactly what memory pressure made us not load; appending it here would re-create the
+    // out-of-memory situation the pause avoided. The paused tailer is just dropped, tailing stays
+    // false, and tailPausedAtRow is kept so the tab still reads as a truncated prefix. (The capture
+    // archive does not depend on this tab: finalization reads the session files on disk.)
     fun drainAndStopTailing(tabId: String, includeTrailingPartialLine: Boolean = false) {
+        if (pausedTails.remove(tabId) != null) {
+            AppLogger.info("tail", "Stopped a paused tab without draining its backlog")
+            stopTailing(tabId)
+            return
+        }
         activeTails[tabId]?.let { active ->
             runBlocking { active.job.cancelAndJoin() }
             active.tailer.drainToEndOfFile(includeTrailingPartialLine) { batch -> appendTailedLines(tabId, batch) }
@@ -144,11 +204,13 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // ConcurrentHashMap removals, safe whether or not the caller already holds the lock.
     fun cancelTailingFor(tabId: String) {
         activeTails.remove(tabId)?.job?.cancel()
+        pausedTails.remove(tabId)
         analysisDebouncer.cancel(tabId)
     }
 
     fun clear() {
         activeTails.clear()
+        pausedTails.clear()
         analysisDebouncer.clear()
     }
 

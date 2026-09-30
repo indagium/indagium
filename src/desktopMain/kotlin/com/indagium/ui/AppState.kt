@@ -2684,6 +2684,46 @@ class AppState(
             "memory",
             "Heap pressure $previous -> $level (${heapUsageLabel(snapshot)} after GC)",
         )
+        if (level == HeapPressure.CRITICAL) pauseLiveCaptureLogViews()
+    }
+
+    /**
+     * At CRITICAL heap pressure, stops appending rows to every live capture tab's in-memory view;
+     * recording to disk is untouched. Never undone automatically: the user resumes explicitly via
+     * [resumeCaptureLogView] once memory allows. Only capture tabs are paused: a plain "Live
+     * Watching" tab is a user-controlled `tail -f` with its own Stop action. A tab whose Stop is
+     * already finalizing is skipped, since its stop path drains it itself. The pause blocks
+     * (TailCoordinator.pauseTailing joins the tailer job), so it runs on [ioScope], never on the
+     * monitor's notification thread.
+     */
+    private fun pauseLiveCaptureLogViews() {
+        val candidates = synchronized(stateLock) {
+            tabs.filter { it.captureSessionId != null && it.tailing }.map { it.id }
+        }.filter { captureFinalizationStatusByTab[it] != CAPTURE_FINALIZING_STATUS }
+        if (candidates.isEmpty()) return
+        ioScope.launch {
+            candidates.forEach { tabId ->
+                if (tailCoordinator.pauseTailing(tabId)) {
+                    AppLogger.info("memory", "Paused the live capture log view to protect the heap")
+                }
+            }
+        }
+    }
+
+    /** True while [tabId]'s live capture log view is paused (recording continues on disk). */
+    internal fun isCaptureLogViewPaused(tabId: String): Boolean = tailCoordinator.isPaused(tabId)
+
+    /**
+     * Resumes a paused live capture log view: the tab catches up with everything recorded meanwhile.
+     * Refused (false) while heap pressure is CRITICAL, because catching up would immediately push it
+     * back into an out-of-memory state; allowed at WARNING and below. Also refused for a tab that is
+     * not a live capture or whose Stop is in progress.
+     */
+    internal fun resumeCaptureLogView(tabId: String): Boolean {
+        if (heapPressure > HeapPressure.WARNING) return false
+        val live = tab(tabId)?.captureSessionId != null &&
+            captureFinalizationStatusByTab[tabId] != CAPTURE_FINALIZING_STATUS
+        return live && tailCoordinator.resumeTailing(tabId)
     }
 
     /** Estimated free heap bytes (max minus occupancy after the last GC); used by the pre-open memory check. */
@@ -3747,6 +3787,10 @@ class AppState(
                     // FileTailer captures this offset synchronously before its coroutine is scheduled.
                     // The recorder has already opened an empty log file, so no adb line can precede it.
                     startCaptureTailing(tabId)
+                    // A capture that starts while the heap is already critical must not grow the
+                    // in-memory view either: pause it straight away (it shows 0 rows and the paused
+                    // message; recording proceeds). Runs on this IO coroutine, where the join is fine.
+                    if (heapPressure == HeapPressure.CRITICAL) tailCoordinator.pauseTailing(tabId)
                     // CaptureCard — the only other place that calls ensureEmbeddedMirror — is a
                     // child of the right sidebar and simply doesn't compose while videoPanelVisible
                     // is false, so a mirror-enabled capture that starts with the panel hidden would
@@ -3864,6 +3908,14 @@ class AppState(
                 // final unterminated line the recorder indexed. Stop is attempted on every path, so
                 // a drain failure still stops the recorder, but an archive is never published from
                 // an incomplete tab.
+                //
+                // "Incomplete" here means the drain FAILED. A tab whose log view was paused at
+                // critical heap pressure (tailPausedAtRow != null) is intentionally a prefix of the
+                // capture and is NOT drained (drainAndStopTailing skips a paused tab so the backlog is
+                // never loaded into memory). That is not a failure: finalizeStopped and the ZIP export
+                // read the recorder's session files on disk, so the archive is complete regardless of
+                // how many rows the tab holds. attachFinalizedCapture and every ordinal-indexed
+                // lookup clamp to logData (see captureTimelineIndex).
                 val stopAttempt = runCatching { controller.stop() }
                 val drainFailure = runCatching {
                     tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine = true)
@@ -3921,7 +3973,7 @@ class AppState(
         if (launchers.isNotEmpty()) closeTabsById(launchers, preferredActiveId = liveCaptureTabId)
     }
 
-    private fun startCaptureTailing(tabId: String) {
+    internal fun startCaptureTailing(tabId: String) {
         tailCoordinator.startTailing(tabId, startOffset = 0L, pollIntervalMs = CAPTURE_TAIL_POLL_INTERVAL_MS)
     }
 
@@ -8273,6 +8325,11 @@ class AppState(
     // internally) — call from ioScope, never from the UI/AWT thread.
     fun drainAndStopTailing(tabId: String, includeTrailingPartialLine: Boolean = false) =
         tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine)
+
+    // See TailCoordinator.pauseTailing: blocks (joins the tailer job), so ioScope only. Production
+    // callers are pauseLiveCaptureLogViews and the capture start path; internal so tests can pause
+    // a tab without raising heap pressure.
+    internal fun pauseTailing(tabId: String): Boolean = tailCoordinator.pauseTailing(tabId)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 

@@ -878,6 +878,15 @@ data class LogTab(
     // rows are new inputs and must receive a fresh scan. Appended last to preserve positional
     // LogTab construction.
     val messageCompositionRevision: Long = 0,
+    // Session-only: set when the live capture's log view was paused at critical heap pressure
+    // (TailCoordinator.pauseTailing) to the number of rows the tab held at that moment; null when
+    // the view is complete. Recording continues on disk while paused, so this tab is then a strict
+    // PREFIX of the capture's own row index. It stays set after Stop so the strip can say the view
+    // is truncated (the finalized archive, which reads the session files, is complete). Like
+    // tailing/search/tidMap above it is deliberately ABSENT from AutosaveCodec's persistedSnapshot()/
+    // tabToken()/tabShellFromToken(): a restored tab reopens sourcePath from disk, i.e. the whole
+    // log. Do not add it there. Appended last to preserve positional LogTab construction.
+    val tailPausedAtRow: Int? = null,
 )
 
 /** Whether [cached] (a note's row, possibly restored from a `.ann` token, which carries no

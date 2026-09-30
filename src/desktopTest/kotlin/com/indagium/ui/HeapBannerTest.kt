@@ -36,8 +36,19 @@ class HeapBannerTest {
         )
         val critical = assertNotNull(heapBannerText(HeapPressure.CRITICAL, HeapSnapshot((11.2 * gb).toLong(), 12 * gb)))
         assertTrue(critical.startsWith("Memory is almost full — Indagium uses 11.2 of 12 GB."))
-        assertTrue("paused" !in critical, "no pause claim until a capture tab is actually paused (W3)")
+        assertTrue("paused" !in critical, "no pause claim unless a capture tab is actually paused")
         assertNotNull(heapBannerText(HeapPressure.WARNING, null))
+    }
+
+    @Test
+    fun pausedSentenceOnlyAppearsAtCriticalAndOnlyWhenACaptureLogIsPaused() {
+        val snap = HeapSnapshot((11.2 * gb).toLong(), 12 * gb)
+        val sentence = "Live capture log view is paused; recording continues."
+        assertTrue(assertNotNull(heapBannerText(HeapPressure.CRITICAL, snap, captureLogPaused = true)).endsWith(" $sentence"))
+        assertFalse(sentence in assertNotNull(heapBannerText(HeapPressure.CRITICAL, snap, captureLogPaused = false)))
+        assertFalse(sentence in assertNotNull(heapBannerText(HeapPressure.CRITICAL, snap)))
+        assertFalse(sentence in assertNotNull(heapBannerText(HeapPressure.WARNING, snap, captureLogPaused = true)))
+        assertNull(heapBannerText(HeapPressure.NORMAL, snap, captureLogPaused = true))
     }
 
     @Test
