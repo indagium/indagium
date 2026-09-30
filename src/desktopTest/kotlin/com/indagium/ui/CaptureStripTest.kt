@@ -4,6 +4,7 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.RecorderSnapshot
+import com.indagium.capture.RecorderState
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
@@ -56,6 +57,45 @@ class CaptureStripTest {
         )
         assertEquals("Video idle", captureVideoStatus(RecorderSnapshot(session = session)))
         assertEquals("Video REC", captureVideoStatus(RecorderSnapshot(session = session, videoRecording = true)))
+    }
+
+    @Test
+    fun noVideoWarningAppearsAfterTheTimeoutAndClearsOnTheFirstVideoPacket() {
+        fun snapshot(
+            elapsedMs: Long,
+            recordVideo: Boolean = true,
+            videoRecording: Boolean = false,
+            state: RecorderState = RecorderState.RECORDING,
+            videoStartElapsedMs: Long? = null,
+        ) = RecorderSnapshot(
+            state = state,
+            session = CaptureSession(
+                id = "session",
+                directory = File("capture"),
+                device = CaptureDevice("serial", "device"),
+                settings = CaptureSettings(recordVideo = recordVideo),
+                startedEpochMs = 0,
+                elapsedMs = elapsedMs,
+                videoStartElapsedMs = videoStartElapsedMs,
+            ),
+            videoRecording = videoRecording,
+        )
+
+        assertNull(captureNoVideoWarning(RecorderSnapshot()), "no session, no warning")
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = CAPTURE_NO_VIDEO_WARNING_AFTER_MS - 1)))
+        assertEquals(
+            CAPTURE_NO_VIDEO_WARNING,
+            captureNoVideoWarning(snapshot(elapsedMs = CAPTURE_NO_VIDEO_WARNING_AFTER_MS)),
+        )
+        assertTrue(CAPTURE_NO_VIDEO_WARNING.contains("screen on and unlocked"))
+        assertEquals(CAPTURE_NO_VIDEO_WARNING, captureNoVideoWarning(snapshot(elapsedMs = 60_000)))
+        // First packet arrived: the recorder flips videoRecording (and records the start offset).
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = 60_000, videoRecording = true)))
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = 60_000, videoStartElapsedMs = 1_200)))
+        // Never for a capture that does not record video, or one that is no longer running.
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = 60_000, recordVideo = false)))
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = 60_000, state = RecorderState.STOPPED)))
+        assertNull(captureNoVideoWarning(snapshot(elapsedMs = 60_000, state = RecorderState.INTERRUPTED)))
     }
 
     @Test
