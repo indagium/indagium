@@ -43,7 +43,7 @@ https://indagium.com/
 Set the repository description to this exact text:
 
 ```
-Android log viewer & logcat analyzer for Windows, macOS and Linux — crashes, ANRs, adb bugreports, DLT.
+Android log viewer & logcat analyzer for Windows, macOS and Linux — capture synchronized Android logcat and screen video, analyze crashes and ANRs, open adb bugreports and DLT.
 ```
 
 Set exactly these topics (and remove unrelated topics):
@@ -51,11 +51,13 @@ Set exactly these topics (and remove unrelated topics):
 ```
 android
 logcat
-logcat-viewer
-log-viewer
-log-analysis
 android-logcat
+logcat-capture
+logcat-viewer
+log-analysis
 android-debugging
+wireless-logcat
+wireless-debugging
 adb
 anr
 bugreport
@@ -82,13 +84,44 @@ once for each search service:
    validation errors.
 4. After the first crawl, confirm that the homepage and route pages resolve
    with status 200, use their canonical URL, and expose the intended title and
-   description. Record the first indexed date or the service's equivalent
-   coverage state.
+   description. For the capture page, verify the visible video, poster, and
+   VideoObject metadata point to the deployed MP4 and thumbnail. Record the first
+   indexed date or the service's equivalent coverage state.
 5. When a page or sitemap changes, resubmit the sitemap, request recrawl for
    the changed canonical URLs, and compare coverage plus enhancement reports
    with the baseline rather than treating a temporary crawl delay as a site
    failure.
 
+### 28-day search-performance handoff
+
+Before deployment, save an export from each service's Search Performance report
+for the most recent **28 complete days** as the pre-change baseline. Record the
+exact start/end dates, property, search type, export date, and whether the
+report had data. Capture clicks, impressions, click-through rate, and average
+position for the property and for each existing canonical sitemap URL; also
+keep the query/keyword rows related to the viewer, analyzer, and new capture
+intent. Leave unavailable values blank and label them as unavailable rather
+than as zero. If no pre-deployment export exists, mark that baseline
+unavailable; do not reconstruct it from a later window.
+
+After the first crawl, record the capture URL's index/coverage status. Once it
+has been indexed for 28 complete days, export the same metrics for the
+post-change window and compare it with the pre-change baseline. Use weekly
+aggregation where the service supports it, and save both exports plus a brief
+note about indexing coverage and notable query/page changes in the website
+operations record. The capture URL has no pre-launch page baseline, so report
+its first indexed 28-day window on its own. If a service has not accumulated
+enough data, record that and revisit after its reporting window fills; do not
+infer traffic or ranking impact from missing data. Google's Performance report
+supports date-range and metric selection; Bing Webmaster Tools supports
+performance comparisons across time periods. See the [Google Search Console
+Performance report](https://support.google.com/webmasters/answer/7576553) and
+[Bing Webmaster Tools Search Performance](https://blogs.bing.com/webmaster/2025/3/Supercharge-Your-Search-Performance-with-Bing-Webmaster-Tools/).
+
 Keep the service-specific verification details and dates in the release or
 website operations record; do not commit credentials or verification tokens to
-the repository.
+the repository. Google does not use `meta keywords` for web ranking; accurate
+content and crawlable internal links are the discoverability work here. Neither
+these changes nor `llms.txt` guarantee indexing, Google rankings, or Gemini
+Log Viewers visibility. The download/rating explanation remains an unverified
+hypothesis. No external accounts are changed by this handoff.

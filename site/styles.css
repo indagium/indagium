@@ -29,8 +29,20 @@ footer { align-items:center; border-top:1px solid var(--line); display:flex; jus
 /* Shared route-page components */
 .supporting-line { color:var(--green); font-size:1.08rem; font-weight:700; letter-spacing:-.02em; margin:-8px 0 18px; }
 .page-hero { display:grid; gap:72px; grid-template-columns:minmax(0,1fr) minmax(360px,.9fr); margin:38px auto 0; max-width:1240px; padding:58px 64px 112px; }
+.capture-page-hero { display:block; max-width:1240px; padding-top:58px; }
+.capture-page-hero > div { max-width:1000px; }
+.capture-page-hero h1 { font-size:clamp(3.1rem,5vw,4rem); }
+.capture-video-section .section-lede { margin-bottom:32px; max-width:820px; }
+.capture-demo { margin:0; max-width:1080px; }
+.capture-demo video { aspect-ratio:16 / 10.43; background:#10110f; border:1px solid var(--line); display:block; padding:3px; width:100%; }
+.capture-walkthrough-copy { margin-top:34px; max-width:860px; }
+.capture-walkthrough { color:var(--copy); font-family:var(--mono); font-size:.78rem; line-height:1.7; margin:16px 0 0; padding-left:1.35rem; }
+.capture-walkthrough li + li { margin-top:12px; }
+.capture-walkthrough b { color:var(--ink); font-family:var(--sans); }
 .page-hero > div { align-self:center; }
 .page-hero h1 { font-size:clamp(2.9rem,5vw,4.5rem); max-width:760px; }
+.page-hero.capture-page-hero { margin-top:0; padding-top:32px; padding-bottom:32px; }
+.page-hero.capture-page-hero h1 { font-size:clamp(3.1rem,5vw,4rem); max-width:1000px; }
 .page-lede { color:var(--copy); font-family:var(--mono); font-size:.88rem; line-height:1.8; margin-bottom:0; max-width:610px; }
 .page-hero-figure { align-self:center; margin:0; }
 .page-hero-figure img { border:1px solid var(--line); display:block; padding:3px; width:100%; }
@@ -90,6 +102,8 @@ video { background:var(--paper); }
 
 @media (max-width:760px) {
   .page-hero { display:block; margin-top:0; padding:55px 24px 84px; }
+  .page-hero.capture-page-hero { padding-top:32px; padding-bottom:22px; }
+  .page-hero.capture-page-hero h1 { font-size:clamp(2.9rem,11vw,3.6rem); }
   .page-hero-figure { margin-top:58px; }
   .feature-matrix, .split-callout { display:block; }
   .evidence-card, .evidence-card:nth-child(odd), .evidence-card:nth-child(even) { border-right:0; padding:28px 0; }
