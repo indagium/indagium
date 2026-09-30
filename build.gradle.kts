@@ -378,7 +378,12 @@ compose.desktop {
         // Multi-GB logcat files materialize millions of parsed entries; the JVM default cap of
         // 25% of physical RAM leaves a 1.5GB file thrashing the GC on 8-16GB machines. Percentage
         // (not -Xmx) so small machines aren't over-committed; memory is only committed as used.
-        jvmArgs("-XX:MaxRAMPercentage=50")
+        // G1 only uncommits heap after a concurrent cycle or full GC, and an idle app never runs
+        // one, so a closed multi-GB capture would keep its footprint forever: G1PeriodicGCInterval
+        // makes an idle JVM return memory by itself, and ExplicitGCInvokesConcurrent keeps the
+        // System.gc() issued by utils/HeapTrim a concurrent cycle so the UI never stalls on a full
+        // stop-the-world GC.
+        jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000", "-XX:+ExplicitGCInvokesConcurrent")
 
         // Company TLS-inspection roots are often installed only in the Windows certificate store,
         // not in the bundled JRE's static cacerts file. Let the Windows installer trust the same
@@ -564,7 +569,8 @@ tasks.register<Exec>("packageFlatpak") {
 // indagium.run.home to point user.home at a throwaway dir so automated/smoke runs don't touch
 // the real ~/Library/Application Support/Indagium (or platform equivalent) session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
-    jvmArgs("-XX:MaxRAMPercentage=50")
+    // Same heap-return flags as compose.desktop.application.jvmArgs above (see the comment there).
+    jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000", "-XX:+ExplicitGCInvokesConcurrent")
     if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
         jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
     }
