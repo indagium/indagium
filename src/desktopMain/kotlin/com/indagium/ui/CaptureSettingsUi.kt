@@ -209,6 +209,9 @@ private fun CaptureScreenRecordingGroup(settings: CaptureSettings, update: (Capt
     CaptureNumericField("Bitrate Mbps", settings.bitrateMbps.toString(), MIN_CAPTURE_BITRATE_MBPS..MAX_CAPTURE_BITRATE_MBPS) {
         update(settings.copy(bitrateMbps = it))
     }
+    // The preset picker itself is in "Before start" above (CaptureStartOptions); typing numbers
+    // here simply turns it to Custom. This line keeps the size those numbers imply next to them.
+    CaptureSizeEstimateLine(settings)
     AppText("Saved video format", color = tc().td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Saved video format"))
     SegmentedControl(
         options = listOf("MP4", "MKV"),

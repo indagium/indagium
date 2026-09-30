@@ -1122,6 +1122,21 @@ reports that limitation. Audio is exported in MKV. Playing captured audio throug
 on the computer is separate and starts muted; it can be enabled from the live mirror's speaker
 control. The microphone records the computer's selected input, not device audio.
 
+**Video quality** picks a preset for the screen recording; new captures use **Balanced**. The size
+limit applies to the longest side of the screen, so 1280 px on a portrait phone is roughly 590 x 1280.
+
+| Preset | Longest side / fps / bitrate | Typical size | 30 min |
+|---|---|---|---|
+| Compact | 1080 px / 15 fps / 1 Mbps | about 4 MB/min | about 110 MB |
+| Balanced | 1280 px / 30 fps / 3 Mbps | about 11 MB/min | about 340 MB |
+| Detailed | 1600 px / 30 fps / 6 Mbps | about 23 MB/min | about 680 MB |
+| Smooth | 1920 px / 60 fps / 12 Mbps | about 45 MB/min | about 1.4 GB |
+
+These are estimates: the real size depends on screen activity (a static screen records smaller, a
+scrolling or video-heavy one approaches the bitrate ceiling of twice the typical figure), and audio
+adds about 1 MB/min. Settings shows **Custom** when the Max size, Max FPS and Bitrate fields under
+Screen recording match no preset; a value saved before presets existed stays as it was.
+
 A snapshot does not stop or restart the capture. **Stop** ends the current recording and finalizes the
 retained session. **Save ZIP** exports a portable archive from a stopped or recovered session. A
 snapshot or archive can cover less video than log time when recording began late, stalled, or has not

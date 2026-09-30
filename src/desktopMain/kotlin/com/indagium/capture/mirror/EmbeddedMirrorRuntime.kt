@@ -57,9 +57,9 @@ internal data class EmbeddedMirrorSnapshot(
 )
 
 internal data class MirrorStreamOptions(
-    val maxSize: Int = 1080,
+    val maxSize: Int = 1280,
     val maxFps: Int = 30,
-    val bitrateMbps: Int = 8,
+    val bitrateMbps: Int = 3,
     val audio: Boolean = false,
     /** Server-side `video_codec_options=i-frame-interval:float=<n>` — a short keyframe interval
      * keeps exact-start snapshot re-encodes cheap (see [com.indagium.capture.FfmpegCaptureVideoExporter])

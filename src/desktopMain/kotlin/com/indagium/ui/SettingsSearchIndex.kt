@@ -332,6 +332,12 @@ private fun capture() = buildList {
             listOf("mirror", "scrcpy", "screen", "android", "device", "phone"),
         ),
     )
+    add(
+        entry(
+            c, "Video quality", "Recording preset (Compact, Balanced, Detailed, Smooth) with an approximate size per minute.",
+            listOf("quality", "preset", "bitrate", "size per minute", "compact", "balanced", "detailed", "smooth", "video", "resolution"),
+        ),
+    )
     add(entry(c, "Buffer mode", "Which logcat buffers are captured: default, all or custom.", listOf("logcat", "buffers", "android", "device")))
     add(
         entry(
