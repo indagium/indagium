@@ -165,6 +165,7 @@ import java.io.InputStream
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -880,6 +881,9 @@ private const val EMBEDDED_MIRROR_SESSION_WAIT_MS = 5_000L
  * before giving up rather than silently opening a second embedded scrcpy server — see that
  * function's doc for the race this closes. */
 private const val EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS = 10_000L
+
+/** Upper bound AppState.close() waits for mirror handles to finish closing on their lifecycle lanes. */
+private const val EMBEDDED_MIRROR_SHUTDOWN_WAIT_MS = 3_000L
 
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
@@ -3117,6 +3121,9 @@ class AppState(
         val controller = captureControllerFor(tabId) ?: return
         val existing = synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
         if (existing != null) {
+            // Reached straight from the UI thread (the Connect click, CaptureCard's LaunchedEffect):
+            // startEmbeddedMirror only queues the start on the handle's lifecycle lane — it must
+            // never block here. See EmbeddedMirrorHandle's threading invariant.
             if (autoStart) startEmbeddedMirror(tabId, existing, controller)
             return
         }
@@ -3218,11 +3225,15 @@ class AppState(
     }
 
     /** Off the calling thread: [EmbeddedMirrorHandle.stop] can block on synchronous adb subprocess
-     * cleanup (see AdbScrcpyConnection.close), and this is called directly from a Compose
-     * Disconnect click handler — blocking there would freeze the UI for that cleanup's duration. */
+     * cleanup (see AdbScrcpyConnection.close) or a decoder-thread join, and this is called directly
+     * from a Compose Disconnect click handler — blocking there would freeze the UI for that
+     * duration. Queued on the handle's own lifecycle lane (not a fresh `ioScope` job) so it is
+     * strictly ordered with the Connect/close requests for the same tab: a rapid Disconnect ->
+     * Connect -> Disconnect ends in the state of the last click, never with two overlapping
+     * transitions. */
     internal fun stopEmbeddedMirror(tabId: String) {
         val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
-        ioScope.launch { handle.stop() }
+        handle.requestStop()
     }
 
     /**
@@ -3296,18 +3307,28 @@ class AppState(
     private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {
         val session = controller.selectedSession.value ?: return
         if (session.device.serial.isBlank()) return
-        handle.start(
+        // Non-blocking (queued on the handle's lifecycle lane): this runs on the UI thread for an
+        // explicit Connect, and the start can wait on a Disconnect that is still tearing down.
+        handle.requestStart(
             session.device.serial,
             MirrorStreamOptions(
                 maxSize = session.settings.maxSize,
                 maxFps = session.settings.maxFps,
                 bitrateMbps = session.settings.bitrateMbps,
             ),
-        )
-        // A user's persisted speaker preference must apply when an embedded mirror connects too.
-        // Previously this player was created only by the toggle callback, so audio stayed silent
-        // until the user toggled mute/unmute even when playAudioLive was already enabled.
-        applyEmbeddedMirrorLiveAudioPreference(tabId, handle)
+            // A user's persisted speaker preference must apply when an embedded mirror connects too.
+            // Previously this player was created only by the toggle callback, so audio stayed silent
+            // until the user toggled mute/unmute even when playAudioLive was already enabled. Only
+            // runs if the start itself ran (a superseded Connect must not attach audio).
+            afterStart = { applyEmbeddedMirrorLiveAudioPreference(tabId, handle) },
+        ).whenComplete { _, failure ->
+            if (failure != null) {
+                val message = "Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}"
+                captureService.reportError(message)
+                embeddedMirrorSetupErrorByTab[tabId] = message
+                AppLogger.warn("embedded-mirror", message, failure)
+            }
+        }
     }
 
     private fun applyEmbeddedMirrorLiveAudioPreference(tabId: String, handle: EmbeddedMirrorHandle) {
@@ -3322,6 +3343,8 @@ class AppState(
         }
     }
 
+    /** Blocking close, for the IO-lane stop path only (never the UI thread — see
+     * [EmbeddedMirrorHandle]'s threading invariant). */
     private fun closeEmbeddedMirror(tabId: String) {
         detachedEmbeddedMirrorTabs.remove(tabId)
         val handle = synchronized(stateLock) {
@@ -4160,7 +4183,13 @@ class AppState(
                 embeddedMirrorVersion++
             }
         }
-        mirrors.forEach { (_, mirror) -> runCatching { mirror.close() } }
+        // Closes run on each handle's lifecycle lane (never blocking on its lifecycle lock from this
+        // possibly-UI thread); wait a bounded time so adb cleanup still normally finishes at exit.
+        val closes = mirrors.map { (_, mirror) -> mirror.requestClose() }
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(EMBEDDED_MIRROR_SHUTDOWN_WAIT_MS)
+        closes.forEach { close ->
+            runCatching { close.get((deadlineNanos - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS) }
+        }
         live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
     }
 
@@ -8065,7 +8094,11 @@ class AppState(
             tabIds.mapNotNull { tabId -> embeddedMirrorsByTab[tabId]?.let { tabId to it } }
         }
         liveMirrors.forEach { (tabId, mirror) ->
-            runCatching { mirror.close() }
+            // requestClose, not close(): this runs on the calling (often UI) thread, and a blocking
+            // close waits on the mirror's lifecycle lock behind any Disconnect still in flight —
+            // the UI-thread-waits-on-a-mirror-lock deadlock (see EmbeddedMirrorHandle's invariant).
+            // The close is queued on the handle's own lane, ordered after that Disconnect.
+            mirror.requestClose()
             synchronized(stateLock) {
                 embeddedMirrorsByTab.remove(tabId, mirror)
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
@@ -8123,7 +8156,7 @@ class AppState(
             if (next.size < 2) compareMode = false
             tabs = next
         }
-        stragglerMirrors.forEach { mirror -> runCatching { mirror.close() } }
+        stragglerMirrors.forEach { mirror -> mirror.requestClose() }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
