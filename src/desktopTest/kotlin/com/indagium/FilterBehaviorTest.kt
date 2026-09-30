@@ -13,7 +13,9 @@ import com.indagium.model.MessageRule
 import com.indagium.model.RuleTarget
 import com.indagium.model.SequenceDef
 import com.indagium.ui.buildFullLineAnnotation
+import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.keywordRegexHighlightRanges
+import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeItems
 import com.indagium.utils.matchesPidTidTokens
@@ -284,6 +286,131 @@ class FilterBehaviorTest {
                 span.start <= start && span.end >= end && span.item.background == Color.Yellow.copy(alpha = 0.6f)
             },
         )
+    }
+
+    private fun render(
+        entry: LogEntry,
+        highlighters: List<Highlighter>,
+        suppressLineTextColor: Boolean = false,
+    ) = buildLogLineRender(
+        entry = entry,
+        highlighters = highlighters,
+        tsColor = Color.Gray,
+        pidColor = Color.Gray,
+        tagColor = Color.DarkGray,
+        msgColor = Color.Black,
+        keywordRegexFilter = null,
+        regexContext = RegexEvaluationContext(),
+        suppressLineTextColor = suppressLineTextColor,
+    )
+
+    private fun androidx.compose.ui.text.AnnotatedString.colorAt(index: Int): Color? =
+        spanStyles.filter { it.start <= index && index < it.end && it.item.color != Color.Unspecified }
+            .lastOrNull()?.item?.color
+
+    @Test
+    fun indagiumWholeLineHighlighterLeavesTheTextStyleAlone() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete", pid = 100, tid = 200)
+        val plain = render(entry, emptyList())
+        val line = render(entry, listOf(Highlighter("h1", "request", false, Color.Yellow, true, wholeLine = true)))
+
+        assertEquals("h1", line.wholeLine?.id)
+        assertEquals(plain.text, line.text)
+    }
+
+    @Test
+    fun matchOnlyHighlighterReportsNoWholeLineOwner() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "com.app.Network", "request complete")
+        val line = render(entry, listOf(Highlighter("h1", "request", false, Color.Yellow, true)))
+
+        assertEquals(null, line.wholeLine)
+    }
+
+    @Test
+    fun kloggWholeLineTextColourCoversEveryCharacter() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.E, "com.app.Network", "request complete", pid = 100, tid = 200)
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val line = render(entry, listOf(hl))
+
+        assertEquals("k1", line.wholeLine?.id)
+        line.text.text.indices.forEach { assertEquals(Color.Magenta, line.text.colorAt(it), "char $it") }
+    }
+
+    @Test
+    @Suppress("MagicNumber")
+    fun kloggWholeLineTextColourSurvivesWrapping() {
+        val entry = LogEntry(
+            1, "10:00:00.000", LogLevel.W, "com.app.Network", "request complete ".repeat(6), pid = 100, tid = 200,
+        )
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val wrapped = visualLogLineForWrapLimit(render(entry, listOf(hl)).text, 20)
+
+        assertTrue(wrapped.text.contains('\n'), "test must actually wrap")
+        wrapped.text.forEachIndexed { i, ch ->
+            if (ch != '\n') assertEquals(Color.Magenta, wrapped.colorAt(i), "char $i of the wrapped line")
+        }
+    }
+
+    @Test
+    fun kloggWholeLineTextColourIsSuppressedWhenAskedTo() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val line = render(entry, listOf(hl), suppressLineTextColor = true)
+
+        // The row is still owned by the rule (LogRow decides whether the background shows), but the
+        // text keeps its ordinary colours so a selection/crash background stays readable.
+        assertEquals("k1", line.wholeLine?.id)
+        assertTrue(line.text.spanStyles.none { it.item.color == Color.Magenta })
+    }
+
+    @Test
+    fun kloggMatchSpanIsOpaqueForeAndBackAtNormalWeight() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, textColor = Color.Red)
+        val line = render(entry, listOf(hl))
+        val start = line.text.text.indexOf("request")
+
+        val span = line.text.spanStyles.single { it.item.background == Color.Yellow }
+        assertEquals(start, span.start)
+        assertEquals(start + "request".length, span.end)
+        assertEquals(Color.Red, span.item.color)
+        assertEquals(null, span.item.fontWeight)
+        assertEquals(null, line.wholeLine)
+    }
+
+    @Test
+    fun indagiumMatchSpanIsStillTheSemiBoldTranslucentWash() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
+        val line = render(entry, listOf(Highlighter("h1", "request", false, Color.Yellow, true)))
+
+        val span = line.text.spanStyles.single { it.item.background == Color.Yellow.copy(alpha = 0.6f) }
+        assertEquals(androidx.compose.ui.text.font.FontWeight.SemiBold, span.item.fontWeight)
+        assertEquals(Color.Unspecified, span.item.color)
+    }
+
+    @Test
+    fun kloggWholeLineWinnerKeepsOnlyTheMatchSpansAboveIt() {
+        val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
+        val above = Highlighter("above", "request", false, Color.Cyan, true)
+        val winner = Highlighter("win", "complete", false, Color.Yellow, true, wholeLine = true, textColor = Color.Black)
+        val below = Highlighter("below", "T", false, Color.Green, true)
+        val line = render(entry, listOf(above, winner, below))
+
+        assertTrue(line.text.spanStyles.any { it.item.background == Color.Cyan.copy(alpha = 0.6f) })
+        assertTrue(line.text.spanStyles.none { it.item.background == Color.Green.copy(alpha = 0.6f) })
+    }
+
+    @Test
+    fun scopedHighlighterOnlyPaintsItsTag() {
+        val net = LogEntry(1, "10:00:00.000", LogLevel.I, "Net", "request complete")
+        val db = LogEntry(2, "10:00:00.001", LogLevel.I, "Db", "request complete")
+        val hl = Highlighter(
+            "h1", "request", false, Color.Yellow, true,
+            target = com.indagium.model.HighlightTarget.MESSAGE, tag = "Net",
+        )
+
+        assertTrue(render(net, listOf(hl)).text.spanStyles.any { it.item.background == Color.Yellow.copy(alpha = 0.6f) })
+        assertTrue(render(db, listOf(hl)).text.spanStyles.none { it.item.background == Color.Yellow.copy(alpha = 0.6f) })
     }
 
     @Test

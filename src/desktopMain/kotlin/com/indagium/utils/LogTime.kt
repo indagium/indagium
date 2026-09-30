@@ -1,6 +1,7 @@
 package com.indagium.utils
 
 import com.indagium.model.LogEntry
+import com.indagium.model.NO_DATE
 import java.util.Locale
 
 /** Returned by [parseMillisOfDay] for a `ts` that isn't a parseable `HH:MM:SS[.fraction]` string —
@@ -20,7 +21,8 @@ private const val SECONDS_PER_HOUR = 3600
 // 23:59:59), not a genuine backwards time jump — real backwards jumps (out-of-order merges, clock
 // adjustments) are always much smaller than half a day in practice. Matches the same heuristic and
 // the same accepted limitation documented on LogMerge.parseLogTimeOfDay: LogEntry.ts never carries
-// a date (LogParser strips the MM-DD prefix), so there's no way to resolve a rollover exactly.
+// a date (LogParser strips the MM-DD prefix into LogEntry.dayOfYear instead), so a rollover can only
+// be resolved exactly where both sides carry a date — see the date-aware overloads below.
 private const val ROLLOVER_THRESHOLD_MS = 12 * MILLIS_PER_HOUR
 
 private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
@@ -87,6 +89,58 @@ fun deltaMillis(prevTs: String, curTs: String): Long? {
     return elapsedMillisOfDay(prev, cur)
 }
 
+private const val MILLIS_PER_DAY = HOURS_PER_DAY * MILLIS_PER_HOUR
+private const val MONTHS_PER_YEAR = 12
+private const val SLOTS_LEAP = 366
+private const val SLOTS_NON_LEAP = 365
+private const val FEB_29_SLOT = 59
+
+// Days per month in a LEAP year: LogEntry.dayOfYear is a 366-slot calendar in which Feb 29 is a slot
+// of its own, because a bare "MM-DD" cannot say whether its year was a leap one.
+private val DAYS_IN_MONTH = intArrayOf(31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+private val DAYS_BEFORE_MONTH = IntArray(MONTHS_PER_YEAR).also { table ->
+    var days = 0
+    for (month in 0 until MONTHS_PER_YEAR) {
+        table[month] = days
+        days += DAYS_IN_MONTH[month]
+    }
+}
+
+/** Maps a calendar month (1-12) and day to [LogEntry.dayOfYear]'s 366-slot calendar (Jan 1 = 0,
+ *  Feb 29 = 59, Dec 31 = 365), or [NO_DATE] for an impossible month/day such as "13-45" or "04-31". */
+fun logDaySlot(month: Int, day: Int): Short {
+    if (month !in 1..MONTHS_PER_YEAR || day < 1 || day > DAYS_IN_MONTH[month - 1]) return NO_DATE
+    return (DAYS_BEFORE_MONTH[month - 1] + day - 1).toShort()
+}
+
+// Position of a slot on a calendar that only counts Feb 29 when [leap]: without it, slots after
+// Feb 29 shift down one so Feb 28 -> Mar 1 is a single day, not a phantom two.
+private fun calendarOrdinal(slot: Int, leap: Boolean): Int = if (leap || slot <= FEB_29_SLOT) slot else slot - 1
+
+// Whole days from [fromSlot] to [toSlot] on a year-wrapping calendar, taking the nearest match
+// (about +/-half a year), so 12-31 -> 01-01 is +1 and a row from the previous day is -1.
+private fun wrappedDayDistance(fromSlot: Int, toSlot: Int, leap: Boolean): Int {
+    val cycle = if (leap) SLOTS_LEAP else SLOTS_NON_LEAP
+    val half = cycle / 2
+    return Math.floorMod(calendarOrdinal(toSlot, leap) - calendarOrdinal(fromSlot, leap) + half, cycle) - half
+}
+
+/** Date-aware form of the string-based [deltaMillis] for two rows. When BOTH carry a date
+ *  ([LogEntry.dayOfYear]) the day difference is used instead of the 12 h midnight guess, so a gap
+ *  across days (buffered earlier-day rows, a capture resumed a day later) reads as its true size
+ *  and a stale same-day row is not misread as a rollover. For clean same-day and midnight-crossing
+ *  rows the result is identical to the string form. Otherwise — either side undated — it IS the
+ *  string form. Feb 29 counts as a day only when one of the two rows sits on it. */
+fun deltaMillis(prev: LogEntry, cur: LogEntry): Long? {
+    val prevMillis = parseMillisOfDay(prev.ts)
+    val curMillis = parseMillisOfDay(cur.ts)
+    if (prevMillis == TS_UNKNOWN || curMillis == TS_UNKNOWN) return null
+    if (prev.dayOfYear == NO_DATE || cur.dayOfYear == NO_DATE) return elapsedMillisOfDay(prevMillis, curMillis)
+    val leap = prev.dayOfYear.toInt() == FEB_29_SLOT || cur.dayOfYear.toInt() == FEB_29_SLOT
+    val days = wrappedDayDistance(prev.dayOfYear.toInt(), cur.dayOfYear.toInt(), leap)
+    return days * MILLIS_PER_DAY + (curMillis - prevMillis)
+}
+
 // Cap on how many samples of each kind (applied/suppressed) unrollLogTimeline keeps — the Follow
 // diagnostic dump (AppState.followDiagnostics) only ever shows a handful, and a pathological log
 // with thousands of qualifying rows must not turn every reload into an unbounded list build.
@@ -111,11 +165,13 @@ data class RolloverSample(val id: Int, val ts: String)
  * aligned with newly selected [LogEntry] rows without reconstructing synthetic log entries (or
  * losing the occurrence id that the diagram persists).  [rawTimestamp] is diagnostic-only; an
  * empty value is appropriate when the source was an occurrence rather than a raw log row.
+ * [dayOfYear] is the row's [LogEntry.dayOfYear] ([NO_DATE] when it has none, as for occurrences).
  */
 internal data class LogTimelinePoint(
     val id: Int,
     val timestampMillis: Long?,
     val rawTimestamp: String = "",
+    val dayOfYear: Short = NO_DATE,
 )
 
 /**
@@ -200,6 +256,11 @@ private fun nextTimelinePointMillis(data: List<LogTimelinePoint>, fromIndex: Int
  * ambiguous, and resolved here in favor of raw time-of-day, which degrades far more gracefully for
  * Follow (a floor search that's merely non-monotonic in a few places) than a silent, permanent
  * +24h would (a floor search that's provably and unrecoverably wrong for the rest of the file).
+ *
+ * When EVERY timestamped row also carries a date ([LogEntry.dayOfYear]) none of the above guessing is
+ * needed: see [unrollDatedTimeline], which derives whole days from the dates and is used instead. The
+ * guessing algorithm described here runs untouched for any log with even one undated timed row.
+ *
  * Deliberately scoped to THIS timeline only, not [deltaMillis] or [com.indagium.utils.LogMerge]'s
  * own 12h heuristics: those compute one-off deltas between ADJACENT rows for display (the Δt
  * gutter, a merge sort key) — a wrong call there mislabels one row's shown delta, it does not
@@ -208,7 +269,7 @@ private fun nextTimelinePointMillis(data: List<LogTimelinePoint>, fromIndex: Int
  */
 fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline =
     unrollLogTimeline(data.map { entry ->
-        LogTimelinePoint(entry.id, parseMillisOfDay(entry.ts).takeUnless { it == TS_UNKNOWN }, entry.ts)
+        LogTimelinePoint(entry.id, parseMillisOfDay(entry.ts).takeUnless { it == TS_UNKNOWN }, entry.ts, entry.dayOfYear)
     })
 
 /**
@@ -220,6 +281,62 @@ fun unrollLogTimeline(data: List<LogEntry>): UnrolledLogTimeline =
  */
 internal fun unrollLogTimeline(data: Iterable<LogTimelinePoint>): UnrolledLogTimeline {
     val points = data.toList()
+    return unrollDatedTimeline(points) ?: unrollUndatedTimeline(points)
+}
+
+/**
+ * The date-driven form of [unrollLogTimeline], or null when it does not apply: it needs at least one
+ * timestamped point and EVERY timestamped point to carry a [LogTimelinePoint.dayOfYear]. Each row's
+ * value is `dayIndex * 24h + millisOfDay`, where dayIndex is the whole-day distance from the first
+ * timed row (nearest match across a year wrap, so 12-31 -> 01-01 is +1, and an out-of-order row from
+ * an earlier day lands at its true, earlier time). Feb 29 is treated as a day only when the log
+ * actually contains a `02-29` row. For a clean single-day or midnight-crossing log this is exactly
+ * what the 12 h heuristic yields; it differs only where dates disagree with that guess (a gap of
+ * several days, buffered earlier-day rows, a resume at a later time of the next day).
+ *
+ * Diagnostics: every step to a later day than the previous timed row is reported as an applied
+ * rollover (so `followDiagnostics` still explains the timeline); nothing is ever suppressed, and the
+ * day model is always valid since nothing here is a guess.
+ */
+private fun unrollDatedTimeline(points: List<LogTimelinePoint>): UnrolledLogTimeline? {
+    var firstSlot = -1
+    var hasLeapDay = false
+    for (point in points) {
+        if (point.timestampMillis == null) continue
+        if (point.dayOfYear == NO_DATE) return null
+        if (firstSlot < 0) firstSlot = point.dayOfYear.toInt()
+        if (point.dayOfYear.toInt() == FEB_29_SLOT) hasLeapDay = true
+    }
+    if (firstSlot < 0) return null
+
+    val byId = LinkedHashMap<Int, Long>()
+    val rolloverSamples = mutableListOf<RolloverSample>()
+    var rolloverCount = 0
+    var previousDay: Int? = null
+    for (point in points) {
+        val millis = point.timestampMillis ?: continue
+        val day = wrappedDayDistance(firstSlot, point.dayOfYear.toInt(), hasLeapDay)
+        previousDay?.let { previous ->
+            if (day > previous) {
+                rolloverCount++
+                if (rolloverSamples.size < ROLLOVER_SAMPLE_CAP) rolloverSamples += RolloverSample(point.id, point.rawTimestamp)
+            }
+        }
+        byId[point.id] = day * MILLIS_PER_DAY + millis
+        previousDay = day
+    }
+    return UnrolledLogTimeline(
+        byId = byId,
+        rolloverAppliedCount = rolloverCount,
+        rolloverAppliedSamples = rolloverSamples,
+        rolloverSuppressedCount = 0,
+        rolloverSuppressedSamples = emptyList(),
+        dayOffsetModelValid = true,
+    )
+}
+
+// The time-of-day-only algorithm documented on [unrollLogTimeline]; runs for any log that is not fully dated.
+private fun unrollUndatedTimeline(points: List<LogTimelinePoint>): UnrolledLogTimeline {
     val byId = LinkedHashMap<Int, Long>()
     var previousMillis: Long? = null
     var dayOffset = 0L

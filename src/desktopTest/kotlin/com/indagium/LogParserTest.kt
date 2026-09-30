@@ -1,11 +1,16 @@
 package com.indagium
 
+import com.indagium.model.Filter
+import com.indagium.model.FilterMode
 import com.indagium.model.LogLevel
+import com.indagium.model.MessageRule
+import com.indagium.ui.contextualMessageRuleCandidates
 import com.indagium.utils.isLikelyTextFile
 import com.indagium.utils.isLikelyTextStream
 import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.parseLogcat
 import com.indagium.utils.parseMillisOfDay
+import com.indagium.utils.passesFilter
 import java.io.ByteArrayInputStream
 import java.nio.charset.StandardCharsets
 import kotlin.io.path.createTempFile
@@ -87,6 +92,111 @@ class LogParserTest {
         assertEquals("Hello world", e.msg)
         assertEquals(1234, e.pid)
         assertEquals(5678, e.tid)
+    }
+
+    @Test
+    fun normalizesRawWrappersOnlyWhenInnerOffsetLogcatRowParses() {
+        val file = createTempFile(prefix = "openlog-raw-wrapper", suffix = ".log")
+        file.writeText(
+            listOf(
+                "I/RAW: 06-29 12:34:56.789 +0300 412 438 I Car_SDK: part_of_message",
+                "I RAW: 2026-09-26 14:22:33.444 +03:00 500 501 E Car_SDK: second payload",
+                "I/RAW: this is not a structured logcat line",
+            ).joinToString("\n"),
+        )
+
+        val entries = parseLogcat(file.toFile())
+
+        assertEquals(3, entries.size)
+        assertEquals("12:34:56.789", entries[0].ts)
+        assertEquals(LogLevel.I, entries[0].level)
+        assertEquals(412, entries[0].pid)
+        assertEquals(438, entries[0].tid)
+        assertEquals("Car_SDK", entries[0].tag)
+        assertEquals("part_of_message", entries[0].msg)
+        assertEquals("14:22:33.444", entries[1].ts)
+        assertEquals(LogLevel.E, entries[1].level)
+        assertEquals(500, entries[1].pid)
+        assertEquals(501, entries[1].tid)
+        assertEquals("Car_SDK", entries[1].tag)
+        assertEquals("second payload", entries[1].msg)
+        assertEquals("RAW", entries[2].tag)
+
+        assertTrue(passesFilter(entries[0], Filter(activeTags = setOf("Car_SDK"))))
+        assertTrue(
+            passesFilter(
+                entries[0],
+                Filter(
+                    messageRules = listOf(
+                        MessageRule("cross-boundary", include = true, pattern = "Car_SDK.*part_of_message", regex = true),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            passesFilter(
+                entries[0],
+                Filter(
+                    messageRules = listOf(
+                        MessageRule("colon-boundary", include = true, pattern = "Car_SDK:.*part_of_message", regex = true),
+                    ),
+                ),
+            ),
+        )
+        assertTrue(
+            passesFilter(
+                entries[0],
+                Filter(
+                    messageRules = listOf(
+                        MessageRule("spaced-colon-boundary", include = true, pattern = "Car_SDK :.*part_of_message", regex = true),
+                    ),
+                ),
+            ),
+        )
+        assertFalse(
+            passesFilter(
+                entries[0],
+                Filter(
+                    messageRules = listOf(
+                        MessageRule("literal-message-only", include = true, pattern = "Car_SDK.*part_of_message"),
+                    ),
+                ),
+            ),
+            "literal message rules must not start matching the tag/message boundary",
+        )
+        assertTrue(
+            contextualMessageRuleCandidates(
+                entries.take(1),
+                "Car_SDK.*part_of_message",
+                regex = true,
+            ).any { it.tag == "Car_SDK" },
+        )
+        assertEquals(FilterMode.TAGS, Filter().mode)
+    }
+
+    // Regression: Android's tombstone/libc crash lines use level 'F' (FATAL), which none of the
+    // four format regexes (nor the LEVEL_CHARS fast path) accepted — only VDIWEA. Those lines fell
+    // through to the RAW fallback, with the wrong level and tag "RAW", which capture surfaces
+    // constantly since its default buffers include `crash`. 'F' is mapped to the existing
+    // LogLevel.A (Assert) tier rather than a new enum constant — see androidLogLevelFrom() in
+    // LogParser.kt.
+    @Test
+    fun parsesThreadtimeFatalTombstoneLineAsAssertLevel() {
+        val file = createTempFile(prefix = "openlog-tombstone", suffix = ".log")
+        file.writeText(
+            "09-20 20:27:37.659 10674 10674 F libc  : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 10674",
+        )
+
+        val entries = parseLogcat(file.toFile())
+
+        assertEquals(1, entries.size)
+        val e = entries.single()
+        assertEquals("20:27:37.659", e.ts)
+        assertEquals(LogLevel.A, e.level)
+        assertEquals("libc", e.tag)
+        assertEquals("Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 10674", e.msg)
+        assertEquals(10674, e.pid)
+        assertEquals(10674, e.tid)
     }
 
     @Test

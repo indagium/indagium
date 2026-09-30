@@ -62,6 +62,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -72,9 +73,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.diagram3.DiagramExportMode
@@ -89,11 +88,13 @@ import com.indagium.diagram3.parseSeq3Note
 import com.indagium.diagram3.updateSeq3NoteCaption
 import com.indagium.diagram3.updateSeq3NoteExportMode
 import com.indagium.model.AnnBlock
+import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.AppSettings
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.VideoFrameReference
+import com.indagium.model.hasSameRow
 import com.indagium.model.resolveRows
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.presentLogLine
@@ -557,11 +558,11 @@ fun AnnotationPanel(
     activeNotePath: String? = null,
     onToggleMd: () -> Unit,
     onCopy: () -> Unit,
+    onCopyFormat: (AnnotationCopyFormat) -> Unit = {},
     onCopyImage: (AnnBlock.Image) -> Unit,
     // Diagram PNGs are rendered from the model in the active theme. The app owns the platform
     // clipboard; the panel only supplies bytes plus useful plain-text fallback.
     onCopyDiagramImage: (png: ByteArray, fallbackText: String) -> Unit = { _, _ -> },
-    onCopyRichPreview: () -> Unit,
     onExportFrames: () -> Unit,
     onSave: () -> Unit,
     // "New Analysis" header action — clears this tab's Notes panel to a blank analysis and pins it
@@ -1102,7 +1103,11 @@ fun AnnotationPanel(
                 horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
             ) {
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
-                AppButton("Copy", onClick = onCopy, modifier = headerButtonModifier)
+                CopyFormatSplitButton(
+                    defaultFormat = settings.annotationCopyFormat,
+                    onChoose = onCopyFormat,
+                    modifier = headerButtonModifier,
+                )
                 AppButton("Save", onClick = { mutate(onSave) }, enabled = !notesLocked, modifier = headerButtonModifier)
                 AppButton("New", onClick = { mutate(onNewAnalysis) }, enabled = !notesLocked, modifier = headerButtonModifier)
                 // Only when this tab has no log at all (opened via Case Library's "Open notes
@@ -1183,7 +1188,10 @@ fun AnnotationPanel(
         if (tab.showAnnMd && hasAnnotationBlocks) {
             MdPreviewDialog(
                 tab = tab, settings = settings, mono = mono,
-                onCopy = onCopy, onCopyRichPreview = onCopyRichPreview, onExportFrames = onExportFrames, onDismiss = onToggleMd,
+                defaultCopyFormat = settings.annotationCopyFormat,
+                onCopyFormat = onCopyFormat,
+                onExportFrames = onExportFrames,
+                onDismiss = onToggleMd,
             )
         }
 
@@ -1367,19 +1375,18 @@ fun AnnotationPanel(
                         EditIconButton(enabled = !notesLocked, onClick = { editingTarget = EditDialogTarget.Prefix })
                     }
                     Spacer(Modifier.height(3.dp))
-                    ScrollableTextArea(
+                    MarkdownInlineOrTextField(
                         value = ann.prefix,
-                        onValue = { mutate { onUpdatePrefix(it) } },
+                        onValueChange = { mutate { onUpdatePrefix(it) } },
                         placeholder = "Heading, context…",
-                        modifier = Modifier.fillMaxWidth()
-                            .focusRequester(prefixFr)
-                            // hasFocus, not isFocused — see ScrollableTextArea's own note.
-                            .onFocusChanged { prefixFocused = it.hasFocus },
-                        fontSize = 12.sp,
+                        tc = tc,
+                        renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
+                        fieldFocusRequester = prefixFr,
                         maxHeight = 160.dp,
-                        resetKey = tab.id,
-                        enabled = !notesLocked,
+                        onFieldFocusChanged = { prefixFocused = it },
                         onClear = { mutate { onUpdatePrefix("") } },
+                        modifier = Modifier.fillMaxWidth().testTag("annotation-prefix-field"),
+                        enabled = !notesLocked,
                     )
                 }
 
@@ -1613,19 +1620,18 @@ fun AnnotationPanel(
                             EditIconButton(enabled = !notesLocked, onClick = { editingTarget = EditDialogTarget.Suffix })
                         }
                         Spacer(Modifier.height(3.dp))
-                        ScrollableTextArea(
+                        MarkdownInlineOrTextField(
                             value = ann.suffix,
-                            onValue = { mutate { onUpdateSuffix(it) } },
+                            onValueChange = { mutate { onUpdateSuffix(it) } },
                             placeholder = "Add follow-up notes…",
-                            modifier = Modifier.fillMaxWidth()
-                                .focusRequester(suffixFr)
-                                // hasFocus, not isFocused — see ScrollableTextArea's own note.
-                                .onFocusChanged { suffixFocused = it.hasFocus },
-                            fontSize = 12.sp,
+                            tc = tc,
+                            renderInlineMarkdown = settings.renderAnnotationMarkdownInline,
+                            fieldFocusRequester = suffixFr,
                             maxHeight = 160.dp,
-                            resetKey = tab.id,
-                            enabled = !notesLocked,
+                            onFieldFocusChanged = { suffixFocused = it },
                             onClear = { mutate { onUpdateSuffix("") } },
+                            modifier = Modifier.fillMaxWidth().testTag("annotation-next-steps-field"),
+                            enabled = !notesLocked,
                         )
                     }
                 }
@@ -2049,14 +2055,12 @@ private fun MdPreviewDialog(
     tab: LogTab,
     settings: AppSettings,
     mono: FontFamily,
-    onCopy: () -> Unit,
-    onCopyRichPreview: () -> Unit,
+    defaultCopyFormat: AnnotationCopyFormat,
+    onCopyFormat: (AnnotationCopyFormat) -> Unit,
     onExportFrames: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     val tc = tc()
-    var copied by remember { mutableStateOf(false) }
-    var richCopied by remember { mutableStateOf(false) }
     var framesExported by remember { mutableStateOf(false) }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
@@ -2071,37 +2075,17 @@ private fun MdPreviewDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 AppText("Markdown Preview", color = tc.ts, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                AppButton(
-                    if (copied) "Copied!" else "Copy",
-                    onClick = {
-                        onCopy()
-                        copied = true
-                    },
+                CopyFormatSplitButton(
+                    defaultFormat = defaultCopyFormat,
+                    onChoose = onCopyFormat,
                     modifier = Modifier.height(28.dp),
                 )
                 TooltipArea(
                     tooltip = {
                         ToolbarTooltip(
-                            "Copies text + inline images as rich HTML. Jira Cloud's comment editor generally " +
-                                "accepts pasted HTML; Server/Data Center may not.",
-                        )
-                    },
-                ) {
-                    AppButton(
-                        if (richCopied) "Copied!" else "Copy as HTML",
-                        onClick = {
-                            onCopyRichPreview()
-                            richCopied = true
-                        },
-                        modifier = Modifier.height(28.dp),
-                    )
-                }
-                TooltipArea(
-                    tooltip = {
-                        ToolbarTooltip(
                             "Writes each note image as frame-0N.jpg into a <logname>_frames folder inside " +
-                                "a folder you choose. With the Jira {code:java} style, Copy's text references " +
-                                "images by that filename — paste it, then attach the exported files so Jira " +
+                                "a folder you choose. Jira wiki copy references images by that filename — " +
+                                "paste it, then attach the exported files so Jira " +
                                 "renders them inline.",
                         )
                     },
@@ -2122,7 +2106,7 @@ private fun MdPreviewDialog(
             Box(Modifier.fillMaxSize()) {
                 // Body is a plain Column inside a verticalScroll (not a LazyColumn, which
                 // SelectionContainer can't span), so wrapping just the body here — not the outer
-                // Column with the header Row's Copy/Copy as HTML/Export frames buttons, and not the
+                // Column with the header Row's Copy menu/Export frames buttons, and not the
                 // whole dialog per the b/372053402 note at CaseLibraryDialog.kt:342-352 — is safe and
                 // needs no extra sizing modifier on SelectionContainer itself.
                 Box(Modifier.fillMaxSize().verticalScroll(scroll).padding(16.dp)) {
@@ -2133,6 +2117,70 @@ private fun MdPreviewDialog(
                     modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp).width(6.dp),
                     style = appScrollbarStyle(tc),
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CopyFormatSplitButton(
+    defaultFormat: AnnotationCopyFormat,
+    onChoose: (AnnotationCopyFormat) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val tc = tc()
+    val density = LocalDensity.current.density
+    val leftShape = RoundedCornerShape(topStart = 4.dp, bottomStart = 4.dp)
+    val rightShape = RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp)
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
+            AppButton(
+                "Copy",
+                onClick = { onChoose(defaultFormat) },
+                modifier = modifier,
+                horizontalPadding = 8.dp,
+                shape = leftShape,
+            )
+            AppButton(
+                "▾",
+                onClick = { expanded = !expanded },
+                modifier = modifier.height(28.dp).width(18.dp),
+                horizontalPadding = 0.dp,
+                shape = rightShape,
+            )
+        }
+        if (expanded) {
+            Popup(
+                alignment = Alignment.TopEnd,
+                offset = IntOffset(0, (34 * density).roundToInt()),
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(focusable = true),
+            ) {
+                Column(
+                    Modifier.width(176.dp)
+                        .background(tc.p, RoundedCornerShape(7.dp))
+                        .border(1.dp, tc.br, RoundedCornerShape(7.dp))
+                        .padding(vertical = 4.dp),
+                ) {
+                    AnnotationCopyFormat.entries.forEach { format ->
+                        HoverBox(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                expanded = false
+                                onChoose(format)
+                            },
+                        ) {
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                AppText(format.label, color = tc.tx, fontSize = 11.sp, modifier = Modifier.weight(1f))
+                                if (format == defaultFormat) AppText("default", color = tc.td, fontSize = 9.sp)
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2253,7 +2301,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
 
                 is AnnBlock.LogRef -> {
                     val rows = block.resolveRows(tab)
-                    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+                    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
                     val context = rememberAnnotationLogLineContext(tab, settings, localSource)
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
@@ -2472,9 +2520,9 @@ private fun BlockTextField(
     placeholder: String,
     tc: ThemeColors,
     fieldFocusRequester: FocusRequester?,
-    secondaryFocusRequester: FocusRequester? = null,
     onFieldFocusChanged: (Boolean) -> Unit,
     enabled: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
     var isFocused by remember { mutableStateOf(false) }
     BasicTextField(
@@ -2483,11 +2531,10 @@ private fun BlockTextField(
         readOnly = !enabled,
         textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
         cursorBrush = SolidColor(tc.ac),
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth()
             .background(tc.bg, FIELD_CORNER)
             .border(1.dp, tc.br, FIELD_CORNER)
             .then(if (fieldFocusRequester != null) Modifier.focusRequester(fieldFocusRequester) else Modifier)
-            .then(if (secondaryFocusRequester != null) Modifier.focusRequester(secondaryFocusRequester) else Modifier)
             .onFocusChanged { isFocused = it.isFocused; onFieldFocusChanged(it.isFocused) }
             .then(if (value.isEmpty() && isFocused) Modifier.heightIn(min = 52.dp) else Modifier)
             .padding(horizontal = 8.dp, vertical = 5.dp),
@@ -2506,7 +2553,7 @@ private fun BlockTextField(
  * rendered view while the card's pencil action remains the full dialog editor.
  */
 @Composable
-private fun MarkdownInlineOrTextField(
+internal fun MarkdownInlineOrTextField(
     value: String,
     placeholder: String,
     tc: ThemeColors,
@@ -2515,9 +2562,17 @@ private fun MarkdownInlineOrTextField(
     onFieldFocusChanged: (Boolean) -> Unit,
     onValueChange: (String) -> Unit,
     enabled: Boolean = true,
+    maxHeight: Dp? = null,
+    onClear: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
+    // An empty Markdown field has to enter edit mode as soon as it gains focus. Otherwise the
+    // first character makes `value.isNotBlank()` true before inlineEditing changes, so this branch
+    // swaps in the preview during the very keystroke that filled the field. Keep every blank field
+    // unfocused on mount; its own focus callback enters inline editing before text can arrive.
     var inlineEditing by remember { mutableStateOf(false) }
     var hasFocusedInlineEditor by remember { mutableStateOf(false) }
+    var inlineEditorFocused by remember { mutableStateOf(false) }
     val inlineEditRequester = remember { FocusRequester() }
 
     LaunchedEffect(inlineEditing) {
@@ -2531,10 +2586,23 @@ private fun MarkdownInlineOrTextField(
         }
     }
 
+    // Some desktop focus transitions briefly report a blur while the BasicTextField is updating
+    // its value/caret. Treat a blur as an exit only if focus is still gone after a frame; this
+    // keeps a populated inline editor alive through the first and subsequent keystrokes.
+    LaunchedEffect(inlineEditing, hasFocusedInlineEditor, inlineEditorFocused) {
+        if (inlineEditing && hasFocusedInlineEditor && !inlineEditorFocused) {
+            // Allow another inline editor to receive focus before treating this as a genuine
+            // exit. A single frame is enough for ordinary text edits but can race the focus
+            // request when moving directly from Prefix to Next steps on desktop.
+            delay(100)
+            if (inlineEditing && !inlineEditorFocused) inlineEditing = false
+        }
+    }
+
     if (renderInlineMarkdown && value.isNotBlank() && !inlineEditing) {
         var hovered by remember(value) { mutableStateOf(false) }
         Box(
-            Modifier.fillMaxWidth()
+            modifier.fillMaxWidth()
                 .background(if (hovered) tc.hv else Color.Transparent, FIELD_CORNER)
                 .clip(FIELD_CORNER)
                 .pointerHoverIcon(PointerIcon(AwtCursor.getPredefinedCursor(AwtCursor.TEXT_CURSOR)))
@@ -2546,25 +2614,40 @@ private fun MarkdownInlineOrTextField(
             AnnotationMarkdownText(value, tc)
         }
     } else {
-        BlockTextField(
-            value = value,
-            onValueChange = onValueChange,
-            placeholder = placeholder,
-            tc = tc,
-            fieldFocusRequester = fieldFocusRequester,
-            secondaryFocusRequester = inlineEditRequester,
-            enabled = enabled,
-            onFieldFocusChanged = { focused ->
-                if (focused) {
-                    hasFocusedInlineEditor = true
-                } else if (inlineEditing && hasFocusedInlineEditor) {
-                    // Losing focus is the return-to-rendered gesture. The callback from the
-                    // parent still runs so panel-level keyboard state remains accurate.
-                    inlineEditing = false
-                }
-                onFieldFocusChanged(focused)
-            },
-        )
+        val activeFocusRequester = if (inlineEditing) inlineEditRequester else fieldFocusRequester
+        val focusChange: (Boolean) -> Unit = { focused ->
+            if (focused) {
+                hasFocusedInlineEditor = true
+                if (renderInlineMarkdown && value.isBlank() && enabled) inlineEditing = true
+            }
+            inlineEditorFocused = focused
+            // The callback from the parent still runs so panel-level keyboard state remains accurate.
+            onFieldFocusChanged(focused)
+        }
+        if (maxHeight != null) {
+            ScrollableTextArea(
+                value = value,
+                onValue = onValueChange,
+                placeholder = placeholder,
+                modifier = modifier
+                    .then(if (activeFocusRequester != null) Modifier.focusRequester(activeFocusRequester) else Modifier)
+                    .onFocusChanged { focusChange(it.hasFocus) },
+                maxHeight = maxHeight,
+                enabled = enabled,
+                onClear = onClear,
+            )
+        } else {
+            BlockTextField(
+                value = value,
+                onValueChange = onValueChange,
+                placeholder = placeholder,
+                tc = tc,
+                fieldFocusRequester = activeFocusRequester,
+                enabled = enabled,
+                onFieldFocusChanged = focusChange,
+                modifier = modifier,
+            )
+        }
     }
 }
 
@@ -2696,6 +2779,7 @@ private fun NoteBlock(
                 onFieldFocusChanged = onFieldFocusChanged,
                 enabled = editingEnabled,
                 onValueChange = onUpdate,
+                modifier = Modifier.testTag("annotation-note-field"),
             )
         }
     }
@@ -3060,7 +3144,7 @@ private fun LogRefBlock(
     editingEnabled: Boolean = true,
 ) {
     val rows = block.resolveRows(tab)
-    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
     val context = rememberAnnotationLogLineContext(tab, settings, localSource)
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 
@@ -3305,8 +3389,10 @@ private fun ImageBlockView(
 
 // Pure decode of a stored image block's bytes into something Compose can draw. Returns null
 // (rendered as a placeholder above) rather than throwing on a corrupt/unsupported blob — an
-// image block should never crash the panel it's part of.
-private fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
+// image block should never crash the panel it's part of. internal (not private): CaptureStrip.kt's
+// CaptureMarkerRow reuses this exact decode for a marker's screenshot
+// thumbnail rather than duplicating it.
+internal fun decodeImageBlockBitmap(bytes: ByteArray): ImageBitmap? =
     runCatching { org.jetbrains.skia.Image.makeFromEncoded(bytes).toComposeImageBitmap() }.getOrNull()
 
 // Same 18dp footprint/hover convention as SquareIconButton (Components.kt), but rendering the

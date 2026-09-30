@@ -74,6 +74,55 @@ class AnthropicMessagesProviderTest {
     }
 
     @Test
+    fun includesScreenImageInsideAnthropicToolResultContent() = runBlocking {
+        var capturedRequest: HttpRequestData? = null
+        val client = HttpClient(MockEngine { request ->
+            capturedRequest = request
+            respond(sse("message_stop {}"), HttpStatusCode.OK, headersOf("Content-Type", "text/event-stream"))
+        }) { expectSuccess = false }
+        val imageRequest = request().copy(
+            messages = request().messages + LlmMessage(
+                LlmRole.TOOL,
+                "Current device screen",
+                toolCallId = "screen-1",
+                images = listOf(LlmImage("c2NyZWVu", "image/jpeg")),
+            ),
+        )
+        AnthropicMessagesProvider(
+            baseUrl = "http://provider.test/v1",
+            httpClient = client,
+        ).use { it.streamChat(imageRequest).toList() }
+
+        val messages = Json.parseToJsonElement((requireNotNull(capturedRequest).body as TextContent).text)
+            .jsonObject["messages"]!!.jsonArray
+        val toolResult = messages.last().jsonObject["content"]!!.jsonArray.single().jsonObject
+        assertEquals("tool_result", toolResult["type"]!!.jsonPrimitive.content)
+        val content = toolResult["content"]!!.jsonArray
+        assertEquals("text", content[0].jsonObject["type"]!!.jsonPrimitive.content)
+        assertEquals("Current device screen", content[0].jsonObject["text"]!!.jsonPrimitive.content)
+        assertEquals("image", content[1].jsonObject["type"]!!.jsonPrimitive.content)
+        val source = content[1].jsonObject["source"]!!.jsonObject
+        assertEquals("base64", source["type"]!!.jsonPrimitive.content)
+        assertEquals("image/jpeg", source["media_type"]!!.jsonPrimitive.content)
+        assertEquals("c2NyZWVu", source["data"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun explainsWhenAnthropicRejectsScreenImageInput() = runBlocking {
+        val client = HttpClient(MockEngine {
+            respond("unsupported image input", HttpStatusCode.BadRequest, headersOf("Content-Type", "application/json"))
+        }) { expectSuccess = false }
+        val imageRequest = request().copy(
+            messages = listOf(LlmMessage(LlmRole.USER, "Describe this screen", images = listOf(LlmImage("c2NyZWVu")))),
+        )
+        AnthropicMessagesProvider(httpClient = client).use { provider ->
+            val failure = provider.streamChat(imageRequest).toList().single() as LlmStreamEvent.Error
+            assertTrue(failure.message.contains("rejected the screen image input"))
+            assertTrue(failure.message.contains("unsupported image input"))
+        }
+    }
+
+    @Test
     fun streamsTextUsageAndCompletion() = runBlocking {
         val events = provider(
             sse(

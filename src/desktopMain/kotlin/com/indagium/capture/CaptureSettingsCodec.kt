@@ -1,0 +1,178 @@
+package com.indagium.capture
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+
+private const val SETTINGS_FORMAT_VERSION = 1
+private const val MIN_MAX_SIZE = 0
+private const val MAX_MAX_SIZE = 8_192
+private const val MIN_MAX_FPS = 1
+private const val MAX_MAX_FPS = 240
+private const val MIN_BITRATE_MBPS = 1
+private const val MAX_BITRATE_MBPS = 500
+private const val MAX_MARKER_WINDOW_MS = 120_000L
+private const val MIN_LIVE_AUDIO_VOLUME = 0
+private const val MAX_LIVE_AUDIO_VOLUME = 100
+
+/** Keyed, versioned persistence for capture preferences embedded in app settings. */
+fun captureSettingsToJson(settings: CaptureSettings): String = buildJsonObject {
+    put("formatVersion", SETTINGS_FORMAT_VERSION)
+    put("adbPath", settings.adbPath)
+    put("scrcpyPath", settings.scrcpyPath)
+    put("buffers", buildJsonArray { settings.buffers.forEach { add(it) } })
+    put("includeBufferedLogs", settings.includeBufferedLogs)
+    put("recordVideo", settings.recordVideo)
+    put("mirror", settings.mirror)
+    put("mirrorMode", settings.effectiveMirrorMode.name)
+    put("audio", settings.audio)
+    put("maxSize", settings.maxSize)
+    put("maxFps", settings.maxFps)
+    put("bitrateMbps", settings.bitrateMbps)
+    put("sessionLimitBytes", settings.sessionLimitBytes)
+    put("freeSpaceReserveBytes", settings.freeSpaceReserveBytes)
+    put("filenameTemplate", settings.filenameTemplate)
+    put("label", settings.label)
+    put("bufferMode", settings.bufferMode.name)
+    put("markerPreMs", settings.markerPreMs)
+    put("markerPostMs", settings.markerPostMs)
+    put("markerScreenshot", settings.markerScreenshot)
+    put("markerNotesInSnapshot", settings.markerNotesInSnapshot)
+    put("videoContainer", settings.videoContainer.name)
+    put("keepDeviceAudio", settings.keepDeviceAudio)
+    put("playAudioLive", settings.playAudioLive)
+    put("liveAudioVolume", settings.liveAudioVolume)
+    put("microphoneDeviceId", settings.microphoneDeviceId)
+    put("hardwareMirror", settings.hardwareMirror)
+}.toString()
+
+/** Returns null for malformed or unsupported settings instead of partially applying them. */
+fun captureSettingsFromJson(raw: String): CaptureSettings? = runCatching {
+    val root = Json.parseToJsonElement(raw).jsonObject
+    val version = root.optional("formatVersion", SETTINGS_FORMAT_VERSION, ::intValue)
+    require(version == SETTINGS_FORMAT_VERSION) { "Unsupported capture settings version: $version" }
+    val defaults = CaptureSettings()
+    val legacyMirror = root.optional("mirror", defaults.mirror, ::booleanValue)
+    CaptureSettings(
+        adbPath = root.optional("adbPath", defaults.adbPath, ::stringValue),
+        scrcpyPath = root.optional("scrcpyPath", defaults.scrcpyPath, ::stringValue),
+        buffers = root.optional("buffers", defaults.buffers, ::stringListValue),
+        includeBufferedLogs = root.optional("includeBufferedLogs", defaults.includeBufferedLogs, ::booleanValue),
+        recordVideo = root.optional("recordVideo", defaults.recordVideo, ::booleanValue),
+        mirror = legacyMirror,
+        audio = root.optional("audio", defaults.audio, ::booleanValue),
+        maxSize = root.optional("maxSize", defaults.maxSize, ::intValue).coerceIn(MIN_MAX_SIZE, MAX_MAX_SIZE),
+        maxFps = root.optional("maxFps", defaults.maxFps, ::intValue).coerceIn(MIN_MAX_FPS, MAX_MAX_FPS),
+        bitrateMbps = root.optional("bitrateMbps", defaults.bitrateMbps, ::intValue).coerceIn(MIN_BITRATE_MBPS, MAX_BITRATE_MBPS),
+        sessionLimitBytes = root.optional("sessionLimitBytes", defaults.sessionLimitBytes, ::longValue).coerceAtLeast(0),
+        freeSpaceReserveBytes = root.optional("freeSpaceReserveBytes", defaults.freeSpaceReserveBytes, ::longValue).coerceAtLeast(0),
+        filenameTemplate = root.optional("filenameTemplate", defaults.filenameTemplate, ::stringValue),
+        label = root.optional("label", defaults.label, ::stringValue),
+        // Deliberately NOT `root.optional(..., ::bufferModeValue)`: that helper errors on a
+        // present-but-malformed value, which fails the whole `runCatching` block and silently
+        // resets every OTHER capture setting to defaults too (see captureSettingsFromJson's own
+        // doc). bufferMode is a forward-compatible enum — an older build reading a settings file
+        // written by a newer build with a buffer mode it doesn't know about should keep the rest
+        // of the user's preferences intact and just fall back this one field to DEFAULT, not
+        // nuke everything. So both "absent" and "present but unrecognized" resolve to DEFAULT here.
+        bufferMode = root.bufferModeOrDefault("bufferMode", defaults.bufferMode),
+        // `mirrorMode` was added after the original boolean setting. An absent mode means the
+        // exact old behavior: mirror=true opens the in-app mirror and false opens nothing.
+        mirrorMode = root.mirrorModeOrDefault(
+            key = "mirrorMode",
+            default = if (legacyMirror) CaptureMirrorMode.EMBEDDED else CaptureMirrorMode.DISABLED,
+        ),
+        // Mark issue (restyle plan Phase 3), appended last matching CaptureSettings' own field
+        // order. Absent on any settings JSON written before this feature existed, which decodes to
+        // this class's defaults — 5s/5s windows, screenshot+snapshot inclusion both on.
+        markerPreMs = root.optional("markerPreMs", defaults.markerPreMs, ::longValue).coerceIn(0, MAX_MARKER_WINDOW_MS),
+        markerPostMs = root.optional("markerPostMs", defaults.markerPostMs, ::longValue).coerceIn(0, MAX_MARKER_WINDOW_MS),
+        markerScreenshot = root.optional("markerScreenshot", defaults.markerScreenshot, ::booleanValue),
+        markerNotesInSnapshot = root.optional("markerNotesInSnapshot", defaults.markerNotesInSnapshot, ::booleanValue),
+        // Archive v3 / MP4 export, appended last matching CaptureSettings' own field order. Same
+        // "absent or unrecognized both fall back to the default" treatment as bufferMode/mirrorMode
+        // above — a settings file written by a newer build with a container this build doesn't know
+        // must not fail the whole decode.
+        videoContainer = root.videoContainerOrDefault("videoContainer", defaults.videoContainer),
+        // "Keep sound on the device", appended last matching CaptureSettings' own field order.
+        // Absent on any settings JSON written before this feature existed, which decodes to false
+        // (the long-standing "device muted while its audio is captured" default).
+        keepDeviceAudio = root.optional("keepDeviceAudio", defaults.keepDeviceAudio, ::booleanValue),
+        // Live audio playback, appended last matching CaptureSettings' own field order. Absent on
+        // any settings JSON written before this feature existed, which decodes to defaults (off,
+        // 80% volume).
+        playAudioLive = root.optional("playAudioLive", defaults.playAudioLive, ::booleanValue),
+        liveAudioVolume = root.optional("liveAudioVolume", defaults.liveAudioVolume, ::intValue)
+            .coerceIn(MIN_LIVE_AUDIO_VOLUME, MAX_LIVE_AUDIO_VOLUME),
+        // Keep unknown but well-formed device IDs intact. The device may be temporarily absent;
+        // capture startup reports that condition and leaves the setting available for later.
+        microphoneDeviceId = root.optional("microphoneDeviceId", defaults.microphoneDeviceId, ::stringValue),
+        // Windows/Linux hardware mirror opt-in, appended last matching CaptureSettings' own field
+        // order. Absent on any settings JSON written before this feature existed, which decodes to
+        // false (the standard Compose/JavaCV mirror stays the default).
+        hardwareMirror = root.optional("hardwareMirror", defaults.hardwareMirror, ::booleanValue),
+    )
+}.getOrNull()
+
+private fun <T> JsonObject.optional(key: String, default: T, parser: (JsonElement) -> T?): T {
+    val value = this[key] ?: return default
+    return parser(value) ?: error("Capture setting $key is invalid")
+}
+
+/** Absent key, wrong JSON type, or a name this build doesn't recognize (e.g. an older build
+ *  reading a file written by a newer one) all fall back to [default] rather than failing the
+ *  decode — see the call site's comment for why this key deviates from its neighbours. */
+private fun JsonObject.bufferModeOrDefault(key: String, default: CaptureBufferMode): CaptureBufferMode {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureBufferMode.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun JsonObject.mirrorModeOrDefault(key: String, default: CaptureMirrorMode): CaptureMirrorMode {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureMirrorMode.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun JsonObject.videoContainerOrDefault(key: String, default: CaptureVideoContainer): CaptureVideoContainer {
+    val raw = stringValue(this[key] ?: return default) ?: return default
+    return runCatching { CaptureVideoContainer.valueOf(raw) }.getOrDefault(default)
+}
+
+private fun stringValue(value: JsonElement): String? =
+    (value as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull
+
+private fun intValue(value: JsonElement): Int? =
+    (value as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+
+private fun longValue(value: JsonElement): Long? =
+    (value as? JsonPrimitive)?.takeIf { !it.isString }?.longOrNull
+
+private fun booleanValue(value: JsonElement): Boolean? =
+    (value as? JsonPrimitive)?.takeIf { !it.isString }?.booleanOrNull
+
+private fun stringListValue(value: JsonElement): List<String>? =
+    (value as? JsonArray)?.map { stringValue(it) ?: return null }
+
+internal fun JsonObject.string(key: String): String? = stringValue(this[key] ?: return null)
+
+internal fun JsonObject.int(key: String): Int? =
+    this[key]?.let(::intValue)
+
+internal fun JsonObject.long(key: String): Long? =
+    this[key]?.let(::longValue)
+
+internal fun JsonObject.boolean(key: String): Boolean? =
+    this[key]?.let(::booleanValue)
+
+internal fun JsonObject.stringList(key: String): List<String>? =
+    this[key]?.let(::stringListValue)

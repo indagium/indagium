@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CompareArrows
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.automirrored.outlined.StickyNote2
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.Close
@@ -33,12 +34,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
-import java.awt.FileDialog
-import java.awt.Frame
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -87,11 +85,25 @@ internal fun TabBar(state: AppState) {
     val standaloneShape = RoundedCornerShape(7.dp)
     val hasRecentFiles = state.recentFiles.isNotEmpty()
     val showToolbarText = !state.settings.toolbarIconOnlyButtons
+    val homeActive = state.activeTab()?.isCaptureLauncher == true
     Row(
         Modifier.fillMaxWidth().height(36.dp).background(tc.p2).border(BorderStroke(1.dp, tc.br)).padding(vertical = 1.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TabOverflowRow(state = state, modifier = Modifier.weight(1f).fillMaxHeight())
+        // Outside TabOverflowRow, not inside it: that row's drag-reorder math divides the strip's
+        // pixel width by its own visible-tab count, so adding a sibling button here (rather than
+        // one more item inside the row) keeps that math untouched.
+        Spacer(Modifier.width(toolbarGap))
+        ToolbarBtn(
+            "",
+            icon = Icons.Outlined.Add,
+            showLabel = false,
+            tooltip = "New tab",
+            active = homeActive,
+            modifier = Modifier.fillMaxHeight(),
+            shape = standaloneShape,
+        ) { state.openHomeTab() }
         Spacer(Modifier.width(toolbarGap))
         ToolbarBtn(
             "Filter",
@@ -120,11 +132,12 @@ internal fun TabBar(state: AppState) {
             modifier = Modifier.fillMaxHeight(),
             shape = middleShape,
         ) { state.updateAiPanelVisible(!state.aiPanelVisible) }
-        // Only offered when the active tab actually has a video attached — toggling
-        // AppState.videoPanelVisible would otherwise have no visible effect (BoundVideoPanel
-        // renders nothing without an attachment), matching Compare's own `enabled = canCompare`
-        // convention of gating on real applicability rather than hiding the whole button.
-        if (state.tab(state.activeTabId)?.attachedVideo != null) {
+        // Capture sessions expose a status card before a video attachment exists; the same global
+        // toggle must therefore remain reachable for live tabs as well as imported captures.
+        val activeTabCanShowVideo = state.tab(state.activeTabId)?.let {
+            it.attachedVideo != null || it.captureSessionId != null
+        } == true
+        if (activeTabCanShowVideo) {
             ToolbarBtn(
                 "Video",
                 icon = Icons.Outlined.Movie,
@@ -161,14 +174,7 @@ internal fun TabBar(state: AppState) {
             tooltip = "Open log file",
             modifier = Modifier.fillMaxHeight(),
             shape = if (hasRecentFiles) middleShape else rightShape,
-        ) {
-            // No setFilenameFilter here: it's unreliable on macOS (the native NSOpenPanel doesn't
-            // consistently invoke it), which greyed out files that would open fine by drag-and-drop.
-            // Show everything and validate after the pick — see AppState.openPathOrShowError.
-            val fd = FileDialog(null as Frame?, "Open Log File", FileDialog.LOAD)
-            fd.isVisible = true
-            fd.file?.let { state.openPathOrShowError(File(fd.directory, it)) }
-        }
+        ) { pickLogFileAndOpen(state, "Open Log File") }
         if (hasRecentFiles) {
             ToolbarBtn(
                 "▾",

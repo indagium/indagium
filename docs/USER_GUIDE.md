@@ -69,9 +69,22 @@ chmod +x Indagium-x.y.z-x86_64.AppImage
 
 # Flatpak bundle (replace x86_64 with aarch64 on ARM64)
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.freedesktop.Platform//24.08
 flatpak install --user ./Indagium-x.y.z-x86_64.flatpak
 flatpak run com.indagium.Indagium
 ```
+
+The AppImage and `.deb` use bundled FFmpeg native libraries that require glibc 2.35 or newer
+(Ubuntu 22.04+) for the in-app mirror, video recording, playback and export. On an older system
+(e.g. Ubuntu 20.04, glibc 2.31) Indagium detects this at startup and adapts automatically: it still
+captures and views logs, "Record video to file" is greyed out, and the device is shown in a host
+`scrcpy` window instead of the in-app mirror (install `scrcpy`; scrcpy 1.x windows are video-only,
+without audio). The Settings/New-tab capture controls explain this in place.
+
+Flatpak is **not** a workaround on Ubuntu 20.04: its bundled flatpak 1.6 cannot read Flathub's
+current summary ("summary exceeded maximum size of 10485760 bytes"), so
+`org.freedesktop.Platform//24.08` cannot be installed there without first adding a newer flatpak,
+e.g. from `ppa:alexlarsson/flatpak`.
 
 Choose the format that fits your system: `.deb` is best for Debian-family systems, AppImage runs
 without installing system files, and Flatpak installs into your user account. All three packages
@@ -198,6 +211,7 @@ right-click options popup.
 | **Select a row** | Click. Shift-click or `⇧↑`/`⇧↓` extends. Drag to select a range |
 | **Copy** | `⌘C` / `Ctrl+C` copies the selected rows |
 | **Select all visible** | `⌘A` / `Ctrl+A` |
+| **Add annotation** | `⌘⇧N` / `Ctrl+Shift+N` annotates the selected rows (or the cursor row), like the context menu's first item |
 | **Time delta (Δt)** | Toggle in the log toolbar. Shows the gap between adjacent rows, or the offset from the first selected row when you have a selection — the fastest way to spot a stall |
 | **Wrapping** | Long messages wrap above a configurable character count; automatic wrapping can be turned off in Settings |
 | **Original / Filtered split** | The **Unfiltered** toolbar button splits the view vertically so you can see the same log with and without your filter |
@@ -260,6 +274,25 @@ need to spot while still seeing their surroundings.
 
 Add one from the filter panel, or right-click a row → **Highlight**. Each highlighter has a pattern
 (substring or regex), a colour, and an on/off toggle.
+
+In the filter panel, type into the search field to get suggestions grouped as **TEXT** (what you
+typed), **TAGS** and **MESSAGES** (repeated messages from Log composition), each with its match count.
+Every suggestion has a **Match** and a **Line** button: *Match* colours just the matching text (the
+default), *Line* tints the whole row. Use ↑↓ to pick, ←→ to switch Match / Line, Enter to add. Press
+Tab on a tag suggestion, or type `tag:Name text`, to limit the highlighter to that tag. A row's
+**Match / Line** chip flips an existing highlighter, and clicking its pattern opens an editor for the
+pattern, case, where to match (tag, message or anywhere), tag limit and colour. Right-click a row →
+**Highlight lines with this tag** tints every line of that tag.
+
+Highlighters from **klogg** can be imported: drop the klogg `.conf` on the filter panel, or use
+**Import** in Saved filters. Each klogg highlighter set arrives as a saved filter that keeps klogg's
+own behaviour (first whole-line match wins, capture groups, colours); the review dialog lists any
+patterns that could not be carried over.
+
+The review dialog has a switch at the top. **Save as saved filters** adds the sets to your library.
+**Add to current filter (tab name)** instead appends the ticked sets' highlighters to the filter of the
+tab you are looking at, leaving its tags, levels and rules alone and skipping highlighters it already
+has. A klogg import opens in the second mode when a log tab is open; the two modes keep separate ticks.
 
 Keyword-search matches can also be highlighted in their own colour — a separate toggle in the panel.
 
@@ -816,6 +849,7 @@ Press `⌘/` / `Ctrl+/` in the app for this list. `⌘` on macOS, `Ctrl` elsewhe
 | `Home` / `End` | Jump to first / last row |
 | `⇧↑` / `⇧↓` | Extend row selection |
 | `⌘A` / `⌘C` | Select all visible rows / copy selected rows |
+| `⌘⇧N` | Add annotation for selected rows |
 | `Enter` / `⇧F10` | Open context menu for selected row |
 | `Space` | Toggle current row selection |
 | `Enter` / `⇧Enter` | Jump to next / previous Find match |

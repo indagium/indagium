@@ -97,6 +97,20 @@ class AccountCliCheckTest {
     }
 
     @Test
+    fun bundledCodexMigrationOnlyReplacesTheKnownObsoletePath() {
+        val current = "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        assertEquals(
+            current,
+            recoveredBundledCodexPath("/Applications/ChatGPT.app/Contents/Resources/codex", current),
+        )
+        assertEquals("/custom/bin/codex", recoveredBundledCodexPath("/custom/bin/codex", current))
+        assertEquals(
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            recoveredBundledCodexPath("/Applications/ChatGPT.app/Contents/Resources/codex", null),
+        )
+    }
+
+    @Test
     fun codexDiscoveryParsesTheLocalCatalogAndIgnoresLeadingDiagnostics() {
         var command: List<String>? = null
         val result = discoverAccountModels(AiProviderKind.CODEX_ACCOUNT) {

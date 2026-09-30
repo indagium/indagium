@@ -39,6 +39,7 @@ com.google.guava:guava:28.1-android=desktopTestRuntimeClasspath
 com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava=desktopTestRuntimeClasspath
 com.google.j2objc:j2objc-annotations:1.3=desktopTestRuntimeClasspath
 com.google.truth:truth:1.0.1=desktopTestRuntimeClasspath
+com.google.zxing:core:3.5.3=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.googlecode.java-diff-utils:diffutils:1.3.0=desktopTestRuntimeClasspath
 com.mikepenz:multiplatform-markdown-renderer-jvm:0.41.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath
 com.mikepenz:multiplatform-markdown-renderer-m3-jvm:0.41.0=desktopCompileClasspath,desktopRuntimeClasspath,desktopTestCompileClasspath,desktopTestRuntimeClasspath

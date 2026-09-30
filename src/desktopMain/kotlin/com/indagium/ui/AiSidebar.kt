@@ -83,8 +83,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.ai.AiChipCommand
 import com.indagium.ai.AiConnectionState
@@ -102,6 +100,7 @@ import com.indagium.ai.ModelDiscoveryResult
 import com.indagium.ai.isLoopbackHost
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.AiProviderKind
+import com.indagium.model.AiProviderProfile
 import com.indagium.model.LogTab
 import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.utils.formatDuration
@@ -166,6 +165,7 @@ internal fun RightSidebarPanel(
     onAiPanelFocusChanged: (Boolean) -> Unit,
     notesContent: @Composable () -> Unit,
     videoContent: (@Composable () -> Unit)? = null,
+    notesVisible: Boolean = state.annotationVisible,
 ) {
     // AiSidebarRuntime batches active-run changes through this revision flow. Observing it here is
     // important: RightSidebarPanel owns Notes, while AiSidebarPanel is a sibling and otherwise a
@@ -175,7 +175,7 @@ internal fun RightSidebarPanel(
     @Suppress("UNUSED_VARIABLE")
     val observedAiRevision = aiRevision
     val notesLocked = state.aiSessions.sessionFor(tab.id).activeRun != null
-    val notesOn = state.annotationVisible
+    val notesOn = notesVisible
     val aiOn = state.aiPanelVisible
     val videoOn = videoContent != null
     val density = LocalDensity.current
@@ -654,6 +654,7 @@ private fun AiSidebarPanel(
                 } else {
                     val context = AiInvestigationContext(
                         tabId = tab.id,
+                        isDeviceCapture = tab.captureSessionId != null || tab.captureSourceSessionId != null,
                         lineId = selectedLineId?.takeIf { action?.requiresLine == true || attachedIds.isNotEmpty() },
                         lineIds = attachedIds,
                         action = action,
@@ -885,7 +886,7 @@ private fun AiProviderControls(
         if (profile.kind.usesHttpEndpoint && !isLoopbackHost(endpointHost) && !profile.remoteDisclosureAcknowledged) {
             Box(Modifier.fillMaxWidth().background(DANGER_RED.copy(.10f), CORNER_SM).padding(7.dp)) {
                 AppText(
-                    "Remote provider is blocked until you acknowledge the data disclosure in Settings.",
+                    "This provider is blocked until you acknowledge in Settings that device screen images and other AI evidence may leave this device.",
                     color = DANGER_RED,
                     fontSize = 10.sp,
                     maxLines = 3,

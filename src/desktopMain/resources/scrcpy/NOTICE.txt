@@ -1,0 +1,11 @@
+Embedded scrcpy server
+
+scrcpy-server-v4.1 is distributed from the official Genymobile scrcpy v4.1 release:
+https://github.com/Genymobile/scrcpy/releases/tag/v4.1
+
+Copyright (C) 2018 Genymobile
+Licensed under the Apache License, Version 2.0. The full license text is available at:
+https://www.apache.org/licenses/LICENSE-2.0
+
+SHA-256:
+deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae

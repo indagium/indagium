@@ -1,0 +1,314 @@
+package com.indagium.ui
+
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
+import com.indagium.capture.StreamingMkvWriter
+import com.indagium.capture.mirror.EmbeddedDeviceSession
+import com.indagium.capture.mirror.EmbeddedMirrorConnection
+import com.indagium.capture.mirror.EmbeddedMirrorRuntime
+import com.indagium.capture.mirror.EmbeddedMirrorState
+import com.indagium.capture.mirror.EmbeddedMirrorTransport
+import com.indagium.capture.mirror.H264Decoder
+import com.indagium.capture.mirror.MirrorFrame
+import com.indagium.capture.mirror.MirrorStreamOptions
+import org.jetbrains.skiko.GraphicsApi
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
+import java.nio.file.Files
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class MacMirrorSelectionTest {
+    @Test
+    fun macosSelectsNativeMirrorWhileOtherPlatformsRetainCompose() {
+        assertTrue(shouldUseMacNativeMirror("Mac OS X"))
+        assertTrue(shouldUseMacNativeMirror("macOS"))
+        assertFalse(shouldUseMacNativeMirror("Linux"))
+        assertFalse(shouldUseMacNativeMirror("Windows 11"))
+    }
+
+    // The D3D11/VAAPI paths have never worked on real hardware yet (Windows black+crash, Linux VM
+    // VAAPI unavailable) — shouldUseDesktopGpuMirror only selects them when the persisted
+    // CaptureSettings.hardwareMirror opt-in is also on, regardless of OS.
+    @Test
+    fun desktopGpuMirrorRequiresBothTheRightOsAndTheExplicitOptIn() {
+        assertTrue(shouldUseDesktopGpuMirror("Windows 11", enabled = true))
+        assertTrue(shouldUseDesktopGpuMirror("Linux", enabled = true))
+        assertFalse(shouldUseDesktopGpuMirror("Windows 11", enabled = false))
+        assertFalse(shouldUseDesktopGpuMirror("Linux", enabled = false))
+        assertFalse(shouldUseDesktopGpuMirror("Mac OS X", enabled = true))
+    }
+
+    @Test
+    fun standaloneBackendHidesNativeSurfaceAfterComposeReplacement() {
+        val first = blockingRuntime()
+        val backend = MirrorBackend.StandaloneRuntime(first)
+        try {
+            backend.start("serial", com.indagium.capture.mirror.MirrorStreamOptions())
+            await { first.snapshot().state == EmbeddedMirrorState.LIVE }
+
+            backend.hideMacSurface()
+            assertTrue(backend.snapshot().state == EmbeddedMirrorState.LIVE)
+            assertTrue(backend.macSurface == null)
+        } finally {
+            backend.close()
+        }
+    }
+
+    // Regression test for the Disconnect bug: SharedRecordingSession.stop()/close() only detach
+    // this mirror's own decoder from the shared recording session (see that class's own doc) — the
+    // recording's connection itself stays LIVE the whole time, exactly as CaptureRecorder's own
+    // reconnect lifecycle owns it. Before the fix, composeLocked() reported that still-LIVE
+    // connectionSnapshot regardless of whether this mirror was attached, so the control bar kept
+    // saying "Live" and the surface stayed black (a fresh SwingPanel surface, never presented to)
+    // after Disconnect.
+    @Test
+    fun sharedRecordingSessionReportsDisconnectedAfterStopWhileTheRecordingConnectionStaysLive() {
+        val videoInput = PipedInputStream(4 * 1024)
+        val videoOutput = PipedOutputStream(videoInput)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = videoInput
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() {
+                    runCatching { videoInput.close() }
+                    runCatching { videoOutput.close() }
+                }
+            }
+        }
+        val mkvFile = Files.createTempFile("shared-recording-session-disconnect-test", ".mkv").toFile()
+        mkvFile.deleteOnExit()
+        val session = EmbeddedDeviceSession(transport, StreamingMkvWriter(mkvFile), elapsedMillis = { 0L })
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                // Never writes to videoOutput above, so the session's own packet pump blocks
+                // reading the stream header forever (bounded only by this test's own timeouts) —
+                // exactly a live device connection that just hasn't sent anything new yet. This
+                // fake decoder mirrors that: it blocks on its bounded feed until detachDecoder()
+                // closes it (read() returns -1), like EmbeddedMirrorTest's own fakes.
+                while (!Thread.currentThread().isInterrupted) {
+                    if (input.read() < 0) return
+                }
+            }
+        }
+        try {
+            session.start("serial", MirrorStreamOptions())
+            await { session.connectionSnapshot().state == EmbeddedMirrorState.LIVE }
+
+            val backend = MirrorBackend.SharedRecordingSession(
+                session = session,
+                decoder = decoder,
+                onSnapshotChanged = {},
+            )
+            try {
+                backend.start("ignored", MirrorStreamOptions())
+                await { backend.snapshot().state == EmbeddedMirrorState.LIVE }
+
+                backend.stop()
+                assertEquals(
+                    EmbeddedMirrorState.DISCONNECTED,
+                    backend.snapshot().state,
+                    "stop() must report DISCONNECTED even though the recording connection stays LIVE",
+                )
+                assertEquals(
+                    EmbeddedMirrorState.LIVE,
+                    session.connectionSnapshot().state,
+                    "the recording's own connection must never be touched by the mirror's stop()",
+                )
+
+                backend.start("ignored", MirrorStreamOptions())
+                await { backend.snapshot().state == EmbeddedMirrorState.LIVE }
+            } finally {
+                backend.close()
+            }
+        } finally {
+            session.close()
+            mkvFile.delete()
+        }
+    }
+
+    @Test
+    fun nativeMirrorClipTracksComposeViewportIntersection() {
+        val clip = mirrorClipFractions(
+            full = Rect(100f, 200f, 500f, 600f),
+            clipped = Rect(100f, 280f, 500f, 520f),
+        )
+
+        assertEquals(MirrorClipFractions(0f, 0.2f, 1f, 0.8f), clip)
+        assertTrue(clip.isVisible)
+    }
+
+    @Test
+    fun nativeMirrorClipHidesFullyClippedOrEmptyBounds() {
+        assertEquals(
+            MirrorClipFractions(0f, 0f, 0f, 0f),
+            mirrorClipFractions(Rect(0f, 100f, 200f, 300f), Rect(0f, 0f, 0f, 0f)),
+        )
+        assertFalse(MirrorClipFractions(0f, 0f, 0f, 0f).isVisible)
+    }
+
+    @Test
+    fun nativeMirrorStaysVisibleBehindComposeOverlayUnderTheDefaultUnderlay() {
+        // keepPixelsUnderOverlay = true is the default-underlay branch: the mirror keeps
+        // presenting live pixels behind a same-window Compose popup/dialog, while device input
+        // is still gated off so the popup — not the device — receives the click.
+        val visible = MirrorClipFractions(0f, 0.2f, 1f, 0.8f)
+
+        assertEquals(
+            visible,
+            effectiveMirrorClip(visible, overlayOccluded = true, keepPixelsUnderOverlay = true),
+        )
+        assertFalse(mirrorCanvasAcceptsDeviceInput(hostMounted = true, overlayOccluded = true))
+        assertTrue(mirrorCanvasAcceptsDeviceInput(hostMounted = true, overlayOccluded = false))
+        assertEquals(visible, effectiveMirrorClip(visible, overlayOccluded = false))
+        assertEquals(MirrorClipFractions(0f, 0f, 0f, 0f), effectiveMirrorClip(null, overlayOccluded = false))
+    }
+
+    @Test
+    fun nativeMirrorIsFullyClippedBehindComposeOverlayUnderTheLegacyFallback() {
+        // keepPixelsUnderOverlay = false is the fallback branch (underlay not requested or not
+        // supported on this machine): today's above-siblings master behavior masks the mirror
+        // entirely while any overlay is open, exactly as it always has.
+        val visible = MirrorClipFractions(0f, 0.2f, 1f, 0.8f)
+
+        assertEquals(
+            MirrorClipFractions(0f, 0f, 0f, 0f),
+            effectiveMirrorClip(visible, overlayOccluded = true, keepPixelsUnderOverlay = false),
+        )
+    }
+
+    @Test
+    fun underlayActiveRequiresTheRequestAndTheOrderIndependentStatusBits() {
+        assertFalse(underlayActiveFor(requested = false, status = 0b1111L))
+        assertFalse(underlayActiveFor(requested = true, status = 0b1110L)) // bit0 (attached) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0b1011L)) // bit2 (sibling exists) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0b0111L)) // bit3 (siblings transparent) missing
+        assertFalse(underlayActiveFor(requested = true, status = 0L))
+        assertTrue(underlayActiveFor(requested = true, status = 0b1111L))
+        // bit1 (currently below siblings) is what the fallback's own "above" ordering clears, so it
+        // must not gate the decision — otherwise a fallback could never upgrade back.
+        assertTrue(underlayActiveFor(requested = true, status = 0b1101L))
+        // Extra high bits beyond the four defined ones must not affect the decision either way.
+        assertTrue(underlayActiveFor(requested = true, status = 0b1_1101L))
+    }
+
+    @Test
+    fun underlayNeedsComposeToActuallyBlendInterop() {
+        assertTrue(composeInteropBlendingEffective(flagEnabled = true, renderApi = GraphicsApi.METAL))
+        // -Dcompose.interop.blending=false: Compose cuts the SwingPanel rect through popups.
+        assertFalse(composeInteropBlendingEffective(flagEnabled = false, renderApi = GraphicsApi.METAL))
+        // A software renderer cannot blend interop even with the flag on.
+        assertFalse(composeInteropBlendingEffective(flagEnabled = true, renderApi = GraphicsApi.SOFTWARE_FAST))
+        assertFalse(composeInteropBlendingEffective(flagEnabled = true, renderApi = null))
+    }
+
+    @Test
+    fun nativeMirrorClipIsEmptyWhenItsComposeHostLeavesTheWindow() {
+        val visible = MirrorClipFractions(0f, 0f, 1f, 1f)
+
+        assertEquals(
+            MirrorClipFractions(0f, 0f, 0f, 0f),
+            effectiveMirrorClip(visible, overlayOccluded = false, hostMounted = false),
+        )
+    }
+
+    @Test
+    fun inlineToDetachedHostHandoffKeepsTheSurfaceMountedUntilTheLastOwnerLeaves() {
+        val owners = MirrorSurfaceHostOwners()
+        val inlineHost = Any()
+        val detachedHost = Any()
+
+        assertTrue(owners.setMounted(inlineHost, mounted = true))
+        assertTrue(owners.setMounted(detachedHost, mounted = true))
+        assertTrue(owners.setMounted(inlineHost, mounted = false))
+        assertFalse(owners.setMounted(detachedHost, mounted = false))
+    }
+
+    @Test
+    fun captureSnapshotPopupStaysBelowAndRightAlignedWhenThereIsRoom() {
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = 8, gapPx = 8, placeAbove = false)
+
+        val position = provider.calculatePosition(
+            anchorBounds = IntRect(700, 100, 800, 140),
+            windowSize = IntSize(1_000, 1_000),
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, 600),
+        )
+
+        assertEquals(320, position.x)
+        assertEquals(148, position.y)
+    }
+
+    @Test
+    fun captureSnapshotPopupCanFlipAboveWithoutCoveringItsTrigger() {
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = 8, gapPx = 8, placeAbove = true)
+
+        val position = provider.calculatePosition(
+            anchorBounds = IntRect(700, 800, 800, 840),
+            windowSize = IntSize(1_000, 1_000),
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, 600),
+        )
+
+        assertEquals(320, position.x)
+        assertEquals(192, position.y)
+        assertTrue(position.y + 600 <= 800 - 8)
+    }
+
+    @Test
+    fun captureSnapshotPopupFitsAboveTriggerInShortWindow() {
+        val margin = 8
+        val gap = 8
+        val anchor = IntRect(600, 80, 700, 100)
+        val window = IntSize(900, 170)
+        val popupHeight = 62
+        val provider = CaptureSnapshotPopupPositionProvider(marginPx = margin, gapPx = gap, placeAbove = true)
+
+        val position = provider.calculatePosition(
+            anchorBounds = anchor,
+            windowSize = window,
+            layoutDirection = LayoutDirection.Ltr,
+            popupContentSize = IntSize(480, popupHeight),
+        )
+
+        assertEquals(220, position.x)
+        assertEquals(margin + 2, position.y)
+        assertTrue(position.y + popupHeight <= anchor.top - gap)
+        assertTrue(position.y + popupHeight <= window.height - margin)
+    }
+
+    private fun blockingRuntime(): EmbeddedMirrorRuntime = EmbeddedMirrorRuntime(
+        transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = ByteArrayInputStream(ByteArray(0))
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        },
+        decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                while (!Thread.currentThread().isInterrupted) Thread.sleep(10)
+            }
+        },
+    )
+
+    private fun await(condition: () -> Boolean) {
+        repeat(100) {
+            if (condition()) return
+            Thread.sleep(20)
+        }
+        assertTrue(condition(), "condition did not become true")
+    }
+}

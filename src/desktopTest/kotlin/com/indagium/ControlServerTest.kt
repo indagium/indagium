@@ -33,6 +33,7 @@ import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 private const val RAW_SOCKET_TIMEOUT_MS = 3_000
+private const val BIND_FAILURE_SETTLE_MS = 500L
 
 class ControlServerTest {
     private lateinit var state: AppState
@@ -62,6 +63,24 @@ class ControlServerTest {
     fun tearDown() {
         server.stop()
         state.close() // also cancels any FileTailer left running by a tail test
+    }
+
+    @Test
+    fun busyPortFailsStartWithoutAnUncaughtServerException() {
+        // CIO binds on its own server coroutine as well as failing start(); that second copy must
+        // be handled by the server, not reach the global handler (where tests then blame it on
+        // whichever runTest-based test runs next).
+        val uncaught = java.util.concurrent.CopyOnWriteArrayList<Throwable>()
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { _, failure -> uncaught += failure }
+        try {
+            val second = ControlServer(state, server.boundPort)
+            kotlin.test.assertFails { second.start() }
+            Thread.sleep(BIND_FAILURE_SETTLE_MS)
+            assertTrue(uncaught.isEmpty(), "uncaught server exceptions: $uncaught")
+        } finally {
+            Thread.setDefaultUncaughtExceptionHandler(previous)
+        }
     }
 
     private fun base() = "http://127.0.0.1:${server.boundPort}"

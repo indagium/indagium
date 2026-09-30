@@ -70,6 +70,31 @@ class FilterBarUiTest {
     }
 
     @Test
+    fun regexBarSummaryIsOffByDefaultAndLabelsRetainedSelectorsWhenEnabled() {
+        installBar(Filter(mode = FilterMode.KEYWORD), onFilterChanged = {})
+        rule.onNodeWithTag("filter-bar-regex-summary").assertDoesNotExist()
+
+        installBar(
+            Filter(
+                mode = FilterMode.KEYWORD,
+                levels = setOf(LogLevel.I),
+                activeTags = setOf("Car_SDK"),
+                pkgPrefixes = setOf("com.example"),
+                excludeTags = setOf("Noise"),
+                excludePkgPrefixes = setOf("vendor"),
+                excludeKw = "ignore",
+                pidTidFilter = "123",
+                messageRules = listOf(
+                    com.indagium.model.MessageRule("r1", true, "ready"),
+                ),
+            ),
+            model = TEST_MODEL.copy(showRegexFilterSummary = true),
+            onFilterChanged = {},
+        )
+        rule.onNodeWithTag("filter-bar-regex-summary").assertIsDisplayed()
+    }
+
+    @Test
     fun focusedBlankTagsFieldShowsFrequentTagsAndClearKeepsThemVisible() {
         var latestFilter = Filter(mode = TAGS)
         installBar(latestFilter) { latestFilter = it }

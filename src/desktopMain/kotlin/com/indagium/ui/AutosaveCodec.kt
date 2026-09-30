@@ -325,7 +325,8 @@ internal fun maskWordForCopy(text: String, settings: AppSettings): String {
     return text.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         val isScreenshotMarker = trimmed.startsWith("[screenshot: ") && trimmed.endsWith("]")
-        if (trimmed == "{code:java}" || trimmed == "{code}" || isScreenshotMarker) {
+        val isCloudFenceMarker = Regex("^(?:`{3,}|~{3,})(?:java)?$").matches(trimmed)
+        if (trimmed == "{code:java}" || trimmed == "{code}" || isCloudFenceMarker || isScreenshotMarker) {
             line
         } else {
             rules.fold(line) { masked, rule ->
@@ -573,6 +574,7 @@ internal fun settingsFromToken(token: String): AppSettings? = runCatching {
 // @Serializable data classes, so this migration doesn't need a new Gradle plugin.
 internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("formatVersion", 1)
+    put("capture", Json.parseToJsonElement(com.indagium.capture.captureSettingsToJson(captureSettings)))
     put("theme", theme.name)
     put("fontSize", fontSize)
     put("interfaceScalePercent", interfaceScalePercent)
@@ -646,6 +648,19 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("diagramDefaultExportMode", diagramDefaultExportMode.name)
     put("suppressTagPrefixConflictPrompt", suppressTagPrefixConflictPrompt)
     put("lastSupportPromptAt", lastSupportPromptAt)
+    put("homeRecentsLayout", homeRecentsLayout.name)
+    saveRootDir?.let { put("saveRootDir", it) }
+    captureSessionsDir?.let { put("captureSessionsDir", it) }
+    captureSnapshotsDir?.let { put("captureSnapshotsDir", it) }
+    captureZipDir?.let { put("captureZipDir", it) }
+    lastSaveDialogDir?.let { put("lastSaveDialogDir", it) }
+    put("homeRecentGridColumns", homeRecentGridColumns)
+    put("annotationCopyFormat", annotationCopyFormat.name)
+    put("showRegexFilterSummary", showRegexFilterSummary)
+    put("deviceLoggingPanelExpanded", deviceLoggingPanelExpanded)
+    workspaceProfileId?.let { put("workspaceProfileId", it) }
+    put("setupAssistantDone", setupAssistantDone)
+    put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -844,10 +859,13 @@ private fun JsonObject.customIssueRulesFromJson(key: String): List<CustomIssueRu
 // guarantee. Never throws: a malformed document (or an unexpected element type via jsonPrimitive's
 // cast) is caught by the outer runCatching and reported as a hard failure (null), same contract as
 // settingsFromToken() above.
+@Suppress("CyclomaticComplexMethod")
 internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
     val o = Json.parseToJsonElement(raw).jsonObject
     val editorCommandValue = o.stringOrNull("editorCommand").orEmpty()
     AppSettings(
+        captureSettings = o["capture"]?.let { com.indagium.capture.captureSettingsFromJson(it.toString()) }
+            ?: com.indagium.capture.CaptureSettings(),
         theme = o.stringOrNull("theme")?.let { runCatching { ThemePreset.valueOf(it) }.getOrNull() } ?: ThemePreset.LIGHT,
         fontSize = o.intOrDefault("fontSize", 12),
         interfaceScalePercent = o.intOrDefault("interfaceScalePercent", DEFAULT_INTERFACE_SCALE_PERCENT)
@@ -945,6 +963,24 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?: com.indagium.diagram3.DiagramExportMode.IMAGE,
         suppressTagPrefixConflictPrompt = o.boolOrDefault("suppressTagPrefixConflictPrompt", false),
         lastSupportPromptAt = o.longOrDefault("lastSupportPromptAt", 0L),
+        homeRecentsLayout = o.stringOrNull("homeRecentsLayout")
+            ?.let { raw -> runCatching { HomeRecentsLayout.valueOf(raw) }.getOrNull() }
+            ?: HomeRecentsLayout.GRID,
+        saveRootDir = o.stringOrNull("saveRootDir"),
+        captureSessionsDir = o.stringOrNull("captureSessionsDir"),
+        captureSnapshotsDir = o.stringOrNull("captureSnapshotsDir"),
+        captureZipDir = o.stringOrNull("captureZipDir"),
+        lastSaveDialogDir = o.stringOrNull("lastSaveDialogDir"),
+        homeRecentGridColumns = o.intOrDefault("homeRecentGridColumns", DEFAULT_HOME_RECENT_GRID_COLUMNS)
+            .coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS),
+        annotationCopyFormat = o.stringOrNull("annotationCopyFormat")
+            ?.let { raw -> runCatching { AnnotationCopyFormat.valueOf(raw) }.getOrNull() }
+            ?: AnnotationCopyFormat.JIRA_CLOUD,
+        showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
+        deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
+        workspaceProfileId = o.stringOrNull("workspaceProfileId"),
+        setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
+        customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
     )
 }.getOrNull()
 
@@ -1237,12 +1273,22 @@ internal fun activeFilterMapFromToken(token: String): Map<String, String> =
         if (p.size >= 2) p[0] to p[1] else null
     }.toMap()
 
+// Fields 0-4 are the original token; the rest were appended for whole-line/scoped/klogg-style
+// highlighters (append-last versioning) and decode with getOrNull, so a five-field token from an
+// older build restores as a plain match-only highlighter.
 internal fun Highlighter.highlighterToken(): String = tokenFields(
     id,
     pattern,
     regex.toString(),
     color.value.toString(),
     on.toString(),
+    wholeLine.toString(),
+    target.name,
+    tag.orEmpty(),
+    caseSensitive.toString(),
+    textColor?.value?.toString().orEmpty(),
+    captureGroupsOnly.toString(),
+    colorVariance.toString(),
 )
 
 internal fun String.highlighterFromToken(): Highlighter? = runCatching {
@@ -1254,6 +1300,14 @@ internal fun String.highlighterFromToken(): Highlighter? = runCatching {
         regex = p[2].toBoolean(),
         color = Color(p[3].toULong()),
         on = p[4].toBoolean(),
+        wholeLine = p.getOrNull(5)?.toBoolean() ?: false,
+        target = p.getOrNull(6)?.let { name -> HighlightTarget.entries.firstOrNull { it.name == name } }
+            ?: HighlightTarget.ANY,
+        tag = p.getOrNull(7)?.takeIf { it.isNotBlank() },
+        caseSensitive = p.getOrNull(8)?.toBoolean() ?: false,
+        textColor = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.toULongOrNull()?.let { Color(it) },
+        captureGroupsOnly = p.getOrNull(10)?.toBoolean() ?: false,
+        colorVariance = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 100) ?: 0,
     )
 }.getOrNull()
 
@@ -1433,7 +1487,13 @@ private fun String.videoFrameFromToken(): VideoFrameReference? = runCatching {
     val source = when (p.getOrNull(2)) {
         "LOCAL" -> p.getOrNull(3)?.takeIf { it.isNotBlank() }?.let(VideoSource::LocalFile)
         "ARCHIVE" -> {
-            val archivePath = p.getOrNull(3)?.takeIf { it.isNotBlank() } ?: return@runCatching null
+            // archivePath alone may legitimately be BLANK: CaptureArchive.kt's
+            // rewriteExportedVideoFrames stamps a marker screenshot with a portable
+            // `VideoSource.ArchiveEntry("", entryPath, displayName)` — empty archivePath meaning
+            // "this same archive" — which AppState.repointPortableVideoFrames only re-points at a
+            // real archive/local path once the tab reopens. entryPath must still be non-blank: a
+            // frame with no asset name at all is unrecoverable either way.
+            val archivePath = p.getOrNull(3) ?: return@runCatching null
             val entryPath = p.getOrNull(4)?.takeIf { it.isNotBlank() } ?: return@runCatching null
             VideoSource.ArchiveEntry(
                 archivePath = archivePath,
@@ -1605,6 +1665,10 @@ private fun VideoAttachment.attachedVideoToken(): String {
         // token written before this field had no separate choice; its anchored attachment restores
         // enabled (the historic/default behavior), while an unlinked attachment remains inactive.
         doubleClickSeekEnabled.toString(),
+        // Fields 10-11: compact durable portable-capture descriptor. The row-level timeline is
+        // intentionally absent; restore rehydrates it from captureSourcePath after parsing the log.
+        captureSourcePath.orEmpty(),
+        captureOffsetMs.toString(),
     )
 }
 
@@ -1636,6 +1700,9 @@ private fun String.attachedVideoFromToken(): VideoAttachment? = runCatching {
         // Field index 9 (append-only). Legacy anchored tokens predate the local state and restore
         // enabled to match the prior default; no anchor is always effectively inactive in AppState.
         doubleClickSeekEnabled = p.getOrNull(9)?.toBooleanStrictOrNull() ?: (anchorVideoMs != null && anchorLogId != null),
+        // Fields 10-11 (append-only). Old attachments remain ordinary anchor-mapped videos.
+        captureSourcePath = p.getOrNull(10)?.takeIf { it.isNotBlank() },
+        captureOffsetMs = p.getOrNull(11)?.toLongOrNull() ?: 0L,
     )
 }.getOrNull()
 

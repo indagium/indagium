@@ -1,6 +1,7 @@
 package com.indagium.utils
 
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.MessageRule
@@ -801,12 +802,19 @@ internal fun matchingMessageRule(
 }
 
 /** The existing highlighter (if any) that a Highlight press for [template] would remove — or null
- *  if pressing it would create a new one instead. Highlighters carry no tag/scope, so the shape is
- *  just pattern+regex, unlike [matchingMessageRule]. */
+ *  if pressing it would create a new one instead. Highlight presses now create a message-scoped
+ *  highlighter carrying the template's tag, so the shape is pattern+regex+tag; older highlighters
+ *  that have no tag at all (created before highlighters could be scoped) still count as a match. */
 internal fun matchingHighlighter(
     highlighters: List<Highlighter>,
     template: MessageTemplate,
 ): Highlighter? {
     val spec = messageRuleSpecForTemplate(template)
-    return highlighters.firstOrNull { it.pattern == spec.pattern && it.regex == spec.regex }
+    val tag = template.tag.trim().takeIf { it.isNotBlank() }
+    return highlighters.firstOrNull {
+        // A TAG-target highlighter matches the tag column, not the message, so it is never what
+        // a message Highlight press would toggle; tag-less ANY ones are the legacy shape.
+        val messageScoped = it.target == HighlightTarget.MESSAGE || (it.target == HighlightTarget.ANY && it.tag == null)
+        messageScoped && it.pattern == spec.pattern && it.regex == spec.regex && (it.tag == null || it.tag == tag)
+    }
 }

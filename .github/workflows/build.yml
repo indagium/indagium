@@ -13,10 +13,12 @@ on:
         options:
           - all
           - linux-portable
+          - windows-only
 
 # `linux-portable` lets us prove the two Linux portable formats on both supported architectures
-# without reserving Windows or macOS runners.  Tag-triggered builds (and the default manual
-# dispatch) keep the complete release matrix below.
+# without reserving Windows or macOS runners. `windows-only` runs the Windows MSI row after the
+# same verification gate. Tag-triggered builds (and the default manual dispatch) keep the complete
+# release matrix below.
 jobs:
   select-build-matrix:
     runs-on: ubuntu-latest
@@ -35,6 +37,11 @@ jobs:
               matrix='{"include":[
                 {"os":"ubuntu-latest","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-x64","linux":true,"include_deb":false,"portable_arch":"x86_64"},
                 {"os":"ubuntu-24.04-arm","tasks":"packageAppImage packageFlatpak","artifact_path":"build/compose/binaries/main/appimage/*.AppImage\nbuild/compose/binaries/main/flatpak/*.flatpak","artifact_name":"Indagium-linux-portable-arm64","linux":true,"include_deb":false,"portable_arch":"aarch64"}
+              ]}'
+              ;;
+            windows-only)
+              matrix='{"include":[
+                {"os":"windows-latest","tasks":"packageMsi","artifact_path":"build/compose/binaries/main/msi","artifact_name":"Indagium-windows-x64","linux":false,"include_deb":false}
               ]}'
               ;;
             all)
@@ -182,12 +189,21 @@ jobs:
           # An unused third-party Chrome source can block required package setup with a hash mismatch.
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
-          sudo apt-get install -y desktop-file-utils flatpak flatpak-builder libxml2-utils
+          sudo apt-get install -y desktop-file-utils flatpak flatpak-builder libxml2-utils \
+            libdrm-dev libegl1-mesa-dev libgles2-mesa-dev libva-dev libx11-dev
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
           # The installed runner CLI must support the deployment-location API
           # used by the later installed-file smoke test.
           flatpak info --help | grep -F -- '--show-location'
+
+      - name: Compile Linux VAAPI/EGL mirror bridge
+        if: matrix.linux
+        run: ./gradlew compileLinuxMirrorNative
+
+      - name: Compile Windows D3D11 mirror bridge
+        if: startsWith(matrix.os, 'windows')
+        run: ./gradlew compileWindowsMirrorNative
 
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.
@@ -195,6 +211,17 @@ jobs:
       # the whole desktop test suite four times before packaging.
       - name: Verify native video duration recovery
         run: ./gradlew desktopTest --tests 'com.indagium.VideoDurationScanTest'
+
+      - name: Verify microphone and Opus pipeline tests
+        run: >-
+          ./gradlew desktopTest
+          --tests 'com.indagium.capture.DesktopMicrophoneTest'
+          --tests 'com.indagium.capture.TimelinePcmMixerTest'
+          --tests 'com.indagium.capture.OpusPcmEncoderTest'
+
+      - name: Smoke-test native mirror library load and Canvas handle
+        if: matrix.linux || startsWith(matrix.os, 'windows')
+        run: ./gradlew desktopTest --tests 'com.indagium.capture.mirror.NativeMirrorBridgeSmokeTest'
 
       # See the matching step in the verify job: testLogging already puts the full failure in the
       # console log above, this is the report tree backup. Name suffixed with artifact_name since
@@ -225,6 +252,31 @@ jobs:
             fi
           done
           exit 1
+
+      - name: Validate packaged Windows D3D11 mirror bridge
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          $msi = (Get-ChildItem 'build/compose/binaries/main/msi' -Filter '*.msi' -File | Select-Object -First 1).FullName
+          if (-not $msi) { throw 'The Windows MSI was not produced.' }
+          $expanded = Join-Path $env:RUNNER_TEMP 'indagium-msi-expanded'
+          New-Item -ItemType Directory -Force -Path $expanded | Out-Null
+          $arguments = @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$expanded`"")
+          $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "MSI administrative extraction failed with exit code $($process.ExitCode)." }
+          $jarTool = (Get-Command jar.exe -ErrorAction Stop).Source
+          $resource = 'native/windows/indagium_mirror.dll'
+          $found = $false
+          foreach ($archive in Get-ChildItem -Path $expanded -Recurse -Filter '*.jar' -File) {
+            $entries = & $jarTool tf $archive.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Could not inspect packaged archive $($archive.FullName)." }
+            if ($entries -contains $resource) {
+              Write-Host "Verified $resource in $($archive.FullName)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) { throw "The packaged MSI is missing $resource." }
 
       # jpackage doesn't emit StartupWMClass in the .desktop file it generates (no Gradle DSL
       # hook for it either), so docks/taskbars can't match the running window (WM_CLASS set to
@@ -300,6 +352,7 @@ jobs:
           desktop_file=$(find "$workdir/opt" -maxdepth 3 -type f -name '*.desktop')
           desktop-file-validate "$desktop_file"
           grep -q '^Exec=.* %F$' "$desktop_file"
+          bash scripts/validate-native-mirror-package.sh "$workdir" native/linux/libindagium_mirror.so
           rm -rf "$workdir"
 
       # Verify every Linux artifact has the architecture suffix required by its packaging format
@@ -339,6 +392,7 @@ jobs:
             grep -q '^MimeType=.*text/plain' "$desktop_file"
             grep -q '^MimeType=.*text/x-log' "$desktop_file"
             xmllint --noout "$mimeinfo_file"
+            bash "$GITHUB_WORKSPACE/scripts/validate-native-mirror-package.sh" squashfs-root native/linux/libindagium_mirror.so
           )
           rm -rf "$appimage_workdir"
 
@@ -354,6 +408,8 @@ jobs:
           # fallback-x11 is gone.
           flatpak info --user --show-permissions com.indagium.Indagium | grep -qE '(^|[;=])x11(;|$)'
           ! flatpak info --user --show-permissions com.indagium.Indagium | grep -q 'fallback-x11'
+          deployment_dir=$(flatpak info --user --show-location com.indagium.Indagium)
+          bash scripts/validate-native-mirror-package.sh "$deployment_dir/files" native/linux/libindagium_mirror.so
           bash scripts/validate-flatpak-install.sh
           flatpak uninstall --user -y com.indagium.Indagium
 

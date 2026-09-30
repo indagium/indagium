@@ -48,9 +48,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
+import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.cachedSeqGroupsFor
 import com.indagium.utils.computeItems
@@ -58,8 +58,11 @@ import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
 import com.indagium.utils.formatDelta
 import com.indagium.utils.formatSignedDelta
+import com.indagium.utils.isKloggStyle
+import com.indagium.utils.kloggVariedColors
 import com.indagium.utils.passesFilter
 import com.indagium.utils.regexRanges
+import com.indagium.utils.resolveLineHighlight
 import com.indagium.utils.resolveProcessDisplayName
 import com.indagium.utils.visibleLogLineText
 import kotlinx.coroutines.CoroutineScope
@@ -93,6 +96,12 @@ private const val EXPANSION_AWAIT_TIMEOUT_MS = 5000L
 // (see the plan's "Out of scope" list).
 private const val DELTA_WARN_THRESHOLD_MS = 1000L
 
+// Alpha of an Indagium whole-line highlight's row background (klogg rules paint their colour opaque).
+private const val WHOLE_LINE_WASH_ALPHA = 0.16f
+
+// Added to that wash while hovered, so a washed row still shows hover like every other row.
+private const val WHOLE_LINE_HOVER_EXTRA_ALPHA = 0.06f
+
 // DANGER_RED is only ever assigned as a LogItem.Row's groupColor for expanded crash/stack-trace
 // group members (see Filter.kt's computeItems — sequence/manual-collapse groupColors always come
 // from a different palette). By default those rows only get a thin left-edge stripe, while the
@@ -100,27 +109,6 @@ private const val DELTA_WARN_THRESHOLD_MS = 1000L
 // extends that full tint to every row in the group, not just the header.
 internal fun isCrashGroupRow(groupColor: Color?, highlightEntireCrashGroup: Boolean): Boolean =
     highlightEntireCrashGroup && groupColor == DANGER_RED
-
-// internal (not private): reused by ui/Minimap.kt's off-thread color resolution so the minimap's
-// "does this row match a highlighter" check is the exact same logic LogRow itself uses, not a
-// second matcher that could silently drift from it.
-internal fun hlRanges(
-    msg: String,
-    hl: Highlighter,
-    regexContext: RegexEvaluationContext,
-): List<Pair<Int, Int>> =
-    if (hl.regex) {
-        regexRanges(msg, hl.pattern, regexContext = regexContext)
-    } else {
-        buildList {
-            var i = 0
-            while (true) {
-                val idx = msg.indexOf(hl.pattern, i, ignoreCase = true)
-                if (idx < 0) break
-                add(idx to idx + hl.pattern.length); i = idx + 1
-            }
-        }
-    }
 
 internal fun keywordRegexHighlightRanges(
     lineText: String,
@@ -409,24 +397,24 @@ private fun rememberTimeDeltaChars(tab: LogTab, visibleItems: List<LogItem>): In
 }
 
 private fun widestVisibleTimeDeltaMagnitudeMs(items: List<LogItem>): Long {
-    var firstTs: String? = null
-    var previousTs: String? = null
+    var firstEntry: LogEntry? = null
+    var previousEntry: LogEntry? = null
     var widest = 0L
     items.forEach { item ->
-        val ts = when (item) {
-            is LogItem.Row -> item.entry.ts
-            is LogItem.SeqHeader -> item.entry.ts
-            is LogItem.ManualHeader -> item.entry.ts
-            is LogItem.StackTraceHeader -> item.entry.ts
+        val entry = when (item) {
+            is LogItem.Row -> item.entry
+            is LogItem.SeqHeader -> item.entry
+            is LogItem.ManualHeader -> item.entry
+            is LogItem.StackTraceHeader -> item.entry
         }
-        if (firstTs == null) firstTs = ts
-        previousTs?.let { previous ->
-            deltaMillis(previous, ts)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
+        if (firstEntry == null) firstEntry = entry
+        previousEntry?.let { previous ->
+            deltaMillis(previous, entry)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
         }
-        previousTs = ts
+        previousEntry = entry
     }
-    firstTs?.let { first ->
-        previousTs?.let { last ->
+    firstEntry?.let { first ->
+        previousEntry?.let { last ->
             deltaMillis(first, last)?.let { widest = maxOf(widest, kotlin.math.abs(it)) }
         }
     }
@@ -848,71 +836,126 @@ internal fun buildFullLineAnnotation(
     // See appendTsPidTid's own doc — null (every pre-existing caller) reproduces the pre-feature
     // render byte-for-byte.
     cellBg: Color? = null,
-): AnnotatedString = buildAnnotatedString {
-    appendTsPidTid(entry, tsColor, pidColor, processDisplay, pidFieldWidth, cellBg)
-    append("  ")
-    withStyle(SpanStyle(color = entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
-        append(entry.level.key.toString())
-    }
-    append("  ")
-    withStyle(SpanStyle(color = tagColor)) { append(entry.tag); append(":") }
-    append(" ")
-    withStyle(SpanStyle(color = msgColor)) { append(entry.msg) }
+): AnnotatedString = buildLogLineRender(
+    entry, highlighters, tsColor, pidColor, tagColor, msgColor, keywordRegexFilter, regexContext,
+    searchHighlight, processDisplay, pidFieldWidth, cellBg,
+).text
+
+/** A row's rendered text plus the whole-line [Highlighter] that owns its tint (null when none
+ *  does) — LogRow paints the row background/stripe from it. */
+internal data class LogLineRender(val text: AnnotatedString, val wholeLine: Highlighter?)
+
+// Same rendering as buildFullLineAnnotation, but also reports the whole-line highlighter so LogRow
+// can tint the row. [suppressLineTextColor] drops a klogg whole-line rule's foreground colour (LogRow
+// passes it for selected and crash rows, whose own backgrounds must stay readable); the tint itself
+// is LogRow's business.
+@Suppress("LongParameterList")
+internal fun buildLogLineRender(
+    entry: LogEntry,
+    highlighters: List<Highlighter>,
+    tsColor: Color,
+    pidColor: Color,
+    tagColor: Color,
+    msgColor: Color,
+    keywordRegexFilter: Filter?,
+    regexContext: RegexEvaluationContext,
+    searchHighlight: SearchHighlight? = null,
+    processDisplay: String? = null,
+    pidFieldWidth: Int = 5,
+    cellBg: Color? = null,
+    suppressLineTextColor: Boolean = false,
+): LogLineRender {
     // Filters/highlighters/Find always match against visibleLogLineText(entry) — the single
-    // source of truth (utils/TextMatch.kt) — never against what's actually rendered above, which
+    // source of truth (utils/TextMatch.kt) — never against what's actually rendered below, which
     // (once a process name, or a numeric pid padded to a wider uniform column, replaces
     // visibleLogLineText's own fixed 5-char pid field) can differ from it — in LENGTH whenever
     // pidFieldWidth != 5, but potentially in CONTENT even when pidFieldWidth == 5 (a resolved name
     // no wider than 5 chars still replaces the digits at that same width). Every offset pair
-    // hlRanges/keywordRegexHighlightRanges/regexRanges hand back is therefore always passed through
-    // remapPidFieldRange (whenever this row even HAS a pid field — entry.pid <= 0 rows never do, on
-    // either side, so those skip straight to identity) before being applied to the text actually
-    // built above — see that function's own doc for the exact rule, including how it widens a range
-    // overlapping the pid field to the field's full rendered span regardless of whether delta is
-    // zero, precisely because content (not just width) can differ there. Mode OFF never resolves a
-    // name at all (LogRow's resolveProcessDisplayName), so this is a no-op there in practice, not
-    // just in the common case — see the OFF-byte-identical test coverage in
+    // resolveLineHighlight/keywordRegexHighlightRanges/regexRanges hand back is therefore always
+    // passed through remapPidFieldRange (whenever this row even HAS a pid field — entry.pid <= 0
+    // rows never do, on either side, so those skip straight to identity) before being applied to
+    // the text actually built below — see that function's own doc for the exact rule, including
+    // how it widens a range overlapping the pid field to the field's full rendered span regardless
+    // of whether delta is zero, precisely because content (not just width) can differ there. Mode
+    // OFF never resolves a name at all (LogRow's resolveProcessDisplayName), so this is a no-op
+    // there in practice, not just in the common case — see the OFF-byte-identical test coverage in
     // ProcessNameRenderingTest.
     val lineText = visibleLogLineText(entry)
-    val pidFieldDelta = pidFieldWidth - 5
-    val pidFieldStart = entry.ts.length + 2
-    val pidFieldEndVisible = pidFieldStart + 5
-
-    fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
-        if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
-    val renderedLength = length
-    for (hl in highlighters.filter { it.on && it.pattern.isNotBlank() }) {
-        hlRanges(lineText, hl, regexContext).forEach { rawRange ->
-            val (s, e) = remap(rawRange)
-            if (s < e && e <= renderedLength)
-                addStyle(SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold), s, e)
+    val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext)
+    // A klogg whole-line rule recolours every character of the row through the base colours below,
+    // so it survives wrapping (visualLogLineForWrapLimit rebuilds lines from these same spans).
+    val lineTextColor = lineHighlight.wholeLine?.textColor?.takeUnless { suppressLineTextColor }
+    val text = buildAnnotatedString {
+        appendTsPidTid(entry, lineTextColor ?: tsColor, lineTextColor ?: pidColor, processDisplay, pidFieldWidth, cellBg)
+        append("  ")
+        withStyle(SpanStyle(color = lineTextColor ?: entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
+            append(entry.level.key.toString())
         }
-    }
-    keywordRegexFilter?.let { filter ->
-        keywordRegexHighlightRanges(lineText, filter, regexContext).forEach { rawRange ->
-            val (s, e) = remap(rawRange)
-            if (s < e && e <= renderedLength) {
-                addStyle(
-                    SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
-                    s,
-                    e,
+        append("  ")
+        withStyle(SpanStyle(color = lineTextColor ?: tagColor)) { append(entry.tag); append(":") }
+        append(" ")
+        withStyle(SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
+        val pidFieldDelta = pidFieldWidth - 5
+        val pidFieldStart = entry.ts.length + 2
+        val pidFieldEndVisible = pidFieldStart + 5
+
+        fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
+            if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
+        val renderedLength = length
+        // The two-space gaps between fields carry no span of their own; cover them too so the whole
+        // line, every character, reads as the rule's text colour.
+        lineTextColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
+        for (span in lineHighlight.spans) {
+            val (s, e) = remap(span.start to span.end)
+            if (s < e && e <= renderedLength) addStyle(highlightSpanStyle(span, lineText), s, e)
+        }
+        keywordRegexFilter?.let { filter ->
+            addRemappedRanges(
+                keywordRegexHighlightRanges(lineText, filter, regexContext),
+                ::remap,
+                SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
+            )
+        }
+        // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
+        // visually — addStyle layers are painted in the order added, later spans on top.
+        searchHighlight?.let { sh ->
+            if (sh.query.isNotEmpty()) {
+                val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
+                addRemappedRanges(
+                    regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext),
+                    ::remap,
+                    SpanStyle(background = bg, fontWeight = FontWeight.SemiBold),
                 )
             }
         }
     }
-    // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
-    // visually — addStyle layers are painted in the order added, later spans on top.
-    searchHighlight?.let { sh ->
-        if (sh.query.isNotEmpty()) {
-            val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
-            regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext).forEach { rawRange ->
-                val (s, e) = remap(rawRange)
-                if (s < e && e <= renderedLength) {
-                    addStyle(SpanStyle(background = bg, fontWeight = FontWeight.SemiBold), s, e)
-                }
-            }
-        }
+    return LogLineRender(text, lineHighlight.wholeLine)
+}
+
+// Applies [style] to each raw (visibleLogLineText-coordinate) range once [remap]ped onto the text
+// built so far; a range that ends up empty or past the end is dropped.
+private fun AnnotatedString.Builder.addRemappedRanges(
+    ranges: List<Pair<Int, Int>>,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+    style: SpanStyle,
+) {
+    val renderedLength = length
+    for (rawRange in ranges) {
+        val (s, e) = remap(rawRange)
+        if (s < e && e <= renderedLength) addStyle(style, s, e)
     }
+}
+
+// Indagium match spans stay the translucent, semi-bold wash they always were; a klogg rule paints
+// its own opaque back/fore pair at normal weight, exactly as klogg does.
+// A klogg rule with variate_colors shades both colours per matched text (utils/KloggColor.kt).
+private fun highlightSpanStyle(span: HlSpan, lineText: String): SpanStyle {
+    val hl = span.hl
+    val fore = hl.textColor ?: return SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold)
+    if (hl.colorVariance <= 0) return SpanStyle(color = fore, background = hl.color)
+    val matched = lineText.substring(span.start.coerceIn(0, lineText.length), span.end.coerceIn(0, lineText.length))
+    val (variedFore, variedBack) = kloggVariedColors(fore, hl.color, hl.colorVariance, matched)
+    return SpanStyle(color = variedFore, background = variedBack)
 }
 
 // Start offset of each wrapped visual line (always begins with 0; count == number of lines).
@@ -956,7 +999,7 @@ fun stripVisualWrapBreaks(text: String): String = text.replace("\n", "")
 fun keyboardCopyTextForLogPanel(selectedText: String?, selectedRowsText: () -> String): String =
     selectedText?.takeIf { it.isNotBlank() } ?: selectedRowsText()
 
-private fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
+internal fun visualLogLineForWrapLimit(line: AnnotatedString, limitChars: Int): AnnotatedString {
     val limit = limitChars.coerceAtLeast(1)
     if (line.length <= limit) return line
     val starts = wrapBreakStarts(line.text, limit)
@@ -1060,6 +1103,7 @@ fun LogViewer(
     onSelectAll: (() -> Unit)? = null,
     onClearSelection: (() -> Unit)? = null,
     onCopySelection: ((Set<Int>?) -> Unit)? = null,
+    onAddAnnotation: ((List<Int>) -> Unit)? = null,
     onCopyText: (String) -> Unit = {},
     // A one-shot, non-selection action for an unmodified primary-button double-click on a plain
     // row. The caller owns the tab binding and any video mapping; nullable keeps previews/tests
@@ -1092,6 +1136,10 @@ fun LogViewer(
     onSearchNext: () -> Unit = {},
     onSearchPrev: () -> Unit = {},
     onSearchClose: () -> Unit = {},
+    // Filtered | Unfiltered scope chip inside the Find field — only FileView.kt turns it on
+    // (compare mode has no Original panel to search).
+    showSearchScopeChip: Boolean = false,
+    onSearchToggleScope: () -> Unit = {},
     // Horizontal filter bar (ui/FilterBar.kt) — rendered once, above BOTH the split (Unfiltered)
     // and single-panel layouts below. `null` (the default) keeps CompareView, previews, and every
     // other existing LogViewer call site unchanged: FileView.kt is the only real caller that wires
@@ -1296,6 +1344,7 @@ fun LogViewer(
             itemOnSelectAll: (() -> Unit)? = onSelectAll,
             itemOnClearSelection: (() -> Unit)? = onClearSelection,
             itemOnCopySelection: ((Set<Int>?) -> Unit)? = onCopySelection,
+            itemOnAddAnnotation: ((List<Int>) -> Unit)? = onAddAnnotation,
             itemsLoading: Boolean = computedItems.loading,
             // Wraps the outer 5-arg onCtxMenu; callers may inject a different selectedIds set.
             itemOnCtxMenu: (Int, Float, Float, String) -> Unit = { id, x, y, sel -> onCtxMenu(id, x, y, sel, emptySet()) },
@@ -1344,15 +1393,25 @@ fun LogViewer(
             // following off, while any real viewport move (wheel, drag, scrollbar, minimap, keyboard
             // nav, or a note/Find/video jump — see the note beside the annotation-nav effects above)
             // does. snapshotFlow conflates, so a burst of scroll frames collapses to one reading.
+            // The decision itself is followTailSampleDecision (see its own doc for the two bugs
+            // this guards against): the FIRST emission after this effect (re)launches is recorded
+            // as the baseline and never changes `followTail` on its own — only a genuine backward
+            // move relative to that baseline turns follow off, and only actually reaching the last
+            // row turns it back on. `previousSample` is updated on every emission regardless of
+            // `selfScrolling`, so the sample right after our own scroll settles (not a stale
+            // pre-scroll one) is what the next real user move gets compared against.
             LaunchedEffect(panelKey, lazyState) {
+                var previousSample: Pair<Int, Int>? = null
                 snapshotFlow { lazyState.firstVisibleItemIndex to lazyState.firstVisibleItemScrollOffset }
-                    .collect {
+                    .collect { sample ->
                         if (!selfScrolling) {
-                            followTail.value = isAtLastRow(
+                            val atLastRow = isAtLastRow(
                                 lazyState.layoutInfo.visibleItemsInfo.lastOrNull()?.index,
                                 currentLastRowIndex,
                             )
+                            followTailSampleDecision(previousSample, sample, atLastRow)?.let { followTail.value = it }
                         }
+                        previousSample = sample
                     }
             }
             // The follow itself. listItems.size is the append signal; it deliberately does not fire
@@ -1362,7 +1421,12 @@ fun LogViewer(
             // scrollForCursor records below). The spacer index is listItems.size, one past the last
             // real row — see newestRowScrollOffset for why that lands the newest row flush at the
             // bottom edge with no row-height estimate.
-            LaunchedEffect(panelKey, settings.autoScrollWhileTailing, effectiveTab.tailing, listItems.size) {
+            // followTail.value is also a key (not just read in the body) so that flipping it off->on
+            // externally — e.g. the capture strip's "Follow filtered/unfiltered" badge — restarts
+            // this effect and jumps straight to the newest row, instead of waiting for the next
+            // listItems.size change. selfScrolling's own set/reset around the body is unaffected: it
+            // still masks exactly the frame this effect's own scroll produces, whichever key changed.
+            LaunchedEffect(panelKey, settings.autoScrollWhileTailing, effectiveTab.tailing, listItems.size, followTail.value) {
                 if (!settings.autoScrollWhileTailing || !effectiveTab.tailing || !followTail.value) return@LaunchedEffect
                 selfScrolling = true
                 try {
@@ -1550,6 +1614,7 @@ fun LogViewer(
                                 itemOnSelectAll,
                                 itemOnClearSelection,
                                 itemOnCopySelection,
+                                itemOnAddAnnotation,
                             ))
                     }
                     .border(1.dp, if (isFocused && keyboardFocusVisible) tc.ac else Color.Transparent)
@@ -1673,8 +1738,8 @@ fun LogViewer(
                                     val deltaMs = when {
                                         !effectiveTab.showTimeDelta -> null
                                         deltaAnchorEntryId != null ->
-                                            effectiveTab.rmap[deltaAnchorEntryId]?.ts?.let { anchorTs -> deltaMillis(anchorTs, item.entry.ts) }
-                                        index > 0 -> deltaMillis(listItems[index - 1].entry.ts, item.entry.ts)
+                                            effectiveTab.rmap[deltaAnchorEntryId]?.let { anchor -> deltaMillis(anchor, item.entry) }
+                                        index > 0 -> deltaMillis(listItems[index - 1].entry, item.entry)
                                         else -> null
                                     }
                                     when (item) {
@@ -2200,6 +2265,7 @@ fun LogViewer(
                         itemOnSelectAll = allOnSelectAll,
                         itemOnClearSelection = allOnClearSelection,
                         itemOnCopySelection = { selectedIds -> onCopySelection?.invoke(selectedIds) },
+                        itemOnAddAnnotation = onAddAnnotation,
                         itemsLoading = computedAllItems.loading,
                         itemOnCtxMenu = { id, x, y, sel -> onCtxMenu(id, x, y, sel, localAllSelected) },
                         panelKey = "${tab.id}:original",
@@ -2242,6 +2308,8 @@ fun LogViewer(
                             onToggleCase = onSearchToggleCase,
                             onNext = onSearchNext,
                             onPrev = onSearchPrev,
+                            showScopeChip = showSearchScopeChip,
+                            onToggleScope = onSearchToggleScope,
                             // Same fix as the single-view branch below: Escape removes the
                             // focused find field entirely, so without an explicit refocus here
                             // keyboard focus falls off the tree and App.kt's root
@@ -2429,6 +2497,8 @@ fun LogViewer(
                     onToggleCase = onSearchToggleCase,
                     onNext = onSearchNext,
                     onPrev = onSearchPrev,
+                    showScopeChip = showSearchScopeChip,
+                    onToggleScope = onSearchToggleScope,
                     // Escape (SearchBar's own key handler) closes and returns focus to the log
                     // row list — reusing this view's own externalFr rather than a second
                     // FocusRequester the caller would otherwise need to hoist and manage.
@@ -2501,6 +2571,42 @@ internal fun centerAnchorIndex(index: Int, viewportHeight: Int, visibleItemSizes
 // "not following" reading first.
 internal fun isAtLastRow(lastVisibleIndex: Int?, lastRowIndex: Int): Boolean =
     lastVisibleIndex == null || lastVisibleIndex >= lastRowIndex
+
+// The user-intent sampler's own decision, pulled out as a pure function so the two bugs it exists
+// to prevent (follow defaulting OFF right as a capture starts; opening the Unfiltered split
+// turning BOTH panels' follow off) can be pinned with a plain unit test instead of a Compose one.
+//
+// The bug in both cases was the SAME: the sampler treated every snapshotFlow emission — including
+// the very first one after a LaunchedEffect (re)launches — as a genuine user scroll. A capture's
+// first rows can land before the first real follow-scroll runs, and opening the Unfiltered split
+// remounts this whole branch (a fresh composition, not a recomposition — see ItemList's own split
+// vs. single-view branches), so the FIRST position this sampler ever sees for either panel is
+// whatever the layout happens to report before anything has actually moved. Reading that as "not
+// at the bottom" flipped follow off although the user never touched a scrollbar.
+//
+// The fix: only ever turn follow OFF for a genuine backward move (an earlier item index, or the
+// same index scrolled further up) relative to the PREVIOUS sample, and only ever turn it back ON
+// once the last row is actually visible. The very first sample after a (re)launch has no previous
+// sample to compare against, so it can only ever be a no-op — the caller keeps whatever the store
+// already had (default `true` for a brand-new panel, or the follow state a resize/remount didn't
+// actually earn a chance to disturb). A pure resize/remount with an unchanged position, or a
+// forward move that doesn't yet reach the bottom, likewise leaves the current value alone: neither
+// is evidence one way or the other.
+//
+// Returns the new follow-state, or `null` to mean "leave it exactly as it is."
+internal fun followTailSampleDecision(
+    previousSample: Pair<Int, Int>?,
+    currentSample: Pair<Int, Int>,
+    atLastRow: Boolean,
+): Boolean? {
+    if (previousSample == null) return null
+    if (atLastRow) return true
+    val (previousIndex, previousOffset) = previousSample
+    val (currentIndex, currentOffset) = currentSample
+    val movedBackward = currentIndex < previousIndex ||
+        (currentIndex == previousIndex && currentOffset < previousOffset)
+    return if (movedBackward) false else null
+}
 
 // Placing the tail-space SPACER's top at the viewport bottom puts the last row's bottom edge
 // exactly there, with no row-height estimate needed — LazyListState's scrollOffset convention is
@@ -2764,9 +2870,15 @@ private data class SelKeyActions(
     val onSelectAll: (() -> Unit)?,
     val onClearSelection: (() -> Unit)?,
     val onCopySelection: ((Set<Int>?) -> Unit)?,
+    val onAddAnnotation: ((List<Int>) -> Unit)?,
 )
 
 internal fun panelCopySelectionIds(tab: LogTab): Set<Int> = tab.selected
+
+// Same targets as the row context menu's first item: the panel's selection (sorted), else the
+// cursor row; null when neither exists so the shortcut does nothing.
+internal fun annotationTargetIds(selected: Set<Int>, cursorId: Int?): List<Int>? =
+    if (selected.isNotEmpty()) selected.sorted() else cursorId?.let { listOf(it) }
 
 private fun handleSelKey(
     ev: KeyEvent,
@@ -2806,6 +2918,11 @@ private fun handleSelKey(
         ev.isShiftPressed && ev.key == Key.DirectionDown -> { extendTo(cursorIdx() + 1); true }
         ev.isShiftPressed && ev.key == Key.PageUp        -> { extendTo(cursorIdx() - PAGE_JUMP_ROWS); true }
         ev.isShiftPressed && ev.key == Key.PageDown      -> { extendTo(cursorIdx() + PAGE_JUMP_ROWS); true }
+        isAction && ev.isShiftPressed && ev.key == Key.N -> {
+            val ids = annotationTargetIds(panelCopySelectionIds(tab), cursor.effectiveCursorId(tab))
+            if (ids != null) actions.onAddAnnotation?.invoke(ids)
+            ids != null
+        }
         isAction && ev.key == Key.A -> { cursor.reset(); actions.onSelectAll?.invoke(); true }
         isAction && ev.key == Key.C -> { actions.onCopySelection?.invoke(panelCopySelectionIds(tab)); true }
         ev.key == Key.Escape        -> { cursor.reset(); actions.onClearSelection?.invoke(); true }
@@ -2971,13 +3088,16 @@ private fun LogRow(
     // added). See appendTsPidTid's own doc for why this is two separate per-field washes rather
     // than one spanning the "  " gap between them.
     val cellBg = item.scopedSeqColor?.copy(alpha = tc.seqCellBgAlpha)
-    val annoLine = remember(
+    // isSel is a key because a klogg whole-line rule's text colour is dropped on selected rows
+    // (see buildLogLineRender's suppressLineTextColor) — the row's selection background must stay
+    // readable — so the text has to be rebuilt when selection toggles.
+    val lineRender = remember(
         tab.id, entry, tab.filter, tsColor, pidColor, cellBg, tc.ts, tc.tx, wrapLimitChars, isCrashGroupRow, autoWrap,
-        searchHighlight, processDisplay, pidFieldChars,
+        searchHighlight, processDisplay, pidFieldChars, isSel,
     ) {
         val tagColor = if (isCrashGroupRow) DANGER_RED else tc.ts
         val msgColor = if (isCrashGroupRow) DANGER_RED else tc.tx
-        val built = buildFullLineAnnotation(
+        val built = buildLogLineRender(
             entry,
             tab.filter.highlighters,
             tsColor,
@@ -2993,17 +3113,30 @@ private fun LogRow(
             processDisplay = processDisplay,
             pidFieldWidth = pidFieldChars,
             cellBg = cellBg,
+            suppressLineTextColor = isSel || isCrashGroupRow,
         )
-        if (autoWrap) built else visualLogLineForWrapLimit(built, wrapLimitChars)
+        if (autoWrap) built else built.copy(text = visualLogLineForWrapLimit(built.text, wrapLimitChars))
     }
+    val annoLine = lineRender.text
+    val wholeLineHl = lineRender.wholeLine
 
     val levelColor = entry.level.defaultColor
+    // selection > crash group > whole-line highlight > hover. A klogg rule paints its opaque back
+    // colour; an Indagium one is a light wash (its stripe below carries the colour at full strength).
     val bg = when {
         isSel -> tc.sl
         isCrashGroupRow -> DANGER_RED.copy(alpha = if (hov) 0.15f else 0.07f)
+        wholeLineHl != null ->
+            if (wholeLineHl.isKloggStyle()) {
+                wholeLineHl.color
+            } else {
+                wholeLineHl.color.copy(alpha = WHOLE_LINE_WASH_ALPHA + if (hov) WHOLE_LINE_HOVER_EXTRA_ALPHA else 0f)
+            }
         hov -> tc.hv
         else -> Color.Transparent
     }
+    // An Indagium whole-line highlight swaps the level stripe for one in its own colour.
+    val stripeHl = wholeLineHl?.takeUnless { it.isKloggStyle() }
     val groupColor = item.groupColor
 
     Row(
@@ -3166,7 +3299,11 @@ private fun LogRow(
             }
             // Level-coloured left edge stripe
             .drawBehind {
-                drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                if (stripeHl != null) {
+                    drawRect(stripeHl.color, topLeft = Offset.Zero, size = Size(3.dp.toPx(), size.height))
+                } else {
+                    drawRect(levelColor.copy(alpha = if (isSel) 0.7f else 0.35f), topLeft = Offset.Zero, size = Size(3f, size.height))
+                }
                 if (groupColor != null && item.indent > 0) {
                     val x = 6.dp.toPx() + ((item.indent - 1).coerceAtLeast(0) * INDENT_STEP.toPx())
                     drawRect(groupColor.copy(alpha = 0.85f), topLeft = Offset(x, 0f), size = Size(2f, size.height))

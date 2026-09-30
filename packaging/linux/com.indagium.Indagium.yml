@@ -19,6 +19,9 @@ finish-args:
   - --socket=x11
   - --socket=pulseaudio
   - --device=dri
+  # Capture's optional host adb/scrcpy integration uses flatpak-spawn --host --watch-bus.
+  # Keep this to the Flatpak portal's single D-Bus talk name; do not broaden host access.
+  - --talk-name=org.freedesktop.Flatpak
 modules:
   - name: indagium
     buildsystem: simple

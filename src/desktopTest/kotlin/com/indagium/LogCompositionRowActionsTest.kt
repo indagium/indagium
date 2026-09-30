@@ -1,6 +1,9 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.Color
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
+import com.indagium.model.Highlighter
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.MessageTemplate
@@ -80,6 +83,55 @@ class LogCompositionRowActionsTest {
     // ── Highlight toggles ────────────────────────────────────────────────────────────────────
 
     @Test
+    fun highlightingATemplateCreatesAMessageScopedMatchOnlyHighlighterWithTheTemplateTag() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+
+        state.toggleHighlightForTemplate(tabId(state), template)
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals(HighlightTarget.MESSAGE, hl.target)
+        assertEquals("Net", hl.tag)
+        assertEquals(false, hl.wholeLine)
+    }
+
+    @Test
+    fun pressingHighlightTogglesOffAnOlderHighlighterThatHasNoTag() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val spec = messageRuleSpecForTemplate(template)
+        val old = Highlighter("old", spec.pattern, spec.regex, Color.Yellow, true)
+        state.tabs = state.tabs.map { it.copy(filter = it.filter.copy(highlighters = listOf(old))) }
+
+        assertEquals(old, matchingHighlighter(state.tabs.single().filter.highlighters, template))
+        state.toggleHighlightForTemplate(tabId(state), template)
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun aHighlighterScopedToAnotherTagIsNotTreatedAsThisTemplatesHighlight() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val spec = messageRuleSpecForTemplate(template)
+        val other = Highlighter("o", spec.pattern, spec.regex, Color.Yellow, true, tag = "Db")
+
+        assertNull(matchingHighlighter(listOf(other), template))
+    }
+
+    @Test
+    fun aTagTargetHighlighterWithTheSamePatternIsNotTreatedAsThisTemplatesHighlight() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val spec = messageRuleSpecForTemplate(template)
+        val tagTarget = Highlighter("t", spec.pattern, spec.regex, Color.Yellow, true, target = HighlightTarget.TAG)
+        val messageTarget = Highlighter("m", spec.pattern, spec.regex, Color.Yellow, true, target = HighlightTarget.MESSAGE)
+
+        assertNull(matchingHighlighter(listOf(tagTarget), template))
+        assertEquals(messageTarget, matchingHighlighter(listOf(tagTarget, messageTarget), template))
+    }
+
+    @Test
     fun highlightingATemplateCreatesAHighlighterAndPressingItAgainRemovesIt() {
         val state = AppState()
         val template = openTabWithTemplate(state, "Net", "heartbeat")
@@ -94,6 +146,47 @@ class LogCompositionRowActionsTest {
         val afterSecondPress = state.tabs.single().filter.highlighters
         assertTrue(afterSecondPress.isEmpty())
         assertNull(matchingHighlighter(afterSecondPress, template))
+    }
+
+    @Test
+    fun theHighlightMenuCreatesAWholeLineHighlighterAndPressingTheOtherModeSwitchesItInPlace() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        val created = state.tabs.single().filter.highlighters.single()
+        assertTrue(created.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, created.target)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = false)
+        val switched = state.tabs.single().filter.highlighters.single()
+        assertEquals(created.id, switched.id, "switching the mode edits the highlighter, it does not replace it")
+        assertEquals(false, switched.wholeLine)
+    }
+
+    @Test
+    fun pressingTheModeAHighlighterAlreadyHasRemovesIt() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun theMainHighlightButtonStillRemovesAWholeLineHighlighterInsteadOfConvertingIt() {
+        val state = AppState()
+        val template = openTabWithTemplate(state, "Net", "heartbeat")
+        val id = tabId(state)
+
+        state.toggleHighlightForTemplate(id, template, wholeLine = true)
+        state.toggleHighlightForTemplate(id, template)
+
+        assertTrue(state.tabs.single().filter.highlighters.isEmpty())
     }
 
     // ── A hand-authored rule counts as applied too ──────────────────────────────────────────

@@ -18,7 +18,8 @@ fun analysisAttributionText(): String = "Analyzed with $ANALYSIS_ATTRIBUTION_PRO
  * different delimiters, so the setting is passed in explicitly at the one shared sink helper.
  */
 fun analysisAttributionMarkdown(style: AnnotationLogBlockStyle): String = when (style) {
-    AnnotationLogBlockStyle.INDENTED -> "Analyzed with [$ANALYSIS_ATTRIBUTION_PRODUCT]($ANALYSIS_ATTRIBUTION_URL)"
+    AnnotationLogBlockStyle.INDENTED, AnnotationLogBlockStyle.JIRA_CLOUD ->
+        "Analyzed with [$ANALYSIS_ATTRIBUTION_PRODUCT]($ANALYSIS_ATTRIBUTION_URL)"
     AnnotationLogBlockStyle.JIRA_JAVA -> "Analyzed with [$ANALYSIS_ATTRIBUTION_PRODUCT|$ANALYSIS_ATTRIBUTION_URL]"
 }
 

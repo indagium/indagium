@@ -7,6 +7,8 @@
 
 package com.indagium.ui
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
@@ -15,10 +17,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
+import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Icon
@@ -27,22 +32,32 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.*
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.ModelDiscoveryResult
@@ -62,6 +77,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import kotlin.math.roundToInt
 
 // ── Settings dialog ───────────────────────────────────────────────────
 // Left-hand nav lists every section; only the selected section's content renders on the
@@ -72,12 +88,35 @@ import java.util.UUID
 /** Published by [AiProviderSettingsSection] each recomposition so [SettingsDialog] can gate
  *  section switches and closing the dialog behind an unsaved-changes prompt without hoisting the
  *  section's entire edit-draft state up to the dialog. */
+private const val ANCHOR_WAIT_FRAMES = 30
+
+/** Which name dialog Settings › General has open. */
+private sealed interface ProfileNameRequest {
+    data object New : ProfileNameRequest
+
+    data class Rename(val profile: ResolvedProfile) : ProfileNameRequest
+}
+
+private val ANCHOR_SCROLL_MARGIN = 16.dp
+private const val FLASH_MS = 1200
+
+/** Keeps the content composed (so its state survives) but neither placed, drawn, hit-testable nor
+ *  exposed to accessibility. */
+private fun Modifier.composedButHidden(): Modifier = this
+    .clearAndSetSemantics {}
+    .layout { measurable, constraints ->
+        measurable.measure(constraints)
+        layout(0, 0) {}
+    }
+
 private class AiProviderGuard(val isDirty: Boolean, val profileName: String, val save: () -> String?)
 
 internal enum class SettingsSection(val title: String, val icon: ImageVector) {
+    General("General", Icons.Outlined.Dashboard),
     Appearance("Appearance", Icons.Outlined.Palette),
     EditorBehavior("Editor behavior", Icons.Outlined.Tune),
     ExportAnnotations("Export & annotations", Icons.Outlined.Description),
+    Capture("Capture", Icons.Outlined.PhoneAndroid),
     Automation("Automation", Icons.Outlined.Bolt),
     AiProviders("AI providers", Icons.Outlined.Psychology),
     VoiceInput("Voice input", Icons.Outlined.Mic),
@@ -91,7 +130,7 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     val tc = tc()
     val shape = RoundedCornerShape(8.dp)
     var selectedSection by remember {
-        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.Appearance)
+        mutableStateOf(state.requestedSettingsSection ?: SettingsSection.General)
     }
     val voiceInputSupported = true
     LaunchedEffect(Unit) {
@@ -109,13 +148,40 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     var pendingClose by remember { mutableStateOf(false) }
     var guardSaveError by remember { mutableStateOf<String?>(null) }
 
-    fun requestSectionSwitch(target: SettingsSection) {
+    // Returns false when the switch was deferred behind the unsaved-changes prompt.
+    fun requestSectionSwitch(target: SettingsSection): Boolean {
         if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
             guardSaveError = null
             pendingSectionSwitch = target
-        } else {
-            selectedSection = target
+            return false
         }
+        selectedSection = target
+        return true
+    }
+
+    // ── Settings search (ui/SettingsSearchIndex.kt, ui/SettingsSearchUi.kt) ──────────────────
+    val visibleSections = remember { SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.toSet() }
+    var query by remember { mutableStateOf("") }
+    val searching = query.isNotBlank()
+    val results = remember(query) { searchSettings(query, visibleSections) }
+    val anchors = remember { SettingsAnchors() }
+    var pendingAnchor by remember { mutableStateOf<String?>(null) }
+    val searchFocus = remember { FocusRequester() }
+    // Keeps the dialog's own key handling (Cmd/Ctrl+F, Esc) alive: a clicked nav item, result row
+    // or dismissed popup would otherwise take keyboard focus with it and leave nothing focused.
+    val rootFocus = remember { FocusRequester() }
+
+    fun reclaimFocus() { runCatching { rootFocus.requestFocus() } }
+    LaunchedEffect(Unit) { reclaimFocus() }
+
+    fun openResult(entry: SettingsSearchEntry) {
+        val reached = entry.section == selectedSection || requestSectionSwitch(entry.section)
+        // A switch deferred behind the AI-provider prompt keeps the results on screen instead, so
+        // the user can simply pick again once they've answered it.
+        if (!reached) return
+        query = ""
+        pendingAnchor = entry.anchor
+        reclaimFocus()
     }
 
     fun requestClose() {
@@ -130,14 +196,61 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
     // there), so it must go through the same unsaved-changes guard rather than closing unconditionally.
     SideEffect { onRequestCloseChanged(::requestClose) }
 
+    val contentScroll = rememberScrollState()
+    val density = LocalDensity.current
+    // After a result click the section is composed again (and, for another section, for the first
+    // time), so give it two frames to lay out before reading the anchor, then scroll and flash.
+    LaunchedEffect(pendingAnchor) {
+        val key = pendingAnchor ?: return@LaunchedEffect
+        repeat(2) { withFrameNanos { } }
+        var y: Float? = null
+        var waited = 0
+        while (y == null && waited < ANCHOR_WAIT_FRAMES) {
+            y = anchors.yInContent(key)
+            if (y == null) {
+                withFrameNanos { }
+                waited++
+            }
+        }
+        // Cleared only at the end: the key of this very effect, so clearing it earlier would
+        // cancel the scroll below. A newer result click changes the key and restarts it instead.
+        val target = y
+        if (target != null) {
+            contentScroll.animateScrollTo((target - with(density) { ANCHOR_SCROLL_MARGIN.toPx() }).toInt().coerceAtLeast(0))
+            anchors.flashKey = key
+            anchors.flash.snapTo(1f)
+            anchors.flash.animateTo(0f, tween(FLASH_MS, easing = LinearEasing))
+        }
+        pendingAnchor = null
+    }
+
     Box(
-        // 190 (sidebar) + 1 (divider) + 572 (content). 572 is tuned tight against ThemeGallery's
-        // FlowRow math (118dp cards, 8dp gaps: 4 cards = 496dp) plus just enough slack (~8dp) that
-        // the scrollbar sits close against the 4th card instead of floating in leftover width.
-        Modifier.width(763.dp).height(560.dp)
+        // 200 (sidebar) + 1 (divider) + 693 (content). 693 less the 24dp padding either side and
+        // the 8dp scrollbar gutter leaves 637dp, tuned tight against ThemeGallery's FlowRow math
+        // (118dp cards, 8dp gaps: 5 cards = 622dp) so five fit per row with the scrollbar close
+        // against the 5th card, and the five workspace-profile cards split the same width evenly.
+        Modifier.width(894.dp).height(620.dp)
             .clip(shape)
             .background(tc.p)
-            .border(1.dp, tc.br, shape),
+            .border(1.dp, tc.br, shape)
+            .onPreviewKeyEvent { ev ->
+                when {
+                    ev.type != KeyEventType.KeyDown -> false
+                    ev.isActionKey && !ev.isShiftPressed && ev.key == Key.F -> {
+                        runCatching { searchFocus.requestFocus() }
+                        true
+                    }
+                    // Esc first clears an active search; with no query it falls through to the
+                    // dialog's own dismiss handling (and its unsaved-changes guard) unchanged.
+                    ev.key == Key.Escape && query.isNotEmpty() -> {
+                        query = ""
+                        true
+                    }
+                    else -> false
+                }
+            }
+            .focusRequester(rootFocus)
+            .focusable(),
     ) {
         Column(Modifier.fillMaxSize()) {
             Row(
@@ -151,19 +264,49 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
             Divider()
             Row(Modifier.weight(1f).fillMaxWidth()) {
                 Column(
-                    Modifier.width(190.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                    Modifier.width(200.dp).fillMaxHeight().padding(vertical = 12.dp, horizontal = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    SettingsSection.entries.filter { it != SettingsSection.VoiceInput || voiceInputSupported }.forEach { section ->
-                        SettingsMenuItem(
-                            section = section,
-                            selected = section == selectedSection,
-                            onClick = { requestSectionSwitch(section) },
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
+                    SettingsSearchField(
+                        query = query,
+                        onQueryChange = { query = it },
+                        focusRequester = searchFocus,
+                        onSubmit = { results.firstOrNull()?.let(::openResult) },
+                    )
+                    // Scrolls only if the section list ever outgrows the space between the search
+                    // field and the shortcuts block below.
                     Column(
-                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp),
+                        Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (searching) {
+                            SettingsMenuItem(
+                                title = "All results",
+                                icon = Icons.Outlined.Search,
+                                selected = true,
+                                onClick = { runCatching { searchFocus.requestFocus() } },
+                                badge = results.size,
+                            )
+                        }
+                        val counts = results.groupingBy { it.section }.eachCount()
+                        SettingsSection.entries.filter { it in visibleSections }.forEach { section ->
+                            SettingsMenuItem(
+                                title = section.title,
+                                icon = section.icon,
+                                selected = !searching && section == selectedSection,
+                                onClick = {
+                                    // Leaving the results for a section is a plain section switch.
+                                    query = ""
+                                    if (section != selectedSection) requestSectionSwitch(section)
+                                    reclaimFocus()
+                                },
+                                badge = if (searching) counts[section] else null,
+                                dimmed = searching && section !in counts,
+                            )
+                        }
+                    }
+                    Column(
+                        Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 2.dp),
                         verticalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
                         AppText(
@@ -181,32 +324,59 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                             variant = ButtonVariant.Secondary,
                             modifier = Modifier.fillMaxWidth(),
                         )
+                        // Closes Settings first (unlike the shortcuts popup): the assistant is a dialog of
+                        // its own. Unsaved AI-provider edits get the usual close prompt instead.
+                        AppButton(
+                            "Run setup assistant…",
+                            onClick = {
+                                if (selectedSection == SettingsSection.AiProviders && aiProviderGuard?.isDirty == true) {
+                                    requestClose()
+                                } else {
+                                    state.rerunSetupAssistant()
+                                }
+                            },
+                            variant = ButtonVariant.Secondary,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
                 Box(Modifier.width(1.dp).fillMaxHeight().background(tc.br))
-                val contentScroll = rememberScrollState()
                 Box(Modifier.weight(1f).fillMaxHeight()) {
-                    Column(
-                        Modifier.fillMaxSize().verticalScroll(contentScroll).padding(24.dp).padding(end = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp),
-                    ) {
-                        when (selectedSection) {
-                            SettingsSection.Appearance -> AppearanceSettingsSection(state)
-                            SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
-                            SettingsSection.Issues -> IssuesSettingsSection(state)
-                            SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
-                            SettingsSection.Automation -> AutomationSettingsSection(state)
-                            SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
-                            SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
-                            SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
-                            SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                    if (searching) SettingsSearchResults(query, results, ::openResult, Modifier.fillMaxSize())
+                    CompositionLocalProvider(LocalSettingsAnchors provides anchors) {
+                        Column(
+                            Modifier.fillMaxSize()
+                                // While results are showing, the selected section stays composed but is
+                                // neither placed nor drawn: leaving it out of the tree would drop its
+                                // unsaved AI-provider edits, which the section-switch guard relies on.
+                                .then(if (searching) Modifier.composedButHidden() else Modifier)
+                                .verticalScroll(contentScroll)
+                                .onGloballyPositioned { anchors.content = it }
+                                .padding(24.dp).padding(end = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(14.dp),
+                        ) {
+                            when (selectedSection) {
+                                SettingsSection.General -> GeneralSettingsSection(state, ::reclaimFocus)
+                                SettingsSection.Appearance -> AppearanceSettingsSection(state)
+                                SettingsSection.Capture -> CaptureSettingsSection(state)
+                                SettingsSection.EditorBehavior -> EditorBehaviorSettingsSection(state)
+                                SettingsSection.Issues -> IssuesSettingsSection(state)
+                                SettingsSection.ExportAnnotations -> ExportAnnotationsSettingsSection(state)
+                                SettingsSection.Automation -> AutomationSettingsSection(state)
+                                SettingsSection.AiProviders -> AiProviderSettingsSection(state) { aiProviderGuard = it }
+                                SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
+                                SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
+                                SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                            }
                         }
                     }
-                    VerticalScrollbar(
-                        adapter = rememberScrollbarAdapter(contentScroll),
-                        modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
-                        style = appScrollbarStyle(tc),
-                    )
+                    if (!searching) {
+                        VerticalScrollbar(
+                            adapter = rememberScrollbarAdapter(contentScroll),
+                            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().padding(vertical = 4.dp),
+                            style = appScrollbarStyle(tc),
+                        )
+                    }
                 }
             }
             Divider()
@@ -350,7 +520,15 @@ private fun SettingsConfirmDialog(
 }
 
 @Composable
-private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClick: () -> Unit) {
+private fun SettingsMenuItem(
+    title: String,
+    icon: ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+    // Search-result count for this nav row (shown as a small pill), and dimming for sections with none.
+    badge: Int? = null,
+    dimmed: Boolean = false,
+) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(8.dp)
@@ -371,24 +549,36 @@ private fun SettingsMenuItem(section: SettingsSection, selected: Boolean, onClic
             )
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
-            section.icon,
+            icon,
             contentDescription = null,
             modifier = Modifier.size(16.dp),
             tint = if (selected) tc.ac else tc.td,
         )
         AppText(
-            section.title,
-            color = if (selected) tc.tx else tc.ts,
+            title,
+            color = when {
+                selected -> tc.tx
+                dimmed -> tc.td
+                else -> tc.ts
+            },
             fontSize = 12.sp,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
         )
+        if (badge != null) {
+            Box(
+                Modifier.background(tc.ac.copy(alpha = .16f), RoundedCornerShape(50)).padding(horizontal = 6.dp, vertical = 1.dp),
+            ) {
+                AppText(badge.toString(), color = tc.ac, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -424,39 +614,41 @@ private fun SettingsScrollableRows(
     }
 }
 
+/** A text link in the accent colour with the hover highlight the footer's "GitHub repository" link uses. */
 @Composable
-private fun AppearanceSettingsSection(state: AppState) {
+internal fun AccentLink(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val tc = tc()
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
-        ThemeGallery(
-            settings = state.settings,
-            selected = state.settings.theme,
-            onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
-        )
+    HoverBox(modifier = modifier.clip(RoundedCornerShape(4.dp)), onClick = onClick) {
+        Box(Modifier.padding(horizontal = 6.dp, vertical = 4.dp)) {
+            AppText(label, color = tc.ac, fontSize = 11.sp, fontFamily = UI)
+        }
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        CompactSetting("Font family", Modifier.weight(1f)) {
+}
+
+/**
+ * The font, size, scale and toolbar-label controls of Settings → Appearance; the setup assistant's
+ * Look step shows this same row so the two can't drift. Controls take their natural width (the
+ * font-family labels were truncated when four equal columns squeezed them) and wrap onto a second
+ * line only when the window is too narrow for all four.
+ */
+@Composable
+internal fun AppearanceBasicsRow(state: AppState) {
+    SettingsControlRow {
+        CompactSetting("Font family") {
             SegmentedControl(
                 options = listOf("Monospace", "Proportional"),
                 selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(fontMono = idx == 0) } },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
             )
         }
-        CompactSetting("Log font size", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+        CompactSetting("Log font size", horizontalAlignment = Alignment.Start) {
             ListStepper(
                 options = (10..24).toList(),
                 value = state.settings.fontSize,
                 onChange = { v -> state.updateSettings { it.copy(fontSize = v) } },
             )
         }
-        CompactSetting("Interface scale", Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+        CompactSetting("Interface scale", horizontalAlignment = Alignment.Start) {
             ListStepper(
                 options = (MIN_INTERFACE_SCALE_PERCENT..MAX_INTERFACE_SCALE_PERCENT step 10).toList(),
                 value = state.settings.interfaceScalePercent,
@@ -466,75 +658,30 @@ private fun AppearanceSettingsSection(state: AppState) {
         CompactSettingWithTooltip(
             label = "Toolbar labels",
             tooltip = "Hides text on the main toolbar buttons, leaving only their icons.",
-            modifier = Modifier.weight(1f),
             horizontalAlignment = Alignment.Start,
         ) {
             SegmentedControl(
                 options = listOf("Show", "Icons only"),
                 selectedIndices = setOf(if (state.settings.toolbarIconOnlyButtons) 1 else 0),
                 onToggle = { idx -> state.updateSettings { it.copy(toolbarIconOnlyButtons = idx == 1) } },
-                modifier = Modifier.fillMaxWidth(),
-                fillWidth = true,
             )
         }
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        TooltipArea(
-            tooltip = {
-                Box(
-                    Modifier
-                        .background(tc.p2, RoundedCornerShape(4.dp))
-                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
-                ) {
-                    AppText(
-                        "Auto-saved notes are written here when this folder exists. Clear temporary data keeps this folder.",
-                        color = tc.tx,
-                        fontSize = 11.sp,
-                        maxLines = 2,
-                    )
-                }
-            },
-        ) {
-            AppText(
-                "Default save folder",
-                color = tc.td,
-                fontSize = 10.sp,
-                fontFamily = UI,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            val fullPath = state.settings.defaultSaveDir
-            val pathText: @Composable () -> Unit = {
-                AppText(
-                    fullPath?.let { truncatePathForDisplay(it) } ?: "(not set)",
-                    color = tc.ts, fontSize = 11.sp, fontFamily = MONO, overflow = TextOverflow.Ellipsis,
-                )
-            }
-            if (fullPath != null) {
-                TooltipArea(
-                    tooltip = {
-                        Box(
-                            Modifier
-                                .background(tc.p2, RoundedCornerShape(4.dp))
-                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 8.dp, vertical = 4.dp),
-                        ) {
-                            AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                ) { pathText() }
-            } else {
-                Box(Modifier.weight(1f)) { pathText() }
-            }
-            AppButton("Browse", onClick = { state.pickSaveFolder() })
-            if (fullPath != null) AppButton(
-                "Clear",
-                onClick = { state.updateSettings { it.copy(defaultSaveDir = null) } })
-        }
+}
+
+@Composable
+private fun AppearanceSettingsSection(state: AppState) {
+    val tc = tc()
+    Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Theme", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        ThemeGallery(
+            settings = state.settings,
+            selected = state.settings.theme,
+            onSelect = { preset -> preset?.let { state.updateSettings { s -> s.copy(theme = it) } } },
+            height = null,
+        )
     }
+    AppearanceBasicsRow(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",
@@ -557,7 +704,150 @@ private fun AppearanceSettingsSection(state: AppState) {
             fontFamily = UI,
         )
     }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+}
+
+@Composable
+private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
+    val tc = tc()
+    val selectedProfile = state.selectedWorkspaceProfile
+    var nameRequest by remember { mutableStateOf<ProfileNameRequest?>(null) }
+    var deleteRequest by remember { mutableStateOf<ResolvedProfile?>(null) }
+    val profiles = WorkspaceProfile.entries.map { it.resolved() } + state.settings.customWorkspaceProfiles.map { it.resolved() }
+    Column(Modifier.settingsAnchor("Workspace profile"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        AppText("Workspace profile", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        AppText(
+            "Sets panels, filter placement, theme and font size in one step. Every setting stays editable afterwards.",
+            color = tc.ts,
+            fontSize = 11.sp,
+            fontFamily = UI,
+        )
+        Spacer(Modifier.height(2.dp))
+        WorkspaceProfileCards(
+            profiles = profiles,
+            selectedId = selectedProfile?.id,
+            onSelect = state::applyResolvedProfile,
+            onMenuClosed = reclaimFocus,
+            menuFor = { profile ->
+                listOf(
+                    ProfileMenuAction("Rename…") { nameRequest = ProfileNameRequest.Rename(profile) },
+                    ProfileMenuAction("Update from current setup") { state.updateWorkspaceProfileFromCurrent(profile.id) },
+                    ProfileMenuAction("Export…") { state.exportWorkspaceProfile(profile) },
+                    ProfileMenuAction("Delete…", danger = true) { deleteRequest = profile },
+                )
+            },
+        )
+        // Read straight from state on every recomposition: theme/font/layout edits made elsewhere
+        // (Appearance, the panel toggles) all show up here without any extra plumbing.
+        val differences = state.workspaceProfileDifferences()
+        val customized = selectedProfile != null && differences.isNotEmpty()
+        if (selectedProfile != null && customized) {
+            val shape = RoundedCornerShape(6.dp)
+            Column(
+                Modifier.fillMaxWidth().background(tc.warnBg, shape).border(0.5.dp, tc.br, shape)
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppText(
+                    "Customized — ${differences.size} ${if (differences.size == 1) "setting differs" else "settings differ"} " +
+                        "from ${selectedProfile.title}: " +
+                        differences.joinToString(", "),
+                    color = tc.tx,
+                    fontSize = 11.sp,
+                    fontFamily = UI,
+                    maxLines = 3,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppButton("Reset to profile", onClick = { state.applyResolvedProfile(selectedProfile) })
+                    AppButton(
+                        "Save as new profile…",
+                        onClick = { nameRequest = ProfileNameRequest.New },
+                        variant = ButtonVariant.Secondary,
+                    )
+                    if (selectedProfile.custom) {
+                        AppButton(
+                            "Update “${selectedProfile.title}”",
+                            onClick = { state.updateWorkspaceProfileFromCurrent(selectedProfile.id) },
+                            variant = ButtonVariant.Secondary,
+                        )
+                    }
+                }
+            }
+        }
+        Row(
+            Modifier.settingsAnchor("Save as new profile"),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (!customized) {
+                AccentLink("Save current setup as profile…", onClick = { nameRequest = ProfileNameRequest.New })
+            }
+            AccentLink(
+                "Import profile…",
+                onClick = {
+                    state.importWorkspaceProfile()
+                    reclaimFocus()
+                },
+                modifier = Modifier.settingsAnchor("Import profile"),
+            )
+            AccentLink(
+                "Export current setup as .json",
+                onClick = {
+                    state.exportWorkspaceProfile(null)
+                    reclaimFocus()
+                },
+                modifier = Modifier.settingsAnchor("Export profile"),
+            )
+        }
+    }
+    nameRequest?.let { request ->
+        val taken = when (request) {
+            ProfileNameRequest.New -> state.workspaceProfileNames()
+            is ProfileNameRequest.Rename -> state.workspaceProfileNames() - request.profile.title
+        }
+        WorkspaceProfileNameDialog(
+            title = if (request is ProfileNameRequest.Rename) "Rename profile" else "Save current setup as a profile",
+            confirmLabel = if (request is ProfileNameRequest.Rename) "Rename" else "Save",
+            initialName = (request as? ProfileNameRequest.Rename)?.profile?.title
+                ?: uniqueProfileName("My profile", state.workspaceProfileNames()),
+            takenNames = taken,
+            onConfirm = { name ->
+                when (request) {
+                    ProfileNameRequest.New -> state.saveCurrentAsWorkspaceProfile(name)
+                    is ProfileNameRequest.Rename -> state.renameWorkspaceProfile(request.profile.id, name)
+                }
+                nameRequest = null
+                reclaimFocus()
+            },
+            onDismiss = {
+                nameRequest = null
+                reclaimFocus()
+            },
+        )
+    }
+    deleteRequest?.let { profile ->
+        SettingsConfirmDialog(
+            title = "Delete profile?",
+            message = "Delete “${profile.title}”? The theme and panels you have now stay as they are. This can't be undone.",
+            onDismissRequest = {
+                deleteRequest = null
+                reclaimFocus()
+            },
+        ) {
+            DialogActionButton("Delete", active = true, danger = true) {
+                state.deleteWorkspaceProfile(profile.id)
+                deleteRequest = null
+                reclaimFocus()
+            }
+            DialogActionButton("Cancel", active = false) {
+                deleteRequest = null
+                reclaimFocus()
+            }
+        }
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        SaveFolderKind.entries.forEach { kind -> SaveFolderSetting(state, kind) }
+    }
+    Column(Modifier.settingsAnchor("Storage"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Storage",
             color = tc.td,
@@ -586,7 +876,11 @@ private fun AppearanceSettingsSection(state: AppState) {
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.settingsAnchor("Temporary data"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TooltipArea(
                 tooltip = {
                     StorageInfoTooltip(
@@ -604,7 +898,11 @@ private fun AppearanceSettingsSection(state: AppState) {
             }
             AppButton("Clear temporary data", onClick = { state.requestClearCache() }, variant = ButtonVariant.Secondary)
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.settingsAnchor("App data"),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             TooltipArea(
                 tooltip = {
                     StorageInfoTooltip(
@@ -628,6 +926,133 @@ private fun AppearanceSettingsSection(state: AppState) {
     state.autosaveError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
+    val cardShape = RoundedCornerShape(6.dp)
+    Row(
+        Modifier.fillMaxWidth().settingsAnchor("Setup assistant")
+            .background(tc.p2, cardShape).border(1.dp, tc.br, cardShape).padding(horizontal = 12.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            AppText("Setup assistant", color = tc.tx, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            AppText("Walk through profile, theme, folders and capture again.", color = tc.td, fontSize = 11.sp, maxLines = 2)
+        }
+        AppButton("Run setup again", onClick = { state.rerunSetupAssistant() }, variant = ButtonVariant.Secondary)
+    }
+}
+
+/** The row for one of the save folders, wired exactly as Settings → General shows it; the setup
+ *  assistant reuses it for the folders it offers. */
+@Composable
+internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind) {
+    when (kind) {
+        SaveFolderKind.ROOT -> SaveFolderRow(
+            label = "Default save folder",
+            tooltip = "Parent folder every other save location below defaults under when it isn't " +
+                "set on its own. Defaults to your Documents folder.",
+            explicitValue = state.settings.saveRootDir,
+            effectivePath = state.effectiveSaveRootDir.absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ROOT) },
+        )
+        SaveFolderKind.ANALYSIS -> SaveFolderRow(
+            label = "Analysis artifacts folder",
+            tooltip = "Where analysis notes, filtered exports and split logs are saved. Auto-saved " +
+                "notes are written here, created on first save.",
+            explicitValue = state.settings.defaultSaveDir,
+            effectivePath = state.effectiveAnalysisDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ANALYSIS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ANALYSIS) },
+        )
+        SaveFolderKind.SESSIONS -> SaveFolderRow(
+            label = "Capture sessions folder",
+            tooltip = "Where new device captures are recorded. A change applies from the next " +
+                "Start; sessions already recorded stay exactly where they are.",
+            explicitValue = state.settings.captureSessionsDir,
+            effectivePath = state.effectiveCaptureSessionsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SESSIONS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SESSIONS) },
+        )
+        SaveFolderKind.SNAPSHOTS -> SaveFolderRow(
+            label = "Snapshots folder",
+            tooltip = "Destination for \"Save snapshot\" while a capture is recording.",
+            explicitValue = state.settings.captureSnapshotsDir,
+            effectivePath = state.effectiveCaptureSnapshotsDir().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.SNAPSHOTS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.SNAPSHOTS) },
+        )
+        SaveFolderKind.ZIP -> SaveFolderRow(
+            label = "Saved captures folder (Save ZIP)",
+            tooltip = "Destination for \"Save ZIP\" on a stopped or retained capture.",
+            explicitValue = state.settings.captureZipDir,
+            effectivePath = state.effectiveCaptureZipDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
+        )
+    }
+}
+
+/**
+ * One row of the five-folder Save folders group (GeneralSettingsSection above): a labeled
+ * tooltip, the effective path (dimmer with a "(default)" suffix when nothing is explicitly set —
+ * [explicitValue] is null), a Browse button, and a Reset button that only shows once the folder
+ * has actually been set to something other than its computed default.
+ */
+@Composable
+internal fun SaveFolderRow(
+    label: String,
+    tooltip: String,
+    explicitValue: String?,
+    effectivePath: String,
+    onBrowse: () -> Unit,
+    onReset: () -> Unit,
+) {
+    val tc = tc()
+    Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        TooltipArea(
+            tooltip = {
+                Box(
+                    Modifier
+                        .background(tc.p2, RoundedCornerShape(4.dp))
+                        .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    AppText(tooltip, color = tc.tx, fontSize = 11.sp, maxLines = 3)
+                }
+            },
+        ) {
+            AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            val displayText = truncatePathForDisplay(effectivePath).let {
+                if (explicitValue != null) it else "$it  (default)"
+            }
+            val pathText: @Composable () -> Unit = {
+                AppText(
+                    displayText,
+                    color = if (explicitValue != null) tc.ts else tc.td,
+                    fontSize = 11.sp,
+                    fontFamily = MONO,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            TooltipArea(
+                tooltip = {
+                    Box(
+                        Modifier
+                            .background(tc.p2, RoundedCornerShape(4.dp))
+                            .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                    ) {
+                        AppText(effectivePath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) { pathText() }
+            AppButton("Browse", onClick = onBrowse)
+            if (explicitValue != null) AppButton("Reset", onClick = onReset)
+        }
+    }
 }
 
 @Composable
@@ -647,234 +1072,225 @@ private fun StorageInfoTooltip(text: String) {
 @Composable
 private fun EditorBehaviorSettingsSection(state: AppState) {
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        // Natural-width controls preserve the requested row groupings at the dialog's content width.
-        EditorBehaviorGridRow(
-            first = {
-                CompactSetting("Visible tabs") {
-                    val tabLimits = listOf(4, 6, 8, 10, 12, 16)
-                    ListStepper(
-                        options = tabLimits,
-                        value = state.settings.visibleTabLimit,
-                        onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
-                    )
-                }
-            },
-            second = {
-                CompactSetting("Keyboard scroll margin") {
-                    val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
-                    ListStepper(
-                        options = scrollMargins,
-                        value = state.settings.navScrollMargin,
-                        onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
-                    )
-                }
-            },
-            third = {
-                CompactSetting("Most-used tags") {
-                    val tagLimits = listOf(0, 3, 5, 10, 20)
-                    ListStepper(
-                        options = tagLimits,
-                        value = state.settings.mostUsedTagLimit,
-                        onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
-                    )
-                }
-            },
-            fourth = {
-                CompactSetting("Filter list rows") {
-                    val rowLimits = listOf(3, 5, 8, 10, 15)
-                    ListStepper(
-                        options = rowLimits,
-                        value = state.settings.filterListRows,
-                        onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
-                    )
-                }
-            },
-            fifth = {
-                CompactSettingWithTooltip(
-                    label = "Follow live logs",
-                    tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
-                        "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
-                        "scrolling back down to the last line resumes it.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
-                    )
-                }
-            },
-        )
+        // Four rows of four on one grid (SettingsGrid): columns are content-sized with equal gaps,
+        // so cells line up as columns and the last column ends on the right content edge.
+        // Reserve an identical two-line label area in every cell of the last row so its controls
+        // align even though one label wraps.
+        val finalRowLabelAreaHeight = 28.dp
 
-        EditorBehaviorGridRow(
-            first = {
-                CompactSettingWithTooltip(
-                    label = "Row wrapping",
-                    // AWT has no horizontal mouse-wheel axis at all (confirmed via
-                    // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
-                    // equivalent), so Compose Desktop only ever produces a horizontal scroll
-                    // delta when Shift is held down (its AWT bridge maps the wheel rotation into
-                    // Offset.x specifically for that case). A genuine two-finger trackpad
-                    // horizontal swipe never reaches Compose as a horizontal delta at all on
-                    // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
-                    // targets that gap directly. Shift+wheel works everywhere regardless, hence
-                    // the tooltip below.
-                    tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
-                        "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
-                        "two-finger trackpad swipe doesn't scroll horizontally.",
-                ) {
-                    RowWrapControl(
-                        auto = state.settings.autoLogRowWrap,
-                        wrapChars = state.settings.logRowWrapLimitChars,
-                        onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
-                        onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
-                    )
-                }
-            },
-            second = {
-                CompactSettingWithTooltip(
-                    label = "Crash rows",
-                    tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
-                    )
-                }
-            },
-            third = {
-                CompactSettingWithTooltip(
-                    label = "Original panel",
-                    tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
-                    )
-                }
-            },
-            fourth = {
-                CompactSettingWithTooltip(
-                    label = "Row number",
-                    tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
-                        "you filter or fold rows, so it always points back to the same spot in the full log.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
-                    )
-                }
-            },
-            fifth = {
-                CompactSettingWithTooltip(
-                    label = "Minimap",
-                    tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
-                        "colored by level. Click or drag on it to jump to that part of the file.",
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
-                    )
-                }
-            },
-        )
-
-        // Reserve an identical two-line label area in every track.  This keeps the controls
-        // aligned while allowing the Ctrl+F label itself to remain a single line at the top.
-        val finalRowLabelAreaHeight = 36.dp
-
-        // Keep the Ctrl+F controls and the related per-tab/video defaults together: they form
-        // the requested final five-column row beneath the denser editor-view preferences.
-        Row(
-            Modifier.fillMaxWidth(),
-            // Five equal tracks ensure a long label cannot push a later control out of view.
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Ctrl+F opens",
-                    tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
-                        "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
-                        "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 1,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
-                    // an old token can still hold it. It remains valid for the shortcut, while the
-                    // dropdown falls back to its current Find bar label until the user selects one
-                    // of the three supported destinations.
-                    val tc = tc()
-                    val density = LocalDensity.current
-                    val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
-                    val labels = listOf("Find bar", "Tags", "Regex")
-                    var open by remember { mutableStateOf(false) }
-                    var suppressToggleUntilMs by remember { mutableStateOf(0L) }
-                    val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
-                    Box(Modifier.fillMaxWidth()) {
-                        HoverBox(
-                            modifier = Modifier.fillMaxWidth().height(26.dp)
-                                .clip(CORNER_SM)
-                                .background(tc.p2, CORNER_SM)
-                                .border(1.dp, tc.br, CORNER_SM),
-                            onClick = {
-                                if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
-                            },
+        SettingsGrid(columns = 4, rowSpacing = 16.dp) {
+            CompactSetting("Visible tabs") {
+                val tabLimits = listOf(4, 6, 8, 10, 12, 16)
+                ListStepper(
+                    options = tabLimits,
+                    value = state.settings.visibleTabLimit,
+                    onChange = { v -> state.updateSettings { it.copy(visibleTabLimit = v) } },
+                )
+            }
+            CompactSetting("Keyboard scroll margin") {
+                val scrollMargins = listOf(0, 2, 3, 5, 8, 12)
+                ListStepper(
+                    options = scrollMargins,
+                    value = state.settings.navScrollMargin,
+                    onChange = { v -> state.updateSettings { it.copy(navScrollMargin = v) } },
+                )
+            }
+            CompactSetting("Most-used tags") {
+                val tagLimits = listOf(0, 3, 5, 10, 20)
+                ListStepper(
+                    options = tagLimits,
+                    value = state.settings.mostUsedTagLimit,
+                    onChange = { v -> state.updateSettings { it.copy(mostUsedTagLimit = v) } },
+                )
+            }
+            CompactSetting("Filter list rows") {
+                val rowLimits = listOf(3, 5, 8, 10, 15)
+                ListStepper(
+                    options = rowLimits,
+                    value = state.settings.filterListRows,
+                    onChange = { v -> state.updateSettings { it.copy(filterListRows = v) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Row wrapping",
+                // AWT has no horizontal mouse-wheel axis at all (confirmed via
+                // java.awt.event.MouseWheelEvent — there's no getWheelRotationX() or
+                // equivalent), so Compose Desktop only ever produces a horizontal scroll
+                // delta when Shift is held down (its AWT bridge maps the wheel rotation into
+                // Offset.x specifically for that case). A genuine two-finger trackpad
+                // horizontal swipe never reaches Compose as a horizontal delta at all on
+                // Linux; see ui/LinuxHorizontalScroll.kt for the X11-button bridge that
+                // targets that gap directly. Shift+wheel works everywhere regardless, hence
+                // the tooltip below.
+                tooltip = "Auto wraps long lines to fit the panel width; toggle off to set a fixed " +
+                    "wrap column and scroll horizontally instead. Tip: hold Shift while scrolling if " +
+                    "two-finger trackpad swipe doesn't scroll horizontally.",
+            ) {
+                RowWrapControl(
+                    auto = state.settings.autoLogRowWrap,
+                    wrapChars = state.settings.logRowWrapLimitChars,
+                    onToggleAuto = { state.updateSettings { it.copy(autoLogRowWrap = !it.autoLogRowWrap) } },
+                    onWrapCharsChange = { limit -> state.updateSettings { it.copy(logRowWrapLimitChars = limit) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Crash rows",
+                tooltip = "Colors every row in an expanded crash/stack-trace group, not just the header.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.highlightEntireCrashGroup) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(highlightEntireCrashGroup = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Row number",
+                tooltip = "Shows a left gutter with each row's original row number. The number stays fixed when " +
+                    "you filter or fold rows, so it always points back to the same spot in the full log.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showRowNumbers) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showRowNumbers = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Minimap",
+                tooltip = "Replaces the scrollbar with a Sublime-style text minimap — a miniature of each line " +
+                    "colored by level. Click or drag on it to jump to that part of the file.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showMinimap) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showMinimap = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Follow live logs",
+                tooltip = "Keeps the view pinned to the newest line while a tab is live-watching " +
+                    "(Start Live Watching). Scrolling up to read earlier lines pauses following; " +
+                    "scrolling back down to the last line resumes it.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.autoScrollWhileTailing) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(autoScrollWhileTailing = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Regex summary",
+                tooltip = "Shows retained Tags-mode selectors above the Regex field. This summary is informational and does not change filtering.",
+            ) {
+                SegmentedControl(
+                    options = listOf("Off", "On"),
+                    selectedIndices = setOf(if (state.settings.showRegexFilterSummary) 1 else 0),
+                    onToggle = { index -> state.updateSettings { it.copy(showRegexFilterSummary = index == 1) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Original panel",
+                tooltip = "Controls whether newly opened files start with the unfiltered Original panel visible.",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.openNewFilesWithUnfiltered) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(openNewFilesWithUnfiltered = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Process names in new tabs",
+                tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
+                    "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
+                    "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
+                    "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
+                    "different logs with two different sets of processes. Per-tab picks reset every session " +
+                    "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
+                )
+            }
+            CompactSettingWithTooltip(
+                label = "Ctrl+F opens",
+                tooltip = "Find bar highlights regex matches in place and jumps between them without hiding " +
+                    "any rows. Tags/Regex instead focuses the corresponding filter field and hides " +
+                    "non-matching rows. \"Ctrl+F opens Original\" below applies to all three.",
+                modifier = Modifier.width(112.dp),
+                labelMaxLines = 1,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                // Rules (CtrlFTarget.MESSAGE_RULE) dropped from the selector, not the enum —
+                // an old token can still hold it. It remains valid for the shortcut, while the
+                // dropdown falls back to its current Find bar label until the user selects one
+                // of the three supported destinations.
+                val tc = tc()
+                val density = LocalDensity.current
+                val targets = listOf(CtrlFTarget.FIND_BAR, CtrlFTarget.TAGS, CtrlFTarget.KEYWORD_REGEX)
+                val labels = listOf("Find bar", "Tags", "Regex")
+                var open by remember { mutableStateOf(false) }
+                var suppressToggleUntilMs by remember { mutableStateOf(0L) }
+                val selectedIndex = targets.indexOf(state.settings.ctrlFTarget)
+                Box(Modifier.fillMaxWidth()) {
+                    HoverBox(
+                        modifier = Modifier.fillMaxWidth().height(26.dp)
+                            .clip(CORNER_SM)
+                            .background(tc.p2, CORNER_SM)
+                            .border(1.dp, tc.br, CORNER_SM),
+                        onClick = {
+                            if (System.currentTimeMillis() >= suppressToggleUntilMs) open = !open
+                        },
+                    ) {
+                        Row(
+                            Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                Modifier.fillMaxSize().padding(horizontal = 10.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                AppText(
-                                    labels.getOrElse(selectedIndex) { labels.first() },
-                                    color = tc.tx,
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Medium,
-                                )
-                                AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
-                            }
+                            AppText(
+                                labels.getOrElse(selectedIndex) { labels.first() },
+                                color = tc.tx,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                            )
+                            AppText(if (open) "▲" else "▼", color = tc.td, fontSize = 9.sp)
                         }
-                        if (open) {
-                            Popup(
-                                alignment = Alignment.TopStart,
-                                offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
-                                onDismissRequest = {
-                                    open = false
-                                    suppressToggleUntilMs = System.currentTimeMillis() + 200
-                                },
-                                properties = PopupProperties(focusable = false),
+                    }
+                    if (open) {
+                        Popup(
+                            alignment = Alignment.TopStart,
+                            offset = IntOffset(0, with(density) { 30.dp.roundToPx() }),
+                            onDismissRequest = {
+                                open = false
+                                suppressToggleUntilMs = System.currentTimeMillis() + 200
+                            },
+                            properties = PopupProperties(focusable = false),
+                        ) {
+                            Column(
+                                Modifier.width(104.dp)
+                                    .shadow(8.dp, RoundedCornerShape(8.dp))
+                                    .background(tc.p, RoundedCornerShape(8.dp))
+                                    .border(1.dp, tc.br, RoundedCornerShape(8.dp))
+                                    .padding(4.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp),
                             ) {
-                                Column(
-                                    Modifier.width(104.dp)
-                                        .shadow(8.dp, RoundedCornerShape(8.dp))
-                                        .background(tc.p, RoundedCornerShape(8.dp))
-                                        .border(1.dp, tc.br, RoundedCornerShape(8.dp))
-                                        .padding(4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                                ) {
-                                    targets.forEachIndexed { index, target ->
-                                        val active = index == selectedIndex
-                                        HoverBox(
-                                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
-                                            baseBg = if (active) tc.abg else Color.Transparent,
-                                            onClick = {
-                                                open = false
-                                                state.updateSettings { it.copy(ctrlFTarget = target) }
-                                            },
-                                        ) {
-                                            AppText(
-                                                labels[index],
-                                                color = if (active) tc.ac else tc.tx,
-                                                fontSize = 11.sp,
-                                                fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                            )
-                                        }
+                                targets.forEachIndexed { index, target ->
+                                    val active = index == selectedIndex
+                                    HoverBox(
+                                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp)),
+                                        baseBg = if (active) tc.abg else Color.Transparent,
+                                        onClick = {
+                                            open = false
+                                            state.updateSettings { it.copy(ctrlFTarget = target) }
+                                        },
+                                    ) {
+                                        AppText(
+                                            labels[index],
+                                            color = if (active) tc.ac else tc.tx,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                        )
                                     }
                                 }
                             }
@@ -882,106 +1298,99 @@ private fun EditorBehaviorSettingsSection(state: AppState) {
                     }
                 }
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Ctrl+F opens Original",
-                    tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
-                        "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
-                        "Original/Filtered split to reveal.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Ctrl+F opens Original",
+                tooltip = "Reveals the active file's unfiltered Original panel whenever Ctrl+F opens, whichever " +
+                    "of Find bar / Tags / Regex it opens with above. Single-tab view only — compare mode has no " +
+                    "Original/Filtered split to reveal.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.openUnfilteredOnCtrlF) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(openUnfilteredOnCtrlF = idx == 0) } },
+                )
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Process names in new tabs",
-                    tooltip = "Whether a newly opened tab starts with process names shown in place of numeric " +
-                        "pids — resolved from the log's own \"Start proc\" lines. This is only the starting " +
-                        "point: showing or hiding names afterwards applies to one tab at a time, from the log " +
-                        "toolbar's options popup or a row's right-click menu, since two tabs are usually two " +
-                        "different logs with two different sets of processes. Per-tab picks reset every session " +
-                        "(pids are reused across runs, so a saved pick could silently point at the wrong process).",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showProcessNamesInNewTabs) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showProcessNamesInNewTabs = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "Video follow readout",
+                tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
+                    "bar, explaining exactly what Follow is doing at the current playhead position.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
+                )
             }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "Video follow readout",
-                    tooltip = "Shows the \"video → log → holding at ...\" diagnostic line under the video transport " +
-                        "bar, explaining exactly what Follow is doing at the current playhead position.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.showVideoFollowReadout) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(showVideoFollowReadout = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
-            }
-            Box(Modifier.weight(1f, fill = true)) {
-                CompactSettingWithTooltip(
-                    label = "New video links:\ndouble-click seeks",
-                    tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
-                        "independently from its header; this does not affect existing links or Follow.",
-                    modifier = Modifier.fillMaxWidth(),
-                    labelMaxLines = 2,
-                    labelAreaHeight = finalRowLabelAreaHeight,
-                ) {
-                    SegmentedControl(
-                        options = listOf("On", "Off"),
-                        selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
-                        onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
-                        modifier = Modifier.fillMaxWidth(),
-                        fillWidth = true,
-                    )
-                }
+            CompactSettingWithTooltip(
+                label = "New video links:\ndouble-click seeks",
+                tooltip = "The default for a newly linked log/video anchor. Each video link can then be toggled " +
+                    "independently from its header; this does not affect existing links or Follow.",
+                labelMaxLines = 2,
+                labelAreaHeight = finalRowLabelAreaHeight,
+            ) {
+                SegmentedControl(
+                    options = listOf("On", "Off"),
+                    selectedIndices = setOf(if (state.settings.enableDoubleClickVideoSeekOnLink) 0 else 1),
+                    onToggle = { idx -> state.updateSettings { it.copy(enableDoubleClickVideoSeekOnLink = idx == 0) } },
+                )
             }
         }
     }
 }
 
-/** Natural-width tracks preserve the requested settings rows at the dialog's content width. */
+/**
+ * A row of compact settings spread across the full content width: cells keep their natural width,
+ * the first starts on the left edge, the last ends on the right edge, the space between is even,
+ * and the row wraps onto a second line if the cells cannot fit. For several rows that should line
+ * up as columns use [SettingsGrid] instead.
+ */
 @Composable
-private fun EditorBehaviorGridRow(
-    first: @Composable () -> Unit,
-    second: @Composable () -> Unit,
-    third: @Composable () -> Unit,
-    fourth: @Composable () -> Unit,
-    fifth: (@Composable () -> Unit)? = null,
-) {
-    Row(
-        Modifier.fillMaxWidth(),
+internal fun SettingsControlRow(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    FlowRow(
+        modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top,
-    ) {
-        first()
-        second()
-        third()
-        fourth()
-        fifth?.invoke()
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) { content() }
+}
+
+/**
+ * Compact settings on a grid with [columns] columns; the children fill it row by row. Each column is
+ * exactly as wide as its widest cell (label or control) and the width left over is split into equal
+ * gaps between columns, so the first column starts on the left edge, the last column's widest cell
+ * ends on the right edge, and every column reads as one clean left edge. Cells are top-aligned
+ * and start-aligned in their column.
+ */
+@Composable
+internal fun SettingsGrid(
+    columns: Int,
+    modifier: Modifier = Modifier,
+    rowSpacing: Dp = 10.dp,
+    content: @Composable () -> Unit,
+) {
+    Layout(content, modifier.fillMaxWidth()) { measurables, constraints ->
+        val width = constraints.maxWidth
+        val placeables = measurables.map { it.measure(Constraints(maxWidth = width)) }
+        val rows = placeables.chunked(columns)
+        val columnWidths = List(columns) { column -> rows.maxOfOrNull { it.getOrNull(column)?.width ?: 0 } ?: 0 }
+        val gap = if (columns > 1) ((width - columnWidths.sum()) / (columns - 1).toFloat()).coerceAtLeast(0f) else 0f
+        val spacing = rowSpacing.roundToPx()
+        val rowHeights = rows.map { row -> row.maxOfOrNull { it.height } ?: 0 }
+        val height = rowHeights.sum() + spacing * (rows.size - 1).coerceAtLeast(0)
+        layout(width, height) {
+            var y = 0
+            rows.forEachIndexed { rowIndex, row ->
+                var x = 0f
+                row.forEachIndexed { column, placeable ->
+                    placeable.placeRelative(x.roundToInt(), y)
+                    x += columnWidths[column] + gap
+                }
+                y += rowHeights[rowIndex] + spacing
+            }
+        }
     }
 }
 
@@ -1006,7 +1415,7 @@ private fun IssuesSettingsSection(state: AppState) {
     val validation = customIssueRulesValidation(drafts)
     val dirty = drafts != state.settings.customIssueRules
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Column(Modifier.settingsAnchor("Custom issue categories"), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             AppText("Custom issue categories", color = tc().tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             AppText(
                 "Each enabled regex is matched against a log tag or message and adds a clickable anchor to Issues. " +
@@ -1078,55 +1487,216 @@ private fun IssuesSettingsSection(state: AppState) {
     }
 }
 
+/**
+ * The twelve note and copy settings on one four-column grid (content-sized columns, equal gaps —
+ * SettingsGrid). Rows group them by purpose: note behaviour, what copying includes, and the
+ * formats. The three wide format controls use tighter segments so all four columns fit with
+ * comfortable gaps.
+ */
+@Composable
+private fun ExportSettingsGrid(state: AppState) {
+    SettingsGrid(columns = 4, rowSpacing = 10.dp) {
+        AutoSaveSetting(state)
+        FilterBackupsSetting(state)
+        InlineMarkdownSetting(state)
+        NumberBlocksSetting(state)
+        PidTidCopySetting(state)
+        PidCopyAsNameSetting(state)
+        RowNumberCopySetting(state)
+        TimeDeltaCopySetting(state)
+        LogBlocksSetting(state)
+        CopyDefaultSetting(state)
+        DiagramNoteActionSetting(state)
+        DiagramExportSetting(state)
+    }
+}
+
+@Composable
+private fun AutoSaveSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Auto-save",
+        tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun FilterBackupsSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Filter backups",
+        tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun NumberBlocksSetting(state: AppState) {
+    CompactSetting("Number blocks") {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun LogBlocksSetting(state: AppState) {
+    CompactSetting("Log blocks") {
+        val styles = AnnotationLogBlockStyle.entries
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Indented", "Wiki", "Cloud"),
+            selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
+            onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
+        )
+    }
+}
+
+@Composable
+private fun InlineMarkdownSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Inline Markdown",
+        tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
+            onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun PidTidCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Pid/Tid copy",
+        tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyPidTid) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyPidTid = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun PidCopyAsNameSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Pid copy as name",
+        tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyPidAsName) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyPidAsName = index == 0) } },
+            enabled = state.settings.copyPidTid,
+        )
+    }
+}
+
+@Composable
+private fun RowNumberCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Row number copy",
+        tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyRowNumber) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyRowNumber = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun TimeDeltaCopySetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Time delta copy",
+        tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
+    ) {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.copyTimeDelta) 0 else 1),
+            onToggle = { index -> state.updateSettings { it.copy(copyTimeDelta = index == 0) } },
+        )
+    }
+}
+
+@Composable
+private fun CopyDefaultSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Copy default",
+        tooltip = "Chooses the format used by the main Copy button. A one-time choice from the Copy menu does not change this default.",
+    ) {
+        val formats = AnnotationCopyFormat.entries
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Cloud", "Wiki", "Markdown", "HTML"),
+            selectedIndices = setOf(formats.indexOf(state.settings.annotationCopyFormat)),
+            onToggle = { index -> state.updateSettings { it.copy(annotationCopyFormat = formats[index]) } },
+        )
+    }
+}
+
+@Composable
+private fun DiagramNoteActionSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Diagram note action",
+        tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
+            "This chooses which half of the split action is primary.",
+    ) {
+        SegmentedControl(
+            segmentHorizontalPadding = 6.dp,
+            options = listOf("Snapshot", "Link"),
+            selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
+            onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
+        )
+    }
+}
+
+@Composable
+private fun DiagramExportSetting(state: AppState) {
+    CompactSettingWithTooltip(
+        label = "Diagram export",
+        tooltip = "Sets the representation for newly added sequence-diagram notes. " +
+            "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
+            "Src keeps the editable diagram text. Existing notes keep their own choice.",
+    ) {
+        SegmentedControl(
+            options = listOf("Img", "Src"),
+            selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
+            onToggle = { index ->
+                state.updateSettings {
+                    it.copy(
+                        diagramDefaultExportMode = if (index == 0) {
+                            DiagramExportMode.IMAGE
+                        } else {
+                            DiagramExportMode.SOURCE
+                        },
+                    )
+                }
+            },
+        )
+    }
+}
+
 @Composable
 private fun ExportAnnotationsSettingsSection(state: AppState) {
     val tc = tc()
-    AnnotationSettingsRow(state)
-    CopyMetadataSettingsRow(state)
-    // The two diagram defaults used to sit one-per-row, each spending a full row on a single
-    // control and leaving the section's last row's worth of space empty below. They share one
-    // row instead, natural-width like the rest of this section's rows — NOT stretched into equal
-    // fifths like CopyMetadataSettingsRow's tracks, which squeezed "Snapshot" down to a couple of
-    // clipped letters.
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(24.dp),
-    ) {
-        CompactSettingWithTooltip(
-            label = "Diagram note action",
-            tooltip = "The sequence-diagram workspace always offers snapshot and linked notes. " +
-                "This chooses which half of the split action is primary.",
-        ) {
-            SegmentedControl(
-                options = listOf("Snapshot", "Link"),
-                selectedIndices = setOf(if (state.settings.diagramLinkedNotePrimary) 1 else 0),
-                onToggle = { idx -> state.updateSettings { it.copy(diagramLinkedNotePrimary = idx == 1) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Diagram export",
-            tooltip = "Sets the representation for newly added sequence-diagram notes. " +
-                "Image works in Markdown and Jira without Mermaid or PlantUML support; " +
-                "Src keeps the editable diagram text. Existing notes keep their own choice.",
-        ) {
-            SegmentedControl(
-                options = listOf("Img", "Src"),
-                selectedIndices = setOf(if (state.settings.diagramDefaultExportMode == DiagramExportMode.IMAGE) 0 else 1),
-                onToggle = { index ->
-                    state.updateSettings {
-                        it.copy(
-                            diagramDefaultExportMode = if (index == 0) {
-                                DiagramExportMode.IMAGE
-                            } else {
-                                DiagramExportMode.SOURCE
-                            },
-                        )
-                    }
-                },
-            )
-        }
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    ExportSettingsGrid(state)
+    Column(Modifier.settingsAnchor("Annotation file prefix"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
             "Annotation file prefix",
             color = tc.td,
@@ -1145,12 +1715,7 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
         AppText("Preview: $previewLabel app.log", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
     }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppText("Mask word on copy", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+        CompactSetting("Mask word on copy") {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.maskWordOnCopy) 0 else 1),
@@ -1226,78 +1791,10 @@ private fun ExportAnnotationsSettingsSection(state: AppState) {
     }
 }
 
-/** Copy settings share one five-column row and the same hover help as the annotation controls above.
- * The dependent name choice remains remembered while PID/TID copying is switched off. */
-@Composable
-internal fun CopyMetadataSettingsRow(state: AppState) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
-            label = "Inline Markdown",
-            tooltip = "Shows non-empty note and caption fields as rendered Markdown in the Notes panel; click them to edit.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.renderAnnotationMarkdownInline) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(renderAnnotationMarkdownInline = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
-            label = "Pid/Tid copy",
-            tooltip = "Includes PID and TID for log rows that contain them when copying lines, annotations, or filtered exports.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyPidTid) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyPidTid = index == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
-            label = "Pid copy as name",
-            tooltip = "Uses a process name learned from the log instead of the numeric PID. Available only while PID/TID copying is on.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyPidAsName) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyPidAsName = index == 0) } },
-                enabled = state.settings.copyPidTid,
-            )
-        }
-        CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
-            label = "Row number copy",
-            tooltip = "Includes the original log row number when the row-number gutter is visible in the log view.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyRowNumber) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyRowNumber = index == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            modifier = Modifier.weight(1f),
-            label = "Time delta copy",
-            tooltip = "Includes Δt only when the active tab's Δt column is visible and the log view can calculate it.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.copyTimeDelta) 0 else 1),
-                onToggle = { index -> state.updateSettings { it.copy(copyTimeDelta = index == 0) } },
-            )
-        }
-    }
-}
-
 @Composable
 private fun AutomationSettingsSection(state: AppState) {
     val tc = tc()
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    SettingsControlRow {
         CompactSetting("MCP control server") {
             SegmentedControl(
                 options = listOf("On", "Off"),
@@ -1305,7 +1802,18 @@ private fun AutomationSettingsSection(state: AppState) {
                 onToggle = { idx -> state.setMcpControlEnabled(idx == 0, state.settings.mcpControlPort) },
             )
         }
-        CompactSetting("Port", horizontalAlignment = Alignment.End) {
+        // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests
+        // to this loopback server. Bearer-token auth still gates every request either way — this only
+        // controls whether a browser is additionally allowed to do that at all. Opt-in for the
+        // uncommon case of a browser-based MCP inspector.
+        CompactSetting("Allow browser-based MCP clients (CORS)") {
+            SegmentedControl(
+                options = listOf("On", "Off"),
+                selectedIndices = setOf(if (state.settings.mcpAllowBrowserClients) 0 else 1),
+                onToggle = { idx -> state.setMcpAllowBrowserClients(idx == 0) },
+            )
+        }
+        CompactSetting("Port") {
             var portText by remember(state.settings.mcpControlPort) {
                 mutableStateOf(state.settings.mcpControlPort.toString())
             }
@@ -1328,47 +1836,23 @@ private fun AutomationSettingsSection(state: AppState) {
     state.mcpControlError?.let { message ->
         AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 2)
     }
-    // (SEC-1) Off by default: CORS lets any origin a browser has open issue cross-origin requests
-    // to this loopback server. Bearer-token auth still gates every request either way — this only
-    // controls whether a browser is additionally allowed to do that at all. Opt-in for the
-    // uncommon case of a browser-based MCP inspector.
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSetting("Allow browser-based MCP clients (CORS)") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.mcpAllowBrowserClients) 0 else 1),
-                onToggle = { idx -> state.setMcpAllowBrowserClients(idx == 0) },
-            )
-        }
-    }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        AppText("Connection info", color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+    CompactSetting("Connection info") {
         // Deliberately doesn't close Settings first — stacks on top instead, so closing
         // this popup returns you to Settings rather than to the main window.
         AppButton("Connection info…", onClick = { state.mcpInfoOpen = true }, variant = ButtonVariant.Secondary)
     }
+    CompactSetting("Debug logging") {
+        SegmentedControl(
+            options = listOf("On", "Off"),
+            selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
+            onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
+        )
+    }
     Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        Modifier.settingsAnchor("Debug log file"),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        CompactSetting("Debug logging") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.debugLoggingEnabled) 0 else 1),
-                onToggle = { idx -> state.setDebugLoggingEnabled(idx == 0) },
-            )
-        }
-    }
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val fullPath = state.settings.debugLogFilePath
         val pathText: @Composable () -> Unit = {
             AppText(
@@ -1388,10 +1872,10 @@ private fun AutomationSettingsSection(state: AppState) {
                         AppText(fullPath, color = tc.tx, fontSize = 11.sp, fontFamily = MONO)
                     }
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f, fill = false),
             ) { pathText() }
         } else {
-            Box(Modifier.weight(1f)) { pathText() }
+            Box(Modifier.weight(1f, fill = false)) { pathText() }
         }
         AppButton("Browse", onClick = { state.pickDebugLogFile() })
         AppButton(
@@ -1407,19 +1891,15 @@ private fun AutomationSettingsSection(state: AppState) {
             AppButton("Retry", onClick = { state.retryDebugLoggingConfiguration() }, variant = ButtonVariant.Secondary)
         }
     }
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CompactSetting("Check for updates automatically") {
+    CompactSetting("Check for updates automatically") {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             SegmentedControl(
                 options = listOf("On", "Off"),
                 selectedIndices = setOf(if (state.settings.autoCheckUpdates) 0 else 1),
                 onToggle = { idx -> state.updateSettings { it.copy(autoCheckUpdates = idx == 0) } },
             )
+            AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
         }
-        AppButton("Check now", onClick = { state.checkForUpdates(manual = true) }, variant = ButtonVariant.Secondary)
     }
     // availableUpdate is checked first: once a release is known, that fact takes priority over
     // whatever the last raw check status happened to be (e.g. a stale UpToDate from a previous run).
@@ -1459,7 +1939,11 @@ private fun SourceCodeSettingsSection(state: AppState) {
             }
         },
     ) {
-        AppButton("Register source code", onClick = { state.pickSourceFolder() })
+        AppButton(
+            "Register source code",
+            onClick = { state.pickSourceFolder() },
+            modifier = Modifier.settingsAnchor("Register source code"),
+        )
     }
     // The "N files changed — reindex recommended" hint stats every indexed file, so it is computed
     // off the UI thread (see AppState.refreshChangedFileCounts) and only re-checked when this
@@ -1528,6 +2012,7 @@ private fun SourceCodeSettingsSection(state: AppState) {
         },
     ) {
         CheckRow(
+            modifier = Modifier.settingsAnchor("Discover simple custom log wrappers"),
             checked = state.settings.sourceAutoDiscoveryEnabled,
             onToggle = {
                 state.updateSettings {
@@ -1712,8 +2197,8 @@ private fun SourceLoggingConfigurations(state: AppState) {
 
     Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            Modifier.fillMaxWidth().settingsAnchor("Logging configurations"),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -1804,7 +2289,7 @@ private fun SourceLoggingConfigurationEditor(
         Modifier.fillMaxWidth().background(tc.p2, CORNER_SM).padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Edit logging configuration", color = tc.tx, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
             AppButton("Cancel", onClick = onClose)
         }
@@ -1833,7 +2318,7 @@ private fun SourceLoggingConfigurationEditor(
                 }
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
             AppText("Wrapper rules", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
             AppButton(
                 "Add rule",
@@ -2044,7 +2529,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
             fontSize = 12.sp,
             maxLines = 4,
         )
-        AppText("Recognition engine", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Recognition engine", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+            modifier = Modifier.settingsAnchor("Recognition engine"),
+        )
         val engineChoices = VoiceRecognitionEngines.availableChoices()
         SegmentedControl(
             options = engineChoices.map { it.label },
@@ -2060,6 +2548,7 @@ private fun VoiceInputSettingsSection(state: AppState) {
         AppText(VoiceRecognitionEngines.description(voiceSettings.recognitionEngine), color = tc.td, fontSize = 10.sp, maxLines = 3)
         if (VoiceRecognitionEngines.supportsTranslation(voiceSettings.recognitionEngine)) {
             CheckRow(
+                modifier = Modifier.settingsAnchor("Translate dictated speech to English"),
                 checked = voiceSettings.translateToEnglish,
                 onToggle = {
                     state.updateSettings { settings ->
@@ -2092,7 +2581,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
             )
         }
         Divider()
-        AppText("Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText(
+            "Recognition language", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+            modifier = Modifier.settingsAnchor("Recognition language"),
+        )
         AppText(
             if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WINDOWS_SPEECH) {
                 "Windows Speech needs a matching installed legacy recognizer. For Ukrainian or any unavailable language, choose Local Whisper."
@@ -2187,7 +2679,10 @@ private fun VoiceInputSettingsSection(state: AppState) {
         }
         Divider()
         if (voiceSettings.recognitionEngine == VoiceRecognitionEngine.WHISPER) {
-            AppText("Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Local model", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Local model"),
+            )
             SegmentedControl(
                 options = VoiceModelCatalog.all.map { model ->
                     if (model.id == VoiceModelCatalog.base.id) "Base (${formatByteSize(model.sizeBytes)})"
@@ -2351,7 +2846,7 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        AppText("Providers", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+        AppText("Providers", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.settingsAnchor("Providers"))
         // Same dropdown-plus-"+" treatment as the AI panel's own provider switcher
         // (AiProviderControls in AiSidebar.kt), for a consistent look and so both places share one
         // battle-tested selection path instead of a second, subtly different one.
@@ -2375,7 +2870,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
             }
         }
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            AppText("Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Provider type", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Provider type"),
+            )
             SegmentedControl(
                 options = com.indagium.model.AiProviderKind.entries.map { it.label },
                 selectedIndices = setOf(com.indagium.model.AiProviderKind.entries.indexOf(kind)),
@@ -2392,11 +2890,20 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                         ackState = endpoint.trim() to false
                     }
                 },
+                modifier = Modifier.fillMaxWidth(),
+                fillWidth = true,
+                weightByLabel = true,
             )
-            AppText("Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+            AppText(
+                "Profile name", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                modifier = Modifier.settingsAnchor("Profile name"),
+            )
             InlineField(name, { name = it }, "LM Studio (local)", Modifier.fillMaxWidth(), fontSize = 12.sp)
             if (kind.usesHttpEndpoint) {
-                AppText("Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "Endpoint", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("Endpoint"),
+                )
                 InlineField(endpoint, { endpoint = it }, "https://api.example.com/v1", Modifier.fillMaxWidth(), fontSize = 12.sp)
             } else {
                 AppText(
@@ -2404,7 +2911,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                     color = tc.td,
                     fontSize = 10.sp,
                 )
-                AppText("CLI executable (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "CLI executable (optional)", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("CLI executable (optional)"),
+                )
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     InlineField(
                         executablePath,
@@ -2463,10 +2973,13 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                 AppText(
                     if (kind.usesHttpEndpoint) "Model (optional)" else "Model (optional override)",
                     color = tc.td, fontSize = 10.sp, fontFamily = UI,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).settingsAnchor("Model"),
                 )
                 if (showReasoningDropdown) {
-                    AppText("Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI, modifier = Modifier.weight(1f))
+                    AppText(
+                        "Reasoning effort", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                        modifier = Modifier.weight(1f).settingsAnchor("Reasoning effort"),
+                    )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2517,7 +3030,10 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
                 )
             }
             if (kind.usesApiKey) {
-                AppText("API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI)
+                AppText(
+                    "API key — this session only; it is never saved", color = tc.td, fontSize = 10.sp, fontFamily = UI,
+                    modifier = Modifier.settingsAnchor("API key"),
+                )
                 InlineField(
                     apiKey,
                     { value -> apiKey = value; state.setAiProviderApiKey(profile.id, value) },
@@ -2531,11 +3047,9 @@ private fun AiProviderSettingsSection(state: AppState, onGuardChange: (AiProvide
         val endpointHost = runCatching { java.net.URI(endpoint.trim()).host.orEmpty() }.getOrDefault("")
         if (kind.usesHttpEndpoint && endpoint.isNotBlank() && !com.indagium.ai.isLoopbackHost(endpointHost)) {
             CheckRow(acknowledged, { ackState = endpoint.trim() to !acknowledged }) {
-                // (SEC-4) Plain-HTTP-only clause added: the original text covered log/source
-                // content leaving the device but not that a non-HTTPS endpoint also puts the API
-                // key itself on the wire unencrypted — a distinct, credential-level risk.
+                // Screen images from device capture tools are sent to this provider when used.
                 AppText(
-                    "I understand logs, source code, paths, and tool results may leave this " +
+                    "I understand logs, source code, paths, device screen images, and tool results may leave this " +
                         "device, and that a plain HTTP (non-HTTPS) endpoint also sends my API key unencrypted.",
                     color = tc.td,
                     fontSize = 10.sp,
@@ -2682,6 +3196,7 @@ private fun CustomAiCommandsSettingsSection(state: AppState) {
             "Add command",
             onClick = { state.customCommandEditorTarget = CustomAiCommand("", "") },
             variant = ButtonVariant.Secondary,
+            modifier = Modifier.settingsAnchor("Add command"),
         )
         SettingsScrollableRows {
             if (state.customAiCommands.isEmpty()) {
@@ -2851,15 +3366,19 @@ internal fun ThemeGallery(
     settings: AppSettings,
     selected: ThemePreset?,
     onSelect: (ThemePreset?) -> Unit,
-    height: Dp = 148.dp,
+    // Null shows every theme at natural height with no inner scroll (Settings, setup assistant);
+    // a fixed height keeps the compact scrolling gallery of the diagram theme picker.
+    height: Dp? = 148.dp,
     followAppTheme: Boolean = false,
 ) {
     val tc = tc()
     val themeScroll = rememberScrollState()
-    Box(Modifier.fillMaxWidth().height(height)) {
+    Box(Modifier.fillMaxWidth().then(if (height != null) Modifier.height(height) else Modifier)) {
         FlowRow(
-            Modifier.fillMaxWidth().verticalScroll(themeScroll).padding(end = 12.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            Modifier.fillMaxWidth().then(if (height != null) Modifier.verticalScroll(themeScroll).padding(end = 12.dp) else Modifier),
+            // Natural height: no scrollbar to leave room for, and the cards spread edge to edge so
+            // the controls below line up with the gallery's right edge.
+            horizontalArrangement = if (height != null) Arrangement.spacedBy(8.dp) else Arrangement.SpaceBetween,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             if (followAppTheme) {
@@ -2879,11 +3398,13 @@ internal fun ThemeGallery(
                 )
             }
         }
-        VerticalScrollbar(
-            adapter = rememberScrollbarAdapter(themeScroll),
-            modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
-            style = appScrollbarStyle(tc),
-        )
+        if (height != null) {
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(themeScroll),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight().width(6.dp),
+                style = appScrollbarStyle(tc),
+            )
+        }
     }
 }
 
@@ -2938,47 +3459,6 @@ internal fun ThemeWindowCard(label: String, colors: ThemeColors, selected: Boole
 }
 
 @Composable
-internal fun AnnotationSettingsRow(state: AppState) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        CompactSettingWithTooltip(
-            label = "Auto-save",
-            tooltip = "Saves note Markdown and its .ann sidecar after note changes.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.autoExportNotes) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(autoExportNotes = idx == 0) } },
-            )
-        }
-        CompactSettingWithTooltip(
-            label = "Filter backups",
-            tooltip = "Writes timestamped saved-filter backups after saved-filter changes.",
-        ) {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.autoSaveFilters) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(autoSaveFilters = idx == 0) } },
-            )
-        }
-        CompactSetting("Number blocks") {
-            SegmentedControl(
-                options = listOf("On", "Off"),
-                selectedIndices = setOf(if (state.settings.numberAnnotationBlocks) 0 else 1),
-                onToggle = { idx -> state.updateSettings { it.copy(numberAnnotationBlocks = idx == 0) } },
-            )
-        }
-        CompactSetting("Log blocks") {
-            val styles = AnnotationLogBlockStyle.entries
-            SegmentedControl(
-                options = listOf("Indented", "{code:java}"),
-                selectedIndices = setOf(styles.indexOf(state.settings.annotationLogBlockStyle)),
-                onToggle = { idx -> state.updateSettings { it.copy(annotationLogBlockStyle = styles[idx]) } },
-            )
-        }
-    }
-}
-
-@Composable
 internal fun CompactSettingWithTooltip(
     label: String,
     tooltip: String,
@@ -2989,7 +3469,11 @@ internal fun CompactSettingWithTooltip(
     content: @Composable () -> Unit,
 ) {
     val tc = tc()
-    Column(modifier, horizontalAlignment = horizontalAlignment, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(
+        modifier.settingsAnchor(label),
+        horizontalAlignment = horizontalAlignment,
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
         val labelContent: @Composable () -> Unit = {
             TooltipArea(
                 tooltip = {
@@ -3030,7 +3514,11 @@ internal fun CompactSetting(
     content: @Composable () -> Unit,
 ) {
     val tc = tc()
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(6.dp), horizontalAlignment = horizontalAlignment) {
+    Column(
+        modifier.settingsAnchor(label),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = horizontalAlignment,
+    ) {
         AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
         content()
     }

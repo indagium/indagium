@@ -3,9 +3,14 @@ package com.indagium.ui
 import androidx.compose.ui.graphics.Color
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
+import com.indagium.model.Highlighter
 import com.indagium.model.LogLevel
 import com.indagium.model.SavedFilter
 import com.indagium.model.SavedFilterFolder
+import com.indagium.utils.importKloggHighlighters
+import com.indagium.utils.looksLikeKloggSettings
+import com.indagium.utils.newId
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -13,6 +18,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
 
 // Extracted from AppState (Task 12 slice 4a, mechanical — no behavior change): the pure
 // encode/decode/naming half of saved-filter import/export — JSON serialization, JSON parsing,
@@ -27,9 +33,21 @@ import kotlinx.serialization.json.jsonPrimitive
 private const val FILTER_LIBRARY_FORMAT = "indagium-saved-filter-library"
 private const val FILTER_LIBRARY_VERSION = 2
 
+/** Review-dialog extras for one imported filter, keyed by the filter's id in [DecodedFilterLibrary.rowInfo]. */
+internal data class ImportRowInfo(
+    val notes: List<String> = emptyList(),
+    /** Non-null makes the row a skipped one that cannot be ticked. */
+    val skippedReason: String? = null,
+)
+
 internal data class DecodedFilterLibrary(
     val filters: List<SavedFilter>,
     val folders: List<SavedFilterFolder> = emptyList(),
+    val rowInfo: Map<String, ImportRowInfo> = emptyMap(),
+    // Import-level notes shown under the review dialog's subtitle.
+    val notes: List<String> = emptyList(),
+    // True when decoded from a klogg export (decided by content, not file name); drives the review's default mode.
+    val fromKlogg: Boolean = false,
 )
 
 internal fun exportFiltersList(
@@ -101,6 +119,14 @@ private fun exportFilterArray(filters: List<SavedFilter>): String = buildString 
     append("]")
 }
 
+private const val MAX_FILTER_IMPORT_BYTES = 8L * 1024 * 1024
+
+/** Reads an import file, refusing anything past ~8 MB (a filter export or klogg config is a few KB). */
+internal fun readFilterImportText(file: File): String {
+    require(file.length() <= MAX_FILTER_IMPORT_BYTES) { "${file.name} is larger than 8 MB." }
+    return file.readText()
+}
+
 internal fun decodeFilters(json: String): Result<List<SavedFilter>> = runCatching {
     val root = Json.parseToJsonElement(json)
     val arrayJson = when (root) {
@@ -167,12 +193,53 @@ internal fun decodeFilterLibrary(json: String): Result<DecodedFilterLibrary> = r
     DecodedFilterLibrary(filters, folders)
 }
 
-internal fun buildImportRows(savedFilters: List<SavedFilter>, imported: List<SavedFilter>): List<ImportFilterReviewRow> {
+/**
+ * Decides by content, not extension, what an import file is: filter JSON (Indagium's own export) or
+ * a klogg settings export (QSettings INI with a highlighter-set section). Anything else is an error
+ * whose message the caller can show as is.
+ */
+internal fun decodeFilterImport(fileName: String, text: String): Result<DecodedFilterLibrary> {
+    val body = text.removePrefix("\uFEFF").trimStart()
+    val readError = IllegalArgumentException("Could not read filter file.")
+    return when {
+        body.startsWith("{") -> decodeFilterLibrary(body).recoverCatching { throw readError }
+        looksLikeKloggSettings(body) -> runCatching {
+            val klogg = importKloggHighlighters(body, fileName)
+            require(klogg != null && klogg.sets.isNotEmpty()) { "No highlighter sets found in this klogg file." }
+            DecodedFilterLibrary(
+                filters = klogg.sets.map { it.filter },
+                rowInfo = klogg.sets.associate { it.filter.id to ImportRowInfo(it.notes, it.skippedReason) },
+                notes = klogg.notes,
+                fromKlogg = true,
+            )
+        }
+        body.startsWith("[") -> decodeFilterLibrary(body).recoverCatching { throw readError }
+        else -> Result.failure(
+            IllegalArgumentException("Unrecognised file: expected an Indagium filter .json or a klogg highlighter export (.conf)."),
+        )
+    }
+}
+
+internal fun buildImportRows(
+    savedFilters: List<SavedFilter>,
+    imported: List<SavedFilter>,
+    rowInfo: Map<String, ImportRowInfo> = emptyMap(),
+): List<ImportFilterReviewRow> {
     var usedNames = savedFilters.map { it.name.normalizedFilterName() }.toMutableSet()
     return imported.mapIndexed { idx, incoming ->
         val existing = savedFilters.firstOrNull { it.name.normalizedFilterName() == incoming.name.normalizedFilterName() }
         val rowId = "import_${System.nanoTime()}_$idx"
-        when {
+        val info = rowInfo[incoming.id] ?: ImportRowInfo()
+        val row = when {
+            info.skippedReason != null ->
+                ImportFilterReviewRow(
+                    rowId = rowId,
+                    incoming = incoming,
+                    action = ImportFilterAction.SKIP,
+                    resolvedName = incoming.name,
+                    skippedReason = info.skippedReason,
+                )
+
             existing != null && existing.sameFilterPayloadAs(incoming) ->
                 ImportFilterReviewRow(
                     rowId = rowId,
@@ -206,6 +273,7 @@ internal fun buildImportRows(savedFilters: List<SavedFilter>, imported: List<Sav
                 )
             }
         }
+        row.copy(notes = info.notes)
     }
 }
 
@@ -217,6 +285,32 @@ internal fun ImportFilterReviewRow.withImportAction(savedFilters: List<SavedFilt
             copy(action = action, resolvedName = uniqueFilterName(savedFilters, incoming.name + " (imported)", targetId))
         ImportFilterAction.ADD -> if (targetId == null) copy(action = action) else this
     }
+
+/** A row can contribute highlighters to the current filter iff it has some (identity to a saved filter is irrelevant there). */
+internal fun ImportFilterReviewRow.hasHighlighters(): Boolean = incoming.highlighters.isNotEmpty()
+
+/** The fields that make two highlighters "the same" when adding imported ones to a tab (id and on/off excluded). */
+private data class HighlighterShape(
+    val pattern: String,
+    val regex: Boolean,
+    val target: HighlightTarget,
+    val tag: String?,
+    val caseSensitive: Boolean,
+    val wholeLine: Boolean,
+    val textColor: Color?,
+    val color: Color,
+    val captureGroupsOnly: Boolean,
+    val colorVariance: Int,
+)
+
+private fun Highlighter.shape() =
+    HighlighterShape(pattern, regex, target, tag, caseSensitive, wholeLine, textColor, color, captureGroupsOnly, colorVariance)
+
+/** [incoming] with fresh ids, minus any whose shape is already in [existing] (or repeats earlier in [incoming]). */
+internal fun newHighlightersFor(existing: List<Highlighter>, incoming: List<Highlighter>): List<Highlighter> {
+    val seen = existing.mapTo(HashSet()) { it.shape() }
+    return incoming.filter { seen.add(it.shape()) }.map { it.copy(id = newId("hl")) }
+}
 
 internal fun uniqueFilterName(savedFilters: List<SavedFilter>, baseName: String, targetId: String? = null): String {
     val used = savedFilters

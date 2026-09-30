@@ -386,6 +386,24 @@ object DesktopStorage {
         File(userHome, ".openlog2/notes")
 
     /**
+     * Platform default parent for every save folder in Settings → General → Storage (the
+     * effective root behind [com.indagium.model.AppSettings.defaultSaveDir]/captureSessionsDir/
+     * captureSnapshotsDir/captureZipDir) when the user hasn't set
+     * [com.indagium.model.AppSettings.saveRootDir] — `~/Documents/Indagium`, or just `~/Indagium`
+     * on a machine with no Documents folder (some minimal Linux setups). One shape on every OS:
+     * `user.home` already resolves to the right per-platform home directory, and "Documents" is
+     * the conventional subfolder name on macOS, Windows, and most Linux desktops alike. The
+     * explicit-[userHome] overload is kept separate so tests never touch the real environment —
+     * see AppState's own `platformDefaultSaveRootDir` constructor seam for how production wires
+     * this in without a bare test construction ever resolving here.
+     */
+    fun defaultSaveRootDir(userHome: String = System.getProperty("user.home").orEmpty()): File {
+        val documents = File(userHome, "Documents")
+        val parent = if (documents.isDirectory) documents else File(userHome)
+        return File(parent, APP_DIR_NAME)
+    }
+
+    /**
      * Wires the real [appDataDir] / [legacyAppDataDir] and runs the one-time copy. Call first in
      * main(). A debug-control process with an isolated app-data override intentionally skips this:
      * migration would import the user's normal session into the test instance.

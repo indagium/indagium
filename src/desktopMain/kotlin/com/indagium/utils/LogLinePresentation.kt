@@ -16,13 +16,13 @@ data class LogLinePresentationContext(
     private val selection: Set<Int> = tab.selected,
 ) {
     private val selectedAnchorId = if (settings.copyTimeDelta && tab.showTimeDelta) deltaAnchorId(selection) else null
-    private val selectedAnchorTs = selectedAnchorId?.let { tab.rmap[it]?.ts }
+    private val selectedAnchor = selectedAnchorId?.let { tab.rmap[it] }
 
     // Selected copies already have a baseline, so they do not need the full visible-entry index.
     // Likewise, when Δt copying is disabled no caller can observe the index. Keep this allocation
     // on the filtered/export path only when Δt is enabled and the ordinary previous-visible-row
     // baseline is actually required.
-    private val indexById = if (settings.copyTimeDelta && tab.showTimeDelta && selectedAnchorTs == null) {
+    private val indexById = if (settings.copyTimeDelta && tab.showTimeDelta && selectedAnchor == null) {
         entries.withIndex().associate { (index, entry) -> entry.id to index }
     } else {
         null
@@ -31,10 +31,10 @@ data class LogLinePresentationContext(
     fun deltaFor(entry: LogEntry): String? {
         if (!settings.copyTimeDelta || !tab.showTimeDelta) return null
         val millis = when {
-            selectedAnchorTs != null -> deltaMillis(selectedAnchorTs, entry.ts)
-            else -> indexById?.get(entry.id)?.takeIf { it > 0 }?.let { index -> deltaMillis(entries[index - 1].ts, entry.ts) }
+            selectedAnchor != null -> deltaMillis(selectedAnchor, entry)
+            else -> indexById?.get(entry.id)?.takeIf { it > 0 }?.let { index -> deltaMillis(entries[index - 1], entry) }
         } ?: return null
-        return if (selectedAnchorTs != null) formatSignedDelta(millis) else formatDelta(millis)
+        return if (selectedAnchor != null) formatSignedDelta(millis) else formatDelta(millis)
     }
 }
 

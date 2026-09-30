@@ -6,18 +6,43 @@ import java.io.File
 import java.io.InputStream
 
 // Threadtime:  MM-DD HH:MM:SS.mmm  PID  TID Level Tag: message
-private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEA])\s+([^:]+):\s*(.*)$""")
+// Level accepts VDIWEA plus F (FATAL) — see androidLogLevelFrom() below for why F maps to
+// LogLevel.A instead of getting its own enum constant.
+private val RE_THREADTIME = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s*(.*)$""")
+
+// Some bug-report/capture wrappers retain the source timezone between the timestamp and the
+// thread columns. Also accept year-qualified timestamps from newer logcat exports. The offset is
+// syntax, not part of LogEntry.ts (which intentionally stores local time-of-day only).
+private val RE_THREADTIME_WITH_OFFSET = Regex(
+    """^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\.\d+)""" +
+        """(?:\s*([+-]\d{2}:?\d{2}|Z))\s+(\d+)\s+(\d+)\s+([VDIWEAF])\s+([^:]+):\s*(.*)$""",
+)
+
+// Two RAW wrappers occur in captured files: Android's `I/RAW: ...` tag form (optionally with an
+// outer pid) and the whitespace form `I RAW: ...`. Do not normalize unless the payload is itself
+// a complete structured logcat row; the ordinary RAW fallback below remains authoritative.
+private val RE_RAW_WRAPPER = Regex("""^I/RAW(?:\s*\(\s*\d+\s*\))?(?:[ \t]+|:[ \t]*)(.+)$|^I[ \t]+RAW\s*:[ \t]*(.+)$""")
 
 // Time:        MM-DD HH:MM:SS.mmm Level/Tag( PID): message
-private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+private val RE_TIME       = Regex("""^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEAF])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
 
 // Brief:       Level/Tag( PID): message
-private val RE_BRIEF      = Regex("""^([VDIWEA])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
+private val RE_BRIEF      = Regex("""^([VDIWEAF])/([^(]+)\(\s*(\d+)\):\s*(.*)$""")
 
 // Bare time:   HH:MM:SS.mmm Level/Tag: message
-private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEA])/([^:]+):\s*(.*)$""")
+private val RE_BARE       = Regex("""^(\d{2}:\d{2}:\d{2}\.\d+)\s+([VDIWEAF])/([^:]+):\s*(.*)$""")
 
 private const val TEXT_SNIFF_BYTES = 8000
+
+// Android also emits 'F' for FATAL (libc/DEBUG tombstone lines use it, e.g. "F libc  : Fatal
+// signal 6"), one tier above 'E' in Android's own log-level tooling — the same tier as 'A'
+// (ASSERT), which is how logcat's own `-v` formatter groups it. LogLevel is a persisted enum
+// whose .key char round-trips through filter chips, AutosaveCodec, and FilterCodec, so adding an
+// F-specific constant would mean teaching every one of those a level logcat itself doesn't have a
+// separate filter flag for. Mapping to the existing A tier keeps a tombstone's severity visible
+// and filterable without widening that surface; LogLevel.from() is left untouched (still V for any
+// unrecognized char) so this mapping stays local to parsing Android's own level chars.
+private fun androidLogLevelFrom(c: Char): LogLevel = if (c == 'F') LogLevel.A else LogLevel.from(c)
 
 // Sniffs the first few KB for NUL bytes (the same heuristic git/most editors use to distinguish
 // text from binary), while allowing an aligned UTF-16 layout, so files can be opened by content,
@@ -49,43 +74,99 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
     // A multi-GB logcat has millions of lines but only a handful of distinct tags — interning
     // them collapses millions of duplicate Strings into shared references (hundreds of MB saved).
     val tagCache = HashMap<String, String>()
-
-    fun intern(tag: String): String = tagCache.getOrPut(tag) { tag }
+    val internTag: (String) -> String = { tag -> tagCache.getOrPut(tag) { tag } }
 
     return lines.mapNotNull { raw ->
         val line = raw.trim()
         if (line.isEmpty() || line.startsWith("-----")) return@mapNotNull null
 
-        parseThreadtimeFast(line)?.let { p ->
-            return@mapNotNull LogEntry(id++, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid)
+        parseStructuredLogcatLine(line, id, internTag)?.let { parsed ->
+            id++
+            return@mapNotNull parsed
         }
-        RE_THREADTIME.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, stripDatePrefix(m.groupValues[1]),
-                LogLevel.from(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
-                pid = m.groupValues[2].toIntOrNull() ?: 0,
-                tid = m.groupValues[3].toIntOrNull() ?: 0,
-            )
+        val wrappedPayload = RE_RAW_WRAPPER.matchEntire(line)?.let { m ->
+            m.groupValues.drop(1).firstOrNull(String::isNotEmpty)
         }
-        RE_TIME.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, stripDatePrefix(m.groupValues[1]),
-                LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
-                pid = m.groupValues[4].toIntOrNull() ?: 0,
-            )
-        }
-        RE_BARE.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(id++, m.groupValues[1], LogLevel.from(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
-        }
-        RE_BRIEF.matchEntire(line)?.let { m ->
-            return@mapNotNull LogEntry(
-                id++, "", LogLevel.from(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
-                pid = m.groupValues[3].toIntOrNull() ?: 0,
-            )
+        wrappedPayload?.let { payload ->
+            parseStructuredLogcatLine(payload, id, internTag)?.let { parsed ->
+                id++
+                return@mapNotNull parsed
+            }
         }
 
         LogEntry(id++, "", LogLevel.I, "RAW", raw.trimEnd())
     }.toList()
+}
+
+// Each match* helper below owns exactly one regex alternative's LogEntry construction, so
+// parseStructuredLogcatLine itself can chain them with `?:` instead of an early `return` per
+// alternative (ReturnCount's guard-clause-style limit counts every one of those).
+private fun matchThreadtimeWithOffset(line: String, id: Int, intern: (String) -> String): LogEntry? {
+    val m = RE_THREADTIME_WITH_OFFSET.matchEntire(line) ?: return null
+    val dateAndTime = m.groupValues[1]
+    val monthDayPrefixed = dateAndTime.length > DATE_PREFIX_LENGTH && dateAndTime[2] == '-'
+    val ts = if (monthDayPrefixed) {
+        stripDatePrefix(dateAndTime)
+    } else {
+        dateAndTime.substringAfterLast(' ').substringAfter('T')
+    }
+    // "MM-DD ..." or the year-qualified "YYYY-MM-DD..." — the year itself is deliberately dropped.
+    val day = if (monthDayPrefixed) dayOfYearOf(dateAndTime, 0, 3) else dayOfYearOf(dateAndTime, 5, 8)
+    return LogEntry(
+        id, ts, androidLogLevelFrom(m.groupValues[5][0]), intern(m.groupValues[6].trim()), m.groupValues[7],
+        pid = m.groupValues[3].toIntOrNull() ?: 0,
+        tid = m.groupValues[4].toIntOrNull() ?: 0,
+        dayOfYear = day,
+    )
+}
+
+private fun matchThreadtime(line: String, id: Int, intern: (String) -> String): LogEntry? {
+    val m = RE_THREADTIME.matchEntire(line) ?: return null
+    return LogEntry(
+        id, stripDatePrefix(m.groupValues[1]),
+        androidLogLevelFrom(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
+        pid = m.groupValues[2].toIntOrNull() ?: 0,
+        tid = m.groupValues[3].toIntOrNull() ?: 0,
+        dayOfYear = dayOfYearOf(m.groupValues[1], 0, 3),
+    )
+}
+
+private fun matchTime(line: String, id: Int, intern: (String) -> String): LogEntry? {
+    val m = RE_TIME.matchEntire(line) ?: return null
+    return LogEntry(
+        id, stripDatePrefix(m.groupValues[1]),
+        androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
+        pid = m.groupValues[4].toIntOrNull() ?: 0,
+        dayOfYear = dayOfYearOf(m.groupValues[1], 0, 3),
+    )
+}
+
+private fun matchBare(line: String, id: Int, intern: (String) -> String): LogEntry? {
+    val m = RE_BARE.matchEntire(line) ?: return null
+    return LogEntry(id, m.groupValues[1], androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[4])
+}
+
+private fun matchBrief(line: String, id: Int, intern: (String) -> String): LogEntry? {
+    val m = RE_BRIEF.matchEntire(line) ?: return null
+    return LogEntry(
+        id, "", androidLogLevelFrom(m.groupValues[1][0]), intern(m.groupValues[2].trim()), m.groupValues[4],
+        pid = m.groupValues[3].toIntOrNull() ?: 0,
+    )
+}
+
+private fun parseStructuredLogcatLine(
+    line: String,
+    id: Int,
+    intern: (String) -> String,
+): LogEntry? {
+    parseThreadtimeFast(line)?.let { p ->
+        return LogEntry(id, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid, dayOfYear = p.dayOfYear)
+    }
+    return matchThreadtimeWithOffset(line, id, intern)
+        ?: matchThreadtime(line, id, intern)
+        ?: matchTime(line, id, intern)
+        ?: matchBare(line, id, intern)
+        ?: matchBrief(line, id, intern)
 }
 
 // LogEntry.ts deliberately carries no date (see LogTime.parseMillisOfDay, which requires a bare
@@ -103,6 +184,15 @@ private fun stripDatePrefix(dateAndTime: String): String = dateAndTime.substring
 
 private const val DATE_PREFIX_LENGTH = 5
 
+// Decodes the two-digit month at [monthAt] and day at [dayAt] of a prefix the caller has already
+// matched as digits (regex groups / digits() checks) into LogEntry.dayOfYear. NO_DATE for an
+// out-of-range month or day (e.g. "13-45"), which then simply keeps that row on the undated path.
+private fun dayOfYearOf(text: String, monthAt: Int, dayAt: Int): Short {
+    val month = (text[monthAt] - '0') * 10 + (text[monthAt + 1] - '0')
+    val day = (text[dayAt] - '0') * 10 + (text[dayAt + 1] - '0')
+    return logDaySlot(month, day)
+}
+
 private class ThreadtimeParts(
     val ts: String,
     val level: LogLevel,
@@ -110,9 +200,10 @@ private class ThreadtimeParts(
     val msg: String,
     val pid: Int,
     val tid: Int,
+    val dayOfYear: Short,
 )
 
-private const val LEVEL_CHARS = "VDIWEA"
+private const val LEVEL_CHARS = "VDIWEAF"
 
 private fun Char.isAsciiDigit(): Boolean = this in '0'..'9'
 
@@ -181,7 +272,7 @@ private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
     var p = afterTid
     while (p < n && line[p].isSeparator()) p++
     if (p == afterTid || p >= n || line[p] !in LEVEL_CHARS) return null
-    val level = LogLevel.from(line[p])
+    val level = androidLogLevelFrom(line[p])
     p++
     val beforeTag = p
     while (p < n && line[p].isSeparator()) p++
@@ -193,5 +284,5 @@ private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
     if (tag.isEmpty()) return null
     p = colon + 1
     while (p < n && line[p].isSeparator()) p++
-    return ThreadtimeParts(ts, level, tag, line.substring(p), pid, tid)
+    return ThreadtimeParts(ts, level, tag, line.substring(p), pid, tid, dayOfYearOf(line, 0, 3))
 }

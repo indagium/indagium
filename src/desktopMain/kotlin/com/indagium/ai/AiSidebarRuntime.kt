@@ -133,7 +133,12 @@ internal class AiSidebarRuntime(
             return AiStartResult.Rejected(error.message ?: "Unable to prepare the model provider.")
         }
         val resourcesForRun = ProviderRunResources(
-            AiAgentRunner(provider, toolGatewayFactory(), maxToolRounds = maxToolRounds()),
+            AiAgentRunner(
+                provider,
+                toolGatewayFactory(),
+                maxToolRounds = maxToolRounds(),
+                onCaptureTabChanged = ::transferCaptureSession,
+            ),
             provider,
         )
         val run = try {
@@ -175,6 +180,12 @@ internal class AiSidebarRuntime(
      */
     fun resetSession(tabId: String) {
         sessions.remove(tabId)
+        scheduleUiUpdate()
+    }
+
+    /** Keeps a run's sidebar/transcript attached to a replacement capture tab. */
+    internal fun transferCaptureSession(fromTabId: String, toTabId: String) {
+        sessions.transfer(fromTabId, toTabId)
         scheduleUiUpdate()
     }
 
@@ -298,6 +309,7 @@ internal class AiSidebarRuntime(
     private fun systemPrompt(context: AiInvestigationContext): String =
         """
         You are Indagium's in-app log investigation assistant. The pinned log tab for this request is `${context.tabId}`.
+        ${deviceCapturePromptGuidance(context.isDeviceCapture)}
         ${when {
             context.lineIds.isNotEmpty() ->
                 "The selected log-line context is `${context.lineIds.joinToString(", ")}`. " +
