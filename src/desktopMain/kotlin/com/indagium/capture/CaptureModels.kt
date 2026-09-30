@@ -52,9 +52,10 @@ data class CaptureSettings(
      */
     val mirror: Boolean = true,
     val audio: Boolean = false,
-    val maxSize: Int = 1080,
+    // Balanced preset ([CaptureVideoPreset.BALANCED]); a stored value always wins over these.
+    val maxSize: Int = 1280,
     val maxFps: Int = 30,
-    val bitrateMbps: Int = 8,
+    val bitrateMbps: Int = 3,
     val sessionLimitBytes: Long = DEFAULT_SESSION_LIMIT_BYTES,
     val freeSpaceReserveBytes: Long = DEFAULT_FREE_SPACE_RESERVE_BYTES,
     val filenameTemplate: String = "{device}_{start}_{range}_{counter}.zip",
@@ -112,6 +113,65 @@ const val MICROPHONE_DEFAULT_ID = "system-default"
 /** The active display choice after applying the pre-choice `mirror` compatibility switch. */
 val CaptureSettings.effectiveMirrorMode: CaptureMirrorMode
     get() = if (mirror) mirrorMode else CaptureMirrorMode.DISABLED
+
+/**
+ * Screen-recording quality presets: a named (longest side, frame rate, bitrate) triple. Not
+ * persisted on its own — [videoPreset] derives it from the three stored numbers, so settings written
+ * before presets existed simply show as [videoPreset] `null` (Custom) when they match none.
+ */
+enum class CaptureVideoPreset(val label: String, val maxSize: Int, val maxFps: Int, val bitrateMbps: Int) {
+    COMPACT("Compact", 1080, 15, 1),
+    BALANCED("Balanced", 1280, 30, 3),
+    DETAILED("Detailed", 1600, 30, 6),
+    SMOOTH("Smooth", 1920, 60, 12),
+}
+
+/** The preset whose triple equals this settings' recording numbers, or `null` (= Custom). */
+fun CaptureSettings.videoPreset(): CaptureVideoPreset? =
+    CaptureVideoPreset.entries.firstOrNull { it.maxSize == maxSize && it.maxFps == maxFps && it.bitrateMbps == bitrateMbps }
+
+fun CaptureSettings.withVideoPreset(preset: CaptureVideoPreset): CaptureSettings =
+    copy(maxSize = preset.maxSize, maxFps = preset.maxFps, bitrateMbps = preset.bitrateMbps)
+
+/** Approximate recording size per minute, in MB (10^6 bytes). [typicalMbPerMin] is what a mixed
+ * screen produces; [capMbPerMin] is the ceiling the encoder bitrate allows. */
+data class CaptureSizeEstimate(val typicalMbPerMin: Double, val capMbPerMin: Double)
+
+private const val MB_PER_MIN_PER_MBPS = 7.5 // 1 Mbps * 60 s / 8 bits per byte
+
+// Calibrated from a real capture: 30 MB/min at an 8 Mbps cap (Android encoders spend well under
+// the target bitrate on mostly static screens).
+private const val TYPICAL_FRACTION_OF_CAP = 0.5
+private const val AUDIO_MB_PER_MIN = 1.0 // Opus at ~128 kbps
+private const val ESTIMATE_MINUTES = 30
+private const val ESTIMATE_TOTAL_STEP_MB = 10
+private const val MB_PER_GB = 1000
+private const val ONE_DECIMAL_BELOW_MB = 10.0
+
+fun captureSizeEstimate(bitrateMbps: Int, withAudio: Boolean): CaptureSizeEstimate {
+    val cap = bitrateMbps * MB_PER_MIN_PER_MBPS
+    val audio = if (withAudio) AUDIO_MB_PER_MIN else 0.0
+    return CaptureSizeEstimate(cap * TYPICAL_FRACTION_OF_CAP + audio, cap + audio)
+}
+
+/** Device audio or the host microphone adds an audio track to the recording. */
+fun CaptureSettings.captureSizeEstimate(): CaptureSizeEstimate =
+    captureSizeEstimate(bitrateMbps, audio || microphoneDeviceId != MICROPHONE_OFF_ID)
+
+/** e.g. `≈ 11 MB/min (up to 23) · 30 min ≈ 340 MB`. */
+fun formatCaptureSizeEstimate(estimate: CaptureSizeEstimate): String {
+    val total = Math.round(estimate.typicalMbPerMin * ESTIMATE_MINUTES / ESTIMATE_TOTAL_STEP_MB) * ESTIMATE_TOTAL_STEP_MB
+    val totalText = if (total >= MB_PER_GB) {
+        String.format(java.util.Locale.ROOT, "%.1f GB", total / MB_PER_GB.toDouble())
+    } else {
+        "$total MB"
+    }
+    return "≈ ${formatMbPerMin(estimate.typicalMbPerMin)} MB/min (up to ${formatMbPerMin(estimate.capMbPerMin)}) · " +
+        "$ESTIMATE_MINUTES min ≈ $totalText"
+}
+
+private fun formatMbPerMin(value: Double): String =
+    if (value < ONE_DECIMAL_BELOW_MB) String.format(java.util.Locale.ROOT, "%.1f", value) else Math.round(value).toString()
 
 /** Keeps the legacy `mirror` bit and the current display choice in sync for UI edits. */
 fun CaptureSettings.withMirrorMode(mode: CaptureMirrorMode): CaptureSettings =

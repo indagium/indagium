@@ -102,7 +102,7 @@ class CaptureToolsTest {
             settings = CaptureSettings(audio = true, bitrateMbps = 12),
             audioCliArgs = listOf("--audio-source=playback", "--audio-dup"),
         )
-        assertTrue(spec.command.containsAll(listOf("--serial", "PHONE", "--max-size=1080", "--max-fps=30", "--bit-rate=12M")))
+        assertTrue(spec.command.containsAll(listOf("--serial", "PHONE", "--max-size=1280", "--max-fps=30", "--bit-rate=12M")))
         assertFalse(spec.command.any { it.startsWith("--video-bit-rate") })
         assertFalse(spec.command.any { it.startsWith("--video-codec") })
         assertFalse(spec.command.any { it.startsWith("--audio-") || it == "--no-audio" })

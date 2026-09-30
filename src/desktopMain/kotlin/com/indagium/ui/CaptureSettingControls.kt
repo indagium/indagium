@@ -31,13 +31,18 @@ import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CaptureBufferMode
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.CaptureVideoPreset
 import com.indagium.capture.DesktopMicrophone
 import com.indagium.capture.MICROPHONE_DEFAULT_ID
 import com.indagium.capture.MICROPHONE_OFF_ID
 import com.indagium.capture.NativeMediaSupport
+import com.indagium.capture.captureSizeEstimate
 import com.indagium.capture.effectiveMirrorMode
 import com.indagium.capture.enumerateDesktopMicrophones
+import com.indagium.capture.formatCaptureSizeEstimate
+import com.indagium.capture.videoPreset
 import com.indagium.capture.withMirrorMode
+import com.indagium.capture.withVideoPreset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -100,6 +105,13 @@ internal fun CaptureStartOptions(
             }
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 CaptureBufferModeControl(settings, edit)
+            }
+        }
+        // Full width (the four segment labels plus the hint/estimate lines want the room) and only
+        // while video is recorded — with Record video off none of these numbers apply.
+        if (settings.recordVideo) {
+            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                CaptureVideoQualityControl(settings, edit, onReclaimFocus)
             }
         }
     }
@@ -455,6 +467,56 @@ internal fun CaptureDeviceDisplayControl(
             maxLines = CAPTURE_HINT_MAX_LINES,
         )
     }
+}
+
+/**
+ * Quality preset picker for the screen recording plus the size it implies. The preset is derived
+ * from the three stored numbers ([videoPreset]), so when the user has typed values in Settings that
+ * match no preset ("Custom") no segment is selected and the caption spells the numbers out.
+ * [onReclaimFocus] gives keyboard focus back to the screen's root key handler after a click — see
+ * CLAUDE.md's note on `Modifier.clickable` stealing focus.
+ */
+@Composable
+internal fun CaptureVideoQualityControl(
+    settings: CaptureSettings,
+    edit: CaptureSettingsEdit,
+    onReclaimFocus: () -> Unit = {},
+) {
+    val colors = tc()
+    val preset = settings.videoPreset()
+    AppText("Video quality", color = colors.td, fontSize = 10.sp, modifier = Modifier.settingsAnchor("Video quality"))
+    SegmentedControl(
+        options = CaptureVideoPreset.entries.map { it.label },
+        selectedIndices = setOfNotNull(preset?.let { CaptureVideoPreset.entries.indexOf(it) }),
+        onToggle = { index ->
+            edit { it.withVideoPreset(CaptureVideoPreset.entries[index]) }
+            onReclaimFocus()
+        },
+        modifier = Modifier.fillMaxWidth(),
+        fillWidth = true,
+    )
+    AppText(
+        if (preset != null) {
+            "${preset.maxSize} px · ${preset.maxFps} fps · ${preset.bitrateMbps} Mbps"
+        } else {
+            "Custom — ${settings.maxSize} px · ${settings.maxFps} fps · ${settings.bitrateMbps} Mbps"
+        },
+        color = colors.td,
+        fontSize = 10.sp,
+        maxLines = 1,
+    )
+    CaptureSizeEstimateLine(settings)
+}
+
+/** One-line "≈ 11 MB/min (up to 23) · 30 min ≈ 340 MB" for the current bitrate and audio choice. */
+@Composable
+internal fun CaptureSizeEstimateLine(settings: CaptureSettings) {
+    AppText(
+        formatCaptureSizeEstimate(settings.captureSizeEstimate()),
+        color = tc().ts,
+        fontSize = 10.sp,
+        maxLines = 2,
+    )
 }
 
 /** Mode selector, the Custom picker (three buffers per row) and one line saying what the mode does. */

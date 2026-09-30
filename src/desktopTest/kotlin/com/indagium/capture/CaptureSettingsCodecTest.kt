@@ -5,6 +5,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 /**
  * Phase 1 (buffer modes) regression coverage. `CaptureSettingsCodec` is shared by three writers —
@@ -17,6 +18,22 @@ class CaptureSettingsCodecTest {
     fun bufferModeDefaultsWhenAbsent() {
         val decoded = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
         assertEquals(CaptureBufferMode.DEFAULT, decoded.bufferMode)
+    }
+
+    @Test
+    fun missingVideoKeysFallBackToTheBalancedPreset() {
+        val decoded = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
+        assertEquals(CaptureVideoPreset.BALANCED, decoded.videoPreset())
+        assertEquals(Triple(1280, 30, 3), Triple(decoded.maxSize, decoded.maxFps, decoded.bitrateMbps))
+    }
+
+    @Test
+    fun savedVideoValuesAreKeptAndShowAsCustom() {
+        val decoded = assertNotNull(
+            captureSettingsFromJson("""{"formatVersion":1,"maxSize":1080,"maxFps":30,"bitrateMbps":8}"""),
+        )
+        assertEquals(Triple(1080, 30, 8), Triple(decoded.maxSize, decoded.maxFps, decoded.bitrateMbps))
+        assertNull(decoded.videoPreset())
     }
 
     @Test

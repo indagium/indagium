@@ -532,8 +532,8 @@ class EmbeddedMirrorTest {
             assertContentEquals(byteArrayOf(4, 5), sockets[1].output.toByteArray())
             assertTrue(runner.serverSpec.command.contains("tunnel_forward=true"))
             assertTrue(runner.serverSpec.command.contains("send_dummy_byte=false"))
-            assertTrue(runner.serverSpec.command.contains("video_bit_rate=8000000"))
-            assertFalse(runner.serverSpec.command.contains("video_bit_rate=8M"))
+            assertTrue(runner.serverSpec.command.contains("video_bit_rate=3000000"))
+            assertFalse(runner.serverSpec.command.contains("video_bit_rate=3M"))
             connection.close()
             assertTrue(sockets.all { it.closed })
         } finally {
