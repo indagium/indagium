@@ -8718,7 +8718,17 @@ class AppState(
                 // manually recalibrated (AppState.setVideoAnchor). Only fall back to the archive's
                 // own estimated anchor when nothing was restored at all, so a restart never silently
                 // discards a manual re-link.
-                val anchor = currentVideo.anchor ?: imported.syncAnchor?.let { syncAnchor ->
+                //
+                // One exception: a capture finalized before the anchor fix can have autosaved its
+                // stale descriptor anchor (pinned to a buffered, pre-recording row) into the tab.
+                // When the archive reports that exact anchor as corrected on load and the restored
+                // one is still identical to it, it was never touched by the user — take the
+                // corrected one instead of resurrecting the wrong row.
+                val stale = imported.staleSyncAnchor?.let { stale ->
+                    val staleId = current.logData.getOrNull(stale.row - 1)?.id
+                    currentVideo.anchor?.takeIf { it.logId == staleId && it.videoMs == stale.videoMs }
+                }
+                val anchor = currentVideo.anchor.takeIf { stale == null } ?: imported.syncAnchor?.let { syncAnchor ->
                     current.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
                 }
                 current.copy(

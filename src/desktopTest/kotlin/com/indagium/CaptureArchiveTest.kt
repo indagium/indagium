@@ -365,6 +365,78 @@ class CaptureArchiveTest {
         assertEquals(1_000L, imported.syncAnchor?.videoMs)
     }
 
+    // A capture finalized before the anchor fix could pin its descriptor anchor to a row recorded
+    // BEFORE the video started (a buffered, earlier-day row). Reopening the finalized folder must
+    // replace that in memory with an anchor on a recorded row, without rewriting the descriptor.
+    @Test
+    fun reopeningAFolderWhoseDescriptorAnchorPointsBeforeTheVideoRecomputesItOnARecordedRow() {
+        val root = createTempDirectory("capture-stale-anchor").toFile()
+        val session = finalizedSessionWithThreeRows(root)
+        val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
+        setDescriptorAnchor(descriptorFile, row = 1, videoMs = 300)
+        val staleText = descriptorFile.readText()
+
+        val imported = CaptureArchiveReader.open(descriptorFile, File(root, "cache"))
+
+        assertEquals(2, imported.syncAnchor?.row)
+        assertEquals(1_000L, imported.syncAnchor?.videoMs)
+        assertEquals(com.indagium.capture.CaptureSyncAnchor(row = 1, videoMs = 300), imported.staleSyncAnchor)
+        assertEquals(1, imported.descriptor.syncAnchor?.row)
+        assertEquals(staleText, descriptorFile.readText(), "the descriptor on disk must not be rewritten")
+    }
+
+    @Test
+    fun reopeningAFolderWhoseDescriptorAnchorIsOnARecordedRowKeepsItUntouched() {
+        val root = createTempDirectory("capture-good-anchor").toFile()
+        val session = finalizedSessionWithThreeRows(root)
+        val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
+        setDescriptorAnchor(descriptorFile, row = 3, videoMs = 2_000)
+
+        val imported = CaptureArchiveReader.open(descriptorFile, File(root, "cache"))
+
+        assertEquals(com.indagium.capture.CaptureSyncAnchor(row = 3, videoMs = 2_000), imported.syncAnchor)
+        assertNull(imported.staleSyncAnchor)
+    }
+
+    @Test
+    fun aFolderWithoutItsIndexFileKeepsTheDescriptorAnchorAsIs() {
+        val root = createTempDirectory("capture-stale-anchor-no-index").toFile()
+        val session = finalizedSessionWithThreeRows(root)
+        val descriptorFile = File(session.directory, CAPTURE_DESCRIPTOR_NAME)
+        setDescriptorAnchor(descriptorFile, row = 1, videoMs = 300)
+        assertTrue(session.indexFile.delete())
+
+        val imported = CaptureArchiveReader.open(descriptorFile, File(root, "cache"))
+
+        assertEquals(com.indagium.capture.CaptureSyncAnchor(row = 1, videoMs = 300), imported.syncAnchor)
+        assertNull(imported.staleSyncAnchor)
+    }
+
+    // Video starts at elapsed 2_000; row 1 (elapsed 1_000) predates it, rows 2-3 are recorded.
+    private fun finalizedSessionWithThreeRows(root: File): CaptureSession {
+        val session = session(root, recordVideo = true).copy(
+            status = com.indagium.capture.CaptureStatus.STOPPED,
+            videoStartElapsedMs = 2_000,
+            elapsedMs = 5_000,
+        )
+        writeCaptureInput(session, listOf(
+            RawRow("01-01 10:00:01.000  1  1 I Tag: row-before-video\n", 1_000, 1),
+            RawRow("01-01 10:00:03.000  1  1 I Tag: row-in-video-1\n", 3_000, 2),
+            RawRow("01-01 10:00:05.000  1  1 I Tag: row-in-video-2\n", 5_000, 3),
+        ))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(7, 8, 9))
+        CaptureArchiveExporter().finalizeSessionInPlace(session)
+        return session
+    }
+
+    private fun setDescriptorAnchor(descriptorFile: File, row: Int, videoMs: Long) {
+        val text = descriptorFile.readText()
+        val rewritten = text.replace(Regex("\"sync\":\\{[^}]*\\}"), "\"sync\":{\"row\":$row,\"videoMs\":$videoMs}")
+        assertTrue(text.contains("\"sync\":{"), "sync key not found in descriptor")
+        descriptorFile.writeText(rewritten, Charsets.UTF_8)
+    }
+
     @Test
     fun finalizeStoppedSessionOpensInPlaceAndKeepsRawVideo() {
         val root = createTempDirectory("capture-finalize").toFile()

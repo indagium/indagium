@@ -116,10 +116,9 @@ class CaptureRecorderTest {
         runner.enqueue(StreamingFakeProcess())
         val recorder = CaptureRecorder(root, runner)
         try {
-            // includeBufferedLogs defaults to true now, which drops "-T", "1" (see CaptureSettings'
-            // own doc); this test is about the DEFAULT buffer-mode -b behavior, so it explicitly
-            // asks for the old "start at current tail" flag instead of relying on the new default.
-            recorder.start(DEVICE, testSettings().copy(includeBufferedLogs = false), CaptureTools(ADB, null, runner))
+            // includeBufferedLogs is off by default, which is what adds "-T", "1" (see
+            // CaptureSettings' own doc); this test is about the DEFAULT buffer-mode -b behavior.
+            recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
             val command = runner.specs.single().command
             assertEquals(listOf("adb", "-s", DEVICE.serial), command.take(3))
             assertTrue(command.containsAll(listOf("logcat", "-v", "threadtime", "-T", "1")))

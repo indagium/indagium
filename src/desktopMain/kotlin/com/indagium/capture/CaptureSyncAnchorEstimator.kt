@@ -44,30 +44,37 @@ private const val ANCHOR_OFFSET_LOW_PERCENTILE = 2.0
  * The offset is estimated from every row that has both a parsed log timestamp and a known video
  * position (see [CaptureSyncSample]), using a low percentile of (videoMs - logTimeMs) rather than
  * the raw minimum (see [ANCHOR_OFFSET_LOW_PERCENTILE]'s own doc for why). The anchor ROW is then
- * chosen among every row that has a log timestamp (not only rows with a known video position): the
- * first one, in ordinal order, whose PREDICTED video position (that row's own logTimeMs + the
- * estimated offset) actually falls inside [videoDurationMs]'s coverage — preferring an anchor near
- * the start of the video over the first ordinal that happens to have a timestamp, which may predict
- * a position before the video even starts (e.g. a log row captured before recording began). Falls
- * back to the first timestamped row, clamped into range, if no candidate's prediction lands inside
- * coverage at all.
+ * chosen among those same RECORDED rows only (both a timestamp and a video position): the first
+ * one, in ordinal order, whose PREDICTED video position (that row's own logTimeMs + the estimated
+ * offset) actually falls inside [videoDurationMs]'s coverage — preferring an anchor near the start
+ * of the video over the first recorded ordinal, which may predict a position before the video even
+ * starts. Falls back to the first recorded row, clamped into range, if no candidate's prediction
+ * lands inside coverage at all.
+ *
+ * Rows without a video position are deliberately never anchor candidates. A capture made with
+ * "include buffered/earlier device logs" starts with a large block of rows buffered on the device
+ * BEFORE recording began, and logcat's timestamps carry no date: a block from yesterday afternoon
+ * followed by today's session looks like a small backwards jump, not a midnight rollover, so the
+ * day-unrolled timeline puts the buffered rows AFTER the session's own logTimeMs. One of those rows
+ * can then "predict" a perfectly in-range video position and win a timestamp-only selection, which
+ * pins the sync to a row from another day and shifts every session row hours away from the video.
+ * A row recorded while the video was running has a host-observed video position and cannot be such
+ * a row. (The offset itself is unaffected: it already came from recorded rows only.)
  *
  * Returns null when there is nothing to anchor: no row has both a timestamp and a video position
- * (including "this export has no video at all"), or no row has a timestamp whatsoever.
+ * (including "this export has no video at all").
  */
 fun estimateCaptureSyncAnchor(samples: List<CaptureSyncSample>, videoDurationMs: Long? = null): CaptureSyncAnchor? {
-    val offsetSamples = samples.filter { it.logTimeMs != null && it.videoMs != null }
-    if (offsetSamples.isEmpty()) return null
-    val offsets = offsetSamples.map { it.videoMs!! - it.logTimeMs!! }.sorted()
+    val recorded = samples.filter { it.logTimeMs != null && it.videoMs != null }.sortedBy { it.ordinal }
+    if (recorded.isEmpty()) return null
+    val offsets = recorded.map { it.videoMs!! - it.logTimeMs!! }.sorted()
     val chosenOffsetMs = lowPercentile(offsets, ANCHOR_OFFSET_LOW_PERCENTILE)
 
-    val candidates = samples.filter { it.logTimeMs != null }.sortedBy { it.ordinal }
-    if (candidates.isEmpty()) return null
-    val preferred = candidates.firstOrNull { candidate ->
+    val preferred = recorded.firstOrNull { candidate ->
         val predicted = candidate.logTimeMs!! + chosenOffsetMs
         predicted in 0..(videoDurationMs ?: Long.MAX_VALUE)
     }
-    val chosen = preferred ?: candidates.first()
+    val chosen = preferred ?: recorded.first()
     val predicted = (chosen.logTimeMs!! + chosenOffsetMs)
         .coerceAtLeast(0L)
         .let { if (videoDurationMs != null) it.coerceAtMost(videoDurationMs) else it }

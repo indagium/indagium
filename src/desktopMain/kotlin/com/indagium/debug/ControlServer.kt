@@ -1543,7 +1543,8 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "recordVideo" to "Override this one launch's video recording without changing the saved capture settings. " +
                     "Defaults to the configured setting.",
                 "includeEarlierDeviceLogs" to "Override this one launch's inclusion of log lines already buffered on the " +
-                    "device before capture started, without changing the saved capture settings.",
+                    "device before capture started, without changing the saved capture settings. Defaults to the configured " +
+                    "setting, which is off unless the user enabled it.",
             ),
         ),
     ),
