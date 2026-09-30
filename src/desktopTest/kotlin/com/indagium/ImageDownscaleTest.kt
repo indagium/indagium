@@ -27,8 +27,8 @@ class ImageDownscaleTest {
         const val COLOR_MOD = 255
     }
 
-    private fun syntheticPngBytes(width: Int, height: Int): ByteArray {
-        val img = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+    private fun syntheticPngBytes(width: Int, height: Int, type: Int = BufferedImage.TYPE_INT_RGB): ByteArray {
+        val img = BufferedImage(width, height, type)
         val g = img.createGraphics()
         for (x in 0 until width step STRIPE_WIDTH) {
             g.color = Color((x * RED_MULTIPLIER) % COLOR_MOD, (x * GREEN_MULTIPLIER) % COLOR_MOD, (x * BLUE_MULTIPLIER) % COLOR_MOD)
@@ -69,6 +69,23 @@ class ImageDownscaleTest {
     fun returnsNullForBytesThatAreNotAnImageAtAll() {
         val garbage = byteArrayOf(1, 2, 3, 4, 5)
         assertNull(downscaleAndEncodeJpeg(garbage))
+    }
+
+    // Regression test for the capture-screenshot "could not add it to Notes" bug: an Android
+    // screencap decodes as ARGB/TYPE_4BYTE_ABGR (confirmed against a real emulator capture, which
+    // came back as 8-bit RGBA), and JPEG has no alpha channel — an ImageIO JPEG writer given that
+    // BufferedImage type directly returns false/throws rather than encoding. This must still
+    // succeed because downscaleAndEncodeJpeg flattens to opaque RGB (see ImageDownscale.kt's
+    // toOpaqueRgb) before it ever reaches the JPEG encoder.
+    @Test
+    fun encodesAnArgbSourceWithAnAlphaChannel() {
+        val argb = syntheticPngBytes(1920, 1080, BufferedImage.TYPE_INT_ARGB)
+        val encoded = downscaleAndEncodeJpeg(argb)
+
+        assertTrue(encoded != null, "an ARGB source must still encode — JPEG has no alpha channel, so the alpha must be flattened away, not fail the encode")
+        requireNotNull(encoded)
+        val decoded = ImageIO.read(ByteArrayInputStream(encoded))
+        assertTrue(decoded != null, "the encoded output must itself be a valid, decodable JPEG")
     }
 
     @Test

@@ -4,7 +4,7 @@ Indagium includes third-party components. Their licenses apply to those componen
 
 | Component | License |
 | --- | --- |
-| Kotlin, JetBrains Compose, AndroidX, Ktor, kotlinx libraries, Skiko, Apache Commons Compress, Jansi, and Multiplatform Markdown Renderer | Apache License 2.0 |
+| Kotlin, JetBrains Compose, AndroidX, Ktor, kotlinx libraries, Skiko, Apache Commons Compress, Jansi, Multiplatform Markdown Renderer, and ZXing | Apache License 2.0 |
 | Model Context Protocol Kotlin SDK and SLF4J | MIT License |
 | XZ for Java 1.10 | 0BSD License |
 

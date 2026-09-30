@@ -16,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.CallMerge
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.FormatColorFill
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.PlayArrow
 import androidx.compose.material.icons.outlined.Schema
@@ -45,9 +46,7 @@ import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.*
 import com.indagium.source.SourceCodeView
@@ -64,6 +63,43 @@ import kotlin.math.roundToInt
 
 /** The popup is bounded visually, but every retained path stays reachable by scrolling. */
 internal fun recentFilesForMenu(recentFiles: List<String>): List<String> = recentFiles
+
+// Grouped out of appHasNativeMirrorOccludingOverlay to keep it under detekt's cyclomatic-
+// complexity threshold; the grouping is cosmetic only — every flag below still contributes to
+// the same OR chain, evaluated in the same order group-by-group.
+private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
+    state.ctx != null || state.tabCtx != null || state.addAnnRequest != null ||
+        state.pendingZipPicker != null || state.pendingFolderPicker != null ||
+        state.sourceCodeView != null || state.caseLibraryTabId != null ||
+        state.customCommandEditorTarget != null || state.sourceFolderInfoEditorTarget != null ||
+        state.recentNotesMenuOpen || (state.recentMenuOpen && state.recentFiles.isNotEmpty())
+
+// Import review rows show this many importer notes, then "+N more".
+private const val IMPORT_ROW_NOTES_SHOWN = 3
+private const val IMPORT_TARGET_NAME_MAX = 28
+
+private fun appHasOpenFilterDialog(state: AppState): Boolean =
+    state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingClearFilterTabId != null ||
+        state.pendingTagPrefixConflict != null || state.pendingDeleteFilterId != null ||
+        state.pendingDeleteSavedFilterFolderId != null || state.pendingFilterRename != null ||
+        state.filterExportDialogOpen || state.mergeTabsDialogOpen || state.pendingSplitPrompt != null
+
+private fun appHasOpenLogOrNoteDialog(state: AppState): Boolean =
+    state.pendingNoteOverwrite != null || state.pendingLogRelink != null || state.pendingDiagramNotice != null ||
+        state.pendingImportReview != null || state.importError != null || state.workspaceProfileError != null ||
+        state.openError != null ||
+        state.retraceDialogState != null
+
+private fun appHasOpenAppLevelDialog(state: AppState): Boolean =
+    state.isLoading || state.settingsOpen || state.licenseAgreementOpen || state.needsLicenseAcceptance ||
+        state.externalDeviceAiApprovals.isNotEmpty() || state.supportDialogOpen || state.setupAssistantOpen ||
+        state.updateDialogVisible || state.cacheClearConfirmOpen ||
+        state.resetAppDataConfirmOpen || state.shortcutsOpen || state.mcpInfoOpen
+
+/** Root-owned overlays can cover the embedded mirror's elevated native layer. */
+internal fun appHasNativeMirrorOccludingOverlay(state: AppState): Boolean =
+    appHasOpenContextMenuOrPicker(state) || appHasOpenFilterDialog(state) ||
+        appHasOpenLogOrNoteDialog(state) || appHasOpenAppLevelDialog(state)
 
 /**
  * Files dropped by Linux file managers are not consistently exposed through AWT's
@@ -132,7 +168,13 @@ internal fun raiseWindowForIncomingDrag(window: java.awt.Window?) {
 
 @Composable
 fun App(
-    state: AppState = remember { AppState(restoreOnCreate = true, filterBackupsDir = DesktopStorage.filterBackupsDir()) },
+    state: AppState = remember {
+        AppState(
+            restoreOnCreate = true,
+            filterBackupsDir = DesktopStorage.filterBackupsDir(),
+            platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
+        )
+    },
     onLicenseDeclined: () -> Unit = {},
     onResetAppData: () -> Unit = {},
     // Null in tests (no real AWT window there) and unused on macOS/Windows — see
@@ -170,8 +212,14 @@ fun App(
         LocalDensity provides scaledDensity,
         LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
         LocalTextContextMenu provides IndagiumTextContextMenu,
+        LocalMirrorOverlayAppState provides state,
     ) {
         val tc = tc()
+        val nativeMirrorOccluded = appHasNativeMirrorOccludingOverlay(state)
+        DisposableEffect(state, nativeMirrorOccluded) {
+            state.setEmbeddedMirrorGlobalOverlayOccluded("app-root-overlays", nativeMirrorOccluded)
+            onDispose { state.setEmbeddedMirrorGlobalOverlayOccluded("app-root-overlays", false) }
+        }
         // PERF-4: keyed on each tab's persistedSnapshot() (id/filename/sourcePath/filter/
         // annotations/showAnnMd/showUnfiltered/expanded/manualBlocks/archiveCandidate — exactly
         // what tabToken() serializes), not on state.tabs itself. state.tabs changes identity on
@@ -210,6 +258,13 @@ fun App(
         }
         LaunchedEffect(state) {
             state.startPendingRestoredTabLoads()
+        }
+        // Auto-opens the home tab whenever there is nothing else to show: start-up with nothing
+        // restored, or the last tab/diagram just closed. Lives here, not inside AppState.init or
+        // closeTabsById, deliberately — see ensureHomeTab's own KDoc for why. isLoading gates a
+        // command-line file argument still being parsed, so home never flashes open underneath it.
+        LaunchedEffect(state.tabs.isEmpty(), state.seq3Sessions.sessions.isEmpty(), state.isLoading) {
+            state.ensureHomeTab()
         }
         val dropTarget = remember(state, window) {
             object : DragAndDropTarget {
@@ -260,7 +315,7 @@ fun App(
                         ev = ev,
                         state = state,
                         onFocusPanel = { panel -> state.keyboardFocusVisible = true; pendingPanelFocus = panel },
-                        onFocusFilterSearch = {
+                        onFocusFilterSearch = { scope ->
                             state.keyboardFocusVisible = true
                             // Settings.ctrlFTarget (FIND_BAR by default) routes Ctrl/Cmd+F to the
                             // non-destructive in-view Find bar instead of focusing a filter input —
@@ -269,8 +324,9 @@ fun App(
                             // exactly the pre-existing filter-focus path below. openUnfilteredOnCtrlF
                             // applies to BOTH branches now — it means "Ctrl+F reveals the Original
                             // split", independent of which of the two things Ctrl+F then does with
-                            // that revealed panel.
-                            if (state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
+                            // that revealed panel. Ctrl/Cmd+Alt+F (scope UNFILTERED) is always the
+                            // Find bar, whatever ctrlFTarget says: it exists to search all lines.
+                            if (scope == SearchScope.UNFILTERED || state.settings.ctrlFTarget == CtrlFTarget.FIND_BAR) {
                                 // Single-tab mode only: ensureActiveTabUnfiltered operates on
                                 // activeTabId, and compare mode has no Original/Filtered split to
                                 // reveal in the first place (its left/right panels are two whole
@@ -303,7 +359,7 @@ fun App(
                                 } else {
                                     state.activeTab()?.id
                                 }
-                                targetTabId?.let { tabId -> state.openSearch(tabId) }
+                                targetTabId?.let { tabId -> state.openSearch(tabId, scope) }
                             } else {
                                 if (state.settings.openUnfilteredOnCtrlF) state.ensureActiveTabUnfiltered()
                                 state.updateFilterVisible(true)
@@ -326,10 +382,13 @@ fun App(
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
                 when {
+                    // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
+                    // is nothing else to show, so this only ever paints for the one frame between
+                    // that condition becoming true and the LaunchedEffect below reacting to it —
+                    // an empty Box, not the old static text, since the text would otherwise flash
+                    // and immediately be replaced by the home tab.
                     state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
-                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            AppText("No files open — click Open to add a log", color = tc.ts, fontSize = 14.sp)
-                        }
+                        Box(Modifier.fillMaxSize())
 
                     // Keyed on the session id — matching the log path's key(activeTab.id) just
                     // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
@@ -337,6 +396,16 @@ fun App(
                     // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
                     activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
                         Seq3Workspace(state, activeSurface.sessionId)
+                    }
+                    // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
+                    // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
+                    // (step 7), this is the only place that still knows about the home tab at all.
+                    activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
+                        HomeScreen(
+                            state = state,
+                            tab = activeTab,
+                            onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                        )
                     }
                     state.compareMode -> CompareView(
                         state = state,
@@ -361,6 +430,10 @@ fun App(
                     }
                 }
             }
+
+            // This belongs above FileView's active-tab key: a detached mirror owns the one native
+            // Canvas while the user moves through other tabs or hides the sidebar.
+            DetachedEmbeddedMirrorWindows(state)
 
             // ── Loading overlay ───────────────────────────────────────
             if (state.isLoading) {
@@ -569,6 +642,11 @@ fun App(
                                     preferPickerLeft = submenuOpensLeft,
                                 ),
                             )
+                            add(
+                                CtxMenuEntry.Action(Icons.Outlined.FormatColorFill, "Highlight lines with this tag") {
+                                    state.addHlTagFromCtx(wholeLine = true)
+                                },
+                            )
                             add(CtxMenuEntry.Divider)
                             // Sequence actions — own block, "Add as sequence" pulled out of the
                             // highlight block above to sit next to the rest of the sequence
@@ -719,7 +797,7 @@ fun App(
                                                 videoController?.let { vc -> state.setVideoAnchor(ctxTab.id, vc.positionMs, entry.id) }
                                                 state.ctx = null
                                             },
-                                            showEnabled = attachedVideo.anchor != null && hasValidMappedPosition,
+                                            showEnabled = hasValidMappedPosition,
                                             onShow = {
                                                 mappedMs?.takeIf { state.isVideoPositionValid(ctxTab, it) }?.let { ms -> videoController?.seek(ms) }
                                                 state.ctx = null
@@ -959,10 +1037,15 @@ fun App(
                         // offer an action startTailing would silently no-op on. DLT additionally
                         // uses framed binary records, so its authoritative format must disable
                         // the menu action even when the source itself is a real plain file.
-                        val canTail = remember(ttab.sourcePath, ttab.logFormat) {
+                        // A capture tab's sourcePath IS a real, currently-existing plain file, so
+                        // it would otherwise pass every check above — but its tailing is driven by
+                        // the recording itself, not the user. Offering "Stop Live Watching" here
+                        // would freeze the live view while the recorder kept appending underneath
+                        // it, silently desyncing the view from what's actually being recorded.
+                        val canTail = remember(ttab.sourcePath, ttab.logFormat, ttab.captureSessionId) {
                             val p = ttab.sourcePath
-                            ttab.logFormat != LogFormat.DLT && p != null && '!' !in p && File(p).isFile &&
-                                detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
+                            ttab.logFormat != LogFormat.DLT && ttab.captureSessionId == null && p != null && '!' !in p &&
+                                File(p).isFile && detectArchiveFormat(File(p)) == ArchiveFormat.None && !isUtf16LogFile(File(p))
                         }
                         val canSplit = remember(ttab.sourcePath) {
                             ttab.sourcePath?.let { state.splitSourceForPath(it) } != null
@@ -1388,6 +1471,62 @@ fun App(
                 }
             }
 
+            // Phase 4 (snapshot archive + import) — see AppState.offerCaptureNotesReimportIfNeeded /
+            // PendingCaptureNotesImport's own doc for exactly when this can appear: reopening or
+            // redropping an archive whose tab is already open AND already has its own notes.
+            // Dropping a zip always opens a brand-new tab, which never reaches this dialog.
+            state.pendingCaptureNotesImport?.let { pending ->
+                Dialog(
+                    onDismissRequest = { state.dismissCaptureNotesImport() },
+                    properties = DialogProperties(dismissOnClickOutside = false),
+                ) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText(
+                            "This snapshot has notes too",
+                            color = tc2.tx,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        AppText(
+                            "\"${pending.archiveName}\" carries its own notes, and this tab already has some. " +
+                                "Nothing is being changed while this is open — choose how to proceed.",
+                            color = tc2.td,
+                            fontSize = 11.sp,
+                            maxLines = 5,
+                        )
+                        Spacer(Modifier.height(14.dp))
+                        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton("Append", active = true) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.APPEND)
+                                }
+                                DialogActionButton("Replace", active = true, danger = true) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.REPLACE)
+                                }
+                            }
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                DialogActionButton("Skip", active = false) {
+                                    state.resolveCaptureNotesImport(com.indagium.capture.CaptureNotesImportAction.SKIP)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             state.pendingFilterLoad?.takeIf { state.updateExistingPickerOpen }?.let { pending ->
                 val target = state.savedFilters.find { it.id == pending.targetFilterId }
                 Dialog(onDismissRequest = { state.cancelUpdateExistingPick() }) {
@@ -1790,6 +1929,24 @@ fun App(
                             fontSize = 11.sp,
                             maxLines = 2,
                         )
+                        review.notes.forEach { note ->
+                            Spacer(Modifier.height(4.dp))
+                            AppText(note, color = tc2.td, fontSize = 10.sp, maxLines = 3)
+                        }
+                        val addMode = review.mode == ImportReviewMode.ADD_TO_CURRENT
+                        if (state.canAddImportToCurrentFilter()) {
+                            Spacer(Modifier.height(8.dp))
+                            val targetName = state.tab(state.activeTabId)?.filename?.ifBlank { null }?.take(IMPORT_TARGET_NAME_MAX) ?: "current tab"
+                            SegmentedControl(
+                                options = listOf("Save as saved filters", "Add to current filter ($targetName)"),
+                                selectedIndices = setOf(if (addMode) 1 else 0),
+                                onToggle = { state.setImportReviewMode(if (it == 1) ImportReviewMode.ADD_TO_CURRENT else ImportReviewMode.SAVE_FILTERS) },
+                                modifier = Modifier.fillMaxWidth(),
+                                fillWidth = true,
+                                weightByLabel = true,
+                                segmentFontSize = 11.sp,
+                            )
+                        }
                         Spacer(Modifier.height(8.dp))
                         val folderNameFor: (String?) -> String = { folderId ->
                             folderId?.let { id ->
@@ -1798,7 +1955,10 @@ fun App(
                             } ?: "Ungrouped"
                         }
                         val toggleableIds: (List<ImportFilterReviewRow>) -> Set<String> = { rows ->
-                            rows.filter { it.skippedReason == null }.map { it.rowId }.toSet()
+                            rows.filter { if (addMode) it.hasHighlighters() else it.skippedReason == null }.map { it.rowId }.toSet()
+                        }
+                        val rowChecked: (ImportFilterReviewRow) -> Boolean = { row ->
+                            if (addMode) row.rowId in review.highlightRowIds else row.action != ImportFilterAction.SKIP
                         }
                         val grouped = review.rows.groupBy { folderNameFor(it.incoming.folderId) }.toList()
                             .sortedWith(compareBy { (name, _) -> name == "Ungrouped" })
@@ -1828,7 +1988,7 @@ fun App(
                                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                     val groupToggleableIds = toggleableIds(rowsInFolder)
                                     val allChecked = groupToggleableIds.isNotEmpty() &&
-                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all { it.action != ImportFilterAction.SKIP }
+                                        rowsInFolder.filter { it.rowId in groupToggleableIds }.all(rowChecked)
                                     Row(
                                         Modifier.fillMaxWidth(),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -1855,9 +2015,9 @@ fun App(
                                                 verticalAlignment = Alignment.CenterVertically,
                                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                                             ) {
-                                                if (row.skippedReason == null) {
+                                                if (row.rowId in allToggleableIds) {
                                                     Checkbox(
-                                                        checked = row.action != ImportFilterAction.SKIP,
+                                                        checked = rowChecked(row),
                                                         onCheckedChange = { state.setImportRowsChecked(setOf(row.rowId), it) },
                                                         colors = CheckboxDefaults.colors(
                                                             checkedColor = tc2.ac,
@@ -1875,18 +2035,35 @@ fun App(
                                                     overflow = TextOverflow.Ellipsis,
                                                 )
                                                 AppText(
-                                                    when (row.action) {
-                                                        ImportFilterAction.ADD -> "add"
-                                                        ImportFilterAction.RENAME -> "rename"
-                                                        ImportFilterAction.REPLACE -> "replace"
-                                                        ImportFilterAction.SKIP -> "skip"
+                                                    if (addMode) {
+                                                        if (rowChecked(row)) "add" else "skip"
+                                                    } else {
+                                                        when (row.action) {
+                                                            ImportFilterAction.ADD -> "add"
+                                                            ImportFilterAction.RENAME -> "rename"
+                                                            ImportFilterAction.REPLACE -> "replace"
+                                                            ImportFilterAction.SKIP -> "skip"
+                                                        }
                                                     },
-                                                    color = if (row.action == ImportFilterAction.SKIP) tc2.td else tc2.ac,
+                                                    color = if (rowChecked(row)) tc2.ac else tc2.td,
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.SemiBold,
                                                 )
                                             }
-                                            if (row.action == ImportFilterAction.RENAME) {
+                                            if (addMode) {
+                                                AppText(
+                                                    if (!row.hasHighlighters()) {
+                                                        row.skippedReason?.let { "Skipped: $it" } ?: "No highlighters."
+                                                    } else if (rowChecked(row)) {
+                                                        "Adds ${row.incoming.highlighters.size} highlighter(s)."
+                                                    } else {
+                                                        "Not added."
+                                                    },
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 2,
+                                                )
+                                            } else if (row.action == ImportFilterAction.RENAME) {
                                                 InlineField(
                                                     row.resolvedName,
                                                     { state.setImportFilterRename(row.rowId, it) },
@@ -1906,7 +2083,18 @@ fun App(
                                                     maxLines = 2,
                                                 )
                                             }
-                                            if (row.targetId != null && row.skippedReason == null) {
+                                            row.notes.take(IMPORT_ROW_NOTES_SHOWN).forEach { note ->
+                                                AppText(note, color = tc2.td, fontSize = 10.sp, maxLines = 3)
+                                            }
+                                            if (row.notes.size > IMPORT_ROW_NOTES_SHOWN) {
+                                                AppText(
+                                                    "+${row.notes.size - IMPORT_ROW_NOTES_SHOWN} more",
+                                                    color = tc2.td,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                )
+                                            }
+                                            if (!addMode && row.targetId != null && row.skippedReason == null) {
                                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                                     AppButton("Rename", onClick = {
                                                         state.setImportFilterAction(row.rowId, ImportFilterAction.RENAME)
@@ -1938,7 +2126,7 @@ fun App(
                             horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            DialogActionButton("Import", active = true) { state.confirmImportFilters() }
+                            DialogActionButton(if (addMode) "Add highlighters" else "Import", active = true) { state.confirmImportFilters() }
                             DialogActionButton("Cancel", active = false) { state.cancelImportFilters() }
                         }
                     }
@@ -1958,6 +2146,24 @@ fun App(
                         Spacer(Modifier.height(14.dp))
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                             DialogActionButton("OK", active = true) { state.importError = null }
+                        }
+                    }
+                }
+            }
+
+            state.workspaceProfileError?.let { message ->
+                Dialog(onDismissRequest = { state.workspaceProfileError = null }) {
+                    val tc2 = tc()
+                    Column(
+                        Modifier.width(400.dp).background(tc2.p, RoundedCornerShape(8.dp))
+                            .border(1.dp, tc2.br, RoundedCornerShape(8.dp)).padding(20.dp),
+                    ) {
+                        AppText("Workspace profile", color = tc2.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        AppText(message, color = tc2.td, fontSize = 11.sp, maxLines = 4)
+                        Spacer(Modifier.height(14.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                            DialogActionButton("OK", active = true) { state.workspaceProfileError = null }
                         }
                     }
                 }
@@ -2219,7 +2425,20 @@ fun App(
                 )
             }
 
-            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible) {
+            // The setup assistant waits behind the license and update dialogs; the support popup
+            // in turn waits for the assistant so a first run isn't greeted by two dialogs at once.
+            if (state.setupAssistantOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible) {
+                Dialog(
+                    onDismissRequest = { state.skipSetupAssistant() },
+                    properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
+                ) {
+                    SetupAssistantDialog(state)
+                }
+            }
+
+            if (state.supportDialogOpen && !state.needsLicenseAcceptance && !state.updateDialogVisible &&
+                !state.setupAssistantOpen
+            ) {
                 SupportDialog(state)
             }
 
@@ -2367,6 +2586,57 @@ fun App(
                     SourceFolderInfoDialog(state = state, path = path) { state.sourceFolderInfoEditorTarget = null }
                 }
             }
+
+            state.externalDeviceAiApprovals.firstOrNull()?.let { approval ->
+                var answered by remember(approval.requestId) { mutableStateOf(false) }
+                Dialog(onDismissRequest = {
+                    if (!answered) {
+                        answered = true
+                        state.resolveExternalDeviceAiApproval(approval.requestId, false)
+                    }
+                }) {
+                    val colors = tc()
+                    Column(
+                        Modifier.widthIn(min = 360.dp, max = 500.dp)
+                            .background(colors.p, RoundedCornerShape(10.dp))
+                            .border(1.dp, colors.br, RoundedCornerShape(10.dp))
+                            .padding(22.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        AppText("Allow device access?", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                        AppText(
+                            "${approval.clientName} wants to view and control ${approval.deviceLabel}. " +
+                                "Screen images may be sent to the connected AI provider. This approval lasts for this MCP session.",
+                            color = colors.td,
+                            fontSize = 12.sp,
+                            maxLines = 6,
+                        )
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                            AppButton(
+                                "Deny",
+                                onClick = {
+                                    if (!answered) {
+                                        answered = true
+                                        state.resolveExternalDeviceAiApproval(approval.requestId, false)
+                                    }
+                                },
+                                enabled = !answered,
+                            )
+                            AppButton(
+                                "Allow for this session",
+                                onClick = {
+                                    if (!answered) {
+                                        answered = true
+                                        state.resolveExternalDeviceAiApproval(approval.requestId, true)
+                                    }
+                                },
+                                variant = ButtonVariant.Primary,
+                                enabled = !answered,
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -2466,7 +2736,7 @@ private fun handleGlobalKey(
     ev: KeyEvent,
     state: AppState,
     onFocusPanel: (KeyboardPanel) -> Unit,
-    onFocusFilterSearch: () -> Unit,
+    onFocusFilterSearch: (SearchScope) -> Unit,
 ): Boolean {
     if (ev.type != KeyEventType.KeyDown) return false
     if (ev.isCtrlPressed && ev.key == Key.Tab) {
@@ -2481,7 +2751,8 @@ private fun handleGlobalKey(
         // Corpus-wide, not tab-scoped like AnnotationPanel's own plain ⌘O ("Open Note") — a
         // distinct chord so the two never collide (checked against Shortcuts.kt's whole catalogue).
         ev.isShiftPressed && ev.key == Key.O  -> { state.activeTab()?.id?.let(state::openCaseLibrary); true }
-        ev.key == Key.F                      -> { onFocusFilterSearch(); true }
+        ev.isAltPressed && ev.key == Key.F   -> { onFocusFilterSearch(SearchScope.UNFILTERED); true }
+        ev.key == Key.F                      -> { onFocusFilterSearch(SearchScope.FILTERED); true }
         ev.key == Key.One                    -> { state.updateFilterVisible(true); onFocusPanel(KeyboardPanel.FILTERS); true }
         ev.key == Key.Two                    -> { onFocusPanel(KeyboardPanel.LOG_VIEW); true }
         ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }

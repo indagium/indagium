@@ -5,7 +5,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 
 /**
- * The three JNI symbols in `native/macos/indagium_speech.m` are matched by string at runtime —
+ * The JNI symbols in `native/macos/indagium_speech.m` are matched by string at runtime —
  * no compiler checks them. If the Kotlin package/class ever moves without updating the native
  * file in lockstep, `System.load()` still succeeds (the dylib is fine) and the
  * `UnsatisfiedLinkError` fires later, uncaught, on the first `nativeEnsureReady` call: macOS
@@ -24,6 +24,7 @@ class AppleSpeechNativeJniSymbolsTest {
             "${expectedPrefix}_nativeEnsureReady",
             "${expectedPrefix}_nativeAvailabilityMessage",
             "${expectedPrefix}_nativeTranscribe",
+            "${expectedPrefix}_nativeMicrophoneAccessDenied",
         ).forEach { symbol -> assertContains(nativeSource, symbol) }
     }
 }

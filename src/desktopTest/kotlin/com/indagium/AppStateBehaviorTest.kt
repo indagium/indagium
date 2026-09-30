@@ -17,6 +17,7 @@ import com.indagium.model.CustomIssueRule
 import com.indagium.model.DEFAULT_KEYWORD_HIGHLIGHT_COLOR
 import com.indagium.model.Filter
 import com.indagium.model.FilterMode
+import com.indagium.model.HighlightTarget
 import com.indagium.model.Highlighter
 import com.indagium.model.IssueCategorySelection
 import com.indagium.model.LogAnalysis
@@ -29,6 +30,7 @@ import com.indagium.model.MIN_INTERFACE_SCALE_PERCENT
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
 import com.indagium.model.ProcessNameMode
+import com.indagium.model.SearchScope
 import com.indagium.model.SequenceDef
 import com.indagium.model.SourceFolderInfo
 import com.indagium.model.SourceLogConfiguration
@@ -41,6 +43,7 @@ import com.indagium.ui.DesktopStorage
 import com.indagium.ui.FilterSearchRequest
 import com.indagium.ui.HL_COLORS
 import com.indagium.ui.ImportFilterAction
+import com.indagium.ui.ImportReviewMode
 import com.indagium.ui.ManualCollapseAvailability
 import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SettingsSection
@@ -89,6 +92,7 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -105,6 +109,10 @@ import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AppStateBehaviorTest {
+    // Stays true even after AppState.ensureHomeTab was added (see the tests further down): that
+    // auto-open is driven from App.kt's own LaunchedEffect, deliberately NOT from AppState.init,
+    // precisely so a bare AppState() — the fixture hundreds of tests in this file build on — stays
+    // exactly this empty.
     @Test
     fun startsWithNoOpenTabs() {
         val state = AppState()
@@ -128,6 +136,102 @@ class AppStateBehaviorTest {
         assertEquals(null, state.activeTab())
         assertEquals("", state.activeTabId)
         assertEquals("", state.compareTabId)
+    }
+
+    // ── Home tab (ui/HomeScreen.kt) ─────────────────────────────────────
+
+    @Test
+    fun ensureHomeTabOpensWhenNothingIsOpen() {
+        val state = AppState()
+        assertTrue(state.tabs.isEmpty())
+
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertTrue(requireNotNull(state.activeTab()).isCaptureLauncher)
+    }
+
+    @Test
+    fun ensureHomeTabIsANoOpWithATabOpen() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("log", "test.log", emptyList()))
+        state.activeTabId = "log"
+
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertEquals("log", state.activeTab()?.id)
+    }
+
+    @Test
+    fun ensureHomeTabIsIdempotent() {
+        val state = AppState()
+
+        state.ensureHomeTab()
+        val firstHomeTabId = requireNotNull(state.activeTab()).id
+        state.ensureHomeTab()
+
+        assertEquals(1, state.tabs.size)
+        assertEquals(firstHomeTabId, requireNotNull(state.activeTab()).id)
+    }
+
+    @Test
+    fun openHomeTabFocusesTheExistingHomeTabInsteadOfCreatingAnother() {
+        val state = AppState()
+
+        state.openHomeTab()
+        val firstHomeTabId = requireNotNull(state.activeTab()).id
+        state.tabs += mkTab("log", "test.log", emptyList())
+        state.activeTabId = "log"
+
+        state.openHomeTab()
+
+        assertEquals(2, state.tabs.size)
+        assertEquals(firstHomeTabId, state.activeTabId)
+    }
+
+    @Test
+    fun openNoteFileInNewTabCreatesLoglessTabAndLeavesHomeTabUntouched() {
+        val state = AppState(
+            autosaveFile = Files.createTempFile("home-tab-notes", ".json").toFile(),
+            autoExportNotes = false,
+        )
+        try {
+            state.openHomeTab()
+            val homeTabId = requireNotNull(state.activeTab()).id
+
+            val noteFile = Files.createTempFile("home-tab-note", ".ann").toFile()
+            val newTabId = requireNotNull(state.openNoteFileInNewTab(noteFile))
+
+            assertEquals(2, state.tabs.size)
+            val newTab = requireNotNull(state.tab(newTabId))
+            assertTrue(newTab.logData.isEmpty())
+            assertFalse(newTab.isCaptureLauncher)
+
+            val home = requireNotNull(state.tab(homeTabId))
+            assertTrue(home.isCaptureLauncher)
+        } finally {
+            state.close()
+        }
+    }
+
+    // canCompare's own doc explains why: an always-present home tab (see ensureHomeTab) has no log
+    // content to compare, so it must never itself count toward, or be selectable as, a compare pane.
+    @Test
+    fun homeTabDoesNotEnableCanCompare() {
+        val state = AppState()
+        state.openHomeTab()
+        val homeTabId = requireNotNull(state.activeTab()).id
+
+        assertFalse(state.canCompare)
+
+        state.tabs += mkTab("log", "test.log", emptyList())
+        assertFalse(state.canCompare, "one real log tab plus the ever-present home tab must not enable Compare")
+
+        state.tabs += mkTab("log2", "test2.log", emptyList())
+        assertTrue(state.canCompare)
+
+        assertTrue(requireNotNull(state.tab(homeTabId)).isCaptureLauncher)
     }
 
     @Test
@@ -1038,6 +1142,210 @@ class AppStateBehaviorTest {
         assertEquals("filters.json", target.pendingImportReview?.sourceName)
         target.confirmImportFilters()
         assertEquals("dropped", target.savedFilters.single().name)
+    }
+
+    @Test
+    fun droppedKloggConfGivesOneReviewRowPerSet() {
+        val dir = createTempDirectory("openlog-klogg").toFile()
+        val file = File(dir, "klogg.conf").apply { writeText(KloggFixtures.V2) }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(file))
+
+        val review = target.pendingImportReview!!
+        assertEquals("klogg.conf", review.sourceName)
+        assertEquals(listOf("Errors", "Broken", "Defaults"), review.rows.map { it.incoming.name })
+        assertEquals("no valid highlighters", review.rows[1].skippedReason)
+        assertTrue("active in klogg" in review.rows[0].notes)
+        assertNull(target.importError)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("Errors", "Defaults"), target.savedFilters.map { it.name })
+        val errors = target.savedFilters.first().highlighters
+        assertEquals(listOf("ERROR (\\d+)", "timeout"), errors.map { it.pattern })
+        assertTrue(errors.all { it.textColor != null && it.captureGroupsOnly })
+
+        // importing it again shows every importable set as identical
+        target.importFiltersFromFiles(listOf(file))
+        assertEquals(listOf("identical", "no valid highlighters", "identical"), target.pendingImportReview!!.rows.map { it.skippedReason })
+    }
+
+    @Test
+    fun theImportButtonPathReadsAKloggConfToo() {
+        val dir = createTempDirectory("openlog-klogg").toFile()
+        val file = File(dir, "old_glogg.ini").apply { writeText(KloggFixtures.LEGACY) }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFile(file)
+
+        assertEquals(listOf("old_glogg"), target.pendingImportReview!!.rows.map { it.incoming.name })
+    }
+
+    private fun stateWithTab(): AppState = AppState(File(createTempDirectory("openlog-hlimport").toFile(), "s.cache")).also { it.addTab() }
+
+    @Test
+    fun importReviewDefaultsToAddingToTheCurrentFilterOnlyForKlogg() {
+        val withTab = stateWithTab()
+        withTab.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        assertEquals(ImportReviewMode.ADD_TO_CURRENT, withTab.pendingImportReview!!.mode)
+        assertTrue(withTab.canAddImportToCurrentFilter())
+
+        val source = stateWithTab()
+        source.addHl(source.tabs.single().id, "abc", false, Color.Red)
+        source.saveFilter(source.tabs.single().id, "mine")
+        val json = source.exportFilters()
+        val other = stateWithTab()
+        other.beginImportFilters(json, "filters.json")
+        assertEquals(ImportReviewMode.SAVE_FILTERS, other.pendingImportReview!!.mode)
+        assertTrue(other.canAddImportToCurrentFilter())
+
+        val noTab = AppState(File(createTempDirectory("openlog-hlimport").toFile(), "n.cache"))
+        noTab.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        assertEquals(ImportReviewMode.SAVE_FILTERS, noTab.pendingImportReview!!.mode)
+        assertFalse(noTab.canAddImportToCurrentFilter())
+        noTab.setImportReviewMode(ImportReviewMode.ADD_TO_CURRENT)
+        assertEquals(ImportReviewMode.SAVE_FILTERS, noTab.pendingImportReview!!.mode)
+    }
+
+    @Test
+    fun confirmingInAddModeAppendsKloggHighlightersAndTouchesNothingElse() {
+        val target = stateWithTab()
+        val tabId = target.tabs.single().id
+        target.addPkgPrefix(tabId, "com.keep")
+        target.toggleLevel(tabId, LogLevel.D)
+        target.addHl(tabId, "existing", false, Color.Green)
+        val before = target.tabs.single().filter
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+
+        assertNull(target.pendingImportReview)
+        assertTrue(target.savedFilters.isEmpty())
+        val after = target.tabs.single().filter
+        assertEquals(before.copy(highlighters = emptyList()), after.copy(highlighters = emptyList()))
+        assertEquals(listOf("existing", "ERROR (\\d+)", "timeout", "foo"), after.highlighters.map { it.pattern })
+        val imported = after.highlighters.drop(1)
+        val errorHl = imported.first()
+        assertEquals(Color.White, errorHl.textColor)
+        assertEquals(Color(0xFFCC0000.toInt()), errorHl.color)
+        assertTrue(errorHl.wholeLine && errorHl.captureGroupsOnly && errorHl.regex)
+        assertEquals(20, imported[1].colorVariance)
+        assertEquals(imported.size, imported.map { it.id }.toSet().size)
+        assertTrue(imported.none { hl -> before.highlighters.any { it.id == hl.id } })
+    }
+
+    @Test
+    fun addModeSkipsShapesAlreadyOnTheTabSoReconfirmingAddsNothing() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+        val afterFirst = target.tabs.single().filter.highlighters
+        assertEquals(3, afterFirst.size)
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.confirmImportFilters()
+        assertNull(target.pendingImportReview)
+        assertNull(target.importError)
+        assertEquals(afterFirst, target.tabs.single().filter.highlighters)
+
+        // a plain highlighter with the same pattern is a different shape (no klogg text colour) and is added
+        val other = stateWithTab()
+        val otherId = other.tabs.single().id
+        other.addHl(otherId, "foo", true, Color.Red, caseSensitive = true, wholeLine = true)
+        other.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        other.confirmImportFilters()
+        assertEquals(4, other.tabs.single().filter.highlighters.size)
+    }
+
+    @Test
+    fun addModeSelectionIgnoresSavedFilterIdentityButNotMissingHighlighters() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+        target.confirmImportFilters() // saves "Errors" and "Defaults"
+
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        val review = target.pendingImportReview!!
+        assertEquals(listOf("identical", "no valid highlighters", "identical"), review.rows.map { it.skippedReason })
+        assertEquals(ImportReviewMode.ADD_TO_CURRENT, review.mode)
+        val (errors, broken, defaults) = review.rows.map { it.rowId }
+        assertEquals(setOf(errors, defaults), review.highlightRowIds)
+
+        // the unselectable row cannot be ticked, an identical one can be unticked and re-ticked
+        target.setImportRowsChecked(setOf(broken), true)
+        assertEquals(setOf(errors, defaults), target.pendingImportReview!!.highlightRowIds)
+        target.setImportRowsChecked(setOf(defaults), false)
+        assertEquals(setOf(errors), target.pendingImportReview!!.highlightRowIds)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("ERROR (\\d+)", "timeout"), target.tabs.single().filter.highlighters.map { it.pattern })
+        assertEquals(2, target.savedFilters.size)
+    }
+
+    @Test
+    fun switchingBackToSaveModeKeepsTheSavedFilterChoices() {
+        val target = stateWithTab()
+        target.beginImportFilters(KloggFixtures.V2, "klogg.conf")
+        val rows = target.pendingImportReview!!.rows
+        target.setImportRowsChecked(setOf(rows[2].rowId), false) // add mode: exclude "Defaults"
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+        // the saved-filter actions were never touched by the add-mode edit
+        assertEquals(listOf(ImportFilterAction.ADD, ImportFilterAction.SKIP, ImportFilterAction.ADD), target.pendingImportReview!!.rows.map { it.action })
+        target.setImportRowsChecked(setOf(rows[0].rowId), false)
+        target.setImportReviewMode(ImportReviewMode.ADD_TO_CURRENT)
+        assertEquals(setOf(rows[0].rowId), target.pendingImportReview!!.highlightRowIds)
+        target.setImportReviewMode(ImportReviewMode.SAVE_FILTERS)
+
+        target.confirmImportFilters()
+        assertEquals(listOf("Defaults"), target.savedFilters.map { it.name })
+        assertTrue(target.tabs.single().filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun droppedJsonFilesKeepTheirFolders() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val source = AppState(File(dir, "source.cache"))
+        source.addTab()
+        source.createSavedFilterFolder("Release")
+        source.saveFilter(source.tabs.single().id, "production", source.savedFilterFolders.single().id)
+        val file = File(dir, "filters.json").apply { writeText(source.exportFilters()) }
+
+        val target = AppState(File(dir, "target.cache"))
+        target.importFiltersFromFiles(listOf(file))
+        target.confirmImportFilters()
+
+        assertEquals(listOf("Release"), target.savedFilterFolders.map { it.name })
+        assertEquals(target.savedFilterFolders.single().id, target.savedFilters.single().folderId)
+    }
+
+    @Test
+    fun droppedFilesThatAreNotFilterFilesSetImportError() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val notes = File(dir, "notes.ini").apply { writeText("just some text\n") }
+        val bad = File(dir, "bad.json").apply { writeText("{not json") }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(notes, bad))
+
+        assertNull(target.pendingImportReview)
+        val error = target.importError!!
+        assertTrue(error.contains("notes.ini") && error.contains("bad.json"))
+    }
+
+    @Test
+    fun anUnreadableDropAlongsideAGoodOneStillStagesTheGoodOne() {
+        val dir = createTempDirectory("openlog-filters").toFile()
+        val good = File(dir, "klogg.conf").apply { writeText(KloggFixtures.LEGACY) }
+        val notes = File(dir, "notes.ini").apply { writeText("just some text\n") }
+        val target = AppState(File(dir, "target.cache"))
+
+        target.importFiltersFromFiles(listOf(good, notes))
+
+        val review = target.pendingImportReview!!
+        assertEquals(1, review.rows.size)
+        assertTrue(review.notes.any { it.startsWith("Not imported: notes.ini") })
+        // One modal only: the failure rides on the review instead of opening the error dialog too.
+        assertNull(target.importError)
     }
 
     @Test
@@ -3021,6 +3329,33 @@ class AppStateBehaviorTest {
         assertTrue(!File(notesDir, "sample_analysis_2.md").exists())
     }
 
+    // Regression for the "note file already exists" prompt firing on a note THIS session just
+    // created moments earlier: before the fix, LogTab.noteTargetName was only ever set AFTER the
+    // commit, by autoExportAnnotations running outside stateLock — leaving a window where a second
+    // upAnn call on the same tab could read the still-unpinned `current`, and later mistake this
+    // session's own about-to-exist file for a foreign collision (see upAnn's AutoExportDecision doc
+    // comment). The fix folds the pin into the SAME upTab commit as the edit that first adds blocks,
+    // so it must already be visible the instant the call that added those blocks returns.
+    @Test
+    fun firstAnnotationEditPinsNoteTargetNameInTheSameCommitAsTheEdit() {
+        val dir = createTempDirectory("openlog-atomic-pin").toFile()
+        val notesDir = File(dir, "notes")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir)
+        val sourcePath = File(dir, "sample.log").absolutePath
+        state.tabs = listOf(
+            mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(sourcePath = sourcePath),
+        )
+
+        state.addNoteBlock("log", "first note")
+
+        // The pin must already be on the committed tab the instant addNoteBlock returns — not
+        // "eventually, once autoExportAnnotations gets around to it" from some other thread.
+        assertEquals("sample_analysis.md", state.tab("log")?.noteTargetName)
+        assertEquals(null, state.pendingNoteOverwrite)
+        waitUntil { File(notesDir, "sample_analysis.md").exists() }
+    }
+
     // The reported bug this whole mechanism exists for: a fresh tab/session opens the SAME log
     // file an earlier session already analyzed and saved notes for. The sourcePath fingerprint
     // recorded in the earlier .ann sidecar matches, so the OLD collision-avoidance logic alone
@@ -3920,6 +4255,34 @@ class AppStateBehaviorTest {
         assertEquals(listOf(File(notesDir, "sample_analysis.md").absolutePath), state.recentNotes)
     }
 
+    // Section 3 (save folders): a user who never configured "Analysis artifacts folder" no longer
+    // falls back to the internal notes dir once a save root exists — notes land in <root>/analysis
+    // instead, created on first write. platformDefaultSaveRootDir is what stands in for
+    // ~/Documents/Indagium here; a bare AppState()/one that only overrides notesDir (like every
+    // test above) never resolves a save root at all and keeps the exact old fallback — see
+    // AppState.effectiveAnalysisDir's own doc.
+    @Test
+    fun autoExportUsesRootAnalysisFolderWhenARootIsConfiguredButNoAnalysisFolderIsSet() {
+        val dir = createTempDirectory("openlog-root-analysis-notes").toFile()
+        val notesDir = File(dir, "notes")
+        val saveRoot = File(dir, "my-save-root")
+        val state = AppState(File(dir, "state.cache"), notesDir = notesDir, platformDefaultSaveRootDir = saveRoot)
+        state.tabs =
+            listOf(mkTab("log", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))))
+
+        state.confirmAddAnn("log", "log", listOf(1), "save this", null)
+        val analysisDir = File(saveRoot, "analysis")
+        waitUntil {
+            File(analysisDir, "sample_analysis.md").exists() &&
+                File(analysisDir, "sample_analysis.ann").exists() &&
+                state.recentNotes.isNotEmpty()
+        }
+
+        assertTrue(File(analysisDir, "sample_analysis.ann").exists())
+        assertTrue(!notesDir.exists() || notesDir.listFiles().orEmpty().isEmpty())
+        assertEquals(listOf(File(analysisDir, "sample_analysis.md").absolutePath), state.recentNotes)
+    }
+
     @Test
     fun autoExportCanBeDisabledForPrivateLogs() {
         val dir = createTempDirectory("openlog-private").toFile()
@@ -4142,6 +4505,33 @@ class AppStateBehaviorTest {
         assertTrue(state.tabs.none { it.sourcePath == source.absolutePath })
     }
 
+    // Section 3 (save folders): confirmSplitPrompt used to write its chosen directory straight
+    // into defaultSaveDir, which would silently repoint the configured "Analysis artifacts
+    // folder" the moment a user split a log to some unrelated destination. It now remembers only
+    // lastSaveDialogDir, leaving an explicitly configured analysis folder untouched.
+    @Test
+    fun confirmingSplitRemembersLastSaveDialogDirWithoutTouchingTheConfiguredAnalysisFolder() {
+        val dir = createTempDirectory("openlog-split-no-default-save-dir").toFile()
+        val source = File(dir, "large.log").apply { writeText("one\nvery long line two\nthree\nfour\n") }
+        val configuredAnalysisDir = File(dir, "bug_analysis").apply { mkdirs() }
+        val outputDir = File(dir, "out")
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.settings = state.settings.copy(defaultSaveDir = configuredAnalysisDir.absolutePath)
+        state.requestSplitForFile(source)
+        val sourceId = state.pendingSplitPrompt!!.sources.single().id
+
+        state.confirmSplitPrompt(
+            modes = mapOf(sourceId to SplitMode.SPLIT),
+            destinationDir = outputDir,
+            postfix = "part",
+            partCounts = mapOf(sourceId to 2),
+        )
+
+        waitUntil { state.tabs.size == 2 && !state.isLoading }
+        assertEquals(configuredAnalysisDir.absolutePath, state.settings.defaultSaveDir)
+        assertEquals(outputDir.absolutePath, state.settings.lastSaveDialogDir)
+    }
+
     @Test
     fun openingMultipleOversizedFilesCreatesOneBatchSplitPrompt() {
         val dir = createTempDirectory("openlog-split-batch-open").toFile()
@@ -4274,20 +4664,24 @@ class AppStateBehaviorTest {
     fun mergeTabsCreatesANewTabInterleavedByTimeAndTaggedBySource() {
         val dir = createTempDirectory("openlog-merge").toFile()
         val state = AppState(autosaveFile = File(dir, "state.cache"))
+        // Not "t1"/"t2": mergeTabs names its tab "t<n>" from a counter shared by every AppState in
+        // the JVM, so when this test ran first (or alone) the merged tab collided with a hand-made
+        // "t1" and upTab("t1") then rewrote both.
         state.tabs = listOf(
             mkTab(
-                "t1", "main.log",
+                "m1", "main.log",
                 listOf(
                     LogEntry(1, "10:00:00.000", LogLevel.I, "App", "main first"),
                     LogEntry(2, "10:00:02.000", LogLevel.I, "App", "main second"),
                 ),
             ),
-            mkTab("t2", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
+            mkTab("s1", "system.log", listOf(LogEntry(1, "10:00:01.000", LogLevel.I, "Sys", "system first"))),
         )
 
-        state.mergeTabs(listOf("t1", "t2"), "Merged Session")
+        state.mergeTabs(listOf("m1", "s1"), "Merged Session")
 
-        waitUntil { state.tabs.size == 3 }
+        // The tab is published and then made active in two steps; wait for both, not just the size.
+        waitUntil { state.tabs.size == 3 && state.activeTabId == state.tabs.last().id }
         val merged = state.tabs.last()
         assertEquals("Merged Session", merged.filename)
         assertEquals(listOf("main first", "system first", "main second"), merged.logData.map { it.msg })
@@ -6851,6 +7245,153 @@ class AppStateBehaviorTest {
         assertTrue(state.tabs.single().filter.highlighters.isEmpty())
     }
 
+    @Test
+    fun addHlDefaultsToAMatchOnlyHighlighterAnywhereOnTheLine() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+
+        state.addHl("t1", "msg", false, Color.Yellow)
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertFalse(hl.wholeLine)
+        assertEquals(HighlightTarget.ANY, hl.target)
+        assertEquals(null, hl.tag)
+        assertFalse(hl.caseSensitive)
+        assertEquals(null, hl.textColor)
+        assertFalse(hl.captureGroupsOnly)
+        assertEquals(0, hl.colorVariance)
+    }
+
+    @Test
+    fun addHlAcceptsTheOptionalSpec() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+
+        state.addHl(
+            "t1", "msg", false, Color.Yellow,
+            wholeLine = true, target = HighlightTarget.MESSAGE, tag = "MyTag", caseSensitive = true,
+        )
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertTrue(hl.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, hl.target)
+        assertEquals("MyTag", hl.tag)
+        assertTrue(hl.caseSensitive)
+    }
+
+    @Test
+    fun addHlTagFromCtxCreatesATagScopedMatchOnlyHighlighter() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx()
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals("MyTag", hl.pattern)
+        assertEquals(HighlightTarget.TAG, hl.target)
+        assertEquals("MyTag", hl.tag)
+        assertFalse(hl.wholeLine)
+        assertFalse(hl.regex)
+    }
+
+    @Test
+    fun addHlTagFromCtxCanCreateAWholeLineTagHighlighter() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "")
+
+        state.addHlTagFromCtx(wholeLine = true)
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertTrue(hl.wholeLine)
+        assertEquals(HighlightTarget.TAG, hl.target)
+        assertEquals("MyTag", hl.tag)
+    }
+
+    @Test
+    fun updateHighlighterKeepsTheIdAndTheListPosition() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "T", "msg"))))
+        state.addHl("t1", "first", false, Color.Yellow)
+        state.addHl("t1", "second", false, Color.Red)
+        state.addHl("t1", "third", false, Color.Blue)
+        val before = state.tabs.single().filter.highlighters
+        val middle = before[1]
+
+        state.updateHighlighter("t1", middle.id) { it.copy(wholeLine = true, pattern = "edited", caseSensitive = true) }
+
+        val after = state.tabs.single().filter.highlighters
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertEquals("edited", after[1].pattern)
+        assertTrue(after[1].wholeLine)
+        assertTrue(after[1].caseSensitive)
+        assertEquals(before[0], after[0])
+        assertEquals(before[2], after[2])
+    }
+
+    @Test
+    fun updateHighlighterIgnoresATransformThatChangesTheId() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "T", "msg"))))
+        state.addHl("t1", "first", false, Color.Yellow)
+        val id = state.tabs.single().filter.highlighters.single().id
+
+        state.updateHighlighter("t1", id) { it.copy(id = "other", on = false) }
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertEquals(id, hl.id)
+        assertFalse(hl.on)
+    }
+
+    @Test
+    fun addHlFromCtxStaysMatchOnlyAnywhere() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "full message"))))
+        state.ctx = CtxMenuState("t1", 1, 0f, 0f, "full message")
+
+        state.addHlFromCtx()
+
+        val hl = state.tabs.single().filter.highlighters.single()
+        assertFalse(hl.wholeLine)
+        assertEquals(HighlightTarget.ANY, hl.target)
+        assertEquals(null, hl.tag)
+    }
+
+    @Test
+    fun updateHighlighterKeepsIdAndPosition() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "msg"))))
+        state.addHl("t1", "one", false, Color.Yellow)
+        state.addHl("t1", "two", false, Color.Cyan)
+        state.addHl("t1", "three", false, Color.Red)
+        val before = state.tabs.single().filter.highlighters
+        val middleId = before[1].id
+
+        // A transform that tries to change the id must not detach the row from it.
+        state.updateHighlighter("t1", middleId) { it.copy(id = "other", wholeLine = true, pattern = "2") }
+
+        val after = state.tabs.single().filter.highlighters
+        assertEquals(before.map { it.id }, after.map { it.id })
+        assertTrue(after[1].wholeLine)
+        assertEquals("2", after[1].pattern)
+        assertEquals(before[0], after[0])
+        assertEquals(before[2], after[2])
+    }
+
+    @Test
+    fun matchingHighlighterIdHonoursCaseSensitivity() {
+        val state = AppState()
+        state.tabs = listOf(mkTab("t1", "test.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "MyTag", "Full Message"))))
+        state.addHl("t1", "Full Message", false, Color.Yellow, caseSensitive = true)
+        state.addHl("t1", "err(or)?", true, Color.Cyan, caseSensitive = true)
+
+        assertEquals(null, state.matchingHighlighterId("t1", "full message"))
+        assertEquals(state.tabs.single().filter.highlighters[0].id, state.matchingHighlighterId("t1", "Full Message"))
+        assertEquals(null, state.matchingHighlighterId("t1", "ERROR"))
+        assertEquals(state.tabs.single().filter.highlighters[1].id, state.matchingHighlighterId("t1", "error"))
+    }
+
     // ── maskWordForCopy ───────────────────────────────────────────────────────
 
     @Test
@@ -7597,8 +8138,13 @@ class AppStateBehaviorTest {
         // a real port could plausibly complete network-stack setup.
         val state =
             AppState(controlTokenFile = File(createTempDirectory("openlog-mcp-token").toFile(), "control-token"))
+        // A real free port, not literal 0: setMcpControlEnabled clamps its port argument to at
+        // least MIN_PORT (1) — unlike ControlServer's own constructor, which treats 0 as "let the
+        // OS pick" — so passing 0 here would make the real bind below target the privileged port 1
+        // and reliably fail with Permission Denied instead of exercising a normal bind.
+        val port = java.net.ServerSocket(0).use { it.localPort }
         val elapsedMs = kotlin.system.measureTimeMillis {
-            state.setMcpControlEnabled(true, 0)
+            state.setMcpControlEnabled(true, port)
         }
         assertTrue(elapsedMs < 500, "setMcpControlEnabled took ${elapsedMs}ms — looks synchronous again")
         waitUntil { state.settings.mcpControlEnabled }
@@ -7736,13 +8282,22 @@ class AppStateBehaviorTest {
     @Test
     fun disableBeforeSlowStartCompletesLeavesNoServerPublished() {
         val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
-        state.setMcpControlEnabled(true, 0)
+        // A real free port, not literal 0 — see mcpControlEnableReturnsImmediatelyWithoutBlockingCaller's
+        // comment: setMcpControlEnabled clamps 0 up to port 1. Because disable races the delayed
+        // factory above, cancelling the outer job never stops the already-dispatched real bind once
+        // it is past delay()'s own cancellation check; binding port 1 as a non-root user reliably
+        // throws Permission Denied from Ktor's own internal accept coroutine — a genuinely
+        // uncaught, unstructured exception that previously surfaced as a random later test's
+        // failure instead of this one's.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
         // The 300ms bind above is still in flight here — disable must invalidate it, not just no-op
         // against a still-null controlServer field.
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
         // Give the delayed start's completion handler a chance to run; if the race regressed, this
-        // is exactly the window where a stale server would get published.
-        Thread.sleep(600)
+        // is exactly the window where a stale server would get published. 5x the delay, not 2x:
+        // in the full desktopTest run (3000+ tests, real FFmpeg subprocess work interleaved) this
+        // margin has to survive real scheduling contention, not just a quiet, isolated run.
+        Thread.sleep(1500)
         assertEquals(null, state.controlServerToken(), "a disabled-before-bind-completed start must never publish")
     }
 
@@ -7751,7 +8306,10 @@ class AppStateBehaviorTest {
         val state = AppState(
             controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } },
         )
-        state.setMcpControlEnabled(true, 0) // first start, still binding
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above for why 0 would instead bind the privileged port 1 and leak an uncaught
+        // Permission Denied once the delayed factory's real bind actually runs.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort }) // first start, still binding
         val secondPort = java.net.ServerSocket(0).use { it.localPort }
         state.setMcpControlEnabled(true, secondPort) // supersedes the first before it finishes
 
@@ -7759,17 +8317,28 @@ class AppStateBehaviorTest {
         // Only the second (latest) generation's server may ever become visible; the first must have
         // been stopped by its own stale completion handler rather than left listening unreferenced.
         assertTrue(state.settings.mcpControlPort == secondPort || state.mcpControlError != null)
+        // The first generation's own delay(200) + real bind/stop keeps running in the background
+        // regardless of the supersede above (see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment). Without this margin the test can return while that stale bind/stop is still in
+        // flight, leaking it into whatever the next test does — a generous margin, not just 2x the
+        // delay, since this has to hold up under real scheduling contention in the full desktopTest
+        // run, not just a quiet, isolated one.
+        Thread.sleep(1200)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
     }
 
     @Test
     fun disableDuringSlowStartIsIdempotentAndSafe() {
         val state = AppState(controlServerFactory = { s, p -> delay(200); ControlServer(s, p).also { it.start() } })
-        state.setMcpControlEnabled(true, 0)
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above.
+        state.setMcpControlEnabled(true, java.net.ServerSocket(0).use { it.localPort })
         // Repeated disable while a start is in flight must not throw and must not crash-loop.
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
         state.setMcpControlEnabled(false, state.settings.mcpControlPort)
-        Thread.sleep(400)
+        // Generous margin, not just 2x the delay — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment on why this has to survive real scheduling contention in the full run.
+        Thread.sleep(1200)
         assertEquals(null, state.controlServerToken())
     }
 
@@ -7778,9 +8347,13 @@ class AppStateBehaviorTest {
         // Main.kt's onDispose calls stopControlServerForShutdown() unconditionally on window close
         // — it must invalidate a still-binding start exactly like an explicit disable does.
         val state = AppState(controlServerFactory = { s, p -> delay(300); ControlServer(s, p).also { it.start() } })
-        state.startControlServerForThisSessionOnly(0)
+        // A real free port, not literal 0 — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment above (startControlServerForThisSessionOnly clamps 0 the same way setMcpControlEnabled does).
+        state.startControlServerForThisSessionOnly(java.net.ServerSocket(0).use { it.localPort })
         state.stopControlServerForShutdown()
-        Thread.sleep(600)
+        // Generous margin, not just 2x the delay — see disableBeforeSlowStartCompletesLeavesNoServerPublished's
+        // comment on why this has to survive real scheduling contention in the full run.
+        Thread.sleep(1500)
         assertEquals(null, state.controlServerToken(), "shutdown must invalidate an in-flight start")
     }
 
@@ -8320,6 +8893,116 @@ class AppStateBehaviorTest {
         assertFalse(closed.active)
         assertEquals("needle", closed.query)
         assertEquals(listOf(1), closed.matchIds.toList())
+    }
+
+    // ── Find scope (Filtered | Unfiltered) ─────────────────────────────────────
+
+    // Warn-level entry 2 is hidden once the W level is toggled off, so it is only reachable by an
+    // all-lines search.
+    private fun scopeTestTabs(): List<com.indagium.model.LogTab> = listOf(
+        mkTab(
+            "log", "test.log",
+            listOf(
+                LogEntry(1, "10:00:00.000", LogLevel.I, "App", "needle shown"),
+                LogEntry(2, "10:00:00.100", LogLevel.W, "App", "needle hidden by filter"),
+                LogEntry(3, "10:00:00.200", LogLevel.I, "App", "needle also shown"),
+            ),
+        ),
+    )
+
+    @Test
+    fun filteredScopeSearchSkipsRowsHiddenByTheFilter() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+
+        state.openSearch("log", SearchScope.FILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.isNotEmpty() }
+
+        assertEquals(listOf(1, 3), state.tab("log")!!.search.matchIds.toList())
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun unfilteredScopeSearchFindsHiddenRowsAndOpensOriginal() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+
+        state.openSearch("log", SearchScope.UNFILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+
+        val tab = state.tab("log")!!
+        assertEquals(listOf(1, 2, 3), tab.search.matchIds.toList())
+        assertEquals(SearchScope.UNFILTERED, tab.search.scope)
+        assertTrue(tab.showUnfiltered)
+    }
+
+    @Test
+    fun switchingScopeWhileOpenRecomputesMatches() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.openSearch("log")
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+
+        state.setSearchScope("log", SearchScope.UNFILTERED)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+        assertTrue(state.tab("log")!!.showUnfiltered)
+
+        state.setSearchScope("log", SearchScope.FILTERED)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+        // Going back to Filtered leaves the Original panel the user may still want open.
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun hidingOriginalWhileUnfilteredResetsScopeAndRecomputes() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.toggleLevel("log", LogLevel.W)
+        state.openSearch("log", SearchScope.UNFILTERED)
+        state.setSearchQuery("log", "needle")
+        waitUntil { state.tab("log")!!.search.matchIds.size == 3 }
+
+        state.toggleUnfiltered("log")
+
+        assertFalse(state.tab("log")!!.showUnfiltered)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        waitUntil { state.tab("log")!!.search.matchIds.size == 2 }
+        assertEquals(listOf(1, 3), state.tab("log")!!.search.matchIds.toList())
+    }
+
+    @Test
+    fun closeSearchKeepsOriginalOpenAfterAnUnfilteredSearch() {
+        val state = AppState()
+        state.tabs = scopeTestTabs()
+        state.openSearch("log", SearchScope.UNFILTERED)
+
+        state.closeSearch("log")
+
+        assertFalse(state.tab("log")!!.search.active)
+        assertTrue(state.tab("log")!!.showUnfiltered)
+    }
+
+    @Test
+    fun compareModeForcesFilteredScope() {
+        val state = AppState()
+        state.tabs = scopeTestTabs() + mkTab("other", "other.log", emptyList())
+        state.updateCompareMode(true)
+        assertTrue(state.compareMode)
+
+        state.openSearch("log", SearchScope.UNFILTERED)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
+
+        state.setSearchScope("log", SearchScope.UNFILTERED)
+        assertEquals(SearchScope.FILTERED, state.tab("log")!!.search.scope)
+        assertFalse(state.tab("log")!!.showUnfiltered)
     }
 
     @Test

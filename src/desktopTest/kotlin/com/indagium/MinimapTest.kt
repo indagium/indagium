@@ -221,6 +221,54 @@ class MinimapTest {
     }
 
     @Test
+    fun wholeLineHighlighterWinsOverErrorLevelAndMatchHighlighters() {
+        val items = listOf(row(1, LogLevel.E, msg = "needle and haystack"))
+        val highlighters = listOf(
+            hl("needle", Color.Yellow),
+            Highlighter("line", "haystack", false, Color.Green, true, wholeLine = true),
+        )
+
+        val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
+
+        assertEquals(Color.Green, bars[0].color)
+    }
+
+    @Test
+    fun firstMatchingWholeLineHighlighterOwnsTheMinimapRow() {
+        val items = listOf(row(1, LogLevel.I, msg = "needle and haystack"))
+        val highlighters = listOf(
+            Highlighter("miss", "absent", false, Color.Red, true, wholeLine = true),
+            Highlighter("first", "haystack", false, Color.Green, true, wholeLine = true),
+            Highlighter("second", "needle", false, Color.Blue, true, wholeLine = true),
+        )
+
+        val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
+
+        assertEquals(Color.Green, bars[0].color)
+    }
+
+    @Test
+    fun crashStillBeatsAWholeLineHighlighter() {
+        val items = listOf(row(1, LogLevel.I, msg = "needle"))
+        val crashIds = BitSet().apply { set(1) }
+        val highlighters = listOf(Highlighter("line", "needle", false, Color.Green, true, wholeLine = true))
+
+        val bars = computeMinimapBars(items, crashIds, rowCount = 1, highlighters = highlighters, mutedColor = muted)
+
+        assertEquals(CRASH_COLOR, bars[0].color)
+    }
+
+    @Test
+    fun matchHighlighterScopedToAnotherTagIsSkipped() {
+        val items = listOf(row(1, LogLevel.I, msg = "needle"))
+        val highlighters = listOf(Highlighter("scoped", "needle", false, Color.Yellow, true, tag = "Other"))
+
+        val bars = computeMinimapBars(items, BitSet(), rowCount = 1, highlighters = highlighters, mutedColor = muted)
+
+        assertEquals(muted, bars[0].color)
+    }
+
+    @Test
     fun nonMatchingHighlighterFallsThroughToMutedColor() {
         val items = listOf(row(1, LogLevel.I, msg = "nothing relevant here", groupColor = Color.Blue))
         val highlighters = listOf(hl("needle", Color.Yellow))

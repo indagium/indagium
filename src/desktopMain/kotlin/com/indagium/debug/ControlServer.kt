@@ -36,7 +36,10 @@ import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -248,6 +251,13 @@ class ControlServer(
     private val allowBrowserClients: Boolean = false,
 ) {
     private var engine: EmbeddedServer<*, *>? = null
+
+    // CIO binds the socket on its own server coroutine, separate from start()'s wait for the
+    // resolved connector. A busy port therefore fails twice: start() rethrows it (AppState turns
+    // that into mcpControlError), and the server coroutine fails with the same BindException.
+    // Without a handler in its context that second copy reaches the global uncaught-exception
+    // handler, where it is logged as a crash and, in tests, blamed on whichever test runs next.
+    private var serverScope: CoroutineScope? = null
     private var mcpServer: Server? = null
 
     // The normal MCP server is shared by manual clients. Account-agent panel runs instead receive
@@ -259,7 +269,10 @@ class ControlServer(
     // execution in lockstep without an HTTP loopback hop.
     private val operations = IndagiumToolOperations(appState)
     internal val toolGateway: IndagiumToolGateway get() = operations.toolGateway
-    private val managedMcpRuns = ManagedMcpRunRegistry(toolGateway)
+    private val managedMcpRuns = ManagedMcpRunRegistry(
+        toolGateway,
+        onCaptureTabChanged = appState.aiSidebarRuntime::transferCaptureSession,
+    )
 
     private data class ClientRecord(val name: String, val lastSeenMs: Long)
 
@@ -312,6 +325,7 @@ class ControlServer(
     // ServerSession.close() (inherited from Protocol) closes the underlying transport, which
     // actually drops the client's HTTP/SSE connection rather than just forgetting our own state.
     fun disconnectMcpSession(id: String) {
+        appState.revokeExternalDeviceAiApproval(id)
         val session = mcpServer?.sessions?.get(id) ?: return
         runBlocking { session.close() }
     }
@@ -327,17 +341,27 @@ class ControlServer(
                 mcp.sessions.values.forEach { session ->
                     launch {
                         val alive = runCatching { withTimeout(mcpPingTimeoutMs) { session.ping() } }.isSuccess
-                        if (!alive) runCatching { session.close() }
+                        if (!alive) {
+                            appState.revokeExternalDeviceAiApproval(session.sessionId)
+                            runCatching { session.close() }
+                        }
                     }
                 }
             }
         }
     }
 
+    @Suppress("TooGenericExceptionCaught")
     fun start() {
         val mcp = buildMcpServer()
         mcpServer = mcp
-        val server = embeddedServer(CIO, host = "127.0.0.1", port = port) {
+        val scope = CoroutineScope(
+            SupervisorJob() + CoroutineExceptionHandler { _, failure ->
+                AppLogger.warn("control-server", "Control server stopped: ${failure.message}", failure)
+            },
+        )
+        serverScope = scope
+        val server = scope.embeddedServer(CIO, host = "127.0.0.1", port = port) {
             // (SEC-1) Browser-based MCP inspectors need CORS with the MCP-specific session/version
             // headers — but installing it unconditionally let any origin a browser had open issue
             // cross-origin requests to this loopback port (the intercept below still authenticates
@@ -399,13 +423,25 @@ class ControlServer(
             reapStaleMcpSessions(mcp)
         }
         server.start(wait = false)
-        resolvedPort = runBlocking { server.engine.resolvedConnectors().first().port }
+        resolvedPort = try {
+            runBlocking { server.engine.resolvedConnectors().first().port }
+        } catch (failure: Exception) {
+            // CIO reports a failed bind here as a cancellation of the connector wait, not the
+            // BindException itself, so any failure tears the half-started server down.
+            runCatching { server.stop() }
+            scope.cancel()
+            serverScope = null
+            throw failure
+        }
         engine = server
     }
 
     fun stop() {
+        mcpServer?.sessions?.keys?.forEach(appState::revokeExternalDeviceAiApproval)
         engine?.stop()
         engine = null
+        serverScope?.cancel()
+        serverScope = null
         mcpServer = null
         managedMcpServers.values.forEach { server ->
             server.sessions.values.forEach { session -> runCatching { runBlocking { session.close() } } }
@@ -470,11 +506,17 @@ class ControlServer(
         val server = Server(
             serverInfo = Implementation(name = "indagium-control", version = "1.0.0"),
             options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+            instructions = DEVICE_CAPTURE_MCP_INSTRUCTIONS,
         )
         toolGateway.tools.forEach { tool ->
             server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
-                val result = runCatching { toolGateway.execute(tool.name, request.arguments?.toArgMap() ?: emptyMap()) }
-                    .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
+                val arguments = request.arguments?.toArgMap() ?: emptyMap()
+                val result = if (tool.name in DEVICE_CONTROL_MCP_TOOLS) {
+                    executeExternalDeviceTool(tool.name, arguments, sessionId, server.sessions[sessionId]?.clientVersion?.name)
+                } else {
+                    runCatching { toolGateway.execute(tool.name, arguments) }
+                        .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
+                }
                 toCallToolResult(tool.name, result, Json.encode(result))
             }
         }
@@ -486,6 +528,7 @@ class ControlServer(
             Server(
                 serverInfo = Implementation(name = "indagium-managed-agent", version = "1.0.0"),
                 options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
+                instructions = DEVICE_CAPTURE_MCP_INSTRUCTIONS,
             ).also { server ->
                 toolGateway.tools.forEach { tool ->
                     server.addTool(name = tool.name, description = tool.description, inputSchema = tool.schema) { request ->
@@ -502,18 +545,112 @@ class ControlServer(
         }
 
     internal fun openAiFunctionDefinitions() = operations.openAiFunctionDefinitions()
+
+    private suspend fun executeExternalDeviceTool(
+        name: String,
+        arguments: Map<String, Any?>,
+        sessionId: String,
+        clientName: String?,
+    ): Any? {
+        val tabId = arguments["tabId"] as? String
+        val explicitSerial = (arguments["deviceSerial"] as? String)?.trim()?.takeIf(String::isNotBlank)
+        val target = runCatching {
+            if (tabId != null) {
+                val (capture, _) = appState.aiCaptureBinding(tabId)
+                // Same rule the tool handlers use (effectiveDeviceSerial): a tabId and a deviceSerial
+                // that name different devices are refused before any approval is requested.
+                effectiveDeviceSerial(capture.device.serial, explicitSerial)
+                capture.device
+            } else {
+                val devices = appState.aiCaptureDevices().filter { it.available }
+                val serial = explicitSerial ?: when (devices.size) {
+                    1 -> devices.single().serial
+                    0 -> error("No ready Android devices were found")
+                    else -> return mapOf(
+                        "needsDeviceSelection" to true,
+                        "message" to "Several Android devices are ready. Call list_android_devices and pass deviceSerial.",
+                    )
+                }
+                devices.firstOrNull { it.serial == serial }
+                    ?: error("Android device $serial is not connected or authorized")
+            }
+        }.getOrElse { return mapOf("error" to (it.message ?: "No live Android capture/device is available")) }
+        val label = "${target.model} (${target.serial})"
+        return appState.executeExternalDeviceAiAction(
+            sessionId = sessionId,
+            clientName = clientName?.takeIf(String::isNotBlank) ?: "MCP client",
+            deviceLabel = label,
+        ) {
+            toolGateway.execute(name, arguments)
+        }
+    }
 }
 
-// get_video_frame is the one tool whose result is a real image rather than data to describe in
-// text: when `rawResult` is the Map get_video_frame's handler returns on success (carrying a
-// non-null imageBase64), reply with a real MCP ImageContent block instead of the default
-// TextContent(JSON) wrap every other tool gets. An error map (no imageBase64) — or any other
-// tool — falls straight through to the usual text path, `textFallback` unchanged.
-private fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
-    val imageBase64 = (rawResult as? Map<*, *>)?.get("imageBase64") as? String
-    if (toolName != "get_video_frame" || imageBase64 == null) return CallToolResult(content = listOf(TextContent(textFallback)))
-    val mimeType = (rawResult["mimeType"] as? String) ?: "image/png"
-    return CallToolResult(content = listOf(ImageContent(data = imageBase64, mimeType = mimeType)))
+private val DEVICE_CAPTURE_MCP_INSTRUCTIONS = """
+Device capture tools control the attached Android device, not the computer running this server.
+To inspect the Android display, call get_device_screen and use its returned image and stated pixel dimensions.
+device_tap and device_swipe coordinates are measured in that image's pixel space and mapped automatically.
+Use device_text, device_key, device_launch_app, and device_open_url for device navigation; list_device_apps
+looks up a package name first. get_device_screen is a transient look only, never saved — call
+capture_device_screenshot to save a screenshot into Notes. start_device_capture reuses a live capture by
+default; set newCapture=true to finalize and retain the current one before a fresh capture, and optionally
+override recordVideo/includeEarlierDeviceLogs for just that one launch. If stop_device_capture is called
+separately, poll its operation to completion before starting again. mark_device_issue and
+export_capture_snapshot are asynchronous; poll get_capture_operation_status until complete.
+export_capture_snapshot accepts a range (all/last_minutes/since_last_save/selection); once the capture is
+stopped, only range=all is available. get_device_capture_status reports the capture's markers, elapsed time,
+and last snapshot path without touching the device.
+""".trimIndent()
+
+// Device-changing or screen-reading tools external MCP clients must get per-session approval for
+// (see AppState.executeExternalDeviceAiAction). Pure discovery/status calls — list_android_devices,
+// list_device_apps, get_device_capture_status, get_device_log_settings, get_capture_operation_status —
+// deliberately stay out of this set, matching list_android_devices' existing no-approval precedent.
+private val DEVICE_CONTROL_MCP_TOOLS = setOf(
+    "start_device_capture", "get_device_screen", "device_tap", "device_swipe", "device_key", "device_text",
+    "stop_device_capture", "mark_device_issue", "export_capture_snapshot", "capture_device_screenshot",
+    "device_launch_app", "device_open_url", "set_device_log_settings",
+)
+
+// Shared wording for every DEVICE_CONTROL_MCP_TOOLS description, so the two authorization paths
+// stay worded identically everywhere they're mentioned instead of drifting tool by tool.
+private const val EXTERNAL_APPROVAL_NOTE =
+    "External MCP clients need per-session approval; requests from Indagium's own AI panel are " +
+        "authorized by the prompt that started them."
+
+// Screen reads and video frames are returned as real MCP image content rather than base64 text.
+// When `rawResult` is the Map a handler returns on success (carrying a non-null imageBase64),
+// reply with an ImageContent block instead of default TextContent(JSON); errors and all other
+// operations retain the text fallback.
+internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
+    val fields = rawResult as? Map<*, *>
+    val imageBase64 = fields?.get("imageBase64") as? String
+    if (toolName !in setOf("get_video_frame", "get_device_screen") || imageBase64 == null) {
+        return CallToolResult(content = listOf(TextContent(textFallback)))
+    }
+    val mimeType = (fields["mimeType"] as? String) ?: "image/png"
+    val content = buildList {
+        if (toolName == "get_device_screen") {
+            val width = (fields["width"] as? Number)?.toInt()
+            val height = (fields["height"] as? Number)?.toInt()
+            val instructions = fields["coordinateInstructions"] as? String
+            add(
+                TextContent(
+                    text = buildString {
+                        append(fields["message"] as? String ?: "Current Android device screen")
+                        if (width != null && height != null) append(" Screenshot dimensions: $width×$height pixels.")
+                        append(' ')
+                        append(
+                            instructions ?: "Tap and swipe coordinates are measured from this returned image's " +
+                                "top-left and mapped to physical device pixels.",
+                        )
+                    },
+                ),
+            )
+        }
+        add(ImageContent(data = imageBase64, mimeType = mimeType))
+    }
+    return CallToolResult(content = content)
 }
 
 private fun bearerToken(rawHeader: String?): String? = rawHeader
@@ -1149,18 +1286,27 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "set_highlighters",
         "Replace a tab's highlighter list — the patterns whose matches are color-marked in the log " +
-            "view. Highlighters do NOT hide or fold rows; they only tint matching text, so they are " +
-            "safe to add freely while investigating. A supplied highlighters list replaces the " +
-            "current one wholesale; clearHighlighters removes all of them. Each highlighters item is " +
-            "an object: { pattern (required), regex (default false), color (optional hex like " +
-            "\"#FF8800\" — omit to auto-assign from the palette), enabled (default true) }.",
+            "view. Highlighters do NOT hide or fold rows; they only tint matching text (or, with " +
+            "wholeLine, the whole row), so they are safe to add freely while investigating. A supplied " +
+            "highlighters list replaces the current one wholesale; clearHighlighters removes all of " +
+            "them. Each highlighters item is an object: { pattern (required), regex (default false), " +
+            "color (optional hex like \"#FF8800\" — omit to auto-assign from the palette), enabled " +
+            "(default true), wholeLine (default false — true tints the entire row instead of only the " +
+            "matched text), target (\"any\" (default, the whole rendered line), \"tag\" or " +
+            "\"message\" — which part of the row the pattern is matched against), tag (optional exact " +
+            "tag; the highlighter only applies to rows with that tag), caseSensitive (default false), " +
+            "textColor (optional hex foreground colour for the highlighted text) }. The result echoes " +
+            "every highlighter back with these fields.",
         schema(
             "tabId" to "string", "highlighters" to "array", "clearHighlighters" to "boolean",
             required = listOf("tabId"),
             descriptions = mapOf(
                 "highlighters" to "Highlighters to set (replaces the current list). Each item is an " +
                     "object: pattern (string, required), regex (boolean, default false), color " +
-                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true).",
+                    "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true), " +
+                    "wholeLine (boolean, default false), target (string: any, tag or message; default any), " +
+                    "tag (string, optional exact tag scope), caseSensitive (boolean, default false), " +
+                    "textColor (string, optional hex foreground colour).",
                 "clearHighlighters" to "If true, remove every highlighter from the tab.",
             ),
         ),
@@ -1378,6 +1524,189 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "entries may resolve a message's target lifeline. Defaults to true.",
             ),
         ),
+    ),
+    McpTool(
+        "list_android_devices",
+        "List ready Android devices that can be selected for a capture. This discovery call does not read or control a device.",
+        schema(),
+    ),
+    McpTool(
+        "start_device_capture",
+        "Start a capture on the selected Android device, or reuse the live capture when it is already recording. " +
+            "Set newCapture=true to finalize and retain the current capture before starting a fresh one. When several " +
+            "devices are ready, pass deviceSerial from list_android_devices. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "deviceSerial" to "string", "newCapture" to "boolean", "recordVideo" to "boolean", "includeEarlierDeviceLogs" to "boolean",
+            descriptions = mapOf(
+                "deviceSerial" to "Serial from list_android_devices. Omit only when exactly one device is ready or to reuse the current device.",
+                "newCapture" to "Finalize the current capture and start a fresh capture (default false).",
+                "recordVideo" to "Override this one launch's video recording without changing the saved capture settings. " +
+                    "Defaults to the configured setting.",
+                "includeEarlierDeviceLogs" to "Override this one launch's inclusion of log lines already buffered on the " +
+                    "device before capture started, without changing the saved capture settings. Defaults to the configured " +
+                    "setting, which is off unless the user enabled it.",
+            ),
+        ),
+    ),
+    McpTool(
+        "stop_device_capture",
+        "Stop and finalize the live capture session after preserving its logs and video. Returns an operationId to " +
+            "poll with get_capture_operation_status. Wait for completion before starting another capture.",
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "get_device_screen",
+        "Read the live Android screen as a transient image. The result includes image dimensions and coordinate " +
+            "instructions; gestures use pixels in this returned image. The screenshot is not saved into the capture. " +
+            EXTERNAL_APPROVAL_NOTE,
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "device_tap",
+        "Tap an image pixel on the live Android screen. x/y are measured from the top-left of the latest " +
+            "get_device_screen image and mapped to physical pixels automatically. " + EXTERNAL_APPROVAL_NOTE,
+        schema("tabId" to "string", "x" to "integer", "y" to "integer", required = listOf("tabId", "x", "y")),
+    ),
+    McpTool(
+        "device_swipe",
+        "Swipe between pixels in the latest get_device_screen image. Coordinates are measured from its top-left and " +
+            "mapped to physical pixels automatically; duration is bounded and validated. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "x1" to "integer", "y1" to "integer", "x2" to "integer", "y2" to "integer",
+            "durationMs" to "integer", required = listOf("tabId", "x1", "y1", "x2", "y2"),
+            descriptions = mapOf("durationMs" to "Gesture duration from 50 to 2000 ms (default 350)."),
+        ),
+    ),
+    McpTool(
+        "device_key",
+        "Press one allowlisted Android key. $EXTERNAL_APPROVAL_NOTE",
+        schema(
+            "tabId" to "string", "key" to "string", required = listOf("tabId", "key"),
+            enums = mapOf(
+                "key" to listOf(
+                    "BACK", "HOME", "RECENTS", "ENTER", "DEL", "TAB", "ESCAPE",
+                    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_CENTER",
+                    "VOLUME_UP", "VOLUME_DOWN", "MENU", "SEARCH", "WAKEUP",
+                ),
+            ),
+        ),
+    ),
+    McpTool(
+        "device_text",
+        "Enter bounded plain text into the focused Android field. $EXTERNAL_APPROVAL_NOTE",
+        schema("tabId" to "string", "text" to "string", required = listOf("tabId", "text")),
+    ),
+    McpTool(
+        "device_launch_app",
+        "Launch an installed Android app by package name. Fails clearly when the package isn't installed or has " +
+            "no launchable activity. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "packageName" to "string", required = listOf("tabId", "packageName"),
+            descriptions = mapOf("packageName" to "Reverse-domain Android package id, e.g. com.example.app."),
+        ),
+    ),
+    McpTool(
+        "list_device_apps",
+        "List launchable apps installed on the bound device. This discovery call does not read or control the " +
+            "device's screen or state.",
+        schema(
+            "tabId" to "string", "query" to "string", "includeSystem" to "boolean", required = listOf("tabId"),
+            descriptions = mapOf(
+                "query" to "Case-insensitive substring filter on package name or activity.",
+                "includeSystem" to "Include likely system packages (default false).",
+            ),
+        ),
+    ),
+    McpTool(
+        "device_open_url",
+        "Open an http/https URL on the device in its default handler. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "url" to "string", required = listOf("tabId", "url"),
+            descriptions = mapOf(
+                "url" to "An http:// or https:// URL with no quotes, backslashes, whitespace, or control characters.",
+            ),
+        ),
+    ),
+    McpTool(
+        "mark_device_issue",
+        "Create a durable issue marker — a log window plus a screenshot when supported — and add it to Notes for " +
+            "this live capture. Returns an operationId to poll with get_capture_operation_status. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "label" to "string", "note" to "string", required = listOf("tabId"),
+            descriptions = mapOf(
+                "label" to "Short heading for the marker (default \"Issue detected here\").",
+                "note" to "Extra text added to the marker's note, under its heading.",
+            ),
+        ),
+    ),
+    McpTool(
+        "capture_device_screenshot",
+        "Save a screenshot of the live Android screen into this capture's Notes, with a linked video frame when " +
+            "available — exactly what the capture strip's own Screenshot button does. Unlike get_device_screen (a " +
+            "transient look that is not saved), this leaves durable evidence in Notes. " + EXTERNAL_APPROVAL_NOTE,
+        schema("tabId" to "string", required = listOf("tabId")),
+    ),
+    McpTool(
+        "export_capture_snapshot",
+        "Export the capture as a non-overwriting ZIP snapshot including available logs, video, notes, and issue " +
+            "markers. Returns an operationId to poll with get_capture_operation_status. Once the capture has been " +
+            "stopped, only range=all is supported (the stopped capture's retained ZIP). " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "range" to "string", "minutes" to "integer", "includeVideo" to "boolean",
+            "open" to "boolean", "filename" to "string",
+            required = listOf("tabId"),
+            enums = mapOf("range" to listOf("all", "last_minutes", "since_last_save", "selection")),
+            descriptions = mapOf(
+                "range" to "Which part of the capture to export. Defaults to all.",
+                "minutes" to "Minutes to cover for range=last_minutes (default 5). 5 or 10 match the popover's " +
+                    "own presets; any other value is a custom window.",
+                "includeVideo" to "Include the recorded video. Defaults to whatever this session records.",
+                "open" to "Open the saved archive in a new tab once it finishes exporting (default false).",
+                "filename" to "Archive basename (a .zip extension is added automatically). A non-overwriting name " +
+                    "is chosen automatically when this is omitted or already taken.",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_device_capture_status",
+        "Read-only status for a device capture: device, live/stopped, elapsed time, whether video is recording, " +
+            "storage used, its markers, and the last exported snapshot path if any. This discovery call does not " +
+            "read or control the device's screen or state.",
+        schema("tabId" to "string", descriptions = mapOf("tabId" to "Omit to use the currently live capture tab, if any.")),
+    ),
+    McpTool(
+        "get_device_log_settings",
+        "Read a device's current logcat buffer sizes, global log level, and per-tag overrides. This discovery " +
+            "call does not read or control the device's screen or state.",
+        schema(
+            "tabId" to "string", "deviceSerial" to "string",
+            descriptions = mapOf(
+                "tabId" to "A live capture tab bound to the device, used only when deviceSerial is omitted.",
+                "deviceSerial" to "Serial from list_android_devices. Takes priority over tabId.",
+            ),
+        ),
+    ),
+    McpTool(
+        "set_device_log_settings",
+        "Change a device's logcat buffer size and/or global log level and return the re-read state. " + EXTERNAL_APPROVAL_NOTE,
+        schema(
+            "tabId" to "string", "deviceSerial" to "string", "bufferSize" to "string", "logLevel" to "string",
+            enums = mapOf(
+                "bufferSize" to listOf("256K", "1M", "4M", "16M"),
+                "logLevel" to listOf("default", "V", "D", "I", "W", "E", "S"),
+            ),
+            descriptions = mapOf(
+                "tabId" to "A live capture tab bound to the device, used only when deviceSerial is omitted.",
+                "deviceSerial" to "Serial from list_android_devices. Takes priority over tabId.",
+                "bufferSize" to "Applies -G to every logcat buffer at once. Provide this and/or logLevel.",
+                "logLevel" to "Sets (or, for default, clears) the global log.tag filter. Provide this and/or bufferSize.",
+            ),
+        ),
+    ),
+    McpTool(
+        "get_capture_operation_status",
+        "Check a device capture, marker, or snapshot operation by operationId.",
+        schema("operationId" to "string", required = listOf("operationId")),
     ),
 )
 

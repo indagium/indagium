@@ -11,8 +11,31 @@ import com.indagium.ai.AiSessionRegistry
 import com.indagium.ai.AiSidebarRuntime
 import com.indagium.ai.CustomAiCommand
 import com.indagium.ai.CustomAiCommandName
+import com.indagium.ai.LocalAccountCli
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.ai.recoveredBundledCodexPath
 import com.indagium.ai.validateAiProviderProfile
+import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureExportPreview
+import com.indagium.capture.CaptureExportRequest
+import com.indagium.capture.CaptureExportResult
+import com.indagium.capture.CaptureMarker
+import com.indagium.capture.CaptureMirrorStartRoute
+import com.indagium.capture.CaptureSession
+import com.indagium.capture.CaptureTimeline
+import com.indagium.capture.CaptureTimelineIndex
+import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
+import com.indagium.capture.CaptureTools
+import com.indagium.capture.NativeMediaSupport
+import com.indagium.capture.adaptedToNativeMedia
+import com.indagium.capture.captureLogEntriesForOrdinals
+import com.indagium.capture.markerHeader
+import com.indagium.capture.markerHeadingLine
+import com.indagium.capture.mirror.MirrorStreamOptions
+import com.indagium.capture.mirrorStartRoute
+import com.indagium.capture.nativeMediaAdaptationNotice
+import com.indagium.capture.ordinalRangeForElapsedWindow
+import com.indagium.capture.parseMarkerHeader
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -44,11 +67,13 @@ import com.indagium.update.SponsorChecker
 import com.indagium.update.UpdateCheckResult
 import com.indagium.update.UpdateChecker
 import com.indagium.update.assetForCurrentOs
+import com.indagium.update.openFolderInFileManager
 import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.CONTENT_SNIFF_BYTES
+import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
 import com.indagium.utils.LogContentKind
@@ -100,12 +125,14 @@ import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.newId
 import com.indagium.utils.openArchiveCandidateStream
 import com.indagium.utils.parseLogFileResult
+import com.indagium.utils.parseLogcat
 import com.indagium.utils.passesFilter
 import com.indagium.utils.planSplitOutputs
 import com.indagium.utils.presentLogLine
 import com.indagium.utils.presentLogLineMarkdown
 import com.indagium.utils.pruneUnreferencedArchiveVideos
 import com.indagium.utils.recoverLogRefRows
+import com.indagium.utils.regexFullyMatches
 import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
@@ -121,7 +148,10 @@ import com.indagium.utils.visibleEntries
 import com.indagium.video.FailedVideoPlayerController
 import com.indagium.video.VideoPlayerController
 import com.indagium.video.defaultVideoPlayerController
+import com.indagium.video.sourceDisplayRotationDegrees
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.add
@@ -132,6 +162,7 @@ import java.awt.datatransfer.StringSelection
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -170,6 +201,51 @@ internal fun messageRuleVariantsForEntry(entry: LogEntry, selectedText: String? 
 // hard stop against an unbounded loop.
 private const val MAX_NOTE_TARGET_SUFFIX = 1000
 
+// Used to normalize a clockwise rotation (manual adjustment + source display rotation) into
+// [0, 360) — see videoRotationDegrees below.
+private const val FULL_CIRCLE_DEGREES = 360
+
+internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
+
+/** Bound on device AI/MCP operations in the "running" state at once; see [AppState.launchDeviceAiOperation]. */
+internal const val MAX_RUNNING_DEVICE_AI_OPERATIONS = 4
+
+// Mark issue (restyle plan Phase 3). No customization per the plan's scope decision (one fixed
+// button, no skins/labels), so every marker gets this same heading text.
+private const val MARKER_DEFAULT_LABEL = "Issue detected here"
+
+// mark_device_issue's optional label/note bounds — generous for a heading/short note, well under
+// CaptureMarkerCodec's own MAX_MARKER_STRING_CHARS for the header's `label` field.
+private const val MARKER_LABEL_MAX_CHARS = 120
+private const val MARKER_NOTE_MAX_CHARS = 2_000
+
+// startCaptureForAi's recordVideo/includeEarlierDeviceLogs per-launch overrides (see
+// startCaptureTab's settingsOverride parameter): named only to keep that parameter's declaration
+// under the line-length limit.
+private typealias CaptureSettingsOverride = (com.indagium.capture.CaptureSettings) -> com.indagium.capture.CaptureSettings
+
+// startCaptureForAi/awaitCaptureControllerRemoval's shared "wait for the recorder to catch up"
+// polling budget: long enough for a slow device/emulator to actually start or finish finalizing,
+// short enough that a genuinely stuck capture still fails within one user-visible wait.
+private const val CAPTURE_START_TIMEOUT_SECONDS = 120L
+private const val CAPTURE_POLL_INTERVAL_MS = 100L
+
+// How long a fresh marker stays undoable (AppState.markerUndoByTab / undoMarkIssue).
+private const val MARKER_UNDO_WINDOW_MS = 10_000L
+private const val MARKER_MS_PER_SECOND = 1_000.0
+
+/** Everything [AppState.attachMarkerScreenshot]/[AppState.finishMarkerWindow] need that
+ *  [AppState.beginMarkerNote] already resolved — the press-time [session]/[settings] snapshot
+ *  (never re-read from the live recorder mid-window, so every step of one press agrees on what
+ *  "markerPreMs"/"markerPostMs" meant), the marker itself, and its display [ordinal]. */
+private data class MarkerPressContext(
+    val noteId: String,
+    val ordinal: Int,
+    val marker: CaptureMarker,
+    val session: CaptureSession,
+    val settings: com.indagium.capture.CaptureSettings,
+)
+
 // Upper bound on AppState.canonicalPathCache. One entry per distinct source path ever resolved;
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
 // then simply stops growing (later paths still resolve, just uncached).
@@ -186,6 +262,16 @@ private class NoteExportWriter {
     val mutex = Mutex()
     val revision = AtomicLong()
 }
+
+// A write lane reservation made INSIDE upAnn's own synchronized(stateLock) block, at commit time —
+// see AppState.reserveExportTarget's doc comment for why the revision number MUST be minted there
+// and not later, unsynchronized, in autoExportAnnotations.
+private class PendingExportTarget(val mdFile: File, val writer: NoteExportWriter, val revision: Long)
+
+// What upAnn hands off to autoExportAnnotations once a commit is safely serialized under
+// stateLock: the committed tab itself, plus the write-lane reservation for it (or null when no
+// write is warranted right now — auto-export off, no blocks, or a genuine conflict/fold case).
+private class CommittedAnnotationEdit(val tab: LogTab, val exportTarget: PendingExportTarget?)
 
 // Stage 1 wired computeMessageTemplates() into this function (Stage 2a unwired it): the
 // ~4s-on-10M-lines scan is too much to pay on every load for a panel most sessions never open. It
@@ -258,6 +344,47 @@ fun emptyWorkspaceTab() = LogTab(
     analysis = LogAnalysis(pending = false),
 )
 
+/**
+ * Attaches a finalized capture to the already-open streaming tab. This is intentionally a pure
+ * tab transformation so the stop/finalization path cannot accidentally reconstruct a tab and
+ * lose annotations, selection, filters, or the tab id.
+ */
+internal fun attachFinalizedCapture(
+    tab: LogTab,
+    imported: com.indagium.capture.ImportedCapture,
+    enableDoubleClickSeek: Boolean,
+): LogTab {
+    // Archive v3 (no per-row mapping file): finalizeSessionInPlace ships a single sync anchor
+    // instead of a CaptureTimeline — see ImportedCapture.syncAnchor's own doc. Resolved against
+    // THIS tab's own already-tailed logData (never imported.logFile — the whole point of this
+    // function is reusing the live tab's rows instead of reparsing) since finalization keeps every
+    // session row, so its export-local ordinal is exactly the tab's own row order. A row that
+    // cannot be resolved (e.g. a test fixture with no logData at all) simply leaves the attachment
+    // unanchored rather than failing the whole attach.
+    val anchor = imported.syncAnchor?.let { syncAnchor ->
+        tab.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
+    }
+    val attachment = imported.videoFile?.let { video ->
+        VideoAttachment(
+            source = VideoSource.LocalFile(video.absolutePath),
+            sourceLabel = "${imported.source.name}/${video.name}",
+            captureSourcePath = imported.source.absolutePath,
+            doubleClickSeekEnabled = enableDoubleClickSeek,
+            anchor = anchor,
+        )
+    }
+    return tab.copy(
+        attachedVideo = attachment,
+        captureTimeline = imported.timeline.takeIf { attachment != null },
+        captureSessionId = null,
+        // Recorded independently of attachment (which is null whenever the session had no video)
+        // so a video-off capture can still be found by its session id after Stop — see the field's
+        // doc in Model.kt for why attachedVideo.captureSourcePath alone isn't enough.
+        captureSourceSessionId = imported.descriptor.sessionId,
+        tailing = false,
+    )
+}
+
 /** Transient state for the non-destructive R8/ProGuard retrace result dialog. */
 sealed interface RetraceDialogState {
     val tabId: String
@@ -291,9 +418,50 @@ private fun defaultAutosaveFile(): File =
     DesktopStorage.autosaveFile()
 
 internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
-internal const val ANNOTATION_PANEL_MAX_WIDTH = 500f
+
+// Raised from 500f so the right sidebar can grow wide enough to show a meaningfully bigger device
+// mirror while capturing (see CaptureCard/EmbeddedMirrorPanel — the mirror sizes itself from the
+// panel's actual measured width). The window-relative guard in annotationPanelEffectiveMaxWidth
+// below is what actually keeps the log view from being squeezed out on a narrow window; this
+// constant is just the stored ceiling, reached on a wide-enough window.
+internal const val ANNOTATION_PANEL_MAX_WIDTH = 1400f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
 internal const val FILTER_PANEL_MAX_WIDTH = 420f
+
+// Width reserved for the log view so the right sidebar (and, when visible, the filter panel) can
+// never squeeze it out entirely. Matches the sidebar/filter dividers' own hit width (HDivider,
+// ui/Components.kt) so the arithmetic in annotationPanelEffectiveMaxWidth lines up with what is
+// actually drawn.
+internal const val LOG_VIEW_MIN_WIDTH = 320f
+internal const val PANEL_DIVIDER_WIDTH = 10f
+
+/**
+ * The largest the right sidebar (Notes/AI/CaptureCard) is allowed to render at *right now*, given
+ * the row's actual measured width. [ANNOTATION_PANEL_MAX_WIDTH] is a generous stored ceiling so a
+ * wide window can show a large device mirror; this is the window-relative guard that keeps the log
+ * view from being squeezed to nothing on a narrower one. The stored `annotationPanelWidth` itself
+ * is never rewritten by this — callers render `min(annotationPanelWidth, this result)` and leave
+ * the stored value alone, so widening the window later restores the larger size without the user
+ * having to redrag the divider.
+ *
+ * Never returns less than [ANNOTATION_PANEL_MIN_WIDTH]: on an extremely narrow window the sidebar
+ * keeps its own floor even if that leaves the log view narrower than [LOG_VIEW_MIN_WIDTH].
+ */
+internal fun annotationPanelEffectiveMaxWidth(
+    availableRowWidth: Float,
+    filterVisible: Boolean,
+    filterPanelWidth: Float,
+    minLogViewWidth: Float = LOG_VIEW_MIN_WIDTH,
+): Float {
+    // One divider between the filter panel and the log view (only drawn while the filter panel
+    // is visible), and one between the log view and the sidebar (this function is only relevant
+    // while the sidebar itself is showing, so that divider is always present).
+    val filterReserved = if (filterVisible) filterPanelWidth + PANEL_DIVIDER_WIDTH else 0f
+    val sidebarDividerReserved = PANEL_DIVIDER_WIDTH
+    val available = availableRowWidth - filterReserved - sidebarDividerReserved - minLogViewWidth
+    return available.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
+}
+
 internal const val COMPARE_SPLIT_MIN = 0.2f
 internal const val COMPARE_SPLIT_MAX = 0.8f
 internal const val RIGHT_SIDEBAR_SPLIT_MIN = 0.2f
@@ -304,6 +472,14 @@ internal const val VIDEO_PANEL_DEFAULT_WIDTH = 380f
 internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
+
+// The five save folders in Settings → General → Storage (see AppState.pickSaveFolder/
+// resetSaveFolder and SettingsDialog.kt's SaveFolderRow). ANALYSIS is what used to be the app's
+// only "Default save folder" — the label moved to ROOT when that folder became the shared parent
+// the other four default under (see AppSettings.saveRootDir's own doc), but the settings key
+// (defaultSaveDir) and this enum's historical default-parameter position on pickSaveFolder() both
+// stayed put so no existing caller needed to change.
+internal enum class SaveFolderKind { ROOT, ANALYSIS, SESSIONS, SNAPSHOTS, ZIP }
 
 // One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
 // [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
@@ -675,6 +851,36 @@ private fun launchEditor(template: String, file: File, line: Int): Boolean = run
 // the 100-512MB range freezing the UI on every filter keystroke.
 internal const val LARGE_FILE_MODE_BYTES = 64L * 1024L * 1024L
 
+// Row-count analogue of LARGE_FILE_MODE_BYTES above, for a tailed tab: an opened-from-disk tab
+// decides largeFileMode once from file.length(), but a tail (in particular a live capture, which
+// starts as an empty file and can run for hours) has no file-length signal to re-check against as
+// it grows. TailCoordinator.appendTailedLines checks this on every batch instead — see its own
+// comment for why the flip is deliberately one-way, never turning back off.
+internal const val LARGE_FILE_MODE_ROWS = 500_000
+
+// Capture logs are flushed frequently enough for responsive rows while avoiding the heavier
+// whole-list filter pass on every half-second default tail tick.
+private const val CAPTURE_TAIL_POLL_INTERVAL_MS = 1_000L
+
+// How long a Screenshot / Mark issue result stays on the capture strip (see captureScreenshotStatus).
+private const val CAPTURE_STATUS_VISIBLE_MS = 4_000L
+private const val CAPTURE_STATUS_FAILURE_VISIBLE_MS = 8_000L
+
+// Keep the debounce below the recorder's 250ms publish cadence so a preview eventually lands
+// while a capture is still running. The per-tab cancellation/generation guard means a new tick
+// replaces the old work instead of queueing a 250ms job storm.
+private const val CAPTURE_PREVIEW_DEBOUNCE_MS = 150L
+
+/** Bound for ensureEmbeddedMirror's awaitCaptureSession: how long to wait for the recorder to
+ * publish its session before treating "not ready yet" as a real failure. */
+private const val EMBEDDED_MIRROR_SESSION_WAIT_MS = 5_000L
+
+/** Bound for ensureEmbeddedMirror's awaitEmbeddedRecordingSession: how long to wait, once a
+ * recordVideo=true session is known, for CaptureRecorder to publish its embedded device session
+ * before giving up rather than silently opening a second embedded scrcpy server — see that
+ * function's doc for the race this closes. */
+private const val EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS = 10_000L
+
 // Debounce for in-view search recompute (AppState.scheduleSearchRecompute) — matches the keyword
 // filter's own debounce (see FilterPanel's kwDisplay LaunchedEffect) so typing into the Find bar
 // feels the same as typing into the filter's keyword field.
@@ -777,6 +983,31 @@ internal fun tagPrefixConflictsOnCheckingTag(tag: String, pkgPrefixes: Set<Strin
 data class PendingFilterLoad(val tabId: String, val targetFilterId: String, val currentFilterId: String?)
 
 data class PendingDuplicateFilterSave(val tabId: String, val existingId: String, val existingName: String, val requestedName: String)
+
+// Phase 4 (snapshot archive + import): AppState.openCaptureFile's `existing != null` branch found
+// this archive already open as [tabId] and, since that tab already has its own notes, reopened the
+// archive to check whether ITS notes (already re-anchored to [tabId]'s own logData — see
+// reanchorImportedCaptureNotes) are worth offering rather than silently discarding. A brand-new tab
+// (the far more common path through openCaptureFile) never has existing notes to protect, so it
+// never reaches this — see AppState.resolveCaptureNotesImport / dismissCaptureNotesImport for the
+// three ways this can resolve.
+data class PendingCaptureNotesImport(val tabId: String, val incoming: Annotations, val archiveName: String)
+
+internal data class ExternalDeviceAiApproval(
+    val requestId: String,
+    val sessionId: String,
+    val clientName: String,
+    val deviceLabel: String,
+)
+
+private data class DeviceAiOperationRecord(
+    val id: String,
+    val description: String,
+    val status: String,
+    val createdAtMs: Long,
+    val result: Any? = null,
+    val error: String? = null,
+)
 
 data class PendingFilterRename(val id: String, val currentName: String, val isDraft: Boolean, val tabId: String?)
 
@@ -903,6 +1134,9 @@ internal fun casePreviewCopyText(preview: CaseLibraryPreview): String = buildStr
 
 enum class ImportFilterAction { RENAME, REPLACE, SKIP, ADD }
 
+/** What confirming the import review does: add saved filters, or add the highlighters to the active tab's filter. */
+enum class ImportReviewMode { SAVE_FILTERS, ADD_TO_CURRENT }
+
 private fun isTransientRegexOnlyChange(before: Filter, after: Filter): Boolean {
     fun Filter.withoutTransientRegexSearch() = copy(
         mode = FilterMode.TAGS,
@@ -959,12 +1193,20 @@ data class ImportFilterReviewRow(
     val resolvedName: String,
     val targetId: String? = null,
     val skippedReason: String? = null,
+    // Per-row remarks from the importer (e.g. a klogg pattern that may not match exactly).
+    val notes: List<String> = emptyList(),
 )
 
 data class PendingImportReview(
     val rows: List<ImportFilterReviewRow>,
     val stagedFolders: List<SavedFilterFolder> = emptyList(),
     val sourceName: String? = null,
+    // Import-level remarks, shown under the dialog's subtitle.
+    val notes: List<String> = emptyList(),
+    val mode: ImportReviewMode = ImportReviewMode.SAVE_FILTERS,
+    // Rows whose highlighters ADD_TO_CURRENT will append; kept apart from the rows' saved-filter actions
+    // so flipping modes never loses either choice.
+    val highlightRowIds: Set<String> = emptySet(),
 )
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
@@ -1001,6 +1243,10 @@ data class AnnotationNavigationRequest(
  */
 enum class FollowMappingStatus {
     NO_ANCHOR,
+
+    /** A portable capture is linked, but this playhead position falls in an explicitly unmapped
+     *  recording interruption. Follow must hold still rather than bridge the missing rows. */
+    UNMAPPED_GAP,
     BEFORE_FIRST,
     AFTER_LAST,
 
@@ -1022,6 +1268,8 @@ enum class FollowMappingStatus {
     ON_VISIBLE_ROW,
 }
 
+enum class VideoMappingKind { NONE, ANCHOR, CAPTURE }
+
 /** Everything a Follow readout needs to explain the current playhead-to-log mapping, including why
  *  it might look "stuck" — see [FollowMappingStatus]. */
 data class VideoFollowMapping(
@@ -1032,7 +1280,7 @@ data class VideoFollowMapping(
     val status: FollowMappingStatus,
     // The raw (day-unrolled) elapsed timestamp Follow computed for the current playhead, BEFORE any
     // visible/full-log floor resolution — i.e. what "the video says" independent of what's actually
-    // selectable. Null exactly when status is NO_ANCHOR (no anchor to map from at all). Lets a
+    // selectable. Null when there is no mapping or the playhead is in an explicit capture gap. Lets a
     // readout show the computed target time alongside whatever row Follow actually holds on,
     // instead of leaving the reader to guess whether "holding" means "close" or "very far behind."
     val mappedElapsedMs: Long? = null,
@@ -1042,6 +1290,9 @@ data class VideoFollowMapping(
     // navigation reads it to decide whether there is a folded row worth revealing; see
     // AppState.followRevealTarget.
     val mappedFullFloorLogId: Int? = null,
+    val mappingKind: VideoMappingKind = VideoMappingKind.NONE,
+    val captureQuality: String? = null,
+    val captureUncertaintyMs: Long? = null,
 )
 
 /** One row-shaped fact inside a [FollowDiagnostics] dump: id/ts/elapsed ONLY, deliberately never
@@ -1071,8 +1322,7 @@ data class FollowDiagnostics(
     val anchor: FollowDiagnosticRow?,
     val anchorVideoMs: Long?,
     val playheadVideoMs: Long,
-    // Null only when hasAnchor is false — everything below is what Follow computed FROM this value,
-    // so a null here means every "chosen"/"candidates"/"status" field downstream is meaningless.
+    // Null when there is no mapping or a capture playhead is in an explicitly unmapped gap.
     val mappedElapsedMs: Long?,
     val mappedElapsedClock: String?,
     val chosenVisibleFloor: FollowDiagnosticRow?,
@@ -1107,6 +1357,9 @@ data class FollowDiagnostics(
     val filterActive: Boolean,
     val totalLogDataSize: Int,
     val displayedItemCount: Int,
+    val mappingKind: VideoMappingKind = if (hasAnchor) VideoMappingKind.ANCHOR else VideoMappingKind.NONE,
+    val captureQuality: String? = null,
+    val captureUncertaintyMs: Long? = null,
 )
 
 private fun FollowDiagnosticRow.format(): String = "id=$id ts=${ts ?: "?"} elapsed=${elapsedMs?.toString() ?: "?"}ms"
@@ -1123,6 +1376,13 @@ fun formatFollowDiagnostics(d: FollowDiagnostics): String = buildString {
     appendLine("Indagium Follow diagnostics — tab ${d.tabId}")
     appendLine("app-data migration: ${migrationOutcomeSummary(DesktopStorage.lastMigrationOutcome)}")
     appendLine("has anchor: ${d.hasAnchor}")
+    appendLine("mapping kind: ${d.mappingKind}")
+    if (d.mappingKind == VideoMappingKind.CAPTURE) {
+        appendLine(
+            "capture sync: quality=${d.captureQuality ?: "unknown"} " +
+                "uncertaintyMs=${d.captureUncertaintyMs ?: "?"}",
+        )
+    }
     if (d.anchor != null) appendLine("anchor: ${d.anchor.format()} videoMs=${d.anchorVideoMs}")
     appendLine("playhead videoMs: ${d.playheadVideoMs}")
     appendLine("mapped target: elapsed=${d.mappedElapsedMs?.toString() ?: "?"}ms clock=${d.mappedElapsedClock ?: "?"}")
@@ -1288,6 +1548,16 @@ class AppState(
     private val archiveCacheDir: File = DesktopStorage.archiveCacheDir(),
     private val customCommandsDir: File = DesktopStorage.customCommandsDir(),
     private val filterBackupsDir: File? = null,
+    // The real ~/Documents/Indagium default for AppSettings.saveRootDir's effective folders
+    // (analysis/captures/snapshots/saved-captures — see effectiveSaveRootOrNull below). Null in
+    // the class, same as filterBackupsDir above: production (App.kt) is the only caller that wires
+    // the real DesktopStorage.defaultSaveRootDir() in, so a bare test construction — or one that
+    // only overrides autosaveFile/notesDir the way hundreds of existing tests already do — can
+    // never resolve a save folder to a real ~/Documents path. Every effective-folder function below
+    // falls back to exactly the directory it used before this setting existed (notesDir, the
+    // legacy capture root, ".", or a capture session's own parent) when this stays null, so no
+    // pre-existing test needs to change just because this feature was added.
+    private val platformDefaultSaveRootDir: File? = null,
     private val autoExportNotes: Boolean = true,
     // Test seam for the S-03 archive extraction budget (openZipEntry): production uses the real
     // 500MB default so tests can exercise the ArchiveBudgetExceededException/showOpenError path
@@ -1313,6 +1583,10 @@ class AppState(
     // restarts. Injectable for the same reason as autosaveFile/controlTokenFile — tests shouldn't
     // touch the real ~/.openlog2-equivalent location.
     private val sourceIndexFile: File = DesktopStorage.sourceIndexFile(),
+    // Test seam: AppStateStartupRaceTest passes Dispatchers.Unconfined so every coroutine the
+    // constructor launches runs inline at its launch site, turning a construction-order race into a
+    // deterministic check. Production always uses Dispatchers.IO.
+    ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     // Where confirmed v3 sequence diagrams are persisted across restarts (DiagramLibraryStore),
     // threaded into Seq3Session below. Injectable for the same reason as autosaveFile/
     // controlTokenFile/sourceIndexFile — tests shouldn't touch the real appDataDir() store.
@@ -1348,10 +1622,17 @@ class AppState(
     // Reveal the completed update in the platform file manager. This callback is injectable so
     // download tests can record the requested file without opening Finder/Explorer.
     private val fileRevealer: (File) -> Unit = ::revealInFileManager,
+    // Capture-session folders are opened directly, while update files are selected in their
+    // parent folder. Keep the operations separate so the capture action does not accidentally
+    // route through the app's log-folder importer.
+    private val captureFolderOpener: (File) -> Unit = ::openFolderInFileManager,
     // Test seam for video/VideoPlayerController.kt: production wraps a real FFmpegFrameGrabber
     // (needs the bytedeco natives on the classpath); tests substitute a fake VideoPlayerController
     // so the mapping/persistence tests in this file's video section never touch real FFmpeg.
     private val videoControllerFactory: (String) -> VideoPlayerController = ::defaultVideoPlayerController,
+    // Lets saved-profile migration tests provide the current bundled executable independently of
+    // the host running the test; production still requires the real bundled path to exist.
+    private val bundledCodexExecutableProvider: () -> String? = LocalAccountCli::bundledCodexExecutable,
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -1365,6 +1646,18 @@ class AppState(
     // Session-only by construction: AppSettings is the only settings object serialized into
     // autosave.cache, so pasted API keys cannot reach an autosave or exported-settings path.
     private val aiProviderApiKeys = ConcurrentHashMap<String, String>()
+
+    private val externalDeviceApprovalDecisions = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
+    private val approvedExternalDeviceSessions = ConcurrentHashMap<String, String>()
+    private val externalDeviceSessionLocks = ConcurrentHashMap<String, Mutex>()
+    internal var externalDeviceAiApprovals by mutableStateOf<List<ExternalDeviceAiApproval>>(emptyList())
+        private set
+    private val deviceAiOperations = ConcurrentHashMap<String, DeviceAiOperationRecord>()
+
+    /** Makes launchDeviceAiOperation's running-count check and registration one atomic step. */
+    private val deviceAiLaunchLock = Any()
+    private val deviceAiStopOperations = ConcurrentHashMap<String, String>()
+    private val deviceAiMarkerBarrier = DeviceAiMarkerBarrier()
 
     // The AI panel owns current-launch conversation state. Keeping the registry here lets tab
     // closure cancel its in-flight request without adding any AI fields to LogTab/autosave.
@@ -1456,7 +1749,12 @@ class AppState(
         activateTab(tabId)
         aiPanelVisible = true
         pendingAiPromptRequest = AiPromptRequest(
-            context = AiInvestigationContext(tabId = tabId, lineId = resolvedLineId, action = action),
+            context = AiInvestigationContext(
+                tabId = tabId,
+                isDeviceCapture = tab.captureSessionId != null || tab.captureSourceSessionId != null,
+                lineId = resolvedLineId,
+                action = action,
+            ),
             prompt = action.prompt,
         )
         ctx = null
@@ -1472,7 +1770,12 @@ class AppState(
         activateTab(tabId)
         aiPanelVisible = true
         pendingAiPromptRequest = AiPromptRequest(
-            context = AiInvestigationContext(tabId = tabId, lineId = null, action = null),
+            context = AiInvestigationContext(
+                tabId = tabId,
+                isDeviceCapture = tab(tabId)?.let { it.captureSessionId != null || it.captureSourceSessionId != null } == true,
+                lineId = null,
+                action = null,
+            ),
             prompt = command.promptTemplate,
         )
         ctx = null
@@ -1533,6 +1836,19 @@ class AppState(
                 aiEvidenceNoteTarget = evidence
             }
         }
+    }
+
+    /** Reveals one note block in the Notes panel — the same "jump to this note" channel AI
+     * evidence cards use ([navigateAiEvidence]'s `AiEvidence.Note` branch above, which this
+     * mirrors exactly), reused by the capture marker list's double-click-to-reveal (see
+     * CaptureMarkerRow in CaptureStrip.kt) since a marker's note id is known without needing an
+     * AiEvidence value of its own. */
+    internal fun revealNoteBlock(tabId: String, blockId: String) {
+        val tab = tab(tabId) ?: return
+        if (tab.annotations.blocks.none { it.id == blockId }) return
+        activateTab(tabId)
+        updateAnnotationVisible(true)
+        aiEvidenceNoteTarget = AiEvidence.Note(tabId, blockId)
     }
 
     fun addAiProviderProfile(): AiProviderProfile {
@@ -1648,9 +1964,8 @@ class AppState(
     var annotationPanelWidth by mutableStateOf(ANNOTATION_PANEL_MIN_WIDTH)
 
     // Video panel (ui/VideoPanel.kt, Task B) — a single global visibility toggle mirroring
-    // filterVisible/annotationVisible above; the panel itself only ever renders when the ACTIVE
-    // tab also has attachedVideo != null (see BoundVideoPanel), so toggling this off/on has no
-    // visible effect on a tab with no video attached.
+    // filterVisible/annotationVisible above; live capture and launcher tabs use the same slot for
+    // their status card before an attached video exists.
     var videoPanelVisible by mutableStateOf(true)
     var videoPanelWidth by mutableStateOf(VIDEO_PANEL_DEFAULT_WIDTH)
     var compareSplit by mutableStateOf(0.5f)
@@ -1675,7 +1990,7 @@ class AppState(
     var searchFocusTabId: String? by mutableStateOf(null)
 
     private val ioJob = SupervisorJob()
-    private val ioScope = CoroutineScope(ioJob + Dispatchers.IO)
+    private val ioScope = CoroutineScope(ioJob + ioDispatcher)
     private val retraceService = RetraceService()
     private val closed = AtomicBoolean(false)
 
@@ -1728,6 +2043,1821 @@ class AppState(
     // AppState itself; ioJob.cancel() in close() still cancels every tailer's Job for free, since
     // each is started on ioScope.
     private val tailCoordinator = TailCoordinator(this, ioScope)
+
+    // Where captures lived before save folders became configurable (Application Support/Indagium/
+    // captures) — still scanned by CaptureService alongside the new, configurable sessions folder
+    // so a session recorded before a user ever touched this setting stays listed and deletable.
+    private val legacyCaptureSessionsRoot: File get() = File(autosaveFile.absoluteFile.parentFile, "captures")
+
+    private val captureServiceDelegate = lazy {
+        CaptureService(this, ioScope, legacyCaptureSessionsRoot, ::effectiveCaptureSessionsDir)
+    }
+    internal val captureService: CaptureService get() = captureServiceDelegate.value
+    private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
+
+    /** Embedded mirror handles are presentation resources, separate from recorder ownership. */
+    private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
+    private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
+
+    /** Tab-local overlay sources that must survive native decoder/surface recreation. */
+    private val embeddedMirrorOverlaySourcesByTab = mutableMapOf<String, MutableSet<String>>()
+
+    /** App-window overlays that cover the native layer, keyed so overlapping overlays compose. */
+    private val embeddedMirrorGlobalOverlaySources = mutableSetOf<String>()
+
+    /** Detached mirror windows are app-owned, so tab navigation cannot dispose a live surface. */
+    private val detachedEmbeddedMirrorTabs = mutableStateSetOf<String>()
+
+    /** Set when an ensureEmbeddedMirror(tabId, autoStart = true) call arrives while another call's
+     * create job for the same tab is already in flight — see ensureEmbeddedMirror's doc. */
+    private val embeddedMirrorPendingAutoStartByTab = mutableMapOf<String, Boolean>()
+
+    // Test seam for the embedded-mirror autostart race (ensureEmbeddedMirror): production deploys a
+    // real scrcpy server over adb (slow, needs a device). Tests substitute a factory they can gate
+    // with a latch to reproduce the exact race — a second ensureEmbeddedMirror call landing while
+    // the first's create job is still in flight — deterministically instead of by timing. A plain
+    // internal property rather than a constructor parameter: EmbeddedMirrorHandle is `internal`
+    // (the whole capture.mirror stack deliberately is), and AppState's own constructor is public,
+    // so a constructor parameter of this type would fail the "public declaration exposes internal
+    // type" check that a property setter of the same visibility does not.
+    internal var embeddedMirrorHandleFactory:
+        (CaptureTools, File, com.indagium.capture.mirror.EmbeddedDeviceSession?, Boolean) -> EmbeddedMirrorHandle =
+        EmbeddedMirrorHandle::create
+
+    /** Setup failures (tool resolution, asset deploy, handle creation) that happened before any
+     * [EmbeddedMirrorHandle] existed to carry a FAILED snapshot of its own — see ensureEmbeddedMirror. */
+    private val embeddedMirrorSetupErrorByTab = mutableStateMapOf<String, String>()
+    private var embeddedMirrorVersion by mutableStateOf(0)
+    private val captureMonitorJobsByTab = mutableMapOf<String, Job>()
+
+    /** Flips the New tab launcher's "Device logging" section, persisted as
+     *  [AppSettings.deviceLoggingPanelExpanded] (expanded by default). The panel also force-expands
+     *  on an error or the small-buffer warning regardless — see CaptureLauncher.kt's
+     *  `DeviceLoggingPanel` — so a real problem is never hidden by a remembered collapse. */
+    internal fun toggleDeviceLoggingPanelExpanded() {
+        updateSettings { it.copy(deviceLoggingPanelExpanded = !it.deviceLoggingPanelExpanded) }
+    }
+
+    /** Observable guard covering tool validation, recovery, and process launch. */
+    internal var captureStartInProgress by mutableStateOf(false)
+        private set
+
+    /** Last asynchronous screenshot result shown by the active capture tab's strip. Also reused by
+     * [markIssue] — see CaptureStrip.kt's status-row comment: Screenshot and Mark issue share the
+     * one truncating feedback line under the strip. */
+    internal var captureScreenshotStatus: String?
+        get() = captureScreenshotStatusState
+        private set(value) {
+            captureScreenshotStatusState = value
+            // Short-lived by design: a persistent line stayed on the strip across Stop and the next
+            // capture, and kept the strip one row taller. An in-progress line ("Taking screenshot…")
+            // stays until its result replaces it; results fade after a few seconds, failures later.
+            captureScreenshotStatusClearJob?.cancel()
+            captureScreenshotStatusClearJob = if (value == null || value.endsWith("…")) {
+                null
+            } else {
+                ioScope.launch {
+                    delay(
+                        if (value.contains("fail", ignoreCase = true)) {
+                            CAPTURE_STATUS_FAILURE_VISIBLE_MS
+                        } else {
+                            CAPTURE_STATUS_VISIBLE_MS
+                        },
+                    )
+                    if (captureScreenshotStatusState == value) captureScreenshotStatusState = null
+                }
+            }
+        }
+    private var captureScreenshotStatusState by mutableStateOf<String?>(null)
+    private var captureScreenshotStatusClearJob: Job? = null
+    private val captureScreenshotCapabilities = mutableStateMapOf<String, CaptureScreenshotCapability>()
+
+    /** One undoable "Mark issue" press per tab, live for [MARKER_UNDO_WINDOW_MS]. A second press
+     * on the same tab before the first undo window closes replaces the entry — only the most
+     * recent marker is undoable, matching the singular "Undo" affordance a snackbar-style control
+     * offers; the earlier marker is simply left in Notes like any committed edit. */
+    internal val markerUndoByTab = mutableStateMapOf<String, MarkerUndoState>()
+
+    // Concurrent, not a plain map: beginMarkerNote/the expiry coroutine touch this from ioScope
+    // while undoMarkIssue removes from the UI thread, so two presses racing a click would
+    // otherwise corrupt a HashMap. markerUndoByTab needs no such guard — a snapshot state map is
+    // already safe to write from any thread.
+    private val markerUndoJobsByTab = ConcurrentHashMap<String, Job>()
+
+    /** Per-tab stopped-capture lifecycle. Kept separate from [LogTab.captureSessionId] so a
+     * failed finalization can leave the raw log usable as an ordinary stopped tab. */
+    private val captureFinalizationStatusByTab = mutableStateMapOf<String, String>()
+    internal var captureExportBusy by mutableStateOf(false)
+        private set
+
+    /** Set while [exportCaptureSnapshot] is waiting for a still-recording MKV's muxer lag to catch
+     * up (see CaptureArchiveExporter.waitForVideoCoverage) so the popover's busy state doesn't look
+     * stuck; cleared alongside [captureExportBusy]. */
+    internal var captureExportBusyMessage by mutableStateOf<String?>(null)
+        private set
+    internal var captureExportResult by mutableStateOf<CaptureExportResult?>(null)
+        private set
+    internal var captureExportPreview by mutableStateOf<CaptureExportPreview?>(null)
+        private set
+    internal var captureExportError by mutableStateOf<String?>(null)
+        private set
+    private var captureExportJob: Job? = null
+
+    /** See [PendingCaptureNotesImport]'s own doc — set only by openCaptureFile's `existing != null`
+     *  branch, never by a fresh-tab open. */
+    internal var pendingCaptureNotesImport by mutableStateOf<PendingCaptureNotesImport?>(null)
+        private set
+
+    /** One cancellable, latest-only preview lane per live capture tab. */
+    private val capturePreviewJobsByTab = mutableMapOf<String, Job>()
+    private val capturePreviewGenerationByTab = mutableMapOf<String, Long>()
+    internal val liveCaptureTabId: String?
+        get() = synchronized(stateLock) { tabs.firstOrNull { it.captureSessionId != null }?.id }
+
+    /**
+     * Presentation-only access to the controller owned by a live capture tab. The controller
+     * remains private to AppState; exposing it here lets Compose collect its recorder snapshot
+     * without creating a second recorder or a VideoPlayerController.
+     */
+    internal fun captureControllerFor(tabId: String): TabCaptureController? =
+        synchronized(stateLock) { captureControllersByTab[tabId] }
+
+    internal fun aiCaptureDevices(): List<CaptureDevice> = captureService.discoverDevicesNow()
+
+    /** AI/MCP device tools stay pinned to a live capture tab, and recheck adb connectivity on each
+     * control request so a disconnect cannot leave stale device consent usable. */
+    internal fun aiCaptureBinding(tabId: String): Pair<CaptureSession, CaptureTools> {
+        val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+        val session = controller.selectedSession.value ?: error("The bound capture has no active session")
+        val tools = captureService.toolsForStart(session.settings)
+        val connected = tools.listDevices().any { it.device.serial == session.device.serial && it.device.available }
+        check(connected) { "Android device ${session.device.serial} is disconnected" }
+        return session to tools
+    }
+
+    /** Starts or reuses the one active capture. A requested fresh run first stops and retains the
+     * old session through AppState's normal finalization path, then starts its replacement. */
+    internal fun startCaptureForAi(
+        deviceSerial: String?,
+        newCapture: Boolean,
+        recordVideo: Boolean? = null,
+        includeEarlierDeviceLogs: Boolean? = null,
+    ): Map<String, Any?> {
+        ensureNoDeviceAiStopIsFinalizing()
+        val liveTabId = liveCaptureTabId
+        val currentSession = liveTabId?.let { captureControllerFor(it)?.selectedSession?.value }
+        if (liveTabId != null && !newCapture && currentSession == null) {
+            error("The current capture is still starting; try again in a moment")
+        }
+        val devices = aiCaptureDevices().filter { it.available }
+        val choice = resolveAiCaptureDevice(
+            readyDevices = devices,
+            liveCaptureSerial = currentSession?.device?.serial,
+            requestedSerial = deviceSerial,
+            newCapture = newCapture,
+        )
+        val device = when (choice) {
+            is AiCaptureDeviceChoice.Selected -> choice.device
+            is AiCaptureDeviceChoice.NeedsSelection -> return mapOf(
+                "needsDeviceSelection" to true,
+                "message" to "More than one Android device is ready. Ask the user to choose one, then pass its deviceSerial before starting capture.",
+                "devices" to choice.devices.map { mapOf("serial" to it.serial, "model" to it.model, "emulator" to it.emulator) },
+            )
+            is AiCaptureDeviceChoice.Unavailable -> error("Android device ${choice.serial} is not connected or authorized")
+            is AiCaptureDeviceChoice.LiveCaptureDeviceConflict -> error(
+                "A capture is already live on ${choice.liveSerial}. Choose Start a new capture to switch devices.",
+            )
+            AiCaptureDeviceChoice.NoReadyDevices -> error("No ready Android devices were found")
+        }
+        reuseLiveCaptureIfRequested(liveTabId, newCapture, currentSession, device)?.let { return it }
+        if (liveTabId != null) {
+            stopCaptureTab(liveTabId)
+            awaitCaptureControllerRemoval(liveTabId)
+        }
+        val settingsOverride = captureSettingsOverrideFor(recordVideo, includeEarlierDeviceLogs)
+        val tabId = startCaptureTab(device, settingsOverride) ?: error(captureService.error ?: "Capture could not start")
+        return awaitCaptureStart(tabId, device)
+    }
+
+    /** The "reuse the current live capture" branch of [startCaptureForAi]: null when a fresh
+     *  capture should start instead (no live capture, or the caller asked for a new one). */
+    private fun reuseLiveCaptureIfRequested(
+        liveTabId: String?,
+        newCapture: Boolean,
+        currentSession: com.indagium.capture.CaptureSession?,
+        device: CaptureDevice,
+    ): Map<String, Any?>? {
+        if (liveTabId == null || newCapture) return null
+        val activeSerial = currentSession?.device?.serial ?: error("The current capture is still starting; try again in a moment")
+        check(activeSerial == device.serial) {
+            "A capture is already live on $activeSerial. Choose Start a new capture to switch devices."
+        }
+        return mapOf(
+            "tabId" to liveTabId,
+            "sessionId" to currentSession.id,
+            "deviceSerial" to activeSerial,
+            "reused" to true,
+        )
+    }
+
+    /** [startCaptureForAi]'s per-launch settings transform, or null when neither override was
+     *  given — see [startCaptureTab]'s own doc for why this never writes back to saved settings. */
+    private fun captureSettingsOverrideFor(recordVideo: Boolean?, includeEarlierDeviceLogs: Boolean?): CaptureSettingsOverride? {
+        if (recordVideo == null && includeEarlierDeviceLogs == null) return null
+        return { base ->
+            base.copy(
+                recordVideo = recordVideo ?: base.recordVideo,
+                includeBufferedLogs = includeEarlierDeviceLogs ?: base.includeBufferedLogs,
+            )
+        }
+    }
+
+    /** Polls the freshly-started tab until its capture session id appears, an interruption is
+     *  reported, or [CAPTURE_START_TIMEOUT_SECONDS] elapses. */
+    private fun awaitCaptureStart(tabId: String, device: CaptureDevice): Map<String, Any?> {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(CAPTURE_START_TIMEOUT_SECONDS)
+        while (System.nanoTime() < deadline) {
+            val started = tab(tabId)?.captureSessionId
+            if (started != null) return mapOf(
+                "tabId" to tabId,
+                "sessionId" to started,
+                "deviceSerial" to device.serial,
+                "reused" to false,
+            )
+            val snapshot = captureControllerFor(tabId)?.snapshot?.value
+            if (snapshot?.state == com.indagium.capture.RecorderState.INTERRUPTED) {
+                error(snapshot.diagnostics.lastOrNull() ?: captureService.error ?: "Capture was interrupted while starting")
+            }
+            Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
+        }
+        error("Capture did not become ready within $CAPTURE_START_TIMEOUT_SECONDS seconds")
+    }
+
+    private fun awaitCaptureControllerRemoval(tabId: String) {
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(CAPTURE_START_TIMEOUT_SECONDS)
+        while (captureControllerFor(tabId) != null && System.nanoTime() < deadline) Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
+        check(captureControllerFor(tabId) == null) { "The previous capture did not finish finalizing within $CAPTURE_START_TIMEOUT_SECONDS seconds" }
+    }
+
+    internal fun launchDeviceAiOperation(
+        description: String,
+        action: suspend () -> Any?,
+        markerTabId: String? = null,
+    ): Map<String, Any?> {
+        val id = UUID.randomUUID().toString()
+        synchronized(deviceAiLaunchLock) {
+            if (deviceAiOperations.values.count { it.status == "running" } >= MAX_RUNNING_DEVICE_AI_OPERATIONS) {
+                return mapOf("error" to "Too many device operations are running; wait for one to finish")
+            }
+            deviceAiOperations[id] = DeviceAiOperationRecord(id, description, "running", System.currentTimeMillis())
+        }
+        markerTabId?.let { deviceAiMarkerBarrier.register(it, id) }
+        if (deviceAiOperations.size > DEVICE_AI_OPERATION_TRIM_THRESHOLD) {
+            val cutoff = System.currentTimeMillis() - DEVICE_AI_OPERATION_RETENTION_MS
+            deviceAiOperations.entries.removeIf { it.value.createdAtMs < cutoff && it.value.status != "running" }
+        }
+        ioScope.launch {
+            var succeeded = false
+            try {
+                val result = action()
+                deviceAiOperations.computeIfPresent(id) { _, old -> old.copy(status = "completed", result = result) }
+                succeeded = true
+            } catch (cancelled: CancellationException) {
+                deviceAiOperations.computeIfPresent(id) { _, old -> old.copy(status = "cancelled") }
+                throw cancelled
+            } catch (failure: Throwable) {
+                deviceAiOperations.computeIfPresent(id) { _, old ->
+                    old.copy(status = "failed", error = failure.message ?: failure::class.simpleName ?: "Operation failed")
+                }
+            } finally {
+                markerTabId?.let { deviceAiMarkerBarrier.complete(it, id, succeeded) }
+            }
+        }
+        return mapOf("operationId" to id, "status" to "running", "message" to description)
+    }
+
+    internal fun deviceAiOperationStatus(operationId: String): Map<String, Any?> {
+        val operation = deviceAiOperations[operationId] ?: return mapOf("error" to "Unknown or expired operation id")
+        return buildMap {
+            put("operationId", operation.id)
+            put("status", operation.status)
+            put("description", operation.description)
+            operation.result?.let { put("result", it) }
+            operation.error?.let { put("error", it) }
+        }
+    }
+
+    internal fun markIssueForAi(tabId: String, label: String? = null, note: String? = null): Map<String, Any?> = launchDeviceAiOperation(
+        description = "Marking issue on the capture",
+        action = {
+            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+            val boundedLabel = label?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_LABEL_MAX_CHARS) ?: MARKER_DEFAULT_LABEL
+            val boundedNote = note?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_NOTE_MAX_CHARS)
+            val context = beginMarkerNote(tabId, controller, boundedLabel, boundedNote)
+                ?: error(captureScreenshotStatus ?: "Issue marker could not be created")
+            val resolvedScreenshotCapability = if (context.settings.markerScreenshot) {
+                resolveScreenshotCapabilityForAi(tabId, controller)
+            } else {
+                screenshotCapability(tabId)
+            }
+            var afterId = context.noteId
+            try {
+                afterId = attachMarkerScreenshot(tabId, controller, context)
+            } finally {
+                // Keep the marker window durable even when screenshot capture itself throws.
+                finishMarkerWindow(tabId, context, afterId)
+            }
+            val screenshotAttached = afterId != context.noteId
+            buildMap {
+                put("tabId", tabId)
+                put("markerId", context.marker.id)
+                put("noteId", context.noteId)
+                put("screenshotAttached", screenshotAttached)
+                if (context.settings.markerScreenshot && !screenshotAttached) {
+                    put(
+                        "warning",
+                        resolvedScreenshotCapability.reason ?: "The issue marker was saved, but its screenshot could not be attached.",
+                    )
+                }
+            }
+        },
+        markerTabId = tabId,
+    )
+
+    internal fun stopCaptureForAi(tabId: String): Map<String, Any?> =
+        launchDeviceAiOperation("Stopping and finalizing the capture", action = {
+            check(captureControllerFor(tabId) != null) { "The bound capture tab is no longer live" }
+            stopCaptureTab(tabId)
+            awaitCaptureControllerRemoval(tabId)
+            mapOf("tabId" to tabId, "status" to "stopped", "retained" to true)
+        }).also { operation ->
+            (operation["operationId"] as? String)?.let { trackDeviceAiStopOperation(it, tabId) }
+        }
+
+    internal fun trackDeviceAiStopOperation(operationId: String, tabId: String) {
+        deviceAiStopOperations[operationId] = tabId
+    }
+
+    internal fun ensureNoDeviceAiStopIsFinalizing() {
+        deviceAiStopOperations.entries.removeIf { (operationId, _) ->
+            deviceAiOperations[operationId]?.status != "running"
+        }
+        val pending = deviceAiStopOperations.entries.firstOrNull { (operationId, _) ->
+            deviceAiOperations[operationId]?.status == "running"
+        } ?: return
+        error(
+            "The previous capture is still finalizing. Poll get_capture_operation_status for operation " +
+                "${pending.key} until it completes before starting another capture.",
+        )
+    }
+
+    /** AI/MCP `export_capture_snapshot`. Mirrors the Capture snapshot popover's own range/minutes/
+     *  includeVideo/filename choices (see [buildCaptureSnapshotExportRequest], the construction the
+     *  two share) plus `open`, matching the popover's "Save + open". Once the capture has stopped,
+     *  only [rangeParam] "all" is supported — a stopped session has no live index/video to compute
+     *  any other range against, so it goes through [saveRetainedCapture]'s own retained-ZIP path
+     *  instead of [TabCaptureController.export]. */
+    internal fun exportCaptureSnapshotForAi(
+        tabId: String,
+        rangeParam: String? = null,
+        minutes: Int? = null,
+        includeVideo: Boolean? = null,
+        open: Boolean = false,
+        filenameParam: String? = null,
+    ): Map<String, Any?> = launchDeviceAiOperation("Exporting the capture as a ZIP archive", action = {
+        // Marker creation includes its post-window and screenshot attachment. If the model
+        // requests a snapshot immediately after mark_device_issue, wait for durable evidence
+        // before capturing the archive boundary.
+        check(deviceAiMarkerBarrier.awaitAndConsume(tabId)) {
+            "An issue marker failed to finish; the snapshot was not exported without its evidence."
+        }
+        val range = resolveCaptureSnapshotRangeForAi(rangeParam, minutes)
+        val filename = filenameParam?.let {
+            requireNotNull(captureArchiveName(it)) { "filename must be a valid archive basename" }
+        }
+        val controller = captureControllerFor(tabId)
+        val result = if (controller == null) {
+            check(range == com.indagium.capture.CaptureRange.ALL) {
+                "This capture has already stopped; only range=all is available (the stopped capture's retained ZIP)."
+            }
+            exportStoppedCaptureSnapshotForAi(tabId, filename)
+        } else {
+            exportLiveCaptureSnapshotForAi(tabId, controller, range, minutes ?: 5, includeVideo, filename)
+        }
+        if (open) openExportedCaptureForAi(result.file)
+        mapOf(
+            "path" to result.file.absolutePath,
+            "message" to result.message,
+            "includedVideo" to (result.videoCoveredEndMs != null),
+            "opened" to open,
+        )
+    })
+
+    private fun exportStoppedCaptureSnapshotForAi(tabId: String, filenameOverride: String?): CaptureExportResult {
+        val sessionId = tab(tabId)?.captureSessionId ?: error("The bound capture tab is no longer live")
+        val session = captureService.retainedSession(sessionId) ?: error("This capture session is no longer on disk")
+        val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
+        check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
+        val suggestedName = filenameOverride ?: com.indagium.capture.renderCaptureFilename(
+            session.settings.filenameTemplate, session.device, session.startedEpochMs,
+            com.indagium.capture.CaptureRange.ALL, session.exportCounter, session.settings.label,
+        )
+        val destination = uniqueSnapshotDestination(directory, suggestedName)
+        val notes = tab(tabId)?.let { it.annotations.preparedForSave(it) }
+        return captureService.exportRetainedSession(sessionId, destination, notes = notes)
+    }
+
+    private suspend fun exportLiveCaptureSnapshotForAi(
+        tabId: String,
+        controller: TabCaptureController,
+        range: com.indagium.capture.CaptureRange,
+        customMinutes: Int,
+        includeVideo: Boolean?,
+        filenameOverride: String?,
+    ): CaptureExportResult {
+        val tabNow = tab(tabId) ?: error("The bound capture tab is no longer live")
+        if (range == com.indagium.capture.CaptureRange.SELECTION && selectedCaptureOrdinals(tabNow) == null) {
+            error("No rows are selected in this tab; select rows before requesting range=selection.")
+        }
+        val boundary = controller.snapshotForExport()
+        val session = boundary.session
+        val directory = effectiveCaptureSnapshotsDir()
+        check(directory.isDirectory || directory.mkdirs()) { "Snapshot folder could not be created: ${directory.absolutePath}" }
+        val suggestedName = filenameOverride ?: com.indagium.capture.renderCaptureFilename(
+            session.settings.filenameTemplate, session.device, session.startedEpochMs, range, session.exportCounter, session.settings.label,
+        )
+        val destination = uniqueSnapshotDestination(directory, suggestedName)
+        val request = buildCaptureSnapshotExportRequest(
+            tab = tabNow,
+            destination = destination,
+            range = range,
+            customMinutes = customMinutes,
+            includeVideo = includeVideo ?: session.settings.recordVideo,
+            cutoffElapsedMs = boundary.elapsedMs,
+            overwriteExisting = false,
+        )
+        val notes = tabNow.annotations.preparedForSave(tabNow)
+        return kotlinx.coroutines.runInterruptible { controller.export(request, notes = notes) }
+    }
+
+    /** "Save + open" for an AI-triggered export: open the archive exactly like the popover's own
+     *  `LaunchedEffect` does — a real capture archive through [openCaptureFile], anything else (a
+     *  hand-edited/corrupted export) through plain [openFile]. */
+    private fun openExportedCaptureForAi(file: File) {
+        if (com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) openCaptureFile(file) else openFile(file)
+    }
+
+    /** AI/MCP `get_device_capture_status`: read-only device/elapsed/markers/storage snapshot for a
+     *  live or already-stopped capture tab. Never touches the device itself. */
+    internal fun deviceCaptureStatusForAi(tabId: String?): Map<String, Any?> = runCatching {
+        val resolvedTabId = tabId?.trim()?.takeIf(String::isNotBlank)
+            ?: liveCaptureTabId
+            ?: error("No tabId was given and no capture is currently live")
+        val tabNow = tab(resolvedTabId) ?: error("Unknown tab: $resolvedTabId")
+        val controller = captureControllerFor(resolvedTabId)
+        val live = controller != null
+        val session = controller?.selectedSession?.value
+            ?: tabNow.captureSessionId?.let { captureService.retainedSession(it) }
+            ?: error("$resolvedTabId is not a capture tab")
+        val storageBytesUsed = listOf(session.logFile, session.indexFile, session.videoFile)
+            .filter { it.isFile }
+            .sumOf { it.length() }
+        val markers = tabNow.annotations.blocks.filterIsInstance<AnnBlock.Note>().mapNotNull { block ->
+            parseMarkerHeader(block.text)?.let { marker ->
+                mapOf(
+                    "id" to marker.id,
+                    "elapsedMs" to marker.elapsedMs,
+                    "label" to marker.label,
+                    "firstOrdinal" to marker.firstOrdinal,
+                    "lastOrdinal" to marker.lastOrdinal,
+                    "noteId" to block.id,
+                )
+            }
+        }
+        mapOf(
+            "tabId" to resolvedTabId,
+            "deviceModel" to session.device.model,
+            "deviceSerial" to session.device.serial,
+            "status" to if (live) "live" else "stopped",
+            "elapsedMs" to session.elapsedMs,
+            "videoRecording" to (session.settings.recordVideo && session.videoStartElapsedMs != null),
+            "storageBytesUsed" to storageBytesUsed,
+            "markers" to markers,
+            // Best-effort only: the last export this process itself saved for ANY tab, since a
+            // per-tab record isn't kept. Null when nothing has been exported yet this launch.
+            "lastSnapshotPath" to captureExportResult?.file?.absolutePath,
+        )
+    }.getOrElse { mapOf("error" to (it.message ?: "Could not read capture status")) }
+
+    internal suspend fun awaitExternalDeviceAiApproval(sessionId: String, clientName: String, deviceLabel: String): Boolean {
+        if (approvedExternalDeviceSessions[sessionId] == deviceLabel) return true
+        approvedExternalDeviceSessions.remove(sessionId)
+        val requestId = "$sessionId\u0000$deviceLabel"
+        val deferred = externalDeviceApprovalDecisions.computeIfAbsent(requestId) { CompletableDeferred() }
+        val item = ExternalDeviceAiApproval(requestId, sessionId, clientName, deviceLabel)
+        if (externalDeviceAiApprovals.none { it.requestId == requestId }) {
+            externalDeviceAiApprovals = externalDeviceAiApprovals + item
+        }
+        return try {
+            val accepted = withTimeoutOrNull(DEVICE_AI_APPROVAL_TIMEOUT_MS) { deferred.await() } ?: false
+            if (accepted) approvedExternalDeviceSessions[sessionId] = deviceLabel
+            accepted
+        } finally {
+            externalDeviceApprovalDecisions.remove(requestId, deferred)
+            externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.requestId == requestId }
+        }
+    }
+
+    internal fun resolveExternalDeviceAiApproval(requestId: String, accepted: Boolean) {
+        externalDeviceApprovalDecisions[requestId]?.complete(accepted)
+    }
+
+    internal fun revokeExternalDeviceAiApproval(sessionId: String) {
+        approvedExternalDeviceSessions.remove(sessionId)
+        externalDeviceApprovalDecisions.entries
+            .filter { it.key.startsWith("$sessionId\u0000") }
+            .forEach { (requestId, deferred) ->
+                externalDeviceApprovalDecisions.remove(requestId, deferred)
+                deferred.complete(false)
+            }
+        externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.sessionId == sessionId }
+    }
+
+    /** Serialize a native MCP session's approval and device command as one bound action. */
+    internal suspend fun executeExternalDeviceAiAction(
+        sessionId: String,
+        clientName: String,
+        deviceLabel: String,
+        action: suspend () -> Any?,
+    ): Any? {
+        val lock = externalDeviceSessionLocks.computeIfAbsent(sessionId) { Mutex() }
+        return lock.withLock {
+            if (!awaitExternalDeviceAiApproval(sessionId, clientName, deviceLabel)) {
+                return@withLock mapOf("error" to "Device access was not approved for this MCP session.")
+            }
+            val result = runCatching { action() }
+                .getOrElse { error -> mapOf("error" to (error.message ?: "Device tool failed")) }
+            val failure = (result as? Map<*, *>)?.get("error") as? String
+            if (failure != null && listOf("disconnect", "not connected", "no longer live", "no active session").any { failure.contains(it, true) }) {
+                revokeExternalDeviceAiApproval(sessionId)
+            }
+            result
+        }
+    }
+
+    internal fun deviceAiApprovalLabel(tabId: String?, serial: String?): String {
+        val target = tabId?.let { id -> captureControllerFor(id)?.selectedSession?.value?.device }
+        return target?.let { "${it.model} (${it.serial})" }
+            ?: serial?.takeIf(String::isNotBlank)?.let { "Android device $it" }
+            ?: "the selected Android device"
+    }
+
+    private companion object DeviceAiLimits {
+        const val DEVICE_AI_OPERATION_RETENTION_MS = 30 * 60_000L
+        const val DEVICE_AI_APPROVAL_TIMEOUT_MS = 5 * 60_000L
+
+        /** [deviceAiOperations] is trimmed (finished entries older than the retention window
+         *  dropped) once it grows past this size, so a long-running launch doesn't retain every
+         *  operation it ever started forever. */
+        const val DEVICE_AI_OPERATION_TRIM_THRESHOLD = 128
+    }
+
+    /** Test seam: registers a controller for [tabId] without going through [startCaptureTab]'s real
+     * device/tool-resolution flow, so ensureEmbeddedMirror's race handling can be exercised directly
+     * against a [TabCaptureController] backed by fakes (see EmbeddedMirrorAutostartTest). */
+    internal fun registerCaptureControllerForTest(tabId: String, controller: TabCaptureController) {
+        synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+    }
+
+    internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
+
+    internal fun screenshotCapability(tabId: String): CaptureScreenshotCapability =
+        captureScreenshotCapabilities[tabId]
+            ?: CaptureScreenshotCapability(CaptureScreenshotAvailability.PENDING)
+
+    /** AI issue markers need to resolve the lazy screenshot probe before attaching evidence. A
+     * pending UI probe must not silently produce a durable marker without the configured image. */
+    private fun resolveScreenshotCapabilityForAi(
+        tabId: String,
+        controller: TabCaptureController,
+    ): CaptureScreenshotCapability {
+        val existing = screenshotCapability(tabId)
+        if (existing.availability != CaptureScreenshotAvailability.PENDING) return existing
+        val result = runCatching { controller.supportsScreenshots() }
+        val resolved = result.fold(
+            onSuccess = { supported ->
+                if (supported) CaptureScreenshotCapability(CaptureScreenshotAvailability.ENABLED)
+                else CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    "This device does not support adb exec-out screenshots",
+                )
+            },
+            onFailure = { failure ->
+                CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    failure.message ?: "adb exec-out screenshot probe failed",
+                )
+            },
+        )
+        captureScreenshotCapabilities[tabId] = resolved
+        return resolved
+    }
+
+    /** Starts the lazy per-session exec-out probe; repeated recompositions are harmless. */
+    internal fun ensureScreenshotCapability(tabId: String) {
+        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.PENDING) return
+        captureScreenshotCapabilities[tabId] = CaptureScreenshotCapability(CaptureScreenshotAvailability.PENDING)
+        val controller = captureControllerFor(tabId) ?: return
+        ioScope.launch {
+            val result = runCatching { controller.supportsScreenshots() }
+            captureScreenshotCapabilities[tabId] = result.fold(
+                onSuccess = { supported ->
+                    if (supported) CaptureScreenshotCapability(CaptureScreenshotAvailability.ENABLED)
+                    else CaptureScreenshotCapability(
+                        CaptureScreenshotAvailability.DISABLED,
+                        "This device does not support adb exec-out screenshots",
+                    )
+                },
+                onFailure = { failure ->
+                    CaptureScreenshotCapability(
+                        CaptureScreenshotAvailability.DISABLED,
+                        failure.message ?: "adb exec-out screenshot probe failed",
+                    )
+                },
+            )
+        }
+    }
+
+    /** Core of both the strip's Screenshot button ([screenshotCapture]) and the AI/MCP
+     *  `capture_device_screenshot` tool ([captureDeviceScreenshotForAi]): takes a raw device
+     *  screenshot, links it to the matching video frame when one is available, and adds it to
+     *  Notes. Throws on failure — each caller translates that into its own status line or tool
+     *  error field, exactly like [controller.screenshotCapture] itself already does for its one
+     *  prior caller. */
+    private suspend fun performScreenshotCapture(tabId: String, controller: TabCaptureController): ScreenshotCaptureOutcome {
+        val screenshot = controller.screenshotCapture()
+        // manualOffsetMs matches every other session-elapsed -> video-position conversion (see
+        // CaptureArchive.kt's writeMapping/finalizeSessionInPlace) — omitting it here used to leave
+        // a fresh screenshot's frame link off by whatever calibration offset the session had
+        // accumulated.
+        val manualOffsetMs = controller.selectedSession.value?.manualOffsetMs ?: 0L
+        val videoFrame = screenshot.videoStartElapsedMs?.let { videoStart ->
+            VideoFrameReference(
+                source = VideoSource.LocalFile(screenshot.videoFile.absolutePath),
+                sourceLabel = "capture.indagium.json/${screenshot.videoFile.name}",
+                positionMs = (screenshot.elapsedMs - videoStart + manualOffsetMs).coerceAtLeast(0L),
+            )
+        }
+        val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
+        val blockId = addImageBlock(tabId = tabId, sourceBytes = screenshot.bytes, provenance = provenance, videoFrame = videoFrame)
+        return ScreenshotCaptureOutcome(screenshot.file, blockId)
+    }
+
+    private data class ScreenshotCaptureOutcome(val file: File, val noteBlockId: String?)
+
+    /** Runs adb screencap away from the Compose thread and publishes a short-lived status line. */
+    internal fun screenshotCapture(tabId: String) {
+        val capability = screenshotCapability(tabId)
+        if (capability.availability != CaptureScreenshotAvailability.ENABLED) {
+            captureScreenshotStatus = capability.reason ?: "Screenshot capability is still being checked"
+            return
+        }
+        // The Screenshot button is only enabled while active (see screenshotButtonEnabled in
+        // CaptureStrip.kt), but recorder state and this lookup are not updated atomically, so a
+        // click that lands right as the capture stops can still reach here with no controller.
+        // This used to be a bare `?: return`: a user-triggered click that silently did nothing.
+        val controller = captureControllerFor(tabId) ?: run {
+            captureScreenshotStatus = "Screenshot failed: capture has already stopped"
+            return
+        }
+        captureScreenshotStatus = "Taking screenshot…"
+        ioScope.launch {
+            val result = runCatching { performScreenshotCapture(tabId, controller) }
+            captureScreenshotStatus = result.fold(
+                onSuccess = { outcome ->
+                    if (outcome.noteBlockId == null) {
+                        "Screenshot saved: ${outcome.file.name} (could not add it to Notes)"
+                    } else {
+                        "Screenshot saved and added to Notes: ${outcome.file.name}"
+                    }
+                },
+                onFailure = { "Screenshot failed: ${it.message ?: it::class.simpleName}" },
+            )
+            if (result.isFailure) {
+                captureScreenshotCapabilities[tabId] = CaptureScreenshotCapability(
+                    CaptureScreenshotAvailability.DISABLED,
+                    result.exceptionOrNull()?.message ?: "Screenshot capture failed",
+                )
+            }
+        }
+    }
+
+    /** AI/MCP `capture_device_screenshot`: exactly [screenshotCapture]'s own logic (see
+     *  [performScreenshotCapture]), synchronous within the operation so the caller gets a durable
+     *  result rather than polling a UI status line. */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun captureDeviceScreenshotForAi(tabId: String): Map<String, Any?> = launchDeviceAiOperation(
+        description = "Saving a device screenshot to Notes",
+        action = {
+            val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
+            val capability = if (screenshotCapability(tabId).availability == CaptureScreenshotAvailability.PENDING) {
+                resolveScreenshotCapabilityForAi(tabId, controller)
+            } else {
+                screenshotCapability(tabId)
+            }
+            if (capability.availability != CaptureScreenshotAvailability.ENABLED) {
+                error(capability.reason ?: "This device does not support screenshots")
+            }
+            val outcome = try {
+                performScreenshotCapture(tabId, controller)
+            } catch (failure: Exception) {
+                captureScreenshotCapabilities[tabId] =
+                    CaptureScreenshotCapability(CaptureScreenshotAvailability.DISABLED, failure.message ?: "Screenshot capture failed")
+                throw failure
+            }
+            mapOf(
+                "tabId" to tabId,
+                "file" to outcome.file.name,
+                "addedToNotes" to (outcome.noteBlockId != null),
+            )
+        },
+    )
+
+    /**
+     * "Mark issue" press (restyle plan Phase 3): writes an ordinary Note immediately (an
+     * `indagium:marker` header plus a heading — see capture/CaptureMarkerCodec.kt) covering the log
+     * window already on disk before the press, attaches a screenshot when the setting allows it,
+     * then waits `markerPostMs` and appends a trailing LogRef once that window has actually
+     * elapsed. Reuses [screenshotCapture]'s own guard shape immediately above — a press that loses
+     * its race with Stop is a status message on the shared strip status line
+     * ([captureScreenshotStatus]), never a silent no-op or a thrown exception.
+     */
+    internal fun markIssue(tabId: String) {
+        val controller = captureControllerFor(tabId) ?: run {
+            captureScreenshotStatus = "Mark issue failed: capture has already stopped"
+            return
+        }
+        ioScope.launch {
+            val context = beginMarkerNote(tabId, controller) ?: return@launch
+            val afterId = attachMarkerScreenshot(tabId, controller, context)
+            finishMarkerWindow(tabId, context, afterId)
+        }
+    }
+
+    /** Removes the blocks (and screenshot file, if any) a still-undoable Mark issue press added —
+     * see [MarkerUndoState]'s own doc for exactly what that covers. A no-op once the 10s window has
+     * closed (the entry is gone) or after the user has already undone it once. */
+    internal fun undoMarkIssue(tabId: String) {
+        val undo = markerUndoByTab.remove(tabId) ?: return
+        markerUndoJobsByTab.remove(tabId)?.cancel()
+        removeBlock(tabId, undo.noteId)
+        undo.imageBlockId?.let { removeBlock(tabId, it) }
+        undo.logRefId?.let { removeBlock(tabId, it) }
+        undo.screenshotFile?.let { runCatching { it.delete() } }
+    }
+
+    /** Resolves [pendingCaptureNotesImport] per the user's Append/Replace/Skip choice. A no-op if
+     *  the prompt already closed (e.g. the tab was closed while it was open). */
+    internal fun resolveCaptureNotesImport(action: com.indagium.capture.CaptureNotesImportAction) {
+        val pending = pendingCaptureNotesImport ?: return
+        pendingCaptureNotesImport = null
+        if (action == com.indagium.capture.CaptureNotesImportAction.SKIP) return
+        upAnn(pending.tabId) { t ->
+            t.copy(annotations = com.indagium.capture.mergeCaptureNotesImport(t.annotations, pending.incoming, action))
+        }
+    }
+
+    internal fun dismissCaptureNotesImport() {
+        pendingCaptureNotesImport = null
+    }
+
+    /** Step 1: resolve the press-time capture-clock boundary, compute the leading (already-on-disk)
+     *  half of the window, and commit the Note. Returns null (having already set
+     *  [captureScreenshotStatus]) when the boundary can't be read — e.g. the controller lost its
+     *  session between the guard in [markIssue] and this coroutine actually running. */
+    private fun beginMarkerNote(
+        tabId: String,
+        controller: TabCaptureController,
+        label: String = MARKER_DEFAULT_LABEL,
+        note: String? = null,
+    ): MarkerPressContext? {
+        val boundary = runCatching { controller.snapshotForExport() }.getOrElse {
+            captureScreenshotStatus = "Mark issue failed: ${it.message ?: it::class.simpleName}"
+            return null
+        }
+        val session = boundary.session
+        val settings = session.settings
+        // Highest existing number + 1, not the count: after a marker in the middle is deleted the
+        // count would hand out a number (id "mN", heading "Marker N") that is still in use.
+        val ordinal = tab(tabId)?.annotations?.blocks.orEmpty()
+            .filterIsInstance<AnnBlock.Note>()
+            .mapNotNull { parseMarkerHeader(it.text)?.id?.removePrefix("m")?.toIntOrNull() }
+            .maxOrNull().let { (it ?: 0) + 1 }
+        val videoStart = session.videoStartElapsedMs
+        val videoMs = videoStart?.let { start ->
+            (boundary.elapsedMs - start + session.manualOffsetMs).takeIf { it >= 0L }
+        }
+        // The leading half [t-preMs, t] is already flushed (boundary.indexLength is exactly the
+        // bound this scan must not read past), so it's resolved synchronously here rather than
+        // waiting for the trailing rescan finishMarkerWindow does after markerPostMs.
+        val leadingRange = ordinalRangeForElapsedWindow(
+            session.indexFile,
+            boundary.indexLength,
+            (boundary.elapsedMs - settings.markerPreMs).coerceAtLeast(0L),
+            boundary.elapsedMs,
+        )
+        val marker = CaptureMarker(
+            id = "m$ordinal",
+            elapsedMs = boundary.elapsedMs,
+            firstOrdinal = leadingRange?.first,
+            lastOrdinal = leadingRange?.last,
+            videoMs = videoMs,
+            label = label,
+            preMs = settings.markerPreMs,
+            postMs = settings.markerPostMs,
+            screenshotPath = if (settings.markerScreenshot) "screenshots/marker-$ordinal.png" else null,
+        )
+        val noteId = "n${System.nanoTime()}"
+        upAnn(tabId) { t ->
+            val text = markerHeader(marker) + "\n" + markerHeadingLine(ordinal, marker.label) + "\n" +
+                (note?.let { "$it\n" } ?: "")
+            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + AnnBlock.Note(noteId, text)))
+        }
+        markerUndoJobsByTab.remove(tabId)?.cancel()
+        markerUndoByTab[tabId] = MarkerUndoState(noteId = noteId)
+        markerUndoJobsByTab[tabId] = ioScope.launch {
+            delay(MARKER_UNDO_WINDOW_MS)
+            if (markerUndoByTab[tabId]?.noteId == noteId) markerUndoByTab.remove(tabId)
+        }
+        return MarkerPressContext(noteId = noteId, ordinal = ordinal, marker = marker, session = session, settings = settings)
+    }
+
+    /** Step 2: attaches a screenshot when the setting allows it AND the device actually supports
+     *  one — unlike [screenshotCapture]'s own button, an unsupported/pending capability here just
+     *  means the marker has no screenshot, not a failed press: the Note and its log window are
+     *  worth keeping either way. Returns the block id the trailing LogRef should insert after —
+     *  the screenshot's if one was added, otherwise the Note's own id. */
+    private suspend fun attachMarkerScreenshot(tabId: String, controller: TabCaptureController, context: MarkerPressContext): String {
+        if (!context.settings.markerScreenshot) return context.noteId
+        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.ENABLED) return context.noteId
+        val shot = runCatching { controller.screenshotCapture() }.getOrNull() ?: return context.noteId
+        // manualOffsetMs matches every other session-elapsed -> video-position conversion — see
+        // the matching comment on screenshotCapture()'s own videoFrame above.
+        val videoFrame = shot.videoStartElapsedMs?.let { start ->
+            VideoFrameReference(
+                source = VideoSource.LocalFile(shot.videoFile.absolutePath),
+                sourceLabel = "capture.indagium.json/${shot.videoFile.name}",
+                positionMs = (shot.elapsedMs - start + context.session.manualOffsetMs).coerceAtLeast(0L),
+            )
+        }
+        val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
+        if (!markerNoteExists(tabId, context.noteId)) {
+            // Deleted while the screenshot was being taken: don't attach it to whatever is now last.
+            runCatching { shot.file.delete() }
+            return context.noteId
+        }
+        val blockId = addImageBlock(tabId, shot.bytes, provenance, afterId = context.noteId, videoFrame = videoFrame) ?: return context.noteId
+        // The header's path so far is only a hint; record the file the recorder actually wrote, so
+        // deleting the marker can remove it and later snapshots stop shipping it.
+        updateMarkerHeader(tabId, context.noteId) { it.copy(screenshotPath = "screenshots/${shot.file.name}") }
+        val undo = markerUndoByTab[tabId]
+        if (undo?.noteId == context.noteId) {
+            markerUndoByTab[tabId] = undo.copy(imageBlockId = blockId, screenshotFile = shot.file)
+        }
+        return blockId
+    }
+
+    /** Step 3: waits out `markerPostMs`, rescans for the full [t-preMs, t+postMs] window against
+     *  whatever is flushed by then, and appends the LogRef under [afterId]. If the capture stopped
+     *  partway through the wait, the window is clipped to what was actually recorded and a status
+     *  line reports the shortfall — the same "keep what was collected" rule [captureScreenshotStatus]
+     *  already uses for a failed screenshot. */
+    private suspend fun finishMarkerWindow(tabId: String, context: MarkerPressContext, afterId: String) {
+        delay(context.settings.markerPostMs)
+        val liveController = captureControllerFor(tabId)
+        val liveBoundary = liveController?.let { runCatching { it.snapshotForExport() }.getOrNull() }
+        val indexFile: File
+        val logFile: File
+        val indexBytes: Long
+        val actualEndMs: Long
+        if (liveBoundary != null) {
+            indexFile = liveBoundary.session.indexFile
+            logFile = liveBoundary.session.logFile
+            indexBytes = liveBoundary.indexLength
+            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, liveBoundary.elapsedMs)
+        } else {
+            // The controller is gone (Stop won the race) — the session's own files are already
+            // fully flushed by stopCaptureTab's finalization, so read them directly.
+            val stopped = captureService.sessions.firstOrNull { it.id == context.session.id } ?: context.session
+            indexFile = stopped.indexFile
+            logFile = stopped.logFile
+            indexBytes = stopped.indexFile.length()
+            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, stopped.elapsedMs)
+        }
+        val requestedEndMs = context.marker.elapsedMs + context.settings.markerPostMs
+        if (actualEndMs < requestedEndMs) {
+            val collectedSeconds = (actualEndMs - context.marker.elapsedMs).coerceAtLeast(0L) / MARKER_MS_PER_SECOND
+            val requestedSeconds = context.settings.markerPostMs / MARKER_MS_PER_SECOND
+            captureScreenshotStatus = "+%.1f s of %.0f s — capture ended".format(Locale.US, collectedSeconds, requestedSeconds)
+        }
+        val fullRange = ordinalRangeForElapsedWindow(
+            indexFile,
+            indexBytes,
+            (context.marker.elapsedMs - context.settings.markerPreMs).coerceAtLeast(0L),
+            actualEndMs,
+        ) ?: return
+        val tabNow = tab(tabId) ?: return
+        // Deleted during the trailing wait: its LogRef would otherwise be appended at the end.
+        if (!markerNoteExists(tabId, context.noteId)) return
+        val missing = fullRange.filterNot { it in tabNow.rmap }.toSet()
+        val sourceEntries = if (missing.isEmpty()) {
+            null
+        } else {
+            // Tail lag: the live tab hasn't caught up to some rows the recorder already flushed.
+            // Read those straight from the capture log by byte offset and merge with what the tab
+            // already has, so the LogRef shows the whole window regardless of tailing progress.
+            (fullRange.mapNotNull { tabNow.rmap[it] } + captureLogEntriesForOrdinals(indexFile, indexBytes, logFile, missing))
+                .sortedBy { it.id }
+        }
+        val logRefId = addLogRefBlock(tabId, fullRange.toList(), caption = "", afterId = afterId, sourceEntries = sourceEntries)
+        if (logRefId != null) {
+            val undo = markerUndoByTab[tabId]
+            if (undo?.noteId == context.noteId) markerUndoByTab[tabId] = undo.copy(logRefId = logRefId)
+        }
+        rewriteMarkerHeaderRows(tabId, context, fullRange)
+    }
+
+    /**
+     * Re-stamps the marker Note's header with the window that was ACTUALLY collected. Until this
+     * runs the header carries only the leading half ([beginMarkerNote] writes it before the
+     * trailing window exists), which is fine for the live UI — [CaptureMarkerRow] navigates via the
+     * neighbouring LogRef, not the header — but the header is the durable record: Phase 4 rebuilds
+     * `logIds` from its `rows` on import, because a LogRef's own ids are parser ids that restart at
+     * 1 per file. Leaving the leading-only range here would silently drop the `+postMs` half of
+     * every marker that survived a snapshot round-trip.
+     */
+    private fun rewriteMarkerHeaderRows(tabId: String, context: MarkerPressContext, fullRange: IntRange) {
+        updateMarkerHeader(tabId, context.noteId) { it.copy(firstOrdinal = fullRange.first, lastOrdinal = fullRange.last) }
+    }
+
+    /** Rewrites one marker Note's header line from its CURRENT header, so the separate updates
+     *  (screenshot path, collected rows) never overwrite each other with a stale copy. The rest of
+     *  the note — which the user may already have typed under — is kept as is. */
+    private fun updateMarkerHeader(tabId: String, noteId: String, transform: (CaptureMarker) -> CaptureMarker) {
+        upAnn(tabId) { t ->
+            val blocks = t.annotations.blocks.map { block ->
+                if (block !is AnnBlock.Note || block.id != noteId) return@map block
+                val current = parseMarkerHeader(block.text) ?: return@map block
+                val updated = transform(current)
+                if (updated == current) return@map block
+                val body = block.text.substringAfter("\n", missingDelimiterValue = "")
+                block.copy(text = markerHeader(updated) + "\n" + body)
+            }
+            t.copy(annotations = t.annotations.copy(blocks = blocks))
+        }
+    }
+
+    private fun markerNoteExists(tabId: String, noteId: String): Boolean =
+        tab(tabId)?.annotations?.blocks?.any { it.id == noteId } == true
+
+    /**
+     * Deletes one marker: its Note plus the screenshot and log excerpt written with it (see
+     * [markerOwnedBlockIds]), and the screenshot file in the capture session when the session is
+     * still on disk — otherwise every later snapshot would keep shipping it. Cancels a pending
+     * Undo for the same marker; a screenshot or log excerpt still being collected for it is
+     * dropped when it arrives ([attachMarkerScreenshot], [finishMarkerWindow]).
+     */
+    internal fun deleteMarker(tabId: String, noteId: String) {
+        val blocks = tab(tabId)?.annotations?.blocks ?: return
+        val note = blocks.firstOrNull { it.id == noteId } as? AnnBlock.Note ?: return
+        val shot = parseMarkerHeader(note.text)?.screenshotPath
+        if (markerUndoByTab[tabId]?.noteId == noteId) {
+            markerUndoByTab.remove(tabId)
+            markerUndoJobsByTab.remove(tabId)?.cancel()
+        }
+        markerOwnedBlockIds(blocks, noteId).forEach { removeBlock(tabId, it) }
+        shot?.let { markerScreenshotFile(tabId, it) }?.let { file -> runCatching { file.delete() } }
+    }
+
+    /** The session file a marker header's `shot` path names, only when it resolves to a direct
+     *  child of that capture session's `screenshots` folder. */
+    private fun markerScreenshotFile(tabId: String, relativePath: String): File? {
+        val tab = tab(tabId) ?: return null
+        val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
+        val directory = captureService.sessions.firstOrNull { it.id == sessionId }?.directory ?: return null
+        val screenshots = File(directory, "screenshots").canonicalFile
+        val file = File(directory, relativePath).canonicalFile
+        return file.takeIf { it.parentFile == screenshots && it.isFile }
+    }
+
+    /** Current UI bridge for a live tab. Reading the version makes map publication observable. */
+    internal fun embeddedMirrorFor(tabId: String): EmbeddedMirrorHandle? {
+        embeddedMirrorVersion
+        return synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
+    }
+
+    /** A setup failure (tool resolution, asset deploy, handle creation) from before any
+     * [EmbeddedMirrorHandle] existed — the panel has no handle to read a FAILED snapshot from in
+     * that case, so this is its only way to learn setup failed at all. Cleared by the next attempt
+     * (whether it succeeds or fails again). */
+    internal fun embeddedMirrorSetupError(tabId: String): String? = embeddedMirrorSetupErrorByTab[tabId]
+
+    internal fun isEmbeddedMirrorDetached(tabId: String): Boolean = tabId in detachedEmbeddedMirrorTabs
+
+    internal fun detachEmbeddedMirror(tabId: String) {
+        if (captureControllerFor(tabId) != null) detachedEmbeddedMirrorTabs.add(tabId)
+        applyEmbeddedMirrorOverlayState(tabId)
+    }
+
+    internal fun returnEmbeddedMirrorToSidebar(tabId: String, revealCaptureTab: Boolean = true) {
+        detachedEmbeddedMirrorTabs.remove(tabId)
+        applyEmbeddedMirrorOverlayState(tabId)
+        if (revealCaptureTab && tabs.any { it.id == tabId && it.captureSessionId != null }) {
+            activateTab(tabId)
+            videoPanelVisible = true
+        }
+    }
+
+    /** Active capture tabs that currently own a separate in-app mirror window. */
+    internal fun detachedEmbeddedMirrorTabs(): List<LogTab> =
+        activeDetachedEmbeddedMirrorTabs(tabs, detachedEmbeddedMirrorTabs)
+
+    /**
+     * Creates/reuses the embedded runtime for a live capture. Tool resolution happens on the IO
+     * lane; the log recorder is never stopped when mirror setup fails. Automatic start follows the
+     * capture session's mirror setting, while the explicit Open/Connect action passes true here.
+     *
+     * Two calls commonly race: `CaptureCard`'s `LaunchedEffect` fires with `autoStart` following
+     * `session?.settings?.mirror` — which can still be null on its first composition — right around
+     * the same time [startCaptureTab] calls this itself with `autoStart = true` once the session is
+     * known. Previously, whichever call's create job started first "won": a second call landing
+     * while that job was still in flight just returned, silently dropping its own `autoStart` intent
+     * — the panel stayed on "Connect to show the device" forever even though a mirror was supposed
+     * to auto-start. [embeddedMirrorPendingAutoStartByTab] fixes that by having a late `autoStart`
+     * request record itself for the in-flight job to honour once it finishes creating the handle.
+     *
+     * The job used to fail outright with "capture session is not ready" if `controller
+     * .selectedSession.value` was still null at the moment this ran — a real race, since the
+     * recorder publishes that StateFlow slightly after `controller.start()` returns. It now waits
+     * (bounded) for the first non-null value instead of failing immediately.
+     *
+     * A second, narrower race lived here too: for a `recordVideo=true` session, `CaptureRecorder
+     * .startCapture` publishes `selectedSession` (so [awaitCaptureSession] above returns) well
+     * before it assigns its embedded device session — adb logcat still has to spawn in between (see
+     * `CaptureRecorder.startCapture`, `mutableSelectedSession.value = session` vs. `embeddedSession
+     * = newSession`). A single synchronous `controller.activeEmbeddedSession()` read landing in that
+     * window used to see null and silently fall back to opening a *second*, independent embedded
+     * scrcpy server for a capture that IS recording video — a real device-encoder resource, not just
+     * a wasted read. [awaitEmbeddedRecordingSession] closes that window by suspending (bounded, never
+     * blocking a thread) on `CaptureRecorder.embeddedSessionFlow` instead of taking one snapshot.
+     * `recordVideo=false` captures skip this wait entirely and always get the handle's own
+     * standalone runtime, same as before.
+     */
+    internal fun ensureEmbeddedMirror(tabId: String, autoStart: Boolean) {
+        val controller = captureControllerFor(tabId) ?: return
+        val existing = synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
+        if (existing != null) {
+            if (autoStart) startEmbeddedMirror(tabId, existing, controller)
+            return
+        }
+        synchronized(stateLock) {
+            if (embeddedMirrorStartJobsByTab.containsKey(tabId)) {
+                if (autoStart) embeddedMirrorPendingAutoStartByTab[tabId] = true
+                return
+            }
+            embeddedMirrorSetupErrorByTab.remove(tabId)
+            embeddedMirrorStartJobsByTab[tabId] = ioScope.launch {
+                try {
+                    val session = awaitCaptureSession(controller)
+                        ?: error("capture session is not ready")
+                    val tools = captureService.toolsForStart(session.settings)
+                    // A capture that's actively recording video already owns one embedded scrcpy
+                    // session (CaptureRecorder/EmbeddedDeviceSession) — share it instead of opening
+                    // a second device encoder. Mirror-only captures (recordVideo=false) skip the wait
+                    // below entirely and always fall back to the handle's own standalone transport
+                    // (null here).
+                    val sharedDeviceSession = if (session.settings.recordVideo) {
+                        awaitEmbeddedRecordingSession(controller)
+                            ?: error(
+                                controller.snapshot.value.diagnostics.lastOrNull()
+                                    ?: "Video recording's embedded session did not start in time",
+                            )
+                    } else {
+                        null
+                    }
+                    val handle = embeddedMirrorHandleFactory(
+                        tools,
+                        File(autosaveFile.absoluteFile.parentFile, "capture-mirrors"),
+                        sharedDeviceSession,
+                        session.settings.hardwareMirror,
+                    )
+                    val startRequest = synchronized(stateLock) {
+                        if (captureControllersByTab[tabId] !== controller) {
+                            null
+                        } else {
+                            embeddedMirrorsByTab[tabId] = handle
+                            embeddedMirrorVersion++
+                            (autoStart || embeddedMirrorPendingAutoStartByTab.remove(tabId) == true) to
+                                embeddedMirrorIsOverlayOccluded(tabId)
+                        }
+                    }
+                    if (startRequest == null) {
+                        handle.close()
+                    } else {
+                        val (wantsAutoStart, overlayOccluded) = startRequest
+                        handle.setOverlayOccluded(overlayOccluded)
+                        if (wantsAutoStart) {
+                            startEmbeddedMirror(tabId, handle, controller)
+                        }
+                    }
+                } catch (failure: Throwable) {
+                    val message = "Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}"
+                    captureService.reportError(message)
+                    embeddedMirrorSetupErrorByTab[tabId] = message
+                    AppLogger.warn("embedded-mirror", message, failure)
+                } finally {
+                    synchronized(stateLock) {
+                        embeddedMirrorStartJobsByTab.remove(tabId)
+                        embeddedMirrorPendingAutoStartByTab.remove(tabId)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Bounded wait for the recorder to publish its session — see ensureEmbeddedMirror's doc. */
+    private suspend fun awaitCaptureSession(controller: TabCaptureController): CaptureSession? =
+        withTimeoutOrNull(EMBEDDED_MIRROR_SESSION_WAIT_MS) { controller.selectedSession.filterNotNull().first() }
+
+    /** Bounded wait for a recordVideo=true capture's embedded device session to appear — see
+     * ensureEmbeddedMirror's doc for the race this closes. Suspends rather than blocking a thread;
+     * a single missed read of [TabCaptureController.activeEmbeddedSession] used to race the window
+     * between `selectedSession` publication and the recorder actually creating its embedded session. */
+    private suspend fun awaitEmbeddedRecordingSession(
+        controller: TabCaptureController,
+    ): com.indagium.capture.mirror.EmbeddedDeviceSession? =
+        withTimeoutOrNull(EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS) {
+            controller.embeddedSessionFlow.filterNotNull().first()
+        }
+
+    /** Explicit Open/Connect action; retained for the existing toolbar/strip call sites. */
+    internal fun openCaptureMirror(tabId: String) = ensureEmbeddedMirror(tabId, autoStart = true)
+
+    /** Reopens the auxiliary scrcpy process if the user closed its external window. */
+    internal fun openExternalCaptureMirror(tabId: String) {
+        val controller = captureControllerFor(tabId) ?: return
+        ioScope.launch {
+            runCatching { controller.openMirror() }
+                .onFailure { failure ->
+                    captureService.reportError(
+                        "External scrcpy mirror could not open: " +
+                            (failure.message ?: failure::class.simpleName),
+                    )
+                }
+        }
+    }
+
+    /** Off the calling thread: [EmbeddedMirrorHandle.stop] can block on synchronous adb subprocess
+     * cleanup (see AdbScrcpyConnection.close), and this is called directly from a Compose
+     * Disconnect click handler — blocking there would freeze the UI for that cleanup's duration. */
+    internal fun stopEmbeddedMirror(tabId: String) {
+        val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
+        ioScope.launch { handle.stop() }
+    }
+
+    /**
+     * The embedded mirror's speaker toggle (EmbeddedMirrorPanel's control bar): persists the
+     * preference in [CaptureSettings.playAudioLive] (a global default, same as e.g. `keepDeviceAudio`
+     * — not per-tab) and, if this tab currently has a live mirror handle, applies it immediately by
+     * attaching/detaching a [com.indagium.capture.mirror.LiveAudioPlayer] on the shared recording
+     * session. Volume reads [CaptureSettings.liveAudioVolume] live on every playback chunk (via the
+     * lambda), so adjusting the Settings slider while audio is already playing takes effect without
+     * retoggling. Off the calling thread for the same reason [stopEmbeddedMirror] is: attaching opens
+     * an FFmpeg decoder context and a javax.sound.sampled line, neither of which should run on a
+     * Compose click handler's thread.
+     */
+    internal fun setEmbeddedMirrorLiveAudioEnabled(tabId: String, enabled: Boolean) {
+        updateSettings { it.copy(captureSettings = it.captureSettings.copy(playAudioLive = enabled)) }
+        val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
+        ioScope.launch {
+            handle.setLiveAudioEnabled(
+                enabled,
+                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+            )
+        }
+    }
+
+    /**
+     * A Compose [Popup] cannot appear above the native JAWT/Metal layer in the same macOS window
+     * under the legacy above-siblings fallback (the underlay keeps it live instead — see
+     * EmbeddedMirrorMacSurface.underlayActive). Callers — currently only
+     * RegisterMirrorOcclusionForCurrentWindow in MirrorOccludingLayers.kt, which every
+     * package-local `Popup`/`Dialog` in this package registers through — mask that surface for the
+     * lifetime of their own composition and restore the already-computed viewport on dismissal.
+     */
+    internal fun setEmbeddedMirrorOverlayOcclusionSource(tabId: String, source: String, occluded: Boolean) {
+        synchronized(stateLock) {
+            val sources = embeddedMirrorOverlaySourcesByTab.getOrPut(tabId) { mutableSetOf() }
+            if (occluded) sources.add(source) else sources.remove(source)
+            if (sources.isEmpty()) embeddedMirrorOverlaySourcesByTab.remove(tabId)
+        }
+        applyEmbeddedMirrorOverlayState(tabId)
+    }
+
+    /**
+     * Registers an app-window overlay such as a modal dialog or the Recent Files menu. Sources
+     * are keyed because two overlays can be open at once; dismissing one must not reveal the
+     * heavyweight Metal layer through the other. Detached mirrors live in their own window and
+     * are excluded from app-window occlusion.
+     */
+    internal fun setEmbeddedMirrorGlobalOverlayOccluded(source: String, occluded: Boolean) {
+        val tabIds = synchronized(stateLock) {
+            if (occluded) embeddedMirrorGlobalOverlaySources.add(source)
+            else embeddedMirrorGlobalOverlaySources.remove(source)
+            embeddedMirrorsByTab.keys.toList()
+        }
+        tabIds.forEach(::applyEmbeddedMirrorOverlayState)
+    }
+
+    private fun embeddedMirrorIsOverlayOccluded(tabId: String): Boolean {
+        val hasTabOverlay = embeddedMirrorOverlaySourcesByTab[tabId]?.isNotEmpty() == true
+        return if (tabId in detachedEmbeddedMirrorTabs) hasTabOverlay
+        else hasTabOverlay || embeddedMirrorGlobalOverlaySources.isNotEmpty()
+    }
+
+    private fun applyEmbeddedMirrorOverlayState(tabId: String) {
+        val pair = synchronized(stateLock) {
+            (embeddedMirrorsByTab[tabId] ?: return) to embeddedMirrorIsOverlayOccluded(tabId)
+        }
+        runCatching { pair.first.setOverlayOccluded(pair.second) }
+    }
+
+    private fun startEmbeddedMirror(tabId: String, handle: EmbeddedMirrorHandle, controller: TabCaptureController) {
+        val session = controller.selectedSession.value ?: return
+        if (session.device.serial.isBlank()) return
+        handle.start(
+            session.device.serial,
+            MirrorStreamOptions(
+                maxSize = session.settings.maxSize,
+                maxFps = session.settings.maxFps,
+                bitrateMbps = session.settings.bitrateMbps,
+            ),
+        )
+        // A user's persisted speaker preference must apply when an embedded mirror connects too.
+        // Previously this player was created only by the toggle callback, so audio stayed silent
+        // until the user toggled mute/unmute even when playAudioLive was already enabled.
+        applyEmbeddedMirrorLiveAudioPreference(tabId, handle)
+    }
+
+    private fun applyEmbeddedMirrorLiveAudioPreference(tabId: String, handle: EmbeddedMirrorHandle) {
+        ioScope.launch {
+            if (synchronized(stateLock) { embeddedMirrorsByTab[tabId] } !== handle) return@launch
+            val captureSettings = settings.captureSettings
+            handle.setLiveAudioEnabled(
+                enabled = captureSettings.playAudioLive && handle.hasLiveAudio,
+                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+            )
+        }
+    }
+
+    private fun closeEmbeddedMirror(tabId: String) {
+        detachedEmbeddedMirrorTabs.remove(tabId)
+        val handle = synchronized(stateLock) {
+            embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+            embeddedMirrorsByTab.remove(tabId)?.also { embeddedMirrorVersion++ }
+        }
+        handle?.close()
+    }
+
+    /**
+     * Starts a snapshot export on the IO lane without stopping the live recorder.
+     *
+     * This was the worst of the capture regressions: `captureControllerFor(tabId) ?: return`, with
+     * no error and no feedback, was reachable from an ordinary button click any time the capture
+     * had already stopped (the controller is removed by stopCaptureTab's finally block) — the user
+     * would click Save/Save+open in the snapshot popover and nothing would happen. That specific
+     * path is now unreachable in the UI (a stopped tab's strip routes through saveRetainedCapture
+     * instead, see CaptureStoppedStrip in CaptureStrip.kt), but the same start/stop race described
+     * on screenshotCapture above still applies here, so this reports through captureExportError —
+     * the same field every other failure in this function already uses — rather than staying silent.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun exportCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+        cancelCapturePreview(tabId)
+        val controller = captureControllerFor(tabId) ?: run {
+            captureExportError = "Capture export failed: capture has already stopped"
+            return
+        }
+        if (captureExportBusy) return
+        captureExportBusy = true
+        captureExportBusyMessage = null
+        captureExportResult = null
+        captureExportPreview = null
+        captureExportError = null
+        // Captured once, at click time, from the tab's CURRENT notes — same "one fixed snapshot of
+        // the request" treatment `request` itself already gets. preparedForSave resolves LogRef
+        // sourceEntries against this tab's own live rmap, exactly like an ordinary .ann sidecar save.
+        val preparedNotes = tab(tabId)?.let { t -> t.annotations.preparedForSave(t) }
+        captureExportJob = ioScope.launch {
+            try {
+                val result = runInterruptible {
+                    controller.export(
+                        request,
+                        onWaitingForVideo = { captureExportBusyMessage = "Waiting for the recording to catch up…" },
+                        notes = preparedNotes,
+                    )
+                }
+                captureExportResult = result
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                captureExportError = failure.message ?: failure::class.simpleName ?: "Capture export failed"
+            } finally {
+                captureExportBusy = false
+                captureExportBusyMessage = null
+                captureExportJob = null
+            }
+        }
+    }
+
+    internal fun previewCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
+        // Preview is not itself a direct button click (it runs off a LaunchedEffect while the
+        // snapshot popover is open), so unlike the other three lookups above this doesn't warrant
+        // captureExportError — but leaving a stale preview on screen from before the capture
+        // stopped would be actively misleading, so clear it instead of the previous silent no-op.
+        val controller = captureControllerFor(tabId) ?: run {
+            cancelCapturePreview(tabId)
+            captureExportPreview = null
+            return
+        }
+        val generation = synchronized(stateLock) {
+            capturePreviewJobsByTab[tabId]?.cancel()
+            val next = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            capturePreviewGenerationByTab[tabId] = next
+            next
+        }
+        val job = ioScope.launch {
+            try {
+                // Recorder snapshots are published at ~250ms cadence. Keep the popover responsive
+                // by coalescing those updates instead of starting one exporter job per cadence
+                // tick; cancellation also interrupts a growing-video preview/remux promptly.
+                delay(CAPTURE_PREVIEW_DEBOUNCE_MS)
+                val preview = runInterruptible { controller.preview(request) }
+                synchronized(stateLock) {
+                    if (capturePreviewGenerationByTab[tabId] == generation && isActive) {
+                        captureExportPreview = preview
+                        capturePreviewJobsByTab.remove(tabId)
+                    }
+                }
+            } catch (_: CancellationException) {
+                // A newer range edit, Save press, or popover dismissal owns the preview lane now.
+            } catch (_: Throwable) {
+                synchronized(stateLock) {
+                    if (capturePreviewGenerationByTab[tabId] == generation) {
+                        captureExportPreview = null
+                        capturePreviewJobsByTab.remove(tabId)
+                    }
+                }
+            }
+        }
+        synchronized(stateLock) { capturePreviewJobsByTab[tabId] = job }
+    }
+
+    /** Cancels only the export job; the per-tab recorder remains active. */
+    internal fun cancelCaptureSnapshot() {
+        captureExportJob?.cancel()
+    }
+
+    internal fun clearCaptureExportStatus() {
+        cancelAllCapturePreviews()
+        captureExportResult = null
+        captureExportPreview = null
+        captureExportError = null
+    }
+
+    private fun cancelCapturePreview(tabId: String) {
+        val job = synchronized(stateLock) {
+            capturePreviewGenerationByTab[tabId] = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            capturePreviewJobsByTab.remove(tabId)
+        }
+        job?.cancel()
+    }
+
+    private fun cancelAllCapturePreviews() {
+        val jobs = synchronized(stateLock) {
+            capturePreviewGenerationByTab.keys.forEach { tabId ->
+                capturePreviewGenerationByTab[tabId] = (capturePreviewGenerationByTab[tabId] ?: 0L) + 1L
+            }
+            capturePreviewJobsByTab.values.toList().also { capturePreviewJobsByTab.clear() }
+        }
+        jobs.forEach { it.cancel() }
+    }
+
+    internal fun updateCaptureSessionCalibration(sourcePath: String, additionalOffsetMs: Long) {
+        captureService.applyCalibration(sourcePath, additionalOffsetMs)
+    }
+
+    /** Settings-only capture hooks; they intentionally do not open the legacy workspace. */
+    internal val captureToolStatus: String?
+        get() = captureService.toolStatus
+
+    internal val captureToolResolution: CaptureToolResolution?
+        get() = captureService.toolResolutionFor(settings.captureSettings)
+
+    /** See NativeMediaSupport.kt — settings/launcher UI reads this to grey out and explain
+     *  controls the adaptation in [startCaptureTab] would otherwise silently override. */
+    internal val captureNativeMediaSupport: NativeMediaSupport
+        get() = captureService.nativeMediaSupport
+
+    internal val captureAdbAvailable: Boolean
+        get() = captureService.adbAvailable
+
+    /** False until the first tool check (see [recheckCaptureTools]) has finished. */
+    internal val captureToolsChecked: Boolean
+        get() = captureService.hasCheckedDevicesOnce && !captureService.discovering
+
+    internal fun browseCaptureAdb() = captureService.browseAdbFromSettings()
+
+    internal fun browseCaptureScrcpy() = captureService.browseScrcpyFromSettings()
+
+    internal fun recheckCaptureTools() = captureService.recheckToolsFromSettings()
+
+    internal fun openCaptureInstallGuidance() = captureService.openInstallGuidanceFromSettings()
+
+    internal fun openRetainedCapture(sessionId: String) {
+        ioScope.launch {
+            // Reachable from a click (the launcher's "Open" button on a retained session) whenever
+            // the session directory was removed on disk between the button rendering and the
+            // click — was a bare `?: return@launch`, part of item 5's silent-no-op audit.
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureService.reportError("This capture session is no longer on disk")
+                return@launch
+            }
+            val descriptor = File(session.directory, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME)
+            if (descriptor.isFile) openPath(descriptor) else openFile(session.logFile)
+        }
+    }
+
+    internal fun discardRetainedCapture(sessionId: String): Boolean {
+        val deleted = runCatching { captureService.discardRetainedSession(sessionId) }.getOrDefault(false)
+        if (deleted) captureService.updateSessions()
+        return deleted
+    }
+
+    // tabId is the open tab (if any) backing this retained session — CaptureStoppedStrip always
+    // has one (its own tab), the launcher's "Retained sessions" list generally doesn't (a session
+    // with no open tab). When present, its CURRENT notes are exported exactly like the live
+    // snapshot path (exportCaptureSnapshot) does via preparedForSave, fixing markers silently
+    // missing from a stopped capture's "Save ZIP" — see this function's own bug-fix history.
+    internal fun saveRetainedCapture(sessionId: String, tabId: String? = null) {
+        val preparedNotes = tabId?.let { id -> tab(id)?.let { t -> t.annotations.preparedForSave(t) } }
+        ioScope.launch {
+            // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
+            // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
+            // CaptureStrip.kt), not just the launcher's retained-sessions list.
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureExportError = "This capture session is no longer on disk"
+                return@launch
+            }
+            val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
+            val filename = com.indagium.capture.renderCaptureFilename(
+                session.settings.filenameTemplate,
+                session.device,
+                session.startedEpochMs,
+                com.indagium.capture.CaptureRange.ALL,
+                session.exportCounter,
+                session.settings.label,
+            )
+            captureExportError = null
+            captureExportResult = runCatching {
+                captureService.exportRetainedSession(sessionId, File(directory, filename), notes = preparedNotes)
+            }.getOrElse { failure ->
+                captureExportError = failure.message ?: "Retained capture export failed"
+                null
+            }
+        }
+    }
+
+    /** Opens the retained capture's directory in Finder/Explorer/the desktop file manager. */
+    internal fun openRetainedCaptureFolder(sessionId: String) {
+        ioScope.launch {
+            val session = captureService.retainedSession(sessionId) ?: run {
+                captureService.reportError("This capture session is no longer on disk")
+                return@launch
+            }
+            if (!session.directory.isDirectory) {
+                captureService.reportError("Capture folder is no longer available: ${session.directory.absolutePath}")
+                return@launch
+            }
+            runCatching { captureFolderOpener(session.directory) }
+                .onFailure { failure ->
+                    captureService.reportError(
+                        "Could not open capture folder: ${failure.message ?: failure::class.simpleName}",
+                    )
+                }
+        }
+    }
+
+    /**
+     * Focus the existing home tab, or create it. The home tab is the same tab as the device-capture
+     * launcher — [LogTab.isCaptureLauncher] doubles as the home-tab marker (see its KDoc) — so this
+     * always lands on the split "Open a log" / capture-launcher screen, never on a live capture
+     * (that used to redirect here; the `+` button must always open home, not jump away from it).
+     */
+    internal fun openHomeTab() {
+        synchronized(stateLock) {
+            tabs.firstOrNull { it.isCaptureLauncher }?.let { setActiveSurfaceToTab(it.id); return }
+            val launcherId = "capture-launcher-${UUID.randomUUID()}"
+            val launcher = mkTab(
+                id = launcherId,
+                filename = "New tab",
+                logData = emptyList(),
+                analysis = LogAnalysis(pending = false),
+                processNameMode = newTabProcessNameMode(),
+            ).copy(isCaptureLauncher = true)
+            tabs = tabs + launcher
+            setActiveSurfaceToTab(launcherId)
+        }
+    }
+
+    /**
+     * Auto-opens the home tab when there is nothing else to show: start-up with nothing restored,
+     * or the last tab/diagram just closed. A no-op while [isLoading] (a command-line file argument
+     * is still parsing — opening home under it would flash and then immediately close) or when any
+     * tab or diagram session already exists. Driven from App.kt's `LaunchedEffect`, deliberately
+     * NOT from `init` or `closeTabsById`: a bare `AppState()` must stay empty (hundreds of test
+     * assertions depend on it), and re-adding a tab from inside a close would fight [stateLock]
+     * (the close already holds it).
+     */
+    internal fun ensureHomeTab() {
+        if (isLoading) return
+        if (tabs.isNotEmpty() || seq3Sessions.sessions.isNotEmpty()) return
+        openHomeTab()
+    }
+
+    // The New tab's "Before start" choices ARE the saved capture settings (the same values the
+    // Settings dialog's own "Before start" block edits), so whatever a user picked for the last
+    // capture is what the next one — and the next app start — begins with. They used to live in a
+    // per-launcher draft copied from the saved settings, which reset every choice on the next New
+    // tab. [tabId] is kept so call sites stay launcher-scoped; per-launch overrides (AI/MCP
+    // startCaptureForAi, the old-glibc adaptation) are still applied in startCaptureTab only.
+    @Suppress("UnusedParameter")
+    internal fun captureLaunchSettings(tabId: String): com.indagium.capture.CaptureSettings = settings.captureSettings
+
+    @Suppress("UnusedParameter")
+    internal fun updateCaptureLaunchSettings(
+        tabId: String,
+        transform: (com.indagium.capture.CaptureSettings) -> com.indagium.capture.CaptureSettings,
+    ) {
+        updateSettings { it.copy(captureSettings = transform(it.captureSettings)) }
+    }
+
+    /**
+     * Starts one live capture and publishes its empty log tab before adb is launched. This method
+     * is synchronous because the recorder's startup callback is the ordering boundary; callers on
+     * the Compose thread should treat it as a short operation, while tests can assert the exact
+     * tab/tailer ordering without a race.
+     *
+     * [settingsOverride], when given, transforms the settings this one launch actually uses
+     * (the saved capture settings) without writing anything back — see
+     * [startCaptureForAi]'s `recordVideo`/`includeEarlierDeviceLogs` per-launch overrides, the only
+     * current caller that passes one.
+     */
+    internal fun startCaptureTab(device: CaptureDevice, settingsOverride: CaptureSettingsOverride? = null): String? {
+        val existing = liveCaptureTabId
+        if (existing != null) {
+            activateTab(existing)
+            return existing
+        }
+        if (!device.available) {
+            captureService.reportError("Device ${device.serial} is not available (${device.state})")
+            return null
+        }
+        synchronized(stateLock) {
+            if (captureStartInProgress) {
+                captureService.reportError("A capture is already starting")
+                return null
+            }
+            captureStartInProgress = true
+        }
+        captureScreenshotStatus = null
+        val settings = this.settings.captureSettings.let { base -> settingsOverride?.invoke(base) ?: base }
+        val controller = captureService.newController()
+        val tabId = "t${tabCounter.getAndIncrement()}"
+        synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+        ioScope.launch {
+            var published = false
+            try {
+                val tools = captureService.toolsForStart(settings)
+                // Old-glibc Linux (see NativeMediaSupport.kt): adapt only the settings THIS launch
+                // uses, never the saved/draft settings above. tools.scrcpy is already resolved, so
+                // the EMBEDDED->EXTERNAL fallback below can tell whether one is actually installed.
+                val mediaSupport = captureService.nativeMediaSupportNow()
+                val adaptedSettings = settings.adaptedToNativeMedia(mediaSupport, tools.scrcpy != null)
+                val startupNotice = nativeMediaAdaptationNotice(settings, adaptedSettings, mediaSupport, tools.scrcpy != null)
+                controller.start(device, adaptedSettings, tools, startupNotice) { session ->
+                    val liveTab = mkTab(
+                        id = tabId,
+                        filename = "Capture — ${device.model}",
+                        logData = emptyList(),
+                        analysis = LogAnalysis(pending = false),
+                        processNameMode = newTabProcessNameMode(),
+                    ).copy(
+                        sourcePath = session.logFile.absolutePath,
+                        tailing = true,
+                        captureSessionId = session.id,
+                        // Deliberately NOT settings.openNewFilesWithUnfiltered: that setting is
+                        // meant for a static file, where "Original" is a genuinely different view
+                        // from "Filtered". A streaming capture tab's Original pane just re-renders
+                        // the same growing feed as Filtered (no filter has been applied yet), so
+                        // honoring the setting would split the strip into two identical panes and
+                        // halve the visible rows for no benefit.
+                        showUnfiltered = false,
+                    )
+                    synchronized(stateLock) {
+                        check(tabs.none { it.captureSessionId != null }) { "A capture is already recording" }
+                        tabs = tabs + liveTab
+                        setActiveSurfaceToTab(tabId)
+                    }
+                    published = true
+                    // FileTailer captures this offset synchronously before its coroutine is scheduled.
+                    // The recorder has already opened an empty log file, so no adb line can precede it.
+                    startCaptureTailing(tabId)
+                    // CaptureCard — the only other place that calls ensureEmbeddedMirror — is a
+                    // child of the right sidebar and simply doesn't compose while videoPanelVisible
+                    // is false, so a mirror-enabled capture that starts with the panel hidden would
+                    // otherwise never auto-start its mirror and never surface a setup error either.
+                    // Showing the panel here doesn't touch non-capture tabs: this callback only
+                    // runs for a capture that is starting.
+                    when (adaptedSettings.mirrorStartRoute()) {
+                        CaptureMirrorStartRoute.EMBEDDED -> {
+                            videoPanelVisible = true
+                            ensureEmbeddedMirror(tabId, autoStart = true)
+                        }
+                        CaptureMirrorStartRoute.EXTERNAL -> {
+                            // The recorder owns this one auxiliary process and closes it with the
+                            // session. A launch failure must never tear down log/video capture.
+                            runCatching { controller.openMirror() }
+                                .onFailure { failure ->
+                                    captureService.reportError(
+                                        "External scrcpy mirror could not open: " +
+                                            (failure.message ?: failure::class.simpleName),
+                                    )
+                                }
+                        }
+                        CaptureMirrorStartRoute.NONE -> Unit
+                    }
+                }
+                captureService.updateSessions()
+                closeCaptureLauncherTabs()
+                monitorCaptureLifecycle(tabId, controller)
+            } catch (failure: java.io.IOException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } catch (failure: IllegalArgumentException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } catch (failure: IllegalStateException) {
+                captureStartFailure(tabId, controller, published, failure)
+            } finally {
+                if (!published) synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+                captureStartInProgress = false
+                if (!published) controller.close()
+            }
+        }
+        return tabId
+    }
+
+    /** Watches unexpected recorder termination so a disconnected device is finalized automatically. */
+    private fun monitorCaptureLifecycle(tabId: String, controller: TabCaptureController) {
+        val monitor = ioScope.launch {
+            controller.snapshot.collect { snapshot ->
+                if (snapshot.state == com.indagium.capture.RecorderState.INTERRUPTED &&
+                    tab(tabId)?.captureSessionId != null
+                ) {
+                    stopCaptureTab(tabId)
+                    cancel()
+                }
+            }
+        }
+        synchronized(stateLock) {
+            if (captureFinalizationStatusByTab.containsKey(tabId) || tabs.none { it.id == tabId && it.captureSessionId != null }) {
+                monitor.cancel()
+            } else {
+                captureMonitorJobsByTab[tabId] = monitor
+            }
+        }
+    }
+
+    private fun captureStartFailure(
+        tabId: String,
+        controller: TabCaptureController,
+        published: Boolean,
+        failure: Throwable,
+    ): String? {
+        if (published) {
+            runCatching { tailCoordinator.cancelTailingFor(tabId) }
+            synchronized(stateLock) {
+                tabs = tabs.filterNot { it.id == tabId }
+                if (activeTabId == tabId) activeTabId = tabs.lastOrNull()?.id.orEmpty()
+                if (activeSurface is ActiveSurface.Log && (activeSurface as ActiveSurface.Log).tabId == tabId) {
+                    activeSurface = activeTabId.takeIf { it.isNotBlank() }?.let(ActiveSurface::Log)
+                }
+            }
+        }
+        runCatching { controller.close() }
+        synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+        captureService.reportError(failure.message ?: "Capture could not start")
+        return null
+    }
+
+    /** Stops, drains, and finalizes one live capture on IO, attaching it back to the same tab. */
+    @Suppress("TooGenericExceptionCaught")
+    internal fun stopCaptureTab(tabId: String) {
+        val controller = synchronized(stateLock) {
+            if (captureFinalizationStatusByTab[tabId] == CAPTURE_FINALIZING_STATUS) return
+            captureControllersByTab[tabId]
+        } ?: return
+        // Captured before any mutation below, so a canceled or failed finalize still remembers
+        // which recorder session this tab came from. Without this, stopCaptureTab's failure paths
+        // cleared captureSessionId and left captureSourceSessionId unset, so a capture that failed
+        // to finalize (or whose finalize was canceled) had no way for the strip/export to find its
+        // session afterward — the raw session directory and logs/logcat.log survive independently
+        // of finalization, so export should too.
+        val sourceSessionId = tab(tabId)?.captureSessionId
+        captureScreenshotStatus = null
+        // Stop the presentation transport immediately; finalization may take time, and mirror
+        // sockets must not outlive the recorder/tab that owns their device session.
+        returnEmbeddedMirrorToSidebar(tabId, revealCaptureTab = false)
+        stopEmbeddedMirror(tabId)
+        captureFinalizationStatusByTab[tabId] = CAPTURE_FINALIZING_STATUS
+        ioScope.launch {
+            try {
+                // Draining is part of the capture's correctness contract: the durable mapping
+                // is row-ordinal based, so finalizing before the last bytes are appended silently
+                // loses the tail of log↔video coverage. The recorder is stopped FIRST — it keeps
+                // writing (and indexing) whatever adb emits while terminating, and a drain that ran
+                // before that would miss those rows — and only then is the tab drained, including a
+                // final unterminated line the recorder indexed. Stop is attempted on every path, so
+                // a drain failure still stops the recorder, but an archive is never published from
+                // an incomplete tab.
+                val stopAttempt = runCatching { controller.stop() }
+                val drainFailure = runCatching {
+                    tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine = true)
+                }.exceptionOrNull()
+                val incomplete = drainFailure?.let {
+                    IllegalStateException("Capture log drain failed: ${it.message ?: it::class.simpleName}", it)
+                } ?: stopAttempt.exceptionOrNull()
+                if (incomplete != null) throw incomplete
+                val stopped = stopAttempt.getOrNull()
+                    ?: error("Capture stopped without a session")
+                val imported = controller.finalizeStopped(stopped)
+                attachFinalizedCapture(tabId, imported)
+                captureFinalizationStatusByTab.remove(tabId)
+            } catch (cancelled: CancellationException) {
+                // A canceled stop must not leave the raw tab marked as recording. The recorder
+                // has already been asked to stop before finalization begins in normal operation;
+                // keep the raw log visible and report the incomplete finalization.
+                captureFinalizationStatusByTab[tabId] = "Finalization canceled"
+                upTab(tabId) { it.copy(captureSessionId = null, tailing = false, captureSourceSessionId = sourceSessionId) }
+                throw cancelled
+            } catch (failure: Throwable) {
+                val message = failure.message ?: failure::class.simpleName ?: "Capture finalization failed"
+                captureFinalizationStatusByTab[tabId] = "Finalization failed: $message"
+                captureService.reportError("Capture finalization failed: $message")
+                // The capture log itself remains a normal, stopped log even if descriptor or
+                // mapping publication fails. Do not hide it or replace the existing tab.
+                upTab(tabId) { it.copy(captureSessionId = null, tailing = false, captureSourceSessionId = sourceSessionId) }
+            } finally {
+                synchronized(stateLock) { captureMonitorJobsByTab.remove(tabId)?.cancel() }
+                synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
+                closeEmbeddedMirror(tabId)
+                controller.close()
+                captureService.updateSessions()
+            }
+        }
+    }
+
+    /** Applies a finalized capture to the existing streaming tab without reparsing/opening one. */
+    private fun attachFinalizedCapture(tabId: String, imported: com.indagium.capture.ImportedCapture) {
+        if (tab(tabId) == null) return
+        upTab(tabId) {
+            // This copy deliberately starts from the current tab rather than constructing a new
+            // parsed tab: tailing may have landed the final rows, and Notes/selection/filter state
+            // must survive the transition from recording to a durable capture attachment.
+            attachFinalizedCapture(it, imported, settings.enableDoubleClickVideoSeekOnLink)
+        }
+        if (tab(tabId)?.attachedVideo != null) videoPanelVisible = true
+    }
+
+    private fun closeCaptureLauncherTabs() {
+        val launchers = synchronized(stateLock) { tabs.filter { it.isCaptureLauncher }.map { it.id }.toSet() }
+        if (launchers.isNotEmpty()) closeTabsById(launchers, preferredActiveId = liveCaptureTabId)
+    }
+
+    private fun startCaptureTailing(tabId: String) {
+        tailCoordinator.startTailing(tabId, startOffset = 0L, pollIntervalMs = CAPTURE_TAIL_POLL_INTERVAL_MS)
+    }
 
     private data class ActiveLoad(val job: Job, val countsAsLoading: AtomicBoolean = AtomicBoolean(true))
 
@@ -1822,7 +3952,10 @@ class AppState(
     var compareTabId by mutableStateOf("")
     var loadingStatus by mutableStateOf<String?>(null)
 
-    val canCompare: Boolean get() = tabs.size > 1
+    // Excludes the home tab (LogTab.isCaptureLauncher) — it is always present (see ensureHomeTab)
+    // and has no log content to compare, so a home tab plus exactly one real log must not enable
+    // Compare, and the home tab itself must never be selectable as a compare pane.
+    val canCompare: Boolean get() = tabs.count { !it.isCaptureLauncher } > 1
 
     // ── Transient UI ─────────────────────────────────────────────────
     // True right after a keyboard-driven panel focus change (F6/Shift+F6, Cmd+1/2/3/F); set
@@ -1849,6 +3982,25 @@ class AppState(
     var openError by mutableStateOf<OpenFileError?>(null)
     var recentFiles by mutableStateOf<List<String>>(emptyList())
     var recentMenuOpen by mutableStateOf(false)
+
+    /** The home tab's Recent-files filter text (ui/HomeScreen.kt). Session-only by design (unlike
+     *  the grid/list layout choice in `AppSettings.homeRecentsLayout`, which is a standing
+     *  preference) — a leftover search string surviving a restart would be confusing, not helpful. */
+    var homeRecentFilter by mutableStateOf("")
+
+    /** The home tab's Recent-files filter-pill row (Type/Modified/Size/Sort — ui/HomeScreen.kt's
+     *  [RecentFilters]). Session-only for the same reason as [homeRecentFilter] just above: a
+     *  filter pill left non-default from a previous session shouldn't silently hide files on the
+     *  next launch. */
+    internal var homeRecentFilters by mutableStateOf(RecentFilters())
+
+    /** Last-computed Recent-files stat results (ui/HomeScreen.kt's [RecentEntry]), cached here
+     *  because `HomeRecentSection` is fully disposed on every tab switch — its own `produceState`
+     *  would otherwise restart from an empty list each time the New tab is re-entered, which is
+     *  exactly the "No recent files yet" flash the flicker fix (item 1) removes. Null only before the
+     *  very first stat read has ever completed in this run; an empty (but non-null) list means a real
+     *  read completed and genuinely found nothing — see [HomeRecentSectionMode]. */
+    internal var homeRecentEntriesCache by mutableStateOf<List<RecentEntry>?>(null)
 
     /** Persisted history of regex patterns committed from the horizontal filter bar's Regex mode
      *  (ui/FilterBar.kt) — see [rememberRegexPattern]'s own doc for the commit contract. Global
@@ -1953,16 +4105,13 @@ class AppState(
     private var annotationNavigationCounter = 0L
     private var searchNavigationCounter = 0L
 
+    /** Whether an autosave from an earlier session was there to restore when this instance was
+     *  created (read before [restoreAutosave] runs). The setup assistant uses it to offer "Keep my
+     *  current setup" to existing users. False whenever restoring is off, as in tests. */
+    val startedWithExistingData: Boolean = restoreOnCreate && autosaveFile.exists()
+
     init {
-        // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
-        // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
-        // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
-        // snapshot-safe to publish from off the UI thread like every other ioScope write in this
-        // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
-        // synchronous — that one is already user-initiated from an explicit click, not startup.
-        ioScope.launch { refreshStorageSizeInfo() }
         if (restoreOnCreate) restoreAutosave()
-        loadPersistedSourceIndex()
         loadCustomAiCommands()
         AppLogger.setFailureReporter { reason -> debugLoggingError = reason }
         debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, settings.debugLogFilePath)
@@ -1975,10 +4124,15 @@ class AppState(
         if (!closed.compareAndSet(false, true)) return
         if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
         autosaveScheduler.cancelPending()
+        cancelAllCapturePreviews()
         aiProviderApiKeys.clear()
+        (externalDeviceApprovalDecisions.keys + approvedExternalDeviceSessions.keys).distinct()
+            .forEach(::revokeExternalDeviceAiApproval)
         aiSidebarRuntime.close()
         aiSessions.clear()
         controlServerManager.stopControlServer()
+        stopAllLiveCaptures()
+        if (captureServiceDelegate.isInitialized()) captureService.close()
         ioJob.cancel() // also cancels every active FileTailer's Job — each is started on ioScope
         tailCoordinator.clear()
         // A tab may never have gone through closeTabsById before an app-wide shutdown. Release
@@ -1993,6 +4147,28 @@ class AppState(
         }
         AppLogger.close()
         AppLogger.setFailureReporter(null)
+    }
+
+    /** Stops recorder processes outside stateLock before the IO scope is cancelled. */
+    private fun stopAllLiveCaptures() {
+        val live = synchronized(stateLock) { captureControllersByTab.toList().also { captureControllersByTab.clear() } }
+        val mirrors = synchronized(stateLock) {
+            embeddedMirrorsByTab.toList().also {
+                embeddedMirrorsByTab.clear()
+                embeddedMirrorStartJobsByTab.values.forEach { job -> job.cancel() }
+                embeddedMirrorStartJobsByTab.clear()
+                embeddedMirrorVersion++
+            }
+        }
+        mirrors.forEach { (_, mirror) -> runCatching { mirror.close() } }
+        live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
+    }
+
+    private fun stopControllerNow(tabId: String, controller: TabCaptureController) {
+        // Stop the recorder first so the final drain also sees what it wrote while terminating adb.
+        runCatching { controller.stop() }
+        runCatching { tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine = true) }
+        runCatching { controller.close() }
     }
 
     // Manual escape hatch for the "still loading" prompt the UI shows after a long stretch of
@@ -2238,6 +4414,177 @@ class AppState(
         autosaveInBackground()
     }
 
+    // ── Workspace profiles (Settings → General, ui/WorkspaceProfiles.kt) ──────────
+    // The five panel toggles live on AppState rather than AppSettings, so a profile is applied as
+    // one updateSettings plus the existing layout setters (each persists via autosaveNow).
+    internal fun applyWorkspaceProfile(profile: WorkspaceProfile) = applyResolvedProfile(profile.resolved())
+
+    internal fun applyResolvedProfile(profile: ResolvedProfile) {
+        val spec = profile.spec
+        updateSettings {
+            it.copy(
+                theme = spec.theme,
+                fontSize = spec.fontSize,
+                showMinimap = spec.showMinimap,
+                toolbarIconOnlyButtons = spec.toolbarIconOnlyButtons,
+                openNewFilesWithUnfiltered = spec.openNewFilesWithUnfiltered,
+                workspaceProfileId = profile.id,
+            )
+        }
+        updateFilterVisible(spec.filterVisible)
+        updateFilterBarVisible(spec.filterBarVisible)
+        updateAnnotationVisible(spec.annotationVisible)
+        updateVideoPanelVisible(spec.videoPanelVisible)
+        updateAiPanelVisible(spec.aiPanelVisible)
+    }
+
+    internal fun layoutSnapshot() = LayoutSnapshot(
+        filterVisible = filterVisible,
+        filterBarVisible = filterBarVisible,
+        annotationVisible = annotationVisible,
+        videoPanelVisible = videoPanelVisible,
+        aiPanelVisible = aiPanelVisible,
+    )
+
+    /** A built-in or custom profile by id; null for no id or one that no longer exists. */
+    internal fun resolveWorkspaceProfile(id: String?): ResolvedProfile? =
+        WorkspaceProfile.fromId(id)?.resolved()
+            ?: settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.resolved()
+
+    internal val selectedWorkspaceProfile: ResolvedProfile?
+        get() = resolveWorkspaceProfile(settings.workspaceProfileId)
+
+    /** Labels of the profile values that no longer match; empty when no (known) profile is selected. */
+    fun workspaceProfileDifferences(): List<String> {
+        val profile = selectedWorkspaceProfile ?: return emptyList()
+        return profileDifferences(profile.spec, settings, layoutSnapshot())
+    }
+
+    /** Every profile name in use, built-in and custom, for keeping new names unique. */
+    internal fun workspaceProfileNames(): List<String> =
+        WorkspaceProfile.entries.map { it.title } + settings.customWorkspaceProfiles.map { it.name }
+
+    /** Set when saving, importing or exporting a workspace profile fails (App.kt shows it). */
+    var workspaceProfileError by mutableStateOf<String?>(null)
+
+    /** Saves the current settings and panel layout as a new custom profile and selects it. */
+    internal fun saveCurrentAsWorkspaceProfile(name: String): CustomWorkspaceProfile {
+        val profile = CustomWorkspaceProfile(
+            id = newCustomProfileId(),
+            name = uniqueProfileName(name, workspaceProfileNames()),
+            spec = currentProfileSpec(settings, layoutSnapshot()),
+        )
+        addCustomWorkspaceProfile(profile)
+        return profile
+    }
+
+    private fun addCustomWorkspaceProfile(profile: CustomWorkspaceProfile) {
+        updateSettings {
+            it.copy(
+                customWorkspaceProfiles = it.customWorkspaceProfiles + profile,
+                workspaceProfileId = profile.id,
+            )
+        }
+    }
+
+    internal fun renameWorkspaceProfile(id: String, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        val others = workspaceProfileNames().toMutableList()
+        settings.customWorkspaceProfiles.firstOrNull { it.id == id }?.let { others.remove(it.name) }
+        val unique = uniqueProfileName(trimmed, others)
+        updateSettings { s ->
+            s.copy(customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(name = unique) else it })
+        }
+    }
+
+    /** Deleting the selected profile leaves no profile selected (the panels and theme stay as they are). */
+    internal fun deleteWorkspaceProfile(id: String) {
+        updateSettings { s ->
+            s.copy(
+                customWorkspaceProfiles = s.customWorkspaceProfiles.filterNot { it.id == id },
+                workspaceProfileId = s.workspaceProfileId.takeUnless { it == id },
+            )
+        }
+    }
+
+    /** Overwrites a custom profile with the current settings and layout, and selects it. */
+    internal fun updateWorkspaceProfileFromCurrent(id: String) {
+        val spec = currentProfileSpec(settings, layoutSnapshot())
+        updateSettings { s ->
+            s.copy(
+                customWorkspaceProfiles = s.customWorkspaceProfiles.map { if (it.id == id) it.copy(spec = spec) else it },
+                workspaceProfileId = id,
+            )
+        }
+    }
+
+    internal fun writeWorkspaceProfileFile(file: File, name: String, spec: ProfileSpec): Result<Unit> =
+        runCatching { file.writeText(encodeWorkspaceProfileFile(name, spec)) }
+
+    /** Save dialog + write. A null [profile] exports the current setup, named after the selected profile if any. */
+    internal fun exportWorkspaceProfile(profile: ResolvedProfile?) {
+        val name = profile?.title ?: selectedWorkspaceProfile?.title ?: "My setup"
+        val spec = profile?.spec ?: currentProfileSpec(settings, layoutSnapshot())
+        val dlg = FileDialog(null as Frame?, "Export workspace profile", FileDialog.SAVE).apply {
+            file = "indagium_profile_${name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_').ifEmpty { "profile" }}.json"
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val target = File(dir, path)
+        ioScope.launch {
+            writeWorkspaceProfileFile(target, name, spec).fold(
+                onSuccess = { AppLogger.info("profiles", "Exported workspace profile to ${target.absolutePath}") },
+                onFailure = { e ->
+                    workspaceProfileError = "Could not save the profile file: ${e.message ?: "unknown error"}"
+                    AppLogger.error("profiles", "Failed to export workspace profile to ${target.absolutePath}", e)
+                },
+            )
+        }
+    }
+
+    /** Reads a profile file, adds it as a custom profile (de-duplicating its name) and applies it. */
+    internal fun importWorkspaceProfileFrom(file: File): Result<CustomWorkspaceProfile> = runCatching {
+        // The size cap's IllegalArgumentException carries the user-facing message; any other failure is a plain read error.
+        val text = runCatching { readFilterImportText(file) }.getOrElse {
+            if (it is IllegalArgumentException) throw it
+            error("Could not read ${file.name}.")
+        }
+        val decoded = decodeWorkspaceProfileFile(text).getOrThrow()
+        val profile = CustomWorkspaceProfile(
+            id = newCustomProfileId(),
+            name = uniqueProfileName(decoded.name, workspaceProfileNames()),
+            spec = decoded.spec,
+        )
+        addCustomWorkspaceProfile(profile)
+        applyResolvedProfile(profile.resolved())
+        profile
+    }
+
+    /** Open dialog + import; [onImported] runs after a successful import (off the UI thread). */
+    internal fun importWorkspaceProfile(onImported: (CustomWorkspaceProfile) -> Unit = {}) {
+        val dlg = FileDialog(null as Frame?, "Import workspace profile", FileDialog.LOAD).apply {
+            setFilenameFilter { _, n -> n.endsWith(".json") }
+            isVisible = true
+        }
+        val path = dlg.file ?: return
+        val dir = dlg.directory ?: return
+        val file = File(dir, path)
+        ioScope.launch {
+            importWorkspaceProfileFrom(file).fold(
+                onSuccess = {
+                    AppLogger.info("profiles", "Imported workspace profile from ${file.absolutePath}")
+                    onImported(it)
+                },
+                onFailure = { e ->
+                    workspaceProfileError = e.message ?: "Could not import that profile."
+                    AppLogger.error("profiles", "Failed to import workspace profile from ${file.absolutePath}", e)
+                },
+            )
+        }
+    }
+
     fun updateSettings(transform: (AppSettings) -> AppSettings) {
         val prev = settings
         val next = transform(settings)
@@ -2412,6 +4759,32 @@ class AppState(
         }
     }
 
+    // ── Setup assistant (ui/SetupAssistantDialog.kt) ──────────────────────────────
+    var setupAssistantOpen by mutableStateOf(false)
+        private set
+
+    /** Called once at startup (see Main.kt). App.kt holds the dialog back until the license and
+     *  update dialogs are out of the way. */
+    fun maybeShowSetupAssistantOnStartup() {
+        if (!settings.setupAssistantDone) setupAssistantOpen = true
+    }
+
+    /** Finishing and skipping both count as done, so the assistant never comes back on its own. */
+    fun finishSetupAssistant() = closeSetupAssistant()
+
+    fun skipSetupAssistant() = closeSetupAssistant()
+
+    private fun closeSetupAssistant() {
+        setupAssistantOpen = false
+        updateSettings { it.copy(setupAssistantDone = true) }
+    }
+
+    /** "Run setup again" from Settings: works whether or not it was done before. */
+    fun rerunSetupAssistant() {
+        settingsOpen = false
+        setupAssistantOpen = true
+    }
+
     /** Opens the popup. Used both by the startup auto-prompt and by the manual "Support project"
      *  link in Settings — a manual open never touches lastSupportPromptAt, so it doesn't reset the
      *  10-day timer. */
@@ -2450,8 +4823,19 @@ class AppState(
     // "restored tab counter" test once autosave restore became async).
     fun upTab(tabId: String, fn: (LogTab) -> LogTab) = synchronized(stateLock) {
         val before = tab(tabId)
-        tabs = tabs.map { if (it.id == tabId) fn(it) else it }
-        val after = tab(tabId)
+        val candidate = before?.let(fn)
+        val compositionInputsChanged = before != null && candidate != null &&
+            (before.logData !== candidate.logData ||
+                before.analysis.stackTraceGroups !== candidate.analysis.stackTraceGroups)
+        val after = if (compositionInputsChanged) {
+            candidate!!.copy(
+                messageCompositionRevision = before!!.messageCompositionRevision + 1,
+                messageComposition = MessageCompositionState.NotComputed,
+            )
+        } else {
+            candidate
+        }
+        tabs = tabs.map { if (it.id == tabId) after ?: it else it }
         if (before != null && after != null && searchNeedsRecompute(before, after)) {
             scheduleSearchRecompute(tabId)
         }
@@ -2732,34 +5116,38 @@ class AppState(
      * the single-flight guard is observable rather than something callers have to time.
      */
     fun requestMessageComposition(tabId: String): Boolean {
-        var target: Filter? = null
+        var target: Pair<Filter, Long>? = null
         upTab(tabId) { t ->
             val state = t.messageComposition
             // Keyed on what actually defines the view, not the whole Filter: adding a highlighter
             // changes `filter` but not one line of what is admitted, so it must not trigger a
             // rescan (see Filter.viewDefiningKey).
             val wanted = t.filter.viewDefiningKey()
+            val revision = t.messageCompositionRevision
             val alreadyCurrent = when (state) {
-                is MessageCompositionState.Computing -> state.forFilter == wanted
-                is MessageCompositionState.Computed -> state.forFilter == wanted
+                is MessageCompositionState.Computing -> state.forFilter == wanted && state.forRevision == revision
+                is MessageCompositionState.Computed -> state.forFilter == wanted && state.forRevision == revision
                 else -> false
             }
             if (alreadyCurrent) {
                 t
             } else {
-                target = wanted
+                target = wanted to revision
                 // Carry the last good result through the rescan so the panel keeps showing it
                 // rather than blanking; hiding one shape is the common trigger and blanking there
                 // reads as a glitch.
                 val previous = (state as? MessageCompositionState.Computed)?.histogram
                     ?: (state as? MessageCompositionState.Computing)?.previous
-                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous))
+                t.copy(messageComposition = MessageCompositionState.Computing(wanted, previous, revision))
             }
         }
-        val startedFor = target ?: return false
+        val (startedFor, startedRevision) = target ?: return false
         compositionJobs.remove(tabId)?.cancel()
         val job = ioScope.launch {
             val snapshot = tab(tabId) ?: return@launch
+            if (snapshot.messageCompositionRevision != startedRevision ||
+                snapshot.filter.viewDefiningKey() != startedFor
+            ) return@launch
             val result = runCatching {
                 // The composition answers "what is this VIEW made of", so it scans what the filter
                 // admits, not the whole file. That is also what makes it cheap in the case that
@@ -2773,10 +5161,13 @@ class AppState(
                 // state with its own Computing(forFilter), so a superseded scan finds a mismatch
                 // here and drops its result rather than overwriting fresher data.
                 val state = t.messageComposition
-                if (state !is MessageCompositionState.Computing || state.forFilter != startedFor) return@upTab t
+                if (state !is MessageCompositionState.Computing) return@upTab t
+                val revisionStale = state.forRevision != startedRevision || t.messageCompositionRevision != startedRevision
+                val filterStale = state.forFilter != startedFor || t.filter.viewDefiningKey() != startedFor
+                if (revisionStale || filterStale) return@upTab t
                 result.fold(
                     onSuccess = { histogram ->
-                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor))
+                        t.copy(messageComposition = MessageCompositionState.Computed(histogram, startedFor, startedRevision))
                     },
                     onFailure = { e ->
                         if (e is CancellationException) throw e
@@ -2810,19 +5201,45 @@ class AppState(
         }
     }
 
-    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate) {
+    // [wholeLine] null is the row's main Highlight button: today's toggle, always match-only. The
+    // split button's menu passes an explicit mode: pressing the mode a highlighter already has
+    // removes it, pressing the other one switches it in place, and no highlighter creates one.
+    fun toggleHighlightForTemplate(tabId: String, template: MessageTemplate, wholeLine: Boolean? = null) {
         val f = tab(tabId)?.filter ?: return
         val existing = matchingHighlighter(f.highlighters, template)
-        if (existing != null) {
-            removeHl(tabId, existing.id)
-        } else {
-            val spec = messageRuleSpecForTemplate(template)
-            addHl(tabId, spec.pattern, spec.regex, nextAvailableHighlighterColor(tabId))
+        when {
+            existing == null -> {
+                val spec = messageRuleSpecForTemplate(template)
+                addHl(
+                    tabId,
+                    spec.pattern,
+                    spec.regex,
+                    nextAvailableHighlighterColor(tabId),
+                    wholeLine = wholeLine == true,
+                    target = HighlightTarget.MESSAGE,
+                    tag = template.tag.trim().takeIf { it.isNotBlank() },
+                )
+            }
+            wholeLine != null && existing.wholeLine != wholeLine ->
+                updateHighlighter(tabId, existing.id) { it.copy(wholeLine = wholeLine, on = true) }
+            else -> removeHl(tabId, existing.id)
         }
     }
 
     // ── Highlighters ────────────────────────────────────────────────
-    fun addHl(tabId: String, pat: String, rx: Boolean, color: Color) {
+    // Only pattern/regex/color are needed for the classic match-text highlighter; the optional spec
+    // parameters default to exactly that (match-only, matched anywhere on the line, case-insensitive).
+    @Suppress("LongParameterList")
+    fun addHl(
+        tabId: String,
+        pat: String,
+        rx: Boolean,
+        color: Color,
+        wholeLine: Boolean = false,
+        target: HighlightTarget = HighlightTarget.ANY,
+        tag: String? = null,
+        caseSensitive: Boolean = false,
+    ) {
         if (pat.isBlank()) return
         upFlt(tabId) { f ->
             f.copy(
@@ -2831,12 +5248,26 @@ class AppState(
                     pat,
                     rx,
                     color,
-                    true
+                    true,
+                    wholeLine = wholeLine,
+                    target = target,
+                    tag = tag,
+                    caseSensitive = caseSensitive,
                 )
             )
         }
         newHlPat = ""
         newHlColor = HL_COLORS[(HL_COLORS.indexOf(color) + 1) % HL_COLORS.size]
+    }
+
+    // Edits one highlighter in place (same id, same list position). A transform that changes the id
+    // is ignored so callers can't accidentally detach the row from its id-keyed UI state.
+    fun updateHighlighter(tabId: String, id: String, transform: (Highlighter) -> Highlighter) = upFlt(tabId) { f ->
+        f.copy(
+            highlighters = f.highlighters.map { hl ->
+                if (hl.id == id) transform(hl).copy(id = id) else hl
+            },
+        )
     }
 
     /**
@@ -2865,9 +5296,9 @@ class AppState(
         if (sel.isBlank()) return null
         return highlighters.filter { it.on }.firstOrNull { hl ->
             if (hl.regex) {
-                runCatching { Regex(hl.pattern, RegexOption.IGNORE_CASE).matches(sel) }.getOrDefault(false)
+                regexFullyMatches(sel, hl.pattern, ignoreCase = !hl.caseSensitive)
             } else {
-                hl.pattern.equals(sel, ignoreCase = true)
+                hl.pattern.equals(sel, ignoreCase = !hl.caseSensitive)
             }
         }
     }
@@ -3420,29 +5851,42 @@ class AppState(
         savedFilters = savedFilters + prepared.filters
     }
 
-    fun beginImportFilters(json: String, sourceName: String? = null) {
-        val library = decodeFilterLibrary(json).getOrElse {
-            importError = "Could not read filter file."
+    /** Stages [text] (Indagium filter JSON or a klogg highlighter export, decided by content) for review. */
+    fun beginImportFilters(text: String, sourceName: String? = null) {
+        val library = decodeFilterImport(sourceName.orEmpty(), text).getOrElse { e ->
+            importError = e.message ?: "Could not read filter file."
             pendingImportReview = null
             return
         }
-        val prepared = prepareImportedLibrary(library)
-        beginImportFilterList(prepared.filters, prepared.folders, sourceName)
+        beginImportFilterList(prepareImportedLibrary(library), sourceName)
     }
 
-    private fun beginImportFilterList(
-        imported: List<SavedFilter>,
-        stagedFolders: List<SavedFilterFolder> = emptyList(),
-        sourceName: String? = null,
-    ) {
-        if (imported.isEmpty()) {
+    private fun beginImportFilterList(library: DecodedFilterLibrary, sourceName: String? = null) {
+        if (library.filters.isEmpty()) {
             importError = "No saved filters found."
             pendingImportReview = null
             return
         }
-        val rows = buildImportRows(savedFilters, imported)
-        pendingImportReview = PendingImportReview(rows, stagedFolders, sourceName)
+        val rows = buildImportRows(savedFilters, library.filters, library.rowInfo)
+        val highlightRowIds = rows.filter { it.hasHighlighters() }.mapTo(linkedSetOf()) { it.rowId }
+        val canAdd = highlightRowIds.isNotEmpty() && hasActiveLogTab()
+        val mode = if (library.fromKlogg && canAdd) ImportReviewMode.ADD_TO_CURRENT else ImportReviewMode.SAVE_FILTERS
+        pendingImportReview = PendingImportReview(rows, library.folders, sourceName, library.notes, mode, highlightRowIds)
         importError = null
+    }
+
+    private fun hasActiveLogTab(): Boolean = tabs.any { it.id == activeTabId }
+
+    /** True when the open import review can add highlighters to the active tab (there is one, and some row has highlighters). */
+    fun canAddImportToCurrentFilter(): Boolean {
+        val review = pendingImportReview ?: return false
+        return hasActiveLogTab() && review.rows.any { it.hasHighlighters() }
+    }
+
+    fun setImportReviewMode(mode: ImportReviewMode) {
+        val review = pendingImportReview ?: return
+        if (mode == ImportReviewMode.ADD_TO_CURRENT && !canAddImportToCurrentFilter()) return
+        pendingImportReview = review.copy(mode = mode)
     }
 
     fun cancelImportFilters() {
@@ -3468,6 +5912,14 @@ class AppState(
      * and per-folder/dialog-level "select all" checkboxes in the import review dialog. */
     fun setImportRowsChecked(rowIds: Set<String>, checked: Boolean) {
         val review = pendingImportReview ?: return
+        if (review.mode == ImportReviewMode.ADD_TO_CURRENT) {
+            // Here a checked row means "include its highlighters"; the saved-filter actions stay as they were.
+            val selectable = review.rows.filter { it.rowId in rowIds && it.hasHighlighters() }.map { it.rowId }
+            pendingImportReview = review.copy(
+                highlightRowIds = if (checked) review.highlightRowIds + selectable else review.highlightRowIds - selectable.toSet(),
+            )
+            return
+        }
         pendingImportReview = review.copy(rows = review.rows.map { row ->
             if (row.rowId !in rowIds) row
             else if (checked) row.withImportAction(savedFilters, if (row.targetId == null) ImportFilterAction.ADD else ImportFilterAction.RENAME)
@@ -3477,6 +5929,10 @@ class AppState(
 
     fun confirmImportFilters() {
         val review = pendingImportReview ?: return
+        if (review.mode == ImportReviewMode.ADD_TO_CURRENT) {
+            addImportedHighlightersToActiveTab(review)
+            return
+        }
         var next = savedFilters
         var changed = false
         val survivingFolderIds = mutableSetOf<String>()
@@ -3509,6 +5965,19 @@ class AppState(
         if (changed) writeFilterBackup()
     }
 
+    /** Appends the checked rows' highlighters (row order, then highlighter order) to the active tab's filter and closes the review. */
+    private fun addImportedHighlightersToActiveTab(review: PendingImportReview) {
+        val tabId = activeTabId
+        val incoming = review.rows.filter { it.rowId in review.highlightRowIds }.flatMap { it.incoming.highlighters }
+        if (incoming.isNotEmpty() && hasActiveLogTab()) {
+            upFlt(tabId) { f ->
+                val added = newHighlightersFor(f.highlighters, incoming)
+                if (added.isEmpty()) f else f.copy(highlighters = f.highlighters + added)
+            }
+        }
+        pendingImportReview = null
+    }
+
     /** Maps imported folder ids onto this library by folder name, adding non-conflicting folders. */
     private fun prepareImportedLibrary(library: DecodedFilterLibrary): DecodedFilterLibrary {
         val mappedIds = mutableMapOf<String, String>()
@@ -3522,7 +5991,7 @@ class AppState(
             }
             mappedIds[imported.id] = target.id
         }
-        return DecodedFilterLibrary(
+        return library.copy(
             filters = library.filters.map { it.copy(folderId = it.folderId?.let(mappedIds::get)) },
             folders = additions,
         )
@@ -3722,7 +6191,22 @@ class AppState(
 
     fun collapseAll(tabId: String) = upTab(tabId) { it.copy(expanded = emptySet()) }
 
-    fun toggleUnfiltered(tabId: String) = upTab(tabId) { it.copy(showUnfiltered = !it.showUnfiltered) }
+    // Hiding Original while Find is scoped to all lines would leave matches the user can no longer
+    // see, so it drops the scope back to FILTERED. upTab's searchNeedsRecompute doesn't watch
+    // showUnfiltered, hence the explicit recompute.
+    fun toggleUnfiltered(tabId: String) {
+        var scopeReset = false
+        upTab(tabId) { t ->
+            val show = !t.showUnfiltered
+            if (!show && t.search.scope == SearchScope.UNFILTERED) {
+                scopeReset = true
+                t.copy(showUnfiltered = false, search = t.search.copy(scope = SearchScope.FILTERED))
+            } else {
+                t.copy(showUnfiltered = show)
+            }
+        }
+        if (scopeReset) scheduleSearchRecompute(tabId)
+    }
 
     // Per-tab Δt-column toggle (LogViewer.kt's toolbar button, beside Export) — see LogTab.showTimeDelta's
     // doc comment for why this lives on the tab rather than in AppSettings.
@@ -3857,18 +6341,21 @@ class AppState(
 
     /** Attaches a local video to the specified tab rather than whichever tab happens to be active.
      *  Drop handling uses this after the paired log has finished its asynchronous load. */
-    fun attachVideoToTab(file: File, targetTabId: String): String? =
-        attachVideo(targetTabId, VideoSource.LocalFile(file.absolutePath), file.absolutePath)
+    fun attachVideoToTab(file: File, targetTabId: String): String? {
+        val source = VideoSource.LocalFile(file.absolutePath)
+        return attachVideo(targetTabId, source, source.annotationDisplayLabel())
+    }
 
     /** Attaches a durable archive reference. Extraction is deferred until playback and uses the
      *  app-managed archive cache, so autosave never records an ephemeral temp-file path. */
     fun attachVideoFromZip(zipFile: File, candidate: ZipLogCandidate, targetTabId: String? = null): String? {
         val tabId = targetTabId ?: activeTabId.takeIf { it.isNotBlank() } ?: return null
         if (candidate.kind != ZipLogCandidateKind.VIDEO) return null
+        val source = VideoSource.ArchiveEntry(zipFile.absolutePath, candidate.entryPath, candidate.displayName)
         return attachVideo(
             tabId,
-            VideoSource.ArchiveEntry(zipFile.absolutePath, candidate.entryPath, candidate.displayName),
-            "${zipFile.name}/${candidate.displayName}",
+            source,
+            source.annotationDisplayLabel(),
         )
     }
 
@@ -3916,7 +6403,11 @@ class AppState(
         }
     }
 
-    fun videoRotationDegrees(tabId: String): Int = tab(tabId)?.attachedVideo?.rotationDegrees ?: 0
+    fun videoRotationDegrees(tabId: String): Int {
+        val manualDegrees = tab(tabId)?.attachedVideo?.rotationDegrees ?: return 0
+        val sourceDegrees = videoControllers[tabId]?.sourceDisplayRotationDegrees ?: 0
+        return ((manualDegrees + sourceDegrees) % FULL_CIRCLE_DEGREES + FULL_CIRCLE_DEGREES) % FULL_CIRCLE_DEGREES
+    }
 
     /** Lazily creates (and caches) the [VideoPlayerController] for [tabId]'s attached video. Null
      *  when the tab doesn't exist or has no video attached — a tab that later gets a video needs a
@@ -4060,18 +6551,26 @@ class AppState(
      * independent from Follow: either may be on while the other is off. An attachment without an
      * anchor has no mapping, so it cannot expose an active double-click seek action.
      */
-    fun setVideoDoubleClickSeekEnabled(tabId: String, enabled: Boolean) = upTab(tabId) { tab ->
-        val video = tab.attachedVideo ?: return@upTab tab
-        // Normalize a malformed/stale stored flag away when there is no linkage. The UI and seek
-        // path also gate on anchor, but keeping the durable state coherent prevents it reviving
-        // unexpectedly if a later operation supplies an anchor without going through setVideoAnchor.
-        if (video.anchor == null) tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
-        else tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
+    fun setVideoDoubleClickSeekEnabled(tabId: String, enabled: Boolean) {
+        upTab(tabId) { tab ->
+            val video = tab.attachedVideo ?: return@upTab tab
+            // Normalize a malformed/stale stored flag away when there is no linkage. The UI and
+            // seek path also gate on anchor, but keeping the durable state coherent prevents it
+            // reviving unexpectedly if a later operation supplies an anchor without going through
+            // setVideoAnchor.
+            if (video.anchor == null && captureTimelineIndex(tab) == null) {
+                tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = false))
+            } else {
+                tab.copy(attachedVideo = video.copy(doubleClickSeekEnabled = enabled))
+            }
+        }
+        autosaveNow()
     }
 
     fun isVideoDoubleClickSeekEnabled(tabId: String): Boolean {
         val video = tab(tabId)?.attachedVideo
-        return video?.anchor != null && video.doubleClickSeekEnabled
+        val currentTab = tab(tabId)
+        return video != null && (video.anchor != null || currentTab?.let(::captureTimelineIndex) != null) && video.doubleClickSeekEnabled
     }
 
     /**
@@ -4147,28 +6646,147 @@ class AppState(
         return startMs..endMs
     }
 
-    fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) = upTab(tabId) { t ->
-        if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
-        t.attachedVideo?.let {
-            t.copy(
-                attachedVideo = it.copy(
-                    anchor = VideoAnchor(videoMs, logId),
-                    // A created/replaced linkage takes today's default exactly once. Later
-                    // setting changes must not silently rewrite this explicit per-video choice.
-                    doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
-                ),
-            )
-        } ?: t
+    fun setVideoAnchor(tabId: String, videoMs: Long, logId: Int) {
+        upTab(tabId) { t ->
+            if (!isVideoPositionValid(t, videoMs) || logId !in t.rmap) return@upTab t
+            t.attachedVideo?.let {
+                val captureIndex = captureTimelineIndex(t)
+                if (captureIndex != null) {
+                    val ordinal = t.logData.indexOfEntryId(logId).takeIf { index -> index >= 0 }?.plus(1)
+                        ?: return@let t
+                    val importedVideoMs = captureIndex.videoMsForOrdinal(ordinal) ?: return@let t
+                    val calibratedOffsetMs = videoMs - importedVideoMs
+                    it.captureSourcePath?.let { sourcePath ->
+                        updateCaptureSessionCalibration(sourcePath, calibratedOffsetMs)
+                    }
+                    return@let t.copy(
+                        attachedVideo = it.copy(
+                            anchor = null,
+                            captureOffsetMs = calibratedOffsetMs,
+                            doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                        ),
+                    )
+                }
+                t.copy(
+                    attachedVideo = it.copy(
+                        anchor = VideoAnchor(videoMs, logId),
+                        // A created/replaced linkage takes today's default exactly once. Later
+                        // setting changes must not silently rewrite this explicit per-video choice.
+                        doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                    ),
+                )
+            } ?: t
+        }
+        autosaveNow()
     }
 
-    fun clearVideoAnchor(tabId: String) = upTab(tabId) { t ->
-        t.attachedVideo?.let {
-            t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
-        } ?: t
+    fun clearVideoAnchor(tabId: String) {
+        upTab(tabId) { t ->
+            t.attachedVideo?.let {
+                if (captureTimelineIndex(t) != null) {
+                    t.copy(
+                        attachedVideo = it.copy(
+                            anchor = null,
+                            doubleClickSeekEnabled = false,
+                            captureSourcePath = null,
+                            captureOffsetMs = 0L,
+                        ),
+                        captureTimeline = null,
+                    )
+                } else {
+                    t.copy(attachedVideo = it.copy(anchor = null, doubleClickSeekEnabled = false))
+                }
+            } ?: t
+        }
+        autosaveNow()
+    }
+
+    private class CaptureIndexCache(
+        val logDataRef: List<LogEntry>,
+        val timelineRef: CaptureTimeline,
+        val index: CaptureTimelineIndex,
+    )
+
+    private val captureIndexByTab = ConcurrentHashMap<String, CaptureIndexCache>()
+
+    private fun captureTimelineIndex(tab: LogTab): CaptureTimelineIndex? {
+        if (tab.attachedVideo?.captureSourcePath == null) return null
+        val timeline = tab.captureTimeline ?: return null
+        captureIndexByTab[tab.id]
+            ?.takeIf { it.logDataRef === tab.logData && it.timelineRef === timeline }
+            ?.let { return it.index }
+        return CaptureTimelineIndex(timeline, tab.logData.size).also { index ->
+            captureIndexByTab[tab.id] = CaptureIndexCache(tab.logData, timeline, index)
+        }
+    }
+
+    private class CaptureFollowFloorIndex(
+        val logDataRef: List<LogEntry>,
+        val visibleIdsRef: IntArray,
+        val summaryVersion: Int,
+        val ids: IntArray,
+        val ordinals: IntArray,
+    )
+
+    private val captureFollowFloorIndexByTab = ConcurrentHashMap<String, CaptureFollowFloorIndex>()
+
+    /** Visible-row floor by parser ordinal; unlike clock mapping this also supports timestamp-less rows. */
+    private fun captureFollowFloorIndex(tab: LogTab): CaptureFollowFloorIndex {
+        val captureIndex = captureTimelineIndex(tab)
+        val version = visibleItemsVersion
+        val reported = visibleItemsByTab[tab.id]?.allIds
+        val visibleIds = reported ?: computeItems(tab, applyFilter = true).map(::logItemEntryId).toIntArray()
+        if (reported != null) {
+            captureFollowFloorIndexByTab[tab.id]
+                ?.takeIf {
+                    it.logDataRef === tab.logData && it.visibleIdsRef === reported && it.summaryVersion == version
+                }
+                ?.let { return it }
+        }
+        val ids = IntArray(visibleIds.size)
+        val ordinals = IntArray(visibleIds.size)
+        var count = 0
+        for (id in visibleIds) {
+            val sourceIndex = tab.logData.indexOfEntryId(id)
+            if (sourceIndex < 0) continue
+            if (captureIndex?.pointForOrdinal(sourceIndex + 1) == null) continue
+            ids[count] = id
+            ordinals[count] = sourceIndex + 1
+            count++
+        }
+        return CaptureFollowFloorIndex(
+            logDataRef = tab.logData,
+            visibleIdsRef = visibleIds,
+            summaryVersion = version,
+            ids = ids.copyOf(count),
+            ordinals = ordinals.copyOf(count),
+        ).also { if (reported != null) captureFollowFloorIndexByTab[tab.id] = it }
+    }
+
+    private fun captureVisibleLogIdAtOrBefore(tab: LogTab, ordinal: Int, segmentFirstOrdinal: Int): Int? {
+        val index = captureFollowFloorIndex(tab)
+        if (index.ids.isEmpty()) return null
+        var lo = 0
+        var hi = index.ordinals.lastIndex
+        var floor = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (index.ordinals[mid] <= ordinal) {
+                floor = mid
+                lo = mid + 1
+            } else {
+                hi = mid - 1
+            }
+        }
+        return floor.takeIf { it >= 0 && index.ordinals[it] >= segmentFirstOrdinal }?.let { index.ids[it] }
     }
 
     /** Video-time (ms) for [logId], relative to [tab]'s single anchor. */
     fun logIdToVideoMs(tab: LogTab, logId: Int): Long? {
+        captureTimelineIndex(tab)?.let { index ->
+            val ordinal = tab.logData.indexOfEntryId(logId).takeIf { it >= 0 }?.plus(1) ?: return null
+            return index.videoMsForOrdinal(ordinal, tab.attachedVideo?.captureOffsetMs ?: 0L)
+        }
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
         val anchorElapsed = elapsed[anchor.logId] ?: return null
@@ -4178,6 +6796,10 @@ class AppState(
 
     /** Inverse of [logIdToVideoMs]: the entry whose mapped video-time is closest to [videoMs]. */
     fun videoMsToNearestLogId(tab: LogTab, videoMs: Long): Int? {
+        captureTimelineIndex(tab)?.let { index ->
+            val point = index.nearest(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point ?: return null
+            return tab.logData.getOrNull(point.ordinal - 1)?.id
+        }
         val anchor = tab.attachedVideo?.anchor ?: return null
         val elapsed = monotonicLogElapsedById(tab)
         val anchorElapsed = elapsed[anchor.logId] ?: return null
@@ -4315,9 +6937,14 @@ class AppState(
      * not a nearest-neighbor lookup: playback must never jump ahead to a future visible line.
      */
     fun followTargetVisibleLogId(tabId: String, videoMs: Long): Int? =
-        tab(tabId)?.let { tab ->
-            val anchor = tab.attachedVideo?.anchor ?: return@let null
-            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@let null
+        tab(tabId)?.let tabLookup@{ tab ->
+            captureTimelineIndex(tab)?.let { index ->
+                val point = index.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L).point
+                    ?: return@tabLookup null
+                return@tabLookup captureVisibleLogIdAtOrBefore(tab, point.ordinal, point.segmentFirstOrdinal)
+            }
+            val anchor = tab.attachedVideo?.anchor ?: return@tabLookup null
+            val anchorElapsed = logElapsedIndex(tab).byId[anchor.logId] ?: return@tabLookup null
             lastVisibleLogIdAtOrBefore(tab, anchorElapsed + (videoMs - anchor.videoMs))
         }
 
@@ -4331,6 +6958,11 @@ class AppState(
      * is returned rather than jumping to the end.
      */
     private fun closestVisibleFollowLogId(tab: LogTab, mappedLogId: Int): Int? {
+        if (captureTimelineIndex(tab) != null) {
+            val ordinal = tab.logData.indexOfEntryId(mappedLogId).takeIf { it >= 0 }?.plus(1) ?: return null
+            val point = captureTimelineIndex(tab)?.pointForOrdinal(ordinal) ?: return null
+            return captureVisibleLogIdAtOrBefore(tab, ordinal, point.segmentFirstOrdinal)
+        }
         val mappedElapsed = logElapsedIndex(tab).byId[mappedLogId] ?: return null
         return lastVisibleLogIdAtOrBefore(tab, mappedElapsed)
     }
@@ -4475,8 +7107,39 @@ class AppState(
      * actually select — the same value [followTargetVisibleLogId] returns — so the readout can never
      * disagree with the selection. Pure (no controller access), so it is directly unit-testable.
      */
+    @Suppress("CyclomaticComplexMethod")
     fun videoFollowMapping(tabId: String, videoMs: Long): VideoFollowMapping {
         val tab = tab(tabId)
+        val captureIndex = tab?.let(::captureTimelineIndex)
+        if (tab != null && captureIndex != null) {
+            val timeline = tab.captureTimeline!!
+            val resolved = captureIndex.floor(videoMs, tab.attachedVideo?.captureOffsetMs ?: 0L)
+            val point = resolved.point
+            val fullFloorId = point?.let { tab.logData.getOrNull(it.ordinal - 1)?.id }
+            val visibleFloorId = point?.let { captureVisibleLogIdAtOrBefore(tab, it.ordinal, it.segmentFirstOrdinal) }
+            val status = when (resolved.kind) {
+                CapturePositionKind.BEFORE_FIRST -> FollowMappingStatus.BEFORE_FIRST
+                CapturePositionKind.AFTER_LAST -> FollowMappingStatus.AFTER_LAST
+                CapturePositionKind.GAP, CapturePositionKind.EMPTY -> FollowMappingStatus.UNMAPPED_GAP
+                CapturePositionKind.MAPPED -> when {
+                    visibleFloorId == null -> FollowMappingStatus.NO_VISIBLE_ROW
+                    fullFloorId != null && fullFloorId != visibleFloorId -> fullFloorHiddenReason(tab, fullFloorId)
+                    else -> FollowMappingStatus.ON_VISIBLE_ROW
+                }
+            }
+            return VideoFollowMapping(
+                anchorLogTs = null,
+                anchorVideoMs = null,
+                mappedNearestLogId = visibleFloorId,
+                mappedNearestLogTs = visibleFloorId?.let { tab.rmap[it]?.ts },
+                status = status,
+                mappedElapsedMs = point?.elapsedMs,
+                mappedFullFloorLogId = fullFloorId,
+                mappingKind = VideoMappingKind.CAPTURE,
+                captureQuality = timeline.quality,
+                captureUncertaintyMs = timeline.uncertaintyMs,
+            )
+        }
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
         val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
@@ -4488,6 +7151,7 @@ class AppState(
                 mappedNearestLogTs = null,
                 status = FollowMappingStatus.NO_ANCHOR,
                 mappedElapsedMs = null,
+                mappingKind = VideoMappingKind.NONE,
             )
         }
 
@@ -4513,6 +7177,7 @@ class AppState(
             status = status,
             mappedElapsedMs = mappedElapsed,
             mappedFullFloorLogId = fullFloorId,
+            mappingKind = VideoMappingKind.ANCHOR,
         )
     }
 
@@ -4560,12 +7225,60 @@ class AppState(
      * threading positions through the hot per-frame function just for this rarely-called diagnostic
      * would cost every real caller a signature change for no benefit.
      */
+    @Suppress("CyclomaticComplexMethod", "LongMethod")
     fun followDiagnostics(tabId: String, videoMs: Long): FollowDiagnostics {
         val tab = tab(tabId)
         val anchor = tab?.attachedVideo?.anchor
         val elapsedIndex = tab?.let(::logElapsedIndex)
         val anchorElapsed = anchor?.let { elapsedIndex?.byId?.get(it.logId) }
         val summary = visibleItemsByTab[tabId]
+        val captureIndex = tab?.let(::captureTimelineIndex)
+        if (tab != null && captureIndex != null) {
+            val mapping = videoFollowMapping(tabId, videoMs)
+            val visibleIndex = captureFollowFloorIndex(tab)
+
+            fun diagnosticRow(id: Int): FollowDiagnosticRow {
+                val ordinal = tab.logData.indexOfEntryId(id).takeIf { it >= 0 }?.plus(1)
+                val captureElapsed = ordinal?.let { captureIndex.pointForOrdinal(it)?.elapsedMs }
+                return FollowDiagnosticRow(id, tab.rmap[id]?.ts, captureElapsed)
+            }
+            val chosenId = mapping.mappedNearestLogId
+            val chosenPos = chosenId?.let { id -> visibleIndex.ids.indexOf(id) } ?: -1
+            val candidates = if (chosenPos >= 0) {
+                ((chosenPos + 1) until visibleIndex.ids.size)
+                    .take(FOLLOW_DIAGNOSTIC_CANDIDATE_COUNT)
+                    .map { diagnosticRow(visibleIndex.ids[it]) }
+            } else {
+                emptyList()
+            }
+            return FollowDiagnostics(
+                tabId = tabId,
+                hasAnchor = false,
+                anchor = null,
+                anchorVideoMs = null,
+                playheadVideoMs = videoMs,
+                mappedElapsedMs = mapping.mappedElapsedMs,
+                mappedElapsedClock = mapping.mappedElapsedMs?.let(::formatElapsedAsClock),
+                chosenVisibleFloor = chosenId?.let(::diagnosticRow),
+                nextVisibleCandidatesAfterFloor = candidates,
+                visibleCandidateCount = visibleIndex.ids.size,
+                candidatesFromSummaryFallback = summary == null,
+                fullLogFloor = mapping.mappedFullFloorLogId?.let(::diagnosticRow),
+                status = mapping.status,
+                rolloverAppliedCount = 0,
+                rolloverAppliedSamples = emptyList(),
+                rolloverSuppressedCount = 0,
+                rolloverSuppressedSamples = emptyList(),
+                dayOffsetModelValid = true,
+                showUnfiltered = tab.showUnfiltered,
+                filterActive = isFilterConfigured(tab.filter),
+                totalLogDataSize = tab.logData.size,
+                displayedItemCount = summary?.allIds?.size ?: computeItems(tab, applyFilter = true).size,
+                mappingKind = VideoMappingKind.CAPTURE,
+                captureQuality = tab.captureTimeline?.quality,
+                captureUncertaintyMs = tab.captureTimeline?.uncertaintyMs,
+            )
+        }
         if (tab == null || anchor == null || elapsedIndex == null || anchorElapsed == null || elapsedIndex.ids.isEmpty()) {
             return FollowDiagnostics(
                 tabId = tabId,
@@ -4590,6 +7303,7 @@ class AppState(
                 filterActive = tab?.let { isFilterConfigured(it.filter) } ?: false,
                 totalLogDataSize = tab?.logData?.size ?: 0,
                 displayedItemCount = summary?.allIds?.size ?: 0,
+                mappingKind = VideoMappingKind.NONE,
             )
         }
 
@@ -4649,6 +7363,7 @@ class AppState(
             filterActive = isFilterConfigured(tab.filter),
             totalLogDataSize = tab.logData.size,
             displayedItemCount = displayedItemCount,
+            mappingKind = VideoMappingKind.ANCHOR,
         )
     }
 
@@ -4735,8 +7450,13 @@ class AppState(
     fun addNoteBlock(tabId: String, text: String, afterId: String? = null): String? =
         annotationManager.addNoteBlock(tabId, text, afterId)
 
-    fun addLogRefBlock(tabId: String, logIds: List<Int>, caption: String = ""): String? =
-        annotationManager.addLogRefBlock(tabId, logIds, caption)
+    fun addLogRefBlock(
+        tabId: String,
+        logIds: List<Int>,
+        caption: String = "",
+        afterId: String? = null,
+        sourceEntries: List<LogEntry>? = null,
+    ): String? = annotationManager.addLogRefBlock(tabId, logIds, caption, afterId, sourceEntries)
 
     fun addImageBlock(
         tabId: String,
@@ -4841,8 +7561,41 @@ class AppState(
     // Reopening an already-open bar (a repeat Ctrl/Cmd+F) deliberately keeps the existing
     // query/matches — only `active` and `focusNonce` change — so ui/SearchBar.kt's
     // LaunchedEffect(focusNonce) can refocus + select-all without losing what was already found.
-    fun openSearch(tabId: String) = upTab(tabId) { t ->
-        t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+    //
+    // [scope] non-null switches what the bar searches (see setSearchScope); null keeps the tab's
+    // last scope, which is what the toolbar Find button and a plain reopen want.
+    fun openSearch(tabId: String, scope: SearchScope? = null) {
+        val scopeChanged = applySearchScope(tabId, scope)
+        upTab(tabId) { t ->
+            t.copy(search = t.search.copy(active = true, focusNonce = t.search.focusNonce + 1))
+        }
+        if (scopeChanged) scheduleSearchRecompute(tabId)
+    }
+
+    /** Switches the Find bar between the filtered view and every line. UNFILTERED also reveals the
+     *  Original panel (LogTab.showUnfiltered) — the panel that actually displays those extra
+     *  matches — and leaves it open after Find closes. Compare mode has no Original panel, so it
+     *  always stays FILTERED. */
+    fun setSearchScope(tabId: String, scope: SearchScope) {
+        if (applySearchScope(tabId, scope)) scheduleSearchRecompute(tabId)
+    }
+
+    // Returns true when the scope actually changed (the caller then recomputes matches). The scope
+    // and showUnfiltered are written in one upTab so a recompute never sees one without the other.
+    private fun applySearchScope(tabId: String, requested: SearchScope?): Boolean {
+        if (requested == null) return false
+        val scope = if (compareMode) SearchScope.FILTERED else requested
+        var changed = false
+        upTab(tabId) { t ->
+            val revealOriginal = scope == SearchScope.UNFILTERED && !t.showUnfiltered
+            if (t.search.scope == scope && !revealOriginal) return@upTab t
+            changed = t.search.scope != scope
+            t.copy(
+                showUnfiltered = t.showUnfiltered || scope == SearchScope.UNFILTERED,
+                search = t.search.copy(scope = scope),
+            )
+        }
+        return changed
     }
 
     // Deliberately keeps query/matchIds (only flips `active` off) rather than resetting to
@@ -4941,9 +7694,16 @@ class AppState(
             // storeInCache = false: `t` carries the search-only effectiveSearchFilter and a
             // fully-expanded fold state, neither of which is what's actually rendered — see the
             // doc above computeItems' storeInCache parameter.
-            val searchItems = computeItems(t.copy(expanded = fullyExpanded), applyFilter = true, regexContext, storeInCache = false)
+            val cancellationCheck = CancellationCheck { ensureActive() }
+            val searchItems = computeItems(
+                t.copy(expanded = fullyExpanded),
+                stored.search.scope == SearchScope.FILTERED || compareMode,
+                cancellationCheck,
+                regexContext,
+                storeInCache = false,
+            )
             ensureActive()
-            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext)
+            val result = computeSearchMatches(searchItems, stored.search.query, stored.search.caseSensitive, regexContext, cancellationCheck)
             ensureActive()
             applySearchResult(tabId, result)
         }
@@ -5000,10 +7760,20 @@ class AppState(
         addHl(c.tabId, text, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
     }
 
-    fun addHlTagFromCtx(color: Color? = null) {
+    // wholeLine = true is the "Highlight lines with this tag" item; the default stays match-only.
+    fun addHlTagFromCtx(color: Color? = null, wholeLine: Boolean = false) {
         val c = ctx ?: return
         val tag = tab(c.tabId)?.rmap?.get(c.entryId)?.tag ?: return
-        addHl(c.tabId, tag, false, color ?: nextAvailableHighlighterColor(c.tabId)); ctx = null
+        addHl(
+            c.tabId,
+            tag,
+            false,
+            color ?: nextAvailableHighlighterColor(c.tabId),
+            wholeLine = wholeLine,
+            target = HighlightTarget.TAG,
+            tag = tag,
+        )
+        ctx = null
     }
 
     fun addSeqFromCtx() {
@@ -5279,15 +8049,62 @@ class AppState(
     // mid-close (A-01). One synchronized block makes "cancel this tab's resources" and "remove it
     // from tabs" atomic together; cancelActiveLoad's own nested synchronized(stateLock) call is
     // safe here since the monitor is reentrant.
-    private fun closeTabsById(tabIds: Set<String>, preferredActiveId: String?) {
+    private fun closeTabsById(
+        tabIds: Set<String>,
+        preferredActiveId: String?,
+        loadsToFinishAfterClose: Set<String> = emptySet(),
+    ) {
         if (tabIds.isEmpty()) return
+        // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
+        // captured under stateLock, but stopped before entering the tab-removal lock below so a
+        // close action never performs process/file IO while stateLock is held.
+        val liveControllers = synchronized(stateLock) {
+            tabIds.mapNotNull { tabId -> captureControllersByTab[tabId]?.let { tabId to it } }
+        }
+        val liveMirrors = synchronized(stateLock) {
+            tabIds.mapNotNull { tabId -> embeddedMirrorsByTab[tabId]?.let { tabId to it } }
+        }
+        liveMirrors.forEach { (tabId, mirror) ->
+            runCatching { mirror.close() }
+            synchronized(stateLock) {
+                embeddedMirrorsByTab.remove(tabId, mirror)
+                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                detachedEmbeddedMirrorTabs.remove(tabId)
+                embeddedMirrorVersion++
+            }
+        }
+        liveControllers.forEach { (tabId, controller) ->
+            synchronized(stateLock) { captureControllersByTab.remove(tabId) }
+            stopControllerNow(tabId, controller)
+        }
+        // A handle can still be present here even after the liveMirrors pass above: a new one can
+        // register (the async create job in ensureEmbeddedMirror) in the window between that
+        // snapshot and this block. Collected under the lock and closed after releasing it, same as
+        // liveMirrors — EmbeddedMirrorHandle.close() can block on a shared session's decoder-thread
+        // join or a standalone connection's synchronous adb cleanup, and stateLock is taken by ~80
+        // other call sites across this class, so blocking IO/joins must never run while holding it.
+        val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
         synchronized(stateLock) {
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
-                cancelActiveLoad(tabId)
+                if (tabId !in loadsToFinishAfterClose) cancelActiveLoad(tabId)
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
+                captureMonitorJobsByTab.remove(tabId)?.cancel()
+                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
+                detachedEmbeddedMirrorTabs.remove(tabId)
+                embeddedMirrorVersion++
+                // B7: CaptureIndexCache/CaptureFollowFloorIndex both hold a strong reference to
+                // the tab's whole List<LogEntry> (captureTimelineIndex/captureFollowFloorIndex
+                // above) and were never removed here — every closed capture tab leaked its entire
+                // log for the lifetime of the app.
+                captureIndexByTab.remove(tabId)
+                captureFollowFloorIndexByTab.remove(tabId)
+                captureScreenshotCapabilities.remove(tabId)
+                capturePreviewGenerationByTab.remove(tabId)
+                capturePreviewJobsByTab.remove(tabId)?.cancel()
                 videoFollowSuppressionByTab.remove(tabId)
                 visibleItemsByTab.remove(tabId)
                 elapsedIndexByTab.remove(tabId)
@@ -5306,6 +8123,7 @@ class AppState(
             if (next.size < 2) compareMode = false
             tabs = next
         }
+        stragglerMirrors.forEach { mirror -> runCatching { mirror.close() } }
         activeSavedFilterIds = activeSavedFilterIds - tabIds
         filterDraftsByTab = filterDraftsByTab - tabIds
         activeFilterDraftTabIds = activeFilterDraftTabIds - tabIds
@@ -5368,6 +8186,14 @@ class AppState(
     fun startTailing(tabId: String) = tailCoordinator.startTailing(tabId)
 
     fun stopTailing(tabId: String) = tailCoordinator.stopTailing(tabId)
+
+    // See TailCoordinator.drainAndStopTailing's own doc — a synchronous final catch-up read before
+    // stopping, so a caller that needs tab.logData to be fully caught up the moment tailing stops
+    // (a capture tab's Stop action, so its log↔video mapping doesn't lose its tail) doesn't race
+    // stopTailing's plain Job.cancel(). BLOCKS the calling thread (runBlocking { cancelAndJoin() }
+    // internally) — call from ioScope, never from the UI/AWT thread.
+    fun drainAndStopTailing(tabId: String, includeTrailingPartialLine: Boolean = false) =
+        tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
@@ -5695,9 +8521,23 @@ class AppState(
         autosaveNow()
     }
 
-    private fun pruneMissingRecentFiles() {
+    // internal (not private): the toolbar's Recent files menu prunes through this when it opens.
+    // ui/HomeScreen.kt's Recents section prunes through pruneMissingRecentFilesOffUiThread below.
+    internal fun pruneMissingRecentFiles() {
         val next = recentFiles.filter { File(it).exists() }
         if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    // HomeScreen's variant: the File.exists() probes (one per recent file, possibly on a slow or
+    // disconnected volume) run on Dispatchers.IO instead of the composition's UI thread; the list is
+    // assigned back on the caller's thread, and only if it is still the list that was probed — a
+    // path added or removed meanwhile belongs to a newer list this stale result must not overwrite.
+    internal suspend fun pruneMissingRecentFilesOffUiThread() {
+        val probed = recentFiles
+        val next = withContext(Dispatchers.IO) { probed.filter { File(it).exists() } }
+        if (next == probed || recentFiles != probed) return
         recentFiles = next
         autosaveNow()
     }
@@ -5707,7 +8547,12 @@ class AppState(
         recentMenuOpen = !recentMenuOpen
     }
 
-    fun openPath(file: File): String? = when (detectArchiveFormat(file)) {
+    fun openPath(file: File): String? = when {
+        file.name == "capture.indagium.json" -> openCaptureFile(file)
+        else -> openOrdinaryPath(file)
+    }
+
+    private fun openOrdinaryPath(file: File): String? = when (detectArchiveFormat(file)) {
         // Zip/SevenZ/Sequential all go through the picker-capable archive path.
         ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file); null }
         is ArchiveFormat.Sequential -> { openZipFile(file); null }
@@ -5719,6 +8564,184 @@ class AppState(
         // and None both land here too — openFile's own existence/readability check produces the
         // right error for those, same as before this change.
         else -> openFile(file)
+    }
+
+    /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
+    @Suppress("TooGenericExceptionCaught")
+    fun openCaptureFile(file: File): String {
+        val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
+        if (existing != null) {
+            setActiveSurfaceToTab(existing.id)
+            offerCaptureNotesReimportIfNeeded(existing, file)
+            return existing.id
+        }
+        val tabId = "t${tabCounter.getAndIncrement()}"
+        beginLoading("Opening capture session...")
+        val job = ioScope.launch(start = CoroutineStart.LAZY) {
+            var published = false
+            try {
+                val imported = com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
+                val logData = parseLogcat(imported.logFile)
+                ensureActive()
+                val sourcePath = if (file.name == "capture.indagium.json") {
+                    imported.logFile.absolutePath
+                } else {
+                    "${file.absolutePath}!${imported.descriptor.log.path}"
+                }
+                // Archive v3 (no per-row mapping file): imported.syncAnchor carries the single
+                // log-row <-> video-position pin the export estimated (see
+                // com.indagium.capture.estimateCaptureSyncAnchor) — turned into an ordinary
+                // VideoAnchor here, against the log this coroutine just parsed, so it's synced
+                // exactly the way a manual link is (AppState.logIdToVideoMs/videoMsToNearestLogId
+                // fall back to that arithmetic whenever captureTimeline is null). v1/v2 archives
+                // have no syncAnchor and instead populate imported.timeline below.
+                val syncAnchor = imported.syncAnchor?.let { anchor ->
+                    logData.getOrNull(anchor.row - 1)?.id?.let { logId -> VideoAnchor(anchor.videoMs, logId) }
+                }
+                val video = imported.videoFile?.let { localVideo ->
+                    val videoSource = if (file.name == "capture.indagium.json") {
+                        VideoSource.LocalFile(localVideo.absolutePath)
+                    } else {
+                        VideoSource.ArchiveEntry(file.absolutePath, imported.descriptor.video!!.path, localVideo.name)
+                    }
+                    VideoAttachment(
+                        source = videoSource,
+                        sourceLabel = "${file.name}/${localVideo.name}",
+                        captureSourcePath = file.absolutePath,
+                        doubleClickSeekEnabled = settings.enableDoubleClickVideoSeekOnLink,
+                        anchor = syncAnchor,
+                    )
+                }
+                // Phase 4: imported.notes is still numbered against the ORIGINAL capture session
+                // (LogEntry.ids don't restart at 1 for a filtered/time-windowed export) — re-anchor
+                // against the log this coroutine just parsed before it becomes this tab's Annotations.
+                // repointPortableVideoFrames then re-points every marker screenshot's export-time
+                // portable video source (CaptureArchive.kt's rewriteExportedVideoFrames) at THIS
+                // tab's own actual attached-video source — computed just above — so Notes clicks seek
+                // it instead of failing navigateToVideoFrame's exact-source-identity check.
+                val importedNotes = imported.notes?.let { notes ->
+                    val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(notes, imported.descriptor.markers, logData)
+                    com.indagium.capture.repointPortableVideoFrames(reanchored, video?.source)
+                }
+                var captureTab = mkTab(tabId, file.nameWithoutExtension, logData,
+                    analysis = pendingAnalysis(logData), processNameMode = newTabProcessNameMode())
+                    .copy(sourcePath = sourcePath, attachedVideo = video, captureTimeline = imported.timeline,
+                        largeFileMode = imported.logFile.length() >= LARGE_FILE_MODE_BYTES,
+                        showUnfiltered = settings.openNewFilesWithUnfiltered)
+                // A brand-new tab never has existing notes to protect (see
+                // offerCaptureNotesReimportIfNeeded's doc for the one case that does), so this always
+                // applies directly — no Append/Replace/Skip prompt on this path, ever.
+                if (importedNotes != null) captureTab = captureTab.copy(annotations = importedNotes)
+                synchronized(stateLock) {
+                    ensureActive()
+                    tabs = tabs + captureTab
+                    setActiveSurfaceToTab(tabId)
+                    if (video != null) videoPanelVisible = true
+                }
+                rememberRecentFile(file)
+                markActiveLoadFinished(tabId)
+                published = true
+                val analysis = buildLogAnalysis(logData, settings.customIssueRules)
+                ensureActive()
+                upTab(tabId) { it.copy(analysis = analysis) }
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                showOpenError("Capture link could not be opened", file.absolutePath,
+                    "${error.message}. You can open the log and video separately without automatic synchronization.")
+                if (file.name != "capture.indagium.json") openZipFile(file, ignoreCaptureDescriptor = true)
+            } finally {
+                val load = activeLoads.remove(tabId)
+                if (!published) finishActiveLoad(load)
+            }
+        }
+        activeLoads[tabId] = ActiveLoad(job)
+        job.start()
+        return tabId
+    }
+
+    /**
+     * Phase 4 (snapshot archive + import): the `existing != null` branch above just switches to the
+     * already-open tab without rereading the archive at all. Two cases are worth the reparse: when
+     * [existing] already has its OWN notes (built up live via Mark issue, or typed by hand) and the
+     * archive on disk might have been re-exported since with more/updated markers — offer a merge —
+     * and when [existing] has NO notes at all yet, so the archive's own markers (e.g. from a Save ZIP
+     * whose export notes the earlier `existing != null` short-circuit never reads) can be applied
+     * straight away with no prompt. Reopening the archive fully here (off the UI thread) is paid on
+     * every reopen rather than only when something is already known to be protected — cheap next to
+     * silently losing markers, since a v3 archive's log/mapping/notes assets are all still small.
+     */
+    private fun offerCaptureNotesReimportIfNeeded(existing: LogTab, file: File) {
+        ioScope.launch {
+            val imported = runCatching {
+                com.indagium.capture.CaptureArchiveReader.open(file, File(archiveCacheDir, "captures"))
+            }.getOrNull() ?: return@launch
+            val notes = imported.notes ?: return@launch
+            val reanchored = com.indagium.capture.reanchorImportedCaptureNotes(
+                notes,
+                imported.descriptor.markers,
+                existing.logData,
+            )
+            // existing.attachedVideo?.source is the ALREADY-open tab's own actual video identity —
+            // re-point any export-time portable marker screenshot at it, same as openCaptureFile's
+            // brand-new-tab path does against the freshly built attachment. See
+            // com.indagium.capture.repointPortableVideoFrames's own doc.
+            val repointed = com.indagium.capture.repointPortableVideoFrames(reanchored, existing.attachedVideo?.source)
+            if (repointed.blocks.isEmpty()) return@launch
+            // Re-read the tab's CURRENT annotations, not the [existing] snapshot captured before this
+            // suspended — it may have gained its first note while this was reopening the archive.
+            val current = tab(existing.id) ?: return@launch
+            if (current.annotations.blocks.isEmpty()) {
+                upAnn(existing.id) { t -> t.copy(annotations = repointed) }
+            } else {
+                pendingCaptureNotesImport = PendingCaptureNotesImport(existing.id, repointed, file.name)
+            }
+        }
+    }
+
+    @Suppress("TooGenericExceptionCaught")
+    private fun restoreCaptureLink(tabId: String) {
+        val original = tab(tabId)?.attachedVideo ?: return
+        val path = original.captureSourcePath ?: return
+        try {
+            val imported = com.indagium.capture.CaptureArchiveReader.open(File(path), File(archiveCacheDir, "captures"))
+            val loaded = tab(tabId) ?: return
+            // The restored source could have been replaced separately from its descriptor.
+            require(parseLogcat(imported.logFile) == loaded.logData) { "Restored logs no longer match the capture" }
+            upTab(tabId) { current ->
+                val currentVideo = current.attachedVideo
+                if (currentVideo?.captureSourcePath != path) return@upTab current
+                // Archive v3 (no per-row mapping file): unlike a v1/v2 CaptureTimeline — too large
+                // to persist, so it must be rehydrated from the reopened archive on every restore —
+                // a v3 VideoAnchor is small enough that it's already part of the restored tab token
+                // (see AutosaveCodec's anchorVideoMs/anchorLogId fields) and may since have been
+                // manually recalibrated (AppState.setVideoAnchor). Only fall back to the archive's
+                // own estimated anchor when nothing was restored at all, so a restart never silently
+                // discards a manual re-link.
+                //
+                // One exception: a capture finalized before the anchor fix can have autosaved its
+                // stale descriptor anchor (pinned to a buffered, pre-recording row) into the tab.
+                // When the archive reports that exact anchor as corrected on load and the restored
+                // one is still identical to it, it was never touched by the user — take the
+                // corrected one instead of resurrecting the wrong row.
+                val stale = imported.staleSyncAnchor?.let { stale ->
+                    val staleId = current.logData.getOrNull(stale.row - 1)?.id
+                    currentVideo.anchor?.takeIf { it.logId == staleId && it.videoMs == stale.videoMs }
+                }
+                val anchor = currentVideo.anchor.takeIf { stale == null } ?: imported.syncAnchor?.let { syncAnchor ->
+                    current.logData.getOrNull(syncAnchor.row - 1)?.id?.let { logId -> VideoAnchor(syncAnchor.videoMs, logId) }
+                }
+                current.copy(
+                    captureTimeline = imported.timeline,
+                    attachedVideo = currentVideo.copy(anchor = anchor),
+                )
+            }
+        } catch (error: Exception) {
+            upTab(tabId) { current -> current.copy(captureTimeline = null,
+                attachedVideo = current.attachedVideo?.copy(doubleClickSeekEnabled = false)) }
+            showOpenError("Capture synchronization unavailable", path,
+                "${error.message}. The log remains open; automatic video linking is disabled.")
+        }
     }
 
     fun dismissOpenError() {
@@ -5735,7 +8758,11 @@ class AppState(
     // user must be able to see and confirm the optional log/video association. 2+ log candidates
     // also show a picker rather than guessing. 0 candidates reports that no log-like entries were
     // found.
-    fun openZipFile(file: File) {
+    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false) {
+        if (!ignoreCaptureDescriptor && com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) {
+            openCaptureFile(file)
+            return
+        }
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
             removeRecentFile(file)
@@ -5864,6 +8891,13 @@ class AppState(
             )
             return
         }
+        // A capture session folder, or an exported capture ZIP unpacked by hand, carries the same
+        // descriptor the ZIP does: open it as a capture (video, notes, log sync) exactly like the
+        // ZIP, instead of the generic scan below that only offers its loose log files.
+        captureDescriptorInFolder(folder)?.let { descriptor ->
+            openCaptureFile(descriptor)
+            return
+        }
         ioScope.launch {
             val scan = runCatching { scanFolderForLogs(folder) }.getOrElse { error ->
                 AppLogger.error("folder", "Folder scan failed", error)
@@ -5884,6 +8918,15 @@ class AppState(
                 )
             }
         }
+    }
+
+    /** The capture descriptor at [folder]'s top level, or inside its only subfolder (unzip tools
+     *  that wrap an archive's contents in one extra directory). */
+    private fun captureDescriptorInFolder(folder: File): File? {
+        File(folder, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME).takeIf { it.isFile }?.let { return it }
+        val onlySubfolder = folder.listFiles()?.filter { it.isDirectory && !it.name.startsWith(".") }?.singleOrNull()
+            ?: return null
+        return File(onlySubfolder, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME).takeIf { it.isFile }
     }
 
     // Returns the tabId allocated for each selected candidate that actually started loading, in
@@ -6071,6 +9114,10 @@ class AppState(
         )
     }
 
+    // Deliberately NOT lastSaveDialogDir/effectiveAnalysisDir: a split's natural destination is
+    // beside the source it's splitting, not wherever the last unrelated Save dialog happened to
+    // write. An explicit AppSettings.defaultSaveDir still wins when set, matching every other
+    // reader of that field.
     fun defaultSplitDestination(source: SplitSource): File =
         settings.defaultSaveDir?.let(::File) ?: source.sourceFile.parentFile ?: File(".")
 
@@ -6089,7 +9136,9 @@ class AppState(
     ) {
         val pending = pendingSplitPrompt ?: return
         pendingSplitPrompt = null
-        settings = settings.copy(defaultSaveDir = destinationDir.absolutePath)
+        // Remembers where the user last split TO without silently changing the configured
+        // "Analysis artifacts folder" — see AppSettings.lastSaveDialogDir's own doc.
+        settings = settings.copy(lastSaveDialogDir = destinationDir.absolutePath)
         beginLoading("Splitting logs...")
         ioScope.launch {
             try {
@@ -6329,7 +9378,31 @@ class AppState(
     }
 
     fun copyAnn(tabId: String) {
-        tab(tabId)?.let { copyToClipboard(maskWordForCopy(buildMd(it, settings), settings)) }
+        copyAnnotationFormat(tabId, settings.annotationCopyFormat)
+    }
+
+    /** One explicit annotation clipboard format. Choosing a menu item never changes the saved default. */
+    fun copyAnnotationFormat(tabId: String, format: AnnotationCopyFormat) {
+        val t = tab(tabId) ?: return
+        val currentSettings = settings
+        val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML) {
+            buildAnnotationsHtml(
+                t,
+                currentSettings,
+                maskText = { maskWordForCopy(it, currentSettings) },
+            ) { document ->
+                Seq3RenderCache.brandedPngBytes(
+                    Seq3RenderCache.layout(document),
+                    resolveSeq3ThemeColors(document, currentSettings).toSeq3RasterTheme(),
+                )
+            }
+        } else {
+            ""
+        }
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(
+            annotationClipboardTransferable(t, currentSettings, format, html),
+            null,
+        )
     }
 
     // Per-image "Copy image" (AnnotationPanel's ImageBlockView) — puts real image bytes on the
@@ -6345,13 +9418,12 @@ class AppState(
      * single-file save picker. The workspace deliberately renders the bytes before calling this,
      * so Download PNG and Copy PNG image share the exact same theme/layout/branding output rather
      * than maintaining two subtly different raster paths. The last chosen directory is persisted
-     * as the normal `defaultSaveDir` used by the other analysis exports.
+     * as `lastSaveDialogDir`, like every other Save dialog — see [AppSettings.lastSaveDialogDir].
      */
     fun downloadSeq3Png(bytes: ByteArray, title: String) {
-        val initialDir = initialDirectoryForPicker(settings.defaultSaveDir?.let(::File))
-        val target = pickSaveFile("Save Sequence Diagram PNG", seq3PngFileName(title), initialDir) ?: return
+        val target = pickSaveFile("Save Sequence Diagram PNG", seq3PngFileName(title), initialSaveDialogDir()) ?: return
         val parent = target.parentFile ?: return
-        updateSettings { it.copy(defaultSaveDir = parent.absolutePath) }
+        updateSettings { it.copy(lastSaveDialogDir = parent.absolutePath) }
         ioScope.launch {
             runCatching { target.writeBytes(bytes) }.fold(
                 onSuccess = { AppLogger.info("export", "Saved sequence diagram PNG to ${target.absolutePath}") },
@@ -6362,22 +9434,11 @@ class AppState(
 
     // "Copy rich preview" (AnnotationPanel header / MdPreviewDialog) — the whole annotation, as
     // buildAnnotationsHtml() renders it, on the clipboard as text/html with inline <img> data
-    // URIs, so a single paste reproduces text *and* pictures. Falls back to the same masked
-    // buildMd() text copyAnn() writes for editors that don't accept the HTML flavor.
+    // URIs, so a single paste reproduces text *and* pictures. Text is copy-masked before it becomes
+    // HTML; falls back to the same masked buildMd() text copyAnn() writes for editors that don't
+    // accept the HTML flavor.
     fun copyRichPreview(tabId: String) {
-        val t = tab(tabId) ?: return
-        // Each diagram is rasterized in ITS OWN theme (WP4's resolveSeq3ThemeColors — a document
-        // saved with a theme override keeps it here too), falling back to the active app theme
-        // for a document that follows it, so a pasted picture matches what the user is looking at
-        // rather than a fixed light palette.
-        val html = buildAnnotationsHtml(t, settings) { document ->
-            Seq3RenderCache.brandedPngBytes(
-                Seq3RenderCache.layout(document),
-                resolveSeq3ThemeColors(document, settings).toSeq3RasterTheme(),
-            )
-        }
-        val plainText = maskWordForCopy(buildMd(t, settings), settings)
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(HtmlTransferable(html, plainText), null)
+        copyAnnotationFormat(tabId, AnnotationCopyFormat.JIRA_CLOUD)
     }
 
     fun exportAnalysisTo(tabId: String, file: File): Boolean {
@@ -6534,36 +9595,48 @@ class AppState(
     }
 
     fun saveAnalysis(tabId: String) {
-        val t = tab(tabId) ?: return
+        val initial = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
-            file = analysisNoteMarkdownName(t.filename, t.sourcePath)
-            settings.defaultSaveDir?.let { directory = it }
+            file = analysisNoteMarkdownName(initial.filename, initial.sourcePath)
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         // Pin only when this manual save actually landed where auto-export writes too (which,
-        // right after the defaultSaveDir update above, is virtually always the case) — otherwise a
-        // manual save to a differently-named file in that same directory (e.g. "foo_analysis_2.md")
-        // would be shadowed by the very next keystroke's auto-export writing the plain
-        // "foo_analysis.md" right back over it. Uses upTab, not upAnn: this manual save is already
-        // in flight, so pinning here must not itself trigger a second, redundant auto-export.
+        // starting from the effective analysis folder above, is virtually always the case unless
+        // the user browsed elsewhere) — otherwise a manual save to a differently-named file in that
+        // same directory (e.g. "foo_analysis_2.md") would be shadowed by the very next keystroke's
+        // auto-export writing the plain "foo_analysis.md" right back over it. Uses upTab, not
+        // upAnn: this manual save is already in flight, so pinning here must not itself trigger a
+        // second, redundant auto-export.
         if (File(dir).absolutePath == activeNotesDir().absolutePath) {
             upTab(tabId) { it.copy(noteTargetName = saved.name) }
         }
+        // Re-read the tab only now: the modal dialog above can stay open for a long time while the
+        // tab keeps changing (tailing, note edits), and the snapshot taken before it would save
+        // stale content. A tab closed meanwhile has nothing left to save.
+        val t = tab(tabId) ?: return
+        // Same per-file write lane auto-export uses, so a manual save and a concurrent auto-export
+        // of the same file can never interleave or land out of order: the later request wins.
+        val writer = noteExportWriters.computeIfAbsent(saved.absolutePath) { NoteExportWriter() }
+        val revision = writer.revision.incrementAndGet()
         ioScope.launch {
-            runCatching {
-                saved.writeText(buildMd(t, settings))
-                File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
-                writeAnnotationFrameImages(t, saved)
-                rememberRecentNote(saved)
-            }.fold(
-                onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
-                onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
-            )
+            writer.mutex.withLock {
+                if (revision != writer.revision.get()) return@withLock
+                runCatching {
+                    saved.writeText(buildMd(t, settings))
+                    File(saved.parent, saved.nameWithoutExtension + ".ann")
+                        .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
+                    writeAnnotationFrameImages(t, saved)
+                    rememberRecentNote(saved)
+                }.fold(
+                    onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
+                    onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
+                )
+            }
         }
     }
 
@@ -6585,8 +9658,8 @@ class AppState(
             parsed.exportMode == com.indagium.diagram3.DiagramExportMode.IMAGE
         }
         if (images.isEmpty() && imageDiagramCount == 0) return
-        val dir = pickDirectory("Export Frames", settings.defaultSaveDir?.let(::File)) ?: return
-        settings = settings.copy(defaultSaveDir = dir.absolutePath)
+        val dir = pickDirectory("Export Frames", initialSaveDialogDir()) ?: return
+        settings = settings.copy(lastSaveDialogDir = dir.absolutePath)
         val framesDir = File(dir, "${t.filename.substringBeforeLast('.')}_frames")
         ioScope.launch {
             runCatching {
@@ -6612,12 +9685,12 @@ class AppState(
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
             file = t.filename.substringBeforeLast('.') + "_filtered.txt"
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
             runCatching { exportFilteredToFile(t, saved, csv = false, settings = settings) }.fold(
@@ -6631,12 +9704,12 @@ class AppState(
         val t = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
             file = t.filename.substringBeforeLast('.') + "_filtered.csv"
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
-        settings = settings.copy(defaultSaveDir = dir)
+        settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
         ioScope.launch {
             runCatching { exportFilteredToFile(t, saved, csv = true, settings = settings) }.fold(
@@ -6724,6 +9797,24 @@ class AppState(
         ioScope.launch { openNoteFile(tabId, file) }
     }
 
+    /** The home tab's "Open notes (.ann)" tile. Modelled on [openCaseNotesOnly]: opens the picked
+     *  notes file in a brand-new, log-less tab ([emptyWorkspaceTab] already renders correctly with
+     *  no rows) rather than on the home tab itself — the home tab never hosts notes, so a fresh id
+     *  is always minted here instead of reusing [tabId]. Returns the new tab's id (mainly for
+     *  tests); null only if the caller passes a directory or otherwise-unreadable path, which
+     *  [openNoteFileAsync] will simply fail on. */
+    fun openNoteFileInNewTab(file: File): String? {
+        if (!file.isFile) return null
+        val n = tabCounter.getAndIncrement()
+        val t = emptyWorkspaceTab().copy(id = "t$n", filename = file.nameWithoutExtension)
+        synchronized(stateLock) {
+            tabs = tabs + t
+            setActiveSurfaceToTab(t.id)
+        }
+        openNoteFileAsync(t.id, file)
+        return t.id
+    }
+
     // Reopening a log used to hand the fresh tab a blank noteTargetName, re-arming upAnn's
     // overwrite gate on the very first edit — every session, forever. That's what actually produced
     // the reported "logcat_analysis_11.md" trail: each reopen re-triggered the "Existing notes
@@ -6792,7 +9883,7 @@ class AppState(
     //
     // Uses upTab, not upAnn: like openNoteFile, starting fresh is not itself an edit to react to —
     // and since nextFreeNoteTargetName-by-construction only ever returns a name nothing on disk owns
-    // yet, upAnn's needsFreshOverwritePrompt could never fire on it anyway (it requires blocks to be
+    // yet, upAnn's autoExportDecision could never return Conflict on it anyway (it requires blocks to be
     // non-empty, and this tab has none). Going through plain upTab makes that guarantee visible at
     // the call site instead of relying on a downstream check to happen to agree: pendingNoteOverwrite
     // is untouched by this function, full stop. The previous file is never read, moved, or written —
@@ -6809,12 +9900,69 @@ class AppState(
         upTab(tabId) { it.copy(annotations = Annotations(), noteTargetName = newName, recoveredNoteRows = emptyMap()) }
     }
 
-    private fun userNotesDir(): File? {
-        val configuredDir = settings.defaultSaveDir?.let(::File) ?: return null
-        return configuredDir.takeIf { it.exists() && it.isDirectory }
-    }
+    // ── Save folders (Settings → General → Storage) ─────────────────────────────────
+    // Pure path resolution for the five folders in AppSettings — see that data class's own doc
+    // comments for what each field means. Nothing here creates a directory; every write site
+    // below calls .mkdirs() itself right before it writes, so a folder that's never been written
+    // to stays absent on disk regardless of how many times these are read.
+    private fun effectiveSaveRootOrNull(): File? = settings.saveRootDir?.let(::File) ?: platformDefaultSaveRootDir
 
-    private fun activeNotesDir(): File = userNotesDir() ?: notesDir
+    /** Display-only: the root every unset child folder below resolves under, always non-null —
+     *  unlike [effectiveSaveRootOrNull], this reflects the real platform default even when
+     *  [platformDefaultSaveRootDir] wasn't injected, since showing a path in Settings never
+     *  touches disk. Actual writes always go through [effectiveSaveRootOrNull] instead. */
+    internal val effectiveSaveRootDir: File get() = effectiveSaveRootOrNull() ?: DesktopStorage.defaultSaveRootDir()
+
+    /** Where analysis notes/exports are written — see [activeNotesDir]. An explicit, existing
+     *  [AppSettings.defaultSaveDir] always wins (a configured-but-currently-missing folder falls
+     *  through instead of being silently created); next is `<save root>/analysis`, created on
+     *  first write; with neither configured, the legacy internal [notesDir]. */
+    private fun effectiveAnalysisDir(): File =
+        settings.defaultSaveDir?.let(::File)?.takeIf { it.exists() && it.isDirectory }
+            ?: effectiveSaveRootOrNull()?.let { File(it, "analysis") }
+            ?: notesDir
+
+    /** Display-only counterpart of [effectiveAnalysisDir]: reflects the configured path exactly as
+     *  set (no existence gate — Settings should show what the user typed, not a defensive
+     *  fallback) and always resolves under [effectiveSaveRootDir] rather than [notesDir]. */
+    internal fun effectiveAnalysisDirForDisplay(): File =
+        settings.defaultSaveDir?.let(::File) ?: File(effectiveSaveRootDir, "analysis")
+
+    /** Where new capture sessions are recorded, read fresh at Start time — see
+     *  [CaptureService.newController]. Falls back to [legacyCaptureSessionsRoot] (the old
+     *  location, still scanned for existing sessions) when nothing is configured. */
+    internal fun effectiveCaptureSessionsDir(): File =
+        settings.captureSessionsDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "captures") }
+            ?: legacyCaptureSessionsRoot
+
+    /** "Save snapshot" destination while a capture is recording (CaptureSnapshotPopover). */
+    internal fun effectiveCaptureSnapshotsDir(): File =
+        settings.captureSnapshotsDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "snapshots") }
+            ?: File(".")
+
+    /** "Save ZIP" destination for a stopped/retained capture. [fallback] is the old
+     *  default (the capture session's own parent directory) used only when nothing here or in
+     *  [AppSettings.saveRootDir] is configured. */
+    internal fun effectiveCaptureZipDir(fallback: File): File =
+        settings.captureZipDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, "saved-captures") }
+            ?: fallback
+
+    /** Display-only counterpart of [effectiveCaptureZipDir] for Settings, where there is no
+     *  specific session to fall back to — falls back to `<save root>/saved-captures` instead. */
+    internal fun effectiveCaptureZipDirForDisplay(): File =
+        effectiveCaptureZipDir(fallback = File(effectiveSaveRootDir, "saved-captures"))
+
+    /** Where a Save/Export dialog starts: the last place ANY such dialog actually saved to, or the
+     *  effective analysis folder the first time — deliberately never [AppSettings.defaultSaveDir]
+     *  directly, so a one-off Save destination never gets confused with it. See
+     *  [AppSettings.lastSaveDialogDir]'s own doc. */
+    internal fun initialSaveDialogDir(): File? =
+        initialDirectoryForPicker(settings.lastSaveDialogDir?.let(::File) ?: effectiveAnalysisDir())
+
+    private fun activeNotesDir(): File = effectiveAnalysisDir()
 
     // internal (not private): the caseSearch instance below (com.indagium.cases) and
     // IndagiumToolOperations' identical one reuse this exact directory set for
@@ -6823,7 +9971,7 @@ class AppState(
     // in tests, where notesDir is injected away from the real ~/.openlog2-equivalent.
     internal fun noteLookupDirs(): List<File> {
         return listOfNotNull(
-            userNotesDir(),
+            effectiveAnalysisDir(),
             notesDir,
             DesktopStorage.legacyNotesDir(),
         ).distinctBy { it.absolutePath }
@@ -7271,11 +10419,12 @@ class AppState(
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
         val dlg = FileDialog(null as Frame?, "Export Case Note", FileDialog.SAVE).apply {
             file = File(preview.id).name.ifBlank { "case_note.md" }
-            settings.defaultSaveDir?.let { directory = it }
+            initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
+        settings = settings.copy(lastSaveDialogDir = dir)
         val target = File(dir, path)
         ioScope.launch {
             runCatching {
@@ -7463,17 +10612,44 @@ class AppState(
     // As of the fix for the "note is added the instant the overwrite prompt appears" bug, the REAL
     // gate lives one level up, in upAnn: it decides — synchronously, before committing anything to
     // `tabs` — whether applying a mutation would create a brand-new conflict, and if so stashes the
-    // mutated tab on pendingNoteOverwrite instead of ever calling this function. So by the time
-    // autoExportAnnotations runs, `tab` has already been committed to `tabs` and is known-safe to
-    // export: either it's pinned (noteTargetName != null, so resolveNoteTarget can't disagree with
-    // what's already on disk under this session's ownership), or upAnn's own
-    // needsFreshOverwritePrompt check just found no collision moments ago, on this same thread. The
-    // pendingNoteOverwrite/exists() checks below are consequently a defensive backstop for a
-    // same-thread TOCTOU (something else creating the file in the instant between that check and
-    // this one) — not the load-bearing gate any more, and by construction they should never fire on
-    // the intended path. Kept anyway: cheap insurance beats a silent overwrite, and removing them
-    // would be trading a belt for a suspender rather than any real behavior duplication.
-    private fun autoExportAnnotations(tab: LogTab) {
+    // mutated tab on pendingNoteOverwrite instead of ever calling this function. And as of the fix
+    // for the follow-up race (several coroutines — Mark issue, a screenshot, a snapshot note —
+    // adding blocks to the same fresh tab within milliseconds during a live capture), upAnn's
+    // AutoExportDecision.ReadyToPin path also PINS noteTargetName in that very same commit, not just
+    // detects the absence of a conflict — see AutoExportDecision's doc comment for why setting the
+    // pin here, one level up and outside the lock, used to leave a window for a second, concurrent
+    // upAnn call on the same tab to see "no conflict yet" against a stale unpinned snapshot and
+    // mistake this session's own about-to-exist file for a foreign collision.
+    //
+    // So by the time autoExportAnnotations runs, `tab` has already been committed to `tabs` and is
+    // known-safe to export: either it's pinned (noteTargetName != null, so resolveNoteTarget can't
+    // disagree with what's already on disk under this session's ownership — true for essentially
+    // every call now that the pin is atomic with the first blocks-adding commit), or upAnn skipped
+    // its own decision entirely because some OTHER tab's prompt was up at commit time (case 4 in
+    // upAnn's doc comment) — which this function's own `pendingNoteOverwrite != null` check just
+    // above already guards against re-running the export for, so it never reaches the block below in
+    // that case either. The pendingNoteOverwrite/exists() checks below are consequently a defensive
+    // backstop for a same-thread TOCTOU (something else creating the file in the instant between
+    // upAnn's check and this one) — not the load-bearing gate any more, and by construction they
+    // should never fire on the intended path. Kept anyway: cheap insurance beats a silent overwrite,
+    // and removing them would be trading a belt for a suspender rather than any real behavior
+    // duplication.
+    //
+    // [reserved], when non-null, is the write-lane reservation upAnn already made for this exact
+    // commit, INSIDE its own synchronized(stateLock) block — see reserveExportTarget's doc comment
+    // for the second race this closes: without it, every call (not just the first, conflict-prone
+    // one) allocated its NoteExportWriter.revision here, AFTER releasing stateLock, purely in
+    // whichever order the OS scheduler happened to let threads reach this line — not in actual
+    // commit order. Under real concurrent load (several coroutines adding blocks to one tab within
+    // milliseconds — exactly the "Mark issue + screenshot + snapshot" capture scenario this whole
+    // gate exists for) that let an EARLIER, smaller snapshot's write win the "latest revision" race
+    // over a LATER, more complete one, permanently writing a note file that silently lagged behind
+    // the tab's actual (correct) in-memory annotations — no prompt, no error, just a stale file.
+    // [reserved] is null only on the rare defensive-backstop path below (something else created the
+    // file in the narrow window between upAnn's check and this one, or a same-thread TOCTOU) or when
+    // this call is blocked behind another tab's prompt — see the `pendingNoteOverwrite != null`
+    // check just below, which returns before [reserved] would ever be consulted in that case anyway.
+    private fun autoExportAnnotations(tab: LogTab, reserved: PendingExportTarget?) {
         if (!autoExportNotes || !settings.autoExportNotes || tab.annotations.blocks.isEmpty()) return
         // A prompt is already up (for this tab or another) — write nothing until it's resolved,
         // rather than silently proceeding or silently dropping the edit. For THIS tab, upAnn never
@@ -7482,7 +10658,7 @@ class AppState(
         // prompt being up.
         if (pendingNoteOverwrite != null) return
         val targetDir = activeNotesDir()
-        val mdFile = resolveNoteTarget(targetDir, tab)
+        val mdFile = reserved?.mdFile ?: resolveNoteTarget(targetDir, tab)
         // The in-memory check comes FIRST, before the exists() syscall: once a tab has a pinned
         // noteTargetName, every later keystroke short-circuits on this and never re-stats the
         // file. Only a still-undecided tab (fresh session, or a legacy autosave restored with
@@ -7513,8 +10689,8 @@ class AppState(
             // very write is about to create and prompt on the very next edit.
             upTab(tab.id) { it.copy(noteTargetName = mdFile.name) }
         }
-        val writer = noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
-        val revision = writer.revision.incrementAndGet()
+        val writer = reserved?.writer ?: noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
+        val revision = reserved?.revision ?: writer.revision.incrementAndGet()
         ioScope.launch {
             writer.mutex.withLock {
                 // A newer mutation was already queued while this coroutine waited for the file's
@@ -7778,27 +10954,75 @@ class AppState(
         pendingNoteOverwrite = null
     }
 
-    // The two halves of upAnn's overwrite gate, split out so upAnn itself stays readable and so
+    // upAnn's overwrite gate, split out so upAnn itself stays readable and so
     // autoExportAnnotations' defensive re-check can describe itself as "the same check upAnn
     // already ran" without inlining the logic twice.
 
-    /** True exactly when applying a mutation would be the FIRST edit on this tab to collide with an
-     *  existing, un-owned export target — the case that needs a human decision before anything
-     *  commits. Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab
-     *  that hasn't been (and, if this returns true, will not be) written into `tabs` yet. */
-    private fun needsFreshOverwritePrompt(next: LogTab): Boolean {
-        if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return false
-        if (next.noteTargetName != null) return false
-        return resolveNoteTarget(activeNotesDir(), next).exists()
+    /** What upAnn should do about auto-export for an about-to-be-committed tab snapshot — computed
+     *  AND acted on inside upAnn's own `synchronized(stateLock)` block, so the decision and the
+     *  commit are atomic.
+     *
+     *  Before [ReadyToPin] existed, [LogTab.noteTargetName] was only ever set later, by
+     *  [autoExportAnnotations] running OUTSIDE the lock. That left a window: several coroutines
+     *  (Mark issue, a screenshot, a snapshot note — the in-app AI's own quick-succession block
+     *  additions during a live capture) each call upAnn on the same still-unpinned tab within
+     *  milliseconds of each other. The first call's `next` has no conflict (the file doesn't exist
+     *  yet), commits, and only pins the tab afterwards from autoExportAnnotations — but by then a
+     *  second call may already have read the still-unpinned `current`, computed its OWN `next`
+     *  (also correctly seeing no conflict at that instant), and committed it too, still unpinned.
+     *  Both calls then run their own autoExportAnnotations against their OWN captured (and by now
+     *  stale) tab snapshot: whichever runs second sees `tab.noteTargetName == null` on ITS stale
+     *  parameter — even though the live tab was already pinned to that very name moments earlier by
+     *  the other call — re-checks `mdFile.exists()`, finds the first call's file genuinely on disk,
+     *  and raises [PendingNoteOverwrite] for a file this same session just created.
+     *
+     *  Resolving-and-pinning here instead, under the same lock and against the same fresh `next`
+     *  that is about to be committed, closes that window: the very first commit that adds blocks to
+     *  an unpinned tab pins it in the SAME atomic step, so no later call on the same tab can ever
+     *  observe "blocks present, still unpinned" and re-derive a target from scratch. */
+    private sealed interface AutoExportDecision {
+        /** Auto-export is off, `next` has no blocks yet, or `next` is already pinned — nothing to
+         *  decide; commit `next` as-is and let [autoExportAnnotations] do its usual thing. */
+        data object Skip : AutoExportDecision
+
+        /** `next` would be the first edit on this (still-unpinned) tab to collide with an existing,
+         *  un-owned export target — the case that needs a human decision before anything commits. */
+        data class Conflict(val mdFile: File) : AutoExportDecision
+
+        /** `next` is the first edit to add blocks to a still-unpinned tab, and its resolved target
+         *  does not exist yet — safe to claim it right now, in the same commit as the edit. */
+        data class ReadyToPin(val mdFile: File) : AutoExportDecision
     }
 
-    /** Builds the stashed-mutation record upAnn publishes instead of committing [next] — resolves
-     *  the same target file autoExportAnnotations would otherwise have exported to, and carries the
-     *  fully-mutated tab itself so the three resolution functions above have the actual edit to
-     *  commit once the user decides, not just whatever's still sitting in `tabs`. */
-    private fun buildPendingNoteOverwrite(tabId: String, next: LogTab): PendingNoteOverwrite {
+    /** Mirrors autoExportAnnotations' own exists()-check line for line, but against a tab that
+     *  hasn't been (and, for [AutoExportDecision.Conflict], will not be) written into `tabs` yet. */
+    private fun autoExportDecision(next: LogTab): AutoExportDecision {
+        if (!autoExportNotes || !settings.autoExportNotes || next.annotations.blocks.isEmpty()) return AutoExportDecision.Skip
+        if (next.noteTargetName != null) return AutoExportDecision.Skip
         val mdFile = resolveNoteTarget(activeNotesDir(), next)
-        return PendingNoteOverwrite(tabId, mdFile.absolutePath, mdFile.name, pendingTab = next)
+        return if (mdFile.exists()) AutoExportDecision.Conflict(mdFile) else AutoExportDecision.ReadyToPin(mdFile)
+    }
+
+    /** Reserves this commit's write-lane slot for [mdFile] — MUST be called from inside upAnn's own
+     *  `synchronized(stateLock)` block, at the moment a commit is decided, not later from
+     *  autoExportAnnotations after the lock is released.
+     *
+     *  [NoteExportWriter.revision] exists so a slower coroutine writing an OLDER snapshot can never
+     *  clobber a faster one that already wrote a NEWER one — but that guarantee only holds if the
+     *  revision numbers are handed out in the same order the snapshots were actually committed.
+     *  Minting the revision here, inside the same monitor that serializes every commit to this tab,
+     *  guarantees exactly that: whichever call's commit is ordered later by the lock always receives
+     *  the higher revision too. Minting it later, unsynchronized, in autoExportAnnotations (as this
+     *  code used to) only guaranteed the revision matched whichever thread happened to reach that
+     *  line last — under real concurrent load (several coroutines adding blocks to one tab within
+     *  milliseconds, e.g. Mark issue + a screenshot + a snapshot note during one live capture) an
+     *  EARLIER, smaller commit's write could reach that unsynchronized line AFTER a LATER, more
+     *  complete commit's did, win the "latest revision" race, and silently write a note file that
+     *  permanently lagged behind the tab's actual (correct) in-memory annotations — no prompt, no
+     *  error thrown, just a stale file nobody was told about. */
+    private fun reserveExportTarget(mdFile: File): PendingExportTarget {
+        val writer = noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
+        return PendingExportTarget(mdFile, writer, writer.revision.incrementAndGet())
     }
 
     // Annotation-aware tab updater — auto-exports after any annotation change. internal, not
@@ -7809,30 +11033,37 @@ class AppState(
     // see PendingNoteOverwrite's doc comment. This is the fix for the reported bug where the new
     // note visibly appeared in the Notes panel (and so, reasonably, looked already-saved) the
     // instant the "Existing notes found" prompt rendered, before the user had picked an option.
-    // Three cases, checked in order:
+    // Four cases, checked in order:
     //  1. A prompt is ALREADY up for THIS tab: `fn` is applied to the still-pending snapshot
     //     (pendingForThisTab.pendingTab), not the stale committed tab, and the result replaces it.
     //     This is what makes a second keystroke, or a second MCP call, arriving before the modal is
     //     dismissed safe — it folds into the pending edit instead of being lost or applied against
     //     out-of-date state.
     //  2. No prompt is up anywhere, and applying `fn` would create a BRAND NEW conflict
-    //     (needsFreshOverwritePrompt): the mutated tab is stashed on pendingNoteOverwrite and
-    //     deliberately NOT committed to `tabs` — the note doesn't exist anywhere the user, the
+    //     (autoExportDecision returns Conflict): the mutated tab is stashed on pendingNoteOverwrite
+    //     and deliberately NOT committed to `tabs` — the note doesn't exist anywhere the user, the
     //     export writer, or an MCP reader can observe it until the prompt is resolved.
-    //  3. Anything else — a DIFFERENT tab's prompt is up, this tab is already pinned
-    //     (noteTargetName != null), or there's no conflict at all — commits immediately and
+    //  3. No prompt is up, and applying `fn` would be the first edit to add blocks to a still-unpinned
+    //     tab whose resolved target does NOT collide with anything (autoExportDecision returns
+    //     ReadyToPin): the pin is folded into `next` and committed in the SAME upTab call as the
+    //     edit itself — see AutoExportDecision's doc for why this has to happen here, atomically
+    //     with the commit, rather than later in autoExportAnnotations (which used to be the only
+    //     place that set the pin, and raced when several coroutines added blocks to the same fresh
+    //     tab in quick succession).
+    //  4. Anything else — a DIFFERENT tab's prompt is up, this tab is already pinned
+    //     (noteTargetName != null), or auto-export is off — commits `next` immediately and
     //     auto-exports, exactly as every mutation did before this change.
     //
-    // Accepted limitation, deliberately not fixed here: case 3 also covers a SECOND tab hitting a
+    // Accepted limitation, deliberately not fixed here: case 4 also covers a SECOND tab hitting a
     // brand-new, first-time conflict while some OTHER tab's prompt is already open — that mutation
-    // still commits immediately (needsFreshOverwritePrompt is only consulted when
-    // pendingNoteOverwrite == null), though its export stays held back by autoExportAnnotations'
-    // own `pendingNoteOverwrite != null` guard until the first prompt resolves. Properly gating a
+    // still commits immediately (autoExportDecision is only consulted when pendingNoteOverwrite ==
+    // null), though its export stays held back by autoExportAnnotations' own
+    // `pendingNoteOverwrite != null` guard until the first prompt resolves. Properly gating a
     // second, independent conflict needs per-tab pending state and a non-singleton modal — real
     // work, for a genuinely rare interleaving (two different tabs each hitting a FIRST-time
     // conflict in the same narrow window), so it's left as a known gap rather than in scope here.
     //
-    // The read (current), the decision (which of the three cases above applies), and the write
+    // The read (current), the decision (which of the four cases above applies), and the write
     // (upTab / pendingNoteOverwrite = ...) are one synchronized(stateLock) block — not read-then-
     // lock-then-blind-write. upTab (see its own comment above) exists precisely because a tabs
     // read-modify-write split across two unsynchronized steps loses updates under concurrency: a UI
@@ -7844,13 +11075,13 @@ class AppState(
     // (kotlin.synchronized), so the non-local `return` on a missing tab, and upTab's own nested
     // synchronized(stateLock) call inside the `else` branch, both work exactly as they read: the
     // monitor is reentrant, and `return` exits upAnn itself, not just the lambda. Note this does put
-    // needsFreshOverwritePrompt's File.exists() probe under the lock — accepted deliberately: it
-    // only runs on the *unpinned* first-conflict path (at most once per tab per session, before a
-    // decision pins noteTargetName), the same stat call already happened synchronously on the
-    // caller's thread before this fix, and a compare-and-swap scheme to keep I/O off the lock is
-    // more machinery than this rare path justifies. autoExportAnnotations itself stays OUTSIDE the
-    // lock — it only launches work on ioScope, so holding stateLock across it would serialize
-    // unrelated tabs' exports for no benefit.
+    // autoExportDecision's File.exists() probe (and, on the ReadyToPin path, the pin itself) under
+    // the lock — accepted deliberately: it only runs on the *unpinned* first-edit path (at most once
+    // per tab per session, before a decision pins noteTargetName), the same stat call already
+    // happened synchronously on the caller's thread before the original fix that introduced this
+    // gate, and a compare-and-swap scheme to keep I/O off the lock is more machinery than this rare
+    // path justifies. autoExportAnnotations itself stays OUTSIDE the lock — it only launches work on
+    // ioScope, so holding stateLock across it would serialize unrelated tabs' exports for no benefit.
     internal fun upAnn(tabId: String, fn: (LogTab) -> LogTab) {
         val committed = synchronized(stateLock) {
             // WP14: `it.handEdit == null` excludes a Seq3Session.confirm() hand-edit conflict
@@ -7865,27 +11096,78 @@ class AppState(
             val pendingForThisTab = pendingNoteOverwrite?.takeIf { it.tabId == tabId && it.handEdit == null }
             val current = pendingForThisTab?.pendingTab ?: tab(tabId) ?: return
             val next = fn(current)
-            when {
-                pendingForThisTab != null -> {
-                    pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
-                    null
-                }
-                pendingNoteOverwrite == null && needsFreshOverwritePrompt(next) -> {
-                    pendingNoteOverwrite = buildPendingNoteOverwrite(tabId, next)
-                    null
-                }
-                else -> {
-                    upTab(tabId) { next }
-                    tab(tabId)
+            if (pendingForThisTab != null) {
+                pendingNoteOverwrite = pendingForThisTab.copy(pendingTab = next)
+                null
+            } else {
+                // Only consulted when no OTHER tab's prompt is already up — see the accepted
+                // limitation above.
+                when (val decision = if (pendingNoteOverwrite == null) autoExportDecision(next) else AutoExportDecision.Skip) {
+                    is AutoExportDecision.Conflict -> {
+                        pendingNoteOverwrite = PendingNoteOverwrite(tabId, decision.mdFile.absolutePath, decision.mdFile.name, pendingTab = next)
+                        null
+                    }
+                    is AutoExportDecision.ReadyToPin -> {
+                        // The atomic fix: pin in the SAME commit as the edit that first added blocks,
+                        // not afterwards — see AutoExportDecision's doc comment. The write-lane
+                        // reservation (reserveExportTarget) is minted here too, for the same reason.
+                        val pinned = next.copy(noteTargetName = decision.mdFile.name)
+                        upTab(tabId) { pinned }
+                        val committedTab = tab(tabId) ?: pinned
+                        CommittedAnnotationEdit(committedTab, reserveExportTarget(decision.mdFile))
+                    }
+                    AutoExportDecision.Skip -> {
+                        upTab(tabId) { next }
+                        val committedTab = tab(tabId) ?: next
+                        // Reserve a write lane whenever this commit will actually reach
+                        // autoExportAnnotations' write path — i.e. it's already pinned and has
+                        // blocks; auto-export being off or blocks being empty means no write is
+                        // coming, so reserving a revision for it would just be wasted bookkeeping
+                        // (and autoExportAnnotations' own top guard would discard it unread anyway).
+                        val target = committedTab.noteTargetName
+                            ?.takeIf { autoExportNotes && settings.autoExportNotes && committedTab.annotations.blocks.isNotEmpty() }
+                            ?.let { name -> reserveExportTarget(File(activeNotesDir(), name)) }
+                        CommittedAnnotationEdit(committedTab, target)
+                    }
                 }
             }
         }
-        committed?.let { autoExportAnnotations(it) }
+        committed?.let { autoExportAnnotations(it.tab, it.exportTarget) }
     }
 
-    fun pickSaveFolder() {
-        val chosen = pickDirectory("Choose Save Folder", settings.defaultSaveDir?.let(::File)) ?: return
-        updateSettings { it.copy(defaultSaveDir = chosen.absolutePath) }
+    /** Browse for one of the five save folders in Settings → General → Storage. Defaults to
+     *  [SaveFolderKind.ANALYSIS], the historical no-arg behavior ("Default save folder" before it
+     *  was renamed — see [SaveFolderKind]'s own doc), so every existing call site kept working
+     *  unchanged; only the CaptureSnapshotPopover's "Choose folder…" needs its own kind. */
+    internal fun pickSaveFolder(kind: SaveFolderKind = SaveFolderKind.ANALYSIS) {
+        val chosen = pickDirectory("Choose Save Folder", explicitSaveFolder(kind)?.let(::File)) ?: return
+        setSaveFolder(kind, chosen.absolutePath)
+    }
+
+    /** Clears one of the five save folders back to its computed default. Only shown in Settings
+     *  when that folder is explicitly set — see SettingsDialog's SaveFolderRow. */
+    internal fun resetSaveFolder(kind: SaveFolderKind) {
+        setSaveFolder(kind, null)
+    }
+
+    private fun explicitSaveFolder(kind: SaveFolderKind): String? = when (kind) {
+        SaveFolderKind.ROOT -> settings.saveRootDir
+        SaveFolderKind.ANALYSIS -> settings.defaultSaveDir
+        SaveFolderKind.SESSIONS -> settings.captureSessionsDir
+        SaveFolderKind.SNAPSHOTS -> settings.captureSnapshotsDir
+        SaveFolderKind.ZIP -> settings.captureZipDir
+    }
+
+    private fun setSaveFolder(kind: SaveFolderKind, value: String?) {
+        updateSettings {
+            when (kind) {
+                SaveFolderKind.ROOT -> it.copy(saveRootDir = value)
+                SaveFolderKind.ANALYSIS -> it.copy(defaultSaveDir = value)
+                SaveFolderKind.SESSIONS -> it.copy(captureSessionsDir = value)
+                SaveFolderKind.SNAPSHOTS -> it.copy(captureSnapshotsDir = value)
+                SaveFolderKind.ZIP -> it.copy(captureZipDir = value)
+            }
+        }
     }
 
     fun pickSourceFolder() {
@@ -8537,7 +11819,8 @@ class AppState(
 
     fun importFiltersFromFile() {
         val dlg = FileDialog(null as Frame?, "Import Filters", FileDialog.LOAD).apply {
-            setFilenameFilter { _, n -> n.endsWith(".json") }; isVisible = true
+            setFilenameFilter { _, n -> n.lowercase().let { it.endsWith(".json") || it.endsWith(".conf") || it.endsWith(".ini") } }
+            isVisible = true
         }
         val path = dlg.file ?: return
         val dir = dlg.directory ?: return
@@ -8545,11 +11828,11 @@ class AppState(
     }
 
     fun importFiltersFromFile(file: File) {
-        runCatching { beginImportFilters(file.readText(), file.name) }
+        runCatching { beginImportFilters(readFilterImportText(file), file.name) }
             .fold(
                 onSuccess = { AppLogger.info("filters", "Imported filters from ${file.absolutePath}") },
                 onFailure = { e ->
-                    importError = "Could not read filter file."
+                    importError = (e as? IllegalArgumentException)?.message ?: "Could not read filter file."
                     pendingImportReview = null
                     AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
                 },
@@ -8561,10 +11844,34 @@ class AppState(
     }
 
     fun importFiltersFromFilesAsync(files: List<File>) {
-        ioScope.launch {
-            val decoded = files.mapNotNull { file -> runCatching { decodeFilters(file.readText()).getOrNull() }.getOrNull() }
-            val imported = decoded.flatten()
-            beginImportFilterList(imported, sourceName = files.joinToString(", ") { it.name })
+        ioScope.launch { importFiltersFromFiles(files) }
+    }
+
+    /** Stages every readable file (filter JSON or klogg export) in one review; files that cannot be read are
+     *  listed in that review's notes, or in [importError] when nothing could be staged (never both dialogs). */
+    fun importFiltersFromFiles(files: List<File>) {
+        val libraries = mutableListOf<DecodedFilterLibrary>()
+        val failures = mutableListOf<Pair<String, String>>()
+        for (file in files) {
+            runCatching { decodeFilterImport(file.name, readFilterImportText(file)).getOrThrow() }.fold(
+                onSuccess = { libraries += it },
+                onFailure = { e ->
+                    failures += file.name to (e.message ?: "could not be read.")
+                    AppLogger.error("filters", "Failed to import filters from ${file.absolutePath}", e)
+                },
+            )
+        }
+        val merged = DecodedFilterLibrary(
+            filters = libraries.flatMap { it.filters },
+            folders = libraries.flatMap { it.folders },
+            rowInfo = libraries.fold(emptyMap()) { acc, lib -> acc + lib.rowInfo },
+            notes = libraries.flatMap { it.notes }.distinct() + failures.map { (name, reason) -> "Not imported: $name — $reason" },
+            fromKlogg = libraries.any { it.fromKlogg },
+        )
+        beginImportFilterList(prepareImportedLibrary(merged), files.joinToString(", ") { it.name })
+        // No review was staged (nothing decoded, or only empty libraries): the error dialog is the only surface.
+        if (pendingImportReview == null && failures.isNotEmpty()) {
+            importError = failures.joinToString("\n") { (name, reason) -> "$name: $reason" }
         }
     }
 
@@ -8711,7 +12018,17 @@ class AppState(
                 } else {
                     settingsFromToken(decoded)
                 }
-                restored?.let { settings = it }
+                restored?.let { value ->
+                    val bundledCodex = bundledCodexExecutableProvider()
+                    val migratedProfiles = value.aiProviderProfiles.map { profile ->
+                        if (profile.kind == AiProviderKind.CODEX_ACCOUNT) {
+                            profile.copy(executablePath = recoveredBundledCodexPath(profile.executablePath, bundledCodex))
+                        } else {
+                            profile
+                        }
+                    }
+                    settings = value.copy(aiProviderProfiles = normalizeAiProviderProfiles(migratedProfiles))
+                }
             }
             "active" -> activeTabId = value.unb64()
             "compare" -> restoreCompareState(value.unb64())
@@ -8773,10 +12090,11 @@ class AppState(
                 val result = loadRestoredTab(source)
                 if (result is RestoredTabLoadResult.MissingArchiveEntry) {
                     ensureActive()
-                    // Remove this job before closeTab() so closing an unavailable shell does not
-                    // cancel the coroutine currently performing that cleanup.
+                    // Keep the load visible as in flight until the unavailable shell has been
+                    // removed. Otherwise observers can see the load finish while the stale tab
+                    // (including its saved video seek link) is still published.
+                    closeTabsById(setOf(tabId), preferredActiveId = null, loadsToFinishAfterClose = setOf(tabId))
                     finishActiveLoad(activeLoads.remove(tabId))
-                    closeTab(tabId)
                     showOpenError(
                         title = "Restored archive entry is unavailable",
                         path = "${result.archiveFile.absolutePath}!${result.entryPath}",
@@ -8802,6 +12120,7 @@ class AppState(
                         largeFileMode = result.largeFileMode,
                     )
                 }
+                restoreCaptureLink(tabId)
                 markActiveLoadFinished(tabId)
                 published = true
                 val issueRules = settings.customIssueRules
@@ -8873,5 +12192,23 @@ class AppState(
         appendLine("tabOrder\t${tabOrderToken().b64()}")
         appendLine("tabs")
         tabs.forEach { appendLine("tab\t${it.tabToken()}") }
+    }
+
+    // Startup background work, deliberately in the LAST init block of the class. Kotlin runs
+    // property initializers and init blocks in declaration order, so a coroutine launched from an
+    // earlier init block can run before later fields exist: loadPersistedSourceIndex ->
+    // publishSourceIndex -> refreshChangedFileCounts read changedFileCountRefreshInFlight (declared
+    // thousands of lines below the first init block) while it was still null, an intermittent NPE
+    // at startup that CI surfaced as UncaughtExceptionsBeforeTest in whichever runTest came next.
+    // Everything launched here starts only after the whole object is constructed.
+    init {
+        // PERF-3a: refreshAppDataSizeInfo() recursively walks the whole app-data dir
+        // (File.totalFileSize()) — on ioScope so a large archive-cache/notes tree can't add to
+        // startup latency before first frame. appDataSizeBytes is mutableStateOf, so this is
+        // snapshot-safe to publish from off the UI thread like every other ioScope write in this
+        // file. The Settings-triggered path (requestClearCache -> refreshArchiveCacheInfo) stays
+        // synchronous — that one is already user-initiated from an explicit click, not startup.
+        ioScope.launch { refreshStorageSizeInfo() }
+        loadPersistedSourceIndex()
     }
 }

@@ -58,10 +58,24 @@ class AccountAgentRunnerTest {
             listOf(
                 "--config", "mcp_servers.indagium.url=\"http://127.0.0.1:41723/mcp\"",
                 "--config", "mcp_servers.indagium.bearer_token_env_var=\"INDAGIUM_MCP_TOKEN\"",
+                "--config", "mcp_servers.indagium.required=true",
             ),
             codexManagedMcpConfig("http://127.0.0.1:41723/mcp"),
         )
         assertEquals(mapOf("INDAGIUM_MCP_TOKEN" to "temporary-token"), codexManagedMcpEnvironment("temporary-token"))
+    }
+
+    @Test
+    fun codexManagedRunDisablesHostExecutionAndBrowserButKeepsManagedMcpConfiguration() {
+        val command = codexManagedToolRestrictionConfig() + codexManagedMcpConfig("http://127.0.0.1:41723/mcp")
+        val configValues = command.windowed(2, 2).filter { it[0] == "--config" }.map { it[1] }
+
+        assertTrue("features.shell_tool=false" in configValues)
+        assertTrue("features.unified_exec=false" in configValues)
+        assertTrue("features.apps=false" in configValues)
+        assertTrue("browser_use.default_origin_policy.access=\"deny\"" in configValues)
+        assertTrue("mcp_servers.indagium.url=\"http://127.0.0.1:41723/mcp\"" in configValues)
+        assertTrue("mcp_servers.indagium.required=true" in configValues)
     }
 
     @Test
@@ -145,6 +159,18 @@ class AccountAgentRunnerTest {
         val decision = decideCodexElicitation(params)
 
         assertTrue(!decision.isManagedServerApproval)
+        assertEquals("decline", decision.response["action"]?.jsonPrimitive?.content)
+    }
+
+    @Test
+    fun explicitlyNamedOtherServerIsNeverAcceptedAsManagedMcp() {
+        val decision = decideCodexElicitation(
+            Json.parseToJsonElement(
+                """{"serverName":"other-server","_meta":{"codex_approval_kind":"mcp_tool_call"}}""",
+            ).jsonObject,
+        )
+
+        assertEquals(false, decision.isManagedServerApproval)
         assertEquals("decline", decision.response["action"]?.jsonPrimitive?.content)
     }
 

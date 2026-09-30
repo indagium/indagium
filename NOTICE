@@ -2,3 +2,11 @@ Indagium
 Copyright 2026 Roman Arnaut
 
 The Indagium name, logo, icon, and branding are owned by Roman Arnaut. No trademark or branding license is granted by the project license or by any other repository document. Use, distribution, or promotion must not imply endorsement by Roman Arnaut or use the Indagium branding except as separately agreed in writing.
+
+Third-party bundled asset
+
+The embedded mirror bundles `scrcpy-server-v4.1` from the official Genymobile scrcpy v4.1 release.
+Copyright (C) 2018 Genymobile. Licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0
+Release: https://github.com/Genymobile/scrcpy/releases/tag/v4.1
+SHA-256: deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae

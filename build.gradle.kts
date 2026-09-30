@@ -4,6 +4,7 @@ import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.testing.logging.TestExceptionFormat
 import org.gradle.api.tasks.testing.logging.TestLogEvent
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.security.MessageDigest
 
 plugins {
     // Kotlin/Compose bumped 2.1.0 -> 2.4.0 so the app can consume the official Kotlin MCP SDK
@@ -59,9 +60,31 @@ val licenseVersion = "2026-07-19"
 val generatedBuildInfoDir = layout.buildDirectory.dir("generated/indagiumBuildInfo/desktopMain/kotlin")
 val generatedLicenseResourcesDir = layout.buildDirectory.dir("generated/indagiumLicenseResources/desktopMain/resources")
 val generatedNativeResourcesDir = layout.buildDirectory.dir("generated/indagiumNativeResources/desktopMain/resources")
+val scrcpyServerResource = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server-v4.1")
+val scrcpyServerMetadata = layout.projectDirectory.file("src/desktopMain/resources/scrcpy/scrcpy-server.properties")
 val isMacHost = org.gradle.internal.os.OperatingSystem.current().isMacOsX
 val isWindowsHost = org.gradle.internal.os.OperatingSystem.current().isWindows
 val isLinuxHost = org.gradle.internal.os.OperatingSystem.current().isLinux
+
+// The embedded mirror is deliberately offline-only: this exact, independently verified scrcpy
+// server asset is packaged when present, but Gradle never downloads it. A source checkout with
+// the asset removed remains buildable and the runtime reports an actionable message.
+val validateScrcpyServerAsset by tasks.registering {
+    inputs.file(scrcpyServerMetadata)
+    doLast {
+        if (!scrcpyServerResource.asFile.isFile) {
+            logger.lifecycle("Embedded scrcpy mirror disabled: ${scrcpyServerResource.asFile} is absent")
+            return@doLast
+        }
+        val expected = "deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae"
+        val actual = MessageDigest.getInstance("SHA-256")
+            .digest(scrcpyServerResource.asFile.readBytes())
+            .joinToString("") { byte -> "%02x".format(byte) }
+        check(actual == expected) {
+            "Embedded scrcpy server checksum mismatch: expected $expected, got $actual"
+        }
+    }
+}
 
 // Compose Desktop's native distribution plugin delegates Linux installers to jpackage, which
 // supports .deb but not portable AppImage or sandboxed Flatpak bundles.  These wrappers both use
@@ -101,6 +124,112 @@ val compileAppleSpeechNative by tasks.registering(Exec::class) {
             "native/macos/indagium_speech.m", "-o", output.absolutePath,
         )
     }
+}
+
+// Mirror-only macOS acceleration is a deliberately small JNI dylib: VideoToolbox decodes H.264
+// into CVPixelBuffers and Metal presents them in a JAWT SurfaceLayers-hosted CAMetalLayer. It is
+// generated during packaging just like the existing Apple Speech bridge, so a signed app contains
+// one reviewable, host-native binary and no JOGL/VLC/GStreamer runtime.
+val compileMacMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isMacHost }
+    val output = generatedNativeResourcesDir.get().file("native/macos/libindagium_mirror.dylib").asFile
+    inputs.file("native/macos/indagium_mirror.mm")
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "clang++", "-dynamiclib", "-std=c++17", "-fobjc-arc",
+            "-I$javaHome/include", "-I$javaHome/include/darwin",
+            "-L$javaHome/lib", "-ljawt",
+            "-framework", "Foundation", "-framework", "AppKit", "-framework", "QuartzCore",
+            "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo", "-framework", "Metal",
+            "native/macos/indagium_mirror.mm", "-o", output.absolutePath,
+        )
+    }
+}
+
+// Linux mirror decode stays in the FFmpeg version already bundled by JavaCPP. The JNI bridge does
+// not link to FFmpeg; it imports AVVAAPIDeviceContext from the pinned public 8.0.1 header, exports
+// the VA surface as DRM PRIME, and presents it through EGL without a CPU pixel transfer.
+val compileLinuxMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isLinuxHost }
+    val output = generatedNativeResourcesDir.get().file("native/linux/libindagium_mirror.so").asFile
+    inputs.files("native/linux/indagium_mirror.cpp", "native/linux/include/libavutil/hwcontext_vaapi.h")
+    outputs.file(output)
+    doFirst {
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "c++", "-std=c++17", "-fPIC", "-shared",
+            "-I${file("native/linux/include").absolutePath}",
+            "-I$javaHome/include", "-I$javaHome/include/linux",
+            "-L$javaHome/lib", "-L$javaHome/lib/server", "-Wl,-rpath,$javaHome/lib",
+            "native/linux/indagium_mirror.cpp", "-o", output.absolutePath,
+            "-ljawt", "-lEGL", "-lGLESv2", "-lX11", "-lva",
+        )
+    }
+}
+
+// Windows uses the bundled FFmpeg D3D11VA decoder and a small D3D11 video-processor swapchain
+// presenter. The Visual Studio C++ tools and Windows SDK on windows-latest provide the headers and
+// import libraries; no native runtime dependency is added to the MSI.
+val compileWindowsMirrorNative by tasks.registering(Exec::class) {
+    onlyIf { isWindowsHost }
+    val output = generatedNativeResourcesDir.get().file("native/windows/indagium_mirror.dll").asFile
+    inputs.files("native/windows/indagium_mirror.cpp", "scripts/compile-windows-mirror.cmd")
+    outputs.file(output)
+    doFirst {
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        val script = file("scripts/compile-windows-mirror.cmd")
+        val source = file("native/windows/indagium_mirror.cpp")
+        commandLine(
+            "cmd.exe", "/d", "/c",
+            "call \"${script.absolutePath}\" \"${javaHome.absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
+        )
+    }
+}
+
+// Focused host-native checks for the custom Annex-B parser and VideoToolbox session lifecycle.
+// These exercise the exact implementation compiled into the packaged dylib, including parameter
+// set reconfiguration and teardown, rather than a Kotlin model of that code.
+val macMirrorNativeTestExecutable = layout.buildDirectory.file("native-tests/indagium_mirror_native_test")
+val compileMacMirrorNativeTests by tasks.registering(Exec::class) {
+    onlyIf { isMacHost }
+    inputs.file("native/macos/indagium_mirror.mm")
+    inputs.file("native/macos/indagium_mirror_native_test.mm")
+    outputs.file(macMirrorNativeTestExecutable)
+    doFirst {
+        val output = macMirrorNativeTestExecutable.get().asFile
+        output.parentFile.mkdirs()
+        val javaHome = javaToolchains.launcherFor {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }.get().metadata.installationPath.asFile
+        commandLine(
+            "clang++", "-std=c++17", "-fobjc-arc", "-fblocks",
+            "-I$javaHome/include", "-I$javaHome/include/darwin",
+            "-L$javaHome/lib", "-L$javaHome/lib/server",
+            "-Wl,-rpath,$javaHome/lib", "-Wl,-rpath,$javaHome/lib/server", "-ljawt", "-ljvm",
+            "-framework", "Foundation", "-framework", "AppKit", "-framework", "QuartzCore",
+            "-framework", "VideoToolbox", "-framework", "CoreMedia", "-framework", "CoreVideo",
+            "-framework", "Metal",
+            "native/macos/indagium_mirror_native_test.mm", "-o", output.absolutePath,
+        )
+    }
+}
+
+tasks.register<Exec>("testMacMirrorNative") {
+    group = "verification"
+    description = "Runs focused macOS native mirror parser, VideoToolbox reconfiguration, and teardown checks."
+    onlyIf { isMacHost }
+    dependsOn(compileMacMirrorNativeTests)
+    commandLine(macMirrorNativeTestExecutable.get().asFile.absolutePath)
 }
 
 val generateBuildInfo by tasks.registering {
@@ -168,6 +297,9 @@ kotlin {
                 implementation(compose.components.resources)
                 implementation("org.apache.commons:commons-compress:1.28.0")
                 implementation("org.tukaani:xz:1.10")
+                // capture/WirelessAdb.kt: the Wi-Fi pairing dialog draws a QR code (ui/WirelessPairingDialogs.kt).
+                // Only the encoder in `core` is used; there is no camera or image-IO dependency.
+                implementation("com.google.zxing:core:3.5.3")
                 // Official R8 Retrace API. Keep this pinned: mapping metadata and the in-process
                 // retrace contract are versioned together, so a moving dependency can silently
                 // change deobfuscation behavior between desktop releases.
@@ -314,7 +446,7 @@ compose.desktop {
                 infoPlist {
                     extraKeysRawXml = """
                         <key>NSMicrophoneUsageDescription</key>
-                        <string>Indagium uses the microphone only to turn your AI question into local text on this device.</string>
+                        <string>Indagium uses the microphone to record audio with a device capture or to turn your AI question into local text on this device.</string>
                         <key>NSSpeechRecognitionUsageDescription</key>
                         <string>Indagium uses Apple Speech only to turn your recorded AI question into text on this device.</string>
                     """.trimIndent()
@@ -340,7 +472,12 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
-    if (isMacHost) dependsOn(compileAppleSpeechNative)
+    if (isMacHost) {
+        dependsOn(compileAppleSpeechNative)
+        dependsOn(compileMacMirrorNative)
+    }
+    if (isLinuxHost) dependsOn(compileLinuxMirrorNative)
+    if (isWindowsHost) dependsOn(compileWindowsMirrorNative)
 }
 
 // jpackage/jlink bundle whatever JVM is running Gradle ITSELF into the native distribution's
@@ -433,6 +570,17 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     }
     System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
     System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
+    // macOS mirror bisect switches: the underlay ordering (on by default — see
+    // EmbeddedMirrorMacSurface.underlayRequested), its stderr diagnostics, Compose interop blending
+    // and the skiko render API all change how the native mirror layer composes with Compose.
+    listOf(
+        "indagium.mirror.underlay",
+        "indagium.mirror.stderr",
+        "compose.interop.blending",
+        "skiko.renderApi",
+    ).forEach { key ->
+        System.getProperty(key)?.let { systemProperty(key, it) }
+    }
 }
 
 // Manual large-file perf harness (LargeFilePerfHarness.kt) — activated by passing
@@ -553,6 +701,10 @@ ktlint {
 
 tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configureEach {
     dependsOn(generateBuildInfo)
+}
+
+tasks.matching { it.name == "desktopProcessResources" || it.name == "desktopTest" }.configureEach {
+    dependsOn(validateScrcpyServerAsset)
 }
 
 // ── Kover ───────────────────────────────────────────────────────────

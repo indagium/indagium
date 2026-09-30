@@ -1,6 +1,7 @@
 package com.indagium.model
 
 import androidx.compose.ui.graphics.Color
+import com.indagium.capture.CaptureTimeline
 import com.indagium.diagram3.DiagramExportMode
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.video.formatVideoTime
@@ -25,6 +26,11 @@ enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
  * binary captures share the same row model and are both represented by [DLT]. */
 enum class LogFormat { LOGCAT, DLT }
 
+/** [LogEntry.dayOfYear] / `LogTimelinePoint.dayOfYear` value for a row that carries no calendar date
+ *  (brief/RAW/bare-time formats, DLT, rows rebuilt from notes). Such rows use the legacy
+ *  time-of-day-only timeline heuristics. */
+const val NO_DATE: Short = -1
+
 data class LogEntry(
     val id: Int,
     val ts: String,
@@ -47,6 +53,12 @@ data class LogEntry(
     val dltMessageType: String? = null,
     val dltTimestamp: Long? = null,
     val dltTimestampSource: String? = null,
+    // Calendar slot (0..365, Feb 29 has its own slot — see utils/LogTime.kt logDaySlot) decoded from
+    // the logcat "MM-DD" prefix, or NO_DATE. `ts` still holds the bare time-of-day, so display,
+    // filters and exports are unaffected; only the timeline/Δt code reads this. A Short is the
+    // smallest type that fits and is absorbed by the object's alignment padding. Appended last so
+    // every positional LogEntry(...) construction keeps compiling.
+    val dayOfYear: Short = NO_DATE,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────
@@ -222,7 +234,12 @@ sealed interface MessageCompositionState {
      *  produced it. Carrying it here is also what makes a superseded scan harmless: a newer request
      *  overwrites this state with its own [forFilter], so when the older scan finishes it no longer
      *  matches and its result is dropped rather than clobbering the fresher one. */
-    data class Computing(val forFilter: Filter, val previous: MessageTemplateHistogram? = null) : MessageCompositionState
+    data class Computing(
+        val forFilter: Filter,
+        val previous: MessageTemplateHistogram? = null,
+        /** In-memory row/stack-analysis generation this scan was started against. */
+        val forRevision: Long = 0,
+    ) : MessageCompositionState
 
     /** The scan completed for [forFilter]. [histogram] may legitimately be empty — e.g. a view that
      *  is entirely one excluded stack-trace dump — and that is a genuine, displayable result, not
@@ -233,7 +250,12 @@ sealed interface MessageCompositionState {
      *  [Computing.previous] carries the last completed histogram so a rescan can keep showing it
      *  instead of blanking the list — a recompute triggered by hiding one shape would otherwise
      *  flash the whole panel empty and back. */
-    data class Computed(val histogram: MessageTemplateHistogram, val forFilter: Filter) : MessageCompositionState
+    data class Computed(
+        val histogram: MessageTemplateHistogram,
+        val forFilter: Filter,
+        /** In-memory row/stack-analysis generation represented by [histogram]. */
+        val forRevision: Long = 0,
+    ) : MessageCompositionState
 
     /** The scan threw. [message] is shown in the panel; the next expand retries from scratch. */
     data class Failed(val message: String) : MessageCompositionState
@@ -321,7 +343,34 @@ data class Filter(
     val sequences: List<SequenceDef> = emptyList(),
 )
 
-data class Highlighter(val id: String, val pattern: String, val regex: Boolean, val color: Color, val on: Boolean)
+/** Which part of a row a [Highlighter] pattern is matched against. */
+enum class HighlightTarget { ANY, TAG, MESSAGE }
+
+/**
+ * A highlight rule. Everything after [on] is optional and defaults to what highlighters always
+ * were: colour the matched text only ([wholeLine] = false), matched anywhere on the rendered line,
+ * case-insensitively. A non-null [textColor] marks a klogg-imported rule, which keeps klogg's own
+ * behaviour (opaque background + this foreground colour, case per [caseSensitive], capture groups).
+ */
+data class Highlighter(
+    val id: String,
+    val pattern: String,
+    val regex: Boolean,
+    val color: Color,
+    val on: Boolean,
+    // true = the whole row is tinted, not just the matched text
+    val wholeLine: Boolean = false,
+    val target: HighlightTarget = HighlightTarget.ANY,
+    // exact-tag scope, same rule as a message rule's tag (utils/Filter.kt ruleScopeMatches)
+    val tag: String? = null,
+    val caseSensitive: Boolean = false,
+    // non-null = klogg style: opaque [color] background + this foreground colour
+    val textColor: Color? = null,
+    // klogg: a regex with capture groups colours only the groups
+    val captureGroupsOnly: Boolean = false,
+    // klogg variate_colors (match-only); 0 = off
+    val colorVariance: Int = 0,
+)
 
 enum class RuleTarget { MESSAGE, PID_TID }
 
@@ -468,6 +517,10 @@ data class Annotations(
     val fingerprint: String? = null,
 )
 
+/** Which item list the Find bar searches: only rows the filter shows, or every line (which is
+ *  what the Original split panel — LogTab.showUnfiltered — displays). */
+enum class SearchScope { FILTERED, UNFILTERED }
+
 // ── In-view search (Ctrl/Cmd+F "Find" bar, ui/SearchBar.kt) ────────
 // Non-destructive: unlike Filter's kwText/kwRegex (which removes non-matching rows), this only
 // highlights matches within whatever's already visible and moves the row selection between them.
@@ -488,6 +541,7 @@ data class LogSearchState(
     /** Bumped on every openSearch() call (including while already open) so ui/SearchBar.kt's
      *  LaunchedEffect can refocus + select-all on a repeat Ctrl/Cmd+F, not just the first open. */
     val focusNonce: Int = 0,
+    val scope: SearchScope = SearchScope.FILTERED,
 ) {
     val matchCount: Int get() = matchIds.size
 
@@ -506,6 +560,7 @@ data class LogSearchState(
             invalidPattern == other.invalidPattern &&
             timedOut == other.timedOut &&
             focusNonce == other.focusNonce &&
+            scope == other.scope &&
             matchIds.contentEquals(other.matchIds)
     }
 
@@ -517,6 +572,7 @@ data class LogSearchState(
         result = 31 * result + invalidPattern.hashCode()
         result = 31 * result + timedOut.hashCode()
         result = 31 * result + focusNonce
+        result = 31 * result + scope.hashCode()
         result = 31 * result + matchIds.contentHashCode()
         return result
     }
@@ -582,10 +638,26 @@ sealed interface VideoSource {
     ) : VideoSource
 }
 
-// [sourceLabel] is the provenance string shown on any frame grabbed from this video
-// ("from <sourceLabel>"). [durationMs] defaults to 0 until the player opens the file and reports
-// the real value. The secondary constructor deliberately preserves source compatibility with
-// callers and saved-data tests written before VideoSource was introduced.
+/** Short user-facing video provenance derived from the durable source identity. Local paths show
+ * only their basename; archive videos identify both the archive and the full in-archive path. An
+ * empty archive path is the portable-capture marker used inside its own archive, where the saved
+ * display name is the only portable archive label available. */
+fun VideoSource.annotationDisplayLabel(): String = when (this) {
+    is VideoSource.LocalFile -> path.videoPathFileName().ifBlank { path }
+    is VideoSource.ArchiveEntry -> if (archivePath.isBlank()) {
+        displayName.ifBlank { entryPath }
+    } else {
+        "${archivePath.videoPathFileName()}/$entryPath"
+    }
+}
+
+private fun String.videoPathFileName(): String = substringAfterLast('/').substringAfterLast('\\')
+
+// [sourceLabel] is a concise cached/legacy display label; frame-note provenance is derived from
+// the durable [source] so old absolute local labels do not leak into exported notes. [durationMs]
+// defaults to 0 until the player opens the file and reports the real value. The secondary
+// constructor deliberately preserves source compatibility with callers and saved-data tests
+// written before VideoSource was introduced.
 data class VideoAttachment(
     val source: VideoSource,
     val sourceLabel: String,
@@ -602,6 +674,13 @@ data class VideoAttachment(
     // with attachment tokens saved before this field existed. AppState initializes newly created
     // links from AppSettings.enableDoubleClickVideoSeekOnLink instead.
     val doubleClickSeekEnabled: Boolean = anchor != null,
+    // Non-null only for a recording imported from an Indagium portable capture. The descriptor is
+    // durable and small; the potentially very large row mapping is rehydrated into
+    // LogTab.captureTimeline after the log has been parsed.
+    val captureSourcePath: String? = null,
+    // User calibration applied on top of the imported clip-relative mapping. Export-time manual
+    // offset is already baked into CaptureTimeline.rows[].videoMs and must not be added here.
+    val captureOffsetMs: Long = 0,
 ) {
     constructor(
         path: String,
@@ -609,12 +688,16 @@ data class VideoAttachment(
         durationMs: Long = 0,
         anchor: VideoAnchor? = null,
         doubleClickSeekEnabled: Boolean = anchor != null,
+        captureSourcePath: String? = null,
+        captureOffsetMs: Long = 0,
     ) : this(
         source = VideoSource.LocalFile(path),
         sourceLabel = sourceLabel,
         durationMs = durationMs,
         anchor = anchor,
         doubleClickSeekEnabled = doubleClickSeekEnabled,
+        captureSourcePath = captureSourcePath,
+        captureOffsetMs = captureOffsetMs,
     )
 
     /** Compatibility/readability accessor. Archive sources intentionally have no durable local path. */
@@ -624,15 +707,19 @@ data class VideoAttachment(
 /**
  * Structured provenance for an annotation image captured from a video. [source] is the durable
  * identity used to verify that a currently attached video is the same recording; [sourceLabel]
- * is the user-facing label displayed below the image; and [positionMs] is the exact playhead
- * timestamp to seek when the evidence is activated.
+ * is retained for saved-data compatibility; and [positionMs] is the exact playhead timestamp to
+ * seek when the evidence is activated. Display text comes from [VideoSource.annotationDisplayLabel].
  */
 data class VideoFrameReference(
     val source: VideoSource,
     val sourceLabel: String,
     val positionMs: Long,
 ) {
-    val provenanceLabel: String get() = "From $sourceLabel @ ${formatVideoTime(positionMs)}"
+    // sourceLabel remains serialized for old autosaves and callers, but older versions stored the
+    // absolute local path there. Derive display text from the structured source so provenance is
+    // concise without losing the full path needed by VideoSource.LocalFile navigation.
+    val provenanceLabel: String
+        get() = "From ${source.annotationDisplayLabel().ifBlank { sourceLabel }} @ ${formatVideoTime(positionMs)}"
 }
 
 // Recognized by both the drag-drop attach path (ui/App.kt's onDrop) and the zip-archive
@@ -708,8 +795,8 @@ data class LogTab(
     // meaningful only in that mode; OFF/ALL ignore it entirely.
     val manualProcessNamePicks: Set<Int> = emptySet(),
     // The video (if any) attached to this tab (ui/AppState.kt's attachVideoToActiveTab/
-    // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked to it via
-    // at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
+    // attachVideoFromZip) — a screen recording bundled alongside this tab's log, linked through a
+    // portable capture timeline or at most one VideoAnchor. Persisted (AutosaveCodec.tabToken/tabShellFromToken), appended last
     // so old tab tokens still parse. Unlike tidMap/search/tailing above, this DOES survive a
     // restart — re-attaching a multi-hundred-MB recording by hand every launch would defeat the
     // point of it being attached at all.
@@ -754,7 +841,52 @@ data class LogTab(
     // Optional absolute R8/ProGuard mapping selected for this tab. Persisted as the final
     // append-only tab-token field; retraced output is deliberately transient and never stored.
     val retraceMappingPath: String? = null,
+    // Session-only row-to-video mapping for an imported portable capture. Autosave persists only
+    // VideoAttachment.captureSourcePath/captureOffsetMs; restore reparses that compact descriptor
+    // after the log rows exist instead of embedding millions of mapping rows in the tab token.
+    val captureTimeline: CaptureTimeline? = null,
+    // Links this tab to a live capture recording session (ui/CaptureCoordinator.kt), if it's the
+    // tab streaming one. Session-only, like tailing/search/tidMap above — deliberately ABSENT from
+    // AutosaveCodec's tabToken()/tabShellFromToken()/persistedSnapshot(). A capture cannot survive
+    // a restart (adb is gone), and the log file at sourcePath restores as an ordinary tab anyway,
+    // which is the correct outcome — the recording is over. If you're adding a field to those
+    // functions later and reflexively including every LogTab field, this one is the deliberate
+    // exception, same as tidMap/manualProcessNamePicks/recoveredNoteRows above: do not add it there.
+    val captureSessionId: String? = null,
+    // Session-only marker for the home tab (ui/HomeScreen.kt), opened by the tab strip's `+`
+    // button or automatically by AppState.ensureHomeTab when nothing else is open. Doubles as the
+    // device-capture launcher's tab — the left half is "Open a log", the right half is
+    // ui/CaptureLauncher.kt's CaptureLauncherContent — so starting a capture from it still closes
+    // it via closeCaptureLauncherTabs(), same as the old standalone "New capture" tab. Appended
+    // after the capture-session field and deliberately omitted from AutosaveCodec so an empty home
+    // tab never reappears after relaunch — a fresh one opens on demand instead (ensureHomeTab).
+    val isCaptureLauncher: Boolean = false,
+    // Remembers which recorder session a STOPPED capture tab came from, so Export/Screenshot/
+    // Mirror can still find it after captureSessionId is cleared on Stop (AppState.
+    // attachFinalizedCapture). Unlike captureSessionId, this deliberately survives past Stop for
+    // the tab's whole lifetime — it is what lets the strip keep offering "Save ZIP"/"Open folder"
+    // on a finished capture instead of going silently unreachable. attachedVideo.captureSourcePath
+    // (set by the same function) was considered as a substitute so this field wouldn't be needed,
+    // but it is null whenever the session recorded no video — a video-off capture would then have
+    // no way to find its session at all — so this field exists instead. Session-only, same
+    // exception as captureSessionId immediately above: deliberately ABSENT from AutosaveCodec's
+    // tabToken()/tabShellFromToken()/persistedSnapshot(). Do not add it there.
+    val captureSourceSessionId: String? = null,
+    // Session-only generation for the inputs behind messageComposition. AppState.upTab increments
+    // it whenever log rows or stack-trace groups are replaced; TailCoordinator advances it while
+    // incrementally folding a tail batch. It intentionally stays out of autosave because restored
+    // rows are new inputs and must receive a fresh scan. Appended last to preserve positional
+    // LogTab construction.
+    val messageCompositionRevision: Long = 0,
 )
+
+/** Whether [cached] (a note's row, possibly restored from a `.ann` token, which carries no
+ *  [LogEntry.dayOfYear]) is still this tab's row with the same id. The date is ignored so notes saved
+ *  before rows carried one keep matching their tab. */
+fun LogTab.hasSameRow(cached: LogEntry): Boolean {
+    val live = rmap[cached.id] ?: return false
+    return live == cached || live.copy(dayOfYear = cached.dayOfYear) == cached
+}
 
 /**
  * The single, shared way to get the log rows a LogRef block should display. Was duplicated as
@@ -802,7 +934,15 @@ data class SavedFilter(
 )
 
 // ── Settings ───────────────────────────────────────────────────────
-enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA }
+enum class AnnotationLogBlockStyle { INDENTED, JIRA_JAVA, JIRA_CLOUD }
+
+/** Clipboard representation for the annotation document's main Copy action. */
+enum class AnnotationCopyFormat(val label: String) {
+    JIRA_CLOUD("Jira Cloud"),
+    JIRA_WIKI("Jira wiki"),
+    MARKDOWN("Markdown"),
+    HTML("HTML"),
+}
 
 // What Ctrl/Cmd+F does. FIND_BAR (the default) opens the non-destructive in-view Find bar
 // (AppState.openSearch, ui/SearchBar.kt); TAGS/KEYWORD_REGEX instead focus the corresponding
@@ -951,12 +1091,23 @@ enum class LinuxFilePickerMode(val label: String) {
     COMPATIBILITY_X11("Compatibility X11"),
 }
 
+/** How the home tab's Recent files section lays out its entries — grid of [RecentGridCard]s or a
+ *  flat list of [RecentListRow]s (see ui/HomeScreen.kt). Persisted so the choice survives restart;
+ *  JSON form only, same rule as the other settings-JSON-only fields in [AppSettings]. */
+enum class HomeRecentsLayout {
+    GRID,
+    LIST,
+}
+
 data class AppSettings(
     val theme: ThemePreset = ThemePreset.LIGHT,
     val fontSize: Int = 12,
     /** Scales the entire Compose interface relative to the platform's density and font scale. */
     val interfaceScalePercent: Int = DEFAULT_INTERFACE_SCALE_PERCENT,
     val fontMono: Boolean = true,
+    // UI label "Analysis artifacts folder" — the key is kept exactly as-is so a user who already
+    // configured this (e.g. "…/bug_analysis") keeps that folder unchanged. Effective path is this
+    // when set, else <saveRootDir>/analysis — see ui/AppState.effectiveAnalysisDir.
     val defaultSaveDir: String? = null,
     val mostUsedTagLimit: Int = 5,
     val filterListRows: Int = 5,
@@ -1132,7 +1283,81 @@ data class AppSettings(
     // treats that as "not due yet" rather than "overdue", so a fresh install waits out one full
     // interval before ever prompting. JSON form ONLY, same rule as the field above.
     val lastSupportPromptAt: Long = 0L,
+    val captureSettings: com.indagium.capture.CaptureSettings = com.indagium.capture.CaptureSettings(),
+    // Grid vs. list for the home tab's Recent files section (ui/HomeScreen.kt). JSON form ONLY,
+    // same rule as the other settings-JSON-only fields above — the frozen legacy positional
+    // settingsFromToken decoder must never gain a field.
+    val homeRecentsLayout: HomeRecentsLayout = HomeRecentsLayout.GRID,
+    // ── Save folders (Settings → General → Storage) ────────────────────────────────
+    // The parent every folder below defaults under when its own field is unset. Null means "use
+    // the platform default" (~/Documents/Indagium — see ui/DesktopStorage.defaultSaveRootDir),
+    // never a bare "" so an empty text field can't be mistaken for "configured". JSON form ONLY,
+    // same rule as the other settings-JSON-only fields above.
+    val saveRootDir: String? = null,
+    // Where new capture sessions are recorded (CaptureService.newController, read at Start time —
+    // a change here only takes effect on the next Start). Defaults to <saveRootDir>/captures.
+    // Sessions already recorded under the previous location stay listed and deletable regardless.
+    // JSON form ONLY.
+    val captureSessionsDir: String? = null,
+    // "Save snapshot" destination while a capture is recording (CaptureSnapshotPopover). Defaults
+    // to <saveRootDir>/snapshots. JSON form ONLY.
+    val captureSnapshotsDir: String? = null,
+    // "Save ZIP" destination for a stopped/retained capture (AppState.saveRetainedCapture).
+    // Defaults to <saveRootDir>/saved-captures. JSON form ONLY.
+    val captureZipDir: String? = null,
+    // Last directory a Save/Export dialog actually wrote to (saveAnalysis, exportAnnotationFrames,
+    // exportFilteredTxt/Csv, exportCasePreview, downloadSeq3Png, the split prompt…) — what those
+    // dialogs open to next time. Kept separate from [defaultSaveDir] so picking a one-off
+    // destination in a Save dialog never silently overwrites the configured "Analysis artifacts
+    // folder" setting. JSON form ONLY.
+    val lastSaveDialogDir: String? = null,
+    // Recent-files grid density on the home tab (ui/HomeScreen.kt's RecentGrid), independent of the
+    // grid/list toggle above. Clamped to a sane range and never let narrower than a card's minimum
+    // width at render time — see RecentGrid's own columns computation. JSON form ONLY, same rule as
+    // the other settings-JSON-only fields above.
+    val homeRecentGridColumns: Int = DEFAULT_HOME_RECENT_GRID_COLUMNS,
+    // Main annotation Copy action. Explicit choices in its menu do not rewrite this preference.
+    // JSON-only so the frozen positional settings token remains compatible.
+    val annotationCopyFormat: AnnotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD,
+    // Shows a compact inventory of retained selectors above the Regex input. Off by default and
+    // informational only; it never changes filter behavior.
+    val showRegexFilterSummary: Boolean = false,
+    // New tab launcher's "Device logging" section: expanded by default; collapsing it is remembered.
+    // JSON-only, same rule as the settings-JSON-only fields above.
+    val deviceLoggingPanelExpanded: Boolean = true,
+    // Id of the WorkspaceProfile (ui/WorkspaceProfiles.kt) last applied from Settings → General;
+    // drives the "Customized — N settings differ" strip. Null until one is chosen, and an unknown
+    // id is treated the same. JSON-only, same rule as the settings-JSON-only fields above.
+    val workspaceProfileId: String? = null,
+    // True once the first-run setup assistant (ui/SetupAssistantDialog.kt) has been finished or
+    // skipped. A missing key decodes to false on purpose: settings written before the assistant
+    // existed show it once, with their current values prefilled. JSON-only, same rule as above.
+    val setupAssistantDone: Boolean = false,
+    // Workspace profiles the user saved or imported (Settings → General); `workspaceProfileId` may
+    // point at one of these as well as at a built-in profile. JSON-only, same rule as above.
+    val customWorkspaceProfiles: List<CustomWorkspaceProfile> = emptyList(),
 )
+
+/** The settings and layout values a workspace profile applies (ui/WorkspaceProfiles.kt). */
+data class ProfileSpec(
+    val theme: ThemePreset,
+    val fontSize: Int,
+    val showMinimap: Boolean,
+    val toolbarIconOnlyButtons: Boolean,
+    val openNewFilesWithUnfiltered: Boolean,
+    val filterVisible: Boolean,
+    val filterBarVisible: Boolean,
+    val annotationVisible: Boolean,
+    val videoPanelVisible: Boolean,
+    val aiPanelVisible: Boolean,
+)
+
+/** A user-made workspace profile. [id] is `custom-<uuid>`, so it can never collide with a built-in id. */
+data class CustomWorkspaceProfile(val id: String, val name: String, val spec: ProfileSpec)
+
+const val DEFAULT_HOME_RECENT_GRID_COLUMNS: Int = 4
+const val MIN_HOME_RECENT_GRID_COLUMNS: Int = 3
+const val MAX_HOME_RECENT_GRID_COLUMNS: Int = 8
 
 enum class ThemePreset(val label: String) {
     LIGHT("Light"),

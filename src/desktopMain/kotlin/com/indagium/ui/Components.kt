@@ -36,6 +36,8 @@ import androidx.compose.material.icons.outlined.VisibilityOff
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.TriStateCheckbox
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -74,7 +76,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.LogLevel
 import kotlinx.coroutines.delay
@@ -163,6 +164,15 @@ fun HDivider(onDelta: (Float) -> Unit) {
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.E_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // pointerInput below is keyed on `density` alone, so its coroutine (and the
+    // detectDragGestures call inside it) is launched once and never relaunched for the life of
+    // this composable. Closing over the raw `onDelta` parameter there would freeze whichever
+    // lambda instance existed the first time it was launched — every later recomposition's fresh
+    // `onDelta` (e.g. one closing over a just-recomputed clamp) would be silently ignored, and the
+    // divider would keep applying deltas against a base that was current only at that first
+    // launch. rememberUpdatedState keeps `currentOnDelta` pointing at the latest lambda without
+    // needing to relaunch the gesture detector.
+    val currentOnDelta by rememberUpdatedState(onDelta)
     // 10dp hit area keeps the pointer inside during normal drags.
     // For fast drags the AWT window cursor is locked for the entire drag so no
     // flicker occurs when the pointer briefly exits the visual stripe.
@@ -176,7 +186,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
                     onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.x / density) },
+                    onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.x / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),
@@ -193,6 +203,9 @@ fun VDivider(onDelta: (Float) -> Unit) {
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
     var hovered  by remember { mutableStateOf(false) }
     var dragging by remember { mutableStateOf(false) }
+    // See HDivider's identical comment: keeps the drag gesture (launched once, never relaunched)
+    // calling the latest `onDelta` instead of whichever closure existed at first composition.
+    val currentOnDelta by rememberUpdatedState(onDelta)
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -203,7 +216,7 @@ fun VDivider(onDelta: (Float) -> Unit) {
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
                     onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
-                    onDrag = { change, dragAmount -> change.consume(); onDelta(dragAmount.y / density) },
+                    onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.y / density) },
                 )
             }
             .pointerHoverIcon(PointerIcon(cursor)),
@@ -681,15 +694,20 @@ fun ToolbarBtn(
     }
 }
 
+/** Rendered by androidx's own [TooltipArea]/Popup, which deliberately never registers mirror
+ * occlusion (unlike the package-local `Popup`/`Dialog` in MirrorOccludingLayers.kt): under the
+ * default underlay it now paints over the mirror's punched hole and becomes visible for the first
+ * time, and its clicks still pass straight through to the device either way — left unregistered
+ * on purpose. */
 @Composable
-internal fun ToolbarTooltip(text: String) {
+internal fun ToolbarTooltip(text: String, maxLines: Int = 2) {
     val tc = tc()
     Box(
         Modifier.background(tc.p2, RoundedCornerShape(4.dp))
             .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
             .padding(horizontal = 8.dp, vertical = 4.dp),
     ) {
-        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = 2)
+        AppText(text, color = tc.tx, fontSize = 11.sp, maxLines = maxLines)
     }
 }
 
@@ -999,6 +1017,7 @@ fun CheckRow(
     checked: Boolean, onToggle: () -> Unit,
     accentColor: Color = LocalTheme.current.ac,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit,
 ) {
     val tc = tc()
@@ -1006,12 +1025,45 @@ fun CheckRow(
     // handler after padding so the complete visual row toggles, not only the checkbox/text bounds.
     DisableSelection {
         Row(
-            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).clickable(onClick = onToggle),
+            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                .then(if (enabled) Modifier.clickable(onClick = onToggle) else Modifier),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Checkbox(checked = checked, onCheckedChange = { onToggle() },
+            Checkbox(checked = checked, onCheckedChange = if (enabled) ({ onToggle() }) else null, enabled = enabled,
                 colors = CheckboxDefaults.colors(checkedColor = accentColor, uncheckedColor = tc.td, checkmarkColor = tc.bg),
                 modifier = Modifier.size(16.dp))
+            content()
+        }
+    }
+}
+
+/** [CheckRow]'s mutually-exclusive counterpart: a Material3 [RadioButton] instead of a checkbox,
+ * for a single choice among several options (checkboxes imply "choose any"; radios imply "choose
+ * one" — see [ArchiveVideoChoiceRow] in EntryPickerDialog.kt, the existing radio-row pattern this
+ * mirrors). [enabled] greys the row out and disables the click without needing the caller to gate
+ * [onSelect] itself. */
+@Composable
+fun RadioRow(
+    selected: Boolean,
+    onSelect: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    content: @Composable RowScope.() -> Unit,
+) {
+    val tc = tc()
+    DisableSelection {
+        Row(
+            modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp)
+                .then(if (enabled) Modifier.clickable(onClick = onSelect) else Modifier),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            RadioButton(
+                selected = selected,
+                onClick = if (enabled) onSelect else null,
+                enabled = enabled,
+                colors = RadioButtonDefaults.colors(selectedColor = tc.ac, unselectedColor = tc.td),
+                modifier = Modifier.size(16.dp),
+            )
             content()
         }
     }
@@ -1225,6 +1277,9 @@ fun SegmentedControl(
     segmentHeight: Dp = 28.dp,
     segmentFontSize: TextUnit = 12.sp,
     segmentHorizontalPadding: Dp = 10.dp,
+    // With [fillWidth], sizes each segment in proportion to its label instead of equally, so a
+    // control mixing long and short labels spans the full width without truncating the long ones.
+    weightByLabel: Boolean = false,
 ) {
     val tc = tc()
     val controlShape = RoundedCornerShape(6.dp)
@@ -1247,7 +1302,7 @@ fun SegmentedControl(
             }
             Box(
                 contentAlignment = Alignment.Center,
-                modifier = (if (fillWidth) Modifier.weight(1f) else Modifier.defaultMinSize(minWidth = 36.dp))
+                modifier = (if (fillWidth) Modifier.weight(if (weightByLabel) label.length + 4f else 1f) else Modifier.defaultMinSize(minWidth = 36.dp))
                     .height(segmentHeight)
                     .clip(segmentShape)
                     .background(

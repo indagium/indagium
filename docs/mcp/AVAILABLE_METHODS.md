@@ -103,6 +103,46 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 
   The tool is read-only — pass returned `source` to `add_text_note` to put it in the analysis.
 
+## Device capture
+
+Device capture tools control the attached Android device, not the computer running this server.
+`list_android_devices`, `get_device_capture_status`, `list_device_apps`, `get_device_log_settings`,
+and `get_capture_operation_status` are read-only discovery/status calls and need no approval; every
+other device tool changes the device or reads its live screen and requires per-session approval
+from an external MCP client (the in-app AI panel is authorized directly by the user's prompt).
+At most four device operations (the asynchronous ones that return an `operationId`) may be running
+at once; further requests return an error until one finishes.
+
+- `list_android_devices` — ready devices, with serial/model/state. `start_device_capture` starts a
+  capture (or reuses the live one); pass `deviceSerial` when several devices are ready, and
+  `newCapture: true` to finalize the current recording first. Optional `recordVideo` and
+  `includeEarlierDeviceLogs` override that one launch's settings without changing the saved
+  defaults. `stop_device_capture` finalizes and retains the session; it returns an `operationId` —
+  poll `get_capture_operation_status` until it completes before starting another capture.
+- `get_device_screen` returns a transient image of the live screen (never saved); `device_tap` and
+  `device_swipe` take pixel coordinates measured in that same image and map them to the physical
+  device automatically. `device_key` presses one allowlisted key (navigation, D-pad, volume, and
+  similar — no POWER/SLEEP). `device_text` enters bounded plain text into the focused field.
+  `device_launch_app` starts an installed app by package name; `list_device_apps` looks one up
+  first (optional `query` substring filter, `includeSystem` to include likely system packages).
+  `device_open_url` opens an http/https URL in the device's default handler.
+- `capture_device_screenshot` saves a screenshot into Notes with a linked video frame — use this,
+  not `get_device_screen`, when the user asks for "a screenshot". `mark_device_issue` creates a
+  durable marker (a log window plus a screenshot when supported); optional `label`/`note` set its
+  heading and extra note text. Both return an `operationId` to poll.
+- `export_capture_snapshot` saves the capture as a non-overwriting ZIP. Optional `range`
+  (`all`/`last_minutes`/`since_last_save`/`selection`, default `all`), `minutes` (for
+  `last_minutes`; 5/10 match the popover's own presets), `includeVideo`, `filename`, and `open`
+  (open the archive in a new tab once saved, like the popover's "Save + open"). Once the capture
+  has stopped, only `range: "all"` is available. Returns an `operationId` to poll.
+- `get_device_capture_status` reports device, live/stopped, elapsed time, whether video is
+  recording, storage used, markers, and the last exported snapshot path, without touching the
+  device. `get_device_log_settings` and `set_device_log_settings` read or change a device's logcat
+  buffer sizes (`256K`/`1M`/`4M`/`16M`) and global log level (`default`/`V`/`D`/`I`/`W`/`E`/`S`). Both validate all arguments before
+  changing anything, and accept `tabId` and/or `deviceSerial`; if both are given they must name the
+  same device or the call is refused.
+- `get_capture_operation_status` checks any of the above asynchronous operations by `operationId`.
+
 ## Prompt starters
 
 > Investigate the crash in the active tab. Start with crash sites, narrow before reading rows,

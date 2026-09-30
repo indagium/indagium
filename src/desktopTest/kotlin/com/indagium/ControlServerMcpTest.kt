@@ -1,6 +1,8 @@
 package com.indagium
 
+import androidx.compose.ui.graphics.Color
 import com.indagium.debug.ControlServer
+import com.indagium.model.HighlightTarget
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.source.SourceIndexStore
@@ -16,6 +18,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 private const val INITIALIZE_REQUEST =
@@ -210,8 +213,7 @@ class ControlServerMcpTest {
     fun toolsListExposesAllTools() {
         val session = initSession()
         val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
-        // Every op the retired Node bridge exposed must still be present, by exact name, plus the
-        // tools added since (get_line_context, get_packages).
+        // Keep the MCP tool registry complete, including the device capture POC surface.
         val expected = listOf(
             "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
@@ -224,9 +226,25 @@ class ControlServerMcpTest {
             "resolve_log_source", "get_source_file", "list_source_declarations", "get_source_declarations", "get_project_info",
             "set_highlighters", "register_source_folder", "reindex_sources", "add_manual_collapse", "add_sequence", "save_filter_preset",
             "search_similar_cases", "get_case", "set_case_metadata", "reindex_cases",
+            "list_android_devices", "start_device_capture", "stop_device_capture", "get_device_screen",
+            "device_tap", "device_swipe", "device_key", "device_text", "device_launch_app", "list_device_apps",
+            "device_open_url", "mark_device_issue", "capture_device_screenshot", "export_capture_snapshot",
+            "get_device_capture_status", "get_device_log_settings", "set_device_log_settings",
+            "get_capture_operation_status",
         )
-        assertEquals(56, expected.size)
+        assertEquals(74, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
+        assertTrue(body.contains("mapped to physical pixels automatically"), "gesture tool descriptions need the image-coordinate contract:\n$body")
+        assertTrue(body.contains("Wait for completion before starting another capture"), "stop/start ordering needs to be documented:\n$body")
+    }
+
+    @Test
+    fun serverInitializationExplainsDeviceCaptureWorkflow() {
+        val response = mcp(INITIALIZE_REQUEST)
+        assertTrue(response.statusCode() in 200..299, "initialize failed: ${response.statusCode()} ${response.body()}")
+        assertTrue(response.body().contains("attached Android device"), response.body())
+        assertTrue(response.body().contains("get_device_screen"), response.body())
+        assertTrue(response.body().contains("newCapture=true"), response.body())
     }
 
     @Test
@@ -359,6 +377,59 @@ class ControlServerMcpTest {
         assertTrue(body.contains("\\\"ok\\\":true"), body)
         assertEquals(1, state.tab("t1")!!.filter.sequences.size)
         assertEquals("boot", state.tab("t1")!!.filter.sequences.single().matchText)
+    }
+
+    @Test
+    fun setHighlightersAcceptsWholeLineScopeAndCaseAndEchoesThemBack() {
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_highlighters","arguments":{"tabId":"t1",""" +
+                """"highlighters":[{"pattern":"boot","wholeLine":true,"target":"message","tag":"App","caseSensitive":true,""" +
+                """"color":"#FF8800","textColor":"#000000"},{"pattern":"plain"}]}}}""",
+            session,
+        ).body()
+
+        assertTrue(body.contains("\\\"ok\\\":true"), body)
+        val (scoped, plain) = state.tab("t1")!!.filter.highlighters
+        assertTrue(scoped.wholeLine)
+        assertEquals(HighlightTarget.MESSAGE, scoped.target)
+        assertEquals("App", scoped.tag)
+        assertTrue(scoped.caseSensitive)
+        assertEquals(Color(0xFF000000), scoped.textColor)
+        // Everything omitted stays what highlighters always were: match-only, anywhere, insensitive.
+        assertFalse(plain.wholeLine)
+        assertEquals(HighlightTarget.ANY, plain.target)
+        assertEquals(null, plain.tag)
+        assertFalse(plain.caseSensitive)
+        assertEquals(null, plain.textColor)
+        // The echo carries the new fields.
+        assertTrue(body.contains("wholeLine"), body)
+        assertTrue(body.contains("caseSensitive"), body)
+        assertTrue(body.contains("textColor"), body)
+    }
+
+    @Test
+    fun setHighlightersRejectsAnUnknownTarget() {
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val session = initSession()
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_highlighters","arguments":{"tabId":"t1",""" +
+                """"highlighters":[{"pattern":"boot","target":"nowhere"}]}}}""",
+            session,
+        ).body()
+
+        assertTrue(body.contains("invalid target"), body)
+        assertTrue(state.tab("t1")!!.filter.highlighters.isEmpty())
+    }
+
+    @Test
+    fun setHighlightersDescriptionDocumentsTheNewFields() {
+        val session = initSession()
+        val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
+        listOf("wholeLine", "target", "caseSensitive", "textColor").forEach {
+            assertTrue(body.contains(it), "set_highlighters description missing $it")
+        }
     }
 
     @Test

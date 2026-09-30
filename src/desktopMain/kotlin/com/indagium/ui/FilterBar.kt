@@ -54,7 +54,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.model.Filter
@@ -164,6 +163,7 @@ data class FilterBarModel(
     val tagUsage: Map<String, Int>,
     val mostUsedTagLimit: Int,
     val regexHistory: List<String>,
+    val showRegexFilterSummary: Boolean = false,
 )
 
 /**
@@ -454,6 +454,33 @@ internal fun filterBarResidualSummary(filter: Filter): String {
     if (filter.excludeKw.isNotBlank()) parts += "excl-kw=\"${filter.excludeKw}\""
     if (filter.pidTidFilter.isNotBlank()) parts += "pid/tid=${filter.pidTidFilter}"
     return parts.joinToString(" · ")
+}
+
+/** Compact inventory of retained Tags-mode selectors hidden while the horizontal Regex field is
+ * active. The leading label makes the scope clear: this is context, not another active filter. */
+internal fun regexFilterSummary(filter: Filter): String {
+    fun values(items: List<String>): String = when {
+        items.isEmpty() -> "none"
+        items.size <= 3 -> items.joinToString(", ") { it.take(24) }
+        else -> items.take(3).joinToString(", ") { it.take(24) } + ", +${items.size - 3}"
+    }
+    val rules = filter.messageRules.filter { it.enabled && it.mode == FilterMode.TAGS && it.pattern.isNotBlank() }
+    val ruleSummary = if (rules.isEmpty()) {
+        "none"
+    } else {
+        val included = rules.count { it.include }
+        val excluded = rules.size - included
+        "+$included/−$excluded (${values(rules.map { it.pattern }.distinct())})"
+    }
+    val activeHighlights = filter.highlighters.count { it.on }
+    val inactiveHighlights = filter.highlighters.size - activeHighlights
+    val levels = filter.levels.sortedBy { it.key }.joinToString("") { it.key.toString() }.ifBlank { "none" }
+    return "Tags-mode selectors (inactive in Regex) — tags: ${values(filter.activeTags.sorted())}; " +
+        "prefixes: ${values(filter.pkgPrefixes.sorted())}; rules: $ruleSummary; " +
+        "tag/prefix exclusions: ${values(filter.excludeTags.sorted())} / ${values(filter.excludePkgPrefixes.sorted())}. " +
+        "Current Regex filters — levels: $levels; message exclusion: ${filter.excludeKw.takeIf { it.isNotBlank() } ?: "none"}; " +
+        "PID/TID: ${filter.pidTidFilter.trim().ifBlank { "none" }}. " +
+        "Display highlighters: $activeHighlights on, $inactiveHighlights off."
 }
 
 /** Total pill count the bar's own Tags-mode pills row renders — package prefixes (both
@@ -2272,10 +2299,19 @@ private fun RegexModeBarContent(
                     }
                 }
             }
-            // Trailing end of the row — see FilterBarResidualChip's doc for why this moved off its
-            // own dedicated row (Regex mode has no per-field badge to trail, unlike Tags mode's
-            // message field, so this is simply the last element here).
-            FilterBarResidualChip(filter, actions, logFocusRequester)
+            // RegexModeBarContent has no residual chip. The optional multi-line summary below is
+            // the sole surface for levels/exclusions/PID-TID/highlighter state in this mode.
+        }
+        if (model.showRegexFilterSummary) {
+            AppText(
+                regexFilterSummary(filter),
+                color = tc.td,
+                fontSize = 9.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 2.dp)
+                    .testTag("filter-bar-regex-summary"),
+            )
         }
     }
 }

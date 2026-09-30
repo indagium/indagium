@@ -33,7 +33,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
@@ -168,6 +167,7 @@ internal fun CompareView(
                         onSelectAll = { state.selectAll(leftTab.id) },
                         onClearSelection = { state.clearSelection(leftTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(leftTab.id, selectedIds) },
+                        onAddAnnotation = { ids -> state.requestAddAnn(leftTab.id, ids) },
                         onCopyText = { text -> state.copyToClipboard(text) },
                         onLogRowDoubleClick = { id -> state.seekVideoToLogRow(leftTab.id, id) },
                         onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(leftTab.id) },
@@ -253,6 +253,7 @@ internal fun CompareView(
                         onSelectAll = { state.selectAll(rightTab.id) },
                         onClearSelection = { state.clearSelection(rightTab.id) },
                         onCopySelection = { selectedIds -> state.copySelectedLines(rightTab.id, selectedIds) },
+                        onAddAnnotation = { ids -> state.requestAddAnn(rightTab.id, ids) },
                         onCopyText = { text -> state.copyToClipboard(text) },
                         onLogRowDoubleClick = { id -> state.seekVideoToLogRow(rightTab.id, id) },
                         onLogRowDoubleClickGestureStarted = { state.beginVideoLogDoubleClickGesture(rightTab.id) },
@@ -286,13 +287,41 @@ internal fun CompareView(
                     // top TabBar (not this view) owns which tab is "primary," and there is one
                     // sidebar/player slot regardless of which side has the attachment.
                     if (state.annotationVisible || state.aiPanelVisible || (state.videoPanelVisible && leftTab.attachedVideo != null)) {
+                        // This row has no filter panel of its own (BoundFilterPanel only appears on
+                        // the left pane above) — the reserved-width guard only needs to account for
+                        // the split divider already subtracted from the right column's share of
+                        // totalWidthDp. See FileView.kt's identical use of
+                        // annotationPanelEffectiveMaxWidth for why ANNOTATION_PANEL_MAX_WIDTH alone
+                        // (now big enough for a wide capture mirror) isn't a safe render width here.
+                        val rightColumnWidthDp = totalWidthDp * (1f - state.compareSplit) - PANEL_DIVIDER_WIDTH
+                        val annotationEffectiveMax = annotationPanelEffectiveMaxWidth(
+                            availableRowWidth = rightColumnWidthDp,
+                            filterVisible = false,
+                            filterPanelWidth = 0f,
+                        )
+                        val annotationRenderedWidth = minOf(state.annotationPanelWidth, annotationEffectiveMax)
                         HDivider { d ->
-                            state.updateAnnotationPanelWidth(state.annotationPanelWidth - d)
+                            // See FileView.kt's identical comment: recompute live instead of
+                            // closing over the rightColumnWidthDp/annotationEffectiveMax/
+                            // annotationRenderedWidth locals above, which are frozen at whatever
+                            // this composable's last recomposition happened to see. Reading
+                            // state.compareSplit/state.annotationPanelWidth at call time picks up
+                            // every prior delta immediately, even ahead of the next recomposition,
+                            // which is what keeps the divider tracking the mouse instead of
+                            // jittering/snapping back to a stale base.
+                            val liveRightColumnWidthDp = totalWidthDp * (1f - state.compareSplit) - PANEL_DIVIDER_WIDTH
+                            val liveEffectiveMax = annotationPanelEffectiveMaxWidth(
+                                availableRowWidth = liveRightColumnWidthDp,
+                                filterVisible = false,
+                                filterPanelWidth = 0f,
+                            )
+                            val liveRenderedWidth = minOf(state.annotationPanelWidth, liveEffectiveMax)
+                            state.updateAnnotationPanelWidth((liveRenderedWidth - d).coerceAtMost(liveEffectiveMax))
                         }
                         RightSidebarPanel(
                             state = state,
                             tab = leftTab,
-                            width = state.annotationPanelWidth,
+                            width = annotationRenderedWidth,
                             aiFocusRequester = aiFr,
                             onAiPanelFocusChanged = { focused ->
                                 if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == aiFr }
@@ -306,9 +335,9 @@ internal fun CompareView(
                                     activeNotePath = state.activeNoteFilePath(leftTab),
                                     onToggleMd = { state.toggleMd(leftTab.id) },
                                     onCopy = { state.copyAnn(leftTab.id) },
+                                    onCopyFormat = { state.copyAnnotationFormat(leftTab.id, it) },
                                     onCopyImage = { block -> state.copyImageToClipboard(block.bytes, block.provenance) },
                                     onCopyDiagramImage = { png, fallback -> state.copyImageToClipboard(png, fallback) },
-                                    onCopyRichPreview = { state.copyRichPreview(leftTab.id) },
                                     onExportFrames = { state.exportAnnotationFrames(leftTab.id) },
                                     onSave = { state.saveAnalysis(leftTab.id) },
                                     onNewAnalysis = { state.newAnalysis(leftTab.id) },
@@ -361,7 +390,7 @@ internal fun CompareView(
                                     notesDiagramSummary = remember(leftTab.annotations, leftTab.logData) { seq3NotesSelection(leftTab) },
                                     onOpenDiagramLibraryItem = { id -> state.seq3Sessions.openLibraryItem(id, leftTab.id) },
                                     onDeleteDiagramLibraryItem = { id -> state.seq3Sessions.deleteLibraryItem(id) },
-                                    width = state.annotationPanelWidth,
+                                    width = annotationRenderedWidth,
                                     focusRequester = annotationFr,
                                     onPanelFocusChanged = { focused ->
                                         if (focused) focusedPanelIdx = visiblePanelFrs().indexOfFirst { it.second == annotationFr }

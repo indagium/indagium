@@ -8,13 +8,17 @@ import java.util.Base64
 // AnnotationPanel's RenderedMarkdownPreview — prefix, numbered blocks, suffix — but emits real
 // markup instead of plain text: escaped paragraphs for Note/LogRef content, and each AnnBlock.
 // Image as an inline <img src="data:image/…;base64,…"> so a paste into a rich-text target (e.g.
-// Jira Cloud's comment editor) shows the actual picture, not just a provenance marker. Unlike
-// copyAnn's plain-text path, this output is NOT run through maskWordForCopy — masking a word
-// inside an escaped fragment is safe, but the risk of a mask rule's word-boundary regex matching
-// inside a base64 image payload (however unlikely) isn't worth it for a feature whose plain-text
-// fallback is already masked.
+// Jira Cloud's comment editor) shows the actual picture, not just a provenance marker. Copy masking
+// (maskWordForCopy) is applied through [maskText] to each TEXT fragment before it is escaped /
+// converted to markup — never to the assembled HTML, so a mask rule's word-boundary regex can't
+// touch tags or base64 image payloads. Image bytes and data URIs are never masked.
 
 /**
+ * [maskText] is applied to every text fragment (prefix/suffix, note text, captions, "From <file>",
+ * log lines, the diagram source fallback) before it becomes HTML; clipboard callers pass the same
+ * copy masking the plain-text flavor uses. The identity default keeps non-clipboard callers
+ * unchanged.
+ *
  * [renderDiagramPng] rasterizes a diagram note for inline embedding. It is injected rather than
  * called directly because rendering needs the active colour theme, which lives in `ui` — this
  * package has no access to it, and shouldn't. The default returns null, which degrades a diagram
@@ -24,22 +28,23 @@ import java.util.Base64
 fun buildAnnotationsHtml(
     tab: LogTab,
     settings: AppSettings = AppSettings(),
+    maskText: (String) -> String = { it },
     renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray? = { null },
 ): String = buildString {
     append("<div>")
     if (tab.annotations.prefix.isNotBlank()) {
-        append("<p>").append(escapeHtmlMultiline(tab.annotations.prefix)).append("</p>")
+        append(annotationMarkdownToHtml(maskText(tab.annotations.prefix)))
     }
     var blockNumber = 1
     for (block in tab.annotations.blocks) {
         blockNumber = when (block) {
-            is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber, renderDiagramPng)
-            is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber)
-            is AnnBlock.Image -> appendImageHtml(block, settings, blockNumber)
+            is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber, maskText, renderDiagramPng)
+            is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber, maskText)
+            is AnnBlock.Image -> appendImageHtml(block, settings, blockNumber, maskText)
         }
     }
     if (tab.annotations.suffix.isNotBlank()) {
-        append("<hr><p>").append(escapeHtmlMultiline(tab.annotations.suffix)).append("</p>")
+        append("<hr>").append(annotationMarkdownToHtml(maskText(tab.annotations.suffix)))
     }
     // Match buildMd's footer, including for an empty analysis. The helper owns the exact linked
     // product text so HTML and Markdown cannot drift apart.
@@ -53,6 +58,7 @@ private fun StringBuilder.appendNoteHtml(
     block: AnnBlock.Note,
     settings: AppSettings,
     blockNumber: Int,
+    maskText: (String) -> String,
     renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray?,
 ): Int {
     if (block.text.isBlank()) return blockNumber
@@ -67,42 +73,49 @@ private fun StringBuilder.appendNoteHtml(
         // always carries the whole document (see Seq3Codec.kt's own doc) — so this only degrades
         // to the `<pre>` fallback below when [renderDiagramPng] itself can't rasterize.
         val png = renderDiagramPng(diagram.document)
-        if (prefix.isNotEmpty()) append("<p>").append(escapeHtmlMultiline(prefix.trim())).append("</p>")
+        if (prefix.isNotEmpty()) append(annotationMarkdownToHtml(prefix.trim()))
         if (png != null) {
             append("<img src=\"data:image/png;base64,")
             append(Base64.getEncoder().encodeToString(png))
             append("\" alt=\"Sequence diagram\">")
         } else {
             // No model to draw (an older or hand-authored note) — the source still communicates.
-            append("<pre>").append(escapeHtmlMultiline(diagram.source)).append("</pre>")
+            append("<pre>").append(escapeHtmlMultiline(maskText(diagram.source))).append("</pre>")
         }
         return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
     }
-    append("<p>").append(escapeHtmlMultiline(prefix + block.text)).append("</p>")
+    append(annotationMarkdownToHtml(prefix + maskText(block.text)))
     return if (settings.numberAnnotationBlocks) blockNumber + 1 else blockNumber
 }
 
-// Mirrors RenderedMarkdownPreview's AnnBlock.LogRef branch (caption heading shown whenever it's
+// Mirrors RenderedMarkdownPreview's AnnBlock.LogRef branch (caption shown whenever it's
 // non-blank OR numbering is on, "From <file>" sub-line for compare-mode sources, then the raw log
 // rows) rather than buildMd()'s Jira-flavored {code:java} fencing — this output is real HTML, so
-// a <pre> block is the equivalent of that fence.
-private fun StringBuilder.appendLogRefHtml(tab: LogTab, block: AnnBlock.LogRef, settings: AppSettings, blockNumber: Int): Int {
+// a <pre><code> block is the equivalent of that fence. Keep the caption's own Markdown as authored;
+// the on-screen preview does not make every caption bold.
+private fun StringBuilder.appendLogRefHtml(
+    tab: LogTab,
+    block: AnnBlock.LogRef,
+    settings: AppSettings,
+    blockNumber: Int,
+    maskText: (String) -> String,
+): Int {
     var num = blockNumber
     if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
         val prefix = if (settings.numberAnnotationBlocks) "${num++}. " else ""
-        append("<p><b>").append(escapeHtmlMultiline(prefix + block.caption)).append("</b></p>")
+        append(annotationMarkdownToHtml(prefix + maskText(block.caption)))
     }
     if (block.sourceFilename != null) {
-        append("<p><i>").append(escapeHtml("From ${block.sourceFilename}")).append("</i></p>")
+        append("<p><i>").append(escapeHtml(maskText("From ${block.sourceFilename}"))).append("</i></p>")
     }
     val rows = block.resolveRows(tab)
     // See buildMd's LogRef branch: persisted/cross-tab rows retain numeric PID/TID but cannot
     // safely inherit this tab's process-name mapping or Δt baseline.
     val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
     val context = if (localSource) LogLinePresentationContext(tab, settings, visibleEntries(tab)) else null
-    append("<pre>")
-    rows.forEach { row -> appendLine(escapeHtml(presentLogLine(tab, row, settings, context, allowProcessName = localSource))) }
-    append("</pre>")
+    append("<pre><code>")
+    rows.forEach { row -> appendLine(escapeHtml(maskText(presentLogLine(tab, row, settings, context, allowProcessName = localSource)))) }
+    append("</code></pre>")
     return num
 }
 
@@ -112,16 +125,27 @@ private fun StringBuilder.appendLogRefHtml(tab: LogTab, block: AnnBlock.LogRef, 
 // clipboard, not just a reference to it. Raw Base64 encoder (not the .b64()/unb64() helpers used
 // elsewhere in this codebase for token persistence) since those round-trip through UTF-8 text and
 // would corrupt binary JPEG bytes.
-private fun StringBuilder.appendImageHtml(block: AnnBlock.Image, settings: AppSettings, blockNumber: Int): Int {
+private fun StringBuilder.appendImageHtml(block: AnnBlock.Image, settings: AppSettings, blockNumber: Int, maskText: (String) -> String): Int {
     var num = blockNumber
     if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
         val prefix = if (settings.numberAnnotationBlocks) "${num++}. " else ""
-        append("<p><b>").append(escapeHtmlMultiline(prefix + block.caption)).append("</b></p>")
+        append(annotationMarkdownToHtml(prefix + maskText(block.caption)))
     }
     block.displayProvenance?.let { append("<p><i>").append(escapeHtml(it)).append("</i></p>") }
     val encoded = Base64.getEncoder().encodeToString(block.bytes)
-    append("<p><img src=\"data:image/${block.format};base64,").append(encoded).append("\" style=\"max-width:100%\"></p>")
+    append("<p><img src=\"data:image/${safeAnnotationImageSubtype(block.format)};base64,")
+        .append(encoded).append("\" style=\"max-width:100%\"></p>")
     return num
+}
+
+private fun safeAnnotationImageSubtype(format: String): String = when (format.lowercase()) {
+    "png" -> "png"
+    "jpg", "jpeg" -> "jpeg"
+    "gif" -> "gif"
+    "webp" -> "webp"
+    // AppState.addImageBlock currently re-encodes all added images as JPEG. Older or malformed
+    // autosaves can carry arbitrary extension strings; never let them alter a clipboard data URI.
+    else -> "jpeg"
 }
 
 private fun escapeHtml(text: String): String = text

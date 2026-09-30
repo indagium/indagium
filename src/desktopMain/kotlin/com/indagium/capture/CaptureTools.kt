@@ -1,0 +1,432 @@
+package com.indagium.capture
+
+import java.io.File
+import java.time.Duration
+import java.util.concurrent.ConcurrentHashMap
+
+data class CaptureExecutable(
+    val path: String,
+    val runOnHost: Boolean = false,
+) {
+    fun command(arguments: List<String>): List<String> =
+        if (runOnHost) listOf("flatpak-spawn", "--host", "--watch-bus", path) + arguments else listOf(path) + arguments
+}
+
+data class CaptureToolValidation(
+    val available: Boolean,
+    val version: String? = null,
+    val message: String,
+)
+
+data class CaptureDeviceResult(
+    val device: CaptureDevice,
+    val guidance: String? = null,
+)
+
+class CaptureTools(
+    val adb: CaptureExecutable,
+    val scrcpy: CaptureExecutable?,
+    private val runner: CaptureProcessRunner,
+) {
+    @Volatile
+    private var validatedScrcpyVersion: ScrcpyVersion? = null
+
+    fun adbSpec(serial: String?, vararg arguments: String): CaptureProcessSpec {
+        return adbSpec(serial, arguments.toList())
+    }
+
+    fun adbSpec(serial: String?, arguments: List<String>): CaptureProcessSpec {
+        require(serial == null || serial.isNotBlank()) { "Device serial cannot be blank" }
+        val args = buildList {
+            if (serial != null) addAll(listOf("-s", serial))
+            addAll(arguments)
+        }
+        return CaptureProcessSpec(adb.command(args))
+    }
+
+    /** Starts a visible, non-recording scrcpy window for an active capture. [audioCliArgs] is the
+     *  "keep sound on the device" delta from [captureAudioPlan] (`--audio-source=playback
+     *  --audio-dup`), decided once by the caller (which has the adb access needed for the Android
+     *  13+ gate) rather than here; empty for the long-standing default behavior. */
+    fun scrcpyMirrorSpec(serial: String, settings: CaptureSettings, audioCliArgs: List<String> = emptyList()): CaptureProcessSpec {
+        val executable = requireNotNull(scrcpy) { "scrcpy is not configured" }
+        val arguments = scrcpyVideoArguments(serial, settings).toMutableList().apply {
+            // An auxiliary mirror is explicitly visible even when recording was configured with
+            // --no-window. It deliberately carries no --record flag, so it cannot overwrite or
+            // race the canonical session MKV.
+            val supportsAudioFlags = validatedScrcpyVersion?.let { it >= ScrcpyVersion(2, 0) } ?: true
+            if (supportsAudioFlags) {
+                if (!settings.audio) add("--no-audio") else addAll(audioCliArgs)
+            }
+        }
+        return if (executable.runOnHost) {
+            CaptureProcessSpec(
+                listOf("flatpak-spawn", "--host", "--watch-bus", "--env=ADB=${adb.path}", executable.path) + arguments,
+            )
+        } else {
+            CaptureProcessSpec(executable.command(arguments), environment = mapOf("ADB" to adb.path))
+        }
+    }
+
+    fun legacyScrcpyAudioWarning(): String? = validatedScrcpyVersion
+        ?.takeIf { it < ScrcpyVersion(2, 0) }
+        ?.let { "Host scrcpy $it cannot forward Android audio; the visible mirror is video-only, while embedded recording keeps its audio track." }
+
+    private fun scrcpyVideoArguments(serial: String, settings: CaptureSettings): List<String> {
+        val version = validatedScrcpyVersion
+        val oldCli = version != null && version < ScrcpyVersion(2, 0)
+        val arguments = mutableListOf(
+            "--serial", serial,
+            "--max-size=${settings.maxSize.coerceAtLeast(0)}",
+            "--max-fps=${settings.maxFps.coerceAtLeast(1)}",
+            if (oldCli) {
+                "--bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M"
+            } else {
+                "--video-bit-rate=${settings.bitrateMbps.coerceAtLeast(1)}M"
+            },
+        )
+        if (!oldCli) {
+            arguments += "--video-codec=h264"
+            // Android's MediaCodec KEY_I_FRAME_INTERVAL is nominally seconds, but hardware/software
+            // encoders schedule it against their configured KEY_FRAME_RATE (commonly 60fps) rather than
+            // the real frame rate scrcpy delivers. On a mostly-static screen scrcpy repeats frames at a
+            // much lower real rate, so short intervals keep its visible auxiliary mirror responsive.
+            arguments += "--video-codec-options=i-frame-interval:float=1"
+        }
+        return arguments
+    }
+
+    // Identity only: `adb version` exits 0 and prints "Android Debug Bridge ..." for every
+    // platform-tools release we care about, so that's the whole check. This function used to also
+    // run `adb help` and grep its TEXT for the literal substrings "devices", "logcat" and
+    // "exec-out" -- but help text is not an API. On platform-tools 35.0.2, `adb help` never prints
+    // the string "exec-out" anywhere in its ~8.8 KB of output (verified: 0 occurrences), even
+    // though `adb exec-out` itself works fine, so that grep rejected every modern adb with "adb is
+    // missing required commands: exec-out" and capture could never start. Do not resurrect a
+    // help-text grep here; if a specific subcommand's *availability* ever needs checking, probe it
+    // functionally (see supportsScreenshots() below for the pattern) rather than parsing --help.
+    fun validateAdb(): CaptureToolValidation {
+        val version = runner.run(CaptureProcessSpec(adb.command(listOf("version"))))
+        if (version.timedOut) return CaptureToolValidation(false, message = "adb version check timed out")
+        val versionText = (version.stdoutText() + "\n" + version.stderrText())
+            .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+        return if (version.exitCode == 0 && versionText?.contains("Android Debug Bridge", ignoreCase = true) == true) {
+            CaptureToolValidation(true, versionText, "adb is ready")
+        } else {
+            CaptureToolValidation(false, versionText, boundedDiagnostic("adb version failed", version))
+        }
+    }
+
+    /**
+     * Whether `adb exec-out` works against this device, probed by actually running it rather than
+     * grepping `adb help` for the flag name -- the same class of bug fixed in validateAdb() above.
+     * This needs a live, connected device, so it is deliberately NOT part of validateAdb() or
+     * device discovery, both of which must stay fast and device-independent; callers invoke this
+     * lazily (e.g. to enable/disable a screenshot action for a specific serial) once a device is
+     * selected. Cached per serial so repeated screenshots don't repeat the round trip. A probe that
+     * can't reach a conclusion (exception, timeout, unexpected output) defaults to "available" --
+     * an inconclusive probe must never disable a feature that would in fact have worked; a real
+     * failure at screenshot time still surfaces its own error (see CaptureRecorder.screenshot()).
+     */
+    fun supportsScreenshots(serial: String): Boolean = screenshotSupport.getOrPut(serial) {
+        runCatching {
+            val probe = runner.run(
+                adbSpec(serial, "exec-out", "echo", SCREENSHOT_PROBE_TOKEN),
+                timeout = Duration.ofSeconds(SCREENSHOT_PROBE_TIMEOUT_SECONDS),
+            )
+            !probe.timedOut && probe.exitCode == 0 && probe.stdoutText().contains(SCREENSHOT_PROBE_TOKEN)
+        }.getOrDefault(true)
+    }
+
+    // Record the reported version so the optional auxiliary window can use scrcpy 1.x flag names.
+    // The embedded recorder does not depend on this host executable.
+    fun validateScrcpy(): CaptureToolValidation {
+        val executable = scrcpy ?: return CaptureToolValidation(false, message = "scrcpy was not found")
+        val version = runner.run(CaptureProcessSpec(executable.command(listOf("--version"))))
+        val versionText = (version.stdoutText() + "\n" + version.stderrText())
+            .lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+        val parsedVersion = versionText?.let(::parseScrcpyVersion)
+        validatedScrcpyVersion = parsedVersion
+        return if (!version.timedOut && version.exitCode == 0 && versionText?.contains("scrcpy", ignoreCase = true) == true) {
+            val compatibility = if (parsedVersion != null && parsedVersion < ScrcpyVersion(2, 0)) {
+                "scrcpy $parsedVersion is supported with legacy video flags; audio forwarding is unavailable on this host version."
+            } else {
+                "scrcpy is ready"
+            }
+            CaptureToolValidation(true, versionText, compatibility)
+        } else {
+            CaptureToolValidation(false, versionText, boundedDiagnostic("scrcpy version failed", version))
+        }
+    }
+
+    /**
+     * Runs one bounded, one-shot adb command against a device and returns its result instead of
+     * throwing — used by the "Device logging" panel (`logcat -g`/`-G`, `getprop`/`setprop`) via the
+     * same [runner]/[CaptureProcessSpec] seam every other adb call in this class already goes
+     * through, so it is bounded by a real timeout, cancellable, and testable through
+     * `FakeCaptureRunner` like everything else here. Deliberately returns [CaptureCommandResult]
+     * rather than `check()`-ing the exit code: a caller reading device state (e.g. an unauthorized
+     * device, or SELinux denying `setprop`) needs the raw stderr to show a useful inline error, not
+     * an exception message.
+     */
+    fun runAdb(serial: String?, arguments: List<String>, timeout: Duration = Duration.ofSeconds(5)): CaptureCommandResult =
+        runner.run(adbSpec(serial, arguments), timeout = timeout)
+
+    /** Reads `ro.build.version.sdk` once — the "keep sound on the device" Android-13+ gate (see
+     *  [captureAudioPlan]) — with the same plain synchronous shape as this class's other
+     *  single-property probes. Null on any failure (timeout, non-zero exit, unparsable output)
+     *  rather than throwing, so this one probe can never fail an entire capture start; the caller
+     *  falls back to the "device muted" behavior and surfaces a diagnostic instead. */
+    fun readDeviceSdkLevel(serial: String): Int? {
+        val result = runAdb(serial, listOf("shell", "getprop", "ro.build.version.sdk"))
+        if (result.timedOut || result.exitCode != 0) return null
+        return parseAndroidSdkLevel(result.stdoutText())
+    }
+
+    /** Whether adb's mDNS backend is usable here (`adb mdns check`); false on any failure, since
+     *  Wi-Fi discovery is an optional extra and must never look like an adb problem. */
+    fun mdnsCheck(): Boolean {
+        val result = runAdb(null, listOf("mdns", "check"))
+        if (result.timedOut) return false
+        val text = (result.stdoutText() + "\n" + result.stderrText()).lowercase()
+        return "mdns daemon version" in text && "unavailable" !in text
+    }
+
+    /** Services adb's mDNS backend currently sees (phones on pairing screens, paired phones). */
+    internal fun mdnsServices(): List<AdbMdnsService> {
+        val result = runAdb(null, listOf("mdns", "services"))
+        check(!result.timedOut) { "adb mdns services timed out" }
+        check(result.exitCode == 0) { boundedDiagnostic("adb mdns services failed", result) }
+        return parseAdbMdnsServices(result.stdoutText())
+    }
+
+    /** `adb pair`. The pairing [code] is an argv element here, so nothing may log this spec's command. */
+    internal fun pair(address: String, code: String): WirelessAdbOutcome =
+        parseAdbPairResult(runAdb(null, listOf("pair", address, code), PAIR_TIMEOUT), secret = code)
+
+    internal fun connect(address: String): WirelessAdbOutcome =
+        parseAdbConnectResult(runAdb(null, listOf("connect", address), CONNECT_TIMEOUT))
+
+    fun listDevices(): List<CaptureDeviceResult> {
+        val result = runner.run(CaptureProcessSpec(adb.command(listOf("devices", "-l"))))
+        check(!result.timedOut) { "adb devices timed out" }
+        check(result.exitCode == 0) { boundedDiagnostic("adb devices failed", result) }
+        return parseAdbDevices(result.stdoutText())
+    }
+
+    private val screenshotSupport = ConcurrentHashMap<String, Boolean>()
+}
+
+/** Numeric version tuple for the CLI behavior split at scrcpy 2.0 (audio/codec flags changed). */
+internal data class ScrcpyVersion(val major: Int, val minor: Int, val patch: Int = 0) : Comparable<ScrcpyVersion> {
+    override fun compareTo(other: ScrcpyVersion): Int =
+        compareValuesBy(this, other, ScrcpyVersion::major, ScrcpyVersion::minor, ScrcpyVersion::patch)
+
+    override fun toString(): String = "$major.$minor.$patch"
+}
+
+internal fun parseScrcpyVersion(output: String): ScrcpyVersion? {
+    val match = SCRCPY_VERSION_REGEX.find(output) ?: return null
+    return ScrcpyVersion(
+        major = match.groupValues[1].toInt(),
+        minor = match.groupValues[2].toInt(),
+        patch = match.groupValues[3].toIntOrNull() ?: 0,
+    )
+}
+
+class CaptureToolResolver(
+    private val runner: CaptureProcessRunner = ProcessBuilderCaptureRunner(),
+    private val environment: Map<String, String> = System.getenv(),
+    private val executableExists: (String) -> Boolean = { path -> File(path).isFile && File(path).canExecute() },
+    private val flatpak: Boolean = File("/.flatpak-info").isFile || environment["FLATPAK_ID"] != null,
+    // Injectable (rather than read live via System.getProperty) so B3's login-shell fallback below
+    // is deterministic in tests regardless of the host the test suite happens to run on.
+    private val isMacOs: Boolean = System.getProperty("os.name").lowercase().contains("mac"),
+) {
+    private val loginShellPathCache = mutableMapOf<String, String?>()
+
+    fun resolve(settings: CaptureSettings): CaptureTools {
+        val adb = resolveExecutable("adb", settings.adbPath, adbCandidates())
+            ?: error("adb was not found. Configure its path or install Android platform-tools.")
+        val scrcpy = resolveExecutable("scrcpy", settings.scrcpyPath, scrcpyCandidates())
+        return CaptureTools(adb, scrcpy, runner)
+    }
+
+    private fun resolveExecutable(name: String, configured: String, common: List<String>): CaptureExecutable? {
+        if (configured.isNotBlank()) {
+            if (!flatpak && executableExists(configured)) return CaptureExecutable(configured)
+            if (flatpak && hostExecutableExists(configured)) return CaptureExecutable(configured, runOnHost = true)
+            error("Configured $name executable does not exist or is not executable: $configured")
+        }
+        if (flatpak) {
+            val host = runner.run(
+                CaptureProcessSpec(listOf("flatpak-spawn", "--host", "--watch-bus", "which", name)),
+                timeout = Duration.ofSeconds(3),
+                outputLimitBytes = 16 * 1024,
+            )
+            if (host.exitCode == 0) {
+                val hostPaths = host.stdoutText().lineSequence()
+                    .map(String::trim)
+                    .filter { it.startsWith('/') }
+                val path = hostPaths.firstOrNull(::hostExecutableExists)
+                if (path != null) return CaptureExecutable(path, runOnHost = true)
+            }
+            val commonHostPath = common.firstOrNull { candidate ->
+                hostExecutableExists(candidate)
+            }
+            return commonHostPath?.let { CaptureExecutable(it, runOnHost = true) }
+        }
+        val fromPath = environment["PATH"]
+            .orEmpty()
+            .split(File.pathSeparatorChar)
+            .asSequence()
+            .filter(String::isNotBlank)
+            .map { File(it, platformExecutableName(name)).absolutePath }
+            .firstOrNull(executableExists)
+        // A macOS .app launched from Finder inherits launchd's minimal PATH
+        // (/usr/bin:/bin:/usr/sbin:/sbin) rather than the user's shell PATH, so the scan above
+        // misses Homebrew, nix, asdf, sdkman, ~/bin, etc. Before falling back to the hardcoded
+        // candidate directories (which only cover Homebrew's default prefix), ask the user's own
+        // login shell what it resolves `name` to -- the same PATH `./gradlew desktopRun` already
+        // inherits from an interactive terminal, which is exactly why this gap is invisible in dev
+        // and only bites a packaged build. Skipped once `fromPath` already found something, and
+        // never attempted on non-macOS or under Flatpak (handled above).
+        val fromLoginShell = if (fromPath == null && isMacOs) {
+            loginShellPath(name)?.takeIf(executableExists)
+        } else {
+            null
+        }
+        val found = fromPath ?: fromLoginShell ?: common.firstOrNull(executableExists)
+        return found?.let(::CaptureExecutable)
+    }
+
+    /**
+     * Resolves `name` via the user's login shell: `$SHELL -lc 'command -v name'`, falling back to
+     * /bin/zsh when $SHELL is unset or not a sane executable (macOS's default since Catalina).
+     * Runs through the same CaptureProcessRunner/CaptureProcessSpec seam as every other capture
+     * subprocess, so it is bounded by a real timeout and cannot hang app startup, and it is
+     * testable through FakeCaptureRunner like everything else in this file. Cached per tool name so
+     * a hanging or slow shell is paid for at most once per resolver instance, not once per
+     * resolution (resolve() can be called repeatedly, e.g. on every "Recheck tools" click).
+     */
+    private fun loginShellPath(name: String): String? = synchronized(loginShellPathCache) {
+        // NOT `getOrPut`: a "not found" result caches as a `null` value, and `getOrPut` treats a
+        // stored `null` the same as a missing key (it calls `get(key) == null`, not
+        // `containsKey`), so it would re-probe forever whenever the shell doesn't have the tool.
+        // `containsKey` is the only correct way to distinguish "cached miss" from "never probed".
+        if (loginShellPathCache.containsKey(name)) return@synchronized loginShellPathCache.getValue(name)
+        val configuredShell = environment["SHELL"]
+        val shell = if (!configuredShell.isNullOrBlank() && executableExists(configuredShell)) {
+            configuredShell
+        } else {
+            DEFAULT_LOGIN_SHELL
+        }
+        val result = runner.run(
+            CaptureProcessSpec(listOf(shell, "-lc", "command -v $name")),
+            timeout = Duration.ofSeconds(LOGIN_SHELL_TIMEOUT_SECONDS),
+            outputLimitBytes = LOGIN_SHELL_OUTPUT_LIMIT_BYTES,
+        )
+        val resolved = if (result.timedOut || result.exitCode != 0) {
+            null
+        } else {
+            result.stdoutText().lineSequence().map(String::trim).firstOrNull { it.startsWith('/') }
+        }
+        loginShellPathCache[name] = resolved
+        resolved
+    }
+
+    private fun hostExecutableExists(path: String): Boolean {
+        val probe = runner.run(
+            CaptureProcessSpec(
+                listOf("flatpak-spawn", "--host", "--watch-bus", "test", "-x", path),
+            ),
+            timeout = Duration.ofSeconds(3),
+            outputLimitBytes = HOST_PROBE_OUTPUT_LIMIT_BYTES,
+        )
+        return !probe.timedOut && probe.exitCode == 0
+    }
+
+    private fun adbCandidates(): List<String> {
+        val sdkRoots = listOfNotNull(environment["ANDROID_SDK_ROOT"], environment["ANDROID_HOME"])
+        return (sdkRoots.map { File(it, "platform-tools/${platformExecutableName("adb")}").absolutePath } +
+            commonExecutableDirectories().map { File(it, platformExecutableName("adb")).absolutePath }).distinct()
+    }
+
+    private fun scrcpyCandidates(): List<String> =
+        commonExecutableDirectories().map { File(it, platformExecutableName("scrcpy")).absolutePath }.distinct()
+
+    private fun commonExecutableDirectories(): List<String> {
+        val userHome = System.getProperty("user.home").orEmpty()
+        val os = System.getProperty("os.name").lowercase()
+        return when {
+            os.contains("win") -> listOf(
+                "C:\\Program Files\\scrcpy",
+                "C:\\Program Files\\Android\\platform-tools",
+                "$userHome\\AppData\\Local\\Android\\Sdk\\platform-tools",
+            )
+            os.contains("mac") -> listOf("/opt/homebrew/bin", "/usr/local/bin", "$userHome/Library/Android/sdk/platform-tools")
+            else -> listOf("/usr/bin", "/usr/local/bin", "/snap/bin", "$userHome/Android/Sdk/platform-tools")
+        }
+    }
+}
+
+fun parseAdbDevices(output: String): List<CaptureDeviceResult> = output.lineSequence()
+    .map(String::trim)
+    .filter { it.isNotEmpty() && !it.startsWith("List of devices") && !it.startsWith('*') }
+    .mapNotNull { line ->
+        val fields = line.split(Regex("\\s+"))
+        if (fields.size < MIN_ADB_DEVICE_FIELDS) return@mapNotNull null
+        val serial = fields[0]
+        val state = when {
+            fields[1] == "no" && fields.getOrNull(NO_PERMISSIONS_FIELD_INDEX) == "permissions" -> "no permissions"
+            else -> fields[1]
+        }
+        val attributes = fields.drop(2).mapNotNull { field ->
+            val separator = field.indexOf(':')
+            if (separator <= 0) null else field.substring(0, separator) to field.substring(separator + 1)
+        }.toMap()
+        val model = attributes["model"]?.replace('_', ' ') ?: serial
+        val device = CaptureDevice(serial = serial, state = state, model = model)
+        CaptureDeviceResult(device, deviceStateGuidance(state, wireless = device.wireless))
+    }
+    .toList()
+
+fun deviceStateGuidance(state: String, wireless: Boolean = false): String? = when (state.lowercase()) {
+    "device" -> null
+    "unauthorized" ->
+        if (wireless) {
+            "Unlock the phone and accept the debugging prompt, or pair it again."
+        } else {
+            "Unlock the device and accept its USB debugging authorization prompt."
+        }
+    "offline" ->
+        if (wireless) {
+            "Check the phone is on the same Wi-Fi and Wireless debugging is still on."
+        } else {
+            "Reconnect the device, then toggle USB debugging if it remains offline."
+        }
+    "no permissions" -> "Grant this user USB access (usually with an Android udev rule), then reconnect the device."
+    "recovery", "sideload", "bootloader" -> "Boot Android normally before starting log capture."
+    else -> "The device is not ready for capture (adb state: $state)."
+}
+
+private fun platformExecutableName(name: String): String =
+    if (System.getProperty("os.name").lowercase().contains("win")) "$name.exe" else name
+
+private fun boundedDiagnostic(prefix: String, result: CaptureCommandResult): String {
+    val detail = (result.stderrText().ifBlank { result.stdoutText() }).trim().take(MAX_TOOL_DIAGNOSTIC_CHARS)
+    return if (detail.isEmpty()) "$prefix (exit ${result.exitCode})" else "$prefix: $detail"
+}
+
+private val PAIR_TIMEOUT: Duration = Duration.ofSeconds(20)
+private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(15)
+private const val HOST_PROBE_OUTPUT_LIMIT_BYTES = 4 * 1024
+private const val MAX_TOOL_DIAGNOSTIC_CHARS = 4_096
+private const val MIN_ADB_DEVICE_FIELDS = 2
+private const val NO_PERMISSIONS_FIELD_INDEX = 2
+private const val SCREENSHOT_PROBE_TOKEN = "indagium-exec-out-probe"
+private const val SCREENSHOT_PROBE_TIMEOUT_SECONDS = 3L
+private const val LOGIN_SHELL_TIMEOUT_SECONDS = 3L
+private const val LOGIN_SHELL_OUTPUT_LIMIT_BYTES = 4 * 1024
+private const val DEFAULT_LOGIN_SHELL = "/bin/zsh"
+private val SCRCPY_VERSION_REGEX = Regex("\\bscrcpy\\s+v?(\\d+)\\.(\\d+)(?:\\.(\\d+))?", RegexOption.IGNORE_CASE)
