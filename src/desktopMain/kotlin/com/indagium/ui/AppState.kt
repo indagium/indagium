@@ -76,6 +76,7 @@ import com.indagium.utils.CONTENT_SNIFF_BYTES
 import com.indagium.utils.CancellationCheck
 import com.indagium.utils.CrossingThreadHint
 import com.indagium.utils.EntryIdMap
+import com.indagium.utils.HeapTrim
 import com.indagium.utils.LogContentKind
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
@@ -250,6 +251,9 @@ private data class MarkerPressContext(
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
 // then simply stops growing (later paths still resolve, just uncached).
 private const val CANONICAL_PATH_CACHE_MAX = 200_000
+
+/** Closing tabs holding at least this many log rows together requests a heap trim (utils/HeapTrim). */
+private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
 
 // Minimum gap between two "Do you like Indagium?" support popups (see supportPromptDue,
 // maybeShowSupportPromptOnStartup below).
@@ -3378,6 +3382,7 @@ class AppState(
                 captureExportBusy = false
                 captureExportBusyMessage = null
                 captureExportJob = null
+                HeapTrim.request("capture snapshot export")
             }
         }
     }
@@ -3537,6 +3542,7 @@ class AppState(
                 captureExportError = failure.message ?: "Retained capture export failed"
                 null
             }
+            HeapTrim.request("retained capture export")
         }
     }
 
@@ -3814,6 +3820,7 @@ class AppState(
                 val imported = controller.finalizeStopped(stopped)
                 attachFinalizedCapture(tabId, imported)
                 captureFinalizationStatusByTab.remove(tabId)
+                HeapTrim.request("capture finalized")
             } catch (cancelled: CancellationException) {
                 // A canceled stop must not leave the raw tab marked as recording. The recorder
                 // has already been asked to stop before finalization begins in normal operation;
@@ -8042,6 +8049,11 @@ class AppState(
         cancelAllLoads()
     }
 
+    /** Large (>= [HEAP_TRIM_CLOSED_ROWS] rows together) or capture/video tabs free enough to be worth a trim. */
+    private fun shouldTrimHeapAfterClosing(closing: List<LogTab>): Boolean =
+        closing.sumOf { it.logData.size.toLong() } >= HEAP_TRIM_CLOSED_ROWS ||
+            closing.any { it.captureSessionId != null || it.captureSourceSessionId != null || it.attachedVideo != null }
+
     // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
     // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
     // concurrent FileTailer flush (appendTailedLines, itself synchronized(stateLock)) could land
@@ -8084,7 +8096,11 @@ class AppState(
         // join or a standalone connection's synchronous adb cleanup, and stateLock is taken by ~80
         // other call sites across this class, so blocking IO/joins must never run while holding it.
         val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
+        var trimHeapAfterClose = false
         synchronized(stateLock) {
+            // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
+            // counting only; the GC request itself is issued after the lock is released.
+            trimHeapAfterClose = shouldTrimHeapAfterClosing(tabs.filter { it.id in tabIds })
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
@@ -8130,6 +8146,9 @@ class AppState(
         transientRegexSearchTabIds = transientRegexSearchTabIds - tabIds
         // Closed tabs may have held the cache's last reference to one or more archive-video files.
         pruneArchiveVideoCache()
+        // A closed big/capture tab leaves gigabytes of freed-but-committed heap that an idle G1
+        // never hands back; see utils/HeapTrim for why this asks for a (concurrent) GC.
+        if (trimHeapAfterClose) HeapTrim.request("closed large or capture tab")
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
