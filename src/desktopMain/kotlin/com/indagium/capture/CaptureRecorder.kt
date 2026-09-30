@@ -993,7 +993,7 @@ private fun forEachRawLine(input: InputStream, consume: (ByteArray) -> Boolean) 
 private fun isSeparator(raw: ByteArray): Boolean =
     raw.toString(Charsets.UTF_8).trim().let { it.isEmpty() || it.startsWith("-----") }
 
-private fun indexRecordJson(record: CaptureLogIndexRecord): String = buildJsonObject {
+internal fun indexRecordJson(record: CaptureLogIndexRecord): String = buildJsonObject {
     put("byteOffset", record.byteOffset)
     put("byteLength", record.byteLength)
     put("elapsedMs", record.elapsedMs)

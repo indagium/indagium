@@ -1470,7 +1470,84 @@ private fun forEachSelectedRecord(indexFile: File, block: (CaptureLogIndexRecord
 // internal, not private: capture/CaptureMarkerWindow.kt's ordinalRangeForElapsedWindow and
 // captureLogEntriesForOrdinals reuse this exact parser for the "Mark issue" window scan, per the
 // restyle plan's Phase 3 — see that file's own header for why a second parser was not written.
-internal fun parseIndexRecord(line: String): CaptureLogIndexRecord {
+internal fun parseIndexRecord(line: String): CaptureLogIndexRecord =
+    parseIndexRecordFast(line) ?: parseIndexRecordJson(line)
+
+private const val INDEX_KEY_OFFSET = "{\"byteOffset\":"
+private const val INDEX_KEY_LENGTH = ",\"byteLength\":"
+private const val INDEX_KEY_ELAPSED = ",\"elapsedMs\":"
+private const val INDEX_KEY_ORDINAL = ",\"rowOrdinal\":"
+private const val NO_NUMBER = Long.MIN_VALUE
+
+/**
+ * Allocation-free parse of the exact canonical line `indexRecordJson` writes:
+ * `{"byteOffset":N,"byteLength":N,"elapsedMs":N}` optionally followed by `,"rowOrdinal":N` before the
+ * closing `}`. No whitespace, no other keys, no `null`; N is an optional `-` and decimal digits with
+ * no leading zero. Returns null on ANY deviation (or a number out of range) so the caller falls back
+ * to [parseIndexRecordJson], which keeps the original semantics and error messages.
+ */
+private fun parseIndexRecordFast(line: String): CaptureLogIndexRecord? {
+    val end = line.length
+    var pos = matchLiteral(line, 0, INDEX_KEY_OFFSET)
+    val offsetEnd = canonicalNumberEnd(line, pos)
+    val offset = parseCanonicalLong(line, pos, offsetEnd)
+    pos = matchLiteral(line, offsetEnd, INDEX_KEY_LENGTH)
+    val lengthEnd = canonicalNumberEnd(line, pos)
+    val length = parseCanonicalLong(line, pos, lengthEnd)
+    pos = matchLiteral(line, lengthEnd, INDEX_KEY_ELAPSED)
+    val elapsedEnd = canonicalNumberEnd(line, pos)
+    val elapsed = parseCanonicalLong(line, pos, elapsedEnd)
+    var ordinal = NO_NUMBER
+    var tail = elapsedEnd
+    val ordinalStart = matchLiteral(line, tail, INDEX_KEY_ORDINAL)
+    if (ordinalStart >= 0) {
+        tail = canonicalNumberEnd(line, ordinalStart)
+        ordinal = parseCanonicalLong(line, ordinalStart, tail)
+        if (ordinal == NO_NUMBER) return null
+    }
+    val valid = offset != NO_NUMBER && length != NO_NUMBER && elapsed != NO_NUMBER &&
+        length in Int.MIN_VALUE..Int.MAX_VALUE && (ordinalStart < 0 || ordinal in Int.MIN_VALUE..Int.MAX_VALUE) &&
+        tail >= 0 && tail == end - 1 && line[tail] == '}'
+    if (!valid) return null
+    return CaptureLogIndexRecord(offset, length.toInt(), elapsed, if (ordinalStart < 0) null else ordinal.toInt())
+}
+
+/** Index just past [literal] when it matches [line] at [from], else -1 (also when [from] is already -1). */
+private fun matchLiteral(line: String, from: Int, literal: String): Int =
+    if (from >= 0 && line.startsWith(literal, from)) from + literal.length else -1
+
+/** End index of `-?(0|[1-9][0-9]*)` starting at [from], or -1 when there is no canonical number there. */
+private fun canonicalNumberEnd(line: String, from: Int): Int {
+    if (from < 0) return -1
+    var i = from
+    val negative = i < line.length && line[i] == '-'
+    if (negative) i++
+    val digitsStart = i
+    while (i < line.length && line[i] in '0'..'9') i++
+    val digits = i - digitsStart
+    val leadingZero = digits > 0 && line[digitsStart] == '0' && (digits > 1 || negative)
+    return if (digits == 0 || leadingZero) -1 else i
+}
+
+/** Parses the canonical number in [from, to) into a Long; [NO_NUMBER] on a miss or overflow. */
+private fun parseCanonicalLong(line: String, from: Int, to: Int): Long {
+    if (to < 0) return NO_NUMBER
+    val negative = line[from] == '-'
+    val limit = if (negative) Long.MIN_VALUE else -Long.MAX_VALUE
+    val multMin = limit / 10
+    var acc = 0L
+    for (i in (if (negative) from + 1 else from) until to) {
+        val d = line[i] - '0'
+        // Accumulate negatively so Long.MIN_VALUE is representable; overflow => fall back.
+        if (acc < multMin) return NO_NUMBER
+        acc *= 10
+        if (acc < limit + d) return NO_NUMBER
+        acc -= d
+    }
+    return if (negative) acc else -acc
+}
+
+internal fun parseIndexRecordJson(line: String): CaptureLogIndexRecord {
     val root = Json.parseToJsonElement(line).jsonObject
     val offset = root.long("byteOffset") ?: error("Capture index row is missing byteOffset")
     val length = root.int("byteLength") ?: error("Capture index row is missing byteLength")
