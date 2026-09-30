@@ -13,9 +13,17 @@ import java.util.concurrent.atomic.AtomicBoolean
  *
  * G1 only uncommits heap at the end of a concurrent cycle or a full GC, and an idle app never
  * starts one, so without this a closed 1M-row capture keeps gigabytes committed forever even though
- * nothing references them. The launch flags `-XX:+ExplicitGCInvokesConcurrent` (makes the
- * `System.gc()` below a concurrent cycle, so the UI never stalls on a stop-the-world full GC) and
- * `-XX:G1PeriodicGCInterval` (the idle backstop) are set together with this in build.gradle.kts.
+ * nothing references them.
+ *
+ * The `System.gc()` below is deliberately a real full GC (the launch flags in build.gradle.kts do
+ * NOT set `-XX:+ExplicitGCInvokesConcurrent`). A concurrent cycle only reclaims fully-empty regions;
+ * it does not evacuate old regions that still contain some garbage, and the mixed collections that
+ * would do so only run while the app allocates, which an idle app does not. The result was ~1 GB
+ * of dead heap staying committed after a large capture was closed. A full GC compacts it at the
+ * cost of a short stop-the-world pause (~0.1-0.3 s with a few hundred MB live), which is acceptable
+ * because callers only request a trim right after a user action (closing a big tab, Stop, export)
+ * and never while a capture is recording (see AppState.requestHeapTrim). `-XX:G1PeriodicGCInterval`
+ * stays as the cheap, concurrent idle backstop.
  *
  * Requests are coalesced: the first one schedules a single GC a few seconds out (so the caller's
  * references have dropped and a burst of closes costs one cycle), later ones while it is pending
