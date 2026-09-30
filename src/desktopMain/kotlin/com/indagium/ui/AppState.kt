@@ -83,6 +83,7 @@ import com.indagium.utils.HeapTrim
 import com.indagium.utils.LogContentKind
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.MAX_ARCHIVE_ENTRY_BYTES
+import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.MergeSourceFile
 import com.indagium.utils.ParsedLog
 import com.indagium.utils.RegexEvaluationContext
@@ -124,6 +125,7 @@ import com.indagium.utils.isValidRegexPattern
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.matchingHighlighter
 import com.indagium.utils.matchingMessageRule
+import com.indagium.utils.memoryShortfall
 import com.indagium.utils.mergeLogs
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.newId
@@ -1507,6 +1509,9 @@ data class PendingSplitPrompt(
     val sources: List<SplitSource>,
     val deferredFiles: List<File> = emptyList(),
     val deferredArchiveEntries: List<DeferredArchiveEntry> = emptyList(),
+    /** Set when the prompt was raised (also) because the files probably won't fit in free heap; see
+     *  [memoryShortfall]. Null for a pure size prompt. */
+    val memoryShortfall: MemoryShortfall? = null,
 )
 
 // Update-check status shown next to Settings' "Check now" button (AutomationSettingsSection).
@@ -2728,6 +2733,16 @@ class AppState(
 
     /** Estimated free heap bytes (max minus occupancy after the last GC); used by the pre-open memory check. */
     internal fun heapFreeBytesEstimate(): Long = heapPressureMonitor.estimatedFreeBytes()
+
+    /**
+     * Free-heap reading the pre-open memory check uses. A seam so tests can pin it (Long.MAX_VALUE = "plenty")
+     * instead of depending on the test JVM's heap; production reads [heapFreeBytesEstimate].
+     */
+    internal var heapFreeBytesProvider: () -> Long = { heapFreeBytesEstimate() }
+
+    /** Shortfall for opening plain logs totalling [fileSizes] bytes at once, or null when they fit. */
+    private fun memoryShortfallFor(fileSizes: List<Long>): MemoryShortfall? =
+        memoryShortfall(fileSizes, heapFreeBytesProvider())
 
     internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
 
@@ -8346,7 +8361,9 @@ class AppState(
         val (folders, nonFolders) = files.partition { it.isDirectory }
         folders.forEach { openFolder(it) }
         val openable = nonFolders.filter { isOpenableAsLog(it) }
-        val oversizedFiles = openable.filter { file ->
+        // Only plain files take part in either check: see the ArchiveFormat.None note below.
+        val plainFiles = openable.filter { detectArchiveFormat(it) is ArchiveFormat.None }
+        val oversizedFiles = plainFiles.filter { file ->
             // ArchiveFormat.None, not !isSupportedArchiveFile: a bare compressed log (foo.log.gz)
             // reports its on-disk (compressed) size via file.length(), which under-reports the
             // real decompressed content by roughly the compression ratio — requiresSplitPrompt
@@ -8356,15 +8373,20 @@ class AppState(
             // already has (see extractCandidate's KDoc) — never split-prompted, just capped.
             // DLT is not exempt here (frame-aware splitting handles it — see DltSplitter.kt); only
             // an unsplittable v2 stream is refused, and only once the user actually chooses Split.
-            detectArchiveFormat(file) is ArchiveFormat.None &&
-                requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
+            requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
-        if (oversizedFiles.isNotEmpty()) {
+        // Files opened together are all resident at once, so the memory check sums the whole batch.
+        val shortfall = if (plainFiles.isEmpty()) null else memoryShortfallFor(plainFiles.map { it.length() })
+        // A memory-only prompt (nothing over the size threshold) offers every plain file of the batch:
+        // which of them to split is the user's call, and there is exactly one shortfall for the batch.
+        val promptFiles = if (oversizedFiles.isEmpty() && shortfall != null) plainFiles else oversizedFiles
+        if (promptFiles.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
-                sources = oversizedFiles.map { SplitSource.RealFile(it) },
-                deferredFiles = openable - oversizedFiles.toSet(),
+                sources = promptFiles.map { SplitSource.RealFile(it) },
+                deferredFiles = openable - promptFiles.toSet(),
+                memoryShortfall = shortfall,
             )
-            oversizedFiles.forEach { file ->
+            promptFiles.forEach { file ->
                 rememberRecentFile(file)
                 rememberAutoExportedNoteFor(file.name, file.absolutePath)
             }
@@ -8542,9 +8564,12 @@ class AppState(
         // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
         // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
-        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None && requiresSplitPrompt(file.length())) {
-            pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)))
-            return null
+        if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None) {
+            val shortfall = memoryShortfallFor(listOf(file.length()))
+            if (requiresSplitPrompt(file.length()) || shortfall != null) {
+                pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)), memoryShortfall = shortfall)
+                return null
+            }
         }
         val n = tabCounter.getAndIncrement() // capture on calling thread before launching
         val tabId = "t$n"
@@ -8983,11 +9008,18 @@ class AppState(
         selected: List<ZipLogCandidate>,
         videoToAttach: ZipLogCandidate? = null,
     ): List<String> {
-        val (oversized, normal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
+        // Entry sizes are the real (uncompressed) sizes, so the memory check applies to them too.
+        val shortfall = memoryShortfallFor(selected.map { it.sizeBytes })
+        val (sizeOversized, sizeNormal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
+        // Memory-only prompt: offer every selected entry (same rule as openPaths).
+        val memoryOnly = sizeOversized.isEmpty() && shortfall != null
+        val oversized = if (memoryOnly) selected else sizeOversized
+        val normal = if (memoryOnly) emptyList() else sizeNormal
         if (oversized.isNotEmpty()) {
             pendingSplitPrompt = PendingSplitPrompt(
                 sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
                 deferredArchiveEntries = normal.map { DeferredArchiveEntry(zipFile, it) },
+                memoryShortfall = shortfall,
             )
             pendingZipPicker = null
             return emptyList()
@@ -9085,9 +9117,14 @@ class AppState(
         splitPromptThresholdBytes: Long = SPLIT_PROMPT_BYTES,
     ): List<String> {
         val files = selected.map { File(folder, it.entryPath) }
-        val (oversized, normal) = selected.zip(files).partition { (_, file) ->
+        val shortfall = memoryShortfallFor(files.map { it.length() })
+        val (sizeOversized, sizeNormal) = selected.zip(files).partition { (_, file) ->
             requiresSplitPrompt(file.length(), splitPromptThresholdBytes)
         }
+        // Memory-only prompt: offer every selected file (same rule as openPaths).
+        val memoryOnly = sizeOversized.isEmpty() && shortfall != null
+        val oversized = if (memoryOnly) selected.zip(files) else sizeOversized
+        val normal = if (memoryOnly) emptyList() else sizeNormal
         if (oversized.isNotEmpty()) {
             // Same "defer everything selected, not just the oversized ones" shape as
             // openZipEntries' identical branch — confirmSplitPrompt already knows how to open a
@@ -9095,6 +9132,7 @@ class AppState(
             pendingSplitPrompt = PendingSplitPrompt(
                 sources = oversized.map { (_, file) -> SplitSource.RealFile(file) },
                 deferredFiles = normal.map { (_, file) -> file },
+                memoryShortfall = shortfall,
             )
             pendingFolderPicker = null
             return emptyList()
@@ -9124,9 +9162,15 @@ class AppState(
         if (existing != null) {
             activateTab(existing.id); return existing.id
         }
-        if (!bypassSplitPrompt && requiresSplitPrompt(candidate.sizeBytes)) {
-            pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.ArchiveEntry(zipFile, candidate)))
-            return null
+        if (!bypassSplitPrompt) {
+            val shortfall = memoryShortfallFor(listOf(candidate.sizeBytes))
+            if (requiresSplitPrompt(candidate.sizeBytes) || shortfall != null) {
+                pendingSplitPrompt = PendingSplitPrompt(
+                    listOf(SplitSource.ArchiveEntry(zipFile, candidate)),
+                    memoryShortfall = shortfall,
+                )
+                return null
+            }
         }
         val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
@@ -9257,7 +9301,8 @@ class AppState(
     fun defaultSplitDestination(source: SplitSource): File =
         settings.defaultSaveDir?.let(::File) ?: source.sourceFile.parentFile ?: File(".")
 
-    fun defaultSplitPartCount(source: SplitSource): Int = suggestedSplitPartCount(source.sizeBytes)
+    fun defaultSplitPartCount(source: SplitSource, memoryShortfall: MemoryShortfall? = null): Int =
+        suggestedSplitPartCount(source.sizeBytes, memoryShortfall)
 
     fun cancelSplitPrompt() {
         pendingSplitPrompt = null
@@ -9291,7 +9336,7 @@ class AppState(
                             source = source,
                             destinationDir = destinationDir,
                             postfix = postfixes[source.id] ?: postfix,
-                            partCount = partCounts[source.id] ?: defaultSplitPartCount(source),
+                            partCount = partCounts[source.id] ?: defaultSplitPartCount(source, pending.memoryShortfall),
                         )
                     }
                 }
