@@ -6,8 +6,15 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -629,6 +636,86 @@ class CaptureRecorderTest {
         }
     }
 
+    @Test
+    fun storageFailureWhileStoppingStillTerminatesAdbAndMarksTheSessionInterrupted() {
+        val root = Files.createTempDirectory("capture-stop-storage-test").toFile()
+        val runner = FakeCaptureRunner()
+        val logcat = StreamingFakeProcess()
+        runner.enqueue(logcat)
+        val failing = AtomicBoolean(false)
+        // A long watchdog interval keeps the periodic publish (which flushes) from draining the
+        // buffer or tripping the failure before the explicit stop below.
+        val recorder = CaptureRecorder(
+            root,
+            runner,
+            watchdogIntervalMs = 60_000,
+            openStorage = { FailingFileOutputStream(it, failing) },
+        )
+        try {
+            recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            logcat.emit("01-02 03:04:05.006  100  101 I Tag: first\n")
+
+            failing.set(true) // disk full from here on: the buffered bytes can no longer be flushed
+            val stopped = assertNotNull(recorder.stop())
+
+            assertEquals(CaptureStatus.INTERRUPTED, stopped.status)
+            assertTrue(stopped.interruptions.single().startsWith("Capture storage failed while stopping:"))
+            assertTrue(stopped.interruptions.single().contains("No space left on device"))
+            assertFalse(logcat.isAlive, "adb must still be terminated when the final flush fails")
+            assertEquals(RecorderState.INTERRUPTED, recorder.snapshot.value.state)
+            assertEquals(CaptureStatus.INTERRUPTED, recorder.listSessions().single().status)
+        } finally {
+            failing.set(false)
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun overlappingOpenMirrorCallsStartExactlyOneScrcpyProcess() {
+        val root = Files.createTempDirectory("capture-mirror-once-test").toFile()
+        val scrcpyStarts = AtomicInteger(0)
+        val scrcpyStarted = CountDownLatch(1)
+        val releaseScrcpy = CountDownLatch(1)
+        val logcat = StreamingFakeProcess()
+        val mirror = StreamingFakeProcess()
+        val runner = CaptureProcessRunner { spec ->
+            if (spec.command.first() == "scrcpy") {
+                scrcpyStarts.incrementAndGet()
+                scrcpyStarted.countDown()
+                check(releaseScrcpy.await(4, TimeUnit.SECONDS)) { "scrcpy launch was never released" }
+                mirror
+            } else {
+                logcat
+            }
+        }
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(DEVICE, testSettings().copy(audio = false), CaptureTools(ADB, CaptureExecutable("scrcpy"), runner))
+            val first = AtomicBoolean(false)
+            val opener = thread(isDaemon = true) { first.set(recorder.openMirror()) }
+            assertTrue(scrcpyStarted.await(4, TimeUnit.SECONDS))
+
+            // The first call is still inside runner.start: an overlapping call must be a no-op.
+            assertTrue(recorder.openMirror())
+            assertEquals(1, scrcpyStarts.get())
+
+            releaseScrcpy.countDown()
+            opener.join(4_000)
+            assertTrue(first.get())
+            assertTrue(recorder.openMirror())
+            assertEquals(1, scrcpyStarts.get())
+
+            // The mirror's stdout pipe is drained so scrcpy can never block on a full pipe.
+            mirror.emit("scrcpy chatter\n")
+            awaitCapture { mirror.inputStream.available() == 0 }
+        } finally {
+            releaseScrcpy.countDown()
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun testSettings(
         recordVideo: Boolean = false,
         sessionLimitBytes: Long = ONE_MIB,
@@ -642,6 +729,14 @@ class CaptureRecorderTest {
         val DEVICE = CaptureDevice("SERIAL", "device", "Pixel")
         val ADB = CaptureExecutable("adb")
         const val ONE_MIB = 1024L * 1024L
+    }
+}
+
+/** A storage stream that fails every write once [failing] is set, like a disk that just filled up. */
+private class FailingFileOutputStream(file: File, private val failing: AtomicBoolean) : FileOutputStream(file, true) {
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        if (failing.get()) throw IOException("No space left on device")
+        super.write(b, off, len)
     }
 }
 

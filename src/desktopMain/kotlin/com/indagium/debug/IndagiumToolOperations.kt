@@ -524,20 +524,9 @@ internal class IndagiumToolOperations(
     }.getOrElse { mapOf("error" to (it.message ?: "Device open URL failed")) }
 
     private fun resolveDeviceLogSerial(tabId: String?, deviceSerial: String?): String {
-        deviceSerial?.trim()?.takeIf(String::isNotBlank)?.let { return it }
-        val id = tabId?.trim()?.takeIf(String::isNotBlank) ?: error("Provide deviceSerial or tabId")
-        return appState.aiCaptureBinding(id).first.device.serial
-    }
-
-    private fun parseLogBufferSizeChoice(raw: String): com.indagium.capture.LogBufferSizeChoice =
-        com.indagium.capture.LogBufferSizeChoice.entries.firstOrNull { it.logcatArg.equals(raw.trim(), ignoreCase = true) }
-            ?: error("bufferSize must be one of 256K, 1M, 4M, 16M")
-
-    private fun parseLogTagLevel(raw: String): com.indagium.capture.LogTagLevel? {
-        val trimmed = raw.trim()
-        if (trimmed.equals("default", ignoreCase = true)) return null
-        return com.indagium.capture.LogTagLevel.selectable.firstOrNull { it.propValue.equals(trimmed, ignoreCase = true) }
-            ?: error("logLevel must be one of default, V, D, I, W, E, S")
+        val id = tabId?.trim()?.takeIf(String::isNotBlank)
+        val tabSerial = id?.let { appState.aiCaptureBinding(it).first.device.serial }
+        return effectiveDeviceSerial(tabSerial, deviceSerial) ?: error("Provide deviceSerial or tabId")
     }
 
     private fun deviceLogStateToMap(serial: String, state: com.indagium.capture.DeviceLogState): Map<String, Any?> = mapOf(
@@ -561,17 +550,12 @@ internal class IndagiumToolOperations(
         bufferSize: String?,
         logLevel: String?,
     ): Map<String, Any?> = runCatching {
-        require(bufferSize != null || logLevel != null) { "Provide bufferSize and/or logLevel" }
+        // Validate everything before applying anything: a bad logLevel must not leave an already
+        // applied bufferSize change behind.
+        val changes = parseDeviceLogChanges(bufferSize, logLevel)
         val serial = resolveDeviceLogSerial(tabId, deviceSerial)
         var state: com.indagium.capture.DeviceLogState? = null
-        bufferSize?.let {
-            val choice = parseLogBufferSizeChoice(it)
-            state = appState.captureService.applyDeviceLogChangeNow(serial, com.indagium.capture.DeviceLogRetryableChange.BufferSize(choice))
-        }
-        logLevel?.let {
-            val level = parseLogTagLevel(it)
-            state = appState.captureService.applyDeviceLogChangeNow(serial, com.indagium.capture.DeviceLogRetryableChange.GlobalLevel(level))
-        }
+        changes.forEach { state = appState.captureService.applyDeviceLogChangeNow(serial, it) }
         deviceLogStateToMap(serial, state ?: appState.captureService.readDeviceLogStateNow(serial))
     }.getOrElse { mapOf("error" to (it.message ?: "Could not change device logging settings")) }
 
@@ -2589,6 +2573,40 @@ private fun encodeDeviceJpeg(image: BufferedImage, quality: Float): ByteArray {
         writer.dispose()
         imageOutput.close()
     }
+}
+
+/**
+ * The one device a tool call targets when it can name it both by `tabId` (the capture tab's device)
+ * and by `deviceSerial`. Returns null when neither is given; fails when both are and disagree, so the
+ * approval label shown for an external client and the device actually controlled can never diverge.
+ */
+internal fun effectiveDeviceSerial(tabSerial: String?, explicitSerial: String?): String? {
+    val fromTab = tabSerial?.trim()?.takeIf(String::isNotBlank)
+    val explicit = explicitSerial?.trim()?.takeIf(String::isNotBlank)
+    require(fromTab == null || explicit == null || fromTab == explicit) {
+        "tabId's device $fromTab does not match deviceSerial $explicit"
+    }
+    return explicit ?: fromTab
+}
+
+/** Parses and validates both `set_device_log_settings` values up front, in apply order. */
+internal fun parseDeviceLogChanges(bufferSize: String?, logLevel: String?): List<com.indagium.capture.DeviceLogRetryableChange> {
+    require(bufferSize != null || logLevel != null) { "Provide bufferSize and/or logLevel" }
+    return listOfNotNull(
+        bufferSize?.let { com.indagium.capture.DeviceLogRetryableChange.BufferSize(parseLogBufferSizeChoice(it)) },
+        logLevel?.let { com.indagium.capture.DeviceLogRetryableChange.GlobalLevel(parseLogTagLevel(it)) },
+    )
+}
+
+private fun parseLogBufferSizeChoice(raw: String): com.indagium.capture.LogBufferSizeChoice =
+    com.indagium.capture.LogBufferSizeChoice.entries.firstOrNull { it.logcatArg.equals(raw.trim(), ignoreCase = true) }
+        ?: error("bufferSize must be one of 256K, 1M, 4M, 16M")
+
+private fun parseLogTagLevel(raw: String): com.indagium.capture.LogTagLevel? {
+    val trimmed = raw.trim()
+    if (trimmed.equals("default", ignoreCase = true)) return null
+    return com.indagium.capture.LogTagLevel.selectable.firstOrNull { it.propValue.equals(trimmed, ignoreCase = true) }
+        ?: error("logLevel must be one of default, V, D, I, W, E, S")
 }
 
 private const val MAX_AI_SCREEN_DIMENSION = 1440

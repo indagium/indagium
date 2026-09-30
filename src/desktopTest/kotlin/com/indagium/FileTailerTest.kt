@@ -45,6 +45,58 @@ class FileTailerTest {
     }
 
     @Test
+    fun readToEndOfFileEmitsTheTrailingPartialLineOnlyWhenAskedTo() {
+        val dir = createTempDirectory("openlog-tail").toFile()
+        val file = File(dir, "out.log").apply { writeText("first\nsecond\nno newline at the end") }
+
+        val ordinary = FileTailer(file, onNewLines = {}, startOffset = 0L)
+        ordinary.start(newScope()).cancel()
+        assertEquals(listOf("first", "second"), ordinary.readToEndOfFile())
+        // Nothing more arrives, and the default never emits the unterminated tail.
+        assertEquals(emptyList(), ordinary.readToEndOfFile())
+
+        val optIn = FileTailer(file, onNewLines = {}, startOffset = 0L)
+        optIn.start(newScope()).cancel()
+        assertEquals(
+            listOf("first", "second", "no newline at the end"),
+            optIn.readToEndOfFile(includeTrailingPartialLine = true),
+        )
+        assertEquals(file.length(), optIn.currentOffset)
+        // The partial line is emitted once, not again on a second drain.
+        assertEquals(emptyList(), optIn.readToEndOfFile(includeTrailingPartialLine = true))
+    }
+
+    @Test
+    fun trailingPartialLineOptInIgnoresAFileThatEndsWithANewlineOrACarriageReturn() {
+        val dir = createTempDirectory("openlog-tail").toFile()
+        val complete = File(dir, "complete.log").apply { writeText("a\nb\n") }
+        val tailer = FileTailer(complete, onNewLines = {}, startOffset = 0L)
+        assertEquals(listOf("a", "b"), tailer.readToEndOfFile(includeTrailingPartialLine = true))
+
+        val carriageReturn = File(dir, "cr.log").apply { writeText("a\n\r") }
+        val crTailer = FileTailer(carriageReturn, onNewLines = {}, startOffset = 0L)
+        assertEquals(listOf("a"), crTailer.readToEndOfFile(includeTrailingPartialLine = true))
+    }
+
+    @Test
+    fun drainToEndOfFileDeliversALargeBacklogInBoundedBatches() {
+        val dir = createTempDirectory("openlog-tail").toFile()
+        val file = File(dir, "out.log")
+        val line = "x".repeat(1023)
+        // ~9 MiB of complete lines plus a partial tail: more than two of FileTailer's 4 MiB chunks.
+        file.bufferedWriter().use { out -> repeat(9 * 1024) { out.write(line); out.write("\n") } }
+        file.appendText("tail")
+        val batches = mutableListOf<Int>()
+        val tailer = FileTailer(file, onNewLines = {}, startOffset = 0L)
+        tailer.drainToEndOfFile(includeTrailingPartialLine = true) { batches += it.size }
+
+        assertEquals(9 * 1024 + 1, batches.sum())
+        assertTrue(batches.size >= 3, "expected several bounded batches, got $batches")
+        assertTrue(batches.dropLast(1).all { it <= 4 * 1024 }, "no batch may exceed the 4 MiB chunk cap: $batches")
+        assertEquals(1, batches.last(), "the trailing partial line arrives as its own final batch")
+    }
+
+    @Test
     fun doesNotEmitAPartialLineUntilItsNewlineArrives() {
         val dir = createTempDirectory("openlog-tail").toFile()
         val file = File(dir, "out.log").apply { writeText("") }

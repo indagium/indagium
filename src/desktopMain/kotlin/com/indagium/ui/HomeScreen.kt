@@ -476,7 +476,7 @@ private fun HomeRecentSection(
     onReclaimFocus: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    LaunchedEffect(Unit) { state.pruneMissingRecentFiles() }
+    LaunchedEffect(Unit) { state.pruneMissingRecentFilesOffUiThread() }
     // Seeded from AppState.homeRecentEntriesCache (survives this composable's own disposal on tab
     // switch — see that field's doc) rather than emptyList(), so re-entering the New tab paints the
     // previous grid/list on the very first frame instead of "No recent files yet" while this re-stats

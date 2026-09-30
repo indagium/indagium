@@ -26,7 +26,10 @@ internal class FakeCaptureRunner : CaptureProcessRunner {
     }
 }
 
-internal class StreamingFakeProcess : RunningCaptureProcess {
+internal class StreamingFakeProcess(
+    /** Written to stdout from [terminate], like adb's last buffered bytes arriving while it exits. */
+    private val emitOnTerminate: String? = null,
+) : RunningCaptureProcess {
     private val alive = AtomicBoolean(true)
     private val exited = CountDownLatch(1)
     private val pipe = PipedInputStream(64 * 1024)
@@ -52,6 +55,7 @@ internal class StreamingFakeProcess : RunningCaptureProcess {
     override fun exitCode(): Int? = if (alive.get()) null else 0
 
     override fun terminate(grace: Duration) {
+        emitOnTerminate?.let(::emit)
         finish()
     }
 

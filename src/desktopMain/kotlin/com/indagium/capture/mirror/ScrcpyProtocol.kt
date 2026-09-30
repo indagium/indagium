@@ -28,7 +28,13 @@ internal class MirrorCoordinateMapper(
     val screenWidth: Int get() = deviceWidth
     val screenHeight: Int get() = deviceHeight
 
-    fun map(viewportX: Float, viewportY: Float): DevicePoint? {
+    /**
+     * Converts a viewport position to a device point. Outside the drawn picture (the letterbox)
+     * this returns null, unless [clamp] is set, which pins the point to the nearest picture edge
+     * instead — used for the rest of a gesture whose DOWN landed inside the picture, so a release
+     * or drag that ends in the letterbox still reaches the device.
+     */
+    fun map(viewportX: Float, viewportY: Float, clamp: Boolean = false): DevicePoint? {
         val rotated = rotationDegrees.absoluteQuarterTurns() % 2 == 1
         val contentWidth = if (rotated) deviceHeight else deviceWidth
         val contentHeight = if (rotated) deviceWidth else deviceHeight
@@ -37,11 +43,10 @@ internal class MirrorCoordinateMapper(
         val drawnHeight = contentHeight * scale
         val left = (viewportWidth - drawnWidth) / 2f
         val top = (viewportHeight - drawnHeight) / 2f
-        if (viewportX < left || viewportX >= left + drawnWidth || viewportY < top || viewportY >= top + drawnHeight) {
-            return null
-        }
-        val x = ((viewportX - left) / scale).roundToInt().coerceIn(0, contentWidth - 1)
-        val y = ((viewportY - top) / scale).roundToInt().coerceIn(0, contentHeight - 1)
+        val outside = viewportX < left || viewportX >= left + drawnWidth || viewportY < top || viewportY >= top + drawnHeight
+        if (outside && !clamp) return null
+        val x = ((viewportX.coerceIn(left, left + drawnWidth) - left) / scale).roundToInt().coerceIn(0, contentWidth - 1)
+        val y = ((viewportY.coerceIn(top, top + drawnHeight) - top) / scale).roundToInt().coerceIn(0, contentHeight - 1)
         return when (rotationDegrees.mod(360)) {
             0 -> DevicePoint(x, y)
             90 -> DevicePoint(deviceWidth - 1 - y, x)

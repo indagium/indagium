@@ -360,6 +360,7 @@ internal class LiveAudioPlayer(
     private val jitterBuffer = AudioJitterBuffer()
     private val decoder = OpusPcmDecoder(onDiagnostic)
     private val running = AtomicBoolean(true)
+    private val decoderClosed = AtomicBoolean(false)
     private val decodeThread = thread(name = "live-audio-decode", isDaemon = true) { runDecodeLoop() }
     private val playbackThread = thread(name = "live-audio-playback", isDaemon = true) { runPlaybackLoop() }
     private var line: SourceDataLine? = null
@@ -377,19 +378,30 @@ internal class LiveAudioPlayer(
     }
 
     private fun runDecodeLoop() {
-        while (running.get()) {
-            val item = try {
-                queue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            } catch (_: InterruptedException) {
-                null
-            } ?: continue
-            if (item.config) {
-                decoder.configure(item.data)
-            } else {
-                val pcm = runCatching { decoder.decode(item.data) }.getOrNull()
-                if (pcm != null && pcm.isNotEmpty()) jitterBuffer.write(pcm, pcm.size / LIVE_AUDIO_CHANNELS)
+        try {
+            while (running.get()) {
+                val item = try {
+                    queue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    null
+                } ?: continue
+                if (item.config) {
+                    decoder.configure(item.data)
+                } else {
+                    val pcm = runCatching { decoder.decode(item.data) }.getOrNull()
+                    if (pcm != null && pcm.isNotEmpty()) jitterBuffer.write(pcm, pcm.size / LIVE_AUDIO_CHANNELS)
+                }
             }
+        } finally {
+            // The decode thread is the decoder's only user, so it frees the native decoder itself
+            // when it exits; close() does so only after the thread is gone (see closeDecoderOnce).
+            closeDecoderOnce()
         }
+    }
+
+    /** Frees the native decoder exactly once, from whichever side gets here first. */
+    private fun closeDecoderOnce() {
+        if (decoderClosed.compareAndSet(false, true)) runCatching { decoder.close() }
     }
 
     private fun runPlaybackLoop() {
@@ -434,7 +446,9 @@ internal class LiveAudioPlayer(
         runCatching { decodeThread.join(JOIN_MS) }
         runCatching { playbackThread.join(JOIN_MS) }
         runCatching { line?.close() }
-        runCatching { decoder.close() }
+        // A decode call stuck in native code can outlast the join above; closing the decoder under
+        // it would free it mid-use. In that case the decode thread frees it when it finally exits.
+        if (!decodeThread.isAlive) closeDecoderOnce()
         jitterBuffer.close()
     }
 

@@ -26,6 +26,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.io.OutputStream
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset
@@ -104,6 +105,8 @@ class CaptureRecorder internal constructor(
     private val embeddedTransportFactory: (CaptureTools) -> EmbeddedMirrorTransport = { tools ->
         AdbScrcpyTransport(tools = tools, runner = runner, localRoot = sessionsRoot)
     },
+    // Test seam: lets a test hand the recorder a storage stream that fails on demand (disk full).
+    private val openStorage: (File) -> FileOutputStream = { FileOutputStream(it, true) },
 ) : Closeable {
     private val lock = Any()
     private val active = AtomicBoolean(false)
@@ -134,6 +137,9 @@ class CaptureRecorder internal constructor(
     private val lastElapsedMsAtomic = AtomicLong(0)
     private var logProcess: RunningCaptureProcess? = null
     private var mirrorProcess: RunningCaptureProcess? = null
+
+    /** Set while [openMirror] is launching scrcpy, so two overlapping calls cannot start two processes. */
+    private var mirrorOpening = false
     private var embeddedSession: EmbeddedDeviceSession? = null
     private val mutableEmbeddedSession = MutableStateFlow<EmbeddedDeviceSession?>(null)
     private var logThread: Thread? = null
@@ -148,6 +154,9 @@ class CaptureRecorder internal constructor(
     private var lastSpaceCheckMs: Long = Long.MIN_VALUE
     private var lastMetadataPersistMs: Long = Long.MIN_VALUE
     private var stopLatch = CountDownLatch(0)
+
+    /** First storage failure seen while stopping (guarded by [lock]); turns the final status INTERRUPTED. */
+    private var stopStorageFailure: String? = null
 
     val snapshot: StateFlow<RecorderSnapshot> = mutableSnapshot.asStateFlow()
     val selectedSession: StateFlow<CaptureSession?> = mutableSelectedSession.asStateFlow()
@@ -229,8 +238,8 @@ class CaptureRecorder internal constructor(
         var openedLogFile: FileOutputStream? = null
         var openedIndexFile: FileOutputStream? = null
         try {
-            openedLogFile = FileOutputStream(session.logFile, true)
-            openedIndexFile = FileOutputStream(session.indexFile, true)
+            openedLogFile = openStorage(session.logFile)
+            openedIndexFile = openStorage(session.indexFile)
         } catch (failure: IOException) {
             runCatching { openedLogFile?.close() }
             runCatching { openedIndexFile?.close() }
@@ -468,27 +477,36 @@ class CaptureRecorder internal constructor(
             requireNotNull(currentSession) to requireNotNull(currentTools)
         }
         synchronized(lock) {
-            if (mirrorProcess?.isAlive == true) return true
+            if (mirrorOpening || mirrorProcess?.isAlive == true) return true
             mirrorProcess = null
+            mirrorOpening = true
         }
-        if (session.settings.audio) tools.legacyScrcpyAudioWarning()?.let(::addDiagnostic)
-        val audioPlan = resolveAudioPlan(tools, session.device.serial, session.settings)
-        val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings, audioPlan.cliArgs))
-        val accepted = synchronized(lock) {
-            if (!active.get()) {
-                false
-            } else {
-                mirrorProcess = process
-                true
+        var stillOpening = true
+        try {
+            if (session.settings.audio) tools.legacyScrcpyAudioWarning()?.let(::addDiagnostic)
+            val audioPlan = resolveAudioPlan(tools, session.device.serial, session.settings)
+            val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings, audioPlan.cliArgs))
+            val accepted = synchronized(lock) {
+                mirrorOpening = false
+                stillOpening = false
+                if (!active.get()) {
+                    false
+                } else {
+                    mirrorProcess = process
+                    true
+                }
             }
+            if (!accepted) {
+                process.terminate()
+                process.close()
+                return false
+            }
+            thread(name = "capture-mirror-${session.id}", isDaemon = true) { monitorMirror(process) }
+            return true
+        } finally {
+            // Only the failure path (legacy warning, audio plan or runner.start threw) still owns the flag.
+            if (stillOpening) synchronized(lock) { mirrorOpening = false }
         }
-        if (!accepted) {
-            process.terminate()
-            process.close()
-            return false
-        }
-        thread(name = "capture-mirror-${session.id}", isDaemon = true) { monitorMirror(process) }
-        return true
     }
 
     fun listSessions(): List<CaptureSession> {
@@ -652,6 +670,7 @@ class CaptureRecorder internal constructor(
 
     private fun monitorMirror(process: RunningCaptureProcess) {
         drainDiagnostics(process.errorStream, "scrcpy mirror")
+        discardOutput(process.inputStream, "scrcpy mirror")
         process.waitFor(Duration.ofDays(VIDEO_MONITOR_MAX_WAIT_DAYS))
         process.exitCode()?.takeIf { it != 0 }?.let { exitCode ->
             addDiagnostic("scrcpy mirror exited with status $exitCode; see the scrcpy mirror output above.")
@@ -663,6 +682,9 @@ class CaptureRecorder internal constructor(
         process.close()
     }
 
+    // Storage failures while stopping (disk full) must never stop the teardown: processes are
+    // always terminated and streams always closed, and the failure is what decides the final status.
+    @Suppress("TooGenericExceptionCaught", "LongMethod", "CyclomaticComplexMethod")
     private fun stopInternal(status: CaptureStatus, reason: String?): CaptureSession? {
         var ownsStop = false
         var processes = emptyList<RunningCaptureProcess>()
@@ -700,10 +722,22 @@ class CaptureRecorder internal constructor(
         runCatching { videoSession?.close() }
         try {
             synchronized(lock) {
-                runCatching { logOutput?.flush(); logFileOutput?.fd?.sync() }
-                runCatching { indexOutput?.flush(); indexFileOutput?.fd?.sync() }
-                runCatching { logOutput?.close() }
-                runCatching { indexOutput?.close() }
+                var storageFailure = stopStorageFailure
+
+                fun guarded(step: () -> Unit) {
+                    try {
+                        step()
+                    } catch (failure: IOException) {
+                        if (storageFailure == null) storageFailure = failure.message ?: failure::class.simpleName
+                    } catch (failure: RuntimeException) {
+                        if (storageFailure == null) storageFailure = failure.message ?: failure::class.simpleName
+                    }
+                }
+                guarded { logOutput?.flush(); logFileOutput?.fd?.sync() }
+                guarded { indexOutput?.flush(); indexFileOutput?.fd?.sync() }
+                guarded { logOutput?.close() }
+                guarded { indexOutput?.close() }
+                stopStorageFailure = null
                 logOutput = null
                 indexOutput = null
                 logFileOutput = null
@@ -713,21 +747,21 @@ class CaptureRecorder internal constructor(
                 embeddedSession = null
                 mutableEmbeddedSession.value = null
                 val old = currentSession ?: return null
-                val interruptionList = if (reason == null) {
-                    old.interruptions
-                } else {
-                    (old.interruptions + reason).takeLast(MAX_DIAGNOSTICS)
-                }
+                val storageReason = storageFailure?.let { "Capture storage failed while stopping: $it" }
+                val interruptionList = (old.interruptions + listOfNotNull(reason, storageReason)).takeLast(MAX_DIAGNOSTICS)
+                // A failed final flush/sync/close means the tail of the log or index may be missing,
+                // so the session must not claim a clean STOPPED.
+                val finalStatus = if (storageReason != null) CaptureStatus.INTERRUPTED else status
                 val finished = old.copy(
                     elapsedMs = maxOf(old.elapsedMs, elapsedNow()),
-                    status = status,
+                    status = finalStatus,
                     interruptions = interruptionList,
                 )
                 currentSession = finished
                 mutableSelectedSession.value = finished
                 persistSession(finished)
                 publishLocked(
-                    if (status == CaptureStatus.STOPPED) RecorderState.STOPPED else RecorderState.INTERRUPTED,
+                    if (finalStatus == CaptureStatus.STOPPED) RecorderState.STOPPED else RecorderState.INTERRUPTED,
                     force = true,
                 )
                 return finished
@@ -756,13 +790,27 @@ class CaptureRecorder internal constructor(
         }
     }
 
+    @Suppress("TooGenericExceptionCaught") // A failing flush during stop must not abort the teardown.
     private fun publishLocked(state: RecorderState, force: Boolean = false) {
         val now = clock.monotonicMillis()
         if (!force && lastPublishMs != Long.MIN_VALUE && now >= lastPublishMs &&
             now - lastPublishMs < PREVIEW_PUBLISH_INTERVAL_MS
         ) return
-        logOutput?.flush()
-        indexOutput?.flush()
+        if (active.get()) {
+            logOutput?.flush()
+            indexOutput?.flush()
+        } else {
+            // Stop path: stopInternal has claimed the stop and still has processes to terminate and
+            // streams to close. Record the failure; the final flush there decides the session status.
+            try {
+                logOutput?.flush()
+                indexOutput?.flush()
+            } catch (failure: IOException) {
+                recordStopStorageFailureLocked(failure)
+            } catch (failure: RuntimeException) {
+                recordStopStorageFailureLocked(failure)
+            }
+        }
         lastPublishMs = now
         val sessionForUi = currentSession?.let { session ->
             if (active.get()) session.copy(elapsedMs = maxOf(session.elapsedMs, elapsedNow())) else session
@@ -778,6 +826,12 @@ class CaptureRecorder internal constructor(
             indexedRows = rowOrdinal,
             videoRecording = embeddedSession?.hasStartedVideo() == true,
         )
+    }
+
+    private fun recordStopStorageFailureLocked(failure: Exception) {
+        val message = failure.message ?: failure::class.simpleName ?: "Capture storage failed"
+        if (stopStorageFailure == null) stopStorageFailure = message
+        addDiagnosticLocked("Capture storage failed while stopping: $message")
     }
 
     private fun addDiagnostic(message: String) = synchronized(lock) {
@@ -814,6 +868,13 @@ class CaptureRecorder internal constructor(
             input.bufferedReader().useLines { lines ->
                 lines.forEach { line -> if (line.isNotBlank()) addDiagnostic("$source: $line") }
             }
+        }
+    }
+
+    /** Reads and drops [input] so a chatty child can never block on a full stdout pipe. */
+    private fun discardOutput(input: InputStream, source: String) {
+        thread(name = "capture-$source-stdout", isDaemon = true) {
+            runCatching { input.use { it.copyTo(OutputStream.nullOutputStream()) } }
         }
     }
 

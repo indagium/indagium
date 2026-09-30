@@ -119,17 +119,46 @@ class FileTailer(
     // up to one poll interval of already-written bytes unread, and for a capture tab that gap
     // would silently desync the log↔video mapping (CaptureTimelineIndex's row-count guard). Reuses
     // readNewLines/readChunk's own line-splitting rather than a second, subtly different reader —
-    // a trailing partial line (no newline yet) is left unread, exactly as the poll loop does.
-    fun readToEndOfFile(): List<String> {
+    // a trailing partial line (no newline yet) is left unread, exactly as the poll loop does,
+    // unless [includeTrailingPartialLine] is set. That opt-in is for a caller that knows the writer
+    // has finished and will never complete the line (a stopped capture: the recorder indexes its
+    // final unterminated line as a row); normal polling never sets it.
+    fun readToEndOfFile(includeTrailingPartialLine: Boolean = false): List<String> {
         val all = mutableListOf<String>()
+        drainToEndOfFile(includeTrailingPartialLine) { all.addAll(it) }
+        return all
+    }
+
+    // Same final catch-up as [readToEndOfFile], but hands each bounded chunk (at most
+    // MAX_TAIL_READ_BYTES of lines) to [onBatch] as it is read, so a large backlog is appended
+    // chunk by chunk instead of being accumulated into one list first.
+    fun drainToEndOfFile(includeTrailingPartialLine: Boolean = false, onBatch: (List<String>) -> Unit) {
         while (true) {
             val result = readNewLines(offset)
             if (result.lines.isEmpty()) break
             offset = result.newOffset
-            all.addAll(result.lines)
+            onBatch(result.lines)
             if (!result.moreAvailable) break
         }
-        return all
+        if (includeTrailingPartialLine) readTrailingPartialLine()?.let { onBatch(listOf(it)) }
+    }
+
+    // The bytes after the last complete line, as one line — or null when there are none, they are
+    // only a carriage return, or (defensively) they contain a newline and so are not a partial line.
+    private fun readTrailingPartialLine(): String? {
+        if (!file.exists()) return null
+        val remaining = file.length() - offset
+        if (remaining <= 0L || remaining > Int.MAX_VALUE) return null
+        val bytes = ByteArray(remaining.toInt())
+        RandomAccessFile(file, "r").use { raf ->
+            raf.seek(offset)
+            raf.readFully(bytes)
+        }
+        if (bytes.contains(NEWLINE_BYTE)) return null
+        val line = String(bytes, Charsets.UTF_8).trimEnd(CARRIAGE_RETURN)
+        if (line.isEmpty()) return null
+        offset += bytes.size
+        return line
     }
 
     private fun readNewLines(fromOffset: Long): ReadResult {

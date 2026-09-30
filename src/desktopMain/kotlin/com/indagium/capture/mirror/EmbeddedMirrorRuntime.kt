@@ -251,7 +251,9 @@ internal class EmbeddedMirrorRuntime(
         actionButton: Long = 0,
         buttons: Long = 0,
     ): Boolean {
-        val point = mapper.map(viewportX, viewportY) ?: return false
+        // Only a press is confined to the picture; MOVE/UP/CANCEL clamp to its edge so a touch that
+        // started inside and ends in the letterbox still releases (else the device stays pressed).
+        val point = mapper.map(viewportX, viewportY, clamp = action != MirrorTouchAction.DOWN) ?: return false
         return send(
             MirrorControlCommand.Touch(
                 action = action,
