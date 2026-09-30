@@ -41,7 +41,7 @@
           {
             "@type": "Question",
             "name": "Does Indagium capture logs directly from a connected device?",
-            "acceptedAnswer": { "@type": "Answer", "text": "No. Indagium is an offline logcat viewer — it opens the .txt/.log files you already captured with adb logcat, not a live device capture tool." }
+            "acceptedAnswer": { "@type": "Answer", "text": "Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Existing files still open offline; see the Android logcat capture guide for setup." }
           },
           {
             "@type": "Question",
@@ -66,7 +66,7 @@
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header">
       <a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a>
-      <nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
+      <nav aria-label="Primary navigation"><a href="/android-logcat-viewer/#features">Features</a><a href="/guides/">Guides</a><a href="/android-logcat-capture/">Capture</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a></nav>
       <a class="header-download" href="https://github.com/indagium/indagium/releases/latest">Download <span aria-hidden="true">↗</span></a>
     </header>
     <main id="main">
@@ -93,12 +93,13 @@
       <section class="section" id="formats" aria-labelledby="viewer-formats-title">
         <p class="eyebrow">What you can open</p>
         <h2 id="viewer-formats-title">One viewer for <em>every capture format.</em></h2>
-        <p class="section-lede">Point Indagium at the file and it opens directly — no conversion step, no adb connection to a device, and no Android Studio project required. Everything below opens as a normal tab in the same viewer.</p>
+        <p class="section-lede">Point Indagium at an existing file and it opens directly — no conversion step, device connection, or Android Studio project is required to read a saved log. For a new live device session, Indagium also captures logcat over USB or Wi-Fi and can record the screen alongside it.</p>
         <div class="feature-matrix">
           <article class="evidence-card"><span>01</span><h3>Logcat text</h3><p>Open logcat .txt or .log files in threadtime, time, brief, or bare format; unrecognised lines fall back to tag RAW. Level filters cover V, D, I, W, E, and A individually.</p></article>
           <article class="evidence-card"><span>02</span><h3>Android bugreports</h3><p>Open a bugreport's .zip or .7z archive directly and pick which content to load into the active tab, instead of extracting the whole archive to disk first.</p></article>
           <article class="evidence-card"><span>03</span><h3><a class="inline-link" href="/dlt-viewer/">DLT captures</a></h3><p>Open .dlt binary captures and raw DLT streams; frames are decoded as records, and non-verbose payloads are kept as readable text/hex (not interpreted through FIBEX or ARXML).</p></article>
           <article class="evidence-card"><span>04</span><h3>DLT Viewer exports</h3><p>Open DLT Viewer text and CSV exports the same way as a native logcat file, including split parts that repeat the CSV header row.</p></article>
+          <article class="evidence-card"><span>05</span><h3>Capture Android logcat live</h3><p>Connect over USB or Android 11+ wireless debugging to stream logcat and record screen video together. Save a ZIP and reopen it with the available video synchronized to the log.</p></article>
         </div>
       </section>
       <section class="section split-callout" aria-labelledby="viewer-next-title">
@@ -111,13 +112,13 @@
         <p class="section-lede">Common questions about opening and reading logcat files, bugreports, and DLT captures in Indagium.</p>
         <div class="faq-list">
           <div><h3>What log formats can I open in Indagium's Android log viewer?</h3><p>Indagium opens logcat text in threadtime, time, brief, and bare formats (unrecognised lines are shown with tag RAW), plus DLT (.dlt) binary captures, raw DLT streams, and DLT Viewer text/CSV exports.</p></div>
-          <div><h3>Does Indagium capture logs directly from a connected device?</h3><p>No. Indagium is an offline logcat viewer — it opens the .txt/.log files you already captured with adb logcat, not a live device capture tool.</p></div>
+          <div><h3>Does Indagium capture logs directly from a connected device?</h3><p>Yes. Indagium can stream live logcat from an authorized Android device over USB or Android 11+ wireless debugging, and record screen video in the same session. Existing files still open offline; see the Android logcat capture guide for setup.</p></div>
           <div><h3>Is Indagium free to use?</h3><p>Yes, Indagium is free to use for both commercial and non-commercial purposes. It is source-available under the PolyForm Perimeter License, not open source.</p></div>
           <div><h3>Can I read logcat files without Android Studio?</h3><p>Yes. Android Studio's Logcat window follows a connected device; Indagium opens the saved .txt or .log file instead, as a focused desktop app for macOS, Windows, and Linux with filters, folded sequences, and side-by-side comparison.</p></div>
           <div><h3>How large a logcat file can the viewer open?</h3><p>Multi-gigabyte logs, with an optional split-on-open for the very biggest files.</p></div>
         </div>
       </section>
     </main>
-    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
+    <footer><div><a class="wordmark" href="/" aria-label="Indagium home"><span>◆</span> indagium</a><p>The Log Analysis Studio for Android logcat.</p></div><nav aria-label="Footer navigation"><a href="/android-logcat-viewer/">Log viewer</a><a href="/logcat-analyzer/">Logcat analyzer</a><a href="/android-bug-report-viewer/">Bugreport viewer</a><a href="/dlt-viewer/">DLT viewer</a><a href="/logcat-mcp-server/">MCP server</a><a href="/guides/">Guides</a><a href="/log-analysis-workflow/">Comparison</a><a href="/android-logcat-capture/">Capture</a><a href="https://github.com/indagium/indagium">GitHub</a><a href="https://github.com/indagium/indagium/releases/latest">Download</a></nav></footer>
   </body>
 </html>

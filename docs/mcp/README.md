@@ -91,6 +91,17 @@ A few worth calling out:
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.
 
+## Device capture
+
+The current tool set also includes approved operations for a connected Android device. Read-only
+listing and capture-status calls need no approval; device changes and live-screen reads require
+per-session approval in an external client. The in-app AI panel uses the authorization in the user's
+prompt. An agent can start or stop log/video capture, mark an issue, save a screenshot to Notes, and
+export a ZIP snapshot; see [AVAILABLE_METHODS.md](AVAILABLE_METHODS.md#device-capture) for operation
+semantics and polling. Capture uses the same USB or Android 11+ wireless debugging setup as the app;
+the [device-capture guide](https://indagium.com/android-logcat-capture/) explains pairing and how a
+reopened ZIP synchronizes its log and video.
+
 ## Direct HTTP (no MCP)
 
 The same server also serves a plain JSON/REST surface for quick scripting or `curl`, e.g.
