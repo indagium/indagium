@@ -94,6 +94,7 @@ import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.LogTab
 import com.indagium.model.VideoFrameReference
+import com.indagium.model.hasSameRow
 import com.indagium.model.resolveRows
 import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.presentLogLine
@@ -2300,7 +2301,7 @@ private fun RenderedMarkdownPreview(tab: LogTab, settings: AppSettings, mono: Fo
 
                 is AnnBlock.LogRef -> {
                     val rows = block.resolveRows(tab)
-                    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+                    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
                     val context = rememberAnnotationLogLineContext(tab, settings, localSource)
                     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
@@ -3143,7 +3144,7 @@ private fun LogRefBlock(
     editingEnabled: Boolean = true,
 ) {
     val rows = block.resolveRows(tab)
-    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
     val context = rememberAnnotationLogLineContext(tab, settings, localSource)
     val borderColor = rows.firstOrNull()?.level?.defaultColor ?: tc.ac
 

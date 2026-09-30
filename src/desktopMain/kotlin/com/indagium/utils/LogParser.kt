@@ -104,15 +104,19 @@ fun parseLogcatLines(lines: Sequence<String>, startId: Int = 1): List<LogEntry> 
 private fun matchThreadtimeWithOffset(line: String, id: Int, intern: (String) -> String): LogEntry? {
     val m = RE_THREADTIME_WITH_OFFSET.matchEntire(line) ?: return null
     val dateAndTime = m.groupValues[1]
-    val ts = if (dateAndTime.length > 5 && dateAndTime[2] == '-') {
+    val monthDayPrefixed = dateAndTime.length > DATE_PREFIX_LENGTH && dateAndTime[2] == '-'
+    val ts = if (monthDayPrefixed) {
         stripDatePrefix(dateAndTime)
     } else {
         dateAndTime.substringAfterLast(' ').substringAfter('T')
     }
+    // "MM-DD ..." or the year-qualified "YYYY-MM-DD..." — the year itself is deliberately dropped.
+    val day = if (monthDayPrefixed) dayOfYearOf(dateAndTime, 0, 3) else dayOfYearOf(dateAndTime, 5, 8)
     return LogEntry(
         id, ts, androidLogLevelFrom(m.groupValues[5][0]), intern(m.groupValues[6].trim()), m.groupValues[7],
         pid = m.groupValues[3].toIntOrNull() ?: 0,
         tid = m.groupValues[4].toIntOrNull() ?: 0,
+        dayOfYear = day,
     )
 }
 
@@ -123,6 +127,7 @@ private fun matchThreadtime(line: String, id: Int, intern: (String) -> String): 
         androidLogLevelFrom(m.groupValues[4][0]), intern(m.groupValues[5].trim()), m.groupValues[6],
         pid = m.groupValues[2].toIntOrNull() ?: 0,
         tid = m.groupValues[3].toIntOrNull() ?: 0,
+        dayOfYear = dayOfYearOf(m.groupValues[1], 0, 3),
     )
 }
 
@@ -132,6 +137,7 @@ private fun matchTime(line: String, id: Int, intern: (String) -> String): LogEnt
         id, stripDatePrefix(m.groupValues[1]),
         androidLogLevelFrom(m.groupValues[2][0]), intern(m.groupValues[3].trim()), m.groupValues[5],
         pid = m.groupValues[4].toIntOrNull() ?: 0,
+        dayOfYear = dayOfYearOf(m.groupValues[1], 0, 3),
     )
 }
 
@@ -154,7 +160,7 @@ private fun parseStructuredLogcatLine(
     intern: (String) -> String,
 ): LogEntry? {
     parseThreadtimeFast(line)?.let { p ->
-        return LogEntry(id, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid)
+        return LogEntry(id, p.ts, p.level, intern(p.tag), p.msg, pid = p.pid, tid = p.tid, dayOfYear = p.dayOfYear)
     }
     return matchThreadtimeWithOffset(line, id, intern)
         ?: matchThreadtime(line, id, intern)
@@ -178,6 +184,15 @@ private fun stripDatePrefix(dateAndTime: String): String = dateAndTime.substring
 
 private const val DATE_PREFIX_LENGTH = 5
 
+// Decodes the two-digit month at [monthAt] and day at [dayAt] of a prefix the caller has already
+// matched as digits (regex groups / digits() checks) into LogEntry.dayOfYear. NO_DATE for an
+// out-of-range month or day (e.g. "13-45"), which then simply keeps that row on the undated path.
+private fun dayOfYearOf(text: String, monthAt: Int, dayAt: Int): Short {
+    val month = (text[monthAt] - '0') * 10 + (text[monthAt + 1] - '0')
+    val day = (text[dayAt] - '0') * 10 + (text[dayAt + 1] - '0')
+    return logDaySlot(month, day)
+}
+
 private class ThreadtimeParts(
     val ts: String,
     val level: LogLevel,
@@ -185,6 +200,7 @@ private class ThreadtimeParts(
     val msg: String,
     val pid: Int,
     val tid: Int,
+    val dayOfYear: Short,
 )
 
 private const val LEVEL_CHARS = "VDIWEAF"
@@ -268,5 +284,5 @@ private fun parseThreadtimeFast(line: String): ThreadtimeParts? {
     if (tag.isEmpty()) return null
     p = colon + 1
     while (p < n && line[p].isSeparator()) p++
-    return ThreadtimeParts(ts, level, tag, line.substring(p), pid, tid)
+    return ThreadtimeParts(ts, level, tag, line.substring(p), pid, tid, dayOfYearOf(line, 0, 3))
 }

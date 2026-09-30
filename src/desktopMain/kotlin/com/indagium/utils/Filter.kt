@@ -1225,7 +1225,7 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
     val rows = block.resolveRows(tab)
     // A recovered/cross-tab LogRef has no reliable current viewer baseline or process-name map.
     // It still copies its own PID/TID data, but deliberately falls back to numeric PID and omits Δt.
-    val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
+    val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
     val context = if (localSource) annotationLineContext(tab, settings) else null
     when (settings.annotationLogBlockStyle) {
         AnnotationLogBlockStyle.INDENTED ->

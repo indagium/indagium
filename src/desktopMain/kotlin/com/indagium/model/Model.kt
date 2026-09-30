@@ -26,6 +26,11 @@ enum class LogLevel(val key: Char, val label: String, val defaultColor: Color) {
  * binary captures share the same row model and are both represented by [DLT]. */
 enum class LogFormat { LOGCAT, DLT }
 
+/** [LogEntry.dayOfYear] / `LogTimelinePoint.dayOfYear` value for a row that carries no calendar date
+ *  (brief/RAW/bare-time formats, DLT, rows rebuilt from notes). Such rows use the legacy
+ *  time-of-day-only timeline heuristics. */
+const val NO_DATE: Short = -1
+
 data class LogEntry(
     val id: Int,
     val ts: String,
@@ -48,6 +53,12 @@ data class LogEntry(
     val dltMessageType: String? = null,
     val dltTimestamp: Long? = null,
     val dltTimestampSource: String? = null,
+    // Calendar slot (0..365, Feb 29 has its own slot — see utils/LogTime.kt logDaySlot) decoded from
+    // the logcat "MM-DD" prefix, or NO_DATE. `ts` still holds the bare time-of-day, so display,
+    // filters and exports are unaffected; only the timeline/Δt code reads this. A Short is the
+    // smallest type that fits and is absorbed by the object's alignment padding. Appended last so
+    // every positional LogEntry(...) construction keeps compiling.
+    val dayOfYear: Short = NO_DATE,
 )
 
 // ── Sequences ──────────────────────────────────────────────────────
@@ -868,6 +879,14 @@ data class LogTab(
     // LogTab construction.
     val messageCompositionRevision: Long = 0,
 )
+
+/** Whether [cached] (a note's row, possibly restored from a `.ann` token, which carries no
+ *  [LogEntry.dayOfYear]) is still this tab's row with the same id. The date is ignored so notes saved
+ *  before rows carried one keep matching their tab. */
+fun LogTab.hasSameRow(cached: LogEntry): Boolean {
+    val live = rmap[cached.id] ?: return false
+    return live == cached || live.copy(dayOfYear = cached.dayOfYear) == cached
+}
 
 /**
  * The single, shared way to get the log rows a LogRef block should display. Was duplicated as
