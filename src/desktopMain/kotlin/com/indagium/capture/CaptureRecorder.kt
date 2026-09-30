@@ -374,6 +374,7 @@ class CaptureRecorder internal constructor(
                     newSession.close()
                     return synchronized(lock) { requireNotNull(currentSession) }
                 }
+                startNoVideoDiagnosticWatcher(session.id, device.serial, settings.recordVideo, newSession)
                 val audioPlan = resolveAudioPlan(tools, device.serial, settings)
                 newSession.start(
                     device.serial,
@@ -665,6 +666,42 @@ class CaptureRecorder internal constructor(
             currentSession = updated
             if (mutableSelectedSession.value?.id == updated.id) mutableSelectedSession.value = updated
             persistSession(updated)
+        }
+    }
+
+    /**
+     * One-shot "no video" evidence (see [reportNoVideoDiagnostic]). Runs on its own daemon thread
+     * and reads only lock-free state ([elapsedNow], the session's atomics) — deliberately NOT on the
+     * watchdog thread, which takes [lock] and could be the very thread that is stuck. Fires at most
+     * once per capture, when the capture is [CAPTURE_NO_VIDEO_AFTER_MS] old and no first video packet
+     * has arrived; ends as soon as video arrives, the capture stops, or the session is stopped.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private fun startNoVideoDiagnosticWatcher(
+        sessionId: String,
+        serial: String,
+        recordVideo: Boolean,
+        embedded: EmbeddedDeviceSession,
+    ) {
+        val trigger = NoVideoDiagnosticTrigger(
+            elapsedMs = ::elapsedNow,
+            recordVideo = recordVideo,
+            firstVideoPacketArrived = embedded::hasReceivedFirstVideoPacket,
+        )
+        if (trigger.isFinished) return
+        thread(name = "capture-no-video-diagnostic-$sessionId", isDaemon = true) {
+            try {
+                while (active.get() && !embedded.isStopped && !trigger.isFinished) {
+                    Thread.sleep(watchdogIntervalMs.coerceAtLeast(1))
+                    if (trigger.poll()) {
+                        reportNoVideoDiagnostic(serial, sessionId, elapsedNow(), embedded.pathStats)
+                    }
+                }
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            } catch (failure: Throwable) {
+                runCatching { AppLogger.warn("capture", "No-video diagnostic watcher failed: ${failure.message}") }
+            }
         }
     }
 

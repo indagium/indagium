@@ -49,6 +49,14 @@ internal class EmbeddedDeviceSession(
     private val microphoneDeviceId: String = MICROPHONE_OFF_ID,
 ) : Closeable {
     private val lock = Any()
+
+    /** Lock-free progress counters for the host video/audio path; see [MirrorPathStats]. */
+    val pathStats = MirrorPathStats(elapsedMillis)
+
+    init {
+        transport.attachStats(pathStats)
+    }
+
     private val generation = AtomicLong(0)
     private var worker: Thread? = null
     private var stopping = false
@@ -175,6 +183,7 @@ internal class EmbeddedDeviceSession(
         // CONNECTING publish ran, if both raced inside one lock scope.
         publishConnectionSnapshot(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
         audioRequestedFlag = options.audio
+        isStopped = false
         startMicrophoneIfRequested()
         synchronized(lock) {
             stopping = false
@@ -186,6 +195,7 @@ internal class EmbeddedDeviceSession(
     }
 
     fun stop() {
+        isStopped = true
         val threadToJoin: Thread?
         val connectionToClose: EmbeddedMirrorConnection?
         synchronized(lock) {
@@ -221,6 +231,19 @@ internal class EmbeddedDeviceSession(
      * read needs no lock at all and closes that cycle from this side.
      */
     fun hasStartedVideo(): Boolean = muxerStarted
+
+    /**
+     * True once the first video *frame* (non-config packet) has reached this session's pump and
+     * [onVideoStartElapsedMs] was about to fire — the moment `CaptureRecorder` logs "Video recording
+     * received its first packet". Lock-free (an atomic), for the same reason as [hasStartedVideo];
+     * the no-video diagnostic polls it from its own thread.
+     */
+    fun hasReceivedFirstVideoPacket(): Boolean = videoAnchorElapsedMs.get() != NO_VIDEO_ANCHOR
+
+    /** True once [stop]/[close] was called; lock-free so the diagnostic watcher can stop polling. */
+    @Volatile
+    var isStopped: Boolean = false
+        private set
 
     /** This session's own device-connection state — see [onConnectionSnapshot]. Never carries a
      * [MirrorFrame]; a shared mirror source overlays its own decoded frames on top of this. */
@@ -393,7 +416,9 @@ internal class EmbeddedDeviceSession(
      * Split out of [runSession] to keep it under detekt's return-count threshold; behaviour is
      * unchanged — same two supersede checks, same order. */
     private fun openAndAcceptConnection(runId: Long, serial: String, options: MirrorStreamOptions): EmbeddedMirrorConnection? {
+        pathStats.transportOpenStarted()
         val openedConnection = transport.open(serial, options)
+        pathStats.transportOpenReturned()
         if (!isCurrent(runId)) {
             runCatching { openedConnection.close() }
             return null
@@ -521,15 +546,16 @@ internal class EmbeddedDeviceSession(
     }
 
     private fun pumpVideo(runId: Long, connection: EmbeddedMirrorConnection, audioRequested: Boolean) {
-        val reader = ScrcpyPacketReader(connection.videoInput)
+        val reader = ScrcpyPacketReader(CountingInputStream(connection.videoInput, pathStats.video))
         when (val header = reader.readHeader()) {
-            is ScrcpyStreamHeader.Codec -> Unit
+            is ScrcpyStreamHeader.Codec -> pathStats.video.headerRead(header.id)
             ScrcpyStreamHeader.Disabled -> throw IOException("embedded video stream unexpectedly disabled")
             ScrcpyStreamHeader.Error -> throw ScrcpyStreamErrorException("embedded scrcpy server reported a configuration error")
         }
         var pendingConfig: ByteArray? = null
         while (isCurrent(runId)) {
             val event = reader.readNext() ?: return
+            pathStats.video.event(event)
             when (event) {
                 is ScrcpyStreamEvent.SessionMeta -> {
                     pendingWidth = event.width
@@ -593,6 +619,7 @@ internal class EmbeddedDeviceSession(
             if (muxerStarted) return
             muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), videoExtradata)
             muxerStarted = true
+            pathStats.muxerStarted()
             val mixed = mixedAudio
             if (mixed != null) {
                 runCatching { mixed.installTrack() }
@@ -655,6 +682,7 @@ internal class EmbeddedDeviceSession(
                 if (!muxerStarted) {
                     muxer.start(pendingWidth.coerceAtLeast(1), pendingHeight.coerceAtLeast(1), ByteArray(0))
                     muxerStarted = true
+                    pathStats.muxerStarted()
                     mixedAudio?.let { mixed ->
                         runCatching { mixed.installTrack() }
                             .onSuccess { audioStarted = true }
@@ -673,6 +701,7 @@ internal class EmbeddedDeviceSession(
             diagnosticToReport?.let(onDiagnostic)
         }
         muxer.writeVideoPacket(outputPts, event.keyFrame, payload)
+        pathStats.muxedVideoPackets.incrementAndGet()
         synchronized(lock) { lastOutputPtsUs = maxOf(lastOutputPtsUs, outputPts) }
         onVideoPacketWrittenHook?.invoke(outputPts, event.keyFrame)
         return if (event.keyFrame) null else pendingConfig
@@ -685,7 +714,7 @@ internal class EmbeddedDeviceSession(
             resolveAudio(null) // no audio socket at all — never keep video waiting for it
             return
         }
-        val reader = ScrcpyPacketReader(audioInput)
+        val reader = ScrcpyPacketReader(CountingInputStream(audioInput, pathStats.audio))
         if (!readAudioHeader(reader)) {
             resolveAudio(null)
             return
@@ -718,11 +747,13 @@ internal class EmbeddedDeviceSession(
         }
         return when (header) {
             ScrcpyStreamHeader.Disabled -> {
+                pathStats.audio.headerRead(ScrcpyCodecIds.STREAM_DISABLED)
                 onDiagnostic("Embedded recording: device audio capture is unavailable; recording video only.")
                 false
             }
             ScrcpyStreamHeader.Error -> false
             is ScrcpyStreamHeader.Codec -> {
+                pathStats.audio.headerRead(header.id)
                 val isOpus = header.id == ScrcpyCodecIds.OPUS
                 if (!isOpus) {
                     onDiagnostic("Embedded recording: unexpected audio codec id 0x${header.id.toString(16)}; recording video only.")
@@ -737,6 +768,7 @@ internal class EmbeddedDeviceSession(
         var configPending: ByteArray? = null
         while (isCurrent(runId)) {
             val event = reader.readNext() ?: return
+            pathStats.audio.event(event)
             when {
                 event !is ScrcpyStreamEvent.Packet -> Unit
                 event.config -> {
@@ -801,6 +833,7 @@ internal class EmbeddedDeviceSession(
         if (!started) return false
         val outputPts = (event.ptsUs - anchor + ptsOffsetUs).coerceAtLeast(0L)
         runCatching { muxer.writeAudioPacket(outputPts, event.data) }
+        pathStats.muxedAudioPackets.incrementAndGet()
         onAudioPacketWrittenHook?.invoke(outputPts)
         return true
     }
