@@ -380,10 +380,12 @@ compose.desktop {
         // (not -Xmx) so small machines aren't over-committed; memory is only committed as used.
         // G1 only uncommits heap after a concurrent cycle or full GC, and an idle app never runs
         // one, so a closed multi-GB capture would keep its footprint forever: G1PeriodicGCInterval
-        // makes an idle JVM return memory by itself, and ExplicitGCInvokesConcurrent keeps the
-        // System.gc() issued by utils/HeapTrim a concurrent cycle so the UI never stalls on a full
-        // stop-the-world GC.
-        jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000", "-XX:+ExplicitGCInvokesConcurrent")
+        // makes an idle JVM return memory by itself (a concurrent cycle, the cheap backstop).
+        // ExplicitGCInvokesConcurrent is deliberately NOT set: utils/HeapTrim issues a real full GC
+        // (a short stop-the-world pause, ~0.1-0.3 s with a few hundred MB live) only at moments the
+        // user just triggered (closing a big tab, Stop, export), because a concurrent cycle cannot
+        // compact old regions that still hold garbage in an idle app, leaving gigabytes committed.
+        jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000")
 
         // Company TLS-inspection roots are often installed only in the Windows certificate store,
         // not in the bundled JRE's static cacerts file. Let the Windows installer trust the same
@@ -570,7 +572,7 @@ tasks.register<Exec>("packageFlatpak") {
 // the real ~/Library/Application Support/Indagium (or platform equivalent) session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     // Same heap-return flags as compose.desktop.application.jvmArgs above (see the comment there).
-    jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000", "-XX:+ExplicitGCInvokesConcurrent")
+    jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000")
     if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
         jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
     }

@@ -2633,6 +2633,19 @@ class AppState(
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
     }
 
+    /** Sink for [requestHeapTrim]; replaced in tests so no real GC is scheduled. */
+    internal var heapTrimRequester: (String) -> Unit = HeapTrim::request
+
+    /**
+     * Asks for a heap trim (utils/HeapTrim: a real full GC, i.e. a short stop-the-world pause) unless
+     * a capture is recording: the pause could stall the tail/mirror threads that feed it. A capture
+     * counts as live while its controller is registered; stop/close paths unregister it first.
+     */
+    internal fun requestHeapTrim(reason: String) {
+        val recording = synchronized(stateLock) { captureControllersByTab.isNotEmpty() }
+        if (!recording) heapTrimRequester(reason)
+    }
+
     internal fun captureFinalizationStatus(tabId: String): String? = captureFinalizationStatusByTab[tabId]
 
     internal fun screenshotCapability(tabId: String): CaptureScreenshotCapability =
@@ -3382,7 +3395,7 @@ class AppState(
                 captureExportBusy = false
                 captureExportBusyMessage = null
                 captureExportJob = null
-                HeapTrim.request("capture snapshot export")
+                requestHeapTrim("capture snapshot export")
             }
         }
     }
@@ -3542,7 +3555,7 @@ class AppState(
                 captureExportError = failure.message ?: "Retained capture export failed"
                 null
             }
-            HeapTrim.request("retained capture export")
+            requestHeapTrim("retained capture export")
         }
     }
 
@@ -3798,6 +3811,7 @@ class AppState(
         stopEmbeddedMirror(tabId)
         captureFinalizationStatusByTab[tabId] = CAPTURE_FINALIZING_STATUS
         ioScope.launch {
+            var finalized = false
             try {
                 // Draining is part of the capture's correctness contract: the durable mapping
                 // is row-ordinal based, so finalizing before the last bytes are appended silently
@@ -3820,7 +3834,7 @@ class AppState(
                 val imported = controller.finalizeStopped(stopped)
                 attachFinalizedCapture(tabId, imported)
                 captureFinalizationStatusByTab.remove(tabId)
-                HeapTrim.request("capture finalized")
+                finalized = true
             } catch (cancelled: CancellationException) {
                 // A canceled stop must not leave the raw tab marked as recording. The recorder
                 // has already been asked to stop before finalization begins in normal operation;
@@ -3841,6 +3855,8 @@ class AppState(
                 closeEmbeddedMirror(tabId)
                 controller.close()
                 captureService.updateSessions()
+                // After the removal above, so this tab no longer counts as a live capture.
+                if (finalized) requestHeapTrim("capture finalized")
             }
         }
     }
@@ -8147,8 +8163,8 @@ class AppState(
         // Closed tabs may have held the cache's last reference to one or more archive-video files.
         pruneArchiveVideoCache()
         // A closed big/capture tab leaves gigabytes of freed-but-committed heap that an idle G1
-        // never hands back; see utils/HeapTrim for why this asks for a (concurrent) GC.
-        if (trimHeapAfterClose) HeapTrim.request("closed large or capture tab")
+        // never hands back; see utils/HeapTrim for why this asks for a full GC.
+        if (trimHeapAfterClose) requestHeapTrim("closed large or capture tab")
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
