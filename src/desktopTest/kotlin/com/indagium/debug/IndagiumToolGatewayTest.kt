@@ -13,6 +13,9 @@ import com.indagium.model.SequenceDef
 import com.indagium.model.VideoAttachment
 import com.indagium.ui.AppState
 import com.indagium.ui.mkTab
+import com.indagium.utils.HeapPressure
+import com.indagium.utils.HeapPressureMonitor
+import com.indagium.utils.HeapSnapshot
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import java.awt.image.BufferedImage
@@ -62,7 +65,7 @@ class IndagiumToolGatewayTest {
     @Test
     fun catalogHasEveryCurrentToolExactlyOnce() {
         val expected = setOf(
-            "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
+            "list_tabs", "get_memory_status", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
@@ -202,6 +205,60 @@ class IndagiumToolGatewayTest {
         assertTrue(schema.contains("caption"))
         assertTrue(tool.description.contains("full-replaces"))
         assertTrue(tool.description.contains("source hash"))
+    }
+
+    @Test
+    fun memoryStatusReportsHeapPressureAndPausedCaptureTabs() {
+        state.heapPressureMonitor = HeapPressureMonitor(maxBytes = { 1_000L }, currentHeapUsedBytes = { 100L })
+        // Before any GC reading: no after-GC figure, free estimate falls back to max - current used.
+        val initial = operations.toolGateway.execute("get_memory_status", emptyMap()) as Map<*, *>
+        assertEquals("NORMAL", initial["heapPressure"])
+        assertNull(initial["heapUsedAfterGcBytes"])
+        assertEquals(900L, initial["heapFreeBytesEstimate"])
+        assertEquals(emptyList<Any?>(), initial["pausedCaptureTabs"])
+
+        state.heapPressureMonitor.onGc(720L, isFullGc = false)
+        state.onHeapPressureChanged(HeapPressure.WARNING, HeapSnapshot(720L, 1_000L))
+        state.tabs = listOf(
+            mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello"))),
+            mkTab(
+                "cap", "capture.log",
+                listOf(
+                    LogEntry(1, "10:00:00.000", LogLevel.I, "App", "a"),
+                    LogEntry(2, "10:00:01.000", LogLevel.I, "App", "b"),
+                ),
+            ).copy(tailPausedAtRow = 2),
+        )
+
+        val status = operations.toolGateway.execute("get_memory_status", emptyMap()) as Map<*, *>
+        assertEquals("WARNING", status["heapPressure"])
+        assertEquals(720L, status["heapUsedAfterGcBytes"])
+        assertEquals(1_000L, status["heapMaxBytes"])
+        assertEquals(280L, status["heapFreeBytesEstimate"])
+        val paused = (status["pausedCaptureTabs"] as List<*>).single() as Map<*, *>
+        assertEquals("cap", paused["tabId"])
+        assertEquals(2, paused["captureLogPausedAtRow"])
+        assertEquals(2, paused["entryCount"])
+
+        state.onHeapPressureChanged(HeapPressure.CRITICAL, HeapSnapshot(900L, 1_000L))
+        assertEquals("CRITICAL", (operations.toolGateway.execute("get_memory_status", emptyMap()) as Map<*, *>)["heapPressure"])
+    }
+
+    @Test
+    fun listTabsAndSequenceSummaryFlagAPausedCaptureTab() {
+        state.tabs = listOf(
+            mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))
+                .copy(tailPausedAtRow = 1),
+            mkTab("t2", "other.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))),
+        )
+        val tabs = operations.toolGateway.execute("list_tabs", emptyMap()) as List<*>
+        assertEquals(1, (tabs[0] as Map<*, *>)["captureLogPausedAtRow"])
+        assertTrue("captureLogPausedAtRow" !in (tabs[1] as Map<*, *>), "an unpaused tab must not carry the field")
+
+        val summary = operations.toolGateway.execute("get_sequence_summary", mapOf("tabId" to "t1")) as Map<*, *>
+        assertEquals(1, summary["captureLogPausedAtRow"])
+        val other = operations.toolGateway.execute("get_sequence_summary", mapOf("tabId" to "t2")) as Map<*, *>
+        assertTrue("captureLogPausedAtRow" !in other)
     }
 
     @Test

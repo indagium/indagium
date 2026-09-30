@@ -215,7 +215,7 @@ class ControlServerMcpTest {
         val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
         // Keep the MCP tool registry complete, including the device capture POC surface.
         val expected = listOf(
-            "list_tabs", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
+            "list_tabs", "get_memory_status", "open_log_file", "preview_split_log_file", "split_log_file", "close_tab",
             "get_filter", "get_sequence_summary", "set_filter", "get_visible_lines", "get_line_context", "select_lines", "get_selection",
             "toggle_group", "expand_all", "collapse_all", "get_tags", "get_packages", "get_log_composition", "get_crash_sites",
             "get_issue_description", "get_annotation_sections", "get_annotation_blocks", "append_annotation_section", "set_annotation_section",
@@ -232,7 +232,7 @@ class ControlServerMcpTest {
             "get_device_capture_status", "get_device_log_settings", "set_device_log_settings",
             "get_capture_operation_status",
         )
-        assertEquals(74, expected.size)
+        assertEquals(75, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
         assertTrue(body.contains("mapped to physical pixels automatically"), "gesture tool descriptions need the image-coordinate contract:\n$body")
         assertTrue(body.contains("Wait for completion before starting another capture"), "stop/start ordering needs to be documented:\n$body")

@@ -136,6 +136,7 @@ internal class IndagiumToolOperations(
 ) {
     private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> = mapOf(
         "list_tabs" to { listTabs() },
+        "get_memory_status" to { memoryStatus() },
         "open_log_file" to { a ->
             openLogFile(
                 a.str("path") ?: "", a.str("entryPath"), a.str("splitMode"),
@@ -581,6 +582,30 @@ internal class IndagiumToolOperations(
             "levels" to t.filter.levels.map { it.key.toString() },
             "tailing" to t.tailing,
             "logFormat" to t.logFormat.name,
+        ) + pausedRowFields(t)
+    }
+
+    /**
+     * `captureLogPausedAtRow` only when a live capture's log view was paused at critical heap pressure:
+     * that tab's row count (entryCount / rawLineCount) is then a prefix of the recording, not its size.
+     */
+    private fun pausedRowFields(tab: LogTab): Map<String, Any?> =
+        tab.tailPausedAtRow?.let { mapOf("captureLogPausedAtRow" to it) } ?: emptyMap()
+
+    private fun memoryStatus(): Map<String, Any?> {
+        val snapshot = appState.heapSnapshot
+        return mapOf(
+            "heapPressure" to appState.heapPressure.name,
+            "heapUsedAfterGcBytes" to snapshot?.usedAfterGcBytes,
+            "heapMaxBytes" to (snapshot?.maxBytes ?: Runtime.getRuntime().maxMemory()),
+            "heapFreeBytesEstimate" to appState.heapFreeBytesEstimate(),
+            "pausedCaptureTabs" to appState.tabs.filter { it.tailPausedAtRow != null }.map { t ->
+                mapOf(
+                    "tabId" to t.id,
+                    "filename" to t.filename,
+                    "entryCount" to t.logData.size,
+                ) + pausedRowFields(t)
+            },
         )
     }
 
@@ -1263,7 +1288,7 @@ internal class IndagiumToolOperations(
                 "rawLineCount" to tab.logData.size,
                 "cacheHit" to cacheHit,
                 "sequences" to summaries,
-            )
+            ) + pausedRowFields(tab)
         }
         val selected = definitions.firstOrNull { it.id == sequenceId }
             ?: return mapOf("error" to "no enabled sequence: $sequenceId")
@@ -1279,7 +1304,7 @@ internal class IndagiumToolOperations(
             "offset" to safeOffset,
             "limit" to safeLimit,
             "occurrences" to occurrences.drop(safeOffset).take(safeLimit).map { occurrenceToMap(it, tab.logData) },
-        )
+        ) + pausedRowFields(tab)
     }
 
     // This mirrors SeqComputer's start/end semantics, including its important fallback: a

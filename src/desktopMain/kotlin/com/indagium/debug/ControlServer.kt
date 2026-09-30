@@ -824,7 +824,22 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "List every tab currently open in the running Indagium app. Multiple tabs can share the " +
             "same filename (e.g. the same log opened twice, or two files with identical names from " +
             "different folders) — sourcePath is the full absolute path and is the reliable way to " +
-            "tell them apart; fall back to id, never assume filename alone is unique.",
+            "tell them apart; fall back to id, never assume filename alone is unique. A live capture " +
+            "tab whose log view was paused at critical heap pressure also carries captureLogPausedAtRow: " +
+            "its entryCount is then only the first N rows of a recording that continues (or finished) " +
+            "on disk, so it undercounts the real log.",
+        schema(),
+    ),
+    IndagiumToolDescriptor(
+        "get_memory_status",
+        "Report the app's JVM heap health. heapPressure is NORMAL, WARNING (~70% of the heap still " +
+            "occupied after garbage collection) or CRITICAL (~85%, confirmed by a full GC). " +
+            "heapUsedAfterGcBytes is the occupancy after the last GC (null until one has been observed), " +
+            "heapMaxBytes the heap cap, heapFreeBytesEstimate the estimated room left. pausedCaptureTabs " +
+            "lists capture tabs whose log view was paused at CRITICAL (recording continues on " +
+            "disk, and a tab stopped while paused stays listed); each entry's entryCount/captureLogPausedAtRow is only the prefix shown in the tab, " +
+            "not the recorded log. Every parsed row stays in memory, so check this before opening " +
+            "another large log. Read-only.",
         schema(),
     ),
     IndagiumToolDescriptor(
@@ -874,7 +889,9 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "summary for every enabled definition. With sequenceId it returns a paginated list of " +
             "occurrences, including 1-based raw row/id/time bounds, lineCount, nestingDepth, and why the " +
             "occurrence ended (end_match, next_sequence_start, or end_of_log). Read-only; repeated " +
-            "calls reuse the current raw-log/definition analysis cache.",
+            "calls reuse the current raw-log/definition analysis cache. rawLineCount is the rows the tab " +
+            "holds: for a capture tab paused at critical heap pressure the result also carries " +
+            "captureLogPausedAtRow and covers only that prefix of the recording.",
         schema(
             "tabId" to "string", "sequenceId" to "string", "offset" to "integer", "limit" to "integer",
             required = listOf("tabId"),
@@ -1714,6 +1731,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.
 private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Get, "/tabs", "list_tabs"),
+    Triple(HttpMethod.Get, "/memory", "get_memory_status"),
     Triple(HttpMethod.Post, "/open", "open_log_file"),
     Triple(HttpMethod.Post, "/split", "split_log_file"),
     Triple(HttpMethod.Post, "/split/preview", "preview_split_log_file"),
