@@ -78,6 +78,50 @@ class FfmpegCaptureVideoExporterTest {
     }
 
     @Test
+    fun exportFinalReadsTheFinishedSourceDirectlyAndMatchesExport() {
+        val source = syntheticCapture()
+        val before = sha256(source)
+        val viaSnapshot = tempFile("snapshot-clip", ".mkv")
+        val direct = tempFile("final-clip", ".mkv")
+
+        val snapshotClip = FfmpegCaptureVideoExporter().export(source, viaSnapshot, 1_500, 3_250)
+        val finalClip = FfmpegCaptureVideoExporter().exportFinal(source, direct, 1_500, 3_250)
+
+        assertEquals(snapshotClip, finalClip)
+        assertContentEquals(before, sha256(source), "exportFinal must never modify the source")
+        // Matroska embeds a random segment UID, so compare the decoded shape rather than raw bytes.
+        assertEquals(codecs(viaSnapshot), codecs(direct), "same streams either way")
+        FFmpegFrameGrabber(direct).use { grabber ->
+            grabber.start()
+            assertTrue(grabber.grabImage() != null, "exportFinal output must be playable")
+        }
+    }
+
+    @Test
+    fun exportFinalToleratesAMissingTrailerAndTruncatedPacketTail() {
+        val bytes = syntheticCapture().readBytes()
+        val source = tempFile("final-truncated", ".mkv").apply {
+            writeBytes(bytes.copyOf(bytes.size - minOf(2_048, bytes.size / 10)))
+        }
+        val destination = tempFile("final-truncated-clip", ".mkv")
+
+        val clip = FfmpegCaptureVideoExporter().exportFinal(source, destination, 0, 10_000)
+
+        assertEquals(0L, clip.actualStartMs)
+        assertTrue(clip.coveredEndMs > 2_500, "the committed prefix should retain most video: $clip")
+        FFmpegFrameGrabber(destination).use { grabber ->
+            grabber.start()
+            assertTrue(grabber.grabImage() != null, "interrupted-session export must be playable")
+        }
+    }
+
+    @Test
+    fun exportFinalRejectsSourceEqualToDestination() {
+        val source = syntheticCapture()
+        assertFailsWith<IllegalArgumentException> { FfmpegCaptureVideoExporter().exportFinal(source, source, 0, 1_000) }
+    }
+
+    @Test
     fun fromStartUsesAndReportsTheFirstKeyframeWhenVideoBeginsAfterZero() {
         val source = syntheticCapture(videoStartOffsetUs = 500_000L)
         val destination = tempFile("offset-clip", ".mkv")

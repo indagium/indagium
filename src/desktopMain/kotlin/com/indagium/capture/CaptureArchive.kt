@@ -40,6 +40,7 @@ import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.UUID
+import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
@@ -696,7 +697,14 @@ class CaptureArchiveExporter(
                     if (session.status == CaptureStatus.RECORDING) {
                         waitForVideoCoverage(session.videoFile, requestedSourceStart, requestedSourceEnd, onWaitingForVideo)
                     }
-                    videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+                    if (session.status == CaptureStatus.RECORDING) {
+                        videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+                    } else {
+                        // STOPPED or INTERRUPTED: the file no longer grows, so skip the prefix
+                        // snapshot. An INTERRUPTED MKV may lack its trailer; the exporter's packet
+                        // scan already tolerates a truncated tail (INVALIDDATA at physical EOF).
+                        videoExporter.exportFinal(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+                    }
                 } catch (failure: Exception) {
                     if (!isNoUsableVideoInterval(failure)) throw failure
                     videoUnavailableForRange = true
@@ -1969,12 +1977,20 @@ private fun sha256(file: File): String {
     return digest.digest().joinToString("") { "%02x".format(it) }
 }
 
+private val ALREADY_COMPRESSED_EXTENSIONS = setOf("mkv", "mp4", "png", "jpg", "jpeg", "webp")
+
+private fun isAlreadyCompressedMedia(path: String): Boolean =
+    path.substringAfterLast('.', "").lowercase() in ALREADY_COMPRESSED_EXTENSIONS
+
 private fun writeZip(work: File, destination: File, descriptor: CaptureArchiveDescriptor) {
     ZipOutputStream(BufferedOutputStream(destination.outputStream())).use { zip ->
         val paths = listOf(CAPTURE_DESCRIPTOR_NAME, CAPTURED_WITH_INDAGIUM_NAME) + descriptor.assets().map { it.path }
         paths.forEach { path ->
             checkNotInterrupted()
             val source = resolveSafe(work, path)
+            // H.264/Opus video and PNG/JPEG/WebP screenshots are already compressed: DEFLATE only
+            // burns CPU for ~0% gain. Level is per entry and needs no CRC pre-pass (unlike STORED).
+            zip.setLevel(if (isAlreadyCompressedMedia(path)) Deflater.NO_COMPRESSION else Deflater.DEFAULT_COMPRESSION)
             zip.putNextEntry(ZipEntry(path).apply { time = 0 })
             source.inputStream().use { input -> copyInterruptibly(input, zip) }
             zip.closeEntry()
