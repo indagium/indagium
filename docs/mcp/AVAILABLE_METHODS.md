@@ -106,9 +106,12 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 ## Device capture
 
 Device capture tools control the attached Android device, not the computer running this server.
-`list_android_devices` and `get_device_capture_status` are read-only discovery/status calls; every
+`list_android_devices`, `get_device_capture_status`, `list_device_apps`, `get_device_log_settings`,
+and `get_capture_operation_status` are read-only discovery/status calls and need no approval; every
 other device tool changes the device or reads its live screen and requires per-session approval
 from an external MCP client (the in-app AI panel is authorized directly by the user's prompt).
+At most four device operations (the asynchronous ones that return an `operationId`) may be running
+at once; further requests return an error until one finishes.
 
 - `list_android_devices` — ready devices, with serial/model/state. `start_device_capture` starts a
   capture (or reuses the live one); pass `deviceSerial` when several devices are ready, and
@@ -135,7 +138,9 @@ from an external MCP client (the in-app AI panel is authorized directly by the u
 - `get_device_capture_status` reports device, live/stopped, elapsed time, whether video is
   recording, storage used, markers, and the last exported snapshot path, without touching the
   device. `get_device_log_settings` and `set_device_log_settings` read or change a device's logcat
-  buffer sizes (`256K`/`1M`/`4M`/`16M`) and global log level (`default`/`V`/`D`/`I`/`W`/`E`/`S`).
+  buffer sizes (`256K`/`1M`/`4M`/`16M`) and global log level (`default`/`V`/`D`/`I`/`W`/`E`/`S`). Both validate all arguments before
+  changing anything, and accept `tabId` and/or `deviceSerial`; if both are given they must name the
+  same device or the call is refused.
 - `get_capture_operation_status` checks any of the above asynchronous operations by `operationId`.
 
 ## Prompt starters

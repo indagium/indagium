@@ -44,6 +44,23 @@ class EmbeddedMirrorTest {
     }
 
     @Test
+    fun clampedMappingPinsLetterboxPositionsToThePictureEdge() {
+        // 1000x1000 viewport, 2000x1000 device: the picture fills the width and sits at y 250..750.
+        val mapper = MirrorCoordinateMapper(1_000, 1_000, 2_000, 1_000)
+        assertNull(mapper.map(500f, 10f), "strict mapping still rejects the letterbox")
+        assertEquals(DevicePoint(1_000, 0), mapper.map(500f, 10f, clamp = true))
+        assertEquals(DevicePoint(1_000, 999), mapper.map(500f, 990f, clamp = true))
+        assertEquals(DevicePoint(0, 500), mapper.map(-40f, 500f, clamp = true))
+        assertEquals(DevicePoint(1_999, 500), mapper.map(1_400f, 500f, clamp = true))
+        // Inside the picture, clamping changes nothing.
+        assertEquals(mapper.map(500f, 500f), mapper.map(500f, 500f, clamp = true))
+
+        val rotated = MirrorCoordinateMapper(1_000, 1_000, 2_000, 1_000, rotationDegrees = 90)
+        assertNull(rotated.map(10f, 500f))
+        assertNotNull(rotated.map(10f, 500f, clamp = true))
+    }
+
+    @Test
     fun controlEncoderUsesBigEndianScrcpyWireFields() {
         val key = ScrcpyControlEncoder.encode(MirrorControlCommand.Key(MirrorKeyAction.DOWN, 29, 2, 3))
         assertContentEquals(

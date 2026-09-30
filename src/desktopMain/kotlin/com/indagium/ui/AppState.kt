@@ -207,6 +207,9 @@ private const val FULL_CIRCLE_DEGREES = 360
 
 internal const val CAPTURE_FINALIZING_STATUS = "FINALIZING"
 
+/** Bound on device AI/MCP operations in the "running" state at once; see [AppState.launchDeviceAiOperation]. */
+internal const val MAX_RUNNING_DEVICE_AI_OPERATIONS = 4
+
 // Mark issue (restyle plan Phase 3). No customization per the plan's scope decision (one fixed
 // button, no skins/labels), so every marker gets this same heading text.
 private const val MARKER_DEFAULT_LABEL = "Issue detected here"
@@ -1650,6 +1653,9 @@ class AppState(
     internal var externalDeviceAiApprovals by mutableStateOf<List<ExternalDeviceAiApproval>>(emptyList())
         private set
     private val deviceAiOperations = ConcurrentHashMap<String, DeviceAiOperationRecord>()
+
+    /** Makes launchDeviceAiOperation's running-count check and registration one atomic step. */
+    private val deviceAiLaunchLock = Any()
     private val deviceAiStopOperations = ConcurrentHashMap<String, String>()
     private val deviceAiMarkerBarrier = DeviceAiMarkerBarrier()
 
@@ -2299,7 +2305,12 @@ class AppState(
         markerTabId: String? = null,
     ): Map<String, Any?> {
         val id = UUID.randomUUID().toString()
-        deviceAiOperations[id] = DeviceAiOperationRecord(id, description, "running", System.currentTimeMillis())
+        synchronized(deviceAiLaunchLock) {
+            if (deviceAiOperations.values.count { it.status == "running" } >= MAX_RUNNING_DEVICE_AI_OPERATIONS) {
+                return mapOf("error" to "Too many device operations are running; wait for one to finish")
+            }
+            deviceAiOperations[id] = DeviceAiOperationRecord(id, description, "running", System.currentTimeMillis())
+        }
         markerTabId?.let { deviceAiMarkerBarrier.register(it, id) }
         if (deviceAiOperations.size > DEVICE_AI_OPERATION_TRIM_THRESHOLD) {
             val cutoff = System.currentTimeMillis() - DEVICE_AI_OPERATION_RETENTION_MS
@@ -3784,15 +3795,21 @@ class AppState(
             try {
                 // Draining is part of the capture's correctness contract: the durable mapping
                 // is row-ordinal based, so finalizing before the last bytes are appended silently
-                // loses the tail of log↔video coverage. If the drain itself fails, still stop the
-                // recorder in the finally path, but never publish an archive from an incomplete
-                // tab.
-                val drainFailure = runCatching { tailCoordinator.drainAndStopTailing(tabId) }.exceptionOrNull()
-                if (drainFailure != null) throw IllegalStateException(
-                    "Capture log drain failed: ${drainFailure.message ?: drainFailure::class.simpleName}",
-                    drainFailure,
-                )
-                val stopped = controller.stop()
+                // loses the tail of log↔video coverage. The recorder is stopped FIRST — it keeps
+                // writing (and indexing) whatever adb emits while terminating, and a drain that ran
+                // before that would miss those rows — and only then is the tab drained, including a
+                // final unterminated line the recorder indexed. Stop is attempted on every path, so
+                // a drain failure still stops the recorder, but an archive is never published from
+                // an incomplete tab.
+                val stopAttempt = runCatching { controller.stop() }
+                val drainFailure = runCatching {
+                    tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine = true)
+                }.exceptionOrNull()
+                val incomplete = drainFailure?.let {
+                    IllegalStateException("Capture log drain failed: ${it.message ?: it::class.simpleName}", it)
+                } ?: stopAttempt.exceptionOrNull()
+                if (incomplete != null) throw incomplete
+                val stopped = stopAttempt.getOrNull()
                     ?: error("Capture stopped without a session")
                 val imported = controller.finalizeStopped(stopped)
                 attachFinalizedCapture(tabId, imported)
@@ -4148,8 +4165,9 @@ class AppState(
     }
 
     private fun stopControllerNow(tabId: String, controller: TabCaptureController) {
-        runCatching { tailCoordinator.drainAndStopTailing(tabId) }
+        // Stop the recorder first so the final drain also sees what it wrote while terminating adb.
         runCatching { controller.stop() }
+        runCatching { tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine = true) }
         runCatching { controller.close() }
     }
 
@@ -8174,7 +8192,8 @@ class AppState(
     // (a capture tab's Stop action, so its log↔video mapping doesn't lose its tail) doesn't race
     // stopTailing's plain Job.cancel(). BLOCKS the calling thread (runBlocking { cancelAndJoin() }
     // internally) — call from ioScope, never from the UI/AWT thread.
-    fun drainAndStopTailing(tabId: String) = tailCoordinator.drainAndStopTailing(tabId)
+    fun drainAndStopTailing(tabId: String, includeTrailingPartialLine: Boolean = false) =
+        tailCoordinator.drainAndStopTailing(tabId, includeTrailingPartialLine)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
@@ -8502,12 +8521,23 @@ class AppState(
         autosaveNow()
     }
 
-    // internal (not private): ui/HomeScreen.kt's Recents section also calls this directly, on
-    // first composition, so files removed since the last prune disappear from the home tab too —
-    // not just from the toolbar's Recent files menu.
+    // internal (not private): the toolbar's Recent files menu prunes through this when it opens.
+    // ui/HomeScreen.kt's Recents section prunes through pruneMissingRecentFilesOffUiThread below.
     internal fun pruneMissingRecentFiles() {
         val next = recentFiles.filter { File(it).exists() }
         if (next == recentFiles) return
+        recentFiles = next
+        autosaveNow()
+    }
+
+    // HomeScreen's variant: the File.exists() probes (one per recent file, possibly on a slow or
+    // disconnected volume) run on Dispatchers.IO instead of the composition's UI thread; the list is
+    // assigned back on the caller's thread, and only if it is still the list that was probed — a
+    // path added or removed meanwhile belongs to a newer list this stale result must not overwrite.
+    internal suspend fun pruneMissingRecentFilesOffUiThread() {
+        val probed = recentFiles
+        val next = withContext(Dispatchers.IO) { probed.filter { File(it).exists() } }
+        if (next == probed || recentFiles != probed) return
         recentFiles = next
         autosaveNow()
     }
@@ -9550,9 +9580,9 @@ class AppState(
     }
 
     fun saveAnalysis(tabId: String) {
-        val t = tab(tabId) ?: return
+        val initial = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Save Analysis", FileDialog.SAVE).apply {
-            file = analysisNoteMarkdownName(t.filename, t.sourcePath)
+            file = analysisNoteMarkdownName(initial.filename, initial.sourcePath)
             initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
@@ -9570,17 +9600,28 @@ class AppState(
         if (File(dir).absolutePath == activeNotesDir().absolutePath) {
             upTab(tabId) { it.copy(noteTargetName = saved.name) }
         }
+        // Re-read the tab only now: the modal dialog above can stay open for a long time while the
+        // tab keeps changing (tailing, note edits), and the snapshot taken before it would save
+        // stale content. A tab closed meanwhile has nothing left to save.
+        val t = tab(tabId) ?: return
+        // Same per-file write lane auto-export uses, so a manual save and a concurrent auto-export
+        // of the same file can never interleave or land out of order: the later request wins.
+        val writer = noteExportWriters.computeIfAbsent(saved.absolutePath) { NoteExportWriter() }
+        val revision = writer.revision.incrementAndGet()
         ioScope.launch {
-            runCatching {
-                saved.writeText(buildMd(t, settings))
-                File(saved.parent, saved.nameWithoutExtension + ".ann")
-                    .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
-                writeAnnotationFrameImages(t, saved)
-                rememberRecentNote(saved)
-            }.fold(
-                onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
-                onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
-            )
+            writer.mutex.withLock {
+                if (revision != writer.revision.get()) return@withLock
+                runCatching {
+                    saved.writeText(buildMd(t, settings))
+                    File(saved.parent, saved.nameWithoutExtension + ".ann")
+                        .writeText(t.annotations.preparedForSave(t).annotationsToken(t.sourcePath, t.filter))
+                    writeAnnotationFrameImages(t, saved)
+                    rememberRecentNote(saved)
+                }.fold(
+                    onSuccess = { AppLogger.info("export", "Saved analysis to ${saved.absolutePath}") },
+                    onFailure = { e -> AppLogger.error("export", "Failed to save analysis to ${saved.absolutePath}", e) },
+                )
+            }
         }
     }
 

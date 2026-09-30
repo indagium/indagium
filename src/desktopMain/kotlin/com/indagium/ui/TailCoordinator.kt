@@ -131,11 +131,15 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     // synchronously wait for shutdown" pattern ControlServer.kt already uses for its own
     // `runBlocking { session.close() }`; Dispatchers.IO's pool is elastic and built for exactly
     // this kind of short blocking wait (at most one file read + one appendTailedLines call).
-    fun drainAndStopTailing(tabId: String) {
+    //
+    // [includeTrailingPartialLine] is for the capture-stop path only, called after the recorder has
+    // stopped writing: its final line may have no trailing newline, yet the recorder indexes it as
+    // a row, so the tab must show it too. The remaining lines are appended chunk by chunk (bounded
+    // by FileTailer's chunk cap) rather than as one list.
+    fun drainAndStopTailing(tabId: String, includeTrailingPartialLine: Boolean = false) {
         activeTails[tabId]?.let { active ->
             runBlocking { active.job.cancelAndJoin() }
-            val remaining = active.tailer.readToEndOfFile()
-            if (remaining.isNotEmpty()) appendTailedLines(tabId, remaining)
+            active.tailer.drainToEndOfFile(includeTrailingPartialLine) { batch -> appendTailedLines(tabId, batch) }
         }
         stopTailing(tabId)
     }

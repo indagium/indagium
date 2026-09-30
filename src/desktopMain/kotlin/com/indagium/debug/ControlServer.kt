@@ -557,6 +557,9 @@ class ControlServer(
         val target = runCatching {
             if (tabId != null) {
                 val (capture, _) = appState.aiCaptureBinding(tabId)
+                // Same rule the tool handlers use (effectiveDeviceSerial): a tabId and a deviceSerial
+                // that name different devices are refused before any approval is requested.
+                effectiveDeviceSerial(capture.device.serial, explicitSerial)
                 capture.device
             } else {
                 val devices = appState.aiCaptureDevices().filter { it.available }
