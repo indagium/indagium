@@ -46,6 +46,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.ai.CustomAiCommand
 import com.indagium.model.*
+import com.indagium.utils.MemoryShortfall
 import java.io.File
 import kotlin.math.roundToInt
 
@@ -1234,6 +1235,11 @@ internal fun SourceFolderInfoDialog(
     }
 }
 
+/** The split dialog's extra line when the files probably won't fit in free memory (GB/MB via [formatByteSize]). */
+internal fun memoryShortfallLine(shortfall: MemoryShortfall): String =
+    "Needs about ${formatByteSize(shortfall.neededBytes)} of memory; " +
+        "about ${formatByteSize(shortfall.freeBytes)} is free. Split it, close other tabs, or open anyway."
+
 @Composable
 internal fun SplitPromptDialog(
     state: AppState,
@@ -1251,7 +1257,7 @@ internal fun SplitPromptDialog(
         mutableStateOf(pending.sources.associate { it.id to "part" })
     }
     var counts by remember(pending) {
-        mutableStateOf(pending.sources.associate { it.id to state.defaultSplitPartCount(it) })
+        mutableStateOf(pending.sources.associate { it.id to state.defaultSplitPartCount(it, pending.memoryShortfall) })
     }
 
     fun chooseDestination() {
@@ -1297,6 +1303,9 @@ internal fun SplitPromptDialog(
                 fontSize = 11.sp,
                 maxLines = 2,
             )
+            pending.memoryShortfall?.let { shortfall ->
+                AppText(memoryShortfallLine(shortfall), color = tc.td, fontSize = 11.sp, maxLines = 3)
+            }
             Column(
                 Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
