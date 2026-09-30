@@ -20,6 +20,16 @@ class CaptureSettingsCodecTest {
     }
 
     @Test
+    fun earlierDeviceLogsAreOffWhenAbsentButAnExplicitTrueIsKept() {
+        assertEquals(false, CaptureSettings().includeBufferedLogs)
+        assertEquals(false, assertNotNull(captureSettingsFromJson("""{"formatVersion":1}""")).includeBufferedLogs)
+        assertEquals(
+            true,
+            assertNotNull(captureSettingsFromJson("""{"formatVersion":1,"includeBufferedLogs":true}""")).includeBufferedLogs,
+        )
+    }
+
+    @Test
     fun microphoneSelectionDefaultsOffAndRoundTrips() {
         val defaultSettings = assertNotNull(captureSettingsFromJson("""{"formatVersion":1}"""))
         assertEquals(MICROPHONE_OFF_ID, defaultSettings.microphoneDeviceId)

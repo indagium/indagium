@@ -194,6 +194,11 @@ data class ImportedCapture(
     // restoreCaptureLink/attachFinalizedCapture — rather than rehydrating a CaptureTimeline. Null
     // for v1/v2 (which populate [timeline] instead) and for a v3 archive with no usable estimate.
     val syncAnchor: CaptureSyncAnchor? = null,
+    // Appended last. Non-null only when the load-time guard (recomputeStaleInPlaceSyncAnchor)
+    // replaced a descriptor anchor that pointed at a pre-recording row: this is that original,
+    // wrong anchor, so a caller that persisted it elsewhere (a restored tab's autosaved VideoAnchor)
+    // can tell "untouched stale anchor" from a deliberate manual re-link.
+    val staleSyncAnchor: CaptureSyncAnchor? = null,
 )
 
 class CaptureArchiveException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -896,6 +901,7 @@ object CaptureArchiveReader {
                 "Capture sync anchor row ${anchor.row} is outside the parsed log ($parsedLogCount rows)"
             }
         }
+        val correctedAnchor = recomputeStaleInPlaceSyncAnchor(root, descriptor, logFile)
         // Decoded but NOT re-anchored here — see ImportedCapture.notes' own doc for why that's the
         // caller's job (it needs the actually-parsed `List<LogEntry>`, which this layer never builds).
         // A malformed/corrupt notes.ann degrades to "no notes" rather than failing the whole import;
@@ -910,10 +916,58 @@ object CaptureArchiveReader {
             descriptor = descriptor,
             source = source,
             notes = notes,
-            syncAnchor = descriptor.syncAnchor,
+            syncAnchor = if (correctedAnchor != null) correctedAnchor.anchor else descriptor.syncAnchor,
+            staleSyncAnchor = correctedAnchor?.let { descriptor.syncAnchor },
         )
     }
 }
+
+/** The result of [recomputeStaleInPlaceSyncAnchor]: a recomputed [anchor], which may be null when
+ *  no row of the capture can be anchored at all. */
+private class CorrectedSyncAnchor(val anchor: CaptureSyncAnchor?)
+
+/**
+ * Load-time guard for captures finalized before [estimateCaptureSyncAnchor] restricted its anchor
+ * candidates to rows recorded while the video was running. Such a capture's descriptor can pin the
+ * anchor to a buffered, pre-recording row (see that function's doc for how), which shifts the whole
+ * log hours away from the video. Returns the recomputed anchor when [descriptor]'s anchor points at
+ * a row whose index `elapsedMs` precedes the video's start, and null when the anchor is fine or
+ * cannot be checked.
+ *
+ * Only an in-place finalized capture folder can be checked: it still carries the recorder's own
+ * `mapping/capture-index.jsonl` (per-row host `elapsedMs`) next to the raw log and video, which a
+ * snapshot `.zip` export never includes — that one is left exactly as written. The descriptor on
+ * disk is not rewritten; the correction lives in the returned [ImportedCapture] only, and any
+ * failure to read the index degrades to "keep the anchor as is".
+ */
+private fun recomputeStaleInPlaceSyncAnchor(
+    root: File,
+    descriptor: CaptureArchiveDescriptor,
+    logFile: File,
+): CorrectedSyncAnchor? {
+    val anchor = descriptor.syncAnchor ?: return null
+    val videoStart = descriptor.videoStartMs ?: return null
+    if (descriptor.log.path != IN_PLACE_LOG_PATH || descriptor.video?.path != IN_PLACE_VIDEO_PATH) return null
+    val indexFile = File(root, IN_PLACE_INDEX_PATH)
+    if (!indexFile.isFile || Files.isSymbolicLink(indexFile.toPath()) || indexFile.length() > MAX_MAPPING_BYTES) return null
+    return runCatching {
+        var anchorElapsedMs: Long? = null
+        forEachSelectedRecord(indexFile) { record ->
+            if (record.rowOrdinal == anchor.row) anchorElapsedMs = record.elapsedMs
+        }
+        val elapsed = anchorElapsedMs ?: return@runCatching null
+        if (elapsed >= videoStart) return@runCatching null
+        // videoStartMs is already `videoStartElapsedMs - manualOffsetMs` (see finalizeSessionInPlace),
+        // so a zero manual offset here reproduces the session's own `elapsed - videoStartMs` math.
+        CorrectedSyncAnchor(
+            computeCaptureSyncAnchor(logFile, indexFile, videoStart, 0L, clip = null, includeRawVideo = true),
+        )
+    }.getOrNull()
+}
+
+private const val IN_PLACE_LOG_PATH = "logs/logcat.log"
+private const val IN_PLACE_VIDEO_PATH = "video/screen.mkv"
+private const val IN_PLACE_INDEX_PATH = "mapping/capture-index.jsonl"
 
 /** Detection deliberately accepts future versions so [open] can report the supported-version error. */
 private fun isCaptureDescriptor(raw: String): Boolean = runCatching {
@@ -1488,15 +1542,25 @@ private fun computeCaptureSyncAnchor(
     session: CaptureSession,
     clip: CaptureVideoClip?,
     includeRawVideo: Boolean = false,
+): CaptureSyncAnchor? = computeCaptureSyncAnchor(
+    logFile, selectionIndex, session.videoStartElapsedMs, session.manualOffsetMs, clip, includeRawVideo,
+)
+
+private fun computeCaptureSyncAnchor(
+    logFile: File,
+    selectionIndex: File,
+    videoStart: Long?,
+    manualOffsetMs: Long,
+    clip: CaptureVideoClip?,
+    includeRawVideo: Boolean = false,
 ): CaptureSyncAnchor? {
     val logTimeByOrdinal = unrollLogTimeline(parseLogcat(logFile)).byId
     var ordinal = 0
-    val videoStart = session.videoStartElapsedMs
     val samples = ArrayList<CaptureSyncSample>()
     forEachSelectedRecord(selectionIndex) { record ->
         if (record.rowOrdinal == null) return@forEachSelectedRecord
         ordinal += 1
-        val sourceVideoMs = videoStart?.let { record.elapsedMs - it + session.manualOffsetMs }
+        val sourceVideoMs = videoStart?.let { record.elapsedMs - it + manualOffsetMs }
         val exportedVideoMs = when {
             clip != null && sourceVideoMs != null && sourceVideoMs in clip.actualStartMs..clip.coveredEndMs ->
                 sourceVideoMs - clip.actualStartMs
