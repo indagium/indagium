@@ -2,7 +2,7 @@
 
 Android log viewer and logcat analyzer for Windows, macOS and Linux — investigate crashes, ANRs, adb bug reports, and supported DLT captures, built with Kotlin and Compose Multiplatform.
 
-![Version](https://img.shields.io/badge/version-1.8.6-blue)
+![Version](https://img.shields.io/badge/version-1.8.7-blue)
 ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey)
 
 ![Folding a repeating region into a collapsible sequence](docs/images/gif-05-sequences.gif)
@@ -357,7 +357,7 @@ Push a version tag to trigger the GitHub Actions build, which produces Linux `.d
 Flatpak bundles for x86-64 and arm64, plus Windows and macOS packages, and creates a GitHub Release automatically:
 
 ```bash
-git tag v1.8.6 && git push --tags
+git tag v1.8.7 && git push --tags
 ```
 
 The macOS build is unsigned (no Apple Developer certificate in CI) — see the Installation section above for the Gatekeeper workaround.
