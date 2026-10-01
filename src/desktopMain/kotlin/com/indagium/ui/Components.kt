@@ -1991,13 +1991,13 @@ private fun CtxActionDivider(colors: ThemeColors) {
     Box(Modifier.width(1.dp).height(18.dp).background(colors.br))
 }
 
-// The 5×5 flyout keeps the original narrow footprint; the 10-column view only widens enough for
-// ten 14dp swatches and their 3dp gaps.
-private val CTX_HIGHLIGHT_PICKER_WIDTH = 128.dp
+// Ten 14dp swatches and nine 3dp gaps, plus the popup's horizontal padding and border.
+private val CTX_HIGHLIGHT_PICKER_WIDTH = 190.dp
 
 // The primary button preserves the existing grouped Highlight action. Its wider final slot puts
 // the entire picker target in the same position as the Show/Hide messages submenu chevron.
 @Composable
+@Suppress("UnusedParameter") // Kept for existing callers; context flyouts always use the 10×10 layout.
 private fun CtxHighlightAction(
     onHighlight: () -> Unit,
     onHighlightColor: (Color) -> Unit,
@@ -2013,7 +2013,7 @@ private fun CtxHighlightAction(
     val windowSize = LocalWindowInfo.current.containerSize
     val maxWidth = with(density) { (windowSize.width.toDp() - 20.dp).coerceAtLeast(180.dp) }
     val maxHeight = with(density) { (windowSize.height.toDp() - 24.dp).coerceAtLeast(140.dp) }
-    val pickerWidth = minOf(if (paletteColumns >= 10) 190.dp else CTX_HIGHLIGHT_PICKER_WIDTH, maxWidth)
+    val pickerWidth = minOf(CTX_HIGHLIGHT_PICKER_WIDTH, maxWidth)
     var hoveringTrigger by remember { mutableStateOf(false) }
     var hoveringPopup by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
@@ -2073,8 +2073,8 @@ private fun CtxHighlightAction(
                         presetColors = HL_COLORS,
                         customColors = customColors,
                         selectedColor = autoColor,
-                        paletteColumns = paletteColumns,
-                        onPaletteColumnsChange = onPaletteColumnsChange,
+                        paletteColumns = 10,
+                        onPaletteColumnsChange = {},
                         testTagPrefix = "context-highlight",
                         onDeleteCustomColor = onDeleteCustomColor,
                         onDeleteMenuOpenChange = { deleteMenuOpen = it },
@@ -2083,6 +2083,7 @@ private fun CtxHighlightAction(
                             pickerOpen = false
                         },
                         expandedHeight = 300.dp,
+                        showModeSelector = false,
                         title = "",
                     )
                 }

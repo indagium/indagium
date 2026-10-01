@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.TooltipArea
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -49,6 +50,11 @@ import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -89,6 +95,7 @@ private const val HL_COUNT_DEBOUNCE_LARGE_MS = 450L
 private const val HL_SEARCH_DEBOUNCE_MS = 120L
 private const val HL_SEARCH_DEBOUNCE_LARGE_MS = 350L
 private const val HL_CANDIDATE_ID = "candidate"
+private const val HIGH_CONTRAST_LUMINANCE_THRESHOLD = 0.48f
 
 // Colour-picker state the panel's Escape handling needs to reach from outside this section (Esc on
 // the panel with no text field focused closes any open picker, as it always did).
@@ -231,15 +238,21 @@ internal fun HighlighterSection(
                 {
                     Row(
                         Modifier.hoverPill().clickable {
-                            val collapsingList = fpState.hlListExpanded
-                            fpState.hlListExpanded = !fpState.hlListExpanded
+                            val listWasVisible = fpState.highlightersExpanded && fpState.hlListExpanded
+                            if (fpState.highlightersExpanded) {
+                                fpState.hlListExpanded = !fpState.hlListExpanded
+                            } else {
+                                fpState.highlightersExpanded = true
+                                fpState.hlListExpanded = true
+                            }
                             onUiStateChanged()
-                            if (collapsingList) {
+                            if (listWasVisible) {
                                 editingId = null
                                 kwPickerOpen = false
                                 sectionState.rowColorPickerId = null
-                                onInputFocusedChange(addFocused)
                             }
+                            onInputFocusedChange(addFocused)
+                            onReclaimFocus()
                         }
                             .padding(horizontal = 5.dp, vertical = 3.dp)
                             .testTag("highlighters-list-toggle"),
@@ -253,7 +266,11 @@ internal fun HighlighterSection(
                             fontFamily = UI,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                        AppText(
+                            if (fpState.highlightersExpanded && fpState.hlListExpanded) "▾" else "▸",
+                            color = tc.ts,
+                            fontSize = 10.sp,
+                        )
                     }
                 }
             } else {
@@ -507,27 +524,239 @@ private fun EditorRow(caption: String, content: @Composable RowScope.() -> Unit)
     }
 }
 
+private data class HighlighterStyleControlsState(
+    val backgroundColor: Color,
+    val backgroundEnabled: Boolean,
+    val foregroundColor: Color?,
+    val bold: Boolean?,
+    val italic: Boolean?,
+    val fontFamily: String?,
+    val backgroundPickerOpen: Boolean,
+    val foregroundPickerOpen: Boolean,
+)
+
+private data class HighlighterStyleControlActions(
+    val onBackgroundColor: (Color) -> Unit,
+    val onBackgroundEnabled: (Boolean) -> Unit,
+    val onForegroundColor: (Color?) -> Unit,
+    val onBold: (Boolean?) -> Unit,
+    val onItalic: (Boolean?) -> Unit,
+    val onFontFamily: (String?) -> Unit,
+    val onBackgroundPickerOpen: (Boolean) -> Unit,
+    val onForegroundPickerOpen: (Boolean) -> Unit,
+)
+
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun TriStateStyleChoice(
-    label: String,
-    value: Boolean?,
-    onChange: (Boolean?) -> Unit,
-    testTag: String,
+private fun HighlighterStyleControls(
+    state: HighlighterStyleControlsState,
+    actions: HighlighterActions,
+    onChange: HighlighterStyleControlActions,
+    testTagPrefix: String,
 ) {
     val tc = tc()
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(42.dp))
-        Row(Modifier.weight(1f).border(1.dp, tc.br, RoundedCornerShape(5.dp)).clip(RoundedCornerShape(5.dp))) {
-            listOf("Default", "On", "Off").forEachIndexed { index, option ->
-                val optionValue = when (index) { 0 -> null; 1 -> true; else -> false }
+    FlowRow(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        HighlighterStyleColorControl(
+            label = "Bg",
+            enabled = state.backgroundEnabled,
+            color = state.backgroundColor,
+            pickerOpen = state.backgroundPickerOpen,
+            testTagPrefix = "$testTagPrefix-background",
+            customColors = actions.customColors,
+            onSaveCustomColor = actions.onSaveCustomColor,
+            onDeleteCustomColor = actions.onDeleteCustomColor,
+            onColorChange = onChange.onBackgroundColor,
+            onPickerOpenChange = onChange.onBackgroundPickerOpen,
+            customColorEditorExpanded = actions.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            onToggleEnabled = {
+                val enabled = !state.backgroundEnabled
+                onChange.onBackgroundEnabled(enabled)
+                if (!enabled) onChange.onBackgroundPickerOpen(false)
+            },
+            onEnableAndOpen = {
+                onChange.onBackgroundEnabled(true)
+                onChange.onBackgroundPickerOpen(true)
+            },
+            groupTestTag = "$testTagPrefix-background-group",
+            toggleTestTag = "$testTagPrefix-background-toggle",
+        )
+        HighlighterStyleColorControl(
+            label = "Fg",
+            enabled = state.foregroundColor != null,
+            color = state.foregroundColor ?: contrastingTextColor(state.backgroundColor),
+            pickerOpen = state.foregroundPickerOpen,
+            testTagPrefix = "$testTagPrefix-foreground",
+            customColors = actions.customColors,
+            onSaveCustomColor = actions.onSaveCustomColor,
+            onDeleteCustomColor = actions.onDeleteCustomColor,
+            onColorChange = { onChange.onForegroundColor(it) },
+            onPickerOpenChange = onChange.onForegroundPickerOpen,
+            customColorEditorExpanded = actions.customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+            onToggleEnabled = {
+                if (state.foregroundColor == null) {
+                    onChange.onForegroundColor(contrastingTextColor(state.backgroundColor))
+                } else {
+                    onChange.onForegroundColor(null)
+                    onChange.onForegroundPickerOpen(false)
+                }
+            },
+            onEnableAndOpen = {
+                onChange.onForegroundColor(contrastingTextColor(state.backgroundColor))
+                onChange.onForegroundPickerOpen(true)
+            },
+            groupTestTag = "$testTagPrefix-foreground-group",
+            toggleTestTag = "$testTagPrefix-foreground-toggle",
+        )
+        HighlighterStyleCycleButton(
+            label = "Bold",
+            glyph = "B",
+            value = state.bold,
+            testTag = "$testTagPrefix-bold-cycle",
+            fontWeight = FontWeight.Bold,
+            onChange = onChange.onBold,
+        )
+        HighlighterStyleCycleButton(
+            label = "Italic",
+            glyph = "I",
+            value = state.italic,
+            testTag = "$testTagPrefix-italic-cycle",
+            fontStyle = FontStyle.Italic,
+            onChange = onChange.onItalic,
+        )
+        SearchableFontDropdown(
+            label = null,
+            selectedFamily = state.fontFamily,
+            defaultLabel = "Log font",
+            fallbackFamily = LocalLogFontFamily.current,
+            onSelect = onChange.onFontFamily,
+            modifier = Modifier.widthIn(min = 88.dp, max = 112.dp),
+            testTagPrefix = "$testTagPrefix-font",
+            showPreview = false,
+        )
+    }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+        AppText("Preview", color = tc.td, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        AppText(
+            "Bold ${styleOverrideName(state.bold)} · Italic ${styleOverrideName(state.italic)}",
+            color = tc.td,
+            fontSize = 9.sp,
+            modifier = Modifier.testTag("$testTagPrefix-style-state"),
+        )
+    }
+}
+
+@Composable
+@OptIn(
+    androidx.compose.foundation.ExperimentalFoundationApi::class,
+    androidx.compose.ui.ExperimentalComposeUiApi::class,
+)
+private fun HighlighterStyleColorControl(
+    label: String,
+    enabled: Boolean,
+    color: Color,
+    pickerOpen: Boolean,
+    testTagPrefix: String,
+    customColors: List<Color>,
+    onSaveCustomColor: (Color) -> Unit,
+    onDeleteCustomColor: (Color) -> Unit,
+    onColorChange: (Color) -> Unit,
+    onPickerOpenChange: (Boolean) -> Unit,
+    customColorEditorExpanded: Boolean,
+    onCustomColorEditorExpandedChange: (Boolean) -> Unit,
+    onToggleEnabled: () -> Unit,
+    onEnableAndOpen: () -> Unit,
+    groupTestTag: String,
+    toggleTestTag: String,
+) {
+    val tc = tc()
+    val shape = RoundedCornerShape(6.dp)
+    var hovered by remember(groupTestTag) { mutableStateOf(false) }
+    val targetName = if (label == "Bg") "Background" else "Text color"
+    val tooltipText = when (label to enabled) {
+        "Bg" to true -> "Background is on. Click chip to turn off; click swatch to choose color."
+        "Bg" to false -> "Background is off. Click chip to turn on; swatch chooses color and turns it on."
+        "Fg" to true -> "Text color is on. Click chip to inherit log color; swatch chooses text color."
+        else -> "Text color is inherited. Click chip to set it; swatch chooses text color."
+    }
+    TooltipArea(tooltip = { ToolbarTooltip(tooltipText, maxLines = 3) }) {
+        Box(
+            Modifier.height(25.dp)
+                .onPointerEvent(PointerEventType.Enter) { hovered = true }
+                .onPointerEvent(PointerEventType.Exit) { hovered = false }
+                .testTag(groupTestTag),
+        ) {
+            Row(
+                Modifier.height(25.dp).clip(shape)
+                    .background(
+                        when {
+                            hovered -> tc.hv
+                            enabled -> tc.ac.copy(alpha = .09f)
+                            else -> tc.p2
+                        },
+                    )
+                    .border(1.dp, if (enabled) tc.ac else tc.br, shape),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Box(
-                    Modifier.weight(1f).height(24.dp)
-                        .background(if (value == optionValue) tc.ac.copy(alpha = .2f) else Color.Transparent)
-                        .clickable { onChange(optionValue) }
-                        .testTag("$testTag-${option.lowercase()}"),
+                    Modifier.size(width = 24.dp, height = 25.dp)
+                        .clickable {
+                            if (enabled) onPickerOpenChange(!pickerOpen) else onEnableAndOpen()
+                        }
+                        .semantics {
+                            contentDescription = if (enabled) {
+                                "Choose $targetName color"
+                            } else {
+                                "Enable $targetName and choose a color"
+                            }
+                            role = Role.Button
+                        }
+                        .testTag(if (enabled) "$testTagPrefix-swatch-zone" else "$testTagPrefix-enable-swatch"),
                     contentAlignment = Alignment.Center,
                 ) {
-                    AppText(option, color = if (value == optionValue) tc.tx else tc.ts, fontSize = 9.sp)
+                    if (enabled) {
+                        HighlighterColorPicker(
+                            color = color,
+                            onColorChange = onColorChange,
+                            customColors = customColors,
+                            onSaveCustomColor = onSaveCustomColor,
+                            onDeleteCustomColor = onDeleteCustomColor,
+                            paletteColumns = 10,
+                            onPaletteColumnsChange = {},
+                            pickerOpen = pickerOpen,
+                            onPickerOpenChange = onPickerOpenChange,
+                            testTagPrefix = testTagPrefix,
+                            customColorEditorExpanded = customColorEditorExpanded,
+                            onCustomColorEditorExpandedChange = onCustomColorEditorExpandedChange,
+                        )
+                    } else {
+                        Box(
+                            Modifier.size(16.dp).clip(CORNER_SM)
+                                .border(1.dp, tc.td.copy(alpha = .65f), CORNER_SM),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            AppText("·", color = tc.td, fontSize = 11.sp)
+                        }
+                    }
+                }
+                Box(
+                    Modifier.height(25.dp)
+                        .clickable(onClick = onToggleEnabled)
+                        .semantics {
+                            contentDescription = targetName
+                            stateDescription = if (enabled) "On" else "Off"
+                            role = Role.Switch
+                        }
+                        .testTag(toggleTestTag)
+                        .padding(start = 2.dp, end = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText(label, color = if (enabled) tc.ac else tc.ts, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
@@ -535,23 +764,72 @@ private fun TriStateStyleChoice(
 }
 
 @Composable
-private fun RuleFontFamilyPicker(
-    selected: String?,
-    fallback: androidx.compose.ui.text.font.FontFamily,
-    onSelect: (String?) -> Unit,
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+private fun HighlighterStyleCycleButton(
+    label: String,
+    glyph: String,
+    value: Boolean?,
+    testTag: String,
+    fontWeight: FontWeight? = null,
+    fontStyle: FontStyle? = null,
+    onChange: (Boolean?) -> Unit,
 ) {
-    EditorRow("Font") {
-        SearchableFontDropdown(
-            label = null,
-            selectedFamily = selected,
-            defaultLabel = "Inherit log font",
-            fallbackFamily = fallback,
-            onSelect = onSelect,
-            modifier = Modifier.weight(1f),
-            testTagPrefix = "highlighter-font",
-            showPreview = false,
-        )
+    val tc = tc()
+    val currentLabel = styleOverrideName(value)
+    TooltipArea(
+        tooltip = { ToolbarTooltip("$label $currentLabel. Click to cycle Default, On, and Off.") },
+    ) {
+        Box(
+            Modifier.size(25.dp).clip(RoundedCornerShape(6.dp))
+                .background(if (value == true) tc.ac.copy(alpha = .12f) else tc.p2)
+                .border(1.dp, if (value == true) tc.ac.copy(alpha = .65f) else tc.br, RoundedCornerShape(6.dp))
+                .clickable {
+                    onChange(when (value) { null -> true; true -> false; false -> null })
+                }
+                .semantics {
+                    contentDescription = "$label $currentLabel. Cycle Default, On, Off."
+                    role = Role.Button
+                }
+                .testTag(testTag),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                glyph,
+                style = TextStyle(
+                    color = if (value == false) tc.td else tc.tx,
+                    fontSize = 12.sp,
+                    fontFamily = UI,
+                    fontWeight = fontWeight ?: FontWeight.Normal,
+                    fontStyle = fontStyle,
+                ),
+            )
+        }
     }
+}
+
+private fun styleOverrideName(value: Boolean?): String = when (value) {
+    null -> "inherit"
+    true -> "on"
+    false -> "off"
+}
+
+private fun contrastingTextColor(background: Color): Color =
+    if (background.luminance() > HIGH_CONTRAST_LUMINANCE_THRESHOLD) Color.Black else Color.White
+
+@Composable
+private fun LargeBackgroundColorPreview(color: Color, onClick: () -> Unit) {
+    val tc = tc()
+    Box(
+        Modifier.size(24.dp).clip(CORNER_SM)
+            .background(color)
+            .border(1.dp, tc.br, CORNER_SM)
+            .clickable(onClick = onClick)
+            .semantics {
+                contentDescription = "Choose background color"
+                role = Role.Button
+            }
+            .testTag("highlighter-add-color-preview"),
+    )
 }
 
 @Composable
@@ -703,7 +981,7 @@ private fun HighlighterEditor(
         }
         EditorRow("Style") {
             SegmentedControl(
-                options = listOf("Match text", "Whole line"),
+                options = listOf("Match", "Whole line"),
                 selectedIndices = setOf(if (draft.wholeLine) 1 else 0),
                 onToggle = { draft = draft.copy(wholeLine = it == 1) },
                 modifier = Modifier.weight(1f),
@@ -713,72 +991,31 @@ private fun HighlighterEditor(
                 segmentHorizontalPadding = 4.dp,
             )
         }
-        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                CompactCheckBox(
-                    checked = draft.backgroundEnabled,
-                    onToggle = { draft = draft.copy(backgroundEnabled = !draft.backgroundEnabled) },
-                    modifier = Modifier.testTag("highlighter-editor-background-toggle"),
-                    accentColor = tc.ac,
-                )
-                AppText("Background", color = tc.ts, fontSize = 10.sp)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                CompactCheckBox(
-                    checked = draft.textColor != null,
-                    onToggle = {
-                        draft = draft.copy(textColor = if (draft.textColor == null) {
-                            if (draft.color.luminance() > .48f) Color.Black else Color.White
-                        } else {
-                            null
-                        })
-                    },
-                    modifier = Modifier.testTag("highlighter-editor-foreground-toggle"),
-                    accentColor = tc.ac,
-                )
-                AppText("Foreground", color = tc.ts, fontSize = 10.sp)
-            }
-        }
-        TriStateStyleChoice("Bold", draft.bold, { draft = draft.copy(bold = it) }, "highlighter-editor-bold-toggle")
-        TriStateStyleChoice("Italic", draft.italic, { draft = draft.copy(italic = it) }, "highlighter-editor-italic-toggle")
-        RuleFontFamilyPicker(draft.fontFamily, LocalLogFontFamily.current) { draft = draft.copy(fontFamily = it) }
+        HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = draft.color,
+                backgroundEnabled = draft.backgroundEnabled,
+                foregroundColor = draft.textColor,
+                bold = draft.bold,
+                italic = draft.italic,
+                fontFamily = draft.fontFamily,
+                backgroundPickerOpen = backgroundColorPickerOpen,
+                foregroundPickerOpen = foregroundColorPickerOpen,
+            ),
+            actions = actions,
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = { draft = draft.copy(color = it) },
+                onBackgroundEnabled = { draft = draft.copy(backgroundEnabled = it) },
+                onForegroundColor = { draft = draft.copy(textColor = it) },
+                onBold = { draft = draft.copy(bold = it) },
+                onItalic = { draft = draft.copy(italic = it) },
+                onFontFamily = { draft = draft.copy(fontFamily = it) },
+                onBackgroundPickerOpen = { backgroundColorPickerOpen = it },
+                onForegroundPickerOpen = { foregroundColorPickerOpen = it },
+            ),
+            testTagPrefix = "highlighter-editor",
+        )
         StylePreview(draft)
-        if (draft.backgroundEnabled) {
-            EditorRow("Back") {
-                HighlighterColorPicker(
-                    color = draft.color,
-                    onColorChange = { draft = draft.copy(color = it) },
-                    customColors = actions.customColors,
-                    onSaveCustomColor = actions.onSaveCustomColor,
-                    onDeleteCustomColor = actions.onDeleteCustomColor,
-                    paletteColumns = actions.paletteColumns,
-                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
-                    pickerOpen = backgroundColorPickerOpen,
-                    onPickerOpenChange = { backgroundColorPickerOpen = it },
-                    testTagPrefix = "highlighter-editor-background",
-                    customColorEditorExpanded = actions.customColorEditorExpanded,
-                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
-                )
-            }
-        }
-        draft.textColor?.let { textColor ->
-            EditorRow("Text") {
-                HighlighterColorPicker(
-                    color = textColor,
-                    onColorChange = { draft = draft.copy(textColor = it) },
-                    customColors = actions.customColors,
-                    onSaveCustomColor = actions.onSaveCustomColor,
-                    onDeleteCustomColor = actions.onDeleteCustomColor,
-                    paletteColumns = actions.paletteColumns,
-                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
-                    pickerOpen = foregroundColorPickerOpen,
-                    onPickerOpenChange = { foregroundColorPickerOpen = it },
-                    testTagPrefix = "highlighter-editor-foreground",
-                    customColorEditorExpanded = actions.customColorEditorExpanded,
-                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
-                )
-            }
-        }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             val matched = counts.counts[draft.id]
             AppText(
@@ -911,20 +1148,10 @@ private fun HighlighterAddForm(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            HighlighterColorPicker(
-                color = newHlColor,
-                onColorChange = actions.onSetNewColor,
-                customColors = actions.customColors,
-                onSaveCustomColor = actions.onSaveCustomColor,
-                onDeleteCustomColor = actions.onDeleteCustomColor,
-                paletteColumns = actions.paletteColumns,
-                onPaletteColumnsChange = actions.onPaletteColumnsChange,
-                pickerOpen = sectionState.addColorPickerOpen,
-                onPickerOpenChange = { sectionState.addColorPickerOpen = it },
-                testTagPrefix = "highlighter-add-background",
-                customColorEditorExpanded = actions.customColorEditorExpanded,
-                onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
-            )
+            LargeBackgroundColorPreview(newHlColor) {
+                if (!addBackgroundEnabled) sectionState.addBackgroundEnabled = true
+                sectionState.addColorPickerOpen = true
+            }
             InlineField(
                 newHlPat,
                 { actions.onSetNewPattern(it); selectedIdx = -1; rowAction = null },
@@ -1014,7 +1241,7 @@ private fun HighlighterAddForm(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
             SegmentedControl(
-                options = listOf("Match text", "Whole line"),
+                options = listOf("Match", "Whole line"),
                 selectedIndices = setOf(if (addWholeLine) 1 else 0),
                 onToggle = { sectionState.addWholeLine = it == 1; rowAction = null },
                 modifier = Modifier.weight(1f),
@@ -1026,61 +1253,35 @@ private fun HighlighterAddForm(
             AppButton(
                 "+ Add",
                 onClick = { typed?.let { commit(it, addWholeLine) } },
-                variant = ButtonVariant.Ghost,
+                variant = ButtonVariant.Primary,
                 enabled = canAdd,
                 modifier = Modifier.testTag("highlighter-add-submit"),
             )
         }
-        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                CompactCheckBox(
-                    checked = addBackgroundEnabled,
-                    onToggle = { sectionState.addBackgroundEnabled = !addBackgroundEnabled },
-                    modifier = Modifier.testTag("highlighter-add-background-toggle"),
-                    accentColor = tc.ac,
-                )
-                AppText("Background", color = tc.ts, fontSize = 10.sp)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                CompactCheckBox(
-                    checked = addTextColor != null,
-                    onToggle = {
-                        sectionState.addTextColor = if (addTextColor == null) {
-                            if (newHlColor.luminance() > .48f) Color.Black else Color.White
-                        } else {
-                            null
-                        }
-                    },
-                    modifier = Modifier.testTag("highlighter-add-foreground-toggle"),
-                    accentColor = tc.ac,
-                )
-                AppText("Foreground", color = tc.ts, fontSize = 10.sp)
-            }
-        }
-        TriStateStyleChoice("Bold", addBold, { sectionState.addBold = it }, "highlighter-add-bold-toggle")
-        TriStateStyleChoice("Italic", addItalic, { sectionState.addItalic = it }, "highlighter-add-italic-toggle")
-        if (addTextColor != null) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                AppText("Text color", color = tc.td, fontSize = 10.sp)
-                HighlighterColorPicker(
-                    color = addTextColor!!,
-                    onColorChange = { sectionState.addTextColor = it },
-                    customColors = actions.customColors,
-                    onSaveCustomColor = actions.onSaveCustomColor,
-                    onDeleteCustomColor = actions.onDeleteCustomColor,
-                    paletteColumns = actions.paletteColumns,
-                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
-                    pickerOpen = addForegroundPickerOpen,
-                    onPickerOpenChange = { sectionState.addForegroundPickerOpen = it },
-                    testTagPrefix = "highlighter-add-foreground",
-                    customColorEditorExpanded = actions.customColorEditorExpanded,
-                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
-                )
-            }
-        }
-        RuleFontFamilyPicker(addFontFamily, LocalLogFontFamily.current) {
-            sectionState.addFontFamily = it
-        }
+        HighlighterStyleControls(
+            state = HighlighterStyleControlsState(
+                backgroundColor = newHlColor,
+                backgroundEnabled = addBackgroundEnabled,
+                foregroundColor = addTextColor,
+                bold = addBold,
+                italic = addItalic,
+                fontFamily = addFontFamily,
+                backgroundPickerOpen = sectionState.addColorPickerOpen,
+                foregroundPickerOpen = addForegroundPickerOpen,
+            ),
+            actions = actions,
+            onChange = HighlighterStyleControlActions(
+                onBackgroundColor = actions.onSetNewColor,
+                onBackgroundEnabled = { sectionState.addBackgroundEnabled = it },
+                onForegroundColor = { sectionState.addTextColor = it },
+                onBold = { sectionState.addBold = it },
+                onItalic = { sectionState.addItalic = it },
+                onFontFamily = { sectionState.addFontFamily = it },
+                onBackgroundPickerOpen = { sectionState.addColorPickerOpen = it },
+                onForegroundPickerOpen = { sectionState.addForegroundPickerOpen = it },
+            ),
+            testTagPrefix = "highlighter-add",
+        )
         StylePreview(
             Highlighter(
                 id = "preview", pattern = "", regex = false, color = newHlColor, on = true,
