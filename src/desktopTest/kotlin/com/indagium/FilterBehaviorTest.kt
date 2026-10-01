@@ -13,8 +13,11 @@ import com.indagium.model.MessageRule
 import com.indagium.model.RuleTarget
 import com.indagium.model.SequenceDef
 import com.indagium.ui.buildFullLineAnnotation
+import com.indagium.ui.buildLogAnalysis
 import com.indagium.ui.buildLogLineRender
 import com.indagium.ui.keywordRegexHighlightRanges
+import com.indagium.ui.mkRmap
+import com.indagium.ui.mkTab
 import com.indagium.ui.visualLogLineForWrapLimit
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.computeItems
@@ -683,6 +686,87 @@ class FilterBehaviorTest {
         val tokens = resolvePidTidTokens("com.example.unknown", mapOf(1234 to "com.example.app"))
 
         assertFalse(matchesPidTidTokens(entry, tokens))
+    }
+
+    // ── Dynamic `tag:<Tag>` PID_TID token (utils/TagProcesses.kt, LogAnalysis.tagPids) ──────
+
+    private fun tagRuleTab(include: Boolean, pattern: String, data: List<LogEntry>): LogTab {
+        val filter = Filter(messageRules = listOf(MessageRule(id = "r1", include = include, target = RuleTarget.PID_TID, pattern = pattern)))
+        return mkTab("t", "f.log", data).copy(filter = filter)
+    }
+
+    private val tagFollowData = listOf(
+        LogEntry(1, "10:00:00.000", LogLevel.I, "X", "from app", pid = 100, tid = 100),
+        LogEntry(2, "10:00:00.001", LogLevel.I, "Other", "same process, other tag", pid = 100, tid = 101),
+        LogEntry(3, "10:00:00.002", LogLevel.I, "Other", "another process", pid = 200, tid = 200),
+        // A different process whose TID happens to equal the followed pid.
+        LogEntry(4, "10:00:00.003", LogLevel.I, "Other", "tid collision", pid = 300, tid = 100),
+    )
+
+    @Test
+    fun tagTokenIncludeRuleShowsEveryLineOfTheProcessesThatLoggedTheTag() {
+        val tab = tagRuleTab(include = true, pattern = "tag:X", data = tagFollowData)
+
+        assertEquals(listOf(1, 2), visibleEntries(tab).map { it.id })
+    }
+
+    @Test
+    fun tagTokenMatchesPidOnlyNeverATidThatEqualsThePid() {
+        val tab = tagRuleTab(include = true, pattern = "tag:X", data = tagFollowData)
+
+        assertFalse(visibleEntries(tab).any { it.id == 4 })
+    }
+
+    @Test
+    fun tagTokenForAnUnknownTagMatchesNothing() {
+        val tab = tagRuleTab(include = true, pattern = "tag:Nope", data = tagFollowData)
+
+        assertTrue(visibleEntries(tab).isEmpty())
+    }
+
+    @Test
+    fun tagTokenExcludeRuleHidesTheWholeProcess() {
+        val tab = tagRuleTab(include = false, pattern = "tag:X", data = tagFollowData)
+
+        assertEquals(listOf(3, 4), visibleEntries(tab).map { it.id })
+    }
+
+    @Test
+    fun pidTidFilterAcceptsTheTagToken() {
+        val tab = mkTab("t", "f.log", tagFollowData).copy(filter = Filter(pidTidFilter = "tag:X"))
+
+        assertEquals(listOf(1, 2), visibleEntries(tab).map { it.id })
+    }
+
+    @Test
+    fun tagTokenCanBeCombinedWithNumericPidsInOnePattern() {
+        val tab = tagRuleTab(include = true, pattern = "tag:X,200", data = tagFollowData)
+
+        assertEquals(listOf(1, 2, 3), visibleEntries(tab).map { it.id })
+    }
+
+    @Test
+    fun aBareTagPrefixWithNoTagNameIsNotATagToken() {
+        val tokens = resolvePidTidTokens("tag:", emptyMap(), mapOf("" to setOf(100)))
+
+        assertTrue(tokens.rawTokens.isEmpty() && tokens.namedPids.isEmpty())
+    }
+
+    @Test
+    fun computeItemsPicksUpANewlyLearnedPidAfterTheLogDataIsReplaced() {
+        // The tail replaces logData on every batch, which re-keys computeItems' memo, so a pid that
+        // only now logged the tag retroactively reveals its earlier rows.
+        val before = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "X", "first run", pid = 100, tid = 100),
+            LogEntry(2, "10:00:01.000", LogLevel.I, "Other", "restarted, not yet logging X", pid = 200, tid = 200),
+        )
+        val tabBefore = tagRuleTab(include = true, pattern = "tag:X", data = before)
+        assertEquals(listOf(1), computeItems(tabBefore, applyFilter = true).map { (it as LogItem.Row).entry.id })
+
+        val after = before + LogEntry(3, "10:00:02.000", LogLevel.I, "X", "second run", pid = 200, tid = 200)
+        val tabAfter = tabBefore.copy(logData = after, rmap = mkRmap(after), analysis = buildLogAnalysis(after))
+
+        assertEquals(listOf(1, 2, 3), computeItems(tabAfter, applyFilter = true).map { (it as LogItem.Row).entry.id })
     }
 
     @Test

@@ -25,11 +25,13 @@ class MergeTailAnalysisTest {
         tagCounts = mapOf("Tag" to 5),
         stackTraceGroups = listOf(group),
         processNames = mapOf(1 to "snapshot.proc"),
+        tagPids = mapOf("Tag" to setOf(1)),
         pending = false,
     )
     private val incremental = LogAnalysis(
         tagCounts = mapOf("Tag" to 9),
         processNames = mapOf(1 to "live.proc", 2 to "other"),
+        tagPids = mapOf("Tag" to setOf(1, 2)),
         pending = true,
     )
 
@@ -41,6 +43,7 @@ class MergeTailAnalysisTest {
         assertEquals(listOf(group), merged.stackTraceGroups)
         assertEquals(incremental.tagCounts, merged.tagCounts, "the refresh does not even compute the counts")
         assertEquals(incremental.processNames, merged.processNames)
+        assertEquals(incremental.tagPids, merged.tagPids)
         assertFalse(merged.pending)
         assertNull(merged.analyzedThroughId, "complete: it covers every row the tab holds")
         assertFalse(merged.isStaleFor(snapshot.last().id))
@@ -54,6 +57,7 @@ class MergeTailAnalysisTest {
         assertEquals(listOf(group), merged.stackTraceGroups)
         assertEquals(incremental.tagCounts, merged.tagCounts)
         assertEquals(incremental.processNames, merged.processNames)
+        assertEquals(incremental.tagPids, merged.tagPids, "the live tag -> pids map covers rows the snapshot never saw")
         // The analysed prefix's results are visible; only the appended rows (ids 6..9) are unanalysed.
         assertFalse(merged.pending, "the prefix's results must not be hidden while rows keep arriving")
         assertEquals(5, merged.analyzedThroughId)

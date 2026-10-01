@@ -108,6 +108,7 @@ import com.indagium.utils.computeMessageTemplates
 import com.indagium.utils.computeProcessNames
 import com.indagium.utils.computeSearchMatches
 import com.indagium.utils.computeStackTraceGroups
+import com.indagium.utils.computeTagPids
 import com.indagium.utils.computeTidMapColors
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.enforceArchiveVideoCacheBudget
@@ -291,8 +292,8 @@ private class CommittedAnnotationEdit(val tab: LogTab, val exportTarget: Pending
 // `analysis` wholesale on its debounce, so a histogram stored here would be silently discarded by
 // the next tail flush.
 //
-// [includeCounts] = false skips tagCounts/processNames (left empty). The live-tail refresh passes it:
-// those two maps are maintained incrementally per batch and the refresh's merge
+// [includeCounts] = false skips tagCounts/processNames/tagPids (left empty). The live-tail refresh passes it:
+// those maps are maintained incrementally per batch and the refresh's merge
 // (TailCoordinator.mergeTailAnalysis) discards its own copies, so recomputing them over a
 // million-row snapshot every ~30 s is pure waste.
 internal fun buildLogAnalysis(
@@ -311,6 +312,7 @@ internal fun buildLogAnalysis(
         crashSites = if (logFormat == LogFormat.DLT) emptyList() else computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
         processNames = if (includeCounts) computeProcessNames(data) else emptyMap(),
+        tagPids = if (includeCounts) computeTagPids(data) else emptyMap(),
         pending = false,
     )
 }
@@ -325,6 +327,7 @@ private fun pendingAnalysis(data: List<LogEntry>, logFormat: LogFormat = LogForm
     LogAnalysis(
         tagCounts = data.groupingBy { it.tag }.eachCount(),
         processNames = computeProcessNames(data),
+        tagPids = computeTagPids(data),
         stackTraceGroups = emptyList(), crashSites = emptyList(), pending = logFormat != LogFormat.DLT,
     )
 
@@ -6381,7 +6384,7 @@ class AppState(
         // above) instead of re-filtering the full logData on every shift-click.
         val regexContext = RegexEvaluationContext()
         val ids = visibleItemsByTab[tabId]?.allIds
-            ?: t.logData.filter { passesFilter(it, t.filter, t.analysis.processNames, regexContext) }
+            ?: t.logData.filter { passesFilter(it, t.filter, t.analysis.processNames, regexContext, t.analysis.tagPids) }
                 .map { it.id }
                 .ifEmpty { t.logData.map { it.id } }
                 .toIntArray()
@@ -7425,7 +7428,7 @@ class AppState(
     // as filtered, the more actionable of the two guesses.
     private fun fullFloorHiddenReason(tab: LogTab, fullFloorId: Int): FollowMappingStatus {
         val entry = tab.rmap[fullFloorId] ?: return FollowMappingStatus.HIDDEN_BY_FILTER
-        return if (passesFilter(entry, tab.filter, tab.analysis.processNames, RegexEvaluationContext())) {
+        return if (passesFilter(entry, tab.filter, tab.analysis.processNames, RegexEvaluationContext(), tab.analysis.tagPids)) {
             FollowMappingStatus.HIDDEN_BY_COLLAPSE
         } else {
             FollowMappingStatus.HIDDEN_BY_FILTER

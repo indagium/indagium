@@ -58,6 +58,13 @@ class MessageRuleInputTest {
     }
 
     @Test
+    fun tagTokenPidRulePillReadsAsThePidOfTheTag() {
+        val follow = MessageRule(id = "r1", include = true, pattern = "tag:CarService", target = RuleTarget.PID_TID)
+
+        assertEquals("pid of CarService", messageRulePillLabel(follow))
+    }
+
+    @Test
     fun pendingScopePromptShowsSelectedRuleAction() {
         assertEquals("Add + rule to", messageRuleScopePrompt(include = true))
         assertEquals("Add - rule to", messageRuleScopePrompt(include = false))

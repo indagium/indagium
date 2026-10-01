@@ -298,6 +298,11 @@ data class LogAnalysis(
     // nothing is analysed yet then. Session-only like the rest of LogAnalysis (never autosaved).
     // Appended last so existing positional/named constructions are unaffected.
     val analyzedThroughId: Int? = null,
+    // tag -> pids (> 0) that logged it (utils/TagProcesses.kt's computeTagPids). Backs the dynamic
+    // `tag:<Tag>` PID_TID token (utils/Filter.kt's resolvePidTidTokens) and the tag rows' "follow
+    // process" popover. A side map like processNames; session-only (never autosaved). Appended last
+    // so existing positional/named constructions are unaffected.
+    val tagPids: Map<String, Set<Int>> = emptyMap(),
 ) {
     /**
      * True when rows beyond the analysed prefix exist (or nothing is analysed yet): the results are
