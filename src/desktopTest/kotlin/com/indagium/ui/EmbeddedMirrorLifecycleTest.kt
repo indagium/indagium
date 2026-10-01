@@ -236,8 +236,10 @@ class EmbeddedMirrorLifecycleTest {
             val handle = requireNotNull(h.app.embeddedMirrorFor(h.tabId))
             // The mirror was already LIVE before the clicks, so "LIVE" alone proves nothing: the last
             // Connect supersedes the Disconnects and must really tear down and re-attach (starts == 2).
-            awaitCondition(5_000) { h.backend.starts.get() == 2 }
-            awaitCondition(5_000) { handle.snapshot.value.state == EmbeddedMirrorState.LIVE }
+            // 15 s, not 5 s: this failed once only when the whole capture/mirror suite ran in
+            // parallel; under that load the 300 ms detach + lane hops can exceed a tight bound.
+            awaitCondition(15_000) { h.backend.starts.get() == 2 }
+            awaitCondition(15_000) { handle.snapshot.value.state == EmbeddedMirrorState.LIVE }
             Thread.sleep(300)
             assertTrue(h.backend.attached, "the LAST click (Connect) must win")
             assertEquals(1, h.backend.maxAttachedDecoders.get())
@@ -973,6 +975,66 @@ class EmbeddedMirrorLifecycleTest {
             f.handle.requestStop().get(5, TimeUnit.SECONDS)
             f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
             awaitCondition(5_000) { f.diagnostics.any { "not attached" in it } }
+        }
+    }
+
+    // A replacement surface that finishes after a close ran must be closed by whoever created it and
+    // never published: nothing else owns it, so it would be a leaked native Metal/D3D surface.
+    @org.junit.Test(timeout = 30_000)
+    fun aReplacementCreatedWhileTheSurfacesAreBeingClosedIsClosedAndNeverPublished() {
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        SharedFixture(factoryGate = gate, factoryEntered = entered).use { f ->
+            f.backend.start("s", MirrorStreamOptions())
+            val stopper = Executors.newSingleThreadExecutor { Thread(it, "swap-stopper").apply { isDaemon = true } }
+            try {
+                val stopDone = stopper.submit { f.backend.stop() }
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "stop() must be inside the surface recreation")
+
+                f.backend.closeNativeSurfaces() // the EDT-safe half of a close: runs while the swap is in flight
+                gate.countDown()
+                stopDone.get(10, TimeUnit.SECONDS)
+
+                assertEquals(2, f.created.size)
+                assertNull(f.backend.nativeSurface, "a replacement created after the close must not be published")
+                assertTrue(f.created.all { it.isClosed }, "every surface ever created must be closed: ${f.created.map { it.closed }}")
+                assertEquals(1, f.created[1].closeCalls.get(), "the replacement is closed by its creator, exactly once")
+            } finally {
+                gate.countDown()
+                stopper.shutdownNow()
+            }
+        }
+    }
+
+    // close() stops waiting for an in-flight swap after SURFACE_SWAP_WAIT_NANOS and clears the fields
+    // anyway; the swap that is still running must then close its own replacement. Takes about 5 s.
+    @org.junit.Test(timeout = 60_000)
+    fun aCloseThatGaveUpWaitingForTheSwapStillEndsWithEverySurfaceClosed() {
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        SharedFixture(factoryGate = gate, factoryEntered = entered).use { f ->
+            f.backend.start("s", MirrorStreamOptions())
+            val stopper = Executors.newSingleThreadExecutor { Thread(it, "swap-stopper").apply { isDaemon = true } }
+            val closer = Executors.newSingleThreadExecutor { Thread(it, "swap-closer").apply { isDaemon = true } }
+            try {
+                val stopDone = stopper.submit { f.backend.stop() }
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "stop() must be inside the surface recreation")
+
+                // The swap is stuck in the factory: close() waits its bounded time, then carries on.
+                val closeDone = closer.submit { f.backend.close() }
+                closeDone.get(30, TimeUnit.SECONDS)
+                assertNull(f.backend.nativeSurface)
+
+                gate.countDown() // the slow factory finally returns, long after close() gave up
+                stopDone.get(10, TimeUnit.SECONDS)
+
+                assertNull(f.backend.nativeSurface, "the late replacement must not be published into a closed mirror")
+                assertTrue(f.created.all { it.isClosed }, "every surface ever created must be closed: ${f.created.map { it.closed }}")
+            } finally {
+                gate.countDown()
+                stopper.shutdownNow()
+                closer.shutdownNow()
+            }
         }
     }
 

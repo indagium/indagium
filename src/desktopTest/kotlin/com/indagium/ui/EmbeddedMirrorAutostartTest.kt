@@ -100,6 +100,90 @@ class EmbeddedMirrorAutostartTest {
         }
     }
 
+    /** A backend whose start throws while [failStarts] is set; no device, no native code. */
+    private class ScriptedStartBackend : MirrorBackend {
+        @Volatile var failStarts = true
+
+        @Volatile private var attached = false
+        val startCalls = AtomicInteger()
+
+        override fun snapshot() = EmbeddedMirrorSnapshot(
+            if (attached) EmbeddedMirrorState.LIVE else EmbeddedMirrorState.DISCONNECTED,
+        )
+
+        override fun start(serial: String, options: com.indagium.capture.mirror.MirrorStreamOptions) {
+            startCalls.incrementAndGet()
+            if (failStarts) error("scrcpy server refused the connection")
+            attached = true
+        }
+
+        override fun stop() {
+            attached = false
+        }
+
+        override fun send(command: com.indagium.capture.mirror.MirrorControlCommand) = false
+
+        override fun isAlreadyStarted(serial: String) = attached
+
+        override fun close() = Unit
+    }
+
+    // A Connect on a handle that already exists used to fail invisibly: the error was stored but the
+    // panel only rendered it when there was no handle, and nothing cleared it afterwards.
+    @org.junit.Test(timeout = 20_000)
+    fun aFailedConnectOnAnExistingHandleIsShownUntilTheNextSuccessfulStartOrDisconnect() {
+        val root = createTempDirectory("embedded-mirror-start-failure").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val controller = TabCaptureController(root, runner = runner)
+        val app = AppState(autosaveFile = Files.createTempFile("embedded-mirror-start-failure-autosave", "").toFile(), autoExportNotes = false)
+        try {
+            val tabId = "t1"
+            app.registerCaptureControllerForTest(tabId, controller)
+            controller.start(
+                CaptureDevice("SERIAL", "device", "Pixel"),
+                CaptureSettings(freeSpaceReserveBytes = 0),
+                CaptureTools(CaptureExecutable("adb"), null, runner),
+            ) {}
+            val backend = ScriptedStartBackend()
+            app.embeddedMirrorHandleFactory = { _, _, _, _ -> EmbeddedMirrorHandle.forBackend(backend) }
+
+            // First Connect creates the handle and its start throws.
+            app.ensureEmbeddedMirror(tabId, autoStart = true)
+            awaitCondition(5_000) { app.embeddedMirrorSetupError(tabId) != null }
+            val handle = requireNotNull(app.embeddedMirrorFor(tabId)) { "the handle exists, so this is not a pre-handle setup failure" }
+            val shown = embeddedMirrorDisplayedError(handle.snapshot.value.error, app.embeddedMirrorSetupError(tabId))
+            assertTrue(shown?.contains("scrcpy server refused the connection") == true, "the panel must render the start failure: $shown")
+
+            // A Retry that succeeds clears it.
+            backend.failStarts = false
+            app.ensureEmbeddedMirror(tabId, autoStart = true)
+            awaitCondition(5_000) { handle.snapshot.value.state == EmbeddedMirrorState.LIVE }
+            awaitCondition(5_000) { app.embeddedMirrorSetupError(tabId) == null }
+            assertNull(embeddedMirrorDisplayedError(handle.snapshot.value.error, app.embeddedMirrorSetupError(tabId)))
+
+            // A failure followed by Disconnect also clears it.
+            backend.failStarts = true
+            app.stopEmbeddedMirror(tabId)
+            awaitCondition(5_000) { handle.snapshot.value.state == EmbeddedMirrorState.DISCONNECTED }
+            app.ensureEmbeddedMirror(tabId, autoStart = true)
+            awaitCondition(5_000) { app.embeddedMirrorSetupError(tabId) != null }
+            app.stopEmbeddedMirror(tabId)
+            assertNull(app.embeddedMirrorSetupError(tabId), "Disconnect ends the failed attempt the panel was showing")
+        } finally {
+            app.close()
+            controller.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @org.junit.Test
+    fun theRuntimesOwnErrorWinsOverTheAppLevelOne() {
+        assertEquals("runtime", embeddedMirrorDisplayedError("runtime", "app"))
+        assertEquals("app", embeddedMirrorDisplayedError(null, "app"))
+        assertNull(embeddedMirrorDisplayedError(null, null))
+    }
+
     @org.junit.Test(timeout = 20_000)
     fun aLateAutoStartRequestDuringAnInFlightCreateJobIsHonouredOnceItFinishes() {
         val root = createTempDirectory("embedded-mirror-autostart").toFile()

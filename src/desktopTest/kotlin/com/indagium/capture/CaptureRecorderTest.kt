@@ -46,6 +46,26 @@ class CaptureRecorderTest {
         }
     }
 
+    // CaptureArchiveExporter must not read a growing MKV directly just because its status was
+    // rewritten on disk: a recorder in this process that is still recording says so here.
+    @Test
+    fun aRecorderRegistersItsSessionAsLiveUntilItsStopFinished() {
+        val root = Files.createTempDirectory("capture-live-registry-test").toFile()
+        val runner = FakeCaptureRunner()
+        runner.enqueue(StreamingFakeProcess())
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            val started = recorder.start(DEVICE, testSettings(), CaptureTools(ADB, null, runner))
+            assertTrue(LiveCaptureSessions.isLive(started.directory))
+
+            val stopped = requireNotNull(recorder.stop())
+            assertFalse(LiveCaptureSessions.isLive(stopped.directory))
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
     @Test
     fun aSecondRecorderCannotLeaveTwoSessionsRecording() {
         val root = Files.createTempDirectory("capture-single-live-test").toFile()

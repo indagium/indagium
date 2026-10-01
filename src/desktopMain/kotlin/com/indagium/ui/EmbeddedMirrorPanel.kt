@@ -1244,6 +1244,23 @@ internal interface MirrorBackend : Closeable {
             }
         }
 
+        /**
+         * Runs [publish] under [lock] only while the mirror is still open and returns whether it ran.
+         * The [closed] check and the field assignment are one atomic step against [closeNativeSurfaces]
+         * and [close], which set [closed] first and then read the fields under the same [lock]: either
+         * the publish lands before that read (and is closed by it) or it sees [closed] and the caller
+         * closes the replacement itself. A replacement created while a close ran, even one whose swap
+         * wait timed out, is therefore never left published and never left open.
+         */
+        private inline fun publishIfOpen(publish: () -> Unit): Boolean = synchronized(lock) {
+            if (closed) {
+                false
+            } else {
+                publish()
+                true
+            }
+        }
+
         private fun recreateGpuSurface(previous: MirrorNativeSurface?) {
             runCatching { previous?.close() }
             if (closed) return
@@ -1251,10 +1268,10 @@ internal interface MirrorBackend : Closeable {
             if (replacement == null) {
                 synchronized(lock) { gpuDirectDecoderFactory = null }
                 AppLogger.warn("embedded-mirror", "GPU recording mirror could not be recreated; using Compose on the next connect")
-            } else if (closed) {
+            } else if (!publishIfOpen { gpuNative = replacement }) {
+                // The mirror was closed while the replacement was being created: nothing may publish
+                // it, and close() already retired the fields, so this is the only place left to close it.
                 runCatching { replacement.close() }
-            } else {
-                synchronized(lock) { gpuNative = replacement }
             }
             // Published after the field is set (see EmbeddedMirrorHandle.nativeSurface): Compose must
             // learn about the replacement itself, not only through the next connection snapshot.
@@ -1268,14 +1285,13 @@ internal interface MirrorBackend : Closeable {
             if (replacement == null) {
                 synchronized(lock) { directDecoderFactory = null }
                 AppLogger.warn("embedded-mirror", "VideoToolbox recording mirror could not be recreated; using Compose on the next connect")
-            } else if (closed) {
-                runCatching { replacement.close() }
             } else {
-                val occluded = synchronized(lock) {
-                    macNative = replacement
-                    overlayOccluded
+                var occluded = false
+                if (publishIfOpen { macNative = replacement; occluded = overlayOccluded }) {
+                    replacement.setOverlayOccluded(occluded)
+                } else {
+                    runCatching { replacement.close() }
                 }
-                replacement.setOverlayOccluded(occluded)
             }
             notifySurfaceChanged()
         }
@@ -1445,6 +1461,10 @@ private fun mirrorStateLabel(state: EmbeddedMirrorState, reconnectAttempt: Int):
     EmbeddedMirrorState.FAILED -> "Failed"
 }
 
+/** The error text the mirror panel renders: the runtime's own, else the app-level connect failure. */
+internal fun embeddedMirrorDisplayedError(snapshotError: String?, setupError: String?): String? =
+    snapshotError ?: setupError
+
 /** Right-panel embedded device surface. The panel owns no recorder and never opens a native window. */
 @Composable
 internal fun EmbeddedMirrorPanel(
@@ -1459,10 +1479,10 @@ internal fun EmbeddedMirrorPanel(
     /** Size the surface from the height this panel is given rather than [sidebarSurfaceHeight] —
      *  see the `flexible` comment at the BoxWithConstraints below. Implied by [detached]. */
     fillAvailableHeight: Boolean = false,
-    // A setup failure (tool resolution, asset deploy, handle creation) from before any handle
-    // existed — the runtime's own FAILED snapshot only exists once a handle does, so without this
-    // the panel silently showed "Connect to show the device" (DISCONNECTED, no error) for a real
-    // failure the app already knew about (see AppState.embeddedMirrorSetupError's doc).
+    // A connect failure the app knows about: from before any handle existed (tool resolution, asset
+    // deploy, handle creation — the runtime's own FAILED snapshot only exists once a handle does), or a
+    // Connect on this handle whose start threw. Without it the panel silently showed "Connect to show
+    // the device" (see AppState.embeddedMirrorSetupError's doc).
     setupError: String? = null,
     // Passed by CaptureCard, remembered per tab, so the typed text and the open/closed text row
     // survive the panel leaving and re-entering composition; the detached window uses its own.
@@ -1506,9 +1526,9 @@ internal fun EmbeddedMirrorPanel(
         lastSurfaceBounds[0]?.let { (full, clipped) -> macSurface?.setVisibleClip(full, clipped) }
         onDispose { macSurface?.setHostMounted(macSurfaceHostToken, false) }
     }
-    // A pre-handle setup failure only makes sense to show while there's still no live/queued
-    // connection attempt to report its own state instead.
-    val effectiveError = snapshot.error ?: setupError?.takeIf { handle == null }
+    // The app's connect failure (pre-handle setup, or a Connect on this handle that threw) shows when
+    // the runtime reports no error of its own; AppState clears it on the next good start/Disconnect.
+    val effectiveError = embeddedMirrorDisplayedError(snapshot.error, setupError)
     val displayedState = if (effectiveError != null && snapshot.state == EmbeddedMirrorState.DISCONNECTED) {
         EmbeddedMirrorState.FAILED
     } else {
