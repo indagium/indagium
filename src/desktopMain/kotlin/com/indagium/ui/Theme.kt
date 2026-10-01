@@ -14,6 +14,11 @@ import com.indagium.model.ThemePreset
 private const val ALPHA_HOVER = 0.04f
 private const val ALPHA_ACCENT_BG = 0.15f
 private const val ALPHA_SELECTION = 0.18f
+
+// Selected rows are tinted ABOVE their content (so span backgrounds can't hide the selection), and
+// a row that already carries a whole-line highlight or crash wash needs more than ALPHA_SELECTION
+// to read against it, including an opaque klogg colour.
+internal const val ALPHA_SELECTION_OVERLAY = 0.22f
 internal const val HL_MATCH_BACKGROUND_ALPHA = 0.6f
 internal const val HL_WHOLE_LINE_BACKGROUND_ALPHA = 0.16f
 
