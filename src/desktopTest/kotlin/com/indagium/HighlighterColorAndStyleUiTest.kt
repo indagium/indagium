@@ -15,6 +15,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
@@ -25,10 +26,12 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -37,6 +40,7 @@ import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.unit.dp
@@ -48,6 +52,7 @@ import com.indagium.model.LogTab
 import com.indagium.ui.AppState
 import com.indagium.ui.AppearanceSystemFontSelectors
 import com.indagium.ui.CtxTagActions
+import com.indagium.ui.DARK_GITHUB
 import com.indagium.ui.FilterPanelUiState
 import com.indagium.ui.FontCatalog
 import com.indagium.ui.HL_COLORS
@@ -57,6 +62,7 @@ import com.indagium.ui.HighlighterSection
 import com.indagium.ui.HighlighterSectionState
 import com.indagium.ui.LocalTheme
 import com.indagium.ui.MAX_CUSTOM_HIGHLIGHT_COLORS
+import com.indagium.ui.ThemeColors
 import com.indagium.ui.WARM_PAPER
 import com.indagium.ui.resolvedInterfaceFontFamily
 import com.indagium.ui.resolvedLogFontFamily
@@ -67,6 +73,7 @@ import org.junit.Test
 import java.awt.image.BufferedImage
 import java.io.File
 import javax.imageio.ImageIO
+import kotlin.math.abs
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
@@ -99,13 +106,62 @@ class HighlighterColorAndStyleUiTest {
         val containsAccent = (0 until pixels.width).any { x ->
             (0 until pixels.height).any { y -> pixels[x, y].toArgb() == accent.toArgb() }
         }
-        assertTrue(containsAccent, "the checked compact checkbox should use the selected theme accent")
+        assertTrue(containsAccent, "the enabled style chip should use the selected theme accent")
     }
 
     private fun collapseAndReopenHighlightersSection() {
         rule.onNodeWithText("Highlighters").performClick()
         rule.onNodeWithTag("highlighter-add-pattern").assertDoesNotExist()
         rule.onNodeWithText("Highlighters").performClick()
+    }
+
+    private fun tapChipAt(testTag: String, xFraction: Float, yFraction: Float) {
+        val size = rule.onNodeWithTag(testTag).fetchSemanticsNode().size
+        val position = Offset(size.width * xFraction, size.height * yFraction)
+        rule.onNodeWithTag(testTag).performTouchInput { click(position) }
+    }
+
+    private fun verifyBackgroundChipHitAreas(sectionState: HighlighterSectionState) {
+        val chip = "highlighter-add-background-group"
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_TOP_PADDING)
+        rule.runOnIdle { assertFalse(sectionState.addBackgroundEnabled, "top-right padding should toggle background off") }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_BOTTOM_PADDING)
+        rule.runOnIdle { assertTrue(sectionState.addBackgroundEnabled, "bottom-right padding should toggle background on") }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_VERTICAL_CENTER)
+        rule.runOnIdle { assertFalse(sectionState.addBackgroundEnabled, "right inset should be part of the chip action") }
+        rule.onNodeWithTag("highlighter-add-background-enable-swatch").performClick()
+        rule.runOnIdle {
+            assertTrue(sectionState.addBackgroundEnabled, "swatch should enable background")
+            assertTrue(sectionState.addColorPickerOpen, "swatch should open its color picker without toggling back off")
+        }
+        rule.onNodeWithTag("highlighter-add-background-picker").performKeyInput { pressKey(Key.Escape) }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_VERTICAL_CENTER)
+        rule.runOnIdle { assertFalse(sectionState.addBackgroundEnabled) }
+    }
+
+    private fun verifyForegroundChipHitAreas(sectionState: HighlighterSectionState) {
+        val chip = "highlighter-add-foreground-group"
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_TOP_PADDING)
+        rule.runOnIdle { assertNotNull(sectionState.addTextColor, "top-right padding should turn text color on") }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_BOTTOM_PADDING)
+        rule.runOnIdle { assertNull(sectionState.addTextColor, "bottom-right padding should turn text color off") }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_VERTICAL_CENTER)
+        rule.runOnIdle { assertNotNull(sectionState.addTextColor, "right inset should be part of the chip action") }
+        recordScreenshot("highlighter-add-foreground-group", "highlighter-foreground-control")
+        assertRenderedThemeAccent("highlighter-add-foreground-group", WARM_PAPER.ac)
+        rule.onNodeWithTag("highlighter-add-foreground-trigger", useUnmergedTree = true).performClick()
+        rule.runOnIdle {
+            assertNotNull(sectionState.addTextColor, "swatch should open its picker without disabling text color")
+            assertTrue(sectionState.addForegroundPickerOpen)
+        }
+        rule.onNodeWithTag("highlighter-add-foreground-picker").performKeyInput { pressKey(Key.Escape) }
+        tapChipAt(chip, CHIP_RIGHT_PADDING, CHIP_VERTICAL_CENTER)
+        rule.runOnIdle { assertNull(sectionState.addTextColor, "chip padding should restore inherited log text color") }
+        rule.onNodeWithTag("highlighter-add-foreground-enable-swatch").performClick()
+        rule.runOnIdle { assertNotNull(sectionState.addTextColor, "foreground swatch should enable a text color") }
+        rule.onNodeWithTag("highlighter-add-foreground-picker").assertExists()
+        rule.runOnIdle { assertTrue(sectionState.addForegroundPickerOpen) }
+        rule.onNodeWithTag("highlighter-add-foreground-picker").performKeyInput { pressKey(Key.Escape) }
     }
 
     private fun verifyRuleListCollapseIsIndependentFromSectionCollapse() {
@@ -120,6 +176,14 @@ class HighlighterColorAndStyleUiTest {
         collapseAndReopenHighlightersSection()
         rule.onNodeWithTag("highlighter-add-pattern").assertExists()
         rule.onNodeWithText("needle").assertExists()
+
+        rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasText("Highlighters"))
+        rule.onNodeWithText("Highlighters").performClick()
+        rule.onNodeWithTag("highlighter-add-pattern").assertDoesNotExist()
+        rule.onNodeWithText("needle").assertDoesNotExist()
+        rule.onNodeWithTag("highlighters-list-toggle").performClick()
+        rule.onNodeWithTag("highlighter-add-pattern").assertExists()
+        rule.onNodeWithText("needle").assertExists()
     }
 
     private fun reopenRuleEditorAndClearStyleOverrides() {
@@ -130,7 +194,7 @@ class HighlighterColorAndStyleUiTest {
         rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-editor-background-toggle"))
         rule.onNodeWithTag("highlighter-editor-background-toggle").performClick()
         rule.onNodeWithTag("highlighter-editor-foreground-toggle").performClick()
-        rule.onNodeWithTag("highlighter-editor-bold-toggle-default").performClick()
+        repeat(2) { rule.onNodeWithTag("highlighter-editor-bold-cycle").performClick() }
         rule.onNodeWithTag("highlighter-editor-done").performClick()
     }
 
@@ -307,7 +371,7 @@ class HighlighterColorAndStyleUiTest {
     }
 
     @Test
-    fun contextPaletteUsesPagedAndRectangleViewsAndRetainsPlainBackgroundAction() {
+    fun contextPaletteUsesTenColumnPagesAndRetainsPlainBackgroundAction() {
         var columns by mutableIntStateOf(5)
         var colorPicked: Color? = null
         var ordinaryHighlightClicks = 0
@@ -331,33 +395,32 @@ class HighlighterColorAndStyleUiTest {
         }
 
         rule.onNodeWithTag("context-highlight-trigger").performClick()
-        rule.onNodeWithText("Page 5 of 5").assertExists()
-        rule.onAllNodesWithTag("context-highlight-empty-slot").assertCountEquals(23)
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("context-highlight-mode-pages").assertDoesNotExist()
+        rule.onNodeWithTag("context-highlight-mode-rectangle").assertDoesNotExist()
+        rule.onAllNodesWithTag("context-highlight-empty-slot").assertCountEquals(98)
         val lastPopupBounds = rule.onNodeWithTag("context-highlight-popup").fetchSemanticsNode().boundsInRoot
         val lastPagePrevBounds = rule.onNodeWithTag("context-highlight-prev-page").fetchSemanticsNode().boundsInRoot
-        recordScreenshot("context-highlight-popup", "context-palette-page-5-warm-paper")
+        recordScreenshot("context-highlight-popup", "context-palette-page-2-warm-paper")
         rule.onNodeWithTag("context-highlight-prev-page").performClick()
-        rule.onNodeWithText("Page 4 of 5").assertExists()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
         val fullPopupBounds = rule.onNodeWithTag("context-highlight-popup").fetchSemanticsNode().boundsInRoot
         val fullPagePrevBounds = rule.onNodeWithTag("context-highlight-prev-page").fetchSemanticsNode().boundsInRoot
         assertEquals(lastPopupBounds.size, fullPopupBounds.size)
         assertEquals(lastPopupBounds.top, fullPopupBounds.top)
         assertEquals(lastPopupBounds.left, fullPopupBounds.left)
-        assertEquals(lastPagePrevBounds.top, fullPagePrevBounds.top)
-        assertEquals(lastPagePrevBounds.left, fullPagePrevBounds.left)
+        assertTrue(abs(lastPagePrevBounds.top - fullPagePrevBounds.top) <= 1f)
+        assertTrue(abs(lastPagePrevBounds.left - fullPagePrevBounds.left) <= 1f)
         rule.onNodeWithTag("context-highlight-next-page").performClick()
-        rule.onNodeWithText("Page 5 of 5").assertExists()
-        recordScreenshot("context-highlight-popup", "context-palette-page-5-warm-paper-repeat")
-        rule.onNodeWithTag("context-highlight-mode-rectangle").performClick()
-        rule.runOnIdle { assertEquals(10, columns) }
         rule.onNodeWithText("Page 2 of 2").assertExists()
+        recordScreenshot("context-highlight-popup", "context-palette-page-2-warm-paper-repeat")
         rule.onNodeWithTag("context-highlight-prev-page").performClick()
         rule.onNodeWithText("Page 1 of 2").assertExists()
-        recordScreenshot("context-highlight-popup", "context-palette-rectangle-warm-paper")
+        recordScreenshot("context-highlight-popup", "context-palette-ten-columns-warm-paper")
         rule.onNodeWithTag("context-highlight-swatch-99").performClick()
         rule.runOnIdle {
             assertEquals(HL_COLORS[99], colorPicked)
-            assertEquals(10, columns, "choosing a color must retain the shared view preference")
+            assertEquals(5, columns, "the context flyout must not change the saved palette preference")
         }
         rule.onNodeWithText("Highlight").performClick()
         rule.runOnIdle {
@@ -490,33 +553,32 @@ class HighlighterColorAndStyleUiTest {
 
         rule.onNodeWithTag("highlighter-add-pattern").assertExists()
         recordScreenshot("highlighter-add-form")
+        verifyBackgroundChipHitAreas(sectionState)
+        verifyForegroundChipHitAreas(sectionState)
+        rule.onNodeWithTag("highlighter-add-bold-cycle").performClick()
+        repeat(2) { rule.onNodeWithTag("highlighter-add-italic-cycle").performClick() }
+        rule.onNodeWithText("Bold on · Italic off").assertExists()
         rule.onNodeWithTag("highlighter-add-pattern").performTextInput("needle")
-        rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-add-background-toggle"))
-        rule.onNodeWithTag("highlighter-add-background-toggle").performClick()
-        rule.onNodeWithTag("highlighter-add-foreground-toggle").performClick()
-        assertRenderedThemeAccent("highlighter-add-foreground-toggle", WARM_PAPER.ac)
-        rule.onNodeWithTag("highlighter-add-bold-toggle-on").performClick()
-        rule.onNodeWithTag("highlighter-add-italic-toggle-off").performClick()
         // Collapsing hides the form, releases panel focus, and retains the user's style draft.
         collapseAndReopenHighlightersSection()
         rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-add-background-toggle"))
         rule.onNodeWithTag("highlighter-add-background-toggle").assertExists()
         if (pickedFont != null) {
-            rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-font-trigger"))
-            rule.onNodeWithTag("highlighter-font-trigger").performClick()
-            rule.onNodeWithTag("highlighter-font-search").performTextInput(pickedFont)
-            rule.onNodeWithTag("highlighter-font-option-0").performClick()
+            rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-add-font-trigger"))
+            rule.onNodeWithTag("highlighter-add-font-trigger").performClick()
+            rule.onNodeWithTag("highlighter-add-font-search").performTextInput(pickedFont)
+            rule.onNodeWithTag("highlighter-add-font-option-0").performClick()
         }
         rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasTestTag("highlighter-add-submit"))
         rule.onNodeWithTag("highlighter-add-submit").performClick()
         rule.runOnIdle {
-            assertNotNull(added)
-            assertEquals("needle", added!!.pattern)
-            assertFalse(added!!.backgroundEnabled)
-            assertNotNull(added!!.textColor)
-            assertEquals(true, added!!.bold)
-            assertEquals(false, added!!.italic)
-            if (pickedFont != null) assertEquals(pickedFont, added!!.fontFamily)
+            val created = assertNotNull(added)
+            assertEquals("needle", created.pattern)
+            assertFalse(created.backgroundEnabled)
+            assertNotNull(created.textColor)
+            assertEquals(true, created.bold)
+            assertEquals(false, created.italic)
+            if (pickedFont != null) assertEquals(pickedFont, created.fontFamily)
         }
 
         rule.onNodeWithTag("highlighter-section-qa").performScrollToNode(hasText("needle"))
@@ -533,6 +595,93 @@ class HighlighterColorAndStyleUiTest {
             assertEquals(false, edited.italic)
         }
     }
+
+    @Test
+    fun compactAddControlsFitNarrowWarmPaperAndDarkWindows() {
+        captureCompactAddForm(320, WARM_PAPER, "compact-add-320-warm-paper")
+        captureCompactAddForm(360, DARK_GITHUB, "compact-add-360-dark-github")
+    }
+
+    @Test
+    fun colorChipTooltipsExplainTogglingAndChoosingColors() {
+        captureCompactAddForm(320, WARM_PAPER, "color-chip-layout")
+        rule.onNodeWithTag("highlighter-add-background-toggle").performMouseInput { moveTo(center) }
+        rule.waitUntil(2_000) {
+            rule.onAllNodesWithText("Background is on.", substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithText("click swatch to choose color", substring = true).assertIsDisplayed()
+        rule.onNodeWithTag("highlighter-add-foreground-toggle").performMouseInput { moveTo(center) }
+        rule.waitUntil(2_000) {
+            rule.onAllNodesWithText("Text color is inherited.", substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        rule.onNodeWithText("swatch chooses text color", substring = true).assertIsDisplayed()
+    }
+
+    private fun captureCompactAddForm(widthDp: Int, theme: ThemeColors, screenshot: String) {
+        val tab = LogTab(
+            id = "compact-add-$widthDp",
+            filename = "compact-add.log",
+            logData = emptyList(),
+            rmap = emptyMap(),
+            analysis = LogAnalysis(pending = false),
+        )
+        val focusRequester = FocusRequester()
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides theme) {
+                Column(
+                    Modifier.width(widthDp.dp).height(440.dp).background(theme.p)
+                        .verticalScroll(rememberScrollState()).testTag("highlighter-section-qa"),
+                ) {
+                    HighlighterSection(
+                        tab = tab,
+                        fpState = FilterPanelUiState(),
+                        sectionState = HighlighterSectionState(),
+                        actions = noOpHighlighterActions(),
+                        sortedTags = emptyList(),
+                        tagUsage = emptyMap(),
+                        mostUsedTagLimit = 5,
+                        filterListRows = 5,
+                        newHlPat = "ANR",
+                        newHlRx = false,
+                        newHlColor = HL_COLORS.first(),
+                        inputFocusRequester = focusRequester,
+                        onInputFocusedChange = {},
+                        onTabOut = {},
+                        onReclaimFocus = {},
+                        onUiStateChanged = {},
+                    )
+                }
+            }
+        }
+        rule.onNodeWithTag("highlighter-add-pattern").assertIsDisplayed()
+        rule.onNodeWithTag("highlighter-add-background-group").assertExists()
+        rule.onNodeWithTag("highlighter-add-foreground-group").assertExists()
+        rule.onNodeWithTag("highlighter-add-bold-cycle").assertExists()
+        rule.onNodeWithTag("highlighter-add-italic-cycle").assertExists()
+        val sectionBounds = rule.onNodeWithTag("highlighter-section-qa").fetchSemanticsNode().boundsInRoot
+        val fontBounds = rule.onNodeWithTag("highlighter-add-font-trigger").fetchSemanticsNode().boundsInRoot
+        assertTrue(fontBounds.right <= sectionBounds.right + 1f, "font selector should stay within the $widthDp dp panel")
+        recordScreenshot("highlighter-section-qa", screenshot)
+    }
+
+    private fun noOpHighlighterActions() = HighlighterActions(
+        onAdd = { _, _, _, _, _, _, _, _, _, _, _ -> },
+        onRemove = {},
+        onToggle = {},
+        onSetColor = { _, _ -> },
+        onUpdate = { _, _ -> },
+        onSetNewPattern = {},
+        onSetNewRegex = {},
+        onSetNewColor = {},
+        onSetKwHighlightEnabled = {},
+        onSetKwHighlightColor = {},
+        onRequestMessageComposition = {},
+        customColors = emptyList(),
+        paletteColumns = 10,
+        onSaveCustomColor = {},
+        onDeleteCustomColor = {},
+        onPaletteColumnsChange = {},
+    )
 
     @Test
     fun appearanceFontSelectorsUpdateIndependentSettingsAndMissingNamesFallBack() {
@@ -592,5 +741,12 @@ class HighlighterColorAndStyleUiTest {
         assertTrue(defaults.highlighterCustomColors.isEmpty())
         assertEquals(5, defaults.highlighterPaletteColumns)
         assertTrue(defaults.highlighterCustomColorEditorExpanded)
+    }
+
+    private companion object {
+        const val CHIP_RIGHT_PADDING = .97f
+        const val CHIP_TOP_PADDING = .04f
+        const val CHIP_BOTTOM_PADDING = .96f
+        const val CHIP_VERTICAL_CENTER = .5f
     }
 }

@@ -333,22 +333,26 @@ pattern, case, where to match (tag, message or anywhere), tag limit and text sty
 
 The Highlighters section lets you choose background and text colours independently, including
 text without a coloured background. You can also override the log font for a rule and set bold or
-italic text, with a preview before applying it. Each bold/italic selector offers **Default**, **On**
-and **Off**: Default keeps the rule's original formatting, On forces the style, and Off forces normal
+italic text, with a preview before applying it. The compact **Bg** and **Fg** controls enable
+background and foreground colours. Click the full text side of a chip, including its padding,
+to toggle it; the swatch side opens the colour picker. Hover for a tip explaining both actions.
+The **B** and **I** buttons
+cycle through **Default**, **On** and **Off**, with their current states shown below: Default keeps
+the rule's original formatting, On forces the style, and Off forces normal
 weight or non-italic text. These styles apply to the matched text or the whole
 line according to the rule's **Match / Line** setting. Right-click highlighting keeps its usual
 background-colour behaviour; edit the rule in the filter panel to apply additional text styles.
 
 Both colour pickers offer the same 100 preset colours and up to **256 custom colours**. The section
-picker uses pages of **10 × 10** swatches. The context picker lets you choose **5 × 5** or **10 × 10**
-pages, and Indagium remembers that choice. Page sizes stay fixed, including the last page, and each
+and context pickers use pages of **10 × 10** swatches. Page sizes stay fixed, including the last page, and each
 popup opens on the page containing its selected colour. Create a colour visually, including its transparency, or enter
 `#RRGGBB` / `#AARRGGBB` in the expandable **Custom color** editor. The editor starts open; its button
 lets you collapse it, and Indagium remembers your choice. Save a colour for reuse in either picker,
 or right-click a custom swatch and choose **Delete color** to remove it from your palette. Custom
 swatches share the main paged grid; there is no separate Saved colors strip. Built-in presets remain
 available. Click the **Highlighters** header to collapse the whole section, including its add
-form; Indagium remembers that choice. Click the active-count chip to collapse only the rule list.
+form; Indagium remembers that choice. Click the active-count chip to toggle the rule list. If the
+whole section is collapsed, clicking that chip expands the section and shows the rules.
 Saved filters, their JSON export/import and the restored session retain each rule's colours and
 text styles. The JSON filter library also carries your saved custom palette; importing it merges
 those colours with your existing palette.

@@ -1245,21 +1245,26 @@ composition keep producing exactly what they always did:
 These fields are appended to highlighter tokens. Legacy tokens without the explicit compatibility
 flag infer `kloggStyle` from their foreground field, preserving the old interpretation; newly
 created foreground rules remain native. Settings JSON stores independent interface/log font
-families, shared custom colours and palette presentation; the legacy positional settings decoder
+families, shared custom colours and custom-editor visibility; the legacy palette-layout setting
+is retained for compatibility, while both pickers now use 10 × 10 pages. The positional settings decoder
 is unchanged. Missing system families fall back at render time without discarding the saved name.
 Filter-library JSON can carry the shared custom palette as optional metadata. Import review stages
 it with the filters and merges validated ARGB colours only when the user confirms an import.
 Font selection uses one searchable dropdown for interface, log and per-rule families; its search
 draft is separate from the selected name so reopening it does not hide other families. Bold/italic
-controls expose nullable overrides as explicit Default/On/Off choices. Font lists use a visible
+controls expose nullable overrides through compact B/I buttons cycling Default/On/Off, with a
+caption reporting the current states. Shared Bg/Fg chips have separate full-height toggle and
+colour-picker zones, including their padding; one tooltip per chip explains both actions and the
+current state. Font lists use a visible
 scrollbar, and dropdown hover feedback is clipped to the control shape. The color popup uses the
 original context-menu swatch styling; its advanced HSV/HEX editor starts open and has a button
 that persists its expansion preference in keyed settings. The shared palette reserves every cell
-on each page so partial pages cannot shrink hover-driven popups. Section pickers use 10 × 10 pages;
-context-menu background pickers retain the persisted 5 × 5 / 10 × 10 choice. The initial page contains
+on each page so partial pages cannot shrink hover-driven popups. Section and context-menu
+background pickers use 10 × 10 pages without a mode selector. The initial page contains
 the selected colour, while manual page navigation remains stable until the popup is reopened or
 its layout changes. Up to 256 saved colours share the preset grid; their context menu can delete
-the saved entry. The separate duplicate Saved colors strip is removed. The active-count chip toggles only the rule list.
+the saved entry. The separate duplicate Saved colors strip is removed. The active-count chip
+toggles the rule list when the section is expanded; when collapsed, it expands both the section and list.
 Whole-section Highlighters visibility is an independent filter-panel UI state,
 persisted at the end of its positional token without changing the older list-only expansion field.
 
@@ -1278,6 +1283,13 @@ painted, what the overview strip shows and what the panel counts cannot disagree
 4. Paint order: Indagium spans in list order (as before), klogg spans reversed so the first in the
    list ends up on top. Plain text scans overlap for Indagium highlighters and never for klogg ones
    (klogg's escaped `globalMatch`).
+
+The row renderer splits whole-line, highlight, keyword and search styles at the union of their
+range endpoints and the base field boundaries. Compose resolves nested spans by range nesting,
+so insertion order alone cannot keep a full-match foreground above the inner PID, level, tag and
+message colours. Applying each layer to the same intervals preserves the intended priorities;
+Find styles remain last. Paint-level Compose tests cover field colours, wrapping, process-name
+remapping and native/klogg overlap order.
 
 **The filter panel side** (`ui/HighlighterSection.kt`, `ui/HighlighterCandidates.kt`). The search-to-add
 field builds its dropdown from pure functions: `parseHighlighterQuery` (a `/re/` regex, or
