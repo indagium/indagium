@@ -99,40 +99,50 @@ class HighlighterVisualAcceptanceTest {
     @Test
     fun lightPopupSwitchesPagesAndClosesWithEscape() {
         install(LIGHT_THEME, 5)
-        rule.onNodeWithText("Page 1 of 5").assertExists()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("visual-mode-pages").assertDoesNotExist()
+        rule.onNodeWithTag("visual-prev-page").performClick()
         rule.onNodeWithTag("visual-hex").assertExists()
         record("light-custom")
         rule.onNodeWithTag("visual-custom-toggle").performClick()
         rule.onNodeWithTag("visual-hex").assertDoesNotExist()
         record("light-pages")
         rule.onNodeWithTag("visual-next-page").performClick()
-        rule.onNodeWithText("Page 2 of 5").assertExists()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
         rule.onNodeWithTag("visual-prev-page").performClick()
-        rule.onNodeWithText("Page 1 of 5").assertExists()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
         rule.onNodeWithTag("visual-custom-toggle").performClick()
         rule.onNodeWithTag("visual-hex").performClick().performKeyInput { pressKey(Key.Escape) }
         rule.onNodeWithTag("visual-picker").assertDoesNotExist()
     }
 
     @Test
-    fun darkPopupSwitchesToExpandedRectangle() {
+    fun darkTenColumnPaletteKeepsItsBoundsForThePartialPage() {
         install(DARK_GITHUB, 5)
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        val partialPage = rule.onNodeWithTag("visual-picker").captureToImage()
+        rule.onNodeWithTag("visual-prev-page").performClick()
+        val fullPage = rule.onNodeWithTag("visual-picker").captureToImage()
+        assertEquals(fullPage.width, partialPage.width)
+        assertEquals(fullPage.height, partialPage.height)
         record("dark-custom")
         rule.onNodeWithTag("visual-custom-toggle").performClick()
         record("dark-pages")
-        rule.onNodeWithTag("visual-mode-rectangle").performClick()
-        rule.onNodeWithText("Page 1 of 5").assertDoesNotExist()
+        val compactFullPage = rule.onNodeWithTag("visual-picker").captureToImage()
+        rule.onNodeWithTag("visual-next-page").performClick()
+        val compactPartialPage = rule.onNodeWithTag("visual-picker").captureToImage()
+        assertEquals(compactFullPage.width, compactPartialPage.width)
+        assertEquals(compactFullPage.height, compactPartialPage.height)
+        rule.onNodeWithText("Page 2 of 2").assertExists()
         rule.onNodeWithTag("visual-palette").assertExists()
         record("dark-rectangle")
-        rule.onNodeWithTag("visual-mode-pages").performClick()
-        rule.onNodeWithText("Page 1 of 5").assertExists()
         rule.onNodeWithTag("visual-custom-toggle").performClick()
-        record("dark-custom")
     }
 
     @Test
     fun warmPaperCustomEditorStartsOpenAndRemembersClosingAcrossPopupReopen() {
         install(WARM_PAPER, 5)
+        rule.onNodeWithTag("visual-prev-page").performClick()
         rule.onNodeWithTag("visual-hex").assertExists()
         record("warm-paper-custom")
         rule.onNodeWithTag("visual-custom-toggle").performClick()
@@ -142,6 +152,7 @@ class HighlighterVisualAcceptanceTest {
         rule.onNodeWithTag("visual-picker").assertDoesNotExist()
         rule.onNodeWithTag("visual-trigger").performClick()
         rule.onNodeWithTag("visual-picker").assertExists()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
         rule.onNodeWithTag("visual-hex").assertDoesNotExist()
         rule.onNodeWithTag("visual-custom-toggle").performClick()
         rule.onNodeWithTag("visual-hex").assertExists()

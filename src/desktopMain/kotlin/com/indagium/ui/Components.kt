@@ -1533,6 +1533,7 @@ internal fun CtxTagActions(
     highlightAutoColor: Color,
     preferPickerLeft: Boolean,
     customColors: List<Color> = emptyList(),
+    onDeleteCustomColor: (Color) -> Unit = {},
     paletteColumns: Int = 5,
     onPaletteColumnsChange: (Int) -> Unit = {},
 ) {
@@ -1575,6 +1576,7 @@ internal fun CtxTagActions(
                         autoColor = highlightAutoColor,
                         preferLeft = preferPickerLeft,
                         customColors = customColors,
+                        onDeleteCustomColor = onDeleteCustomColor,
                         paletteColumns = paletteColumns,
                         onPaletteColumnsChange = onPaletteColumnsChange,
                     )
@@ -1838,6 +1840,7 @@ internal fun CtxSelectionActions(
     highlightAutoColor: Color,
     preferPickerLeft: Boolean,
     customColors: List<Color> = emptyList(),
+    onDeleteCustomColor: (Color) -> Unit = {},
     paletteColumns: Int = 5,
     onPaletteColumnsChange: (Int) -> Unit = {},
 ) {
@@ -1880,6 +1883,7 @@ internal fun CtxSelectionActions(
                         autoColor = highlightAutoColor,
                         preferLeft = preferPickerLeft,
                         customColors = customColors,
+                        onDeleteCustomColor = onDeleteCustomColor,
                         paletteColumns = paletteColumns,
                         onPaletteColumnsChange = onPaletteColumnsChange,
                     )
@@ -2000,6 +2004,7 @@ private fun CtxHighlightAction(
     autoColor: Color,
     preferLeft: Boolean,
     customColors: List<Color>,
+    onDeleteCustomColor: (Color) -> Unit,
     paletteColumns: Int,
     onPaletteColumnsChange: (Int) -> Unit,
 ) {
@@ -2012,9 +2017,10 @@ private fun CtxHighlightAction(
     var hoveringTrigger by remember { mutableStateOf(false) }
     var hoveringPopup by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
+    var deleteMenuOpen by remember { mutableStateOf(false) }
     var anchorWidthPx by remember { mutableStateOf(0) }
-    LaunchedEffect(hoveringTrigger, hoveringPopup) {
-        if (hoveringTrigger || hoveringPopup) {
+    LaunchedEffect(hoveringTrigger, hoveringPopup, deleteMenuOpen) {
+        if (hoveringTrigger || hoveringPopup || deleteMenuOpen) {
             pickerOpen = true
         } else if (pickerOpen) {
             delay(CTX_SUBMENU_CLOSE_DELAY_MS)
@@ -2064,11 +2070,14 @@ private fun CtxHighlightAction(
                     verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
                     HighlightPaletteGrid(
-                        palette = (HL_COLORS + customColors).distinct(),
+                        presetColors = HL_COLORS,
+                        customColors = customColors,
                         selectedColor = autoColor,
                         paletteColumns = paletteColumns,
                         onPaletteColumnsChange = onPaletteColumnsChange,
                         testTagPrefix = "context-highlight",
+                        onDeleteCustomColor = onDeleteCustomColor,
+                        onDeleteMenuOpenChange = { deleteMenuOpen = it },
                         onColorChange = { color ->
                             onHighlightColor(color)
                             pickerOpen = false

@@ -101,18 +101,19 @@ internal fun BoundFilterPanel(
             onSaveCustomColor = { color ->
                 val hex = highlightColorHex(color)
                 state.updateSettings { settings ->
-                    settings.copy(
-                        highlighterCustomColors = (settings.highlighterCustomColors + hex)
-                            .distinct().take(MAX_CUSTOM_HIGHLIGHT_COLORS),
-                    )
+                    val current = customHighlightColors(settings.highlighterCustomColors)
+                    if (hex in current.map(::highlightColorHex) || current.size >= MAX_CUSTOM_HIGHLIGHT_COLORS) {
+                        settings
+                    } else {
+                        settings.copy(highlighterCustomColors = (current.map(::highlightColorHex) + hex).take(MAX_CUSTOM_HIGHLIGHT_COLORS))
+                    }
                 }
             },
             onDeleteCustomColor = { color ->
-                val hex = highlightColorHex(color)
                 state.updateSettings { settings ->
                     settings.copy(
                         highlighterCustomColors = settings.highlighterCustomColors.filterNot {
-                            it.equals(hex, ignoreCase = true)
+                            parseHighlightHex(it) == color
                         },
                     )
                 }
