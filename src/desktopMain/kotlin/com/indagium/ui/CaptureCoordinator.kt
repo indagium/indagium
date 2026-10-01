@@ -563,6 +563,14 @@ internal class CaptureService(
         return CaptureRecorder(session.directory.parentFile).use { it.deleteSession(sessionId) }
     }
 
+    /**
+     * Publishes the durable descriptor of a stopped session that was never finalized (the app quit
+     * during the capture) and returns it as an [com.indagium.capture.ImportedCapture], ready for
+     * [attachFinalizedCapture]. Blocking: call from an IO thread.
+     */
+    fun finalizeStoppedSession(session: CaptureSession): com.indagium.capture.ImportedCapture =
+        CaptureArchiveExporter().finalizeSessionInPlace(session)
+
     fun exportRetainedSession(sessionId: String, destination: File, notes: Annotations? = null): CaptureExportResult {
         val session = requireNotNull(retainedSession(sessionId)) { "Capture session not found: $sessionId" }
         return CaptureArchiveExporter().export(

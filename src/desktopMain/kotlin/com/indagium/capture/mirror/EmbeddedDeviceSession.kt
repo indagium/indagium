@@ -11,6 +11,7 @@ import com.indagium.capture.TimelineOpusAudio
 import com.indagium.capture.captureNativeFailureDiagnostic
 import com.indagium.capture.hasNativeLinkageFailure
 import com.indagium.capture.microphoneFailureIndicatesPermissionDenied
+import com.indagium.debug.AppLogger
 import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
@@ -408,7 +409,16 @@ internal class EmbeddedDeviceSession(
 
     override fun close() {
         stop()
-        runCatching { muxer.finish() }
+        // The trailer (cues, durations, final segment size) is what makes the MKV a normal seekable
+        // file. A failure here used to vanish into runCatching; report it so a recording that did not
+        // finalize is visible in the capture diagnostics and the debug log.
+        try {
+            muxer.finish()
+        } catch (failure: Throwable) {
+            val detail = failure.message ?: failure::class.simpleName
+            AppLogger.warn("capture", "Embedded recording: could not finalize the video file ($detail)", failure)
+            runCatching { onDiagnostic("Embedded recording: could not finalize the video file ($detail); it may not be seekable.") }
+        }
     }
 
     /** Opens the transport and registers it as [currentConnection] if the run is still current,

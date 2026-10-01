@@ -2378,7 +2378,7 @@ internal fun FilterPanel(
                 ) {
                     AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
                     AppText(
-                        if (tab.analysis.isStaleFor(tab.logData.lastOrNull()?.id)) "Analyzing crashes…" else "None found in this category",
+                        crashListEmptyText(tab.analysis, tab.logData.lastOrNull()?.id, live = tab.tailing),
                         color = tc.td,
                         fontSize = 10.sp,
                         maxLines = 2,
@@ -3915,4 +3915,17 @@ internal fun slashWrappedRegex(input: String): String? {
     val suffix = input.substring(end + 1)
     if (suffix.isNotEmpty() && suffix != "i") return null
     return input.substring(1, end).takeIf { it.isNotBlank() }
+}
+
+/**
+ * Empty-state text of the Issues crash list. "Analyzing crashes…" is only for the initial pending
+ * state (nothing analysed yet) — on a live capture the analysed prefix always lags the tail
+ * ([LogAnalysis.isStaleFor]), so an empty list there means "nothing found so far", and saying
+ * "Analyzing" forever read as a stuck analysis.
+ */
+internal fun crashListEmptyText(analysis: LogAnalysis, lastRowId: Int?, live: Boolean): String = when {
+    analysis.pending -> "Analyzing crashes…"
+    live && analysis.isStaleFor(lastRowId) -> "No crashes found yet"
+    analysis.isStaleFor(lastRowId) -> "Analyzing crashes…"
+    else -> "None found in this category"
 }

@@ -15,6 +15,7 @@ private const val WIDTH = 64
 private const val HEIGHT = 48
 private const val FRAME_COUNT = 24
 private const val FRAME_STEP_US = 33_000L
+private val AUDIO_PTS_US = listOf(251_000L, 251_300L, 251_600L, 251_900L, 271_000L, 271_100L, 291_000L, 335_000L, 335_400L)
 
 /**
  * Verifies [StreamingMkvWriter] against real H.264 packets (produced by the bundled libopenh264
@@ -100,6 +101,78 @@ class StreamingMkvWriterTest {
             assertTrue(grabber.grabImage() != null)
         }
     }
+
+    @Test
+    fun submillisecondAudioTimestampsStayStrictlyIncreasingInTheFile() {
+        val (extradata, samples) = encodeSyntheticH264()
+        val destination = tempFile("streaming-mkv-audio-dts", ".mkv")
+        StreamingMkvWriter(destination).use { writer ->
+            writer.start(WIDTH, HEIGHT, extradata)
+            writer.addAudio(48_000, 2, opusHead())
+            // Bursts of audio packets a few hundred microseconds apart (device AudioRecord jitter):
+            // distinct in the microsecond clock, identical once rounded to Matroska's millisecond
+            // block timestamps — exactly the pairs ffmpeg reported as "non monotonically increasing".
+            val video = samples.take(4)
+            writer.writeVideoPacket(video[0].ptsUs, video[0].keyFrame, video[0].data)
+            AUDIO_PTS_US.forEach { writer.writeAudioPacket(it, byteArrayOf(0xF8.toByte(), 0xFF.toByte(), 0xFE.toByte())) }
+            video.drop(1).forEach { writer.writeVideoPacket(it.ptsUs + 335_000L, it.keyFrame, it.data) }
+            writer.finish()
+        }
+
+        val dtsByStream = readPacketDts(destination)
+        val audio = dtsByStream.getValue(1)
+        assertEquals(AUDIO_PTS_US.size, audio.size, "every audio packet must be present")
+        audio.zipWithNext().forEach { (a, b) -> assertTrue(b > a, "audio dts must be strictly increasing: $audio") }
+        assertEquals(251L, audio.first(), "the first packet keeps its own millisecond")
+        // Bumped forward only as far as strict ordering needs, never dragged ahead of real time.
+        assertTrue(audio.last() <= 336L, "audio timeline drifted: $audio")
+        val video = dtsByStream.getValue(0)
+        video.zipWithNext().forEach { (a, b) -> assertTrue(b > a, "video dts must be strictly increasing: $video") }
+    }
+
+    @Test
+    fun finishFinalizesTheTrailerAndIsSafeToCallTwice() {
+        val (extradata, samples) = encodeSyntheticH264()
+        val destination = tempFile("streaming-mkv-finish", ".mkv")
+        val writer = StreamingMkvWriter(destination, clusterTimeLimitMs = 100, clusterSizeLimitBytes = 2_048)
+        writer.start(WIDTH, HEIGHT, extradata)
+        samples.forEach { writer.writeVideoPacket(it.ptsUs, it.keyFrame, it.data) }
+        assertTrue(!MkvStructure.read(destination).isFinalized, "a growing file has no trailer yet")
+
+        writer.finish()
+        writer.finish() // exactly once: the second call is a no-op
+        writer.close()
+
+        val structure = MkvStructure.read(destination)
+        assertTrue(structure.segmentSizeKnown, "finalized Segment size must be known: $structure")
+        assertTrue(structure.hasCues, "finalized file must carry Cues: $structure")
+        assertTrue(structure.isFinalized, "finalized file must report a duration: $structure")
+    }
+
+    /** dts of every packet per stream index, in file order, in the stream's own time base (ms). */
+    private fun readPacketDts(file: File): Map<Int, List<Long>> {
+        val result = HashMap<Int, MutableList<Long>>()
+        FFmpegFrameGrabber(file).use { grabber ->
+            grabber.start()
+            while (true) {
+                val packet = grabber.grabPacket() ?: break
+                if (packet.size() <= 0) break
+                result.getOrPut(packet.stream_index()) { mutableListOf() } += packet.dts()
+            }
+        }
+        return result
+    }
+
+    /** Minimal valid OpusHead (stereo, 48 kHz) used as the audio stream's extradata. */
+    private fun opusHead(): ByteArray = ByteBuffer.allocate(19).order(java.nio.ByteOrder.LITTLE_ENDIAN).apply {
+        put("OpusHead".toByteArray(Charsets.US_ASCII))
+        put(1)
+        put(2)
+        putShort(312)
+        putInt(48_000)
+        putShort(0)
+        put(0)
+    }.array()
 
     private data class Sample(val ptsUs: Long, val keyFrame: Boolean, val data: ByteArray)
 

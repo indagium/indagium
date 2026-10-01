@@ -1514,6 +1514,16 @@ runs its full timeout inside the window). The design:
   `lifecycleLock`, and a non-EDT caller waits for an EDT teardown at most `EDT_CLOSE_WAIT_MS`
   (`runOnEdtBounded`, never `invokeAndWait`).
 
+- **Surface publication.** The surface Compose hosts is its own observable: `EmbeddedMirrorHandle.nativeSurface`
+  (a `StateFlow<MirrorNativeSurface?>`), republished by the backend (via `MirrorBackend.setSurfaceListener`, outside
+  its locks) every time the surface is retired or replaced, and by the handle after each lifecycle job. The panel
+  reads it from there and wraps `SwingPanel` in `key(surface)`, because `SwingPanel` calls its factory once per
+  node: a Disconnect -> Connect that replaced the surface without recomposing (the connection snapshot ended up
+  equal to the one already composed) left the panel hosting the retired canvas while the decoder rendered into the
+  new one, i.e. a black mirror and no `Metal mirror AppKit hierarchy` log line. `SharedRecordingSession.start`
+  also refuses to bind a decoder to an already-closed surface (it creates a replacement first) and logs when a
+  bound surface is still not attached to a window after ~3 s.
+
 Pinned by `EmbeddedMirrorLifecycleTest`.
 
 Plus atomics and concurrent collections: `AtomicLong` for id generation (`utils/Ids.kt:7`),

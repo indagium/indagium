@@ -9,6 +9,8 @@ import com.indagium.capture.CaptureTools
 import com.indagium.capture.FakeCaptureRunner
 import com.indagium.capture.StreamingFakeProcess
 import com.indagium.capture.StreamingMkvWriter
+import com.indagium.capture.mirror.BoundedScrcpyPacketFeed
+import com.indagium.capture.mirror.DirectH264Decoder
 import com.indagium.capture.mirror.EmbeddedDeviceSession
 import com.indagium.capture.mirror.EmbeddedMirrorConnection
 import com.indagium.capture.mirror.EmbeddedMirrorSnapshot
@@ -17,12 +19,18 @@ import com.indagium.capture.mirror.EmbeddedMirrorTransport
 import com.indagium.capture.mirror.H264Decoder
 import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorFrame
+import com.indagium.capture.mirror.MirrorFrameInfo
 import com.indagium.capture.mirror.MirrorStreamOptions
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.awt.EventQueue
 import java.io.InputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.nio.file.Files
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -32,6 +40,9 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotSame
+import kotlin.test.assertNull
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /**
@@ -713,6 +724,268 @@ class EmbeddedMirrorLifecycleTest {
 
         releaseEdt.countDown()
         awaitCondition(5_000) { lateRan.get() } // the work was still queued, not dropped
+    }
+
+    // ---- surface publication: the decoder's surface must be the one Compose hosts -------------------
+
+    /** Stands in for the Metal canvas: closing is final, "attached" is set by [FakeCompose] when the
+     * panel hosts it, and no Canvas/native library is needed. */
+    private class FakeSurface(val id: Int) : MirrorNativeSurface {
+        @Volatile var closed = false
+
+        @Volatile var attached = false
+        val closeCalls = AtomicInteger()
+        override val mode = "fake-metal"
+        override val isClosed get() = closed
+        override val isPresentationAttached get() = !closed && attached
+
+        override fun describeAttachment() = "fake#$id closed=$closed attached=$attached"
+
+        override fun close() {
+            closeCalls.incrementAndGet()
+            closed = true
+        }
+    }
+
+    /** Models VideoToolbox decoder: close() closes the surface it was bound to. */
+    private class BoundDecoder(val surface: FakeSurface) : DirectH264Decoder {
+        override fun decode(input: BoundedScrcpyPacketFeed, onFrame: (MirrorFrameInfo) -> Unit) {
+            while (input.nextPacket() != null) {
+                // swallow packets until the feed is closed
+            }
+        }
+
+        override fun close() = surface.close()
+    }
+
+    /** Models the panel: observes the handle's surface flow (conflated, like collectAsState) and
+     * hosts exactly the latest published surface, remounting only when its identity changes — what
+     * `key(surface) { SwingPanel(...) }` does. Hosting marks the surface as attached to a window. */
+    private class FakeCompose(handle: EmbeddedMirrorHandle) : AutoCloseable {
+        private val scope = CoroutineScope(Dispatchers.Default)
+
+        @Volatile var mounted: FakeSurface? = null
+        val mounts = AtomicInteger()
+
+        init {
+            scope.launch {
+                handle.nativeSurface.collect { published ->
+                    val next = published as? FakeSurface
+                    if (next !== mounted) {
+                        mounted?.attached = false
+                        mounted = next
+                        next?.attached = true
+                        mounts.incrementAndGet()
+                    }
+                }
+            }
+        }
+
+        override fun close() = scope.cancel()
+    }
+
+    private class SharedFixture(
+        val factoryGate: CountDownLatch? = null,
+        val factoryEntered: CountDownLatch? = null,
+        attachCheckDelayMs: Long = 0L,
+        initialSurfaceClosed: Boolean = false,
+    ) : AutoCloseable {
+        val created = CopyOnWriteArrayList<FakeSurface>()
+        val bound = CopyOnWriteArrayList<FakeSurface>()
+        val diagnostics = CopyOnWriteArrayList<String>()
+        private val mkvFile = Files.createTempFile("mirror-surface-publication", ".mkv").toFile().apply { deleteOnExit() }
+        val session = EmbeddedDeviceSession(
+            EmbeddedMirrorTransport { _, _ -> error("the session is never started in this test") },
+            StreamingMkvWriter(mkvFile),
+            elapsedMillis = { 0L },
+        )
+        private var surfaceIds = 0
+
+        private fun newSurface() = FakeSurface(++surfaceIds).also { created += it }
+
+        val backend = MirrorBackend.SharedRecordingSession(
+            session = session,
+            decoder = object : H264Decoder {
+                override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) = Unit
+            },
+            macSurface = newSurface().also { if (initialSurfaceClosed) it.close() },
+            directDecoderFactory = { surface -> BoundDecoder(surface as FakeSurface).also { bound += surface } },
+            macSurfaceFactory = {
+                factoryEntered?.countDown()
+                factoryGate?.await(10, TimeUnit.SECONDS)
+                newSurface()
+            },
+            bindDiagnostics = SurfaceBindDiagnostics(attachCheckDelayMs) { diagnostics += it },
+            onSnapshotChanged = {},
+        )
+        val handle = EmbeddedMirrorHandle.forBackend(backend)
+        val compose = FakeCompose(handle)
+
+        val published: FakeSurface get() = requireNotNull(handle.nativeSurface.value as FakeSurface?)
+
+        /** The invariant: the decoder is bound to the published, open surface, and that is what the
+         * panel hosts. [settle] gives the (asynchronous) collector a moment to catch up. */
+        fun assertDecoderBoundToHostedSurface(context: String) {
+            val surface = published
+            assertFalse(surface.isClosed, "$context: the published surface is closed")
+            assertSame(surface, bound.last(), "$context: the decoder is bound to a different surface than the published one")
+            awaitCondition(5_000) { compose.mounted === surface }
+            assertTrue(surface.isPresentationAttached, "$context: the published surface is not hosted")
+        }
+
+        override fun close() {
+            compose.close()
+            handle.close()
+            session.close()
+            mkvFile.delete()
+        }
+    }
+
+    @org.junit.Test(timeout = 60_000)
+    fun everyDisconnectConnectPublishesTheNewSurfaceAndBindsTheDecoderToIt() {
+        SharedFixture().use { f ->
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            f.assertDecoderBoundToHostedSurface("initial Connect")
+            assertEquals(1, f.created.size)
+
+            repeat(60) { round ->
+                val before = f.published
+                // Back-to-back like a fast double click: the Connect usually supersedes the queued
+                // Disconnect, so the lane runs it as one restart (stop then start).
+                val stop = f.handle.requestStop()
+                val start = f.handle.requestStart("s", MirrorStreamOptions())
+                stop.get(10, TimeUnit.SECONDS)
+                start.get(10, TimeUnit.SECONDS)
+
+                assertNotSame(before, f.published, "round $round: a new surface was created but never published")
+                assertTrue(before.isClosed, "round $round: the retired surface must be closed")
+                f.assertDecoderBoundToHostedSurface("round $round")
+                assertEquals(f.created.last(), f.published, "round $round: the newest surface is the published one")
+            }
+            // Never more than one live (unclosed) surface at a time.
+            assertEquals(1, f.created.count { !it.isClosed })
+        }
+    }
+
+    @org.junit.Test(timeout = 60_000)
+    fun spacedOutDisconnectsAndConnectsAlsoRepublishTheSurface() {
+        SharedFixture().use { f ->
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            repeat(20) { round ->
+                val before = f.published
+                f.handle.requestStop().get(10, TimeUnit.SECONDS)
+                // Disconnected: the swap already completed, the replacement is what is published.
+                assertNotSame(before, f.published, "round $round: the replacement was not published by Disconnect")
+                assertFalse(f.published.isClosed)
+                f.handle.requestStart("s", MirrorStreamOptions()).get(10, TimeUnit.SECONDS)
+                f.assertDecoderBoundToHostedSurface("round $round")
+            }
+        }
+    }
+
+    @org.junit.Test(timeout = 60_000)
+    fun aBusyLaneCollapsesDisconnectConnectBurstsAndStillEndsBoundToThePublishedSurface() {
+        SharedFixture().use { f ->
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            repeat(15) { round ->
+                val parked = CountDownLatch(1)
+                val gate = CountDownLatch(1)
+                val slow = f.handle.requestStart("s", MirrorStreamOptions()) {
+                    parked.countDown()
+                    gate.await(10, TimeUnit.SECONDS)
+                }
+                assertTrue(parked.await(5, TimeUnit.SECONDS))
+                val burst = if (round % 2 == 0) {
+                    listOf(f.handle.requestStop(), f.handle.requestStart("s", MirrorStreamOptions()))
+                } else {
+                    listOf(
+                        f.handle.requestStop(),
+                        f.handle.requestStart("s", MirrorStreamOptions()),
+                        f.handle.requestStop(),
+                        f.handle.requestStart("s", MirrorStreamOptions()),
+                    )
+                }
+                gate.countDown()
+                slow.get(10, TimeUnit.SECONDS)
+                burst.forEach { it.get(10, TimeUnit.SECONDS) }
+                f.assertDecoderBoundToHostedSurface("busy-lane round $round")
+                assertEquals(1, f.created.count { !it.isClosed }, "round $round: exactly one open surface")
+            }
+        }
+    }
+
+    @org.junit.Test(timeout = 60_000)
+    fun aConnectArrivingWhileTheSurfaceSwapIsInFlightBindsToTheReplacement() {
+        val gate = CountDownLatch(1)
+        val entered = CountDownLatch(1)
+        SharedFixture(factoryGate = gate, factoryEntered = entered).use { f ->
+            f.backend.start("s", MirrorStreamOptions())
+            val first = f.published
+            val stopper = Executors.newSingleThreadExecutor { Thread(it, "swap-stopper").apply { isDaemon = true } }
+            val starter = Executors.newSingleThreadExecutor { Thread(it, "swap-starter").apply { isDaemon = true } }
+            try {
+                val stopDone = stopper.submit { f.backend.stop() }
+                assertTrue(entered.await(5, TimeUnit.SECONDS), "stop() must be inside the surface recreation")
+                // The old surface is retired and not yet replaced: nothing is published.
+                assertNull(f.handle.nativeSurface.value, "the retired surface must no longer be published")
+                val startDone = starter.submit { f.backend.start("s", MirrorStreamOptions()) }
+                Thread.sleep(300)
+                assertFalse(startDone.isDone, "Connect must wait for the swap instead of binding to a retired surface")
+
+                gate.countDown()
+                stopDone.get(10, TimeUnit.SECONDS)
+                startDone.get(10, TimeUnit.SECONDS)
+
+                assertNotSame(first, f.published)
+                f.assertDecoderBoundToHostedSurface("connect during swap")
+                assertEquals(2, f.bound.size)
+            } finally {
+                gate.countDown()
+                stopper.shutdownNow()
+                starter.shutdownNow()
+            }
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun aSurfaceThatIsAlreadyClosedAtConnectIsReplacedBeforeTheDecoderBindsToIt() {
+        SharedFixture(initialSurfaceClosed = true).use { f ->
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+
+            assertEquals(2, f.created.size, "a replacement surface must have been created")
+            assertTrue(f.created[0].isClosed)
+            f.assertDecoderBoundToHostedSurface("closed surface at Connect")
+            assertTrue(f.bound.none { it.isClosed }, "a decoder was bound to a closed surface")
+            assertTrue(f.diagnostics.any { "already closed" in it }, "the closed surface must be logged: ${f.diagnostics}")
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun aDecoderBoundToASurfaceThatNeverAttachesIsReportedAndAHostedOneIsNot() {
+        SharedFixture(attachCheckDelayMs = 150).use { f ->
+            // Hosted: FakeCompose marks the published surface attached, so the check stays quiet.
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            Thread.sleep(500)
+            assertTrue(f.diagnostics.none { "not attached" in it }, "unexpected diagnostic: ${f.diagnostics}")
+
+            // Not hosted: take the panel away, reconnect, and the check must say so.
+            f.compose.close()
+            f.handle.requestStop().get(5, TimeUnit.SECONDS)
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            awaitCondition(5_000) { f.diagnostics.any { "not attached" in it } }
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun closingTheHandlePublishesNoSurfaceAndClosesTheLastOne() {
+        SharedFixture().use { f ->
+            f.handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            val surface = f.published
+            f.handle.close()
+            assertNull(f.handle.nativeSurface.value)
+            assertTrue(surface.isClosed)
+            awaitCondition(5_000) { f.compose.mounted == null }
+        }
     }
 
     companion object {

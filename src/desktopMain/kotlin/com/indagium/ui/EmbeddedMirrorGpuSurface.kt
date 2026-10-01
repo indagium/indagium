@@ -14,23 +14,33 @@ import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_D3D11
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_VAAPI
 import java.awt.Canvas
 import java.awt.GraphicsEnvironment
-import java.io.Closeable
 
 /** Heavyweight AWT drawable used only by the Windows D3D11 and Linux VAAPI/EGL direct paths. */
 internal class EmbeddedMirrorGpuSurface private constructor(
-    val mode: String,
+    override val mode: String,
     val canvas: Canvas,
     private val presenter: HardwareMirrorFramePresenter,
     private val hardwareDeviceType: Int,
     private val hardwarePixelFormat: Int,
-) : Closeable {
+) : MirrorNativeSurface {
+    @Volatile private var closed = false
+
+    override val isClosed: Boolean get() = closed
+    override val isPresentationAttached: Boolean get() = !closed && canvas.isShowing
+
+    override fun describeAttachment(): String =
+        "closed=$closed displayable=${canvas.isDisplayable} showing=${canvas.isShowing}"
+
     fun createDecoder(): DirectH264Decoder = HardwareH264MirrorDecoder(
         hardwareDeviceType = hardwareDeviceType,
         hardwarePixelFormat = hardwarePixelFormat,
         presenter = presenter,
     )
 
-    override fun close() = presenter.close()
+    override fun close() {
+        closed = true
+        presenter.close()
+    }
 
     companion object {
         fun create(): EmbeddedMirrorGpuSurface {
