@@ -10,6 +10,8 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.Movie
@@ -21,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -3251,10 +3254,10 @@ private fun LogRow(
     val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
     val levelColor = entry.level.defaultColor
-    // selection > crash group > whole-line highlight > hover. Imported klogg alpha stays intact;
-    // native whole-line backgrounds use a light wash and a stronger color stripe.
+    // crash group > whole-line highlight > hover. Imported klogg alpha stays intact; native
+    // whole-line backgrounds use a light wash and a stronger color stripe. Selection is not in this
+    // chain: it is an overlay above the content (selectionOverlay below), so the wash stays under it.
     val bg = when {
-        isSel -> tc.sl
         isCrashGroupRow -> DANGER_RED.copy(alpha = if (hov) 0.15f else 0.07f)
         wholeLineBgHl != null -> if (wholeLineBgHl.isKloggStyle()) {
             wholeLineBgHl.color
@@ -3264,11 +3267,13 @@ private fun LogRow(
                     (HL_WHOLE_LINE_BACKGROUND_ALPHA + if (hov) WHOLE_LINE_HOVER_EXTRA_ALPHA else 0f),
             )
         }
-        hov -> tc.hv
+        hov && !isSel -> tc.hv
         else -> Color.Transparent
     }
-    // An Indagium whole-line highlight swaps the level stripe for one in its own colour.
-    val stripeHl = wholeLineHl?.takeIf { !it.isKloggStyle() && it.backgroundEnabled }
+    val selectionOverlay = rowSelectionOverlay(isSel, isCrashGroupRow || wholeLineBgHl != null, tc.ac, tc.sl)
+    // An Indagium whole-line highlight swaps the level stripe for one in its own colour, except on a
+    // selected row, which keeps the level stripe so the selection reads as selection.
+    val stripeHl = wholeLineHl?.takeIf { !isSel && !it.isKloggStyle() && it.backgroundEnabled }
     val groupColor = item.groupColor
 
     Row(
@@ -3277,6 +3282,10 @@ private fun LogRow(
             .heightIn(min = 22.dp)
             .pointerHoverIcon(PointerIcon(AwtCursor.getDefaultCursor()), overrideDescendants = true)
             .background(bg)
+            .drawWithContent {
+                drawContent()
+                selectionOverlay?.let { drawRect(it) }
+            }
             .onGloballyPositioned { coords ->
                 val pos = coords.positionInRoot()
                 rowBoundsAbs[entry.id] = pos.y to (pos.y + coords.size.height)
@@ -3544,7 +3553,7 @@ private fun LogRow(
         // BasicTextField — and does not affect drag-selection, which is entirely a property of the
         // single BasicTextField inside it.
         Box(Modifier.weight(1f)) {
-            BasicTextField(
+            SelectableLogLineField(
                 value = TextFieldValue(annotatedString = annoLine, selection = sel),
                 onValueChange = { new ->
                     sel = new.selection
@@ -3557,10 +3566,9 @@ private fun LogRow(
                     }
                     onSelectedTextChange(selectedText)
                 },
-                readOnly = true,
-                singleLine = false,
                 textStyle = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
-                cursorBrush = SolidColor(Color.Transparent),
+                selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
+                handleColor = tc.ac,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
                     .onSizeChanged { if (showsElidedName) popupAnchorHeightPx = it.height },
                 // Measuring bounding boxes only runs for a row that can actually show the popup —
@@ -3607,6 +3615,69 @@ private fun LogRow(
                 }
             }
         }
+    }
+}
+
+/**
+ * Tint drawn over a selected row's content, so span backgrounds can't hide the selection. A row with
+ * a wash of its own (whole-line highlight, crash group) needs the stronger alpha to read against it,
+ * including an opaque klogg colour; a plain row keeps the original [plainSelection] look.
+ */
+internal fun rowSelectionOverlay(isSelected: Boolean, hasRowWash: Boolean, accent: Color, plainSelection: Color): Color? =
+    when {
+        !isSelected -> null
+        hasRowWash -> accent.copy(alpha = ALPHA_SELECTION_OVERLAY)
+        else -> plainSelection
+    }
+
+// Compose's text-field draw fills the selection BEFORE painting the text, so any span background
+// (highlighter match, find, keyword, seq cell wash) covers it. Hiding the built-in selection fill and
+// repainting the selected range after the content keeps the selection visible over every highlight.
+// ~0.35 on top of the text reads like the old 0.4 default fill that sat underneath it.
+internal const val SELECTION_OVERLAY_ALPHA = 0.35f
+
+@Composable
+internal fun SelectableLogLineField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    textStyle: TextStyle,
+    selectionColor: Color,
+    handleColor: Color,
+    modifier: Modifier = Modifier,
+    onTextLayout: (TextLayoutResult) -> Unit = {},
+) {
+    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    val selection = value.selection
+    // Transparent backgroundColor disables the built-in (under-text) fill; the handle colour is
+    // irrelevant on desktop but kept at the accent for parity with a mobile-style handle.
+    CompositionLocalProvider(
+        LocalTextSelectionColors provides TextSelectionColors(
+            handleColor = handleColor,
+            backgroundColor = Color.Transparent,
+        ),
+    ) {
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            readOnly = true,
+            singleLine = false,
+            textStyle = textStyle,
+            cursorBrush = SolidColor(Color.Transparent),
+            modifier = modifier.drawWithContent {
+                drawContent()
+                val result = layout
+                if (result != null && !selection.collapsed) {
+                    val end = result.layoutInput.text.length
+                    val from = selection.min.coerceIn(0, end)
+                    val to = selection.max.coerceIn(0, end)
+                    if (from < to) drawPath(result.getPathForRange(from, to), selectionColor)
+                }
+            },
+            onTextLayout = {
+                layout = it
+                onTextLayout(it)
+            },
+        )
     }
 }
 
