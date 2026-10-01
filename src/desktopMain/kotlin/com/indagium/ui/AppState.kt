@@ -111,6 +111,7 @@ import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.computeTidMapColors
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.enforceArchiveVideoCacheBudget
+import com.indagium.utils.estimatedHeapBytesForLog
 import com.indagium.utils.exportFilteredToFile
 import com.indagium.utils.extractAppVersionHeuristic
 import com.indagium.utils.extractArchiveVideoToCache
@@ -289,21 +290,27 @@ private class CommittedAnnotationEdit(val tab: LogTab, val exportTarget: Pending
 // LogTab.messageComposition instead of this LogAnalysis — TailCoordinator replaces a tab's whole
 // `analysis` wholesale on its debounce, so a histogram stored here would be silently discarded by
 // the next tail flush.
+//
+// [includeCounts] = false skips tagCounts/processNames (left empty). The live-tail refresh passes it:
+// those two maps are maintained incrementally per batch and the refresh's merge
+// (TailCoordinator.mergeTailAnalysis) discards its own copies, so recomputing them over a
+// million-row snapshot every ~30 s is pure waste.
 internal fun buildLogAnalysis(
     data: List<LogEntry>,
     customIssueRules: List<CustomIssueRule> = emptyList(),
     logFormat: LogFormat = LogFormat.LOGCAT,
+    includeCounts: Boolean = true,
 ): LogAnalysis {
     // Crash/ANR recognizers are Android logcat heuristics. DLT payloads can contain arbitrary
     // application text that looks like an exception, so running those heuristics on DLT creates
     // misleading Issues anchors and expensive work for no user value.
     val stackGroups = if (logFormat == LogFormat.DLT) emptyList() else computeStackTraceGroups(data)
     return LogAnalysis(
-        tagCounts = data.groupingBy { it.tag }.eachCount(),
+        tagCounts = if (includeCounts) data.groupingBy { it.tag }.eachCount() else emptyMap(),
         stackTraceGroups = stackGroups,
         crashSites = if (logFormat == LogFormat.DLT) emptyList() else computeCrashSites(data, stackGroups),
         customIssueSites = computeCustomIssueSites(data, customIssueRules),
-        processNames = computeProcessNames(data),
+        processNames = if (includeCounts) computeProcessNames(data) else emptyMap(),
         pending = false,
     )
 }
@@ -1513,6 +1520,19 @@ sealed class SplitSource {
 
 data class DeferredArchiveEntry(val archiveFile: File, val candidate: ZipLogCandidate)
 
+/**
+ * A recording that was dropped / picked together with the log(s) of a [PendingSplitPrompt] and must
+ * still be attached once the prompt is resolved (to every tab it opens), exactly as the
+ * non-prompt open path attaches it.
+ */
+sealed interface PendingPromptVideo {
+    /** A recording entry inside [zipFile] (the archive picker's video choice). */
+    data class FromArchive(val zipFile: File, val candidate: ZipLogCandidate) : PendingPromptVideo
+
+    /** A plain video file (a log + video drop, or the folder picker's video choice). */
+    data class FromFile(val file: File) : PendingPromptVideo
+}
+
 data class PendingSplitPrompt(
     val sources: List<SplitSource>,
     val deferredFiles: List<File> = emptyList(),
@@ -1520,7 +1540,54 @@ data class PendingSplitPrompt(
     /** Set when the prompt was raised (also) because the files probably won't fit in free heap; see
      *  [memoryShortfall]. Null for a pure size prompt. */
     val memoryShortfall: MemoryShortfall? = null,
+    /** The recording to attach to the opened log tab(s) once the prompt is resolved (Split or Open as
+     *  is). Null when the open carried none. Appended last. */
+    val video: PendingPromptVideo? = null,
 )
+
+/**
+ * Merges a newly raised prompt into one that is still pending, so a second prompt never silently
+ * replaces (and drops the files of) the first. Sources are de-duplicated by id; a file offered as a
+ * source is not also deferred; the larger memory shortfall wins; the first recording is kept.
+ */
+internal fun mergeSplitPrompts(existing: PendingSplitPrompt, added: PendingSplitPrompt): PendingSplitPrompt {
+    val sources = (existing.sources + added.sources).distinctBy { it.id }
+    val sourceIds = sources.map { it.id }.toSet()
+    return PendingSplitPrompt(
+        sources = sources,
+        deferredFiles = (existing.deferredFiles + added.deferredFiles).distinct()
+            .filter { SplitSource.RealFile(it).id !in sourceIds },
+        deferredArchiveEntries = (existing.deferredArchiveEntries + added.deferredArchiveEntries).distinct()
+            .filter { SplitSource.ArchiveEntry(it.archiveFile, it.candidate).id !in sourceIds },
+        memoryShortfall = listOfNotNull(existing.memoryShortfall, added.memoryShortfall).maxByOrNull { it.neededBytes },
+        video = existing.video ?: added.video,
+    )
+}
+
+/** What a split wrote and which of the parts became tabs; [unopened] stayed on disk (see [MemoryOpenBudget]). */
+internal data class SplitOpenResult(
+    val written: List<File>,
+    val openedTabIds: List<String>,
+    val unopened: List<File>,
+)
+
+/**
+ * Free-heap budget shared by everything one confirmed prompt opens: [tryReserve] answers whether a
+ * file of the given size still fits (and reserves it), [reserveRegardless] accounts for a file that
+ * is opened anyway (the first part of a split, an "open as is" source).
+ */
+internal class MemoryOpenBudget(private var remainingBytes: Long) {
+    fun tryReserve(fileBytes: Long): Boolean {
+        val need = estimatedHeapBytesForLog(fileBytes)
+        if (need > remainingBytes) return false
+        remainingBytes -= need
+        return true
+    }
+
+    fun reserveRegardless(fileBytes: Long) {
+        remainingBytes = (remainingBytes - estimatedHeapBytesForLog(fileBytes)).coerceAtLeast(0L)
+    }
+}
 
 // Update-check status shown next to Settings' "Check now" button (AutomationSettingsSection).
 // Deliberately has no "an update is available" case of its own — AppState.availableUpdate already
@@ -2676,7 +2743,7 @@ class AppState(
     internal var heapPressure by mutableStateOf(HeapPressure.NORMAL)
         private set
 
-    /** The after-GC reading behind [heapPressure] (for display); null until a level change has been reported. */
+    /** The latest published after-GC reading (for display; throttled, see [onHeapReading]); null until the first GC. */
     internal var heapSnapshot by mutableStateOf<HeapSnapshot?>(null)
         private set
 
@@ -2694,8 +2761,20 @@ class AppState(
      */
     fun startHeapPressureMonitoring() {
         if (!heapMonitoringStarted.compareAndSet(false, true)) return
-        heapPressureMonitor.start(::onHeapPressureChanged)
+        heapPressureMonitor.start(onReading = ::onHeapReading, onChange = ::onHeapPressureChanged)
     }
+
+    /**
+     * Every after-GC reading the monitor publishes (throttled to about one per second), so the banner
+     * text and [currentHeapSnapshot] track the live heap instead of the snapshot taken at the last
+     * level change. Level handling stays in [onHeapPressureChanged].
+     */
+    internal fun onHeapReading(snapshot: HeapSnapshot) {
+        heapSnapshot = snapshot
+    }
+
+    /** The newest after-GC reading: read straight from the monitor, falling back to the published one. */
+    internal fun currentHeapSnapshot(): HeapSnapshot? = heapPressureMonitor.latestSnapshot ?: heapSnapshot
 
     /** Monitor callback; may arrive on a JMX notification thread. */
     internal fun onHeapPressureChanged(level: HeapPressure, snapshot: HeapSnapshot) {
@@ -2725,7 +2804,10 @@ class AppState(
         if (candidates.isEmpty()) return
         ioScope.launch {
             candidates.forEach { tabId ->
-                if (tailCoordinator.pauseTailing(tabId)) {
+                // The finalization check is repeated at claim time: Stop may have started since the
+                // candidate list above was built (TailCoordinator.pauseTailing).
+                val mayPause = { captureFinalizationStatusByTab[tabId] != CAPTURE_FINALIZING_STATUS }
+                if (tailCoordinator.pauseTailing(tabId, mayPause)) {
                     AppLogger.info("memory", "Paused the live capture log view to protect the heap")
                 }
             }
@@ -2736,13 +2818,29 @@ class AppState(
     internal fun isCaptureLogViewPaused(tabId: String): Boolean = tailCoordinator.isPaused(tabId)
 
     /**
+     * The backlog recorded while [tabId]'s log view was paused, as a shortfall against the free heap
+     * (null = it fits, or the tab has no paused tailer). Catching up loads every one of those bytes
+     * into the tab, exactly like opening a file of that size.
+     */
+    internal fun captureLogResumeBacklogShortfall(tabId: String): MemoryShortfall? {
+        val backlog = tailCoordinator.pausedBacklogBytes(tabId) ?: return null
+        return memoryShortfallFor(listOf(backlog))
+    }
+
+    /**
      * Resumes a paused live capture log view: the tab catches up with everything recorded meanwhile.
-     * Refused (false) while heap pressure is CRITICAL, because catching up would immediately push it
-     * back into an out-of-memory state; allowed at WARNING and below. Also refused for a tab that is
-     * not a live capture or whose Stop is in progress.
+     * Refused (false) while heap pressure is CRITICAL, or when the backlog recorded while paused
+     * would not fit in the free heap ([captureLogResumeEnabled], the same predicate the capture
+     * strip's Resume button uses; the reason is logged), because catching up would immediately push
+     * memory back into an out-of-memory state. Allowed at WARNING and below. Also refused for a tab
+     * that is not a live capture or whose Stop is in progress.
      */
     internal fun resumeCaptureLogView(tabId: String): Boolean {
-        if (heapPressure > HeapPressure.WARNING) return false
+        val backlogShortfall = captureLogResumeBacklogShortfall(tabId)
+        if (!captureLogResumeEnabled(heapPressure, backlogShortfall)) {
+            AppLogger.info("memory", "Resume refused: ${captureLogResumeBlockedReason(heapPressure, backlogShortfall)}")
+            return false
+        }
         val live = tab(tabId)?.captureSessionId != null &&
             captureFinalizationStatusByTab[tabId] != CAPTURE_FINALIZING_STATUS
         return live && tailCoordinator.resumeTailing(tabId)
@@ -2756,6 +2854,9 @@ class AppState(
      * instead of depending on the test JVM's heap; production reads [heapFreeBytesEstimate].
      */
     internal var heapFreeBytesProvider: () -> Long = { heapFreeBytesEstimate() }
+
+    /** Shortfall for opening [source] alone right now, or null when it fits (MCP split preview/route). */
+    internal fun memoryShortfallForSource(source: SplitSource): MemoryShortfall? = memoryShortfallFor(listOf(source.sizeBytes))
 
     /** Shortfall for opening plain logs totalling [fileSizes] bytes at once, or null when they fit. */
     private fun memoryShortfallFor(fileSizes: List<Long>): MemoryShortfall? =
@@ -8458,7 +8559,8 @@ class AppState(
     // See TailCoordinator.pauseTailing: blocks (joins the tailer job), so ioScope only. Production
     // callers are pauseLiveCaptureLogViews and the capture start path; internal so tests can pause
     // a tab without raising heap pressure.
-    internal fun pauseTailing(tabId: String): Boolean = tailCoordinator.pauseTailing(tabId)
+    internal fun pauseTailing(tabId: String, mayPause: () -> Boolean = { true }): Boolean =
+        tailCoordinator.pauseTailing(tabId, mayPause)
 
     fun openFile(file: File): String? = openFileInternal(file, bypassSplitPrompt = false)
 
@@ -8495,10 +8597,12 @@ class AppState(
         // which of them to split is the user's call, and there is exactly one shortfall for the batch.
         val promptFiles = if (oversizedFiles.isEmpty() && shortfall != null) plainFiles else oversizedFiles
         if (promptFiles.isNotEmpty()) {
-            pendingSplitPrompt = PendingSplitPrompt(
-                sources = promptFiles.map { SplitSource.RealFile(it) },
-                deferredFiles = openable - promptFiles.toSet(),
-                memoryShortfall = shortfall,
+            raiseSplitPrompt(
+                PendingSplitPrompt(
+                    sources = promptFiles.map { SplitSource.RealFile(it) },
+                    deferredFiles = openable - promptFiles.toSet(),
+                    memoryShortfall = shortfall,
+                ),
             )
             promptFiles.forEach { file ->
                 rememberRecentFile(file)
@@ -8563,8 +8667,17 @@ class AppState(
                 // openFile returns a stable id immediately, but its tab is published on ioScope.
                 // Target that id, never activeTabId, because another load or tab click may change
                 // the active tab while parsing is in progress.
-                val tabId = openFile(nonVideos.single())
-                if (tabId != null) attachVideoToTabWhenAvailable(videos.single(), tabId)
+                val log = nonVideos.single()
+                val tabId = openFile(log)
+                if (tabId != null) {
+                    attachVideoToTabWhenAvailable(videos.single(), tabId)
+                } else {
+                    // Null is also "the size / free-memory check raised a split prompt": the recording
+                    // rides along with it and is attached once the prompt is resolved.
+                    attachVideoToPendingPrompt(videos.single()) { source ->
+                        source is SplitSource.RealFile && source.file.absolutePath == log.absolutePath
+                    }
+                }
             }
 
             else -> {
@@ -8655,7 +8768,9 @@ class AppState(
         openPath(file)
     }
 
-    private fun openFileInternal(file: File, bypassSplitPrompt: Boolean): String? {
+    // [bypassMemoryCheck] skips only the free-heap check (the size threshold still prompts): a file
+    // that a confirmed prompt deferred was already weighed in that prompt's batch decision.
+    private fun openFileInternal(file: File, bypassSplitPrompt: Boolean, bypassMemoryCheck: Boolean = false): String? {
         val path = file.absolutePath
         if (!file.exists() || !file.isFile) {
             removeRecentFile(file)
@@ -8679,9 +8794,9 @@ class AppState(
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
         // no SplitSource to route into — BoundedInputStream during parsing is its size cap).
         if (!bypassSplitPrompt && detectArchiveFormat(file) is ArchiveFormat.None) {
-            val shortfall = memoryShortfallFor(listOf(file.length()))
+            val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(file.length()))
             if (requiresSplitPrompt(file.length()) || shortfall != null) {
-                pendingSplitPrompt = PendingSplitPrompt(listOf(SplitSource.RealFile(file)), memoryShortfall = shortfall)
+                raiseSplitPrompt(PendingSplitPrompt(listOf(SplitSource.RealFile(file)), memoryShortfall = shortfall))
                 return null
             }
         }
@@ -8822,15 +8937,20 @@ class AppState(
         recentMenuOpen = !recentMenuOpen
     }
 
-    fun openPath(file: File): String? = when {
+    fun openPath(file: File): String? = openPathInternal(file, bypassMemoryCheck = false)
+
+    // A file deferred by a confirmed split prompt: opened without a fresh free-heap check (it was part
+    // of the prompt's batch decision, and a per-file re-check would raise new prompts that overwrite
+    // one another).
+    private fun openPathInternal(file: File, bypassMemoryCheck: Boolean): String? = when {
         file.name == "capture.indagium.json" -> openCaptureFile(file)
-        else -> openOrdinaryPath(file)
+        else -> openOrdinaryPath(file, bypassMemoryCheck)
     }
 
-    private fun openOrdinaryPath(file: File): String? = when (detectArchiveFormat(file)) {
+    private fun openOrdinaryPath(file: File, bypassMemoryCheck: Boolean = false): String? = when (detectArchiveFormat(file)) {
         // Zip/SevenZ/Sequential all go through the picker-capable archive path.
-        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file); null }
-        is ArchiveFormat.Sequential -> { openZipFile(file); null }
+        ArchiveFormat.Zip, ArchiveFormat.SevenZ -> { openZipFile(file, bypassMemoryCheck = bypassMemoryCheck); null }
+        is ArchiveFormat.Sequential -> { openZipFile(file, bypassMemoryCheck = bypassMemoryCheck); null }
         // CompressedFile falls through to plain openFile alongside None (an ordinary log/text
         // file) — that's what makes a bare compressed log cheap to support: no picker (there's
         // exactly one log inside), sourcePath stays the bare absolute path so dedup/recents/
@@ -8838,7 +8958,7 @@ class AppState(
         // FileSource that restores correctly via the `parser` seam change above. Unsupported
         // and None both land here too — openFile's own existence/readability check produces the
         // right error for those, same as before this change.
-        else -> openFile(file)
+        else -> openFileInternal(file, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck)
     }
 
     /** Capture descriptors bind exact asset hashes and row ordinals, never transient tab IDs. */
@@ -9033,7 +9153,7 @@ class AppState(
     // user must be able to see and confirm the optional log/video association. 2+ log candidates
     // also show a picker rather than guessing. 0 candidates reports that no log-like entries were
     // found.
-    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false) {
+    fun openZipFile(file: File, ignoreCaptureDescriptor: Boolean = false, bypassMemoryCheck: Boolean = false) {
         if (!ignoreCaptureDescriptor && com.indagium.capture.CaptureArchiveReader.isCaptureArchive(file)) {
             openCaptureFile(file)
             return
@@ -9067,7 +9187,7 @@ class AppState(
             candidates.size == 1 && videoCandidates.isEmpty() -> {
                 rememberRecentFile(file)
                 recentMenuOpen = false
-                openZipEntries(file, listOf(candidates.first()))
+                openZipEntries(file, listOf(candidates.first()), bypassMemoryCheck = bypassMemoryCheck)
             }
             candidates.isNotEmpty() -> {
                 rememberRecentFile(file)
@@ -9121,24 +9241,32 @@ class AppState(
         zipFile: File,
         selected: List<ZipLogCandidate>,
         videoToAttach: ZipLogCandidate? = null,
+        bypassMemoryCheck: Boolean = false,
     ): List<String> {
         // Entry sizes are the real (uncompressed) sizes, so the memory check applies to them too.
-        val shortfall = memoryShortfallFor(selected.map { it.sizeBytes })
+        val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(selected.map { it.sizeBytes })
         val (sizeOversized, sizeNormal) = selected.partition { requiresSplitPrompt(it.sizeBytes) }
         // Memory-only prompt: offer every selected entry (same rule as openPaths).
         val memoryOnly = sizeOversized.isEmpty() && shortfall != null
         val oversized = if (memoryOnly) selected else sizeOversized
         val normal = if (memoryOnly) emptyList() else sizeNormal
         if (oversized.isNotEmpty()) {
-            pendingSplitPrompt = PendingSplitPrompt(
-                sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
-                deferredArchiveEntries = normal.map { DeferredArchiveEntry(zipFile, it) },
-                memoryShortfall = shortfall,
+            // The picker's video choice travels with the prompt and is attached once it is resolved.
+            raiseSplitPrompt(
+                PendingSplitPrompt(
+                    sources = oversized.map { SplitSource.ArchiveEntry(zipFile, it) },
+                    deferredArchiveEntries = normal.map { DeferredArchiveEntry(zipFile, it) },
+                    memoryShortfall = shortfall,
+                    video = videoToAttach?.takeIf { it.kind == ZipLogCandidateKind.VIDEO }
+                        ?.let { PendingPromptVideo.FromArchive(zipFile, it) },
+                ),
             )
             pendingZipPicker = null
             return emptyList()
         }
-        val tabIds = selected.mapNotNull { openZipEntry(zipFile, it, bypassSplitPrompt = false) }
+        val tabIds = selected.mapNotNull {
+            openZipEntry(zipFile, it, bypassSplitPrompt = false, bypassMemoryCheck = bypassMemoryCheck)
+        }
         pendingZipPicker = null
         attachArchiveVideoToTabsWhenAvailable(zipFile, videoToAttach, tabIds)
         return tabIds
@@ -9243,10 +9371,14 @@ class AppState(
             // Same "defer everything selected, not just the oversized ones" shape as
             // openZipEntries' identical branch — confirmSplitPrompt already knows how to open a
             // plain File deferred this way (its `deferredFiles.forEach { openPath(it) }`).
-            pendingSplitPrompt = PendingSplitPrompt(
-                sources = oversized.map { (_, file) -> SplitSource.RealFile(file) },
-                deferredFiles = normal.map { (_, file) -> file },
-                memoryShortfall = shortfall,
+            raiseSplitPrompt(
+                PendingSplitPrompt(
+                    sources = oversized.map { (_, file) -> SplitSource.RealFile(file) },
+                    deferredFiles = normal.map { (_, file) -> file },
+                    memoryShortfall = shortfall,
+                    video = videoToAttach?.takeIf { it.kind == ZipLogCandidateKind.VIDEO }
+                        ?.let { PendingPromptVideo.FromFile(File(folder, it.entryPath)) },
+                ),
             )
             pendingFolderPicker = null
             return emptyList()
@@ -9270,18 +9402,25 @@ class AppState(
     // existing tab's id on the dedup fast path, the newly allocated id once a load is launched, or
     // null when nothing was launched (deferred into a split prompt instead). See openZipEntries'
     // doc comment for why callers want this rather than re-deriving it from sourcePath.
-    private fun openZipEntry(zipFile: File, candidate: ZipLogCandidate, bypassSplitPrompt: Boolean): String? {
+    private fun openZipEntry(
+        zipFile: File,
+        candidate: ZipLogCandidate,
+        bypassSplitPrompt: Boolean,
+        bypassMemoryCheck: Boolean = false,
+    ): String? {
         val path = "${zipFile.absolutePath}!${candidate.entryPath}"
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
             activateTab(existing.id); return existing.id
         }
         if (!bypassSplitPrompt) {
-            val shortfall = memoryShortfallFor(listOf(candidate.sizeBytes))
+            val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(candidate.sizeBytes))
             if (requiresSplitPrompt(candidate.sizeBytes) || shortfall != null) {
-                pendingSplitPrompt = PendingSplitPrompt(
-                    listOf(SplitSource.ArchiveEntry(zipFile, candidate)),
-                    memoryShortfall = shortfall,
+                raiseSplitPrompt(
+                    PendingSplitPrompt(
+                        listOf(SplitSource.ArchiveEntry(zipFile, candidate)),
+                        memoryShortfall = shortfall,
+                    ),
                 )
                 return null
             }
@@ -9422,6 +9561,25 @@ class AppState(
         pendingSplitPrompt = null
     }
 
+    // Posts a prompt without discarding one that is still pending (see mergeSplitPrompts).
+    private fun raiseSplitPrompt(prompt: PendingSplitPrompt) {
+        pendingSplitPrompt = pendingSplitPrompt?.let { mergeSplitPrompts(it, prompt) } ?: prompt
+    }
+
+    // Hangs [video] on the pending prompt that holds the source [matches] selects, if any.
+    private fun attachVideoToPendingPrompt(video: File, matches: (SplitSource) -> Boolean) {
+        val pending = pendingSplitPrompt ?: return
+        if (pending.sources.none(matches)) return
+        pendingSplitPrompt = pending.copy(video = pending.video ?: PendingPromptVideo.FromFile(video))
+    }
+
+    private fun attachPromptVideo(video: PendingPromptVideo, tabIds: List<String>) {
+        when (video) {
+            is PendingPromptVideo.FromArchive -> attachArchiveVideoToTabsWhenAvailable(video.zipFile, video.candidate, tabIds)
+            is PendingPromptVideo.FromFile -> tabIds.forEach { attachVideoToTabWhenAvailable(video.file, it) }
+        }
+    }
+
     fun confirmSplitPrompt(
         modes: Map<String, SplitMode>,
         destinationDir: File,
@@ -9436,41 +9594,97 @@ class AppState(
         settings = settings.copy(lastSaveDialogDir = destinationDir.absolutePath)
         beginLoading("Splitting logs...")
         ioScope.launch {
+            val openedTabIds = mutableListOf<String>()
+            val unopenedParts = mutableListOf<File>()
+            // A prompt raised (also) by a memory shortfall opens only what fits: one budget, read now
+            // (the user may have closed tabs since the prompt), shared by everything this confirm opens.
+            val budget = pending.memoryShortfall?.let { MemoryOpenBudget(heapFreeBytesProvider()) }
             try {
+                // Deferred files were already weighed in the prompt's batch decision: no fresh free-heap
+                // check, or each could raise a new prompt over the others and some would never open.
                 pending.deferredFiles.forEach { file ->
-                    openPath(file)
+                    budget?.reserveRegardless(file.length())
+                    openPathInternal(file, bypassMemoryCheck = true)?.let(openedTabIds::add)
                 }
                 pending.deferredArchiveEntries.forEach { deferred ->
-                    openZipEntry(deferred.archiveFile, deferred.candidate, bypassSplitPrompt = true)
+                    budget?.reserveRegardless(deferred.candidate.sizeBytes)
+                    openZipEntry(deferred.archiveFile, deferred.candidate, bypassSplitPrompt = true)?.let(openedTabIds::add)
                 }
                 pending.sources.forEach { source ->
                     when (modes[source.id] ?: SplitMode.SPLIT) {
-                        SplitMode.OPEN_AS_IS -> openSplitSourceAsIs(source)
-                        SplitMode.SPLIT -> splitSourceAndOpenParts(
-                            source = source,
-                            destinationDir = destinationDir,
-                            postfix = postfixes[source.id] ?: postfix,
-                            partCount = partCounts[source.id] ?: defaultSplitPartCount(source, pending.memoryShortfall),
-                        )
+                        SplitMode.OPEN_AS_IS -> {
+                            budget?.reserveRegardless(source.sizeBytes)
+                            openSplitSourceAsIs(source)?.let(openedTabIds::add)
+                        }
+                        SplitMode.SPLIT -> {
+                            val result = splitSourceAndOpenParts(
+                                source = source,
+                                destinationDir = destinationDir,
+                                postfix = postfixes[source.id] ?: postfix,
+                                partCount = partCounts[source.id] ?: defaultSplitPartCount(source, pending.memoryShortfall),
+                                budget = budget,
+                            )
+                            openedTabIds += result.openedTabIds
+                            unopenedParts += result.unopened
+                        }
                     }
                 }
+                pending.video?.let { attachPromptVideo(it, openedTabIds) }
+                if (unopenedParts.isNotEmpty()) reportUnopenedSplitParts(destinationDir, openedTabIds.size, unopenedParts)
             } finally {
                 finishLoading()
             }
         }
     }
 
-    fun splitSourceAndOpen(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> =
-        splitSourceAndOpenParts(source, destinationDir, postfix, partCount)
+    // Tells the user where the parts that did not fit in memory are. The plain open-error dialog is the
+    // only generic notice surface; the folder is its path line.
+    private fun reportUnopenedSplitParts(destinationDir: File, openedCount: Int, unopened: List<File>) {
+        AppLogger.info("memory", "Split parts left on disk to stay within memory: ${unopened.size}")
+        openError = OpenFileError(
+            title = "Only some split parts were opened",
+            path = destinationDir.absolutePath,
+            message = "To stay within available memory, $openedCount " +
+                "${if (openedCount == 1) "log was" else "logs were"} opened and ${unopened.size} " +
+                "${if (unopened.size == 1) "part was" else "parts were"} left on disk in the folder above " +
+                "(${unopened.first().name}${if (unopened.size > 1) ", ..." else ""}). " +
+                "Close other tabs, then open them from there.",
+        )
+    }
 
-    private fun splitSourceAndOpenParts(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> {
+    fun splitSourceAndOpen(source: SplitSource, destinationDir: File, postfix: String, partCount: Int): List<File> =
+        splitSourceAndOpenParts(source, destinationDir, postfix, partCount).written
+
+    /**
+     * [splitSourceAndOpen] for a source whose open was blocked by a memory [shortfall]: every part is
+     * written, but only as many as fit in the free heap are opened (at least the first); the result's
+     * `unopened` parts stay on disk. A null [shortfall] opens every part, as before.
+     */
+    internal fun splitSourceAndOpenWithinMemory(
+        source: SplitSource,
+        destinationDir: File,
+        postfix: String,
+        partCount: Int,
+        shortfall: MemoryShortfall?,
+    ): SplitOpenResult = splitSourceAndOpenParts(
+        source, destinationDir, postfix, partCount,
+        budget = shortfall?.let { MemoryOpenBudget(heapFreeBytesProvider()) },
+    )
+
+    private fun splitSourceAndOpenParts(
+        source: SplitSource,
+        destinationDir: File,
+        postfix: String,
+        partCount: Int,
+        budget: MemoryOpenBudget? = null,
+    ): SplitOpenResult {
         val classification = classifySplitSourceAndStream(source) ?: run {
             showOpenError(
                 title = "Could not open source to split",
                 path = source.sourceFile.absolutePath,
                 message = "The source could not be read.",
             )
-            return emptyList()
+            return SplitOpenResult(emptyList(), emptyList(), emptyList())
         }
         val (kind, sample, stream) = classification
         if (kind == LogContentKind.DLT_UNSUPPORTED_V2) {
@@ -9480,7 +9694,7 @@ class AppState(
                 path = source.sourceFile.absolutePath,
                 message = "DLT protocol v2 is not supported, so this capture can't be split.",
             )
-            return emptyList()
+            return SplitOpenResult(emptyList(), emptyList(), emptyList())
         }
         val outputs = planSplitOutputs(source.displayName, destinationDir, postfix, partCount)
         val written = when (kind) {
@@ -9490,8 +9704,19 @@ class AppState(
                 splitStreamToFiles(stream, outputs, source.sizeBytes, partPreamble = leadingLineBytes(sample))
             else -> splitStreamToFiles(stream, outputs, source.sizeBytes)
         }
-        written.forEach { part -> loadSplitPartAsTab(part) }
-        return written
+        val openedIds = mutableListOf<String>()
+        val unopened = mutableListOf<File>()
+        written.forEach { part ->
+            // The first part always opens; later ones only while the budget still holds them.
+            val fits = budget == null || if (openedIds.isEmpty()) {
+                budget.reserveRegardless(part.length())
+                true
+            } else {
+                budget.tryReserve(part.length())
+            }
+            if (fits) loadSplitPartAsTab(part)?.let(openedIds::add) else unopened += part
+        }
+        return SplitOpenResult(written, openedIds, unopened)
     }
 
     /**
@@ -9550,12 +9775,12 @@ class AppState(
         return -1
     }
 
-    private fun loadSplitPartAsTab(file: File) {
+    private fun loadSplitPartAsTab(file: File): String? {
         val path = file.absolutePath
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
             setActiveSurfaceToTab(existing.id)
-            return
+            return existing.id
         }
         rememberRecentFile(file)
         rememberAutoExportedNoteFor(file.name, path)
@@ -9567,7 +9792,7 @@ class AppState(
                 path = path,
                 message = error.message ?: error::class.simpleName.orEmpty().ifBlank { "Unknown error" },
             )
-            return
+            return null
         }
         val logData = parsed.entries
         val prefixLabel = settings.annotationPrefixLabel.trim().ifBlank { "From" }
@@ -9589,13 +9814,12 @@ class AppState(
             setActiveSurfaceToTab(t.id)
         }
         autoLoadOwnNotesIfAny(tabId)
+        return tabId
     }
 
-    private fun openSplitSourceAsIs(source: SplitSource) {
-        when (source) {
-            is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
-            is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
-        }
+    private fun openSplitSourceAsIs(source: SplitSource): String? = when (source) {
+        is SplitSource.RealFile -> openFileInternal(source.file, bypassSplitPrompt = true)
+        is SplitSource.ArchiveEntry -> openZipEntry(source.archiveFile, source.candidate, bypassSplitPrompt = true)
     }
 
     private fun splitSourceFromPath(sourcePath: String, entryPath: String?): SplitSource? {

@@ -16,15 +16,20 @@ Recent state; file-open calls must still use explicit approved fixture paths.
 - `list_tabs` — open tabs and ids; `open_log_file`, `preview_split_log_file`, and
   `split_log_file` — open or prepare a file/archive; `close_tab` — close a tab. A live capture
   tab whose log view was paused at critical heap pressure carries `captureLogPausedAtRow`; its
-  `entryCount` is then only the first N rows of the recording (the full log is on disk).
+  `entryCount` is then only the first N rows of the recording (the full log is on disk). A file
+  too large for the free heap returns `needsSplit` with `memoryShortfall` (`neededBytes`,
+  `freeBytes`) and a `suggestedPartCount` of at least 2; `split_log_file` then opens only the
+  parts that fit and lists the rest in `unopenedPaths`.
 - `get_memory_status` — JVM heap health: `heapPressure` (`NORMAL`/`WARNING`/`CRITICAL`),
-  `heapUsedAfterGcBytes`, `heapMaxBytes`, `heapFreeBytesEstimate`, and `pausedCaptureTabs`. Every
+  `heapUsedAfterGcBytes` (the latest GC reading), `heapMaxBytes`, `heapFreeBytesEstimate`, and `pausedCaptureTabs`. Every
   parsed row lives in memory, so check it before opening another large log.
 - `get_visible_lines` — rendered, filtered/folded rows; use `limit`, `offset`, `fields`, and
   `compact` to keep responses small. `get_line_context` — raw surrounding rows for one `lineId`,
   independent of filters/folding.
 - `get_tags` and `get_packages` — discover exact tag or package-prefix values. `get_crash_sites`
   and `get_issue_description` — find high-signal failure anchors and the user-reported problem.
+  On a tab tailed live, `get_crash_sites` returns `partial: true` with `analyzedThroughId` (rows
+  after that id are not analysed yet); `pending: true` means the first analysis has not finished.
 - `get_log_composition` — rank the distinct masked message shapes in the tab's CURRENT FILTERED
   VIEW (not the whole file), most frequent first by default. Narrow with `set_filter`, then call
   this instead of scrolling for repeats. `order:rare` flips to least-frequent-first — the lens

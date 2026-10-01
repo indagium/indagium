@@ -849,8 +849,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "contains exactly one candidate log, that one opens automatically; if it contains none, " +
             "returns an error; if it contains several, returns { needsSelection: true, candidates: " +
             "[...] } without opening anything — call again with the same path plus entryPath set to " +
-            "one candidate's entryPath to open that one. Oversized sources return { needsSplit: true, " +
-            "... } instead of opening; use split_log_file to split and open parts.",
+            "one candidate's entryPath to open that one. Oversized sources, and sources that would not " +
+            "fit in the free heap, return { needsSplit: true, ... } instead of opening (memoryShortfall " +
+            "{ neededBytes, freeBytes } appears when memory is part of the reason, with " +
+            "suggestedPartCount >= 2); use split_log_file to split and open parts, or splitMode " +
+            "open_as_is to open it anyway.",
         schema(
             "path" to "string", "entryPath" to "string", "splitMode" to "string",
             "destinationDir" to "string", "postfix" to "string", "partCount" to "integer",
@@ -860,14 +863,19 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "preview_split_log_file",
         "Return split metadata for a real log file or archive entry without opening it: size, " +
-            "suggested part count, default destination, default postfix, and source identifiers.",
+            "suggested part count, default destination, default postfix, and source identifiers. " +
+            "`reasons` lists why a split is advised (size, memory); `memoryShortfall` { neededBytes, " +
+            "freeBytes } is present when the file would not fit in the free heap, and then " +
+            "suggestedPartCount is at least 2.",
         schema("path" to "string", "entryPath" to "string", required = listOf("path")),
     ),
     McpTool(
         "split_log_file",
         "Split a real log file or archive entry into line-preserving plain log files, save them to " +
             "the destination directory, and open the generated parts as tabs. Existing outputs are " +
-            "not overwritten.",
+            "not overwritten. When the source would not fit in the free heap (memoryShortfall is " +
+            "returned) the default partCount is at least 2, every part is written, but only as many " +
+            "parts as fit are opened as tabs; the rest are listed in unopenedPaths and stay on disk.",
         schema(
             "path" to "string", "entryPath" to "string", "destinationDir" to "string",
             "postfix" to "string", "partCount" to "integer", required = listOf("path"),
@@ -1038,7 +1046,10 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "carries `signature` (same exception class + call site, same ANR process, or same " +
             "native-crash signal with the varying tid normalized out), `occurrenceCount` (how many " +
             "sites share that signature), and `firstLogId` (the earliest one). Group by `signature` " +
-            "and skip past the first occurrence instead of re-reading duplicates one at a time.",
+            "and skip past the first occurrence instead of re-reading duplicates one at a time. " +
+            "`pending: true` (no sites) means the first analysis of the tab has not finished. On a tab " +
+            "being tailed live, `partial: true` with `analyzedThroughId` means the sites cover only " +
+            "the rows up to that log id; rows after it are not analysed yet and a later call sees them.",
         schema("tabId" to "string", required = listOf("tabId")),
     ),
     McpTool(

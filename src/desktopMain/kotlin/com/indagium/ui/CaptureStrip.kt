@@ -96,6 +96,7 @@ import com.indagium.capture.renderCaptureFilename
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
 import com.indagium.utils.HeapPressure
+import com.indagium.utils.MemoryShortfall
 import kotlinx.coroutines.delay
 import java.io.File
 import java.util.Locale
@@ -188,10 +189,25 @@ internal fun captureLogPausedMessage(pausedAtRow: Int): String =
 internal fun captureLogTruncatedNote(shownRows: Int): String =
     "Showing the first $shownRows rows — the full log is in the saved capture / ZIP"
 
-/** Resume only makes sense once catching up cannot push the heap straight back to critical. */
-internal fun captureLogResumeEnabled(level: HeapPressure): Boolean = level <= HeapPressure.WARNING
+/**
+ * Resume only makes sense once catching up cannot push the heap straight back to critical: the heap
+ * must not be at CRITICAL, and the backlog recorded while paused ([backlogShortfall], the estimate of
+ * loading it into the free heap, null = it fits) must fit. The ONE predicate behind both
+ * [AppState.resumeCaptureLogView] and the strip's Resume button.
+ */
+internal fun captureLogResumeEnabled(level: HeapPressure, backlogShortfall: MemoryShortfall? = null): Boolean =
+    level <= HeapPressure.WARNING && backlogShortfall == null
 
 internal const val CAPTURE_LOG_RESUME_BLOCKED_HINT = "Free memory first (close other tabs)"
+
+/** Why Resume is refused (tooltip / log line); only meaningful when [captureLogResumeEnabled] is false. */
+internal fun captureLogResumeBlockedReason(level: HeapPressure, backlogShortfall: MemoryShortfall?): String = when {
+    level > HeapPressure.WARNING -> CAPTURE_LOG_RESUME_BLOCKED_HINT
+    backlogShortfall != null ->
+        "Loading the rows recorded while paused needs about ${formatByteSize(backlogShortfall.neededBytes)} " +
+            "of memory; about ${formatByteSize(backlogShortfall.freeBytes)} is free. Close other tabs first"
+    else -> CAPTURE_LOG_RESUME_BLOCKED_HINT
+}
 
 internal fun captureLogCoverageLine(preview: CaptureExportPreview?): String = when {
     preview == null -> "Log …"
@@ -725,7 +741,8 @@ internal fun CaptureStrip(
         // button, so it must not be hidden by (or hide) the transient screenshot status, and a real
         // failure (mirror error / microphone warning) above it stays visible alongside it.
         tab.tailPausedAtRow?.let { pausedAt ->
-            val resumeEnabled = captureLogResumeEnabled(state.heapPressure)
+            val backlogShortfall = state.captureLogResumeBacklogShortfall(tab.id)
+            val resumeEnabled = captureLogResumeEnabled(state.heapPressure, backlogShortfall)
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -741,7 +758,11 @@ internal fun CaptureStrip(
                 )
                 ToolbarBtn(
                     label = "Resume",
-                    tooltip = if (resumeEnabled) "Load the rows recorded while paused" else CAPTURE_LOG_RESUME_BLOCKED_HINT,
+                    tooltip = if (resumeEnabled) {
+                        "Load the rows recorded while paused"
+                    } else {
+                        captureLogResumeBlockedReason(state.heapPressure, backlogShortfall)
+                    },
                     enabled = resumeEnabled,
                     modifier = Modifier.height(24.dp),
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
