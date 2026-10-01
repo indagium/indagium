@@ -12643,6 +12643,7 @@ class AppState(
                 restoreCaptureLink(tabId)
                 markActiveLoadFinished(tabId)
                 published = true
+                (source as? RestoredTabSource.FileSource)?.let { scheduleUnfinalizedCaptureAdoption(tabId, it.file) }
                 val issueRules = settings.customIssueRules
                 val full = buildLogAnalysis(result.logData, issueRules, logFormat)
                 ensureActive()
@@ -12657,6 +12658,42 @@ class AppState(
         activeLoads[tabId] = ActiveLoad(job)
         job.start()
     }
+
+    /**
+     * A capture stopped by quitting the app (or by a crash) never went through [stopCaptureTab]'s
+     * finalization, and neither the attached video nor the capture session link is autosaved for a
+     * live tab — so it reopens as a plain log. When the restored tab's file is the log of such a
+     * stopped-but-unfinalized session, finalize it in place now and attach its video exactly like a
+     * normal Stop does ([attachFinalizedCapture]). Runs off the UI thread after the tab is already
+     * visible, so it never delays startup; failures are reported, never thrown.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    private fun scheduleUnfinalizedCaptureAdoption(tabId: String, logFile: File) {
+        val tab = tab(tabId) ?: return
+        if (tab.attachedVideo != null || tab.captureSessionId != null) return
+        ioScope.launch {
+            try {
+                val imported = synchronized(captureAdoptionLock) {
+                    // Re-checked under the lock: two restored tabs on one log must finalize once.
+                    val session = unfinalizedStoppedCaptureForLog(logFile) ?: return@launch
+                    AppLogger.info("capture", "Finalizing the capture stopped by the last quit (${session.id})")
+                    captureService.finalizeStoppedSession(session)
+                }
+                val current = tab(tabId) ?: return@launch
+                if (current.attachedVideo != null || current.captureSessionId != null) return@launch
+                attachFinalizedCapture(tabId, imported)
+                captureService.updateSessions()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                val message = failure.message ?: failure::class.simpleName ?: "unknown error"
+                AppLogger.warn("capture", "Could not finalize the capture stopped by the last quit: $message", failure)
+                captureService.reportError("Could not restore the video of the capture stopped by the last quit: $message")
+            }
+        }
+    }
+
+    private val captureAdoptionLock = Any()
 
     private fun loadRestoredTab(source: RestoredTabSource): RestoredTabLoadResult {
         return when (source) {

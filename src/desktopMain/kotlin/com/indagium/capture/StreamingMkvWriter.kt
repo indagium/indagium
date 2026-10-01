@@ -78,6 +78,14 @@ internal class StreamingMkvWriter(
     private var lastVideoPtsUs = -1L
     private var lastAudioPtsUs = -1L
 
+    // Last timestamp actually handed to the muxer per stream, in that stream's own time base (the
+    // Matroska muxer rewrites it to 1/1000 in avformat_write_header). Strict monotonicity has to be
+    // enforced HERE, after the rescale: two packets 300 us apart are distinct in the microsecond
+    // clock the callers use, but land on the same millisecond block timestamp, and a file with two
+    // blocks of one track at the same timestamp makes every FFmpeg reader log "non monotonically
+    // increasing dts" (and some players stall or jump around them).
+    private val lastStreamTimestamp = HashMap<Int, Long>()
+
     /** Allocates the output context and its video stream. Must be called before anything else;
      * [addAudio] (if used) must follow immediately, before the first packet write. */
     @Synchronized
@@ -138,16 +146,25 @@ internal class StreamingMkvWriter(
     fun hasWrittenVideo(): Boolean = lastVideoPtsUs >= 0
 
     /** Writes the trailer (cues, durations) so the file is a normal, fully seekable Matroska
-     * recording once capture stops. Safe to call even if no packet was ever written. */
+     * recording once capture stops. Safe to call even if no packet was ever written.
+     *
+     * Runs at most once and ALWAYS releases the output (file handle, FFmpeg context), even when
+     * the trailer write fails: before, a failure threw before [closeInternal], leaving the file
+     * open and its buffered tail unflushed, and the caller (which only logged nothing) never knew.
+     * The failure is still rethrown after the cleanup so the caller can report it. */
     @Synchronized
     fun finish() {
         if (closed) return
-        val context = output
-        if (context != null && headerWritten && !trailerWritten) {
-            ffmpegCheck(av_write_trailer(context), "finalize streaming Matroska output")
-            trailerWritten = true
+        try {
+            val context = output
+            if (context != null && headerWritten && !trailerWritten) {
+                // Marked first: a trailer that failed half way must never be retried by close().
+                trailerWritten = true
+                ffmpegCheck(av_write_trailer(context), "finalize streaming Matroska output")
+            }
+        } finally {
+            closeInternal()
         }
-        closeInternal()
     }
 
     /** Best-effort finalize on abrupt shutdown (e.g. the app closing) — prefer [finish] on the
@@ -210,11 +227,23 @@ internal class StreamingMkvWriter(
             packet.dts(ptsUs)
             if (keyFrame) packet.flags(packet.flags() or AV_PKT_FLAG_KEY)
             av_packet_rescale_ts(packet, microsecondTimeBase(), stream.time_base())
+            val strictTimestamp = strictlyAfterPrevious(streamIndex, packet.dts())
+            packet.pts(strictTimestamp)
+            packet.dts(strictTimestamp)
             ffmpegCheck(av_interleaved_write_frame(context, packet), "write streaming mkv packet")
         } finally {
             av_packet_unref(packet)
             av_packet_free(packet)
         }
+    }
+
+    /** [timestamp] (already in the stream's time base) bumped to at least one tick past the
+     * previous packet of the same stream; remembered for the next call. */
+    private fun strictlyAfterPrevious(streamIndex: Int, timestamp: Long): Long {
+        val previous = lastStreamTimestamp[streamIndex]
+        val strict = if (previous != null && timestamp <= previous) previous + 1 else timestamp
+        lastStreamTimestamp[streamIndex] = strict
+        return strict
     }
 
     private fun newStream(context: AVFormatContext, mediaType: Int, codecId: Int) = requireNotNull(avformat_new_stream(context, null)) {

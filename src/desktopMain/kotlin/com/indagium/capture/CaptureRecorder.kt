@@ -1037,7 +1037,7 @@ internal fun indexRecordJson(record: CaptureLogIndexRecord): String = buildJsonO
     record.rowOrdinal?.let { put("rowOrdinal", it) }
 }.toString()
 
-private fun sessionJson(session: CaptureSession): String = buildJsonObject {
+internal fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("formatVersion", 1)
     put("id", session.id)
     put("device", buildJsonObject {
@@ -1062,6 +1062,15 @@ private fun sessionJson(session: CaptureSession): String = buildJsonObject {
     put("interruptions", buildJsonArray { session.interruptions.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
     put("manualOffsetMs", session.manualOffsetMs)
 }.toString()
+
+/**
+ * Reads the `session.json` of one capture session [directory] without needing a recorder rooted at
+ * its parent — for callers that already know the exact session (a restored tab whose log lives in
+ * it). Null when the file is missing or not a recognised session.
+ */
+fun readCaptureSessionDirectory(directory: File): CaptureSession? = runCatching {
+    sessionFromJson(File(directory, SESSION_FILE).readText(), directory)
+}.getOrNull()
 
 private fun sessionFromJson(raw: String, directory: File): CaptureSession? = runCatching {
     val root = Json.parseToJsonElement(raw).jsonObject

@@ -44,6 +44,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -55,6 +56,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Color
@@ -122,8 +124,10 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -172,6 +176,27 @@ internal class EmbeddedMirrorHandle private constructor(
 ) : Closeable {
     private val _snapshot = MutableStateFlow(backend.snapshot())
     val snapshot: StateFlow<EmbeddedMirrorSnapshot> = _snapshot
+
+    // The native surface Compose must currently host. A StateFlow of its own (not read ad hoc from
+    // [macSurface]/[gpuSurface] during composition) because the snapshot flow cannot carry it: a
+    // Disconnect -> Connect replaces the surface while the published snapshot can end up equal to the
+    // one Compose already composed, so nothing would recompose, and the panel kept hosting the OLD
+    // (closed) canvas while the decoder rendered into the NEW one — the black mirror. Every change of
+    // the backend's surface is published here, after it is visible through the backend, and
+    // [publishSurface] re-reads the backend under [surfacePublishLock] so a stale read can never
+    // overwrite a newer one.
+    private val surfacePublishLock = Any()
+    private val _nativeSurface = MutableStateFlow(backend.nativeSurface)
+    val nativeSurface: StateFlow<MirrorNativeSurface?> = _nativeSurface
+
+    init {
+        backend.setSurfaceListener { publishSurface() }
+    }
+
+    /** Re-reads the backend's current surface and publishes it. Safe from any thread, never blocks. */
+    internal fun publishSurface() {
+        synchronized(surfacePublishLock) { _nativeSurface.value = backend.nativeSurface }
+    }
 
     // One worker per handle, created lazily on first use and released after LIFECYCLE_IDLE_MS (a
     // handle that never sees a lifecycle call never owns a thread). FIFO + a single thread is what
@@ -327,11 +352,13 @@ internal class EmbeddedMirrorHandle private constructor(
         if (backend.isAlreadyStarted(serial)) return
         backend.start(serial, options)
         _snapshot.value = backend.snapshot()
+        publishSurface()
     }
 
     private fun stopNow() {
         backend.stop()
         _snapshot.value = backend.snapshot()
+        publishSurface()
     }
 
     private fun closeNow() {
@@ -342,6 +369,7 @@ internal class EmbeddedMirrorHandle private constructor(
         try {
             backend.close()
             _snapshot.value = backend.snapshot()
+            publishSurface()
         } finally {
             lifecycleLane.shutdown()
         }
@@ -617,7 +645,7 @@ internal class EmbeddedMirrorHandle private constructor(
                     session = session,
                     decoder = JavaCvH264Decoder(),
                     macSurface = requireNotNull(surface),
-                    directDecoderFactory = { activeSurface -> MacVideoToolboxMirrorDecoder(activeSurface) },
+                    directDecoderFactory = { activeSurface -> MacVideoToolboxMirrorDecoder(activeSurface as EmbeddedMirrorMacSurface) },
                     macSurfaceFactory = surfaceFactory,
                 ) { snapshot -> handle._snapshot.value = snapshot }
                 handle = EmbeddedMirrorHandle(backend)
@@ -646,7 +674,7 @@ internal class EmbeddedMirrorHandle private constructor(
                     session = session,
                     decoder = JavaCvH264Decoder(),
                     gpuSurface = gpuSurface,
-                    gpuDirectDecoderFactory = { activeSurface -> activeSurface.createDecoder() },
+                    gpuDirectDecoderFactory = { activeSurface -> (activeSurface as EmbeddedMirrorGpuSurface).createDecoder() },
                     gpuSurfaceFactory = surfaceFactory,
                     onSnapshotChanged = { snapshot ->
                         handle._snapshot.value = snapshot
@@ -698,6 +726,21 @@ internal fun shouldUseDesktopGpuMirror(
     enabled: Boolean,
 ): Boolean = enabled && (osName.contains("win", ignoreCase = true) || osName.contains("linux", ignoreCase = true))
 
+/**
+ * Diagnostics for [MirrorBackend.SharedRecordingSession] binding a decoder to a native surface.
+ * [attachCheckDelayMs] is how long after a bind the "is that surface actually in a window?" check
+ * runs: long enough for Compose to mount a freshly published surface (one recomposition plus the
+ * JAWT attach), short enough to sit next to the 5 s "Metal mirror perf" lines; 0 disables the check.
+ */
+internal class SurfaceBindDiagnostics(
+    val attachCheckDelayMs: Long = DEFAULT_ATTACH_CHECK_DELAY_MS,
+    val sink: (String) -> Unit = { AppLogger.warn("embedded-mirror", it) },
+) {
+    private companion object {
+        const val DEFAULT_ATTACH_CHECK_DELAY_MS = 3_000L
+    }
+}
+
 /** What [EmbeddedMirrorHandle] drives — either its own standalone transport, or a shared view onto
  * a live recording's device stream. See each implementation's doc. Deliberately not `sealed` so
  * tests can drive [EmbeddedMirrorHandle.forBackend] with a fake.
@@ -707,6 +750,17 @@ internal fun shouldUseDesktopGpuMirror(
 internal interface MirrorBackend : Closeable {
     val macSurface: EmbeddedMirrorMacSurface? get() = null
     val gpuSurface: EmbeddedMirrorGpuSurface? get() = null
+
+    /** The one native surface this backend currently wants hosted (at most one of Metal/GPU). What
+     * [EmbeddedMirrorHandle.nativeSurface] publishes; fakes without real AWT surfaces override it. */
+    val nativeSurface: MirrorNativeSurface? get() = macSurface ?: gpuSurface
+
+    /**
+     * Registers the callback the backend invokes — outside its own locks — every time [nativeSurface]
+     * changes (retired, replaced, dropped for the Compose fallback). The handle republishes it to
+     * Compose; without it a replaced surface is invisible to the UI. Called once, at handle creation.
+     */
+    fun setSurfaceListener(listener: () -> Unit) = Unit
 
     /**
      * Compose popups are rendered in a scene layer above their anchor, but JAWT Metal is an AppKit
@@ -752,13 +806,19 @@ internal interface MirrorBackend : Closeable {
      * the capture isn't recording video — see [EmbeddedMirrorHandle.create]'s doc. */
     class StandaloneRuntime(
         private var runtime: EmbeddedMirrorRuntime,
-        override var macSurface: EmbeddedMirrorMacSurface? = null,
-        override var gpuSurface: EmbeddedMirrorGpuSurface? = null,
+        @Volatile override var macSurface: EmbeddedMirrorMacSurface? = null,
+        @Volatile override var gpuSurface: EmbeddedMirrorGpuSurface? = null,
     ) : MirrorBackend {
         private val lock = Any()
         private var startedSerial: String? = null
         private var startedOptions: MirrorStreamOptions? = null
         private var switchedToCompose = false
+
+        @Volatile private var surfaceListener: () -> Unit = {}
+
+        override fun setSurfaceListener(listener: () -> Unit) {
+            surfaceListener = listener
+        }
 
         // Set under [lock] by close(); start() checks it under the same lock, so a start can never
         // begin a new adb forward + scrcpy server once close() has been entered.
@@ -810,6 +870,7 @@ internal interface MirrorBackend : Closeable {
             // disposal so that stale native pixels cannot remain above the Compose fallback.
             if (retiredSurface != null) {
                 EventQueue.invokeLater { runCatching { retiredSurface.close() } }
+                runCatching { surfaceListener() }
             }
             AppLogger.warn("embedded-mirror", "mode=compose-fallback status=active connection=reused")
         }
@@ -825,6 +886,7 @@ internal interface MirrorBackend : Closeable {
             }
             if (retiredSurface != null) {
                 EventQueue.invokeLater { runCatching { retiredSurface.close() } }
+                runCatching { surfaceListener() }
             }
             AppLogger.warn("embedded-mirror", "mode=compose-fallback status=active connection=reused")
         }
@@ -858,21 +920,44 @@ internal interface MirrorBackend : Closeable {
     class SharedRecordingSession(
         private val session: EmbeddedDeviceSession,
         private val decoder: H264Decoder,
-        override var macSurface: EmbeddedMirrorMacSurface? = null,
-        private var directDecoderFactory: ((EmbeddedMirrorMacSurface) -> DirectH264Decoder)? = null,
-        private val macSurfaceFactory: (() -> EmbeddedMirrorMacSurface)? = null,
-        override var gpuSurface: EmbeddedMirrorGpuSurface? = null,
-        private var gpuDirectDecoderFactory: ((EmbeddedMirrorGpuSurface) -> DirectH264Decoder)? = null,
-        private val gpuSurfaceFactory: (() -> EmbeddedMirrorGpuSurface)? = null,
+        macSurface: MirrorNativeSurface? = null,
+        private var directDecoderFactory: ((MirrorNativeSurface) -> DirectH264Decoder)? = null,
+        private val macSurfaceFactory: (() -> MirrorNativeSurface)? = null,
+        gpuSurface: MirrorNativeSurface? = null,
+        private var gpuDirectDecoderFactory: ((MirrorNativeSurface) -> DirectH264Decoder)? = null,
+        private val gpuSurfaceFactory: (() -> MirrorNativeSurface)? = null,
         private val liveAudioSinkFactory: (
             onDiagnostic: (String) -> Unit,
             volume: () -> Float,
         ) -> com.indagium.capture.mirror.LiveAudioSink = { onDiagnostic, volume ->
             com.indagium.capture.mirror.LiveAudioPlayer(onDiagnostic = onDiagnostic, volume = volume)
         },
+        private val bindDiagnostics: SurfaceBindDiagnostics = SurfaceBindDiagnostics(),
         private val onSnapshotChanged: (EmbeddedMirrorSnapshot) -> Unit,
     ) : MirrorBackend {
         private val lock = Any()
+
+        // The native surfaces, guarded by [lock]. Typed by the [MirrorNativeSurface] contract so the
+        // publication logic is testable without AWT; [macSurface]/[gpuSurface] expose the concrete
+        // classes the Compose panel hosts.
+        private var macNative: MirrorNativeSurface? = macSurface
+        private var gpuNative: MirrorNativeSurface? = gpuSurface
+
+        override val macSurface: EmbeddedMirrorMacSurface? get() = synchronized(lock) { macNative as? EmbeddedMirrorMacSurface }
+        override val gpuSurface: EmbeddedMirrorGpuSurface? get() = synchronized(lock) { gpuNative as? EmbeddedMirrorGpuSurface }
+        override val nativeSurface: MirrorNativeSurface? get() = synchronized(lock) { macNative ?: gpuNative }
+
+        @Volatile private var surfaceListener: () -> Unit = {}
+
+        override fun setSurfaceListener(listener: () -> Unit) {
+            surfaceListener = listener
+        }
+
+        /** Tells the handle (and through it Compose) that [nativeSurface] changed. Never call while
+         * holding [lock]: the listener reads [nativeSurface] back. */
+        private fun notifySurfaceChanged() {
+            runCatching { surfaceListener() }
+        }
 
         // Serializes start/stop/fallback transitions without holding [lock] while a session call
         // can join a decoder worker or invoke native teardown callbacks. The state lock remains
@@ -899,6 +984,12 @@ internal interface MirrorBackend : Closeable {
         private companion object {
             /** Generous: a native surface close waits at most [EDT_CLOSE_WAIT_MS] for the EDT. */
             const val SURFACE_SWAP_WAIT_NANOS = 5_000_000_000L
+
+            val attachChecker: ScheduledExecutorService by lazy {
+                Executors.newSingleThreadScheduledExecutor { task ->
+                    Thread(task, "embedded-mirror-attach-check").apply { isDaemon = true }
+                }
+            }
         }
 
         private var connectionSnapshot = session.connectionSnapshot()
@@ -926,7 +1017,7 @@ internal interface MirrorBackend : Closeable {
         override fun setOverlayOccluded(occluded: Boolean) {
             val surface = synchronized(lock) {
                 overlayOccluded = occluded
-                macSurface
+                macNative
             }
             surface?.setOverlayOccluded(occluded)
         }
@@ -965,13 +1056,24 @@ internal interface MirrorBackend : Closeable {
                 // report the recording's current state (LIVE, most commonly) right away rather than
                 // waiting for this decoder's first frame — see the class doc's Disconnect fix.
                 onSnapshotChanged(snapshot())
+                // A decoder must only ever be bound to a surface that is published (so Compose hosts
+                // it) and still open. A closed one can only be left over from a swap that failed or
+                // timed out; replace it before binding rather than render into the void.
+                replaceClosedSurfaceLocked()
+                var boundSurface: MirrorNativeSurface? = null
                 val direct = try {
                     synchronized(lock) {
+                        val mac = macNative
+                        val gpu = gpuNative
                         when {
-                            macSurface != null && directDecoderFactory != null ->
-                                directDecoderFactory!!.invoke(requireNotNull(macSurface)) to "videotoolbox-metal"
-                            gpuSurface != null && gpuDirectDecoderFactory != null ->
-                                gpuDirectDecoderFactory!!.invoke(requireNotNull(gpuSurface)) to requireNotNull(gpuSurface).mode
+                            mac != null && directDecoderFactory != null -> {
+                                boundSurface = mac
+                                directDecoderFactory!!.invoke(mac) to mac.mode
+                            }
+                            gpu != null && gpuDirectDecoderFactory != null -> {
+                                boundSurface = gpu
+                                gpuDirectDecoderFactory!!.invoke(gpu) to gpu.mode
+                            }
                             else -> null to null
                         }
                     }
@@ -997,6 +1099,7 @@ internal interface MirrorBackend : Closeable {
                     AppLogger.info("embedded-mirror", connectingMessage)
                     session.reportMirrorDiagnostic(connectingMessage)
                     try {
+                        boundSurface?.let { noteDecoderBound(it, selectedMode.orEmpty()) }
                         session.attachDirectDecoder(requireNotNull(direct.first), onFrame = { frame ->
                             if (nativeModeReported.compareAndSet(false, true)) {
                                 session.reportMirrorDiagnostic(
@@ -1034,8 +1137,9 @@ internal interface MirrorBackend : Closeable {
                 directDecoderFactory = null
                 gpuDirectDecoderFactory = null
                 lastFrameInfo = null
-                listOfNotNull(macSurface.also { macSurface = null }, gpuSurface.also { gpuSurface = null })
+                listOfNotNull(macNative.also { macNative = null }, gpuNative.also { gpuNative = null })
             }
+            notifySurfaceChanged()
             retiredSurfaces.forEach { runCatching { it.close() } }
             attachComposeDecoder()
         }
@@ -1061,11 +1165,12 @@ internal interface MirrorBackend : Closeable {
                     directDecoderFactory = null
                     gpuDirectDecoderFactory = null
                     lastFrameInfo = null
-                    listOfNotNull(macSurface.also { macSurface = null }, gpuSurface.also { gpuSurface = null })
+                    listOfNotNull(macNative.also { macNative = null }, gpuNative.also { gpuNative = null })
                 }
             }
+            notifySurfaceChanged()
             // Closing the Swing surface may need the EDT, so it happens outside [lifecycleLock]. It
-            // is idempotent, and makes the next Compose snapshot remove it.
+            // is idempotent, and the notification above already made Compose drop it.
             retiredSurfaces.forEach { runCatching { it.close() } }
             AppLogger.warn(
                 "embedded-mirror",
@@ -1084,9 +1189,9 @@ internal interface MirrorBackend : Closeable {
 
         /** What [stop] retired under [lifecycleLock] and still has to close + replace outside it. */
         private sealed interface RetiredSurface {
-            class Gpu(val previous: EmbeddedMirrorGpuSurface?) : RetiredSurface
+            class Gpu(val previous: MirrorNativeSurface?) : RetiredSurface
 
-            class Mac(val previous: EmbeddedMirrorMacSurface?) : RetiredSurface
+            class Mac(val previous: MirrorNativeSurface?) : RetiredSurface
         }
 
         private fun stop(recreateNativeSurface: Boolean) {
@@ -1097,8 +1202,8 @@ internal interface MirrorBackend : Closeable {
                     lastFrame = null
                     lastFrameInfo = null
                     recreateNativeSurface && !closed && (
-                        (directDecoderFactory != null && macSurface != null) ||
-                            (gpuDirectDecoderFactory != null && gpuSurface != null)
+                        (directDecoderFactory != null && macNative != null) ||
+                            (gpuDirectDecoderFactory != null && gpuNative != null)
                     )
                 }
                 // Publish DISCONNECTED immediately rather than waiting for detachDecoder()/native
@@ -1113,6 +1218,8 @@ internal interface MirrorBackend : Closeable {
             // closed flag and leave the mirror permanently blank. The close/recreate needs the EDT,
             // so it runs here, outside [lifecycleLock] — see the invariant on that field.
             try {
+                // Compose drops the retired surface's SwingPanel now, before it is closed.
+                notifySurfaceChanged()
                 when (retired) {
                     is RetiredSurface.Gpu -> recreateGpuSurface(retired.previous)
                     is RetiredSurface.Mac -> recreateMacSurface(retired.previous)
@@ -1130,14 +1237,14 @@ internal interface MirrorBackend : Closeable {
             surfaceSwapInFlight = true
             return synchronized(lock) {
                 if (gpuDirectDecoderFactory != null) {
-                    RetiredSurface.Gpu(gpuSurface.also { gpuSurface = null })
+                    RetiredSurface.Gpu(gpuNative.also { gpuNative = null })
                 } else {
-                    RetiredSurface.Mac(macSurface.also { macSurface = null })
+                    RetiredSurface.Mac(macNative.also { macNative = null })
                 }
             }
         }
 
-        private fun recreateGpuSurface(previous: EmbeddedMirrorGpuSurface?) {
+        private fun recreateGpuSurface(previous: MirrorNativeSurface?) {
             runCatching { previous?.close() }
             if (closed) return
             val replacement = runCatching { gpuSurfaceFactory?.invoke() }.getOrNull()
@@ -1147,11 +1254,14 @@ internal interface MirrorBackend : Closeable {
             } else if (closed) {
                 runCatching { replacement.close() }
             } else {
-                synchronized(lock) { gpuSurface = replacement }
+                synchronized(lock) { gpuNative = replacement }
             }
+            // Published after the field is set (see EmbeddedMirrorHandle.nativeSurface): Compose must
+            // learn about the replacement itself, not only through the next connection snapshot.
+            notifySurfaceChanged()
         }
 
-        private fun recreateMacSurface(previous: EmbeddedMirrorMacSurface?) {
+        private fun recreateMacSurface(previous: MirrorNativeSurface?) {
             runCatching { previous?.close() }
             if (closed) return
             val replacement = runCatching { macSurfaceFactory?.invoke() }.getOrNull()
@@ -1162,10 +1272,52 @@ internal interface MirrorBackend : Closeable {
                 runCatching { replacement.close() }
             } else {
                 val occluded = synchronized(lock) {
-                    macSurface = replacement
+                    macNative = replacement
                     overlayOccluded
                 }
                 replacement.setOverlayOccluded(occluded)
+            }
+            notifySurfaceChanged()
+        }
+
+        /**
+         * Under [lifecycleLock], right before a decoder is bound: a published surface that is already
+         * closed (a swap whose close was queued behind a busy UI thread, a wait that timed out) would
+         * swallow every decoded frame, so replace it with a fresh one from the factory first. The
+         * closed surface's own close is a no-op, so this never needs the EDT.
+         */
+        private fun replaceClosedSurfaceLocked() {
+            if (closed) return
+            val (mac, gpu) = synchronized(lock) { macNative to gpuNative }
+            if (mac != null && mac.isClosed && directDecoderFactory != null) {
+                bindDiagnostics.sink("mode=${mac.mode} the published surface was already closed at Connect; creating a new one")
+                synchronized(lock) { if (macNative === mac) macNative = null }
+                recreateMacSurface(mac)
+            }
+            if (gpu != null && gpu.isClosed && gpuDirectDecoderFactory != null) {
+                bindDiagnostics.sink("mode=${gpu.mode} the published surface was already closed at Connect; creating a new one")
+                synchronized(lock) { if (gpuNative === gpu) gpuNative = null }
+                recreateGpuSurface(gpu)
+            }
+        }
+
+        /** Logs the binding and, a few seconds later, whether the surface really made it into a window. */
+        private fun noteDecoderBound(surface: MirrorNativeSurface, mode: String) {
+            if (surface.isClosed) {
+                bindDiagnostics.sink("mode=$mode decoder bound to a CLOSED surface (${surface.describeAttachment()}); the mirror will stay black")
+            }
+            if (bindDiagnostics.attachCheckDelayMs <= 0L) return
+            runCatching {
+                attachChecker.schedule({
+                    val stillBound = synchronized(lock) { attached && (macNative === surface || gpuNative === surface) }
+                    if (stillBound && (surface.isClosed || !surface.isPresentationAttached)) {
+                        bindDiagnostics.sink(
+                            "mode=$mode decoder has been bound for ${bindDiagnostics.attachCheckDelayMs}ms but its surface is not attached " +
+                                "to a window (${surface.describeAttachment()}); a black mirror is expected unless the panel " +
+                                "is off screen",
+                        )
+                    }
+                }, bindDiagnostics.attachCheckDelayMs, TimeUnit.MILLISECONDS)
             }
         }
 
@@ -1225,7 +1377,7 @@ internal interface MirrorBackend : Closeable {
          * replacement paths check [closed]); never takes [lifecycleLock]. Idempotent. */
         override fun closeNativeSurfaces() {
             closed = true
-            val surfaces = synchronized(lock) { listOfNotNull(macSurface, gpuSurface) }
+            val surfaces = synchronized(lock) { listOfNotNull(macNative, gpuNative) }
             surfaces.forEach { runCatching { it.close() } }
         }
 
@@ -1238,17 +1390,18 @@ internal interface MirrorBackend : Closeable {
             stop(recreateNativeSurface = false)
             setLiveAudioEnabled(false, volume = { 1f }, onDiagnostic = {})
             connectionListener.close()
-            runCatching { macSurface?.close() }
-            macSurface = null
-            runCatching { gpuSurface?.close() }
-            gpuSurface = null
+            val (mac, gpu) = synchronized(lock) { macNative.also { macNative = null } to gpuNative.also { gpuNative = null } }
+            notifySurfaceChanged()
+            runCatching { mac?.close() }
+            runCatching { gpu?.close() }
         }
 
         fun hideGpuSurface() {
             val retiredSurface = synchronized(lock) {
                 gpuDirectDecoderFactory = null
-                gpuSurface.also { gpuSurface = null }
+                gpuNative.also { gpuNative = null }
             }
+            if (retiredSurface != null) notifySurfaceChanged()
             runCatching { retiredSurface?.close() }
         }
     }
@@ -1328,8 +1481,16 @@ internal fun EmbeddedMirrorPanel(
     val focusRequester = remember { FocusRequester() }
     val frame = snapshot.frame
     val frameInfo = snapshot.frameInfo
-    val macSurface = handle?.macSurface
-    val gpuSurface = handle?.gpuSurface
+    // Observed from the handle's own surface flow, not read straight off the backend: a replaced
+    // surface (Disconnect -> Connect) must recompose the panel even when the connection snapshot
+    // ends up identical — see EmbeddedMirrorHandle.nativeSurface.
+    val nativeSurface by (handle?.nativeSurface ?: remember { MutableStateFlow<MirrorNativeSurface?>(null) }).collectAsState()
+    val macSurface = nativeSurface as? EmbeddedMirrorMacSurface
+    val gpuSurface = nativeSurface as? EmbeddedMirrorGpuSurface
+    // Last layout bounds of the surface box, so a surface mounted AFTER the last layout pass (a
+    // replacement) can be clipped immediately instead of waiting for the next onGloballyPositioned,
+    // which never comes when the box's size did not change. A new surface starts fully clipped.
+    val lastSurfaceBounds = remember { arrayOfNulls<Pair<Rect, Rect>>(1) }
     val macOverlayOccluded by remember(macSurface) {
         macSurface?.overlayOccludedState ?: MutableStateFlow(false)
     }.collectAsState()
@@ -1342,6 +1503,7 @@ internal fun EmbeddedMirrorPanel(
     // recorder, packet pump, and decoder alive. Detached mirror windows keep their own host mounted.
     DisposableEffect(macSurface) {
         macSurface?.setHostMounted(macSurfaceHostToken, true)
+        lastSurfaceBounds[0]?.let { (full, clipped) -> macSurface?.setVisibleClip(full, clipped) }
         onDispose { macSurface?.setHostMounted(macSurfaceHostToken, false) }
     }
     // A pre-handle setup failure only makes sense to show while there's still no live/queued
@@ -1570,12 +1732,11 @@ internal fun EmbeddedMirrorPanel(
                                 )
                                 .onGloballyPositioned { coordinates ->
                                     val fullBounds = coordinates.boundsInWindow(clipBounds = false)
-                                    macSurface?.setVisibleClip(
-                                        fullBounds = fullBounds,
-                                        // A detached AWT Canvas has no scroll viewport. Passing its full
-                                        // bounds resets the native mask before the same layer is reparented.
-                                        clippedBounds = if (detached) fullBounds else coordinates.boundsInWindow(clipBounds = true),
-                                    )
+                                    // A detached AWT Canvas has no scroll viewport. Passing its full
+                                    // bounds resets the native mask before the same layer is reparented.
+                                    val clippedBounds = if (detached) fullBounds else coordinates.boundsInWindow(clipBounds = true)
+                                    lastSurfaceBounds[0] = fullBounds to clippedBounds
+                                    macSurface?.setVisibleClip(fullBounds = fullBounds, clippedBounds = clippedBounds)
                                 },
                             contentAlignment = Alignment.Center,
                         ) {
@@ -1590,12 +1751,17 @@ internal fun EmbeddedMirrorPanel(
                                         AppText("Capture and streaming continue.", color = colors.td, fontSize = 9.sp)
                                     }
                                 } else {
-                                    SwingPanel(
-                                        background = Color.Transparent,
-                                        factory = { macSurface.canvas },
-                                        modifier = Modifier.fillMaxSize(),
-                                        update = { macSurface.requestDisplay() },
-                                    )
+                                    // Keyed on the surface: SwingPanel calls its factory once per node, so
+                                    // without the key a replaced surface would keep hosting the old,
+                                    // closed canvas while the decoder rendered into the new one.
+                                    key(macSurface) {
+                                        SwingPanel(
+                                            background = Color.Transparent,
+                                            factory = { macSurface.canvas },
+                                            modifier = Modifier.fillMaxSize(),
+                                            update = { macSurface.requestDisplay() },
+                                        )
+                                    }
                                 }
                             } else if (gpuSurface != null && frameInfo != null && mirrorConnected) {
                                 // Mounted only once the direct decoder has actually presented a
@@ -1605,11 +1771,13 @@ internal fun EmbeddedMirrorPanel(
                                 // before the first frame and, since stop() recreates a fresh
                                 // surface, after every Disconnect too. Otherwise this falls through
                                 // to the placeholder text below, same as the macSurface branch above.
-                                SwingPanel(
-                                    background = Color.Transparent,
-                                    factory = { gpuSurface.canvas },
-                                    modifier = Modifier.fillMaxSize(),
-                                )
+                                key(gpuSurface) {
+                                    SwingPanel(
+                                        background = Color.Transparent,
+                                        factory = { gpuSurface.canvas },
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
                             } else if (bitmap != null) {
                                 Image(bitmap, "Device mirror", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
                             } else {

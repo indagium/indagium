@@ -2,6 +2,7 @@
 
 package com.indagium.capture.mirror
 
+import com.indagium.capture.MkvStructure
 import com.indagium.capture.StreamingMkvWriter
 import org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_H264
 import org.bytedeco.ffmpeg.global.avutil.AV_PIX_FMT_BGR24
@@ -10,6 +11,8 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.InputStream
+import java.io.PipedInputStream
+import java.io.PipedOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.file.Files
@@ -18,6 +21,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.test.assertEquals
@@ -470,7 +474,101 @@ class EmbeddedDeviceSessionTest {
         }
     }
 
+    /**
+     * The quit-during-capture path: the app closes the session while the device is still streaming
+     * packets (a live socket feeding the pump, the muxer mid-write). The MKV must come out finalized
+     * and seekable regardless: stop the writers first, then write the trailer exactly once.
+     */
+    @org.junit.Test(timeout = 30_000)
+    fun closingWhileTheDeviceIsStillStreamingLeavesAFinalizedSeekableMkv() {
+        val pipeIn = PipedInputStream(1 shl 20)
+        val pipeOut = PipedOutputStream(pipeIn)
+        val producerStop = AtomicBoolean(false)
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = pipeIn
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() {
+                    runCatching { pipeIn.close() }
+                }
+            }
+        }
+        val file = tempFile()
+        val written = AtomicInteger()
+        val diagnostics = CopyOnWriteArrayList<String>()
+        val session = EmbeddedDeviceSession(
+            transport,
+            StreamingMkvWriter(file, clusterTimeLimitMs = 100, clusterSizeLimitBytes = 4_096),
+            elapsedMillis = { 0L },
+            onDiagnostic = { diagnostics += it },
+            onVideoPacketWrittenHook = { _, _ -> written.incrementAndGet() },
+        )
+        // The producer is the device: header, config, then a key frame and a delta every ~20 ms for
+        // as long as the test runs — including while (and after) close() runs. It owns the pipe's
+        // write end for its whole life (a dead writer thread would break the pipe).
+        val producer = Thread {
+            runCatching {
+                pipeOut.write(videoStream(32, 32, H264_FIXTURE.config, emptyList()))
+                var index = 0
+                while (!producerStop.get()) {
+                    val packet = Packet(index * 33_000L, index % 30 == 0, if (index % 30 == 0) H264_FIXTURE.key else H264_FIXTURE.delta)
+                    pipeOut.write(packetBytes(packet))
+                    pipeOut.flush()
+                    index++
+                    Thread.sleep(20)
+                }
+            }
+        }.apply { isDaemon = true }
+        try {
+            producer.start()
+            session.start("serial", MirrorStreamOptions())
+            awaitTrue(timeoutMs = 10_000) { written.get() >= 15 }
+            assertFalse(MkvStructure.read(file).isFinalized, "still recording: no trailer yet")
+
+            val started = System.nanoTime()
+            session.close() // the quit: must return promptly and leave a finished file
+            val closeMs = (System.nanoTime() - started) / 1_000_000
+            assertTrue(closeMs < 6_000, "closing during an active write took $closeMs ms")
+
+            val structure = MkvStructure.read(file)
+            assertTrue(structure.segmentSizeKnown, "Segment size must be rewritten by the trailer: $structure")
+            assertTrue(structure.hasCues, "finalized MKV must carry Cues: $structure")
+            assertTrue(structure.isFinalized, "finalized MKV must carry a duration: $structure")
+            assertTrue(diagnostics.none { "could not finalize" in it }, "finalization failed: $diagnostics")
+
+            // Reopened by FFmpeg exactly like the player does: a real duration and a working seek.
+            org.bytedeco.javacv.FFmpegFrameGrabber(file).use { grabber ->
+                grabber.start()
+                assertTrue(grabber.lengthInTime > 0, "reopened file reports no duration")
+                grabber.timestamp = grabber.lengthInTime / 2
+                assertTrue(grabber.grabImage() != null, "a seek into the middle of the finalized file must decode a frame")
+            }
+            // Idempotent: a second close (CaptureRecorder closes the session again from its own close())
+            // must neither throw nor rewrite anything.
+            val sizeAfterClose = file.length()
+            session.close()
+            assertEquals(sizeAfterClose, file.length())
+        } finally {
+            producerStop.set(true)
+            runCatching { pipeOut.close() }
+            session.close()
+        }
+    }
+
     private data class Packet(val ptsUs: Long, val keyFrame: Boolean, val data: ByteArray)
+
+    private fun packetBytes(packet: Packet): ByteArray = ByteArrayOutputStream().also { out ->
+        DataOutputStream(out).apply {
+            var flags = packet.ptsUs
+            if (packet.keyFrame) flags = flags or (1L shl 61)
+            writeLong(flags)
+            writeInt(packet.data.size)
+            write(packet.data)
+        }
+    }.toByteArray()
 
     private fun videoStream(width: Int, height: Int, config: ByteArray, packets: List<Packet>): ByteArray =
         ByteArrayOutputStream().also { out ->

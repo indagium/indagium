@@ -19,7 +19,6 @@ import java.awt.event.HierarchyEvent
 import java.awt.event.HierarchyListener
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
-import java.io.Closeable
 import java.util.Collections
 import java.util.IdentityHashMap
 import java.util.concurrent.CountDownLatch
@@ -158,8 +157,16 @@ internal fun runOnEdtBounded(timeoutMs: Long, task: () -> Unit): Boolean {
 
 internal class EmbeddedMirrorMacSurface(
     private val diagnosticSink: (String) -> Unit = {},
-) : Closeable {
+) : MirrorNativeSurface {
     val canvas = Canvas()
+
+    override val mode: String get() = "videotoolbox-metal"
+    override val isClosed: Boolean get() = closed
+    override val isPresentationAttached: Boolean get() = !closed && attachedWindow != null
+
+    override fun describeAttachment(): String =
+        "closed=$closed attachedToWindow=${attachedWindow != null} hostMounted=$hostMounted " +
+            "displayable=${canvas.isDisplayable} showing=${canvas.isShowing}"
 
     /** Core Animation underlay ordering (the mirror layer sits below Compose's own Metal layer,
      * which paints a transparent hole over it) for same-window Compose overlays. Default true; a
@@ -189,7 +196,8 @@ internal class EmbeddedMirrorMacSurface(
 
     @Volatile private var closed = false
     private var lastNativeHierarchy: String? = null
-    private var attachedWindow: java.awt.Window? = null
+
+    @Volatile private var attachedWindow: java.awt.Window? = null
     private var lastVisibleClip: MirrorClipFractions? = null
     private var lastVisibleClipSize: Pair<Float, Float>? = null
     private val hostOwners = MirrorSurfaceHostOwners()
@@ -295,7 +303,7 @@ internal class EmbeddedMirrorMacSurface(
     }
 
     /** Applies the requested overlay mode; under the underlay native pixels stay visible beneath it. */
-    fun setOverlayOccluded(occluded: Boolean) {
+    override fun setOverlayOccluded(occluded: Boolean) {
         if (closed || overlayOccluded == occluded) return
         overlayOccluded = occluded
         _overlayOccludedState.value = occluded
