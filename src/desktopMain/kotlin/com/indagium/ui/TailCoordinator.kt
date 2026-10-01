@@ -15,6 +15,7 @@ import com.indagium.utils.computeStackTraceGroups
 import com.indagium.utils.detectArchiveFormat
 import com.indagium.utils.isUtf16LogFile
 import com.indagium.utils.mergeMessageTemplates
+import com.indagium.utils.mergeTagPids
 import com.indagium.utils.parseLogcatLines
 import com.indagium.utils.passesFilter
 import com.indagium.utils.viewDefiningKey
@@ -399,6 +400,9 @@ internal class TailCoordinator(private val appState: AppState, private val scope
                             // see its doc), while pids from earlier batches not mentioned in this
                             // one keep their previously learned name instead of being dropped.
                             processNames = cur.analysis.processNames + computeProcessNames(newEntries),
+                            // Unioned per tag, same incremental rationale: a tag newly seen on a
+                            // restarted app's pid makes `tag:` rules pick up that pid's earlier rows.
+                            tagPids = mergeTagPids(cur.analysis.tagPids, newEntries),
                             // Coverage stops at the rows that existed before this batch; keep an
                             // earlier (smaller) bound if the prefix was already partial.
                             analyzedThroughId = if (cur.analysis.pending) {
@@ -426,7 +430,7 @@ internal class TailCoordinator(private val appState: AppState, private val scope
     private suspend fun refreshAnalysis(tabId: String) {
         val logData = synchronized(appState.stateLock) { appState.tab(tabId)?.logData } ?: return
         val issueRules = appState.settings.customIssueRules
-        // includeCounts = false: tagCounts/processNames are maintained per batch and mergeTailAnalysis
+        // includeCounts = false: tagCounts/processNames/tagPids are maintained per batch and mergeTailAnalysis
         // takes the live maps, so computing them here again would be thrown away.
         val full = buildLogAnalysis(logData, issueRules, includeCounts = false)
         currentCoroutineContext().ensureActive()
@@ -470,7 +474,7 @@ internal fun extendsSnapshot(current: List<LogEntry>, snapshot: List<LogEntry>):
 
 /**
  * Decides what a full [buildLogAnalysis] result computed for [snapshot] does to [current]'s
- * analysis, or null to discard it. Either way the result's own `tagCounts`/`processNames` are
+ * analysis, or null to discard it. Either way the result's own `tagCounts`/`processNames`/`tagPids` are
  * ignored: [current]'s incrementally maintained maps already cover every current row (the tail
  * refresh does not even compute them).
  * - [current] still holds exactly the snapshot list: [full]'s stack/crash/custom-issue data,
@@ -486,12 +490,14 @@ internal fun mergeTailAnalysis(current: LogTab, snapshot: List<LogEntry>, full: 
         current.logData === snapshot -> full.copy(
             tagCounts = live.tagCounts,
             processNames = live.processNames,
+            tagPids = live.tagPids,
             pending = false,
             analyzedThroughId = null,
         )
         extendsSnapshot(current.logData, snapshot) && current.logData.size > snapshot.size -> full.copy(
             tagCounts = live.tagCounts,
             processNames = live.processNames,
+            tagPids = live.tagPids,
             pending = false,
             analyzedThroughId = snapshot.last().id,
         )

@@ -29,7 +29,9 @@ import com.indagium.model.MAX_INTERFACE_SCALE_PERCENT
 import com.indagium.model.MIN_INTERFACE_SCALE_PERCENT
 import com.indagium.model.ManualCollapseBlock
 import com.indagium.model.ManualCollapseDirection
+import com.indagium.model.MessageRule
 import com.indagium.model.ProcessNameMode
+import com.indagium.model.RuleTarget
 import com.indagium.model.SearchScope
 import com.indagium.model.SequenceDef
 import com.indagium.model.SourceFolderInfo
@@ -84,6 +86,7 @@ import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.listArchiveVideoCandidates
 import com.indagium.utils.passesFilter
 import com.indagium.utils.resolveProcessDisplayName
+import com.indagium.utils.visibleEntries
 import com.indagium.video.VideoPlayerController
 import kotlinx.coroutines.delay
 import java.io.File
@@ -4901,6 +4904,38 @@ class AppStateBehaviorTest {
             mapOf(100 to "com.example.first", 200 to "com.example.second"),
             state.tab(tabId)!!.analysis.processNames,
         )
+
+        state.stopTailing(tabId)
+    }
+
+    @Test
+    fun startTailingMergesTagPidsAndRevealsARestartedProcessOnceItLogsTheFollowedTag() {
+        // Restart scenario for a `tag:X` PID_TID rule: pid 100 logs X; a later batch carries pid
+        // 200's first lines (a different tag) and only afterwards a line tagged X. Once that last
+        // batch lands, pid 200's EARLIER lines are visible too — the rule is re-resolved against
+        // the merged tagPids on every filter run, retroactively.
+        val dir = createTempDirectory("openlog-tailing-tagpids").toFile()
+        val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I X: first run\n") }
+        val state = AppState(autosaveFile = File(dir, "state.cache"))
+        state.openFile(file)
+        waitUntil { state.tabs.size == 1 && !state.isLoading }
+        val tabId = state.tabs.single().id
+        assertEquals(mapOf("X" to setOf(100)), state.tab(tabId)!!.analysis.tagPids)
+        state.upFlt(tabId) {
+            it.copy(messageRules = listOf(MessageRule(id = "r1", include = true, target = RuleTarget.PID_TID, pattern = "tag:X")))
+        }
+
+        state.startTailing(tabId)
+
+        file.appendText("06-26 10:00:01.000  200  200 I Boot: restarted\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 2 }
+        assertEquals(mapOf("X" to setOf(100), "Boot" to setOf(200)), state.tab(tabId)!!.analysis.tagPids)
+        assertEquals(listOf("first run"), visibleEntries(state.tab(tabId)!!).map { it.msg })
+
+        file.appendText("06-26 10:00:02.000  200  200 I X: second run\n")
+        waitUntil { state.tab(tabId)!!.logData.size == 3 }
+        assertEquals(setOf(100, 200), state.tab(tabId)!!.analysis.tagPids["X"])
+        assertEquals(listOf("first run", "restarted", "second run"), visibleEntries(state.tab(tabId)!!).map { it.msg })
 
         state.stopTailing(tabId)
     }

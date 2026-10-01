@@ -1084,6 +1084,7 @@ fun CompactCheckBox(
     modifier: Modifier = Modifier,
     indeterminate: Boolean = false,
     accentColor: Color = LocalTheme.current.ac,
+    enabled: Boolean = true,
 ) {
     val tc = tc()
     val state = when {
@@ -1094,10 +1095,13 @@ fun CompactCheckBox(
     TriStateCheckbox(
         state = state,
         onClick = onToggle,
+        enabled = enabled,
         colors = CheckboxDefaults.colors(
             checkedColor = accentColor,
             uncheckedColor = tc.td,
             checkmarkColor = tc.bg,
+            disabledCheckedColor = accentColor.copy(.4f),
+            disabledUncheckedColor = tc.td.copy(.4f),
         ),
         modifier = modifier.size(20.dp),
     )

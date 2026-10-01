@@ -495,7 +495,7 @@ internal fun expansionAndIndexForEntry(
     // which on a large log made a bulk exclude/hide action feel like a hang.
     if (applyFilter) {
         val entry = tab.rmap[entryId] ?: return null
-        if (!passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext)) return null
+        if (!passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) return null
     }
     var expanded = tab.expanded
     var candidateItems = currentItems ?: computeItems(tab.copy(expanded = expanded), applyFilter, regexContext, storeInCache = false)
