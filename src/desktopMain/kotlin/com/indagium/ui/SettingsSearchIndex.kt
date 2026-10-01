@@ -104,7 +104,30 @@ private fun appearance() = buildList {
             listOf("dark", "light", "palette", "colors", "look"),
         ),
     )
-    add(entry(SettingsSection.Appearance, "Font family", "Monospace or proportional log text.", listOf("typeface", "mono")))
+    add(
+        entry(
+            SettingsSection.Appearance,
+            "Fallback log family",
+            "Default monospace or proportional log text when no system family is selected.",
+            listOf("typeface", "mono", "font family"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance,
+            "Interface font",
+            "Search and preview an installed system font for controls and interface text.",
+            listOf("typeface", "ui", "font family"),
+        ),
+    )
+    add(
+        entry(
+            SettingsSection.Appearance,
+            "Log font",
+            "Search and preview an installed system font for log rows and highlighter previews.",
+            listOf("typeface", "font family", "monospace"),
+        ),
+    )
     add(
         entry(
             SettingsSection.Appearance, "Log font size",

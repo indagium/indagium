@@ -501,6 +501,7 @@ internal fun shouldSyncSequenceVisualOrder(dragId: String?, justReleasedSequence
 // Collapse/expand state for the filter panel. Held outside the composable so it survives
 // the panel being hidden and re-shown (FilterPanel is removed from the tree when invisible).
 class FilterPanelUiState {
+    var highlightersExpanded  by mutableStateOf(true)
     var hlListExpanded      by mutableStateOf(true)
     var lvlExpanded         by mutableStateOf(true)
     var seqExpanded         by mutableStateOf(true)

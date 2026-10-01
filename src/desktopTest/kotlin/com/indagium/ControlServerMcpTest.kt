@@ -397,16 +397,45 @@ class ControlServerMcpTest {
         assertEquals("App", scoped.tag)
         assertTrue(scoped.caseSensitive)
         assertEquals(Color(0xFF000000), scoped.textColor)
+        assertTrue(scoped.kloggStyle)
+        assertTrue(scoped.backgroundEnabled)
         // Everything omitted stays what highlighters always were: match-only, anywhere, insensitive.
         assertFalse(plain.wholeLine)
         assertEquals(HighlightTarget.ANY, plain.target)
         assertEquals(null, plain.tag)
         assertFalse(plain.caseSensitive)
         assertEquals(null, plain.textColor)
+        assertFalse(plain.kloggStyle)
         // The echo carries the new fields.
         assertTrue(body.contains("wholeLine"), body)
         assertTrue(body.contains("caseSensitive"), body)
         assertTrue(body.contains("textColor"), body)
+    }
+
+    @Test
+    fun setHighlightersSupportsNativeForegroundAndTypographyWithExplicitCompatibilityMode() {
+        state.tabs = listOf(mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hi"))))
+        val body = mcp(
+            """{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"set_highlighters","arguments":{"tabId":"t1",""" +
+                """"highlighters":[{"pattern":"green","color":"#40112233","textColor":"#8044CC66","kloggStyle":false,""" +
+                """"backgroundEnabled":false,"fontFamily":"Retain missing font","bold":false,"italic":true,""" +
+                """"captureGroupsOnly":true,"colorVariance":25}]}}}""",
+            initSession(),
+        ).body()
+        assertTrue(body.contains("\\\"ok\\\":true"), body)
+        val rule = state.tab("t1")!!.filter.highlighters.single()
+        assertFalse(rule.kloggStyle)
+        assertFalse(rule.backgroundEnabled)
+        assertEquals(Color(0x40112233), rule.color)
+        assertEquals(Color(0x8044CC66), rule.textColor)
+        assertEquals("Retain missing font", rule.fontFamily)
+        assertEquals(false, rule.bold)
+        assertEquals(true, rule.italic)
+        assertTrue(rule.captureGroupsOnly)
+        assertEquals(25, rule.colorVariance)
+        listOf("kloggStyle", "backgroundEnabled", "fontFamily", "bold", "italic", "captureGroupsOnly", "colorVariance").forEach {
+            assertTrue(body.contains(it), "missing field in echo: $it, $body")
+        }
     }
 
     @Test
@@ -427,7 +456,7 @@ class ControlServerMcpTest {
     fun setHighlightersDescriptionDocumentsTheNewFields() {
         val session = initSession()
         val body = mcp("""{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}""", session).body()
-        listOf("wholeLine", "target", "caseSensitive", "textColor").forEach {
+        listOf("wholeLine", "target", "caseSensitive", "textColor", "kloggStyle", "backgroundEnabled", "fontFamily", "bold", "italic").forEach {
             assertTrue(body.contains(it), "set_highlighters description missing $it")
         }
     }

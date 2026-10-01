@@ -1001,36 +1001,57 @@ internal class IndagiumToolOperations(
     // missing color is assigned round-robin from HL_COLORS (the same palette the UI's add form
     // cycles), so a client never has to know the palette to get visually distinct highlighters.
     private fun parseHighlighters(raw: List<Map<String, Any?>>): Result<List<Highlighter>> = runCatching {
-        raw.mapIndexed { idx, m ->
-            val pattern = m.str("pattern")?.takeIf { it.isNotBlank() }
-                ?: error("highlighters[$idx]: missing or blank 'pattern'")
-            val color = m.str("color")?.takeIf { it.isNotBlank() }?.let {
-                parseHexColor(it) ?: error("highlighters[$idx]: invalid hex color '$it' (expected #RRGGBB or #AARRGGBB)")
-            } ?: HL_COLORS[idx % HL_COLORS.size]
-            val target = m.str("target")?.takeIf { it.isNotBlank() }?.let { name ->
-                HighlightTarget.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
-                    ?: error("highlighters[$idx]: invalid target '$name' (expected any, tag or message)")
-            } ?: HighlightTarget.ANY
-            val textColor = m.str("textColor")?.takeIf { it.isNotBlank() }?.let {
-                parseHexColor(it) ?: error("highlighters[$idx]: invalid hex textColor '$it' (expected #RRGGBB or #AARRGGBB)")
-            }
-            Highlighter(
-                id = m.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("hl")}_$idx",
-                pattern = pattern,
-                regex = m.bool("regex") ?: false,
-                color = color,
-                on = m.bool("enabled") ?: true,
-                wholeLine = m.bool("wholeLine") ?: false,
-                target = target,
-                tag = m.str("tag")?.takeIf { it.isNotBlank() },
-                caseSensitive = m.bool("caseSensitive") ?: false,
-                textColor = textColor,
-            )
-        }
+        raw.mapIndexed(::parseHighlighter)
     }
 
-    // The klogg-only fields (captureGroupsOnly, colorVariance) come from the import path, never from
-    // MCP clients, so they are not echoed here; textColor is, and only when set.
+    private fun parseHighlighter(index: Int, fields: Map<String, Any?>): Highlighter {
+        val pattern = fields.str("pattern")?.takeIf { it.isNotBlank() }
+            ?: error("highlighters[$index]: missing or blank 'pattern'")
+        val color = parseHighlighterColor(fields, "color", index)
+            ?: HL_COLORS[index % HL_COLORS.size]
+        val textColor = parseHighlighterColor(fields, "textColor", index)
+        val target = parseHighlighterTarget(fields, index)
+        val kloggStyle = if (fields.containsKey("kloggStyle")) {
+            fields.bool("kloggStyle") ?: false
+        } else {
+            textColor != null
+        }
+        return Highlighter(
+            id = fields.str("id")?.takeIf { it.isNotBlank() } ?: "${newId("hl")}_$index",
+            pattern = pattern,
+            regex = fields.bool("regex") ?: false,
+            color = color,
+            on = fields.bool("enabled") ?: true,
+            wholeLine = fields.bool("wholeLine") ?: false,
+            target = target,
+            tag = fields.str("tag")?.takeIf { it.isNotBlank() },
+            caseSensitive = fields.bool("caseSensitive") ?: false,
+            textColor = textColor,
+            kloggStyle = kloggStyle,
+            backgroundEnabled = fields.bool("backgroundEnabled") ?: true,
+            fontFamily = fields.str("fontFamily")?.takeIf { it.isNotBlank() },
+            bold = fields.bool("bold"),
+            italic = fields.bool("italic"),
+            captureGroupsOnly = fields.bool("captureGroupsOnly") ?: false,
+            colorVariance = fields.anyInt("colorVariance")?.coerceIn(0, 100) ?: 0,
+        )
+    }
+
+    private fun parseHighlighterColor(fields: Map<String, Any?>, key: String, index: Int): Color? =
+        fields.str(key)?.takeIf { it.isNotBlank() }?.let { raw ->
+            parseHexColor(raw) ?: error(
+                "highlighters[$index]: invalid hex $key '$raw' (expected #RRGGBB or #AARRGGBB)",
+            )
+        }
+
+    private fun parseHighlighterTarget(fields: Map<String, Any?>, index: Int): HighlightTarget =
+        fields.str("target")?.takeIf { it.isNotBlank() }?.let { name ->
+            HighlightTarget.entries.firstOrNull { it.name.equals(name, ignoreCase = true) }
+                ?: error("highlighters[$index]: invalid target '$name' (expected any, tag or message)")
+        } ?: HighlightTarget.ANY
+
+    // textColor is independent from provenance; old requests without kloggStyle retain the legacy
+    // foreground-implies-klogg inference at parse time, while new requests can opt out explicitly.
     private fun highlighterToMap(h: Highlighter): Map<String, Any?> = buildMap {
         put("id", h.id)
         put("pattern", h.pattern)
@@ -1041,6 +1062,13 @@ internal class IndagiumToolOperations(
         put("target", h.target.name.lowercase())
         put("tag", h.tag)
         put("caseSensitive", h.caseSensitive)
+        put("kloggStyle", h.kloggStyle)
+        put("backgroundEnabled", h.backgroundEnabled)
+        put("fontFamily", h.fontFamily)
+        put("bold", h.bold)
+        put("italic", h.italic)
+        put("captureGroupsOnly", h.captureGroupsOnly)
+        put("colorVariance", h.colorVariance)
         h.textColor?.let { put("textColor", colorToHex(it)) }
     }
 

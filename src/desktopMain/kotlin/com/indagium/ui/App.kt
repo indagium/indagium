@@ -209,6 +209,8 @@ fun App(
         LocalTheme provides theme,
         LocalFontBase provides state.settings.fontSize,
         LocalUseMono provides state.settings.fontMono,
+        LocalUiFontFamily provides state.settings.resolvedInterfaceFontFamily(),
+        LocalLogFontFamily provides state.settings.resolvedLogFontFamily(),
         LocalDensity provides scaledDensity,
         LocalContextMenuRepresentation provides IndagiumContextMenuRepresentation,
         LocalTextContextMenu provides IndagiumTextContextMenu,
@@ -923,6 +925,11 @@ fun App(
                                                 onHighlightColor = e.onHighlightColor,
                                                 highlightAutoColor = e.highlightAutoColor,
                                                 preferPickerLeft = e.preferPickerLeft,
+                                                customColors = customHighlightColors(state.settings.highlighterCustomColors),
+                                                paletteColumns = state.settings.highlighterPaletteColumns,
+                                                onPaletteColumnsChange = { columns ->
+                                                    state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }
+                                                },
                                             )
                                         is CtxMenuEntry.CollapseActions ->
                                             CtxCollapseActions(
@@ -964,6 +971,11 @@ fun App(
                                                 onHighlightColor = e.onHighlightColor,
                                                 highlightAutoColor = e.highlightAutoColor,
                                                 preferPickerLeft = e.preferPickerLeft,
+                                                customColors = customHighlightColors(state.settings.highlighterCustomColors),
+                                                paletteColumns = state.settings.highlighterPaletteColumns,
+                                                onPaletteColumnsChange = { columns ->
+                                                    state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }
+                                                },
                                             )
                                         is CtxMenuEntry.SourceActions ->
                                             CtxSourceActions(
@@ -2510,7 +2522,7 @@ fun App(
                             value = confirmation,
                             onValueChange = { confirmation = it },
                             singleLine = true,
-                            textStyle = androidx.compose.ui.text.TextStyle(color = tc2.tx, fontSize = 12.sp),
+                            textStyle = androidx.compose.ui.text.TextStyle(color = tc2.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current),
                             cursorBrush = androidx.compose.ui.graphics.SolidColor(tc2.ac),
                             modifier = Modifier.fillMaxWidth().border(1.dp, tc2.br, RoundedCornerShape(5.dp)).padding(8.dp),
                         )

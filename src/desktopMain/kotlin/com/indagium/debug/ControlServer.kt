@@ -1303,7 +1303,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     McpTool(
         "set_highlighters",
         "Replace a tab's highlighter list — the patterns whose matches are color-marked in the log " +
-            "view. Highlighters do NOT hide or fold rows; they only tint matching text (or, with " +
+            "view. Highlighters do NOT hide or fold rows; they style matching text (or, with " +
             "wholeLine, the whole row), so they are safe to add freely while investigating. A supplied " +
             "highlighters list replaces the current one wholesale; clearHighlighters removes all of " +
             "them. Each highlighters item is an object: { pattern (required), regex (default false), " +
@@ -1312,8 +1312,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "matched text), target (\"any\" (default, the whole rendered line), \"tag\" or " +
             "\"message\" — which part of the row the pattern is matched against), tag (optional exact " +
             "tag; the highlighter only applies to rows with that tag), caseSensitive (default false), " +
-            "textColor (optional hex foreground colour for the highlighted text) }. The result echoes " +
-            "every highlighter back with these fields.",
+            "textColor (optional hex foreground), kloggStyle (optional explicit legacy priority; when " +
+            "omitted, an old request with textColor keeps the former klogg behavior), backgroundEnabled " +
+            "(default true), fontFamily (optional installed font family), bold and italic (optional " +
+            "booleans), captureGroupsOnly (default false) and colorVariance (0-100, default 0). The result " +
+            "echoes every highlighter back with these fields.",
         schema(
             "tabId" to "string", "highlighters" to "array", "clearHighlighters" to "boolean",
             required = listOf("tabId"),
@@ -1323,7 +1326,11 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                     "(string, optional hex e.g. \"#FF8800\" or \"#AAFF8800\"), enabled (boolean, default true), " +
                     "wholeLine (boolean, default false), target (string: any, tag or message; default any), " +
                     "tag (string, optional exact tag scope), caseSensitive (boolean, default false), " +
-                    "textColor (string, optional hex foreground colour).",
+                    "textColor (string, optional hex foreground), kloggStyle (boolean, optional explicit " +
+                    "legacy priority; omitted old requests infer true from textColor), backgroundEnabled " +
+                    "(boolean, default true), fontFamily (optional installed family name), bold and italic " +
+                    "(optional booleans), captureGroupsOnly (boolean, default false), colorVariance " +
+                    "(integer 0-100, default 0).",
                 "clearHighlighters" to "If true, remove every highlighter from the tab.",
             ),
         ),

@@ -9,7 +9,7 @@ import com.indagium.model.SavedFilter
 // Imports the highlighter sets of a klogg settings export (a QSettings INI, see QSettingsIni.kt)
 // as saved filters. The user picks or drops the file themselves; nothing here looks for an installed
 // klogg. Each set becomes one SavedFilter carrying only highlighters, and every rule keeps klogg's own
-// behaviour through the Highlighter fields Phase 1 added (textColor != null marks it klogg-style):
+// behaviour through the explicit kloggStyle Highlighter marker:
 //
 //   klogg regexp / use_regex      -> pattern / regex          (use_regex=false: plain text, klogg escapes it)
 //   klogg ignore_case             -> caseSensitive = !ignore_case
@@ -178,6 +178,7 @@ private fun convertHighlighter(
         textColor = fore,
         captureGroupsOnly = true,
         colorVariance = if (variate && matchOnly) variance.coerceIn(0, 100) else 0,
+        kloggStyle = true,
     )
 }
 

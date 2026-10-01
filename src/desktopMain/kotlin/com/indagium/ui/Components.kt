@@ -59,6 +59,10 @@ import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextRange
@@ -85,7 +89,7 @@ import java.awt.Cursor as AwtCursor
 
 @Composable fun tc() = LocalTheme.current
 
-@Composable fun monoFont() = if (LocalUseMono.current) FontFamily.Monospace else FontFamily.Default
+@Composable fun monoFont() = LocalLogFontFamily.current
 
 @Composable fun baseSp() = LocalFontBase.current.sp
 
@@ -271,7 +275,7 @@ fun AppText(
     text: String,
     color: Color = LocalTheme.current.tx,
     fontSize: TextUnit = LocalFontBase.current.sp,
-    fontFamily: FontFamily = FontFamily.Default,
+    fontFamily: FontFamily = LocalUiFontFamily.current,
     fontWeight: FontWeight = FontWeight.Normal,
     modifier: Modifier = Modifier,
     maxLines: Int = 1,
@@ -282,7 +286,8 @@ fun AppText(
     onTextLayout: ((TextLayoutResult) -> Unit)? = null,
 ) {
     androidx.compose.material3.Text(
-        text, color = color, fontSize = fontSize, fontFamily = fontFamily,
+        text, color = color, fontSize = fontSize,
+        fontFamily = fontFamily,
         fontWeight = fontWeight, modifier = modifier, maxLines = maxLines, overflow = overflow,
         textDecoration = textDecoration,
         onTextLayout = onTextLayout ?: {},
@@ -604,11 +609,11 @@ fun ColHeader(
 }
 
 @Composable
-fun PillBtn(label: String, active: Boolean, onClick: () -> Unit) {
+fun PillBtn(label: String, active: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     val tc = tc()
     var hovered by remember { mutableStateOf(false) }
     Box(
-        Modifier
+        modifier
             .border(1.dp, if (active) tc.ac else tc.br, CORNER_MD)
             .background(if (active) tc.ac.copy(.15f) else if (hovered) tc.hv else Color.Transparent, CORNER_MD)
             .clip(CORNER_MD)
@@ -774,7 +779,7 @@ fun InlineField(
     BasicTextField(
         value = value, onValueChange = onValue,
         visualTransformation = visualTransformation,
-        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
+        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = LocalUiFontFamily.current),
         cursorBrush = SolidColor(tc.ac),
         singleLine = singleLine,
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -851,7 +856,7 @@ fun InlineField(
     BasicTextField(
         value = value, onValueChange = onValue,
         visualTransformation = visualTransformation,
-        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = FontFamily.Default),
+        textStyle = TextStyle(color = tc.tx, fontSize = fontSize, fontFamily = LocalUiFontFamily.current),
         cursorBrush = SolidColor(tc.ac),
         singleLine = singleLine,
         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -963,7 +968,7 @@ fun ScrollableTextArea(
                 onValue(it.text)
             },
             readOnly = !enabled,
-            textStyle = TextStyle(color = tc.tx, fontSize = fontSize, lineHeight = lineHeight, fontFamily = FontFamily.Default),
+            textStyle = TextStyle(color = tc.tx, fontSize = fontSize, lineHeight = lineHeight, fontFamily = LocalUiFontFamily.current),
             cursorBrush = SolidColor(tc.ac),
             onTextLayout = { layout = it },
             // heightIn must come before verticalScroll: verticalScroll measures its child unbounded
@@ -1099,10 +1104,10 @@ fun CompactCheckBox(
 }
 
 @Composable
-fun ColorSwatch(color: Color, selected: Boolean, onClick: () -> Unit) {
+fun ColorSwatch(color: Color, selected: Boolean, modifier: Modifier = Modifier, size: Dp = 14.dp, onClick: () -> Unit) {
     val tc = tc()
     Box(
-        Modifier.size(14.dp)
+        modifier.size(size)
             .background(color, CORNER_SM)
             .border(2.dp, if (selected) tc.tx else Color.Transparent, CORNER_SM)
             .clip(CORNER_SM)
@@ -1368,6 +1373,7 @@ fun AppButton(
     }
     Box(
         modifier = modifier
+            .then(if (enabled) Modifier else Modifier.semantics { disabled() })
             .then(if (variant == ButtonVariant.Secondary)
                 Modifier.border(0.5.dp, if (isDanger) DANGER_RED.copy(.5f) else tc.br, shape)
             else Modifier)
@@ -1526,6 +1532,9 @@ internal fun CtxTagActions(
     onHighlightColor: (Color) -> Unit,
     highlightAutoColor: Color,
     preferPickerLeft: Boolean,
+    customColors: List<Color> = emptyList(),
+    paletteColumns: Int = 5,
+    onPaletteColumnsChange: (Int) -> Unit = {},
 ) {
     val tc = tc()
     HoverBox(
@@ -1565,6 +1574,9 @@ internal fun CtxTagActions(
                         onHighlightColor = onHighlightColor,
                         autoColor = highlightAutoColor,
                         preferLeft = preferPickerLeft,
+                        customColors = customColors,
+                        paletteColumns = paletteColumns,
+                        onPaletteColumnsChange = onPaletteColumnsChange,
                     )
                 }
             }
@@ -1825,6 +1837,9 @@ internal fun CtxSelectionActions(
     onHighlightColor: (Color) -> Unit,
     highlightAutoColor: Color,
     preferPickerLeft: Boolean,
+    customColors: List<Color> = emptyList(),
+    paletteColumns: Int = 5,
+    onPaletteColumnsChange: (Int) -> Unit = {},
 ) {
     val tc = tc()
     HoverBox(
@@ -1864,6 +1879,9 @@ internal fun CtxSelectionActions(
                         onHighlightColor = onHighlightColor,
                         autoColor = highlightAutoColor,
                         preferLeft = preferPickerLeft,
+                        customColors = customColors,
+                        paletteColumns = paletteColumns,
+                        onPaletteColumnsChange = onPaletteColumnsChange,
                     )
                 }
             }
@@ -1969,9 +1987,9 @@ private fun CtxActionDivider(colors: ThemeColors) {
     Box(Modifier.width(1.dp).height(18.dp).background(colors.br))
 }
 
-// 82dp inner width fits five 14dp swatches with 3dp gaps, but not a sixth. Matching the
-// 9dp vertical padding makes every edge around the grid equally spaced.
-private val CTX_HIGHLIGHT_PICKER_WIDTH = 100.dp
+// The 5×5 flyout keeps the original narrow footprint; the 10-column view only widens enough for
+// ten 14dp swatches and their 3dp gaps.
+private val CTX_HIGHLIGHT_PICKER_WIDTH = 128.dp
 
 // The primary button preserves the existing grouped Highlight action. Its wider final slot puts
 // the entire picker target in the same position as the Show/Hide messages submenu chevron.
@@ -1981,9 +1999,16 @@ private fun CtxHighlightAction(
     onHighlightColor: (Color) -> Unit,
     autoColor: Color,
     preferLeft: Boolean,
+    customColors: List<Color>,
+    paletteColumns: Int,
+    onPaletteColumnsChange: (Int) -> Unit,
 ) {
     val tc = tc()
     val density = LocalDensity.current
+    val windowSize = LocalWindowInfo.current.containerSize
+    val maxWidth = with(density) { (windowSize.width.toDp() - 20.dp).coerceAtLeast(180.dp) }
+    val maxHeight = with(density) { (windowSize.height.toDp() - 24.dp).coerceAtLeast(140.dp) }
+    val pickerWidth = minOf(if (paletteColumns >= 10) 190.dp else CTX_HIGHLIGHT_PICKER_WIDTH, maxWidth)
     var hoveringTrigger by remember { mutableStateOf(false) }
     var hoveringPopup by remember { mutableStateOf(false) }
     var pickerOpen by remember { mutableStateOf(false) }
@@ -2005,7 +2030,8 @@ private fun CtxHighlightAction(
         HoverBox(
             modifier = Modifier.align(Alignment.CenterEnd).size(24.dp).clip(RoundedCornerShape(6.dp))
                 .onPointerEvent(PointerEventType.Enter) { hoveringTrigger = true }
-                .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false },
+                .onPointerEvent(PointerEventType.Exit) { hoveringTrigger = false }
+                .testTag("context-highlight-trigger"),
             onClick = { pickerOpen = true },
         ) {
             Box(
@@ -2018,29 +2044,38 @@ private fun CtxHighlightAction(
             Popup(
                 alignment = Alignment.TopStart,
                 offset = IntOffset(
-                    if (preferLeft) -with(density) { CTX_HIGHLIGHT_PICKER_WIDTH.roundToPx() } else anchorWidthPx,
+                    if (preferLeft) -with(density) { pickerWidth.roundToPx() } else anchorWidthPx,
                     0,
                 ),
                 onDismissRequest = { pickerOpen = false },
                 properties = PopupProperties(focusable = false),
             ) {
-                FlowRow(
-                    Modifier.width(CTX_HIGHLIGHT_PICKER_WIDTH)
+                Column(
+                    Modifier.width(pickerWidth)
+                        .heightIn(max = minOf(380.dp, maxHeight))
+                        .verticalScroll(rememberScrollState())
                         .shadow(8.dp, RoundedCornerShape(7.dp))
                         .background(tc.p, RoundedCornerShape(7.dp))
                         .border(1.dp, tc.br, RoundedCornerShape(7.dp))
                         .padding(9.dp)
                         .onPointerEvent(PointerEventType.Enter) { hoveringPopup = true }
-                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false },
-                    horizontalArrangement = Arrangement.spacedBy(3.dp),
-                    verticalArrangement = Arrangement.spacedBy(3.dp),
+                        .onPointerEvent(PointerEventType.Exit) { hoveringPopup = false }
+                        .testTag("context-highlight-popup"),
+                    verticalArrangement = Arrangement.spacedBy(5.dp),
                 ) {
-                    HL_COLORS.forEach { color ->
-                        ColorSwatch(color, color == autoColor) {
-                            pickerOpen = false
+                    HighlightPaletteGrid(
+                        palette = (HL_COLORS + customColors).distinct(),
+                        selectedColor = autoColor,
+                        paletteColumns = paletteColumns,
+                        onPaletteColumnsChange = onPaletteColumnsChange,
+                        testTagPrefix = "context-highlight",
+                        onColorChange = { color ->
                             onHighlightColor(color)
-                        }
-                    }
+                            pickerOpen = false
+                        },
+                        expandedHeight = 300.dp,
+                        title = "",
+                    )
                 }
             }
         }

@@ -14,6 +14,7 @@ import com.indagium.utils.newId
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -48,18 +49,24 @@ internal data class DecodedFilterLibrary(
     val notes: List<String> = emptyList(),
     // True when decoded from a klogg export (decided by content, not file name); drives the review's default mode.
     val fromKlogg: Boolean = false,
+    val customColors: List<String> = emptyList(),
 )
 
 internal fun exportFiltersList(
     filters: List<SavedFilter>,
     folders: List<SavedFilterFolder> = emptyList(),
     includeEmptyFolders: Boolean = false,
+    highlighterCustomColors: List<String> = emptyList(),
 ): String = buildString {
     val referencedFolderIds = filters.mapNotNullTo(linkedSetOf()) { it.folderId }
     val exportedFolders = if (includeEmptyFolders) folders else folders.filter { it.id in referencedFolderIds }
     appendLine("{")
     appendLine("  \"format\": \"$FILTER_LIBRARY_FORMAT\",")
     appendLine("  \"version\": $FILTER_LIBRARY_VERSION,")
+    val exportedColors = normalizeHighlighterCustomColors(highlighterCustomColors)
+    if (exportedColors.isNotEmpty()) {
+        appendLine("  \"highlighterCustomColors\": [${exportedColors.joinToString(", ") { it.jsonStr() }}],")
+    }
     appendLine("  \"folders\": [")
     exportedFolders.forEachIndexed { index, folder ->
         append("    {\"id\": ${folder.id.jsonStr()}, \"name\": ${folder.name.jsonStr()}}")
@@ -190,8 +197,23 @@ internal fun decodeFilterLibrary(json: String): Result<DecodedFilterLibrary> = r
         val name = folder["name"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
         if (id != null && name != null) SavedFilterFolder(id, name) else null
     }
-    DecodedFilterLibrary(filters, folders)
+    val customColors = (obj["highlighterCustomColors"] as? JsonArray)
+        ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+        .orEmpty()
+    DecodedFilterLibrary(
+        filters = filters,
+        folders = folders,
+        customColors = normalizeHighlighterCustomColors(customColors),
+    )
 }
+
+/** Canonicalizes palette values to unique ARGB hex strings and applies the persisted setting cap. */
+internal fun normalizeHighlighterCustomColors(raw: List<String>): List<String> = raw.asSequence()
+    .mapNotNull(::parseHighlightHex)
+    .map(::highlightColorHex)
+    .distinct()
+    .take(MAX_CUSTOM_HIGHLIGHT_COLORS)
+    .toList()
 
 /**
  * Decides by content, not extension, what an import file is: filter JSON (Indagium's own export) or
@@ -301,10 +323,18 @@ private data class HighlighterShape(
     val color: Color,
     val captureGroupsOnly: Boolean,
     val colorVariance: Int,
+    val kloggStyle: Boolean,
+    val backgroundEnabled: Boolean,
+    val fontFamily: String?,
+    val bold: Boolean?,
+    val italic: Boolean?,
 )
 
 private fun Highlighter.shape() =
-    HighlighterShape(pattern, regex, target, tag, caseSensitive, wholeLine, textColor, color, captureGroupsOnly, colorVariance)
+    HighlighterShape(
+        pattern, regex, target, tag, caseSensitive, wholeLine, textColor, color, captureGroupsOnly, colorVariance,
+        kloggStyle, backgroundEnabled, fontFamily, bold, italic,
+    )
 
 /** [incoming] with fresh ids, minus any whose shape is already in [existing] (or repeats earlier in [incoming]). */
 internal fun newHighlightersFor(existing: List<Highlighter>, incoming: List<Highlighter>): List<Highlighter> {

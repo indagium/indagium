@@ -329,7 +329,7 @@ class FilterBehaviorTest {
     @Test
     fun kloggWholeLineTextColourCoversEveryCharacter() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.E, "com.app.Network", "request complete", pid = 100, tid = 200)
-        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta, kloggStyle = true)
         val line = render(entry, listOf(hl))
 
         assertEquals("k1", line.wholeLine?.id)
@@ -342,7 +342,7 @@ class FilterBehaviorTest {
         val entry = LogEntry(
             1, "10:00:00.000", LogLevel.W, "com.app.Network", "request complete ".repeat(6), pid = 100, tid = 200,
         )
-        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta, kloggStyle = true)
         val wrapped = visualLogLineForWrapLimit(render(entry, listOf(hl)).text, 20)
 
         assertTrue(wrapped.text.contains('\n'), "test must actually wrap")
@@ -354,7 +354,7 @@ class FilterBehaviorTest {
     @Test
     fun kloggWholeLineTextColourIsSuppressedWhenAskedTo() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
-        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta)
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, wholeLine = true, textColor = Color.Magenta, kloggStyle = true)
         val line = render(entry, listOf(hl), suppressLineTextColor = true)
 
         // The row is still owned by the rule (LogRow decides whether the background shows), but the
@@ -366,7 +366,7 @@ class FilterBehaviorTest {
     @Test
     fun kloggMatchSpanIsOpaqueForeAndBackAtNormalWeight() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
-        val hl = Highlighter("k1", "request", false, Color.Yellow, true, textColor = Color.Red)
+        val hl = Highlighter("k1", "request", false, Color.Yellow, true, textColor = Color.Red, kloggStyle = true)
         val line = render(entry, listOf(hl))
         val start = line.text.text.indexOf("request")
 
@@ -392,7 +392,7 @@ class FilterBehaviorTest {
     fun kloggWholeLineWinnerKeepsOnlyTheMatchSpansAboveIt() {
         val entry = LogEntry(1, "10:00:00.000", LogLevel.I, "T", "request complete")
         val above = Highlighter("above", "request", false, Color.Cyan, true)
-        val winner = Highlighter("win", "complete", false, Color.Yellow, true, wholeLine = true, textColor = Color.Black)
+        val winner = Highlighter("win", "complete", false, Color.Yellow, true, wholeLine = true, textColor = Color.Black, kloggStyle = true)
         val below = Highlighter("below", "T", false, Color.Green, true)
         val line = render(entry, listOf(above, winner, below))
 

@@ -25,6 +25,16 @@ private fun legacyTokenFields(vararg values: String): String = values.joinToStri
  */
 class FilterPanelTokenTest {
     @Test
+    fun highlightersSectionDefaultsExpandedAndAppendsItsPersistedState() {
+        val fresh = FilterPanelUiState()
+        assertEquals(true, fresh.highlightersExpanded)
+        fresh.highlightersExpanded = false
+        val restored = FilterPanelUiState().apply { restoreFilterPanelToken(fresh.filterPanelToken()) }
+        assertFalse(restored.highlightersExpanded)
+        assertEquals(true, restored.hlListExpanded, "the whole-section toggle must not overwrite the list-specific state")
+    }
+
+    @Test
     fun logCompositionExpandedRoundTripsThroughTheToken() {
         val original = FilterPanelUiState().apply {
             logCompositionExpanded = true
@@ -65,5 +75,6 @@ class FilterPanelTokenTest {
         restored.restoreFilterPanelToken(legacyToken)
 
         assertFalse(restored.logCompositionExpanded, "a legacy token with no field 11 must restore at the collapsed default")
+        assertEquals(true, restored.highlightersExpanded, "legacy tokens keep the new section at its expanded default")
     }
 }

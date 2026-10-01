@@ -2,6 +2,7 @@ package com.indagium.ui
 
 import androidx.compose.foundation.ScrollbarStyle
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
@@ -13,6 +14,8 @@ import com.indagium.model.ThemePreset
 private const val ALPHA_HOVER = 0.04f
 private const val ALPHA_ACCENT_BG = 0.15f
 private const val ALPHA_SELECTION = 0.18f
+internal const val HL_MATCH_BACKGROUND_ALPHA = 0.6f
+internal const val HL_WHOLE_LINE_BACKGROUND_ALPHA = 0.16f
 
 // Search highlights derive from the active theme's own palette so they stay on-theme in every
 // preset (a rose theme gets rose/teal, not a fixed blue/orange): the current match uses the accent
@@ -235,8 +238,10 @@ fun appScrollbarStyle(tc: ThemeColors) = ScrollbarStyle(
 val LocalTheme     = staticCompositionLocalOf { LIGHT_THEME }
 val LocalFontBase  = staticCompositionLocalOf { 12 }
 val LocalUseMono   = staticCompositionLocalOf { true }
+val LocalUiFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Default }
+val LocalLogFontFamily = staticCompositionLocalOf<FontFamily> { FontFamily.Monospace }
 
-val HL_COLORS = listOf(
+private val INITIAL_HL_COLORS = listOf(
     Color(0xFFfacc15), Color(0xFFf97316), Color(0xFFec4899), Color(0xFF22c55e),
     Color(0xFF06b6d4), Color(0xFFa78bfa), Color(0xFF38bdf8), Color(0xFFfb923c),
     Color(0xFF4ade80), Color(0xFFf472b6), Color(0xFFe879f9), Color(0xFF34d399),
@@ -245,6 +250,27 @@ val HL_COLORS = listOf(
     Color(0xFFd946ef), Color(0xFF84cc16), Color(0xFFef4444), Color(0xFF14b8a6),
     Color(0xFF6366f1),
 )
+
+/** Stable 100-color palette. The first 25 entries intentionally preserve the historic order. */
+val HL_COLORS: List<Color> = buildHighlighterPalette()
+
+@Suppress("MagicNumber") // HSV coordinates and ARGB swatches are color data, not tunable behavior.
+private fun buildHighlighterPalette(): List<Color> = buildList(100) {
+    addAll(INITIAL_HL_COLORS)
+    listOf(0xFF000000, 0xFFFFFFFF, 0xFF303030, 0xFF606060, 0xFF909090, 0xFFC0C0C0,
+        0xFF1F2937, 0xFF64748B, 0xFFE2E8F0, 0xFFFFF7ED, 0xFFFEF2F2, 0xFFF0FDF4)
+        .mapTo(this) { Color(it) }
+    var hueIndex = 0
+    while (size < 100) {
+        val hue = (hueIndex * 360f / 65f) % 360f
+        val saturation = listOf(.22f, .42f, .62f, .82f)[hueIndex % 4]
+        val value = listOf(.96f, .82f, .66f, .48f)[(hueIndex / 4) % 4]
+        val candidate = Color.hsv(hue, saturation, value)
+        if (candidate !in this) add(candidate)
+        hueIndex++
+    }
+}
+
 val SEQ_COLORS = listOf(
     Color(0xFF8957e5), Color(0xFFf0883e), Color(0xFF3fb950), Color(0xFF388bfd),
     Color(0xFFec4899), Color(0xFF06b6d4), Color(0xFFfacc15), Color(0xFFa78bfa),
@@ -255,7 +281,7 @@ val SEQ_COLORS = listOf(
 )
 
 val MONO = FontFamily.Monospace
-val UI   = FontFamily.Default
+val UI: FontFamily @Composable get() = LocalUiFontFamily.current
 
 // Semantic colour constants (theme-agnostic — same across all themes)
 val DANGER_RED = Color(0xFFf85149)   // error / danger / exclude

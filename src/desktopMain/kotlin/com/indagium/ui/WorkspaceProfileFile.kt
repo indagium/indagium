@@ -61,6 +61,9 @@ internal fun describeProfileSpec(spec: ProfileSpec): String {
 internal fun currentProfileSpec(settings: AppSettings, layout: LayoutSnapshot) = ProfileSpec(
     theme = settings.theme,
     fontSize = settings.fontSize,
+    fontMono = settings.fontMono,
+    interfaceFontFamily = settings.interfaceFontFamily,
+    logFontFamily = settings.logFontFamily,
     showMinimap = settings.showMinimap,
     toolbarIconOnlyButtons = settings.toolbarIconOnlyButtons,
     openNewFilesWithUnfiltered = settings.openNewFilesWithUnfiltered,
@@ -88,6 +91,9 @@ internal fun newCustomProfileId(): String = CUSTOM_PROFILE_ID_PREFIX + UUID.rand
 internal fun profileSpecToJson(spec: ProfileSpec): JsonObject = buildJsonObject {
     put("theme", spec.theme.name)
     put("fontSize", spec.fontSize)
+    put("fontMono", spec.fontMono)
+    spec.interfaceFontFamily?.let { put("interfaceFontFamily", it) }
+    spec.logFontFamily?.let { put("logFontFamily", it) }
     put("showMinimap", spec.showMinimap)
     put("toolbarIconOnlyButtons", spec.toolbarIconOnlyButtons)
     put("openNewFilesWithUnfiltered", spec.openNewFilesWithUnfiltered)
@@ -108,6 +114,9 @@ internal fun profileSpecFromJson(o: JsonObject): ProfileSpec {
             ?.let { name -> ThemePreset.entries.firstOrNull { it.name == name } } ?: base.theme,
         fontSize = ((o["fontSize"] as? JsonPrimitive)?.intOrNull ?: base.fontSize)
             .coerceIn(MIN_PROFILE_FONT_SIZE, MAX_PROFILE_FONT_SIZE),
+        fontMono = bool("fontMono", base.fontMono),
+        interfaceFontFamily = (o["interfaceFontFamily"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
+        logFontFamily = (o["logFontFamily"] as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() },
         showMinimap = bool("showMinimap", base.showMinimap),
         toolbarIconOnlyButtons = bool("toolbarIconOnlyButtons", base.toolbarIconOnlyButtons),
         openNewFilesWithUnfiltered = bool("openNewFilesWithUnfiltered", base.openNewFilesWithUnfiltered),

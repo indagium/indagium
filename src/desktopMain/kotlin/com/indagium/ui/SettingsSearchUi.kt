@@ -153,7 +153,7 @@ internal fun SettingsSearchField(
             value = query,
             onValueChange = onQueryChange,
             singleLine = true,
-            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp),
+            textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current),
             cursorBrush = SolidColor(tc.ac),
             modifier = Modifier.weight(1f)
                 .testTag("settings-search-field")

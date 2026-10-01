@@ -1518,7 +1518,7 @@ private fun aiMarkdownColors(colors: ThemeColors) = markdownColor(
 
 @Composable
 private fun aiMarkdownTypography(colors: ThemeColors): MarkdownTypography {
-    val body = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = UI)
+    val body = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current)
     val code = TextStyle(color = colors.tx, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
     val heading = body.copy(fontWeight = FontWeight.SemiBold)
     return markdownTypography(
@@ -1764,7 +1764,7 @@ private fun AiPromptComposer(
                     promptValue = it
                     onPromptChange(it.text)
                 },
-                textStyle = TextStyle(color = colors.tx, fontSize = 12.sp),
+                textStyle = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current),
                 cursorBrush = SolidColor(colors.ac),
                 onTextLayout = { promptLayout = it },
                 modifier = Modifier.fillMaxSize()

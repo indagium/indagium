@@ -223,7 +223,7 @@ class HighlighterCandidatesTest {
             highlighterBadges(Highlighter("1", "x", false, Color.Red, true, target = HighlightTarget.MESSAGE, caseSensitive = true)),
         )
         assertEquals(listOf("tag"), highlighterBadges(Highlighter("1", "x", false, Color.Red, true, target = HighlightTarget.TAG)))
-        assertEquals(listOf("klogg"), highlighterBadges(Highlighter("1", "x", false, Color.Red, true, textColor = Color.Black)))
+        assertEquals(listOf("klogg"), highlighterBadges(Highlighter("1", "x", false, Color.Red, true, textColor = Color.Black, kloggStyle = true)))
     }
 
     @Test
