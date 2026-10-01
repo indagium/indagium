@@ -314,9 +314,20 @@ class CaptureAppRoundTripTest {
                 app.tabs = listOf(tab)
 
                 app.saveRetainedCapture(sessionId, "t1")
+                // Busy and owner are set synchronously, before the IO job even starts, so the strip's
+                // "Saving…" state and its session scoping are there from the first frame.
+                assertTrue(app.captureExportBusy, "a retained save must report busy while it runs")
+                assertEquals(sessionId, app.captureExportOwner)
+                // A second click before the first finishes must be ignored, not start a competing
+                // export (which would also reset the status of the first).
+                app.saveRetainedCapture("another-session", "t1")
+                assertEquals(sessionId, app.captureExportOwner)
                 withTimeout(WAIT_TIMEOUT_MS) {
                     while (app.captureExportResult == null && app.captureExportError == null) delay(POLL_INTERVAL_MS)
                 }
+                withTimeout(WAIT_TIMEOUT_MS) { while (app.captureExportBusy) delay(POLL_INTERVAL_MS) }
+                assertNull(app.captureExportBusyMessage)
+                assertEquals(sessionId, app.captureExportOwner, "the finished result still belongs to its session")
                 assertNull(app.captureExportError)
                 val exported = assertNotNull(app.captureExportResult).file
 
