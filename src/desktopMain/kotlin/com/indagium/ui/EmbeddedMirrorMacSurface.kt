@@ -511,6 +511,10 @@ internal class EmbeddedMirrorMacSurface(
      * a timeout only costs the caller's ordering guarantee (logged), never a leaked surface.
      */
     override fun close() {
+        // Already torn down (e.g. inline on the EDT by EmbeddedMirrorHandle.requestClose): nothing to
+        // hop to the EDT for, so a later close from the lane returns at once instead of queueing
+        // behind — and possibly timing out against — a busy UI thread.
+        if (closed) return
         val completed = runOnEdtBounded(EDT_CLOSE_WAIT_MS) { closeOnEdt() }
         if (!completed) {
             onDiagnostic("Metal mirror close is queued behind a busy UI thread; continuing without waiting for it")
