@@ -31,11 +31,12 @@ class HighlightMatchTest {
         caseSensitive: Boolean = false,
         textColor: Color? = null,
         groupsOnly: Boolean = false,
+        kloggStyle: Boolean = false,
         on: Boolean = true,
     ) = Highlighter(
         id, pattern, regex, Color.Yellow, on,
         wholeLine = wholeLine, target = target, tag = tag, caseSensitive = caseSensitive,
-        textColor = textColor, captureGroupsOnly = groupsOnly,
+        textColor = textColor, captureGroupsOnly = groupsOnly, kloggStyle = kloggStyle,
     )
 
     private fun spans(vararg hls: Highlighter, e: LogEntry = entry) =
@@ -159,7 +160,7 @@ class HighlightMatchTest {
     @Test
     fun kloggWholeLineWithGroupsNeedsACapturedGroupToOwnTheRow() {
         val e = LogEntry(4, "10:00:00.003", LogLevel.I, "T", "foo only")
-        val rule = hl("k", "foo(bar)?", regex = true, wholeLine = true, textColor = Color.Black, groupsOnly = true)
+        val rule = hl("k", "foo(bar)?", regex = true, wholeLine = true, textColor = Color.Black, groupsOnly = true, kloggStyle = true)
         assertNull(spans(rule, e = e).wholeLine)
         assertFalse(highlighterMatches(rule, e, visibleLogLineText(e), ctx))
         val hit = LogEntry(5, "10:00:00.004", LogLevel.I, "T", "foobar")
@@ -174,7 +175,7 @@ class HighlightMatchTest {
     @Test
     fun captureGroupsOnlyFlowsThroughResolveLineHighlight() {
         val e = LogEntry(3, "10:00:00.002", LogLevel.I, "T", "id=42 done")
-        val result = spans(hl("a", "id=(\\d+)", regex = true, groupsOnly = true), e = e)
+        val result = spans(hl("a", "id=(\\d+)", regex = true, groupsOnly = true, kloggStyle = true), e = e)
         val span = result.spans.single()
         assertEquals("42", visibleLogLineText(e).substring(span.start, span.end))
     }
@@ -205,7 +206,7 @@ class HighlightMatchTest {
     @Test
     fun kloggWinnerDropsTheSpansOfMatchHighlightersBelowIt() {
         val above = hl("above", "Request")
-        val winner = hl("winner", "done", wholeLine = true, textColor = Color.Black)
+        val winner = hl("winner", "done", wholeLine = true, textColor = Color.Black, kloggStyle = true)
         val below = hl("below", "Net")
         val result = spans(above, winner, below)
         assertEquals("winner", result.wholeLine?.id)
@@ -227,8 +228,8 @@ class HighlightMatchTest {
         val a = hl("a", "Request")
         val b = hl("b", "Request")
         assertEquals(listOf("a", "a", "b", "b"), spans(a, b).spans.map { it.hl.id })
-        val k1 = hl("k1", "Request", textColor = Color.Black)
-        val k2 = hl("k2", "Request", textColor = Color.Black)
+        val k1 = hl("k1", "Request", textColor = Color.Black, kloggStyle = true)
+        val k2 = hl("k2", "Request", textColor = Color.Black, kloggStyle = true)
         // Later spans paint on top, so klogg's first-in-list highlighter must come last.
         assertEquals(listOf("k2", "k2", "k1", "k1"), spans(k1, k2).spans.map { it.hl.id })
     }
@@ -241,7 +242,7 @@ class HighlightMatchTest {
         assertEquals(3, spans(hl("a", "aa", target = HighlightTarget.MESSAGE), e = e).spans.size)
         assertEquals(
             2,
-            spans(hl("a", "aa", target = HighlightTarget.MESSAGE, textColor = Color.Black), e = e).spans.size,
+            spans(hl("a", "aa", target = HighlightTarget.MESSAGE, textColor = Color.Black, kloggStyle = true), e = e).spans.size,
         )
     }
 

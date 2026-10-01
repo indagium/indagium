@@ -1220,6 +1220,7 @@ data class PendingImportReview(
     // Rows whose highlighters ADD_TO_CURRENT will append; kept apart from the rows' saved-filter actions
     // so flipping modes never loses either choice.
     val highlightRowIds: Set<String> = emptySet(),
+    val customColors: List<String> = emptyList(),
 )
 
 data class OpenFileError(val title: String, val path: String?, val message: String)
@@ -4588,6 +4589,9 @@ class AppState(
             it.copy(
                 theme = spec.theme,
                 fontSize = spec.fontSize,
+                fontMono = spec.fontMono,
+                interfaceFontFamily = spec.interfaceFontFamily,
+                logFontFamily = spec.logFontFamily,
                 showMinimap = spec.showMinimap,
                 toolbarIconOnlyButtons = spec.toolbarIconOnlyButtons,
                 openNewFilesWithUnfiltered = spec.openNewFilesWithUnfiltered,
@@ -5402,6 +5406,11 @@ class AppState(
         target: HighlightTarget = HighlightTarget.ANY,
         tag: String? = null,
         caseSensitive: Boolean = false,
+        backgroundEnabled: Boolean = true,
+        textColor: Color? = null,
+        fontFamily: String? = null,
+        bold: Boolean? = null,
+        italic: Boolean? = null,
     ) {
         if (pat.isBlank()) return
         upFlt(tabId) { f ->
@@ -5416,6 +5425,11 @@ class AppState(
                     target = target,
                     tag = tag,
                     caseSensitive = caseSensitive,
+                    backgroundEnabled = backgroundEnabled,
+                    textColor = textColor,
+                    fontFamily = fontFamily,
+                    bold = bold,
+                    italic = italic,
                 )
             )
         }
@@ -6003,7 +6017,12 @@ class AppState(
 
     fun exportFilters(selectedIds: Set<String>? = null): String {
         val filters = selectedIds?.let { ids -> savedFilters.filter { it.id in ids } } ?: savedFilters
-        return exportFiltersList(filters, savedFilterFolders, includeEmptyFolders = selectedIds == null)
+        return exportFiltersList(
+            filters,
+            savedFilterFolders,
+            includeEmptyFolders = selectedIds == null,
+            highlighterCustomColors = settings.highlighterCustomColors,
+        )
     }
 
     fun importFilters(json: String) {
@@ -6012,6 +6031,7 @@ class AppState(
         val prepared = prepareImportedLibrary(library)
         savedFilterFolders = savedFilterFolders + prepared.folders
         savedFilters = savedFilters + prepared.filters
+        mergeImportedHighlighterCustomColors(prepared.customColors)
     }
 
     /** Stages [text] (Indagium filter JSON or a klogg highlighter export, decided by content) for review. */
@@ -6034,7 +6054,15 @@ class AppState(
         val highlightRowIds = rows.filter { it.hasHighlighters() }.mapTo(linkedSetOf()) { it.rowId }
         val canAdd = highlightRowIds.isNotEmpty() && hasActiveLogTab()
         val mode = if (library.fromKlogg && canAdd) ImportReviewMode.ADD_TO_CURRENT else ImportReviewMode.SAVE_FILTERS
-        pendingImportReview = PendingImportReview(rows, library.folders, sourceName, library.notes, mode, highlightRowIds)
+        pendingImportReview = PendingImportReview(
+            rows = rows,
+            stagedFolders = library.folders,
+            sourceName = sourceName,
+            notes = library.notes,
+            mode = mode,
+            highlightRowIds = highlightRowIds,
+            customColors = library.customColors,
+        )
         importError = null
     }
 
@@ -6125,20 +6153,32 @@ class AppState(
             savedFilterFolders = savedFilterFolders + foldersToAdd
         }
         pendingImportReview = null
+        if (changed) mergeImportedHighlighterCustomColors(review.customColors)
         if (changed) writeFilterBackup()
     }
 
     /** Appends the checked rows' highlighters (row order, then highlighter order) to the active tab's filter and closes the review. */
     private fun addImportedHighlightersToActiveTab(review: PendingImportReview) {
         val tabId = activeTabId
-        val incoming = review.rows.filter { it.rowId in review.highlightRowIds }.flatMap { it.incoming.highlighters }
+        val selectedRows = review.rows.filter { it.rowId in review.highlightRowIds }
+        val incoming = selectedRows.flatMap { it.incoming.highlighters }
         if (incoming.isNotEmpty() && hasActiveLogTab()) {
             upFlt(tabId) { f ->
                 val added = newHighlightersFor(f.highlighters, incoming)
                 if (added.isEmpty()) f else f.copy(highlighters = f.highlighters + added)
             }
+            mergeImportedHighlighterCustomColors(review.customColors)
         }
         pendingImportReview = null
+    }
+
+    /** Merge confirmed imported palette colors after existing entries, canonicalized and capped. */
+    private fun mergeImportedHighlighterCustomColors(imported: List<String>) {
+        if (imported.isEmpty()) return
+        val merged = normalizeHighlighterCustomColors(settings.highlighterCustomColors + imported)
+        if (merged != settings.highlighterCustomColors) {
+            updateSettings { it.copy(highlighterCustomColors = merged) }
+        }
     }
 
     /** Maps imported folder ids onto this library by folder name, adding non-conflicting folders. */
@@ -12081,6 +12121,7 @@ class AppState(
             rowInfo = libraries.fold(emptyMap()) { acc, lib -> acc + lib.rowInfo },
             notes = libraries.flatMap { it.notes }.distinct() + failures.map { (name, reason) -> "Not imported: $name — $reason" },
             fromKlogg = libraries.any { it.fromKlogg },
+            customColors = libraries.flatMap { it.customColors },
         )
         beginImportFilterList(prepareImportedLibrary(merged), files.joinToString(", ") { it.name })
         // No review was staged (nothing decoded, or only empty libraries): the error dialog is the only surface.

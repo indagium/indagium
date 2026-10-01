@@ -45,6 +45,9 @@ Recent state; file-open calls must still use explicit approved fixture paths.
   nesting depth, and `endReason`.
 - `set_highlighters`, `select_lines`, `get_selection`, `toggle_group`, `expand_all`,
   `collapse_all`, and `add_manual_collapse` — mark, select, or reveal the evidence needed next.
+  `set_highlighters` accepts the optional style fields `backgroundEnabled`, `textColor`, `fontFamily`,
+  `bold`, and `italic`; `kloggStyle` explicitly retains imported klogg match ordering. Older requests
+  that send `textColor` without `kloggStyle` keep their previous klogg behavior.
 
 ## Notes, exports, and follow-up material
 

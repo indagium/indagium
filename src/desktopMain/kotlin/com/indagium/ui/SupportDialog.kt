@@ -87,6 +87,7 @@ private fun SupportDialogBody(state: AppState, tc: ThemeColors) {
                 color = tc.ts,
                 fontSize = 13.sp,
                 lineHeight = 19.5.sp,
+                fontFamily = LocalUiFontFamily.current,
             )
             val sponsorSuffix = if (state.sponsorUrl != null) {
                 " Or, if it saves you time, consider sponsoring its development."
@@ -98,6 +99,7 @@ private fun SupportDialogBody(state: AppState, tc: ThemeColors) {
                 color = tc.ts,
                 fontSize = 13.sp,
                 lineHeight = 19.5.sp,
+                fontFamily = LocalUiFontFamily.current,
             )
         }
         Row(

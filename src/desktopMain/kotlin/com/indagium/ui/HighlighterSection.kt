@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.FormatColorFill
 import androidx.compose.material.icons.outlined.Highlight
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -36,6 +38,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -45,6 +48,9 @@ import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -77,38 +83,52 @@ import kotlinx.coroutines.withContext
 private const val HL_ROW_DP = 30
 private const val HL_DROPDOWN_ROW_DP = 28
 private const val HL_DROPDOWN_MAX_DP = 220
-private const val HL_EDITOR_EXTRA_DP = 320
+private const val HL_EDITOR_EXTRA_DP = 620
 private const val HL_COUNT_DEBOUNCE_MS = 200L
 private const val HL_COUNT_DEBOUNCE_LARGE_MS = 450L
 private const val HL_SEARCH_DEBOUNCE_MS = 120L
 private const val HL_SEARCH_DEBOUNCE_LARGE_MS = 350L
 private const val HL_CANDIDATE_ID = "candidate"
 
-// Foreground choices for a klogg-style highlighter (opaque background + this text colour).
-private val KLOGG_TEXT_COLORS = listOf(
-    Color.White,
-    Color.Black,
-    Color(0xFFFFD54F),
-    Color(0xFFEF5350),
-    Color(0xFF64B5F6),
-)
-
 // Colour-picker state the panel's Escape handling needs to reach from outside this section (Esc on
 // the panel with no text field focused closes any open picker, as it always did).
 internal class HighlighterSectionState {
     var rowColorPickerId by mutableStateOf<String?>(null)
     var addColorPickerOpen by mutableStateOf(false)
+    var addForegroundPickerOpen by mutableStateOf(false)
+    var addWholeLine by mutableStateOf(false)
+    var addBackgroundEnabled by mutableStateOf(true)
+    var addTextColor by mutableStateOf<Color?>(null)
+    var addFontFamily by mutableStateOf<String?>(null)
+    var addBold by mutableStateOf<Boolean?>(null)
+    var addItalic by mutableStateOf<Boolean?>(null)
+    val addScopeChip = mutableStateOf<String?>(null)
 
     fun closeColorPickers() {
         rowColorPickerId = null
         addColorPickerOpen = false
+        addForegroundPickerOpen = false
     }
 }
 
 // The section's callbacks in one bag, so FilterPanel passes one parameter instead of a dozen (see
 // LogCompositionActions for the same idea).
+internal typealias AddHighlighterAction = (
+    pattern: String,
+    regex: Boolean,
+    color: Color,
+    wholeLine: Boolean,
+    target: HighlightTarget,
+    tag: String?,
+    backgroundEnabled: Boolean,
+    textColor: Color?,
+    fontFamily: String?,
+    bold: Boolean?,
+    italic: Boolean?,
+) -> Unit
+
 internal data class HighlighterActions(
-    val onAdd: (pattern: String, regex: Boolean, color: Color, wholeLine: Boolean, target: HighlightTarget, tag: String?) -> Unit,
+    val onAdd: AddHighlighterAction,
     val onRemove: (String) -> Unit,
     val onToggle: (String) -> Unit,
     val onSetColor: (String, Color) -> Unit,
@@ -119,6 +139,13 @@ internal data class HighlighterActions(
     val onSetKwHighlightEnabled: (Boolean) -> Unit,
     val onSetKwHighlightColor: (Color) -> Unit,
     val onRequestMessageComposition: () -> Unit,
+    val customColors: List<Color>,
+    val paletteColumns: Int,
+    val onSaveCustomColor: (Color) -> Unit,
+    val onDeleteCustomColor: (Color) -> Unit,
+    val onPaletteColumnsChange: (Int) -> Unit,
+    val customColorEditorExpanded: Boolean = true,
+    val onCustomColorEditorExpandedChange: (Boolean) -> Unit = {},
 )
 
 // Counts run off the UI thread and are keyed on the fields that decide what matches (not colour,
@@ -197,27 +224,56 @@ internal fun HighlighterSection(
     // A highlighter deleted elsewhere (MCP, another panel action) must not leave a dangling editor.
     LaunchedEffect(editing == null, editingId) { if (editing == null && editingId != null) editingId = null }
 
-    SectionHeader(
-        "Highlighters",
-        trailing = if (displayedCount > 0) ({
-            Row(
-                Modifier.hoverPill().clickable {
-                    fpState.hlListExpanded = !fpState.hlListExpanded
-                    onUiStateChanged()
-                }.padding(horizontal = 4.dp, vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                if (enabledCount > 0) {
-                    AppText("$enabledCount active", color = tc.ac, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold)
+    Box(Modifier.testTag("highlighters-section-header")) {
+        SectionHeader(
+            "Highlighters",
+            trailing = if (displayedCount > 0) {
+                {
+                    Row(
+                        Modifier.hoverPill().clickable {
+                            val collapsingList = fpState.hlListExpanded
+                            fpState.hlListExpanded = !fpState.hlListExpanded
+                            onUiStateChanged()
+                            if (collapsingList) {
+                                editingId = null
+                                kwPickerOpen = false
+                                sectionState.rowColorPickerId = null
+                                onInputFocusedChange(addFocused)
+                            }
+                        }
+                            .padding(horizontal = 5.dp, vertical = 3.dp)
+                            .testTag("highlighters-list-toggle"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    ) {
+                        AppText(
+                            "$enabledCount active",
+                            color = if (enabledCount > 0) tc.ac else tc.td,
+                            fontSize = 10.sp,
+                            fontFamily = UI,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
+                    }
                 }
-                val offCount = displayedCount - enabledCount
-                if (offCount > 0) AppText("$offCount off", color = tc.td, fontSize = 10.sp, fontFamily = UI)
-                AppText(if (fpState.hlListExpanded) "▾" else "▸", color = tc.ts, fontSize = 10.sp)
-            }
-        }) else null,
-    )
-    if (displayedCount > 0 && fpState.hlListExpanded) {
+            } else {
+                null
+            },
+            expanded = fpState.highlightersExpanded,
+            onToggle = {
+                fpState.highlightersExpanded = !fpState.highlightersExpanded
+                onUiStateChanged()
+                if (!fpState.highlightersExpanded) {
+                    editingId = null
+                    addFocused = false
+                    kwPickerOpen = false
+                    sectionState.closeColorPickers()
+                    onInputFocusedChange(false)
+                }
+            },
+        )
+    }
+    if (fpState.highlightersExpanded && displayedCount > 0 && fpState.hlListExpanded) {
         val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
         BoundedScrollBoxDp(rows) {
             if (regexHighlightAvailable) {
@@ -228,35 +284,34 @@ internal fun HighlighterSection(
                     HighlighterRow(
                         hl = hl,
                         countText = counts.counts[hl.id]?.let { formatHighlightCount(it, counts.capped) },
-                        pickerOpen = sectionState.rowColorPickerId == hl.id,
-                        editing = editingId == hl.id,
-                        onPickColor = {
-                            sectionState.rowColorPickerId = if (sectionState.rowColorPickerId == hl.id) null else hl.id
+                        colorPicker = {
+                            HighlighterColorPicker(
+                                color = hl.color,
+                                onColorChange = { actions.onSetColor(hl.id, it) },
+                                customColors = actions.customColors,
+                                onSaveCustomColor = actions.onSaveCustomColor,
+                                onDeleteCustomColor = actions.onDeleteCustomColor,
+                                paletteColumns = actions.paletteColumns,
+                                onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                                pickerOpen = sectionState.rowColorPickerId == hl.id,
+                                onPickerOpenChange = { open -> sectionState.rowColorPickerId = if (open) hl.id else null },
+                                testTagPrefix = "highlighter-row-color",
+                                customColorEditorExpanded = actions.customColorEditorExpanded,
+                                onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+                            )
                         },
+                        editing = editingId == hl.id,
                         onEdit = { editingId = if (editingId == hl.id) null else hl.id },
                         onToggleMode = { actions.onUpdate(hl.id) { it.copy(wholeLine = !it.wholeLine) } },
                         onToggleOn = { actions.onToggle(hl.id) },
                         onRemove = { actions.onRemove(hl.id) },
                     )
-                    if (sectionState.rowColorPickerId == hl.id) {
-                        FlowRow(
-                            Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                            horizontalArrangement = Arrangement.spacedBy(3.dp),
-                            verticalArrangement = Arrangement.spacedBy(3.dp),
-                        ) {
-                            HL_COLORS.forEach { c ->
-                                ColorSwatch(c, c == hl.color) {
-                                    actions.onSetColor(hl.id, c)
-                                    sectionState.rowColorPickerId = null
-                                }
-                            }
-                        }
-                    }
                     if (editingId == hl.id) {
                         HighlighterEditor(
                             tab = tab,
                             original = hl,
                             sortedTags = sortedTags,
+                            actions = actions,
                             onDone = { edited ->
                                 actions.onUpdate(hl.id) { current ->
                                     current.copy(
@@ -268,6 +323,10 @@ internal fun HighlighterSection(
                                         tag = edited.tag,
                                         color = edited.color,
                                         textColor = edited.textColor,
+                                        backgroundEnabled = edited.backgroundEnabled,
+                                        fontFamily = edited.fontFamily,
+                                        bold = edited.bold,
+                                        italic = edited.italic,
                                     )
                                 }
                                 editingId = null
@@ -281,23 +340,25 @@ internal fun HighlighterSection(
             }
         }
     }
-    HighlighterAddForm(
-        tab = tab,
-        sectionState = sectionState,
-        actions = actions,
-        sortedTags = sortedTags,
-        tagUsage = tagUsage,
-        mostUsedTagLimit = mostUsedTagLimit,
-        newHlPat = newHlPat,
-        newHlRx = newHlRx,
-        newHlColor = newHlColor,
-        inputFocusRequester = inputFocusRequester,
-        onFocusedChange = { focused ->
-            addFocused = focused
-            onInputFocusedChange(focused || editing != null)
-        },
-        onTabOut = onTabOut,
-    )
+    if (fpState.highlightersExpanded) {
+        HighlighterAddForm(
+            tab = tab,
+            sectionState = sectionState,
+            actions = actions,
+            sortedTags = sortedTags,
+            tagUsage = tagUsage,
+            mostUsedTagLimit = mostUsedTagLimit,
+            newHlPat = newHlPat,
+            newHlRx = newHlRx,
+            newHlColor = newHlColor,
+            inputFocusRequester = inputFocusRequester,
+            onFocusedChange = { focused ->
+                addFocused = focused
+                onInputFocusedChange(focused || editing != null)
+            },
+            onTabOut = onTabOut,
+        )
+    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -315,10 +376,19 @@ private fun KeywordHighlightRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            ColorPickerSwatch(
+            HighlighterColorPicker(
                 color = filter.kwHighlightColor,
+                onColorChange = { color -> actions.onSetKwHighlightColor(color); onPickerOpenChange(false) },
+                customColors = actions.customColors,
+                onSaveCustomColor = actions.onSaveCustomColor,
+                onDeleteCustomColor = actions.onDeleteCustomColor,
+                paletteColumns = actions.paletteColumns,
+                onPaletteColumnsChange = actions.onPaletteColumnsChange,
                 pickerOpen = pickerOpen,
-                onClick = { onPickerOpenChange(!pickerOpen) },
+                onPickerOpenChange = onPickerOpenChange,
+                testTagPrefix = "keyword-highlight-color",
+                customColorEditorExpanded = actions.customColorEditorExpanded,
+                onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
             )
             AppText(
                 "/${filter.kwText}/i",
@@ -333,20 +403,6 @@ private fun KeywordHighlightRow(
                 color = filter.kwHighlightColor,
                 onClick = { actions.onSetKwHighlightEnabled(!filter.kwHighlightEnabled) },
             )
-        }
-        if (pickerOpen) {
-            FlowRow(
-                Modifier.fillMaxWidth().padding(start = 30.dp, end = 12.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                HL_COLORS.forEach { color ->
-                    ColorSwatch(color, color == filter.kwHighlightColor) {
-                        actions.onSetKwHighlightColor(color)
-                        onPickerOpenChange(false)
-                    }
-                }
-            }
         }
     }
 }
@@ -379,9 +435,8 @@ private fun HighlightModeChip(wholeLine: Boolean, onClick: () -> Unit) {
 private fun HighlighterRow(
     hl: Highlighter,
     countText: String?,
-    pickerOpen: Boolean,
+    colorPicker: @Composable () -> Unit,
     editing: Boolean,
-    onPickColor: () -> Unit,
     onEdit: () -> Unit,
     onToggleMode: () -> Unit,
     onToggleOn: () -> Unit,
@@ -395,7 +450,7 @@ private fun HighlighterRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        ColorPickerSwatch(color = hl.color, pickerOpen = pickerOpen, onClick = onPickColor)
+        colorPicker()
         // The whole pattern area opens the editor; clicking it again closes it.
         Row(
             Modifier.weight(1f)
@@ -444,11 +499,92 @@ private fun HighlighterRow(
 
 // "Match in" / "Only tag" style rows: a fixed-width caption, then the control.
 @Composable
-private fun EditorRow(caption: String, content: @Composable () -> Unit) {
+private fun EditorRow(caption: String, content: @Composable RowScope.() -> Unit) {
     val tc = tc()
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(caption, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(52.dp))
         content()
+    }
+}
+
+@Composable
+private fun TriStateStyleChoice(
+    label: String,
+    value: Boolean?,
+    onChange: (Boolean?) -> Unit,
+    testTag: String,
+) {
+    val tc = tc()
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        AppText(label, color = tc.td, fontSize = 10.sp, fontFamily = UI, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(42.dp))
+        Row(Modifier.weight(1f).border(1.dp, tc.br, RoundedCornerShape(5.dp)).clip(RoundedCornerShape(5.dp))) {
+            listOf("Default", "On", "Off").forEachIndexed { index, option ->
+                val optionValue = when (index) { 0 -> null; 1 -> true; else -> false }
+                Box(
+                    Modifier.weight(1f).height(24.dp)
+                        .background(if (value == optionValue) tc.ac.copy(alpha = .2f) else Color.Transparent)
+                        .clickable { onChange(optionValue) }
+                        .testTag("$testTag-${option.lowercase()}"),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    AppText(option, color = if (value == optionValue) tc.tx else tc.ts, fontSize = 9.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RuleFontFamilyPicker(
+    selected: String?,
+    fallback: androidx.compose.ui.text.font.FontFamily,
+    onSelect: (String?) -> Unit,
+) {
+    EditorRow("Font") {
+        SearchableFontDropdown(
+            label = null,
+            selectedFamily = selected,
+            defaultLabel = "Inherit log font",
+            fallbackFamily = fallback,
+            onSelect = onSelect,
+            modifier = Modifier.weight(1f),
+            testTagPrefix = "highlighter-font",
+            showPreview = false,
+        )
+    }
+}
+
+@Composable
+private fun StylePreview(highlighter: Highlighter) {
+    val tc = tc()
+    val previewAlpha = if (highlighter.wholeLine) {
+        HL_WHOLE_LINE_BACKGROUND_ALPHA
+    } else {
+        HL_MATCH_BACKGROUND_ALPHA
+    }
+    val previewBg = when {
+        !highlighter.backgroundEnabled -> tc.p2
+        highlighter.kloggStyle -> highlighter.color
+        else -> highlighter.color.copy(alpha = highlighter.color.alpha * previewAlpha)
+    }
+    val weight = highlighter.bold?.let { if (it) FontWeight.Bold else FontWeight.Normal }
+        ?: if (highlighter.wholeLine || highlighter.kloggStyle) null else FontWeight.SemiBold
+    Box(
+        Modifier.fillMaxWidth()
+            .background(previewBg, RoundedCornerShape(4.dp))
+            .border(1.dp, tc.br, RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 5.dp),
+    ) {
+        Text(
+            "Preview matched text",
+            style = TextStyle(
+                color = highlighter.textColor ?: tc.tx,
+                fontFamily = FontCatalog.resolveOrNull(highlighter.fontFamily) ?: LocalLogFontFamily.current,
+                fontWeight = weight,
+                fontStyle = highlighter.italic?.let { if (it) FontStyle.Italic else FontStyle.Normal },
+                fontSize = 11.sp,
+            ),
+        )
     }
 }
 
@@ -462,6 +598,7 @@ private fun HighlighterEditor(
     tab: LogTab,
     original: Highlighter,
     sortedTags: List<String>,
+    actions: HighlighterActions,
     onDone: (Highlighter) -> Unit,
     onCancel: () -> Unit,
     onDelete: () -> Unit,
@@ -470,6 +607,8 @@ private fun HighlighterEditor(
     var draft by remember(original.id) { mutableStateOf(original) }
     var tagPickerOpen by remember(original.id) { mutableStateOf(false) }
     var tagSearch by remember(original.id) { mutableStateOf("") }
+    var backgroundColorPickerOpen by remember(original.id) { mutableStateOf(false) }
+    var foregroundColorPickerOpen by remember(original.id) { mutableStateOf(false) }
     val patternFr = remember { FocusRequester() }
     LaunchedEffect(original.id) { runCatching { patternFr.requestFocus() } }
     val counts = rememberHighlighterRowCounts(tab, listOf(draft))
@@ -500,6 +639,7 @@ private fun HighlighterEditor(
                 { draft = draft.copy(pattern = it) },
                 "pattern",
                 Modifier.weight(1f)
+                    .testTag("highlighter-editor-pattern")
                     .focusRequester(patternFr)
                     .onPreviewKeyEvent { ev ->
                         if (ev.type == KeyEventType.KeyDown && (ev.key == Key.Enter || ev.key == Key.NumPadEnter)) {
@@ -573,17 +713,70 @@ private fun HighlighterEditor(
                 segmentHorizontalPadding = 4.dp,
             )
         }
-        EditorRow(if (draft.textColor != null) "Back" else "Colour") {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                HL_COLORS.forEach { c -> ColorSwatch(c, c == draft.color) { draft = draft.copy(color = c) } }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                CompactCheckBox(
+                    checked = draft.backgroundEnabled,
+                    onToggle = { draft = draft.copy(backgroundEnabled = !draft.backgroundEnabled) },
+                    modifier = Modifier.testTag("highlighter-editor-background-toggle"),
+                    accentColor = tc.ac,
+                )
+                AppText("Background", color = tc.ts, fontSize = 10.sp)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                CompactCheckBox(
+                    checked = draft.textColor != null,
+                    onToggle = {
+                        draft = draft.copy(textColor = if (draft.textColor == null) {
+                            if (draft.color.luminance() > .48f) Color.Black else Color.White
+                        } else {
+                            null
+                        })
+                    },
+                    modifier = Modifier.testTag("highlighter-editor-foreground-toggle"),
+                    accentColor = tc.ac,
+                )
+                AppText("Foreground", color = tc.ts, fontSize = 10.sp)
             }
         }
-        val textColor = draft.textColor
-        if (textColor != null) {
+        TriStateStyleChoice("Bold", draft.bold, { draft = draft.copy(bold = it) }, "highlighter-editor-bold-toggle")
+        TriStateStyleChoice("Italic", draft.italic, { draft = draft.copy(italic = it) }, "highlighter-editor-italic-toggle")
+        RuleFontFamilyPicker(draft.fontFamily, LocalLogFontFamily.current) { draft = draft.copy(fontFamily = it) }
+        StylePreview(draft)
+        if (draft.backgroundEnabled) {
+            EditorRow("Back") {
+                HighlighterColorPicker(
+                    color = draft.color,
+                    onColorChange = { draft = draft.copy(color = it) },
+                    customColors = actions.customColors,
+                    onSaveCustomColor = actions.onSaveCustomColor,
+                    onDeleteCustomColor = actions.onDeleteCustomColor,
+                    paletteColumns = actions.paletteColumns,
+                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                    pickerOpen = backgroundColorPickerOpen,
+                    onPickerOpenChange = { backgroundColorPickerOpen = it },
+                    testTagPrefix = "highlighter-editor-background",
+                    customColorEditorExpanded = actions.customColorEditorExpanded,
+                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+                )
+            }
+        }
+        draft.textColor?.let { textColor ->
             EditorRow("Text") {
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    KLOGG_TEXT_COLORS.forEach { c -> ColorSwatch(c, c == textColor) { draft = draft.copy(textColor = c) } }
-                }
+                HighlighterColorPicker(
+                    color = textColor,
+                    onColorChange = { draft = draft.copy(textColor = it) },
+                    customColors = actions.customColors,
+                    onSaveCustomColor = actions.onSaveCustomColor,
+                    onDeleteCustomColor = actions.onDeleteCustomColor,
+                    paletteColumns = actions.paletteColumns,
+                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                    pickerOpen = foregroundColorPickerOpen,
+                    onPickerOpenChange = { foregroundColorPickerOpen = it },
+                    testTagPrefix = "highlighter-editor-foreground",
+                    customColorEditorExpanded = actions.customColorEditorExpanded,
+                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+                )
             }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -597,7 +790,13 @@ private fun HighlighterEditor(
                 overflow = TextOverflow.Ellipsis,
             )
             AppButton("Delete", onClick = onDelete, variant = ButtonVariant.Ghost, isDanger = true)
-            AppButton("Done", onClick = { commit() }, variant = ButtonVariant.Primary, enabled = canCommit)
+            AppButton(
+                "Done",
+                onClick = { commit() },
+                variant = ButtonVariant.Primary,
+                enabled = canCommit,
+                modifier = Modifier.testTag("highlighter-editor-done"),
+            )
         }
     }
 }
@@ -620,8 +819,14 @@ private fun HighlighterAddForm(
 ) {
     val tc = tc()
     val filter = tab.filter
-    var scopeChip by remember(tab.id) { mutableStateOf<String?>(null) }
-    var addWholeLine by remember(tab.id) { mutableStateOf(false) }
+    var scopeChip by sectionState.addScopeChip
+    val addWholeLine = sectionState.addWholeLine
+    val addBackgroundEnabled = sectionState.addBackgroundEnabled
+    val addTextColor = sectionState.addTextColor
+    val addFontFamily = sectionState.addFontFamily
+    val addBold = sectionState.addBold
+    val addItalic = sectionState.addItalic
+    val addForegroundPickerOpen = sectionState.addForegroundPickerOpen
     var selectedIdx by remember(tab.id) { mutableStateOf(-1) }
     // null = follow the Match text | Whole line control; 0 / 1 = ←/→ picked Match / Line for the row.
     var rowAction by remember(tab.id) { mutableStateOf<Int?>(null) }
@@ -672,7 +877,10 @@ private fun HighlighterAddForm(
             // Same shape already listed: switch it to the chosen mode instead of stacking a copy.
             actions.onUpdate(existing.id) { it.copy(wholeLine = wholeLine, on = true) }
         } else {
-            actions.onAdd(candidate.pattern, candidate.regex, newHlColor, wholeLine, candidate.target, candidate.tag)
+            actions.onAdd(
+                candidate.pattern, candidate.regex, newHlColor, wholeLine, candidate.target, candidate.tag,
+                addBackgroundEnabled, addTextColor, addFontFamily, addBold, addItalic,
+            )
             actions.onSetNewColor(nextHighlightColor(newHlColor, (filter.highlighters.map { it.color } + newHlColor).toSet()))
         }
         actions.onSetNewPattern("")
@@ -703,17 +911,25 @@ private fun HighlighterAddForm(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                Modifier.size(20.dp)
-                    .background(newHlColor, CORNER_SM)
-                    .border(1.dp, if (sectionState.addColorPickerOpen) tc.tx else tc.br, CORNER_SM)
-                    .clickable { sectionState.addColorPickerOpen = !sectionState.addColorPickerOpen },
+            HighlighterColorPicker(
+                color = newHlColor,
+                onColorChange = actions.onSetNewColor,
+                customColors = actions.customColors,
+                onSaveCustomColor = actions.onSaveCustomColor,
+                onDeleteCustomColor = actions.onDeleteCustomColor,
+                paletteColumns = actions.paletteColumns,
+                onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                pickerOpen = sectionState.addColorPickerOpen,
+                onPickerOpenChange = { sectionState.addColorPickerOpen = it },
+                testTagPrefix = "highlighter-add-background",
+                customColorEditorExpanded = actions.customColorEditorExpanded,
+                onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
             )
             InlineField(
                 newHlPat,
                 { actions.onSetNewPattern(it); selectedIdx = -1; rowAction = null },
                 "text, tag, message or /regex/",
-                Modifier.weight(1f)
+                Modifier.weight(1f).testTag("highlighter-add-pattern")
                     .focusRequester(inputFocusRequester)
                     .onFocusChanged {
                         fieldFocused = it.isFocused
@@ -784,13 +1000,6 @@ private fun HighlighterAddForm(
             )
             PillBtn(".*", active = newHlRx, onClick = { actions.onSetNewRegex(!newHlRx) })
         }
-        if (sectionState.addColorPickerOpen) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                HL_COLORS.forEach { c ->
-                    ColorSwatch(c, c == newHlColor) { actions.onSetNewColor(c); sectionState.addColorPickerOpen = false }
-                }
-            }
-        }
         if (showDropdown && candidates.isNotEmpty()) {
             HighlightCandidateDropdown(
                 candidates = candidates,
@@ -807,7 +1016,7 @@ private fun HighlighterAddForm(
             SegmentedControl(
                 options = listOf("Match text", "Whole line"),
                 selectedIndices = setOf(if (addWholeLine) 1 else 0),
-                onToggle = { addWholeLine = it == 1; rowAction = null },
+                onToggle = { sectionState.addWholeLine = it == 1; rowAction = null },
                 modifier = Modifier.weight(1f),
                 fillWidth = true,
                 segmentHeight = 22.dp,
@@ -819,8 +1028,66 @@ private fun HighlighterAddForm(
                 onClick = { typed?.let { commit(it, addWholeLine) } },
                 variant = ButtonVariant.Ghost,
                 enabled = canAdd,
+                modifier = Modifier.testTag("highlighter-add-submit"),
             )
         }
+        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                CompactCheckBox(
+                    checked = addBackgroundEnabled,
+                    onToggle = { sectionState.addBackgroundEnabled = !addBackgroundEnabled },
+                    modifier = Modifier.testTag("highlighter-add-background-toggle"),
+                    accentColor = tc.ac,
+                )
+                AppText("Background", color = tc.ts, fontSize = 10.sp)
+            }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                CompactCheckBox(
+                    checked = addTextColor != null,
+                    onToggle = {
+                        sectionState.addTextColor = if (addTextColor == null) {
+                            if (newHlColor.luminance() > .48f) Color.Black else Color.White
+                        } else {
+                            null
+                        }
+                    },
+                    modifier = Modifier.testTag("highlighter-add-foreground-toggle"),
+                    accentColor = tc.ac,
+                )
+                AppText("Foreground", color = tc.ts, fontSize = 10.sp)
+            }
+        }
+        TriStateStyleChoice("Bold", addBold, { sectionState.addBold = it }, "highlighter-add-bold-toggle")
+        TriStateStyleChoice("Italic", addItalic, { sectionState.addItalic = it }, "highlighter-add-italic-toggle")
+        if (addTextColor != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                AppText("Text color", color = tc.td, fontSize = 10.sp)
+                HighlighterColorPicker(
+                    color = addTextColor!!,
+                    onColorChange = { sectionState.addTextColor = it },
+                    customColors = actions.customColors,
+                    onSaveCustomColor = actions.onSaveCustomColor,
+                    onDeleteCustomColor = actions.onDeleteCustomColor,
+                    paletteColumns = actions.paletteColumns,
+                    onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                    pickerOpen = addForegroundPickerOpen,
+                    onPickerOpenChange = { sectionState.addForegroundPickerOpen = it },
+                    testTagPrefix = "highlighter-add-foreground",
+                    customColorEditorExpanded = actions.customColorEditorExpanded,
+                    onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
+                )
+            }
+        }
+        RuleFontFamilyPicker(addFontFamily, LocalLogFontFamily.current) {
+            sectionState.addFontFamily = it
+        }
+        StylePreview(
+            Highlighter(
+                id = "preview", pattern = "", regex = false, color = newHlColor, on = true,
+                wholeLine = addWholeLine, textColor = addTextColor, backgroundEnabled = addBackgroundEnabled,
+                fontFamily = addFontFamily, bold = addBold, italic = addItalic,
+            ),
+        )
     }
 }
 

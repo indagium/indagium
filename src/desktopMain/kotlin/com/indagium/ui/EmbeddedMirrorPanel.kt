@@ -1765,7 +1765,7 @@ private fun MirrorTextRow(handle: EmbeddedMirrorHandle?, live: Boolean, clipboar
             value = clipboardState.text,
             onValueChange = { clipboardState.text = it },
             singleLine = true,
-            textStyle = TextStyle(color = MIRROR_CONTROL_BAR_TINT, fontSize = 11.sp),
+            textStyle = TextStyle(color = MIRROR_CONTROL_BAR_TINT, fontSize = 11.sp, fontFamily = LocalUiFontFamily.current),
             cursorBrush = SolidColor(MIRROR_CONTROL_BAR_TINT),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
             keyboardActions = KeyboardActions(onSend = { send() }),

@@ -65,7 +65,8 @@ class SettingsSearchTest {
     @Test
     fun everyTokenMustMatch() {
         val found = labels("log font")
-        assertEquals("Log font size", found.first(), found.toString())
+        assertEquals("Log font", found.first(), found.toString())
+        assertTrue("Log font size" in found, found.toString())
         assertFalse("Theme" in found, found.toString())
         assertTrue(labels("font zzzznotathing").isEmpty())
     }

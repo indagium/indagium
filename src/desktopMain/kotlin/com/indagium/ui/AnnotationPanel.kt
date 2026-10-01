@@ -2418,7 +2418,7 @@ internal fun annotationMarkdownColors(colors: ThemeColors) = markdownColor(
 
 @Composable
 internal fun annotationMarkdownTypography(colors: ThemeColors): MarkdownTypography {
-    val body = TextStyle(color = colors.tx, fontSize = 13.sp, fontFamily = UI)
+    val body = TextStyle(color = colors.tx, fontSize = 13.sp, fontFamily = LocalUiFontFamily.current)
     val code = TextStyle(color = colors.ts, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
     val heading = body.copy(fontWeight = FontWeight.SemiBold)
     return markdownTypography(
@@ -2529,7 +2529,7 @@ private fun BlockTextField(
         value = value,
         onValueChange = { if (enabled) onValueChange(it) },
         readOnly = !enabled,
-        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+        textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
         cursorBrush = SolidColor(tc.ac),
         modifier = modifier.fillMaxWidth()
             .background(tc.bg, FIELD_CORNER)

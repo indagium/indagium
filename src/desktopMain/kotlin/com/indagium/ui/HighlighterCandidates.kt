@@ -200,7 +200,7 @@ internal fun highlighterBadges(hl: Highlighter): List<String> = buildList {
         HighlightTarget.MESSAGE -> add("msg")
         HighlightTarget.ANY -> Unit
     }
-    if (hl.textColor != null) add("klogg")
+    if (hl.kloggStyle) add("klogg")
 }
 
 /** The fields that decide which rows a highlighter matches; colour, on/off and whole-line are not
@@ -213,9 +213,10 @@ internal data class HighlighterMatchKey(
     val tag: String?,
     val caseSensitive: Boolean,
     val captureGroupsOnly: Boolean,
+    val kloggStyle: Boolean,
 )
 
-internal fun Highlighter.matchKey() = HighlighterMatchKey(id, pattern, regex, target, tag, caseSensitive, captureGroupsOnly)
+internal fun Highlighter.matchKey() = HighlighterMatchKey(id, pattern, regex, target, tag, caseSensitive, captureGroupsOnly, kloggStyle)
 
 /** "12", or "≥12" when only the first part of a large file was scanned. */
 internal fun formatHighlightCount(count: Int, capped: Boolean): String = if (capped) "≥$count" else count.toString()

@@ -133,27 +133,54 @@ private fun resolveMinimapColor(
     highlighters: List<Highlighter>,
     regexContext: RegexEvaluationContext,
     mutedColor: Color,
-): Color {
-    if (isCrash) return CRASH_COLOR
-    val lineText by lazy(LazyThreadSafetyMode.NONE) { visibleLogLineText(item.entry) }
-    val wholeLine = highlighters.firstOrNull {
-        it.wholeLine && highlighterMatches(it, item.entry, lineText, regexContext)
+): Color = if (isCrash) {
+    CRASH_COLOR
+} else {
+    val lineText = lazy(LazyThreadSafetyMode.NONE) { visibleLogLineText(item.entry) }
+    matchingWholeLineColor(highlighters, item.entry, lineText, regexContext)
+        ?: minimapLevelColor(item.entry.level)
+        ?: matchingTextColor(highlighters, item.entry, lineText, regexContext)
+        ?: headerColor(item)
+        ?: mutedColor
+}
+
+private fun matchingWholeLineColor(
+    highlighters: List<Highlighter>,
+    entry: com.indagium.model.LogEntry,
+    lineText: Lazy<String>,
+    regexContext: RegexEvaluationContext,
+): Color? = highlighters.firstOrNull {
+    it.wholeLine && highlighterMatches(it, entry, lineText.value, regexContext)
+}?.let { highlighter ->
+    when {
+        highlighter.backgroundEnabled -> highlighter.color
+        else -> highlighter.textColor
     }
-    if (wholeLine != null) return wholeLine.color
-    when (item.entry.level) {
-        LogLevel.E, LogLevel.A -> return LogLevel.E.defaultColor
-        LogLevel.W -> return LogLevel.W.defaultColor
-        else -> {}
-    }
-    highlighters.firstOrNull { !it.wholeLine && highlighterMatches(it, item.entry, lineText, regexContext) }
-        ?.let { return it.color }
-    val headerColor = when (item) {
-        is LogItem.Row -> null
-        is LogItem.SeqHeader -> item.color
-        is LogItem.ManualHeader -> item.color
-        is LogItem.StackTraceHeader -> null
-    }
-    return headerColor ?: mutedColor
+}
+
+private fun minimapLevelColor(level: LogLevel): Color? = when (level) {
+    LogLevel.E, LogLevel.A -> LogLevel.E.defaultColor
+    LogLevel.W -> LogLevel.W.defaultColor
+    else -> null
+}
+
+private fun matchingTextColor(
+    highlighters: List<Highlighter>,
+    entry: com.indagium.model.LogEntry,
+    lineText: Lazy<String>,
+    regexContext: RegexEvaluationContext,
+): Color? = highlighters.firstOrNull {
+    !it.wholeLine && highlighterMatches(it, entry, lineText.value, regexContext) &&
+        (it.backgroundEnabled || it.textColor != null)
+}?.let { highlighter ->
+    if (highlighter.backgroundEnabled) highlighter.color else highlighter.textColor
+}
+
+private fun headerColor(item: LogItem): Color? = when (item) {
+    is LogItem.Row -> null
+    is LogItem.SeqHeader -> item.color
+    is LogItem.ManualHeader -> item.color
+    is LogItem.StackTraceHeader -> null
 }
 
 /** Maps a display-order item index to the `[0, rowCount)` drawable row it falls in — the forward

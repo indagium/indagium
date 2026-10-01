@@ -579,6 +579,11 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("fontSize", fontSize)
     put("interfaceScalePercent", interfaceScalePercent)
     put("fontMono", fontMono)
+    interfaceFontFamily?.let { put("interfaceFontFamily", it) }
+    logFontFamily?.let { put("logFontFamily", it) }
+    put("highlighterCustomColors", buildJsonArray { highlighterCustomColors.forEach { add(it) } })
+    put("highlighterPaletteColumns", highlighterPaletteColumns)
+    put("highlighterCustomColorEditorExpanded", highlighterCustomColorEditorExpanded)
     defaultSaveDir?.let { put("defaultSaveDir", it) }
     put("mostUsedTagLimit", mostUsedTagLimit)
     put("filterListRows", filterListRows)
@@ -871,6 +876,12 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         interfaceScalePercent = o.intOrDefault("interfaceScalePercent", DEFAULT_INTERFACE_SCALE_PERCENT)
             .coerceIn(MIN_INTERFACE_SCALE_PERCENT, MAX_INTERFACE_SCALE_PERCENT),
         fontMono = o.boolOrDefault("fontMono", true),
+        interfaceFontFamily = o.stringOrNull("interfaceFontFamily")?.takeIf { it.isNotBlank() },
+        logFontFamily = o.stringOrNull("logFontFamily")?.takeIf { it.isNotBlank() },
+        highlighterCustomColors = (o["highlighterCustomColors"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?.distinct()?.take(MAX_CUSTOM_HIGHLIGHT_COLORS).orEmpty(),
+        highlighterPaletteColumns = o.intOrDefault("highlighterPaletteColumns", 5).let { if (it >= 10) 10 else 5 },
+        highlighterCustomColorEditorExpanded = o.boolOrDefault("highlighterCustomColorEditorExpanded", true),
         defaultSaveDir = o.stringOrNull("defaultSaveDir"),
         mostUsedTagLimit = o.intOrDefault("mostUsedTagLimit", 5),
         filterListRows = o.intOrDefault("filterListRows", 5).coerceIn(1, 20),
@@ -1230,6 +1241,8 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     // sfFavoritesExpanded, same append-last discipline as every other field here. A legacy token
     // written before this section existed has no field 11 and restores at the default (collapsed).
     logCompositionExpanded.toString(),
+    // Field index 12: the full Highlighters section. Keep it after every existing positional field.
+    highlightersExpanded.toString(),
 )
 
 internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -1251,6 +1264,7 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
         ?: emptySet()
     sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
     logCompositionExpanded = p.getOrNull(11)?.toBooleanStrictOrNull() ?: logCompositionExpanded
+    highlightersExpanded = p.getOrNull(12)?.toBooleanStrictOrNull() ?: highlightersExpanded
 }
 
 private fun IssueCategorySelection.token(): String = when (this) {
@@ -1289,6 +1303,11 @@ internal fun Highlighter.highlighterToken(): String = tokenFields(
     textColor?.value?.toString().orEmpty(),
     captureGroupsOnly.toString(),
     colorVariance.toString(),
+    kloggStyle.toString(),
+    backgroundEnabled.toString(),
+    fontFamily.orEmpty(),
+    bold?.toString().orEmpty(),
+    italic?.toString().orEmpty(),
 )
 
 internal fun String.highlighterFromToken(): Highlighter? = runCatching {
@@ -1308,6 +1327,13 @@ internal fun String.highlighterFromToken(): Highlighter? = runCatching {
         textColor = p.getOrNull(9)?.takeIf { it.isNotBlank() }?.toULongOrNull()?.let { Color(it) },
         captureGroupsOnly = p.getOrNull(10)?.toBoolean() ?: false,
         colorVariance = p.getOrNull(11)?.toIntOrNull()?.coerceIn(0, 100) ?: 0,
+        // Older complete tokens used non-null textColor as their only klogg marker. New tokens
+        // always carry the explicit flag, so foreground-only native rules stay native.
+        kloggStyle = p.getOrNull(12)?.toBooleanStrictOrNull() ?: (p.getOrNull(9)?.isNotBlank() == true),
+        backgroundEnabled = p.getOrNull(13)?.toBooleanStrictOrNull() ?: true,
+        fontFamily = p.getOrNull(14)?.takeIf { it.isNotBlank() },
+        bold = p.getOrNull(15)?.toBooleanStrictOrNull(),
+        italic = p.getOrNull(16)?.toBooleanStrictOrNull(),
     )
 }.getOrNull()
 

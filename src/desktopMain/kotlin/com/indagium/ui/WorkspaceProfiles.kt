@@ -4,8 +4,8 @@ import com.indagium.model.AppSettings
 import com.indagium.model.ProfileSpec
 import com.indagium.model.ThemePreset
 
-// Built-in workspace profiles (Settings → General): one click sets the theme, log font size and
-// the panel layout together. Every value is still individually editable afterwards; the
+// Built-in workspace profiles (Settings → General): one click sets the theme, log typography and
+// panel layout together. Every value is still individually editable afterwards; the
 // "Customized" strip in the General section is driven by [profileDifferences].
 
 /** The panel-visibility fields that live on AppState (not AppSettings) and that a profile sets. */
@@ -81,6 +81,8 @@ internal fun profileDifferences(spec: ProfileSpec, settings: AppSettings, layout
     buildList {
         if (settings.theme != spec.theme) add("Theme")
         if (settings.fontSize != spec.fontSize) add("Log font size")
+        if (settings.fontMono != spec.fontMono || settings.logFontFamily != spec.logFontFamily) add("Log font")
+        if (settings.interfaceFontFamily != spec.interfaceFontFamily) add("Interface font")
         if (settings.showMinimap != spec.showMinimap) add("Minimap")
         if (settings.toolbarIconOnlyButtons != spec.toolbarIconOnlyButtons) add("Toolbar labels")
         if (settings.openNewFilesWithUnfiltered != spec.openNewFilesWithUnfiltered) add("Original panel for new files")

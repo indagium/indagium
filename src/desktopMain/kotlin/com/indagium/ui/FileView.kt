@@ -75,10 +75,16 @@ internal fun BoundFilterPanel(
             onGoToFirst = { template -> state.requestLineNavigation(tab.id, template.firstEntryId) },
         )
     }
-    val highlighterActions = remember(state, tab.id) {
+    val highlighterCustomColors = customHighlightColors(state.settings.highlighterCustomColors)
+    val highlighterPaletteColumns = state.settings.highlighterPaletteColumns
+    val customColorEditorExpanded = state.settings.highlighterCustomColorEditorExpanded
+    val highlighterActions = remember(state, tab.id, highlighterCustomColors, highlighterPaletteColumns, customColorEditorExpanded) {
         HighlighterActions(
-            onAdd = { pattern, regex, color, wholeLine, target, tag ->
-                state.addHl(tab.id, pattern, regex, color, wholeLine = wholeLine, target = target, tag = tag)
+            onAdd = { pattern, regex, color, wholeLine, target, tag, backgroundEnabled, textColor, fontFamily, bold, italic ->
+                state.addHl(
+                    tab.id, pattern, regex, color, wholeLine = wholeLine, target = target, tag = tag,
+                    backgroundEnabled = backgroundEnabled, textColor = textColor, fontFamily = fontFamily, bold = bold, italic = italic,
+                )
             },
             onRemove = { state.removeHl(tab.id, it) },
             onToggle = { state.toggleHl(tab.id, it) },
@@ -90,6 +96,34 @@ internal fun BoundFilterPanel(
             onSetKwHighlightEnabled = { state.setKwHighlightEnabled(tab.id, it) },
             onSetKwHighlightColor = { state.setKwHighlightColor(tab.id, it) },
             onRequestMessageComposition = { state.requestMessageComposition(tab.id) },
+            customColors = highlighterCustomColors,
+            paletteColumns = highlighterPaletteColumns,
+            onSaveCustomColor = { color ->
+                val hex = highlightColorHex(color)
+                state.updateSettings { settings ->
+                    settings.copy(
+                        highlighterCustomColors = (settings.highlighterCustomColors + hex)
+                            .distinct().take(MAX_CUSTOM_HIGHLIGHT_COLORS),
+                    )
+                }
+            },
+            onDeleteCustomColor = { color ->
+                val hex = highlightColorHex(color)
+                state.updateSettings { settings ->
+                    settings.copy(
+                        highlighterCustomColors = settings.highlighterCustomColors.filterNot {
+                            it.equals(hex, ignoreCase = true)
+                        },
+                    )
+                }
+            },
+            onPaletteColumnsChange = { columns ->
+                state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }
+            },
+            customColorEditorExpanded = customColorEditorExpanded,
+            onCustomColorEditorExpandedChange = { expanded ->
+                state.updateSettings { it.copy(highlighterCustomColorEditorExpanded = expanded) }
+            },
         )
     }
     FilterPanel(

@@ -967,7 +967,7 @@ private fun MarkdownWriteArea(
             textStyle = TextStyle(
                 color = tc.tx,
                 fontSize = 13.sp,
-                fontFamily = FontFamily.Default,
+                fontFamily = LocalUiFontFamily.current,
                 lineHeight = 21.sp,
             ),
             cursorBrush = SolidColor(tc.ac),
@@ -1129,7 +1129,7 @@ internal fun CustomAiCommandEditorDialog(
                 BasicTextField(
                     value = template,
                     onValueChange = { template = it },
-                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = FontFamily.Default, lineHeight = 18.sp),
+                    textStyle = TextStyle(color = tc.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current, lineHeight = 18.sp),
                     cursorBrush = SolidColor(tc.ac),
                     modifier = Modifier.fillMaxSize()
                         .background(tc.bg, CORNER_MD)

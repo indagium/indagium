@@ -21,8 +21,8 @@ internal data class LineHighlight(val wholeLine: Highlighter?, val spans: List<H
     }
 }
 
-/** A non-null text colour marks a klogg-imported highlighter, which keeps klogg's own rules. */
-internal fun Highlighter.isKloggStyle(): Boolean = textColor != null
+/** True when the rule came from klogg and should keep its matching and color-variance semantics. */
+internal fun Highlighter.isKloggStyle(): Boolean = kloggStyle
 
 private fun tagLimitAllows(hl: Highlighter, entry: LogEntry): Boolean {
     val exact = hl.tag?.takeIf { it.isNotBlank() } ?: return true

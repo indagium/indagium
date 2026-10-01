@@ -303,7 +303,10 @@ class KloggImportTest {
     @Test
     fun addModeKeepsRulesThatDifferOnlyInColourOrCaptureGroups() {
         fun hl(color: Color, captureGroupsOnly: Boolean = false, variance: Int = 0) =
-            Highlighter("x", "p", true, color, true, textColor = Color.Black, captureGroupsOnly = captureGroupsOnly, colorVariance = variance)
+            Highlighter(
+                "x", "p", true, color, true, textColor = Color.Black,
+                captureGroupsOnly = captureGroupsOnly, colorVariance = variance, kloggStyle = true,
+            )
         val existing = listOf(hl(Color.Red))
         assertEquals(1, newHighlightersFor(existing, listOf(hl(Color.Blue))).size)
         assertEquals(1, newHighlightersFor(existing, listOf(hl(Color.Red, captureGroupsOnly = true))).size)

@@ -19,7 +19,7 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 - **Message rules** — filter lines by message content or PID/TID (substring or regex), optionally scoped to a tag or package
 - **Sequences** — collapse recurring regions into colored, nestable groups using start/end patterns
 - **Manual collapse** — fold to start, to end, or an explicit range when there's no pattern to match
-- **Highlighters** — color-code matched text or whole lines by text, tag, message or regex without filtering anything out; pick from tag and message suggestions, and import klogg highlighter sets
+- **Highlighters** — style matched text or whole lines by text, tag, message or regex; choose independent text/background colors from 100 presets or saved custom colors, override fonts, bold and italic, and import klogg highlighter sets
 - **Find bar** — in-view search across the fully expanded log
 - **Filter presets** — save, organize into folders, favorite, export and import filter configurations
 

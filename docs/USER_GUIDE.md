@@ -328,8 +328,28 @@ Every suggestion has a **Match** and a **Line** button: *Match* colours just the
 default), *Line* tints the whole row. Use ↑↓ to pick, ←→ to switch Match / Line, Enter to add. Press
 Tab on a tag suggestion, or type `tag:Name text`, to limit the highlighter to that tag. A row's
 **Match / Line** chip flips an existing highlighter, and clicking its pattern opens an editor for the
-pattern, case, where to match (tag, message or anywhere), tag limit and colour. Right-click a row →
+pattern, case, where to match (tag, message or anywhere), tag limit and text style. Right-click a row →
 **Highlight lines with this tag** tints every line of that tag.
+
+The Highlighters section lets you choose background and text colours independently, including
+text without a coloured background. You can also override the log font for a rule and set bold or
+italic text, with a preview before applying it. Each bold/italic selector offers **Default**, **On**
+and **Off**: Default keeps the rule's original formatting, On forces the style, and Off forces normal
+weight or non-italic text. These styles apply to the matched text or the whole
+line according to the rule's **Match / Line** setting. Right-click highlighting keeps its usual
+background-colour behaviour; edit the rule in the filter panel to apply additional text styles.
+
+Both colour pickers offer the same 100 preset colours and saved custom colours. Switch between
+pages of **5 × 5** swatches with previous/next arrows and an expanded rectangle with ten columns;
+Indagium remembers your choice. Create a colour visually, including its transparency, or enter
+`#RRGGBB` / `#AARRGGBB` in the expandable **Custom color** editor. The editor starts open; its button
+lets you collapse it, and Indagium remembers your choice. Save a colour for reuse in either picker,
+or remove it from your custom palette. The context-menu background picker uses the same compact
+palette layout. Click the **Highlighters** header to collapse the whole section, including its add
+form; Indagium remembers that choice. Click the active-count chip to collapse only the rule list.
+Saved filters, their JSON export/import and the restored session retain each rule's colours and
+text styles. The JSON filter library also carries your saved custom palette; importing it merges
+those colours with your existing palette.
 
 Highlighters from **klogg** can be imported: drop the klogg `.conf` on the filter panel, or use
 **Import** in Saved filters. Each klogg highlighter set arrives as a saved filter that keeps klogg's
@@ -862,7 +882,7 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 |---|---|
 | **General** | Workspace profile, first-run/setup assistant, and the default parent plus separate analysis, capture-session, snapshot, and saved-ZIP folders |
 | **Capture** | adb and optional scrcpy paths, log buffers, mirror mode, recording/audio options, video limits, naming, storage guard, and capture troubleshooting |
-| **Appearance** | Theme (20 built in), font size and family, interface scale, row numbers, minimap, icon-only toolbar |
+| **Appearance** | Theme (20 built in), independent interface and log fonts, log font size, interface scale, row numbers, minimap, icon-only toolbar |
 | **Editor behavior** | What `⌘F` targets, whether new files open with the unfiltered split, row wrapping limits, navigation scroll margin, tag list sizes |
 | **Export & annotations** | Default save directory, Markdown vs Jira log-block style, block numbering, prefix label, auto-export, copy-masking rules |
 | **Automation** | MCP control server on/off, port, allow browser clients, regenerate token, connection info, diagnostic logging |
@@ -871,6 +891,12 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **AI commands** | Custom `/command` prompt library |
 | **Source code** | Source folders, log wrapper rules, auto-discovery, index status and reindex, editor command |
 | **Issues** | Custom issue rules (name + regex) |
+
+**Interface font** and **Log font** are separate searchable dropdowns in Appearance. Opening a
+dropdown shows available installed families with the current choice marked; use its search field
+to narrow the list. A highlighter inherits the log font unless you
+override it for that rule. If a selected family is unavailable on another computer, Indagium uses
+the corresponding default while retaining the selected name.
 
 Use the Settings search field to find a setting by name or task; activate a result to jump to its
 section and control. `⌘F` / `Ctrl+F` focuses the Settings search while Settings is open. Workspace

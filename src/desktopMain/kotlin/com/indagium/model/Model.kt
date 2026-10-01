@@ -349,8 +349,8 @@ enum class HighlightTarget { ANY, TAG, MESSAGE }
 /**
  * A highlight rule. Everything after [on] is optional and defaults to what highlighters always
  * were: colour the matched text only ([wholeLine] = false), matched anywhere on the rendered line,
- * case-insensitively. A non-null [textColor] marks a klogg-imported rule, which keeps klogg's own
- * behaviour (opaque background + this foreground colour, case per [caseSensitive], capture groups).
+ * case-insensitively. [kloggStyle] independently marks imported klogg semantics; [textColor] is
+ * also available to native rules without changing matcher precedence.
  */
 data class Highlighter(
     val id: String,
@@ -364,12 +364,22 @@ data class Highlighter(
     // exact-tag scope, same rule as a message rule's tag (utils/Filter.kt ruleScopeMatches)
     val tag: String? = null,
     val caseSensitive: Boolean = false,
-    // non-null = klogg style: opaque [color] background + this foreground colour
+    // Optional foreground; klogg priority is carried separately by [kloggStyle].
     val textColor: Color? = null,
     // klogg: a regex with capture groups colours only the groups
     val captureGroupsOnly: Boolean = false,
     // klogg variate_colors (match-only); 0 = off
     val colorVariance: Int = 0,
+    /** Explicit compatibility mode. A foreground color alone never changes matcher precedence. */
+    val kloggStyle: Boolean = false,
+    /** Whether [color] paints a background. False supports foreground-only and typography rules. */
+    val backgroundEnabled: Boolean = true,
+    /** Optional named system font; null inherits the configured log font. */
+    val fontFamily: String? = null,
+    /** Null preserves the historical weight for this rule type. */
+    val bold: Boolean? = null,
+    /** Null preserves the historical non-italic style. */
+    val italic: Boolean? = null,
 )
 
 enum class RuleTarget { MESSAGE, PID_TID }
@@ -1114,6 +1124,15 @@ data class AppSettings(
     /** Scales the entire Compose interface relative to the platform's density and font scale. */
     val interfaceScalePercent: Int = DEFAULT_INTERFACE_SCALE_PERCENT,
     val fontMono: Boolean = true,
+    /** Optional named system families. Null means the platform default UI font / fontMono log font. */
+    val interfaceFontFamily: String? = null,
+    val logFontFamily: String? = null,
+    /** User-created colors shared by match and foreground pickers, stored as #AARRGGBB. */
+    val highlighterCustomColors: List<String> = emptyList(),
+    /** Palette presentation: 5 uses paged 5x5; 10 shows a scrollable 10-column palette. */
+    val highlighterPaletteColumns: Int = 5,
+    /** Whether shared highlighter color pickers show the HSV/HEX custom editor. JSON-only. */
+    val highlighterCustomColorEditorExpanded: Boolean = true,
     // UI label "Analysis artifacts folder" — the key is kept exactly as-is so a user who already
     // configured this (e.g. "…/bug_analysis") keeps that folder unchanged. Effective path is this
     // when set, else <saveRootDir>/analysis — see ui/AppState.effectiveAnalysisDir.
@@ -1359,6 +1378,9 @@ data class ProfileSpec(
     val annotationVisible: Boolean,
     val videoPanelVisible: Boolean,
     val aiPanelVisible: Boolean,
+    val fontMono: Boolean = true,
+    val interfaceFontFamily: String? = null,
+    val logFontFamily: String? = null,
 )
 
 /** A user-made workspace profile. [id] is `custom-<uuid>`, so it can never collide with a built-in id. */

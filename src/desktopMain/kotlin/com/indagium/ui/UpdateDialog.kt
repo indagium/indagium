@@ -140,7 +140,7 @@ private fun updateMarkdownColors(colors: ThemeColors) = markdownColor(
 
 @Composable
 private fun updateMarkdownTypography(colors: ThemeColors): MarkdownTypography {
-    val body = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = UI)
+    val body = TextStyle(color = colors.tx, fontSize = 12.sp, fontFamily = LocalUiFontFamily.current)
     val code = TextStyle(color = colors.tx, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
     val heading = body.copy(fontWeight = FontWeight.SemiBold)
     return markdownTypography(

@@ -678,6 +678,11 @@ classDiagram
         +Color textColor
         +Boolean captureGroupsOnly
         +Int colorVariance
+        +Boolean kloggStyle
+        +Boolean backgroundEnabled
+        +String fontFamily
+        +Boolean bold
+        +Boolean italic
     }
 
     class MessageRule {
@@ -1219,7 +1224,7 @@ step, not N.
 ### 10.3 Highlighters
 
 A `Highlighter` (`model/Model.kt`) began as `(id, pattern, regex, color, on)` and always coloured the
-matched text on the rendered line. Seven optional fields now sit after `on`, all defaulting to that
+matched text on the rendered line. Optional fields now sit after `on`, all defaulting to that
 original behaviour, so an old autosave, a saved filter, the MCP tool, the context menu and Log
 composition keep producing exactly what they always did:
 
@@ -1229,9 +1234,30 @@ composition keep producing exactly what they always did:
 | `target` | Match against the whole rendered line (`ANY`), only `entry.tag` (`TAG`) or only `entry.msg` (`MESSAGE`) | `ANY` |
 | `tag` | Exact-tag limit, the same rule as a message rule's tag (`ruleScopeMatches`) | `null` |
 | `caseSensitive` | Case-sensitive matching | `false` (ignore case) |
-| `textColor` | Non-null marks a **klogg-style** highlighter: opaque `color` background plus this foreground | `null` |
+| `textColor` | Foreground override independent of the background and matching behaviour | `null` |
 | `captureGroupsOnly` | A regex with capture groups colours only the groups (klogg) | `false` |
 | `colorVariance` | klogg `variate_colors` shade spread (match-only), 0 = off | `0` |
+| `kloggStyle` | Explicit klogg matching/paint precedence and background behaviour | `false` |
+| `backgroundEnabled` | Paint the rule's background; false allows text/typography-only rules | `true` |
+| `fontFamily` | Named system family override; null inherits the log font | `null` |
+| `bold`, `italic` | Optional text-style overrides; null retains historical defaults | `null` |
+
+These fields are appended to highlighter tokens. Legacy tokens without the explicit compatibility
+flag infer `kloggStyle` from their foreground field, preserving the old interpretation; newly
+created foreground rules remain native. Settings JSON stores independent interface/log font
+families, shared custom colours and palette presentation; the legacy positional settings decoder
+is unchanged. Missing system families fall back at render time without discarding the saved name.
+Filter-library JSON can carry the shared custom palette as optional metadata. Import review stages
+it with the filters and merges validated ARGB colours only when the user confirms an import.
+Font selection uses one searchable dropdown for interface, log and per-rule families; its search
+draft is separate from the selected name so reopening it does not hide other families. Bold/italic
+controls expose nullable overrides as explicit Default/On/Off choices. Font lists use a visible
+scrollbar, and dropdown hover feedback is clipped to the control shape. The color popup uses the
+original context-menu swatch styling; its advanced HSV/HEX editor starts open and has a button
+that persists its expansion preference in keyed settings. The shared compact palette grid also
+serves context-menu background actions. The active-count chip toggles only the rule list.
+Whole-section Highlighters visibility is an independent filter-panel UI state,
+persisted at the end of its positional token without changing the older list-only expansion field.
 
 **`utils/HighlightMatch.kt` is the one matcher.** `highlighterMatches` answers "does this enabled
 highlighter find its pattern on this row" (tag limit and target honoured); `resolveLineHighlight`
@@ -1736,7 +1762,7 @@ routes by content: `{` or `[` is the JSON filter library, a `[HighlighterSetColl
   `@ByteArray(…)` values are not decoded; the keys that carry them are reported as a note.
 - `utils/KloggHighlighterImport.kt` turns each set into one `SavedFilter` (name = set name, every other
   filter field default). Mapping: `regex = use_regex`, `caseSensitive = !ignore_case`, `wholeLine =
-  !match_only`, `color = back_colour`, `textColor = fore_colour`, `captureGroupsOnly = true`,
+  !match_only`, `color = back_colour`, `textColor = fore_colour`, `kloggStyle = true`, `captureGroupsOnly = true`,
   `colorVariance = variate_colors && match_only ? color_variance : 0`. Missing keys take klogg's own
   defaults; colours are `#AARRGGBB`, `#RRGGBB` or SVG names (`utils/QtColorParse.kt`). The `quick\…`
   entries are colour presets and are ignored. Ids come from the set id (or name) plus the index, so

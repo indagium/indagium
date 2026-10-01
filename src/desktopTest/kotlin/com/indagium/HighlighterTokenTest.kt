@@ -52,8 +52,31 @@ class HighlighterTokenTest {
             textColor = Color(0xFFAABBCC),
             captureGroupsOnly = true,
             colorVariance = 25,
+            kloggStyle = true,
+            backgroundEnabled = false,
+            fontFamily = "A Font Family",
+            bold = false,
+            italic = true,
         )
         assertEquals(h, h.highlighterToken().highlighterFromToken())
+    }
+
+    @Test
+    fun legacyFullTokenUsesForegroundAsItsKloggMarkerButNewNativeForegroundDoesNot() {
+        val legacyKlogg = Highlighter(
+            "legacy-klogg", "id=(\\d+)", regex = true, color = Color.Yellow, on = true,
+            textColor = Color.Magenta, captureGroupsOnly = true, colorVariance = 15,
+        )
+        val legacyFields = listOf(
+            legacyKlogg.id, legacyKlogg.pattern, legacyKlogg.regex.toString(), legacyKlogg.color.value.toString(), legacyKlogg.on.toString(),
+            legacyKlogg.wholeLine.toString(), legacyKlogg.target.name, legacyKlogg.tag.orEmpty(), legacyKlogg.caseSensitive.toString(),
+            legacyKlogg.textColor!!.value.toString(), legacyKlogg.captureGroupsOnly.toString(), legacyKlogg.colorVariance.toString(),
+        ).joinToString("|") { b64(it) }
+        assertEquals(true, legacyFields.highlighterFromToken()?.kloggStyle)
+
+        val native = Highlighter("native", "x", false, Color.Yellow, true, textColor = Color.Magenta, bold = true)
+        assertEquals(native, native.highlighterToken().highlighterFromToken())
+        assertFalse(native.highlighterToken().highlighterFromToken()!!.kloggStyle)
     }
 
     @Test

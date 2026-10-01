@@ -634,7 +634,7 @@ internal fun AccentLink(label: String, onClick: () -> Unit, modifier: Modifier =
 @Composable
 internal fun AppearanceBasicsRow(state: AppState) {
     SettingsControlRow {
-        CompactSetting("Font family") {
+        CompactSetting("Fallback log family") {
             SegmentedControl(
                 options = listOf("Monospace", "Proportional"),
                 selectedIndices = setOf(if (state.settings.fontMono) 0 else 1),
@@ -670,6 +670,37 @@ internal fun AppearanceBasicsRow(state: AppState) {
 }
 
 @Composable
+internal fun AppearanceSystemFontSelectors(state: AppState) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SearchableFontDropdown(
+            label = "Interface font",
+            selectedFamily = state.settings.interfaceFontFamily,
+            defaultLabel = "System default",
+            fallbackFamily = androidx.compose.ui.text.font.FontFamily.Default,
+            onSelect = { family ->
+                state.updateSettings { it.copy(interfaceFontFamily = family) }
+            },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).settingsAnchor("Interface font"),
+            testTagPrefix = "settings-interface-font",
+        )
+        val defaultLogFont = if (state.settings.fontMono) androidx.compose.ui.text.font.FontFamily.Monospace
+        else androidx.compose.ui.text.font.FontFamily.Default
+        val defaultLogLabel = if (state.settings.fontMono) "Monospace (default)" else "Proportional (default)"
+        SearchableFontDropdown(
+            label = "Log font",
+            selectedFamily = state.settings.logFontFamily,
+            defaultLabel = defaultLogLabel,
+            fallbackFamily = defaultLogFont,
+            onSelect = { family ->
+                state.updateSettings { it.copy(logFontFamily = family) }
+            },
+            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp).settingsAnchor("Log font"),
+            testTagPrefix = "settings-log-font",
+        )
+    }
+}
+
+@Composable
 private fun AppearanceSettingsSection(state: AppState) {
     val tc = tc()
     Column(Modifier.settingsAnchor("Theme"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -682,6 +713,7 @@ private fun AppearanceSettingsSection(state: AppState) {
         )
     }
     AppearanceBasicsRow(state)
+    AppearanceSystemFontSelectors(state)
     if (isLinuxOs) {
         CompactSettingWithTooltip(
             label = "File picker",

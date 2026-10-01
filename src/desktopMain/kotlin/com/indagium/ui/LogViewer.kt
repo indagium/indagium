@@ -41,6 +41,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.*
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -95,9 +96,6 @@ private const val EXPANSION_AWAIT_TIMEOUT_MS = 5000L
 // visible row is at least this long — a fixed v1 threshold; a user-configurable one is out of scope
 // (see the plan's "Out of scope" list).
 private const val DELTA_WARN_THRESHOLD_MS = 1000L
-
-// Alpha of an Indagium whole-line highlight's row background (klogg rules paint their colour opaque).
-private const val WHOLE_LINE_WASH_ALPHA = 0.16f
 
 // Added to that wash while hovered, so a washed row still shows hover like every other row.
 private const val WHOLE_LINE_HOVER_EXTRA_ALPHA = 0.06f
@@ -884,7 +882,8 @@ internal fun buildLogLineRender(
     val lineHighlight = resolveLineHighlight(entry, lineText, highlighters, regexContext)
     // A klogg whole-line rule recolours every character of the row through the base colours below,
     // so it survives wrapping (visualLogLineForWrapLimit rebuilds lines from these same spans).
-    val lineTextColor = lineHighlight.wholeLine?.textColor?.takeUnless { suppressLineTextColor }
+    val wholeLineRule = lineHighlight.wholeLine
+    val lineTextColor = wholeLineRule?.textColor?.takeUnless { suppressLineTextColor }
     val text = buildAnnotatedString {
         appendTsPidTid(entry, lineTextColor ?: tsColor, lineTextColor ?: pidColor, processDisplay, pidFieldWidth, cellBg)
         append("  ")
@@ -902,32 +901,11 @@ internal fun buildLogLineRender(
         fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
             if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
         val renderedLength = length
-        // The two-space gaps between fields carry no span of their own; cover them too so the whole
-        // line, every character, reads as the rule's text colour.
-        lineTextColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
-        for (span in lineHighlight.spans) {
-            val (s, e) = remap(span.start to span.end)
-            if (s < e && e <= renderedLength) addStyle(highlightSpanStyle(span, lineText), s, e)
-        }
-        keywordRegexFilter?.let { filter ->
-            addRemappedRanges(
-                keywordRegexHighlightRanges(lineText, filter, regexContext),
-                ::remap,
-                SpanStyle(background = filter.kwHighlightColor.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold),
-            )
-        }
-        // Appended last (after highlighter + keyword-regex spans above) so a Find match always wins
-        // visually — addStyle layers are painted in the order added, later spans on top.
-        searchHighlight?.let { sh ->
-            if (sh.query.isNotEmpty()) {
-                val bg = if (sh.isCurrentRow) sh.currentBg else sh.matchBg
-                addRemappedRanges(
-                    regexRanges(lineText, sh.query, ignoreCase = !sh.caseSensitive, regexContext = regexContext),
-                    ::remap,
-                    SpanStyle(background = bg, fontWeight = FontWeight.SemiBold),
-                )
-            }
-        }
+        addWholeLineStyles(wholeLineRule, lineTextColor, renderedLength)
+        addHighlighterSpans(lineHighlight.spans, lineText, renderedLength, ::remap)
+        keywordRegexFilter?.let { addKeywordRegexStyles(it, lineText, regexContext, ::remap) }
+        // Appended last so Find always wins visually; addStyle layers paint in insertion order.
+        searchHighlight?.let { addSearchStyles(it, lineText, regexContext, ::remap) }
     }
     return LogLineRender(text, lineHighlight.wholeLine)
 }
@@ -946,16 +924,101 @@ private fun AnnotatedString.Builder.addRemappedRanges(
     }
 }
 
-// Indagium match spans stay the translucent, semi-bold wash they always were; a klogg rule paints
-// its own opaque back/fore pair at normal weight, exactly as klogg does.
+private fun AnnotatedString.Builder.addWholeLineStyles(
+    rule: Highlighter?,
+    textColor: Color?,
+    renderedLength: Int,
+) {
+    // The two-space gaps between fields carry no span of their own; cover them too so the whole
+    // line, every character, reads as the rule's text colour.
+    textColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
+    if (rule == null || renderedLength <= 0) return
+    val family = FontCatalog.resolveOrNull(rule.fontFamily)
+    val weight = rule.bold?.let { if (it) FontWeight.Bold else FontWeight.Normal }
+    val style = rule.italic?.let { if (it) FontStyle.Italic else FontStyle.Normal }
+    if (family != null || weight != null || style != null) {
+        addStyle(SpanStyle(fontFamily = family, fontWeight = weight, fontStyle = style), 0, renderedLength)
+    }
+}
+
+private fun AnnotatedString.Builder.addHighlighterSpans(
+    spans: List<HlSpan>,
+    lineText: String,
+    renderedLength: Int,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+) {
+    spans.forEach { span ->
+        val (start, end) = remap(span.start to span.end)
+        if (start < end && end <= renderedLength) addStyle(highlightSpanStyle(span, lineText), start, end)
+    }
+}
+
+private fun AnnotatedString.Builder.addKeywordRegexStyles(
+    filter: Filter,
+    lineText: String,
+    regexContext: RegexEvaluationContext,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+) {
+    addRemappedRanges(
+        keywordRegexHighlightRanges(lineText, filter, regexContext),
+        remap,
+        SpanStyle(
+            background = filter.kwHighlightColor.copy(alpha = HL_MATCH_BACKGROUND_ALPHA),
+            fontWeight = FontWeight.SemiBold,
+        ),
+    )
+}
+
+private fun AnnotatedString.Builder.addSearchStyles(
+    searchHighlight: SearchHighlight,
+    lineText: String,
+    regexContext: RegexEvaluationContext,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+) {
+    if (searchHighlight.query.isEmpty()) return
+    val background = if (searchHighlight.isCurrentRow) searchHighlight.currentBg else searchHighlight.matchBg
+    addRemappedRanges(
+        regexRanges(
+            lineText,
+            searchHighlight.query,
+            ignoreCase = !searchHighlight.caseSensitive,
+            regexContext = regexContext,
+        ),
+        remap,
+        SpanStyle(background = background, fontWeight = FontWeight.SemiBold),
+    )
+}
+
+// Native match spans use a translucent, semi-bold wash. Imported klogg colors retain their source
+// alpha and legacy weight behavior; native rules can request foreground and typography separately.
 // A klogg rule with variate_colors shades both colours per matched text (utils/KloggColor.kt).
-private fun highlightSpanStyle(span: HlSpan, lineText: String): SpanStyle {
+internal fun highlightSpanStyle(span: HlSpan, lineText: String): SpanStyle {
     val hl = span.hl
-    val fore = hl.textColor ?: return SpanStyle(background = hl.color.copy(alpha = 0.6f), fontWeight = FontWeight.SemiBold)
-    if (hl.colorVariance <= 0) return SpanStyle(color = fore, background = hl.color)
-    val matched = lineText.substring(span.start.coerceIn(0, lineText.length), span.end.coerceIn(0, lineText.length))
-    val (variedFore, variedBack) = kloggVariedColors(fore, hl.color, hl.colorVariance, matched)
-    return SpanStyle(color = variedFore, background = variedBack)
+    var background: Color? = null
+    var foreground: Color? = null
+    if (hl.kloggStyle) {
+        foreground = hl.textColor
+        if (hl.colorVariance > 0 && (foreground != null || hl.backgroundEnabled)) {
+            val matched = lineText.substring(span.start.coerceIn(0, lineText.length), span.end.coerceIn(0, lineText.length))
+            val (variedFore, variedBack) = kloggVariedColors(foreground ?: Color.Black, hl.color, hl.colorVariance, matched)
+            if (foreground != null) foreground = variedFore
+            if (hl.backgroundEnabled) background = variedBack
+        } else if (hl.backgroundEnabled) {
+            background = hl.color
+        }
+    } else {
+        if (hl.backgroundEnabled) background = hl.color.copy(alpha = hl.color.alpha * HL_MATCH_BACKGROUND_ALPHA)
+        foreground = hl.textColor
+    }
+    val weight = hl.bold?.let { if (it) FontWeight.Bold else FontWeight.Normal }
+        ?: if (hl.kloggStyle) null else FontWeight.SemiBold
+    return SpanStyle(
+        color = foreground ?: Color.Unspecified,
+        background = background ?: Color.Unspecified,
+        fontFamily = FontCatalog.resolveOrNull(hl.fontFamily),
+        fontWeight = weight,
+        fontStyle = hl.italic?.let { if (it) FontStyle.Italic else FontStyle.Normal },
+    )
 }
 
 // Start offset of each wrapped visual line (always begins with 0; count == number of lines).
@@ -1631,11 +1694,11 @@ fun LogViewer(
                         // error, so rowContentWidth there is just the real viewport width directly.
                         val density = LocalDensity.current.density
                         val textMeasurer = rememberTextMeasurer()
-                        val charWidthDp = remember(textMeasurer, fontSizeSp, density) {
+                        val charWidthDp = remember(textMeasurer, fontSizeSp, density, mono) {
                             val sampleLen = 64
                             val measured = textMeasurer.measure(
                                 AnnotatedString("M".repeat(sampleLen)),
-                                TextStyle(fontFamily = MONO, fontSize = fontSizeSp.sp),
+                                TextStyle(fontFamily = mono, fontSize = fontSizeSp.sp),
                             )
                             (measured.size.width / sampleLen) / density
                         }
@@ -3119,24 +3182,27 @@ private fun LogRow(
     }
     val annoLine = lineRender.text
     val wholeLineHl = lineRender.wholeLine
+    val wholeLineBgHl = wholeLineHl?.takeIf { it.backgroundEnabled }
 
     val levelColor = entry.level.defaultColor
-    // selection > crash group > whole-line highlight > hover. A klogg rule paints its opaque back
-    // colour; an Indagium one is a light wash (its stripe below carries the colour at full strength).
+    // selection > crash group > whole-line highlight > hover. Imported klogg alpha stays intact;
+    // native whole-line backgrounds use a light wash and a stronger color stripe.
     val bg = when {
         isSel -> tc.sl
         isCrashGroupRow -> DANGER_RED.copy(alpha = if (hov) 0.15f else 0.07f)
-        wholeLineHl != null ->
-            if (wholeLineHl.isKloggStyle()) {
-                wholeLineHl.color
-            } else {
-                wholeLineHl.color.copy(alpha = WHOLE_LINE_WASH_ALPHA + if (hov) WHOLE_LINE_HOVER_EXTRA_ALPHA else 0f)
-            }
+        wholeLineBgHl != null -> if (wholeLineBgHl.isKloggStyle()) {
+            wholeLineBgHl.color
+        } else {
+            wholeLineBgHl.color.copy(
+                alpha = wholeLineBgHl.color.alpha *
+                    (HL_WHOLE_LINE_BACKGROUND_ALPHA + if (hov) WHOLE_LINE_HOVER_EXTRA_ALPHA else 0f),
+            )
+        }
         hov -> tc.hv
         else -> Color.Transparent
     }
     // An Indagium whole-line highlight swaps the level stripe for one in its own colour.
-    val stripeHl = wholeLineHl?.takeUnless { it.isKloggStyle() }
+    val stripeHl = wholeLineHl?.takeIf { !it.isKloggStyle() && it.backgroundEnabled }
     val groupColor = item.groupColor
 
     Row(
