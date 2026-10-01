@@ -48,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -84,6 +85,7 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.indagium.capture.CAPTURE_NO_VIDEO_AFTER_MS
 import com.indagium.capture.CaptureExportPreview
+import com.indagium.capture.CaptureExportResult
 import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
@@ -95,6 +97,7 @@ import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.renderCaptureFilename
 import com.indagium.model.AnnBlock
 import com.indagium.model.LogTab
+import com.indagium.update.revealInFileManager
 import com.indagium.utils.HeapPressure
 import com.indagium.utils.MemoryShortfall
 import kotlinx.coroutines.delay
@@ -540,7 +543,9 @@ internal fun CaptureStrip(
     var snapshotTriggerBounds by remember(tab.id) { mutableStateOf<Rect?>(null) }
 
     fun dismissSnapshotPopover() {
-        if (state.captureExportBusy) state.cancelCaptureSnapshot()
+        // Only this popover's own export: a retained-session save running for a stopped tab (owner
+        // != null) is not the popover's to cancel.
+        if (state.captureExportBusy && state.captureExportOwner == null) state.cancelCaptureSnapshot()
         snapshotOpen = false
         state.clearCaptureExportStatus()
         onReturnFocus()
@@ -916,6 +921,9 @@ private fun CaptureStoppedStrip(
     val sessionId = tab.captureSourceSessionId ?: return
     val session = state.captureService.sessions.firstOrNull { it.id == sessionId }
     val colors = tc()
+    val exportStatus = captureExportStatusFor(
+        sessionId, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+    )
     val (deviceModel, deviceSerial) = captureSessionDeviceParts(session, tab.filename.removePrefix("Capture — "))
     Column(Modifier.fillMaxWidth().background(colors.p2)) {
         Row(
@@ -941,7 +949,7 @@ private fun CaptureStoppedStrip(
             )
             Spacer(Modifier.weight(1f))
             ToolbarBtn(
-                label = "Save ZIP",
+                label = if (exportStatus.busy) "Saving…" else "Save ZIP",
                 icon = Icons.Outlined.Save,
                 active = true,
                 tooltip = "Export this capture as a ZIP",
@@ -978,20 +986,99 @@ private fun CaptureStoppedStrip(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 3.dp),
             )
         }
-        if (session == null || state.captureExportError != null || state.captureExportResult != null) {
+        if (exportStatus.busy) {
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (session == null) {
-                    AppText("Session no longer on disk", color = DANGER_RED, fontSize = 10.sp)
-                }
-                state.captureExportError?.let {
-                    AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                }
-                state.captureExportResult?.let { AppText("Saved ${it.file.name}", color = colors.ac, fontSize = 10.sp) }
+                AppText(state.captureExportBusyMessage ?: "Saving ZIP…", color = colors.td, fontSize = 10.sp)
+                IndeterminateLoadingLine(Modifier.weight(1f))
+                AccentLink("Cancel", { state.cancelCaptureSnapshot(); onReturnFocus() })
             }
         }
+        if (session == null) {
+            AppText(
+                "Session no longer on disk", color = DANGER_RED, fontSize = 10.sp,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp),
+            )
+        }
+        CaptureExportNotice(
+            result = exportStatus.result,
+            error = exportStatus.error,
+            onClose = { state.clearCaptureExportStatus() },
+            onReclaimFocus = onReturnFocus,
+        )
+    }
+}
+
+/** How long a successful ZIP save's "Saved …" line stays before it hides itself; errors never auto-hide. */
+internal const val CAPTURE_EXPORT_NOTICE_MS = 8_000L
+
+/** What one surface (a stopped tab's strip, a launcher row, the snapshot popover) shows of the global
+ * export status. */
+internal data class CaptureExportStatusView(
+    val busy: Boolean,
+    val result: CaptureExportResult?,
+    val error: String?,
+)
+
+/**
+ * [AppState]'s export busy/result/error are global, so a surface shows them only when it is the
+ * [owner] of the run: [sessionId] is the retained session it represents, or null for the live
+ * snapshot popover (which owns exports started by exportCaptureSnapshot).
+ */
+internal fun captureExportStatusFor(
+    sessionId: String?,
+    owner: String?,
+    busy: Boolean,
+    result: CaptureExportResult?,
+    error: String?,
+): CaptureExportStatusView =
+    if (sessionId == owner) CaptureExportStatusView(busy, result, error) else CaptureExportStatusView(false, null, null)
+
+/**
+ * The saved/failed line under a ZIP save: success shows the file name, "Open folder" and ×, and hides
+ * itself after [CAPTURE_EXPORT_NOTICE_MS]; a failure stays until × is clicked. [onClose] clears the
+ * status; [onReclaimFocus] runs only for a click, because a clicked control keeps keyboard focus (see
+ * CLAUDE.md's Popup/clickable note) — an auto-hide has no click and must not steal focus from
+ * whatever the user has since started typing in.
+ */
+@Composable
+internal fun CaptureExportNotice(
+    result: CaptureExportResult?,
+    error: String?,
+    onClose: () -> Unit,
+    onReclaimFocus: () -> Unit,
+) {
+    if (result == null && error == null) return
+    val colors = tc()
+    val latestOnClose by rememberUpdatedState(onClose)
+    LaunchedEffect(result) {
+        if (result != null) {
+            delay(CAPTURE_EXPORT_NOTICE_MS)
+            latestOnClose()
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(start = 10.dp, end = 4.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (error != null) {
+            AppText(
+                "Save failed: $error", color = DANGER_RED, fontSize = 10.sp,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
+        } else if (result != null) {
+            AppText(
+                "Saved ${result.file.name}", color = colors.ac, fontSize = 10.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
+            AccentLink("Open folder", { revealInFileManager(result.file); onReclaimFocus() })
+        }
+        // Right after the text (not pushed to the row's far end), so it reads as this notice's close.
+        CloseButton(onClick = { onClose(); onReclaimFocus() })
     }
 }
 
@@ -1030,6 +1117,11 @@ private fun CaptureSnapshotPopover(
     onReturnFocus: () -> Unit,
 ) {
     val colors = tc()
+    // The popover owns only live-snapshot exports (null owner); a retained-session save running for
+    // another tab must not paint its busy/saved/failed state here.
+    val exportStatus = captureExportStatusFor(
+        null, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+    )
     val density = LocalDensity.current
     val hostWindowSize = LocalWindowInfo.current.containerSize
     val hostWidth = with(density) { hostWindowSize.width.toDp() }
@@ -1274,15 +1366,16 @@ private fun CaptureSnapshotPopover(
                     )
                     AppButton("Confirm overwrite", { overwriteConfirmed = true; onReturnFocus() }, ButtonVariant.Secondary)
                 }
-                if (state.captureExportBusy) {
+                if (exportStatus.busy) {
+                    IndeterminateLoadingLine(Modifier.fillMaxWidth())
                     state.captureExportBusyMessage?.let {
                         AppText(it, color = colors.td, fontSize = 10.sp)
                     }
                 }
-                state.captureExportError?.let { error ->
+                exportStatus.error?.let { error ->
                     AppText("Snapshot failed: $error", color = DANGER_RED, fontSize = 10.sp, maxLines = 3)
                 }
-                state.captureExportResult?.let { result ->
+                exportStatus.result?.let { result ->
                     AppText("Saved ${result.file.name}: ${result.message}", color = colors.ac, fontSize = 10.sp, maxLines = 2)
                     if (includeVideo && result.videoCoveredEndMs != null && result.videoCoveredEndMs < result.logCoveredEndMs) {
                         AppText(
@@ -1327,9 +1420,9 @@ private fun CaptureSnapshotPopover(
             }
         }
     }
-    LaunchedEffect(state.captureExportResult) {
+    LaunchedEffect(exportStatus.result) {
         if (saveAndOpen) {
-            state.captureExportResult?.file?.let { file ->
+            exportStatus.result?.file?.let { file ->
                 // The export is always our own capture ZIP (a portable archive with a
                 // capture.indagium.json descriptor), never a plain text log — routing it through
                 // plain openFile() parsed the ZIP's raw bytes as a text log and produced a tab full

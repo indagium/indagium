@@ -688,8 +688,13 @@ internal fun UnfinishedSessionsSection(state: AppState, retained: List<CaptureSe
     var confirmDeleteSelected by remember { mutableStateOf(false) }
     var deleteSelectedError by remember { mutableStateOf<String?>(null) }
 
-    state.captureExportError?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
     val retainedIds = retained.map { it.id }.toSet()
+    // A failure for a session that has no row any more (it was discarded, or is gone from disk) has
+    // nowhere else to show; every other save status renders under its own row.
+    state.captureExportOwner?.takeIf { it !in retainedIds }?.let { owner ->
+        val orphan = captureExportStatusFor(owner, owner, false, null, state.captureExportError)
+        orphan.error?.let { AppText("Save failed: $it", color = DANGER_RED, fontSize = 10.sp) }
+    }
     LaunchedEffect(retainedIds) { selectedIds = selectedIds.intersect(retainedIds) }
 
     if (retained.isEmpty()) {
@@ -773,6 +778,9 @@ private fun UnfinishedSessionRow(
     onDiscardId: (String?) -> Unit,
 ) {
     val tc = tc()
+    val exportStatus = captureExportStatusFor(
+        session.id, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+    )
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(
@@ -787,11 +795,24 @@ private fun UnfinishedSessionRow(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AppButton("Open", { state.openRetainedCapture(session.id) }, ButtonVariant.Secondary)
-                AppButton("Save ZIP", { state.saveRetainedCapture(session.id) }, ButtonVariant.Secondary)
+                AppButton(
+                    if (exportStatus.busy) "Saving…" else "Save ZIP",
+                    { state.saveRetainedCapture(session.id) },
+                    ButtonVariant.Secondary,
+                    enabled = !state.captureExportBusy,
+                )
                 AppButton("Open folder", { state.openRetainedCaptureFolder(session.id) }, ButtonVariant.Ghost)
                 AppButton("Discard", { onDiscardId(session.id) }, ButtonVariant.Ghost)
             }
         }
+        // No focus requester reaches the launcher panel (unlike the capture strip), so there is
+        // nothing to reclaim after ×.
+        CaptureExportNotice(
+            result = exportStatus.result,
+            error = exportStatus.error,
+            onClose = { state.clearCaptureExportStatus() },
+            onReclaimFocus = {},
+        )
         if (discardId == session.id) {
             AppText("Discard this retained capture? The raw session directory will be removed.", color = DANGER_RED, fontSize = 10.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

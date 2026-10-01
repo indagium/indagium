@@ -2260,6 +2260,13 @@ class AppState(
         private set
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
+
+    /** Who the busy/result/error above belong to: the retained session id of a [saveRetainedCapture]
+     * run, or null for a live [exportCaptureSnapshot] (owned by the snapshot popover). The status is
+     * global, so each surface compares this against its own id (see [captureExportStatusFor]) to avoid
+     * showing another capture's "Saved" line. */
+    internal var captureExportOwner by mutableStateOf<String?>(null)
+        private set
     private var captureExportJob: Job? = null
 
     /** See [PendingCaptureNotesImport]'s own doc — set only by openCaptureFile's `existing != null`
@@ -3610,10 +3617,13 @@ class AppState(
     internal fun exportCaptureSnapshot(tabId: String, request: CaptureExportRequest) {
         cancelCapturePreview(tabId)
         val controller = captureControllerFor(tabId) ?: run {
+            if (!captureExportBusy) captureExportOwner = null
             captureExportError = "Capture export failed: capture has already stopped"
             return
         }
         if (captureExportBusy) return
+        // The snapshot popover owns this status (null owner), not any retained session.
+        captureExportOwner = null
         captureExportBusy = true
         captureExportBusyMessage = null
         captureExportResult = null
@@ -3775,33 +3785,51 @@ class AppState(
     // with no open tab). When present, its CURRENT notes are exported exactly like the live
     // snapshot path (exportCaptureSnapshot) does via preparedForSave, fixing markers silently
     // missing from a stopped capture's "Save ZIP" — see this function's own bug-fix history.
+    @Suppress("TooGenericExceptionCaught")
     internal fun saveRetainedCapture(sessionId: String, tabId: String? = null) {
+        // Both the strip and the launcher disable their buttons while busy; this guards a second
+        // click that lands before the disabled state recomposes, and a live snapshot in flight.
+        if (captureExportBusy) return
+        captureExportBusy = true
+        captureExportBusyMessage = "Saving ZIP…"
+        captureExportOwner = sessionId
+        captureExportResult = null
+        captureExportError = null
         val preparedNotes = tabId?.let { id -> tab(id)?.let { t -> t.annotations.preparedForSave(t) } }
-        ioScope.launch {
-            // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
-            // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
-            // CaptureStrip.kt), not just the launcher's retained-sessions list.
-            val session = captureService.retainedSession(sessionId) ?: run {
-                captureExportError = "This capture session is no longer on disk"
-                return@launch
-            }
-            val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
-            val filename = com.indagium.capture.renderCaptureFilename(
-                session.settings.filenameTemplate,
-                session.device,
-                session.startedEpochMs,
-                com.indagium.capture.CaptureRange.ALL,
-                session.exportCounter,
-                session.settings.label,
-            )
-            captureExportError = null
-            captureExportResult = runCatching {
-                captureService.exportRetainedSession(sessionId, File(directory, filename), notes = preparedNotes)
-            }.getOrElse { failure ->
+        captureExportJob = ioScope.launch {
+            try {
+                // Same reachable-but-silent gap as openRetainedCapture above, now also the export path
+                // for a stopped streaming capture tab's "Save ZIP" (CaptureStoppedStrip in
+                // CaptureStrip.kt), not just the launcher's retained-sessions list.
+                val session = captureService.retainedSession(sessionId)
+                if (session == null) {
+                    captureExportError = "This capture session is no longer on disk"
+                } else {
+                    val directory = effectiveCaptureZipDir(fallback = session.directory.parentFile)
+                    val filename = com.indagium.capture.renderCaptureFilename(
+                        session.settings.filenameTemplate,
+                        session.device,
+                        session.startedEpochMs,
+                        com.indagium.capture.CaptureRange.ALL,
+                        session.exportCounter,
+                        session.settings.label,
+                    )
+                    // runInterruptible so cancelCaptureSnapshot() interrupts the blocking export
+                    // (the exporter checks for interruption and removes its temp archive).
+                    captureExportResult = runInterruptible {
+                        captureService.exportRetainedSession(sessionId, File(directory, filename), notes = preparedNotes)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
                 captureExportError = failure.message ?: "Retained capture export failed"
-                null
+            } finally {
+                captureExportBusy = false
+                captureExportBusyMessage = null
+                captureExportJob = null
+                requestHeapTrim("retained capture export")
             }
-            requestHeapTrim("retained capture export")
         }
     }
 
