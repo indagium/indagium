@@ -699,21 +699,23 @@ fun buildFullLineAnnotation(
 // backgrounds, one per field, rather than one background spanning the "  " gap between them — same
 // two-cell shape the foreground tint (tsColor/pidColor, already computed per-field by the caller)
 // already implies. Applied first, before the caller's own highlighter/keyword/search addStyle
-// passes below run — later-added spans paint on top (see this function's own doc), so a highlighter
-// hit, keyword-regex hit, or Find match landing on the ts/pid text still visually wins over this
-// wash exactly as before this feature existed.
+// passes below run. Those later styles are split at these field boundaries so Compose resolves
+// equal-sized spans in the intended layer order instead of letting nested field spans take over.
 private fun AnnotatedString.Builder.appendTsPidTid(
     entry: LogEntry,
     tsColor: Color,
     pidColor: Color,
     processDisplay: String?,
     pidFieldWidth: Int,
+    foregroundRanges: MutableList<Pair<Int, Int>>,
     cellBg: Color? = null,
 ) {
-    withStyle(SpanStyle(color = tsColor, background = cellBg ?: Color.Unspecified)) { append(entry.ts) }
+    appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = tsColor, background = cellBg ?: Color.Unspecified)) {
+        append(entry.ts)
+    }
     if (entry.pid > 0) {
         append("  ")
-        withStyle(SpanStyle(color = pidColor, background = cellBg ?: Color.Unspecified)) {
+        appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = pidColor, background = cellBg ?: Color.Unspecified)) {
             if (processDisplay != null) {
                 append(middleEllipsis(processDisplay, pidFieldWidth).padEnd(pidFieldWidth))
             } else {
@@ -723,6 +725,16 @@ private fun AnnotatedString.Builder.appendTsPidTid(
             append(entry.tid.toString().padStart(5))
         }
     }
+}
+
+private fun AnnotatedString.Builder.appendTrackedForegroundRange(
+    ranges: MutableList<Pair<Int, Int>>,
+    style: SpanStyle,
+    content: AnnotatedString.Builder.() -> Unit,
+) {
+    val start = length
+    withStyle(style) { content() }
+    if (start < length) ranges += start to length
 }
 
 // Change 3 (process-names rework): remaps a [start, end) offset pair computed against
@@ -885,15 +897,30 @@ internal fun buildLogLineRender(
     val wholeLineRule = lineHighlight.wholeLine
     val lineTextColor = wholeLineRule?.textColor?.takeUnless { suppressLineTextColor }
     val text = buildAnnotatedString {
-        appendTsPidTid(entry, lineTextColor ?: tsColor, lineTextColor ?: pidColor, processDisplay, pidFieldWidth, cellBg)
+        val foregroundRanges = mutableListOf<Pair<Int, Int>>()
+        appendTsPidTid(
+            entry,
+            lineTextColor ?: tsColor,
+            lineTextColor ?: pidColor,
+            processDisplay,
+            pidFieldWidth,
+            foregroundRanges,
+            cellBg,
+        )
         append("  ")
-        withStyle(SpanStyle(color = lineTextColor ?: entry.level.defaultColor, fontWeight = FontWeight.Bold)) {
+        appendTrackedForegroundRange(
+            foregroundRanges,
+            SpanStyle(color = lineTextColor ?: entry.level.defaultColor, fontWeight = FontWeight.Bold),
+        ) {
             append(entry.level.key.toString())
         }
         append("  ")
-        withStyle(SpanStyle(color = lineTextColor ?: tagColor)) { append(entry.tag); append(":") }
+        appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: tagColor)) {
+            append(entry.tag)
+            append(":")
+        }
         append(" ")
-        withStyle(SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
+        appendTrackedForegroundRange(foregroundRanges, SpanStyle(color = lineTextColor ?: msgColor)) { append(entry.msg) }
         val pidFieldDelta = pidFieldWidth - 5
         val pidFieldStart = entry.ts.length + 2
         val pidFieldEndVisible = pidFieldStart + 5
@@ -901,92 +928,131 @@ internal fun buildLogLineRender(
         fun remap(range: Pair<Int, Int>): Pair<Int, Int> =
             if (entry.pid <= 0) range else remapPidFieldRange(range, pidFieldStart, pidFieldEndVisible, pidFieldDelta)
         val renderedLength = length
-        addWholeLineStyles(wholeLineRule, lineTextColor, renderedLength)
-        addHighlighterSpans(lineHighlight.spans, lineText, renderedLength, ::remap)
-        keywordRegexFilter?.let { addKeywordRegexStyles(it, lineText, regexContext, ::remap) }
-        // Appended last so Find always wins visually; addStyle layers paint in insertion order.
-        searchHighlight?.let { addSearchStyles(it, lineText, regexContext, ::remap) }
+        val highlighterStyles = lineHighlight.spans.mapNotNull { span ->
+            remappedRange(span.start to span.end, renderedLength, ::remap)?.let { range ->
+                RenderedHighlightStyle(range.first, range.second, highlightSpanStyle(span, lineText))
+            }
+        }
+        val keywordRanges = keywordRegexFilter?.let { filter ->
+            remappedRanges(keywordRegexHighlightRanges(lineText, filter, regexContext), renderedLength, ::remap)
+        }.orEmpty()
+        val searchRanges = searchHighlight?.takeIf { it.query.isNotEmpty() }?.let { search ->
+            remappedRanges(
+                regexRanges(lineText, search.query, ignoreCase = !search.caseSensitive, regexContext = regexContext),
+                renderedLength,
+                ::remap,
+            )
+        }.orEmpty()
+        val boundaries = styleBoundaries(
+            renderedLength,
+            foregroundRanges,
+            highlighterStyles.map { it.start to it.end },
+            keywordRanges,
+            searchRanges,
+        )
+
+        addWholeLineStyles(wholeLineRule, lineTextColor, renderedLength, boundaries)
+        highlighterStyles.forEach { addStyleInSegments(it.style, it.start, it.end, boundaries) }
+        keywordRegexFilter?.let { filter ->
+            addStylesInRanges(
+                keywordRanges,
+                SpanStyle(
+                    background = filter.kwHighlightColor.copy(alpha = HL_MATCH_BACKGROUND_ALPHA),
+                    fontWeight = FontWeight.SemiBold,
+                ),
+                boundaries,
+            )
+        }
+        // Search retains its existing final priority over highlights and keyword matches.
+        searchHighlight?.let { search ->
+            val background = if (search.isCurrentRow) search.currentBg else search.matchBg
+            addStylesInRanges(searchRanges, SpanStyle(background = background, fontWeight = FontWeight.SemiBold), boundaries)
+        }
     }
     return LogLineRender(text, lineHighlight.wholeLine)
 }
 
-// Applies [style] to each raw (visibleLogLineText-coordinate) range once [remap]ped onto the text
-// built so far; a range that ends up empty or past the end is dropped.
-private fun AnnotatedString.Builder.addRemappedRanges(
+private data class RenderedHighlightStyle(val start: Int, val end: Int, val style: SpanStyle)
+
+// Maps a raw visible-line range onto the rendered row and discards ranges that do not fit.
+private fun remappedRanges(
     ranges: List<Pair<Int, Int>>,
+    renderedLength: Int,
     remap: (Pair<Int, Int>) -> Pair<Int, Int>,
-    style: SpanStyle,
-) {
-    val renderedLength = length
-    for (rawRange in ranges) {
-        val (s, e) = remap(rawRange)
-        if (s < e && e <= renderedLength) addStyle(style, s, e)
+): List<Pair<Int, Int>> = ranges.mapNotNull { remappedRange(it, renderedLength, remap) }
+
+private fun remappedRange(
+    range: Pair<Int, Int>,
+    renderedLength: Int,
+    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
+): Pair<Int, Int>? {
+    val (start, end) = remap(range)
+    return (start to end).takeIf { start < end && end <= renderedLength }
+}
+
+// Compose resolves nested SpanStyles by their range nesting, not merely by addStyle call order. Use
+// the union of every style layer's endpoints so each priority layer is applied to identical,
+// disjoint intervals; this preserves field colors while still letting later highlights/search win.
+private fun styleBoundaries(
+    renderedLength: Int,
+    vararg ranges: List<Pair<Int, Int>>,
+): List<Int> = buildList {
+    add(0)
+    add(renderedLength)
+    ranges.forEach { layer ->
+        layer.forEach { (start, end) ->
+            add(start)
+            add(end)
+        }
     }
+}.distinct().sorted()
+
+private fun AnnotatedString.Builder.addStyleInSegments(
+    style: SpanStyle,
+    start: Int,
+    end: Int,
+    boundaries: List<Int>,
+) {
+    val first = boundaries.binarySearch(start)
+    val last = boundaries.binarySearch(end)
+    if (first < 0 || last < 0) return
+    for (index in first until last) {
+        val from = boundaries[index]
+        val to = boundaries[index + 1]
+        if (from < to) addStyle(style, from, to)
+    }
+}
+
+private fun AnnotatedString.Builder.addStylesInRanges(
+    ranges: List<Pair<Int, Int>>,
+    style: SpanStyle,
+    boundaries: List<Int>,
+) {
+    ranges.forEach { (start, end) -> addStyleInSegments(style, start, end, boundaries) }
 }
 
 private fun AnnotatedString.Builder.addWholeLineStyles(
     rule: Highlighter?,
     textColor: Color?,
     renderedLength: Int,
+    boundaries: List<Int>,
 ) {
     // The two-space gaps between fields carry no span of their own; cover them too so the whole
     // line, every character, reads as the rule's text colour.
-    textColor?.let { addStyle(SpanStyle(color = it), 0, renderedLength) }
+    if (renderedLength > 0) {
+        textColor?.let { addStylesInRanges(listOf(0 to renderedLength), SpanStyle(color = it), boundaries) }
+    }
     if (rule == null || renderedLength <= 0) return
     val family = FontCatalog.resolveOrNull(rule.fontFamily)
     val weight = rule.bold?.let { if (it) FontWeight.Bold else FontWeight.Normal }
     val style = rule.italic?.let { if (it) FontStyle.Italic else FontStyle.Normal }
     if (family != null || weight != null || style != null) {
-        addStyle(SpanStyle(fontFamily = family, fontWeight = weight, fontStyle = style), 0, renderedLength)
+        addStylesInRanges(
+            listOf(0 to renderedLength),
+            SpanStyle(fontFamily = family, fontWeight = weight, fontStyle = style),
+            boundaries,
+        )
     }
-}
-
-private fun AnnotatedString.Builder.addHighlighterSpans(
-    spans: List<HlSpan>,
-    lineText: String,
-    renderedLength: Int,
-    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
-) {
-    spans.forEach { span ->
-        val (start, end) = remap(span.start to span.end)
-        if (start < end && end <= renderedLength) addStyle(highlightSpanStyle(span, lineText), start, end)
-    }
-}
-
-private fun AnnotatedString.Builder.addKeywordRegexStyles(
-    filter: Filter,
-    lineText: String,
-    regexContext: RegexEvaluationContext,
-    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
-) {
-    addRemappedRanges(
-        keywordRegexHighlightRanges(lineText, filter, regexContext),
-        remap,
-        SpanStyle(
-            background = filter.kwHighlightColor.copy(alpha = HL_MATCH_BACKGROUND_ALPHA),
-            fontWeight = FontWeight.SemiBold,
-        ),
-    )
-}
-
-private fun AnnotatedString.Builder.addSearchStyles(
-    searchHighlight: SearchHighlight,
-    lineText: String,
-    regexContext: RegexEvaluationContext,
-    remap: (Pair<Int, Int>) -> Pair<Int, Int>,
-) {
-    if (searchHighlight.query.isEmpty()) return
-    val background = if (searchHighlight.isCurrentRow) searchHighlight.currentBg else searchHighlight.matchBg
-    addRemappedRanges(
-        regexRanges(
-            lineText,
-            searchHighlight.query,
-            ignoreCase = !searchHighlight.caseSensitive,
-            regexContext = regexContext,
-        ),
-        remap,
-        SpanStyle(background = background, fontWeight = FontWeight.SemiBold),
-    )
 }
 
 // Native match spans use a translucent, semi-bold wash. Imported klogg colors retain their source
