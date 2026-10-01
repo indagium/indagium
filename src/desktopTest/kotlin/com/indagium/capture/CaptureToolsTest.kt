@@ -109,6 +109,15 @@ class CaptureToolsTest {
 
         val audioOff = tools.scrcpyMirrorSpec("PHONE", CaptureSettings(audio = false))
         assertFalse(audioOff.command.contains("--no-audio"))
+        // No audio flags on 1.x, so the visible window never "has audio" that could be retried away.
+        assertFalse(tools.scrcpyMirrorUsesAudio(CaptureSettings(audio = true)))
+    }
+
+    @Test
+    fun mirrorUsesAudioOnlyWhenTheSettingIsOnAndTheHostSupportsAudioFlags() {
+        val tools = CaptureTools(CaptureExecutable("/usr/bin/adb"), CaptureExecutable("/usr/bin/scrcpy"), FakeCaptureRunner())
+        assertTrue(tools.scrcpyMirrorUsesAudio(CaptureSettings(audio = true)))
+        assertFalse(tools.scrcpyMirrorUsesAudio(CaptureSettings(audio = false)))
     }
 
     @Test

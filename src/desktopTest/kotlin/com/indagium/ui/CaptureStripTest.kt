@@ -3,6 +3,7 @@ package com.indagium.ui
 import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
+import com.indagium.capture.MIRROR_AUDIO_FALLBACK_DIAGNOSTIC
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.model.AnnBlock
@@ -43,6 +44,15 @@ class CaptureStripTest {
             ),
         )
         assertNull(latestMicrophoneCaptureWarning(listOf("Audio mixer dropped late samples.")))
+    }
+
+    @Test
+    fun mirrorAudioFallbackShowsAShortNoticeOnlyAfterTheRetryDiagnostic() {
+        assertEquals(
+            "scrcpy window reopened without sound (audio device error)",
+            latestMirrorAudioFallbackNotice(listOf("scrcpy mirror: ERROR: x", MIRROR_AUDIO_FALLBACK_DIAGNOSTIC)),
+        )
+        assertNull(latestMirrorAudioFallbackNotice(listOf("scrcpy mirror: ERROR: Could not open audio device")))
     }
 
     @Test

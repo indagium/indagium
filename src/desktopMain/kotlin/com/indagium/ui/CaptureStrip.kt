@@ -90,6 +90,7 @@ import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureRange
 import com.indagium.capture.CaptureSession
+import com.indagium.capture.MIRROR_AUDIO_FALLBACK_DIAGNOSTIC
 import com.indagium.capture.RecorderSnapshot
 import com.indagium.capture.RecorderState
 import com.indagium.capture.effectiveMirrorMode
@@ -508,6 +509,14 @@ internal fun latestMicrophoneCaptureWarning(diagnostics: List<String>): String? 
     "microphone" in lower && listOf("unavailable", "could not", "failed", "stopped", "denied").any(lower::contains)
 }
 
+/** Short strip notice once the visible scrcpy window was reopened without sound after an audio crash. */
+internal fun latestMirrorAudioFallbackNotice(diagnostics: List<String>): String? =
+    if (diagnostics.any { it.startsWith(MIRROR_AUDIO_FALLBACK_DIAGNOSTIC) }) {
+        "scrcpy window reopened without sound (audio device error)"
+    } else {
+        null
+    }
+
 /** 48dp live-capture chrome rendered only above an active streaming log tab. */
 @Composable
 internal fun CaptureStrip(
@@ -731,7 +740,9 @@ internal fun CaptureStrip(
         // screenshot status but not the two real failures above.
         val noVideoWarning = captureNoVideoWarning(snapshot)
         val warning = mirrorError ?: microphoneWarning ?: noVideoWarning
-        val statusLine = warning ?: state.captureScreenshotStatus
+        // Informational, not a failure: the window is up again, just silent. Lowest priority and not red.
+        val mirrorAudioNotice = latestMirrorAudioFallbackNotice(snapshot.diagnostics)
+        val statusLine = warning ?: mirrorAudioNotice ?: state.captureScreenshotStatus
         if (statusLine != null) {
             AppText(
                 statusLine,
