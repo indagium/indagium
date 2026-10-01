@@ -21,6 +21,7 @@ import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.captureToImage
@@ -32,10 +33,12 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performMouseInput
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.pressKey
+import androidx.compose.ui.test.rightClick
 import androidx.compose.ui.unit.dp
 import com.indagium.model.AppSettings
 import com.indagium.model.Filter
@@ -53,6 +56,7 @@ import com.indagium.ui.HighlighterColorPicker
 import com.indagium.ui.HighlighterSection
 import com.indagium.ui.HighlighterSectionState
 import com.indagium.ui.LocalTheme
+import com.indagium.ui.MAX_CUSTOM_HIGHLIGHT_COLORS
 import com.indagium.ui.WARM_PAPER
 import com.indagium.ui.resolvedInterfaceFontFamily
 import com.indagium.ui.resolvedLogFontFamily
@@ -132,8 +136,9 @@ class HighlighterColorAndStyleUiTest {
 
     @Test
     fun pickerPagesRectangleAndPersistsTransparentHexCustomColors() {
-        var selected by mutableStateOf(Color.Black)
-        var custom by mutableStateOf(emptyList<Color>())
+        val savedAtStart = Color(0x80445566)
+        var selected by mutableStateOf(savedAtStart)
+        var custom by mutableStateOf(listOf(savedAtStart))
         var columns by mutableIntStateOf(5)
         var open by mutableStateOf(true)
         var customEditorExpanded by mutableStateOf(true)
@@ -159,30 +164,18 @@ class HighlighterColorAndStyleUiTest {
         }
 
         rule.onNodeWithTag("functional-picker-hex").assertExists()
+        rule.onNodeWithTag("functional-picker-mode-pages").assertDoesNotExist()
         recordScreenshot("functional-picker-picker", "palette-custom-expanded-warm-paper")
-        rule.onNodeWithText("Page 1 of 4").assertExists()
-        rule.onNodeWithTag("functional-picker-next-page").performClick()
-        rule.onNodeWithText("Page 2 of 4").assertExists()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("functional-picker-prev-page").performClick()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
         rule.onNodeWithTag("functional-picker-swatch-25").performClick()
         rule.runOnIdle { assertEquals(HL_COLORS[25], selected) }
-        rule.onNodeWithTag("functional-picker-prev-page").performClick()
-        rule.onNodeWithText("Page 1 of 4").assertExists()
-
-        rule.onNodeWithTag("functional-picker-mode-rectangle").performClick()
-        rule.runOnIdle { assertEquals(10, columns) }
-        rule.onNodeWithTag("functional-picker-palette").performScrollToNode(
-            androidx.compose.ui.test.hasTestTag("functional-picker-swatch-99"),
-        )
-        rule.onNodeWithTag("functional-picker-swatch-99").performClick()
-        rule.runOnIdle { assertEquals(HL_COLORS[99], selected) }
+        rule.onNodeWithText("Page 1 of 2").assertExists()
 
         val oldColor = selected
-        rule.onNodeWithTag("functional-picker-custom-toggle").performClick()
-        rule.onNodeWithTag("functional-picker-hex").assertDoesNotExist()
         rule.onNodeWithTag("functional-picker-picker").performKeyInput { pressKey(Key.Escape) }
         rule.onNodeWithTag("functional-picker-trigger").performClick()
-        rule.onNodeWithTag("functional-picker-hex").assertDoesNotExist()
-        rule.onNodeWithTag("functional-picker-custom-toggle").performClick()
         rule.onNodeWithTag("functional-picker-hex").assertExists()
         rule.onNodeWithTag("functional-picker-hex").performTextClearance()
         rule.onNodeWithTag("functional-picker-hex").performTextInput("#BADG")
@@ -192,10 +185,95 @@ class HighlighterColorAndStyleUiTest {
 
         rule.onNodeWithTag("functional-picker-hex").performTextClearance()
         rule.onNodeWithTag("functional-picker-hex").performTextInput("#80445566")
+        rule.onNodeWithTag("functional-picker-save").assertIsNotEnabled()
+        rule.onNodeWithTag("functional-picker-hex").performTextClearance()
+        rule.onNodeWithTag("functional-picker-hex").performTextInput("#80667788")
         rule.onNodeWithTag("functional-picker-save").performClick()
-        rule.runOnIdle { assertEquals(listOf(Color(0x80445566)), custom) }
-        rule.onAllNodesWithTag("functional-picker-delete-custom")[0].performClick()
-        rule.runOnIdle { assertTrue(custom.isEmpty()) }
+        rule.runOnIdle { assertEquals(listOf(savedAtStart, Color(0x80667788)), custom) }
+        rule.onNodeWithTag("functional-picker-hex").performTextClearance()
+        rule.onNodeWithTag("functional-picker-hex").performTextInput("#8044AABB")
+        rule.onNodeWithTag("functional-picker-apply").performClick()
+        rule.runOnIdle { assertEquals(Color(0x8044AABB), selected) }
+        rule.onNodeWithTag("functional-picker-next-page").performClick()
+        rule.onNodeWithTag("functional-picker-swatch-100").performMouseInput { rightClick() }
+        rule.onNodeWithTag("functional-picker-delete-menu").assertExists()
+        rule.onNodeWithTag("functional-picker-delete-menu").performClick()
+        rule.runOnIdle {
+            assertEquals(Color(0x8044AABB), selected, "deleting a saved color must not change the current selection")
+            assertEquals(listOf(Color(0x80667788)), custom)
+        }
+        rule.onNodeWithTag("functional-picker-picker").performKeyInput { pressKey(Key.Escape) }
+        rule.onNodeWithTag("functional-picker-picker").assertDoesNotExist()
+    }
+
+    @Test
+    fun pickerUsesFixedPagesAndReopensOnTheSelectedColorWithoutJumpingDuringNavigation() {
+        val custom = listOf(Color(0x80112233), Color(0x80445566))
+        var selected by mutableStateOf(Color(0xFF010203))
+        var open by mutableStateOf(true)
+        rule.setContent {
+            HighlighterColorPicker(
+                color = selected,
+                onColorChange = { selected = it },
+                customColors = custom,
+                onSaveCustomColor = {},
+                onDeleteCustomColor = {},
+                paletteColumns = 5,
+                onPaletteColumnsChange = {},
+                pickerOpen = open,
+                onPickerOpenChange = { open = it },
+                testTagPrefix = "fixed-picker",
+                customColorEditorExpanded = false,
+            )
+        }
+
+        rule.onNodeWithText("Page 1 of 2").assertExists()
+        rule.runOnIdle { selected = custom.last() }
+        rule.onNodeWithText("Page 1 of 2").assertExists()
+        rule.onNodeWithTag("fixed-picker-picker").performKeyInput { pressKey(Key.Escape) }
+        rule.onNodeWithTag("fixed-picker-trigger").performClick()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onAllNodesWithTag("fixed-picker-empty-slot").assertCountEquals(98)
+        rule.onNodeWithTag("fixed-picker-prev-page").performClick()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
+        rule.onNodeWithTag("fixed-picker-swatch-25").performClick()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
+        rule.onNodeWithTag("fixed-picker-picker").performKeyInput { pressKey(Key.Escape) }
+        rule.onNodeWithTag("fixed-picker-trigger").performClick()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
+        rule.onNodeWithTag("fixed-picker-next-page").performClick()
+        rule.onNodeWithTag("fixed-picker-swatch-101").performClick()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("fixed-picker-picker").performKeyInput { pressKey(Key.Escape) }
+        rule.onNodeWithTag("fixed-picker-trigger").performClick()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+    }
+
+    @Test
+    fun pickerShowsCustomColorLimitInsteadOfSilentlyIgnoringSave() {
+        val colors = (0 until MAX_CUSTOM_HIGHLIGHT_COLORS).map { index ->
+            Color((0x80 shl 24) or (index shl 16) or (index shl 8) or index)
+        }
+        rule.setContent {
+            HighlighterColorPicker(
+                color = colors.last(),
+                onColorChange = {},
+                customColors = colors,
+                onSaveCustomColor = {},
+                onDeleteCustomColor = {},
+                paletteColumns = 10,
+                onPaletteColumnsChange = {},
+                pickerOpen = true,
+                onPickerOpenChange = {},
+                testTagPrefix = "cap-picker",
+            )
+        }
+        rule.onNodeWithText("Page 4 of 4").assertExists()
+        rule.onAllNodesWithTag("cap-picker-empty-slot").assertCountEquals(44)
+        rule.onNodeWithTag("cap-picker-custom-color-limit").assertIsDisplayed()
+        rule.onNodeWithTag("cap-picker-hex").performTextClearance()
+        rule.onNodeWithTag("cap-picker-hex").performTextInput("#FE123456")
+        rule.onNodeWithTag("cap-picker-save").assertIsNotEnabled()
     }
 
     @Test
@@ -233,7 +311,7 @@ class HighlighterColorAndStyleUiTest {
         var columns by mutableIntStateOf(5)
         var colorPicked: Color? = null
         var ordinaryHighlightClicks = 0
-        var custom by mutableStateOf(listOf(Color(0x80445566)))
+        var custom by mutableStateOf(listOf(Color(0x80112233), Color(0x80445566)))
         rule.setContent {
             CompositionLocalProvider(LocalTheme provides WARM_PAPER) {
                 Box(Modifier.width(640.dp).background(WARM_PAPER.p)) {
@@ -242,7 +320,7 @@ class HighlighterColorAndStyleUiTest {
                         onExclude = {},
                         onHighlight = { ordinaryHighlightClicks++ },
                         onHighlightColor = { colorPicked = it },
-                        highlightAutoColor = Color.Yellow,
+                        highlightAutoColor = custom.last(),
                         preferPickerLeft = false,
                         customColors = custom,
                         paletteColumns = columns,
@@ -253,15 +331,29 @@ class HighlighterColorAndStyleUiTest {
         }
 
         rule.onNodeWithTag("context-highlight-trigger").performClick()
-        rule.onNodeWithText("Page 1 of 5").assertExists()
-        recordScreenshot("context-highlight-popup", "context-palette-page-1-warm-paper")
+        rule.onNodeWithText("Page 5 of 5").assertExists()
+        rule.onAllNodesWithTag("context-highlight-empty-slot").assertCountEquals(23)
+        val lastPopupBounds = rule.onNodeWithTag("context-highlight-popup").fetchSemanticsNode().boundsInRoot
+        val lastPagePrevBounds = rule.onNodeWithTag("context-highlight-prev-page").fetchSemanticsNode().boundsInRoot
+        recordScreenshot("context-highlight-popup", "context-palette-page-5-warm-paper")
+        rule.onNodeWithTag("context-highlight-prev-page").performClick()
+        rule.onNodeWithText("Page 4 of 5").assertExists()
+        val fullPopupBounds = rule.onNodeWithTag("context-highlight-popup").fetchSemanticsNode().boundsInRoot
+        val fullPagePrevBounds = rule.onNodeWithTag("context-highlight-prev-page").fetchSemanticsNode().boundsInRoot
+        assertEquals(lastPopupBounds.size, fullPopupBounds.size)
+        assertEquals(lastPopupBounds.top, fullPopupBounds.top)
+        assertEquals(lastPopupBounds.left, fullPopupBounds.left)
+        assertEquals(lastPagePrevBounds.top, fullPagePrevBounds.top)
+        assertEquals(lastPagePrevBounds.left, fullPagePrevBounds.left)
         rule.onNodeWithTag("context-highlight-next-page").performClick()
-        rule.onNodeWithText("Page 2 of 5").assertExists()
-        recordScreenshot("context-highlight-popup", "context-palette-page-2-warm-paper")
+        rule.onNodeWithText("Page 5 of 5").assertExists()
+        recordScreenshot("context-highlight-popup", "context-palette-page-5-warm-paper-repeat")
         rule.onNodeWithTag("context-highlight-mode-rectangle").performClick()
         rule.runOnIdle { assertEquals(10, columns) }
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("context-highlight-prev-page").performClick()
+        rule.onNodeWithText("Page 1 of 2").assertExists()
         recordScreenshot("context-highlight-popup", "context-palette-rectangle-warm-paper")
-        rule.onNodeWithTag("context-highlight-palette").performScrollToNode(hasTestTag("context-highlight-swatch-99"))
         rule.onNodeWithTag("context-highlight-swatch-99").performClick()
         rule.runOnIdle {
             assertEquals(HL_COLORS[99], colorPicked)
@@ -271,6 +363,57 @@ class HighlighterColorAndStyleUiTest {
         rule.runOnIdle {
             assertEquals(1, ordinaryHighlightClicks)
             assertEquals(HL_COLORS[99], colorPicked, "the ordinary action remains separate from color selection")
+        }
+    }
+
+    @Test
+    fun contextSecondaryClickDeletesOnlySavedColorsWithoutHighlighting() {
+        val first = Color(0x80112233)
+        val second = Color(0x80445566)
+        var custom by mutableStateOf(listOf(first, second))
+        var highlightCalls = 0
+        var colorCalls = 0
+        rule.setContent {
+            CompositionLocalProvider(LocalTheme provides WARM_PAPER) {
+                Box(Modifier.width(640.dp).background(WARM_PAPER.p)) {
+                    CtxTagActions(
+                        onInclude = {},
+                        onExclude = {},
+                        onHighlight = { highlightCalls++ },
+                        onHighlightColor = { colorCalls++ },
+                        highlightAutoColor = second,
+                        preferPickerLeft = false,
+                        customColors = custom,
+                        onDeleteCustomColor = { deleted -> custom = custom.filterNot { it == deleted } },
+                        paletteColumns = 10,
+                        onPaletteColumnsChange = {},
+                    )
+                }
+            }
+        }
+        rule.onNodeWithTag("context-highlight-trigger").performClick()
+        rule.onNodeWithText("Page 2 of 2").assertExists()
+        rule.onNodeWithTag("context-highlight-swatch-101").performMouseInput { rightClick() }
+        rule.onNodeWithTag("context-highlight-delete-menu").assertExists()
+        rule.runOnIdle {
+            assertEquals(0, highlightCalls)
+            assertEquals(0, colorCalls)
+            assertEquals(listOf(first, second), custom)
+        }
+        rule.onNodeWithTag("context-highlight-delete-menu").performClick()
+        rule.runOnIdle {
+            assertEquals(listOf(first), custom)
+            assertEquals(0, highlightCalls)
+            assertEquals(0, colorCalls)
+        }
+        // Presets are never deletable, and secondary-click never activates the normal highlight.
+        rule.onNodeWithTag("context-highlight-trigger").performClick()
+        rule.onNodeWithTag("context-highlight-swatch-0").performMouseInput { rightClick() }
+        rule.onNodeWithTag("context-highlight-delete-menu").assertDoesNotExist()
+        rule.runOnIdle {
+            assertEquals(0, highlightCalls)
+            assertEquals(0, colorCalls)
+            assertEquals(listOf(first), custom)
         }
     }
 

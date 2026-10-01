@@ -926,6 +926,15 @@ fun App(
                                                 highlightAutoColor = e.highlightAutoColor,
                                                 preferPickerLeft = e.preferPickerLeft,
                                                 customColors = customHighlightColors(state.settings.highlighterCustomColors),
+                                                onDeleteCustomColor = { color ->
+                                                    state.updateSettings { settings ->
+                                                        settings.copy(
+                                                            highlighterCustomColors = settings.highlighterCustomColors.filterNot {
+                                                                parseHighlightHex(it) == color
+                                                            },
+                                                        )
+                                                    }
+                                                },
                                                 paletteColumns = state.settings.highlighterPaletteColumns,
                                                 onPaletteColumnsChange = { columns ->
                                                     state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }
@@ -972,6 +981,15 @@ fun App(
                                                 highlightAutoColor = e.highlightAutoColor,
                                                 preferPickerLeft = e.preferPickerLeft,
                                                 customColors = customHighlightColors(state.settings.highlighterCustomColors),
+                                                onDeleteCustomColor = { color ->
+                                                    state.updateSettings { settings ->
+                                                        settings.copy(
+                                                            highlighterCustomColors = settings.highlighterCustomColors.filterNot {
+                                                                parseHighlightHex(it) == color
+                                                            },
+                                                        )
+                                                    }
+                                                },
                                                 paletteColumns = state.settings.highlighterPaletteColumns,
                                                 onPaletteColumnsChange = { columns ->
                                                     state.updateSettings { it.copy(highlighterPaletteColumns = if (columns >= 10) 10 else 5) }

@@ -1254,8 +1254,12 @@ draft is separate from the selected name so reopening it does not hide other fam
 controls expose nullable overrides as explicit Default/On/Off choices. Font lists use a visible
 scrollbar, and dropdown hover feedback is clipped to the control shape. The color popup uses the
 original context-menu swatch styling; its advanced HSV/HEX editor starts open and has a button
-that persists its expansion preference in keyed settings. The shared compact palette grid also
-serves context-menu background actions. The active-count chip toggles only the rule list.
+that persists its expansion preference in keyed settings. The shared palette reserves every cell
+on each page so partial pages cannot shrink hover-driven popups. Section pickers use 10 × 10 pages;
+context-menu background pickers retain the persisted 5 × 5 / 10 × 10 choice. The initial page contains
+the selected colour, while manual page navigation remains stable until the popup is reopened or
+its layout changes. Up to 256 saved colours share the preset grid; their context menu can delete
+the saved entry. The separate duplicate Saved colors strip is removed. The active-count chip toggles only the rule list.
 Whole-section Highlighters visibility is an independent filter-panel UI state,
 persisted at the end of its positional token without changing the older list-only expansion field.
 

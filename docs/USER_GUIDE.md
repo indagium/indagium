@@ -339,13 +339,15 @@ weight or non-italic text. These styles apply to the matched text or the whole
 line according to the rule's **Match / Line** setting. Right-click highlighting keeps its usual
 background-colour behaviour; edit the rule in the filter panel to apply additional text styles.
 
-Both colour pickers offer the same 100 preset colours and saved custom colours. Switch between
-pages of **5 × 5** swatches with previous/next arrows and an expanded rectangle with ten columns;
-Indagium remembers your choice. Create a colour visually, including its transparency, or enter
+Both colour pickers offer the same 100 preset colours and up to **256 custom colours**. The section
+picker uses pages of **10 × 10** swatches. The context picker lets you choose **5 × 5** or **10 × 10**
+pages, and Indagium remembers that choice. Page sizes stay fixed, including the last page, and each
+popup opens on the page containing its selected colour. Create a colour visually, including its transparency, or enter
 `#RRGGBB` / `#AARRGGBB` in the expandable **Custom color** editor. The editor starts open; its button
 lets you collapse it, and Indagium remembers your choice. Save a colour for reuse in either picker,
-or remove it from your custom palette. The context-menu background picker uses the same compact
-palette layout. Click the **Highlighters** header to collapse the whole section, including its add
+or right-click a custom swatch and choose **Delete color** to remove it from your palette. Custom
+swatches share the main paged grid; there is no separate Saved colors strip. Built-in presets remain
+available. Click the **Highlighters** header to collapse the whole section, including its add
 form; Indagium remembers that choice. Click the active-count chip to collapse only the rule list.
 Saved filters, their JSON export/import and the restored session retain each rule's colours and
 text styles. The JSON filter library also carries your saved custom palette; importing it merges
