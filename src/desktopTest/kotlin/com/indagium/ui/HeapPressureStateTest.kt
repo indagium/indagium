@@ -4,6 +4,9 @@ import com.indagium.utils.HeapPressure
 import com.indagium.utils.HeapPressureMonitor
 import com.indagium.utils.HeapSnapshot
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -95,6 +98,40 @@ class HeapPressureStateTest {
             assertEquals(HeapPressure.WARNING, app.heapPressure)
             app.close()
             assertEquals(0, monitor.registeredListenerCount, "close stops the monitor")
+        } finally {
+            app.close()
+        }
+    }
+
+    // Two collector beans notify concurrently: the thread that decided WARNING is slow to deliver, the
+    // one that decided CRITICAL is not. AppState must still end at the monitor's real level (a stale
+    // WARNING would let resumeCaptureLogView proceed at real CRITICAL).
+    @Test
+    fun interleavedNotificationsLeaveAppStateAtTheMonitorsRealLevel() {
+        val app = newApp()
+        try {
+            val monitor = HeapPressureMonitor(maxBytes = { 10 * gb }, requestFullGc = {}, currentHeapUsedBytes = { 0L })
+            app.heapPressureMonitor = monitor
+            val warningEntered = CountDownLatch(1)
+            val releaseWarning = CountDownLatch(1)
+            monitor.setOnChange { level, snapshot ->
+                if (level == HeapPressure.WARNING) {
+                    warningEntered.countDown()
+                    assertTrue(releaseWarning.await(10, TimeUnit.SECONDS))
+                }
+                app.onHeapPressureChanged(level, snapshot)
+            }
+
+            val a = thread { monitor.onGc(usedAfterGcBytes = 8 * gb, isFullGc = false) } // NORMAL -> WARNING
+            assertTrue(warningEntered.await(5, TimeUnit.SECONDS))
+            val b = thread { monitor.onGc(usedAfterGcBytes = 9 * gb, isFullGc = true) } // WARNING -> CRITICAL
+            b.join(5_000)
+            releaseWarning.countDown()
+            a.join(5_000)
+
+            assertEquals(HeapPressure.CRITICAL, monitor.pressure)
+            assertEquals(HeapPressure.CRITICAL, app.heapPressure)
+            assertEquals(9 * gb, app.heapSnapshot?.usedAfterGcBytes)
         } finally {
             app.close()
         }

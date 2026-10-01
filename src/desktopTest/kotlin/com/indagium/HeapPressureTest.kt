@@ -7,6 +7,15 @@ import com.indagium.utils.HeapPressureDecision
 import com.indagium.utils.HeapPressureMonitor
 import com.indagium.utils.HeapSnapshot
 import com.indagium.utils.nextHeapPressure
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import javax.management.ListenerNotFoundException
+import javax.management.MBeanNotificationInfo
+import javax.management.NotificationEmitter
+import javax.management.NotificationFilter
+import javax.management.NotificationListener
+import kotlin.concurrent.thread
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
@@ -250,5 +259,122 @@ class HeapPressureTest {
         monitor.stop()
         monitor.stop()
         assertTrue(monitor.estimatedFreeBytes() >= 0)
+    }
+
+    // Two collector beans can notify at once. The level decided first must be delivered first: a
+    // slow thread that decided NORMAL->WARNING used to deliver after the thread that decided
+    // WARNING->CRITICAL, leaving the consumer on WARNING while the monitor was CRITICAL.
+    @Test
+    fun levelChangesAreDeliveredInDecisionOrderEvenWhenAnEarlierCallbackIsSlow() {
+        val f = Fixture()
+        val delivered = CopyOnWriteArrayList<HeapPressure>()
+        val firstEntered = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        f.monitor.setOnChange { level, _ ->
+            if (delivered.isEmpty()) {
+                firstEntered.countDown()
+                assertTrue(releaseFirst.await(10, TimeUnit.SECONDS))
+            }
+            delivered += level
+        }
+        val a = thread { f.monitor.onGc(750, isFullGc = false) } // NORMAL -> WARNING, callback parked
+        assertTrue(firstEntered.await(5, TimeUnit.SECONDS))
+        val b = thread { f.monitor.onGc(900, isFullGc = true) } // WARNING -> CRITICAL, decided second
+        b.join(5_000)
+        assertEquals(HeapPressure.CRITICAL, f.monitor.pressure)
+
+        releaseFirst.countDown()
+        a.join(5_000)
+
+        assertEquals(listOf(HeapPressure.WARNING, HeapPressure.CRITICAL), delivered.toList())
+    }
+
+    @Test
+    fun readingsAndLevelChangesShareOneDeliveryOrder() {
+        val f = Fixture()
+        val events = CopyOnWriteArrayList<String>()
+        val firstEntered = CountDownLatch(1)
+        val releaseFirst = CountDownLatch(1)
+        f.monitor.setOnChange { level, _ ->
+            events += "level:$level"
+            firstEntered.countDown()
+            assertTrue(releaseFirst.await(10, TimeUnit.SECONDS))
+        }
+        f.monitor.setOnReading { events += "reading:${it.usedAfterGcBytes}" }
+        val a = thread { f.monitor.onGc(750, isFullGc = false) }
+        assertTrue(firstEntered.await(5, TimeUnit.SECONDS))
+        f.now += 2_000
+        val b = thread { f.monitor.onGc(760, isFullGc = false) } // same level, new reading
+        b.join(5_000)
+        releaseFirst.countDown()
+        a.join(5_000)
+        assertEquals(listOf("level:WARNING", "reading:750", "reading:760"), events.toList())
+    }
+
+    @Test
+    fun aCallbackThatThrowsDoesNotStopLaterDeliveries() {
+        val f = Fixture()
+        val readings = mutableListOf<Long>()
+        f.monitor.setOnChange { _, _ -> error("boom") }
+        f.monitor.setOnReading { readings += it.usedAfterGcBytes }
+        f.monitor.onGc(750, isFullGc = false)
+        f.now += 2_000
+        f.monitor.onGc(300, isFullGc = false)
+        assertEquals(listOf(750L, 300L), readings)
+    }
+
+    // ---- listener registration ----
+
+    private class FakeEmitter(private val failOnAdd: Boolean = false) : NotificationEmitter {
+        val listeners = mutableListOf<NotificationListener>()
+
+        override fun addNotificationListener(listener: NotificationListener, filter: NotificationFilter?, handback: Any?) {
+            if (failOnAdd) error("bean refused the listener")
+            listeners += listener
+        }
+
+        override fun removeNotificationListener(listener: NotificationListener) {
+            if (!listeners.remove(listener)) throw ListenerNotFoundException()
+        }
+
+        override fun removeNotificationListener(listener: NotificationListener, filter: NotificationFilter?, handback: Any?) =
+            removeNotificationListener(listener)
+
+        override fun getNotificationInfo(): Array<MBeanNotificationInfo> = emptyArray()
+    }
+
+    // A bean that throws on add must not leave the listeners already added to earlier beans
+    // untracked: stop() could not remove them and a later start() would double-process every GC.
+    @Test
+    fun aBeanThatRefusesTheListenerLeavesNoUntrackedListenerBehind() {
+        val first = FakeEmitter()
+        val broken = FakeEmitter(failOnAdd = true)
+        val third = FakeEmitter()
+        val monitor = HeapPressureMonitor(emitters = { listOf(first, broken, third) })
+
+        monitor.start { _, _ -> }
+        assertEquals(2, monitor.registeredListenerCount, "the healthy beans are still watched")
+        assertEquals(1, first.listeners.size)
+        assertEquals(1, third.listeners.size)
+
+        monitor.stop()
+        assertEquals(0, monitor.registeredListenerCount)
+        assertTrue(first.listeners.isEmpty(), "stop() must remove the listener added before the failure")
+        assertTrue(third.listeners.isEmpty())
+    }
+
+    @Test
+    fun startAgainAfterAPartialFailureDoesNotDoubleRegister() {
+        val first = FakeEmitter()
+        val broken = FakeEmitter(failOnAdd = true)
+        val monitor = HeapPressureMonitor(emitters = { listOf(first, broken) })
+
+        monitor.start { _, _ -> }
+        monitor.start { _, _ -> } // idempotent: replaces, never stacks
+        assertEquals(1, first.listeners.size, "a second start must not add a second listener to the same bean")
+        assertEquals(1, monitor.registeredListenerCount)
+
+        monitor.stop()
+        assertTrue(first.listeners.isEmpty())
     }
 }

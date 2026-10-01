@@ -121,17 +121,26 @@ internal fun nextHeapPressure(
  * `"G1 Concurrent GC"` pause notifications, which are not full collections. So only "major" counts.
  *
  * **Hysteresis** is in [nextHeapPressure]. [onChange] runs only when the level changes (the optional `onReading` of [start] receives every
- * after-GC reading instead, throttled to one per [HEAP_READING_PUBLISH_INTERVAL_MS]), on the JMX
+ * after-GC reading instead, throttled to one per [HEAP_READING_PUBLISH_INTERVAL_MS]), on a JMX
  * notification thread and never while an internal lock is held (two beans may notify concurrently, so
  * callers must tolerate being called from different threads and should marshal to their own thread).
  *
- * The seams ([maxBytes], [requestFullGc], [nowMs], [currentHeapUsedBytes]) exist for tests.
+ * **Delivery is ordered.** Callbacks are queued in the order the decisions were made (under [lock])
+ * and drained by one thread at a time, so a slower notification thread can never deliver an older
+ * level after a newer one: the last callback a consumer sees always carries the monitor's real level.
+ * A thread that finds a drain already running enqueues and returns; the draining thread delivers its
+ * event too.
+ *
+ * The seams ([maxBytes], [requestFullGc], [nowMs], [currentHeapUsedBytes], [emitters]) exist for tests.
  */
 internal class HeapPressureMonitor(
     private val maxBytes: () -> Long = { Runtime.getRuntime().maxMemory() },
     private val requestFullGc: () -> Unit = ::requestFullGcOnDaemonThread,
     private val nowMs: () -> Long = { System.nanoTime() / NANOS_PER_MS },
     private val currentHeapUsedBytes: () -> Long = { ManagementFactory.getMemoryMXBean().heapMemoryUsage.used },
+    private val emitters: () -> List<NotificationEmitter> = {
+        ManagementFactory.getGarbageCollectorMXBeans().filterIsInstance<NotificationEmitter>()
+    },
 ) {
     private val lock = Any()
     private var level = HeapPressure.NORMAL
@@ -149,6 +158,10 @@ internal class HeapPressureMonitor(
     private var onChange: ((HeapPressure, HeapSnapshot) -> Unit)? = null
     private var onReading: ((HeapSnapshot) -> Unit)? = null
     private val registered = mutableListOf<Pair<NotificationEmitter, NotificationListener>>()
+
+    // Callback deliveries in decision order, drained by one thread at a time (see class doc). Guarded by [lock].
+    private val deliveries = ArrayDeque<() -> Unit>()
+    private var delivering = false
 
     // Lock-free evidence for diagnostics (see [diagnosticSummary]): were GC notifications arriving at all?
     private val gcNotificationCount = AtomicLong(0)
@@ -177,13 +190,17 @@ internal class HeapPressureMonitor(
                 .map { it.name }
                 .toSet()
             val listener = NotificationListener { notification, _ -> handleNotification(notification, heapPools) }
-            val added = ManagementFactory.getGarbageCollectorMXBeans()
-                .filterIsInstance<NotificationEmitter>()
-                .map { emitter ->
+            // Each listener is recorded the moment it is added, so `registered` always matches what is
+            // really attached (stop() can remove it) even when a later bean throws; one bad bean does
+            // not stop the others from being watched.
+            emitters().forEach { emitter ->
+                try {
                     emitter.addNotificationListener(listener, null, null)
-                    emitter to listener
+                    synchronized(lock) { registered += emitter to listener }
+                } catch (t: Throwable) {
+                    log("heap pressure monitor could not listen to a collector bean: $t")
                 }
-            synchronized(lock) { registered += added }
+            }
             activeMonitor = this
         } catch (t: Throwable) {
             log("heap pressure monitor failed to start: $t")
@@ -209,6 +226,7 @@ internal class HeapPressureMonitor(
         val toRemove = synchronized(lock) {
             onChange = null
             onReading = null
+            deliveries.clear()
             registered.toList().also { registered.clear() }
         }
         toRemove.forEach { (emitter, listener) -> runCatching { emitter.removeNotificationListener(listener) } }
@@ -232,10 +250,6 @@ internal class HeapPressureMonitor(
     @Suppress("TooGenericExceptionCaught")
     internal fun onGc(usedAfterGcBytes: Long, isFullGc: Boolean) {
         try {
-            var changeTo: Pair<HeapPressure, HeapSnapshot>? = null
-            var callback: ((HeapPressure, HeapSnapshot) -> Unit)? = null
-            var readingCallback: ((HeapSnapshot) -> Unit)? = null
-            var readingSnapshot: HeapSnapshot? = null
             var confirm = false
             synchronized(lock) {
                 val snap = HeapSnapshot(usedAfterGcBytes.coerceAtLeast(0L), maxBytes())
@@ -252,27 +266,48 @@ internal class HeapPressureMonitor(
                 if (decision.level != level) {
                     level = decision.level
                     resetConfirmBackoff()
-                    changeTo = decision.level to snap
-                    callback = onChange
+                    val newLevel = decision.level
+                    val callback = onChange
+                    deliveries.addLast {
+                        log("heap pressure -> $newLevel (occupancy ${"%.2f".format(snap.occupancy)}, fullGc=$isFullGc)")
+                        callback?.invoke(newLevel, snap)
+                    }
                 }
                 val lastPublished = lastReadingPublishMs
-                if (onReading != null && (lastPublished == null || now - lastPublished >= HEAP_READING_PUBLISH_INTERVAL_MS)) {
+                val readingCallback = onReading
+                if (readingCallback != null && (lastPublished == null || now - lastPublished >= HEAP_READING_PUBLISH_INTERVAL_MS)) {
                     lastReadingPublishMs = now
-                    readingCallback = onReading
-                    readingSnapshot = snap
+                    deliveries.addLast { readingCallback(snap) }
                 }
             }
-            changeTo?.let { (newLevel, snap) ->
-                log("heap pressure -> $newLevel (occupancy ${"%.2f".format(snap.occupancy)}, fullGc=$isFullGc)")
-                callback?.invoke(newLevel, snap)
-            }
-            readingSnapshot?.let { readingCallback?.invoke(it) }
+            drainDeliveries()
             if (confirm) {
                 log("heap near critical after non-full GC; requesting confirming full GC")
                 requestFullGc()
             }
         } catch (t: Throwable) {
             log("heap pressure handling failed: $t")
+        }
+    }
+
+    // Delivers queued callbacks in order, outside [lock]. Only one thread drains at a time: a thread that
+    // finds a drain running leaves its event queued for that drainer (which re-checks the queue under
+    // [lock] before giving up the role, so no event is stranded).
+    @Suppress("TooGenericExceptionCaught")
+    private fun drainDeliveries() {
+        synchronized(lock) {
+            if (delivering) return
+            delivering = true
+        }
+        while (true) {
+            val next = synchronized(lock) {
+                deliveries.removeFirstOrNull().also { if (it == null) delivering = false }
+            } ?: return
+            try {
+                next()
+            } catch (t: Throwable) {
+                log("heap pressure callback failed: $t")
+            }
         }
     }
 

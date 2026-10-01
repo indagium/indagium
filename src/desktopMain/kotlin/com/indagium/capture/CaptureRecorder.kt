@@ -270,6 +270,7 @@ class CaptureRecorder internal constructor(
                 logOutput = BufferedOutputStream(requireNotNull(logFileOutput), CAPTURE_WRITE_BUFFER_BYTES)
                 indexOutput = BufferedOutputStream(requireNotNull(indexFileOutput), CAPTURE_WRITE_BUFFER_BYTES)
                 active.set(true)
+                LiveCaptureSessions.add(session.directory)
                 mutableSelectedSession.value = session
                 publishLocked(RecorderState.RECORDING, force = true)
                 false
@@ -728,10 +729,12 @@ class CaptureRecorder internal constructor(
         var videoSession: EmbeddedDeviceSession? = null
         var startup: CountDownLatch? = null
         val calledFromStarter = synchronized(lock) { Thread.currentThread() === starterThread }
+        var liveDirectory: File? = null
         val completion = synchronized(lock) {
             if (starting) startCancellationRequested = true
             if (active.getAndSet(false)) {
                 ownsStop = true
+                liveDirectory = currentSession?.directory
                 reason?.let(::addDiagnosticLocked)
                 publishLocked(RecorderState.STOPPING, force = true)
                 processes = listOfNotNull(logProcess, mirrorProcess)
@@ -804,6 +807,8 @@ class CaptureRecorder internal constructor(
                 return finished
             }
         } finally {
+            // After the MKV is closed and the final status persisted: until now the file may still grow.
+            liveDirectory?.let(LiveCaptureSessions::remove)
             completion.countDown()
         }
     }
@@ -1155,3 +1160,26 @@ private const val SCREENSHOT_TIMEOUT_SECONDS = 15L
 private const val VIDEO_MONITOR_MAX_WAIT_DAYS = 3_650L
 private const val PROCESS_JOIN_TIMEOUT_MS = 3_000L
 private const val WATCHDOG_JOIN_TIMEOUT_MS = 1_000L
+
+/**
+ * Directories of capture sessions that a [CaptureRecorder] in THIS process is recording right now:
+ * added when a recorder activates, removed once its stop has closed the video file and persisted the
+ * final status. [CaptureArchiveExporter] consults it because a session's on-disk status can lie
+ * (`recoverSessions()` may mark a live session INTERRUPTED), so "the video stopped growing" must not
+ * be inferred from the status of a session this process still owns.
+ */
+internal object LiveCaptureSessions {
+    private val directories = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private fun key(directory: File): String = directory.absoluteFile.normalize().path
+
+    fun add(directory: File) {
+        directories.add(key(directory))
+    }
+
+    fun remove(directory: File) {
+        directories.remove(key(directory))
+    }
+
+    fun isLive(directory: File): Boolean = key(directory) in directories
+}

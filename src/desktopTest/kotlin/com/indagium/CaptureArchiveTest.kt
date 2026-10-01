@@ -860,6 +860,7 @@ class CaptureArchiveTest {
         listOf(
             com.indagium.capture.CaptureStatus.RECORDING to "export",
             com.indagium.capture.CaptureStatus.STOPPED to "exportFinal",
+            // INTERRUPTED is only trusted as final for a quiet file (the file below is made old and idle).
             com.indagium.capture.CaptureStatus.INTERRUPTED to "exportFinal",
         ).forEach { (status, expectedCall) ->
             val root = createTempDirectory("capture-archive-final-$status").toFile()
@@ -867,10 +868,11 @@ class CaptureArchiveTest {
             writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 10_000, 1)))
             session.videoFile.parentFile.mkdirs()
             session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+            session.videoFile.setLastModified(System.currentTimeMillis() - 60_000L)
             calls.clear()
 
             val destination = File(root, "export.zip")
-            CaptureArchiveExporter(recordingVideo).export(
+            CaptureArchiveExporter(recordingVideo, videoStabilitySampleMs = 10L).export(
                 session,
                 CaptureExportRequest(destination, CaptureRange.ALL, cutoffElapsedMs = 400_000),
             )
@@ -879,6 +881,83 @@ class CaptureArchiveTest {
             // Either path still produces an archive the reader opens, video included.
             assertTrue(CaptureArchiveReader.open(destination, File(root, "cache")).videoFile?.isFile == true)
         }
+    }
+
+    // An INTERRUPTED status read from disk can be stale: another recorder's recoverSessions() marks a
+    // session that is still recording INTERRUPTED until its owner persists again. The MKV keeps
+    // growing, so reading it directly (exportFinal) would race the writer; only the snapshot is safe.
+    @Test
+    fun anInterruptedSessionWhoseVideoIsStillBeingWrittenIsSnapshottedNotReadDirectly() {
+        val calls = mutableListOf<String>()
+        val root = createTempDirectory("capture-archive-stale-interrupted").toFile()
+        val session = session(root, recordVideo = true).copy(status = com.indagium.capture.CaptureStatus.INTERRUPTED)
+        writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 10_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        // Just written: the file was touched moments ago, i.e. a writer may still be appending to it.
+        session.videoFile.setLastModified(System.currentTimeMillis())
+
+        CaptureArchiveExporter(CallRecordingVideoExporter(calls), videoStabilitySampleMs = 10L).export(
+            session,
+            CaptureExportRequest(File(root, "export.zip"), CaptureRange.ALL, cutoffElapsedMs = 400_000),
+        )
+
+        assertEquals(listOf("export"), calls)
+    }
+
+    @Test
+    fun anInterruptedSessionWhoseVideoGrowsDuringTheStabilityCheckIsSnapshotted() {
+        val calls = mutableListOf<String>()
+        val root = createTempDirectory("capture-archive-growing-interrupted").toFile()
+        val session = session(root, recordVideo = true).copy(status = com.indagium.capture.CaptureStatus.INTERRUPTED)
+        writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 10_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        session.videoFile.setLastModified(System.currentTimeMillis() - 60_000L)
+        // The writer appends while the exporter waits between its two samples, then looks idle again.
+        val appender = thread {
+            Thread.sleep(100)
+            session.videoFile.appendBytes(byteArrayOf(4))
+            session.videoFile.setLastModified(System.currentTimeMillis() - 60_000L)
+        }
+
+        CaptureArchiveExporter(CallRecordingVideoExporter(calls), videoStabilitySampleMs = 400L).export(
+            session,
+            CaptureExportRequest(File(root, "export.zip"), CaptureRange.ALL, cutoffElapsedMs = 400_000),
+        )
+        appender.join()
+
+        assertEquals(listOf("export"), calls)
+    }
+
+    @Test
+    fun aSessionStillRecordingInThisProcessIsNeverReadDirectlyEvenWithAQuietFileAndAStoppedStatus() {
+        val calls = mutableListOf<String>()
+        val root = createTempDirectory("capture-archive-live-owner").toFile()
+        val session = session(root, recordVideo = true).copy(status = com.indagium.capture.CaptureStatus.INTERRUPTED)
+        writeCaptureInput(session, listOf(RawRow("01-01 10:00:00.000  1  1 I Tag: row\n", 10_000, 1)))
+        session.videoFile.parentFile.mkdirs()
+        session.videoFile.writeBytes(byteArrayOf(1, 2, 3))
+        session.videoFile.setLastModified(System.currentTimeMillis() - 60_000L)
+
+        com.indagium.capture.LiveCaptureSessions.add(session.directory)
+        try {
+            CaptureArchiveExporter(CallRecordingVideoExporter(calls), videoStabilitySampleMs = 10L).export(
+                session,
+                CaptureExportRequest(File(root, "live.zip"), CaptureRange.ALL, cutoffElapsedMs = 400_000),
+            )
+        } finally {
+            com.indagium.capture.LiveCaptureSessions.remove(session.directory)
+        }
+        assertEquals(listOf("export"), calls)
+
+        // Once the owner is gone and the file is quiet, the same session takes the fast path.
+        calls.clear()
+        CaptureArchiveExporter(CallRecordingVideoExporter(calls), videoStabilitySampleMs = 10L).export(
+            session,
+            CaptureExportRequest(File(root, "stopped.zip"), CaptureRange.ALL, cutoffElapsedMs = 400_000),
+        )
+        assertEquals(listOf("exportFinal"), calls)
     }
 
     @Test

@@ -82,6 +82,8 @@ private const val LAST_TEN_MINUTES = 10L
 private const val MAX_SCREENSHOT_NAME_LENGTH = 80
 private const val MAX_CAPTURE_FILENAME_STEM_LENGTH = 180
 private const val DEFAULT_VIDEO_COVERAGE_WAIT_POLL_MS = 200L
+private const val DEFAULT_VIDEO_QUIET_AGE_MS = 10_000L
+private const val DEFAULT_VIDEO_STABILITY_SAMPLE_MS = 500L
 private const val VIDEO_COVERAGE_WAIT_POLL_MAX_MS = 1_000L
 private const val VIDEO_COVERAGE_WAIT_POLL_BACKOFF_MULTIPLIER = 2
 
@@ -220,6 +222,12 @@ class CaptureArchiveExporter(
     // one production call site, opts in explicitly with DEFAULT_VIDEO_COVERAGE_WAIT_MS.
     private val videoCoverageWaitMs: Long = 0L,
     private val videoCoverageWaitPollMs: Long = DEFAULT_VIDEO_COVERAGE_WAIT_POLL_MS,
+    // How long a video file of an INTERRUPTED session must have been untouched, and how far apart
+    // its two (length, mtime) samples are, before [export] trusts it as final (see [isVideoFinal]).
+    // Tests shrink these; the clock is a seam for the same reason.
+    private val videoQuietAgeMs: Long = DEFAULT_VIDEO_QUIET_AGE_MS,
+    private val videoStabilitySampleMs: Long = DEFAULT_VIDEO_STABILITY_SAMPLE_MS,
+    private val clockMs: () -> Long = System::currentTimeMillis,
 ) {
     /**
      * Cheap coverage-probe result cache keyed by source path+length so the popover's debounced
@@ -551,6 +559,44 @@ class CaptureArchiveExporter(
         }
     }
 
+    /**
+     * Whether [session]'s video file may be read directly ([CaptureVideoExporter.exportFinal]) instead
+     * of through a prefix snapshot. [CaptureSession.status] alone is not proof: it can be read from
+     * disk, and `CaptureRecorder.recoverSessions()` (run by any other recorder's start, or another app
+     * instance where single-instance is skipped) marks a still-recording session INTERRUPTED until its
+     * owner persists again, while its MKV keeps growing. So:
+     * - RECORDING is never final.
+     * - A session this process is still recording ([LiveCaptureSessions]) is never final.
+     * - STOPPED is final: only the owning recorder writes it, after it closed the MKV.
+     * - INTERRUPTED is final only when the file is demonstrably quiet: untouched for
+     *   [videoQuietAgeMs] and unchanged (length and mtime) across two samples [videoStabilitySampleMs]
+     *   apart. Anything else falls back to the always-safe snapshot export.
+     */
+    private fun isVideoFinal(session: CaptureSession): Boolean = when {
+        session.status == CaptureStatus.RECORDING -> false
+        LiveCaptureSessions.isLive(session.directory) -> false
+        session.status == CaptureStatus.STOPPED -> true
+        else -> isVideoQuiet(session.videoFile)
+    }
+
+    private fun isVideoQuiet(file: File): Boolean {
+        val first = FileStamp.of(file)
+        if (first.lastModifiedMs <= 0L || clockMs() - first.lastModifiedMs < videoQuietAgeMs) return false
+        try {
+            Thread.sleep(videoStabilitySampleMs)
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return false
+        }
+        return FileStamp.of(file) == first
+    }
+
+    private data class FileStamp(val length: Long, val lastModifiedMs: Long) {
+        companion object {
+            fun of(file: File) = FileStamp(file.length(), file.lastModified())
+        }
+    }
+
     private fun isNoUsableVideoInterval(failure: Exception): Boolean {
         if (failure is IllegalArgumentException) return true
         val message = failure.message?.lowercase() ?: return false
@@ -697,13 +743,13 @@ class CaptureArchiveExporter(
                     if (session.status == CaptureStatus.RECORDING) {
                         waitForVideoCoverage(session.videoFile, requestedSourceStart, requestedSourceEnd, onWaitingForVideo)
                     }
-                    if (session.status == CaptureStatus.RECORDING) {
-                        videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
-                    } else {
-                        // STOPPED or INTERRUPTED: the file no longer grows, so skip the prefix
-                        // snapshot. An INTERRUPTED MKV may lack its trailer; the exporter's packet
-                        // scan already tolerates a truncated tail (INVALIDDATA at physical EOF).
+                    if (isVideoFinal(session)) {
+                        // The file no longer grows, so skip the prefix snapshot. An INTERRUPTED MKV may
+                        // lack its trailer; the exporter's packet scan already tolerates a truncated
+                        // tail (INVALIDDATA at physical EOF).
                         videoExporter.exportFinal(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
+                    } else {
+                        videoExporter.export(session.videoFile, stagedVideo, requestedSourceStart, requestedSourceEnd)
                     }
                 } catch (failure: Exception) {
                     if (!isNoUsableVideoInterval(failure)) throw failure

@@ -3289,10 +3289,10 @@ class AppState(
         return synchronized(stateLock) { embeddedMirrorsByTab[tabId] }
     }
 
-    /** A setup failure (tool resolution, asset deploy, handle creation) from before any
-     * [EmbeddedMirrorHandle] existed — the panel has no handle to read a FAILED snapshot from in
-     * that case, so this is its only way to learn setup failed at all. Cleared by the next attempt
-     * (whether it succeeds or fails again). */
+    /** The last mirror connect failure for [tabId]: a setup failure (tool resolution, asset deploy,
+     * handle creation) from before any [EmbeddedMirrorHandle] existed, or a Connect on an existing
+     * handle whose start threw. The panel shows it either way (see [embeddedMirrorDisplayedError]).
+     * Cleared by the next setup attempt, by the next start that runs successfully, and by Disconnect. */
     internal fun embeddedMirrorSetupError(tabId: String): String? = embeddedMirrorSetupErrorByTab[tabId]
 
     internal fun isEmbeddedMirrorDetached(tabId: String): Boolean = tabId in detachedEmbeddedMirrorTabs
@@ -3461,6 +3461,8 @@ class AppState(
      * Connect -> Disconnect ends in the state of the last click, never with two overlapping
      * transitions. */
     internal fun stopEmbeddedMirror(tabId: String) {
+        // A Disconnect ends whatever failed connect the panel was still showing.
+        embeddedMirrorSetupErrorByTab.remove(tabId)
         val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
         handle.requestStop()
     }
@@ -3549,13 +3551,18 @@ class AppState(
             // Previously this player was created only by the toggle callback, so audio stayed silent
             // until the user toggled mute/unmute even when playAudioLive was already enabled. Only
             // runs if the start itself ran (a superseded Connect must not attach audio).
-            afterStart = { applyEmbeddedMirrorLiveAudioPreference(tabId, handle) },
+            afterStart = {
+                // The start really ran and did not throw: a failure shown from an earlier attempt is over.
+                embeddedMirrorSetupErrorByTab.remove(tabId)
+                applyEmbeddedMirrorLiveAudioPreference(tabId, handle)
+            },
         ).whenComplete { _, failure ->
             if (failure != null) {
+                // The handle's lifecycle lane already logged the failure with its stack trace; this
+                // only publishes it for the panel (which shows it while a handle exists, too).
                 val message = "Embedded mirror could not connect: ${failure.message ?: failure::class.simpleName}"
                 captureService.reportError(message)
                 embeddedMirrorSetupErrorByTab[tabId] = message
-                AppLogger.warn("embedded-mirror", message, failure)
             }
         }
     }
@@ -3576,6 +3583,7 @@ class AppState(
      * threading invariant): goes through the handle's lane and waits for it, bounded. */
     private fun closeEmbeddedMirror(tabId: String) {
         detachedEmbeddedMirrorTabs.remove(tabId)
+        embeddedMirrorSetupErrorByTab.remove(tabId)
         val handle = synchronized(stateLock) {
             embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
             embeddedMirrorsByTab.remove(tabId)?.also { embeddedMirrorVersion++ }
