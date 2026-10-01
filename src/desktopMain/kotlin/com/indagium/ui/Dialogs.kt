@@ -1238,7 +1238,8 @@ internal fun SourceFolderInfoDialog(
 /** The split dialog's extra line when the files probably won't fit in free memory (GB/MB via [formatByteSize]). */
 internal fun memoryShortfallLine(shortfall: MemoryShortfall): String =
     "Needs about ${formatByteSize(shortfall.neededBytes)} of memory; " +
-        "about ${formatByteSize(shortfall.freeBytes)} is free. Split it, close other tabs, or open anyway."
+        "about ${formatByteSize(shortfall.freeBytes)} is free. Split it (only the parts that fit will open), " +
+        "close other tabs, or open anyway."
 
 @Composable
 internal fun SplitPromptDialog(

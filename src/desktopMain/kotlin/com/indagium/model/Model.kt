@@ -289,7 +289,23 @@ data class LogAnalysis(
     // real completion path (buildLogAnalysis in AppState.kt)
     // sets this to false explicitly, so flipping the default doesn't change any intentional case.
     val pending: Boolean = true,
-)
+    // Coverage of stackTraceGroups/crashSites/customIssueSites during a live tail: the highest entry
+    // id the full analysis was computed over. null means "covers every row the tab holds" (a
+    // completed load, or a refresh that saw the tab's current rows). While rows keep arriving, a
+    // refresh computed for an earlier snapshot lands with `pending = false` and this set to that
+    // snapshot's last id: its results are shown, and only rows with a higher id are unanalysed (they
+    // render unfolded, and the crash list says it is still catching up). Ignored while [pending] —
+    // nothing is analysed yet then. Session-only like the rest of LogAnalysis (never autosaved).
+    // Appended last so existing positional/named constructions are unaffected.
+    val analyzedThroughId: Int? = null,
+) {
+    /**
+     * True when rows beyond the analysed prefix exist (or nothing is analysed yet): the results are
+     * a lower bound, not the whole story. [lastRowId] is the tab's last entry id (null = no rows).
+     */
+    fun isStaleFor(lastRowId: Int?): Boolean =
+        pending || (analyzedThroughId != null && lastRowId != null && lastRowId > analyzedThroughId)
+}
 
 // How the PID cell decides whether to show a resolved process name (LogAnalysis.processNames) in
 // place of the bare pid number (ui/LogViewer.kt's LogRow). OFF is the default and the only mode

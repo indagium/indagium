@@ -52,6 +52,33 @@ class HeapPressureStateTest {
         }
     }
 
+    // The banner text reads heapSnapshot: it used to be written only when the LEVEL changed, so at
+    // NORMAL it stayed null and after a change it froze at the reading that caused it.
+    @Test
+    fun everyPublishedGcReadingReachesTheBannerSnapshotWithoutALevelChange() {
+        val app = newApp()
+        try {
+            var now = 1_000_000L
+            val monitor = HeapPressureMonitor(maxBytes = { 10 * gb }, requestFullGc = {}, nowMs = { now }, currentHeapUsedBytes = { 0L })
+            app.heapPressureMonitor = monitor
+            monitor.setOnChange(app::onHeapPressureChanged)
+            monitor.setOnReading(app::onHeapReading)
+
+            monitor.onGc(usedAfterGcBytes = 3 * gb, isFullGc = false) // NORMAL: no level change
+            assertEquals(HeapPressure.NORMAL, app.heapPressure)
+            assertEquals(HeapSnapshot(3 * gb, 10 * gb), app.heapSnapshot)
+
+            monitor.onGc(usedAfterGcBytes = 8 * gb, isFullGc = false) // -> WARNING, throttled reading is the same instant
+            now += 2_000
+            monitor.onGc(usedAfterGcBytes = 7 * gb, isFullGc = false) // still WARNING: only the reading callback fires
+            assertEquals(HeapPressure.WARNING, app.heapPressure)
+            assertEquals(7 * gb, app.heapSnapshot?.usedAfterGcBytes, "the snapshot tracks the heap, not the level change")
+            assertEquals(HeapSnapshot(7 * gb, 10 * gb), app.currentHeapSnapshot())
+        } finally {
+            app.close()
+        }
+    }
+
     @Test
     fun startHeapPressureMonitoringIsIdempotent() {
         val app = newApp()

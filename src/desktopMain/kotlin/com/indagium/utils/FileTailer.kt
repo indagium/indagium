@@ -68,6 +68,9 @@ class FileTailer(
      *  tailer left off. */
     val currentOffset: Long get() = offset
 
+    /** Bytes of [file] this tailer has not emitted yet (file length minus [currentOffset], never negative). */
+    fun unreadBytes(): Long = (file.length() - offset).coerceAtLeast(0L)
+
     // The starting offset is captured synchronously, on the CALLER's thread, before scope.launch
     // even schedules the coroutine body — not lazily inside it. scope.launch returns immediately;
     // if a caller appends to the file right after start() returns (the exact pattern every test

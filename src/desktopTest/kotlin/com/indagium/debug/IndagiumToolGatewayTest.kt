@@ -245,6 +245,105 @@ class IndagiumToolGatewayTest {
     }
 
     @Test
+    fun memoryStatusReflectsTheLatestGcReadingEvenAtNormalAndBetweenLevelChanges() {
+        state.heapPressureMonitor = HeapPressureMonitor(maxBytes = { 1_000L }, currentHeapUsedBytes = { 100L })
+
+        state.heapPressureMonitor.onGc(300L, isFullGc = false) // stays NORMAL: no level change reaches AppState
+        val normal = operations.toolGateway.execute("get_memory_status", emptyMap()) as Map<*, *>
+        assertEquals("NORMAL", normal["heapPressure"])
+        assertEquals(300L, normal["heapUsedAfterGcBytes"], "a NORMAL reading used to report null forever")
+        assertEquals(1_000L, normal["heapMaxBytes"])
+        assertEquals(700L, normal["heapFreeBytesEstimate"])
+
+        state.heapPressureMonitor.onGc(450L, isFullGc = false)
+        val later = operations.toolGateway.execute("get_memory_status", emptyMap()) as Map<*, *>
+        assertEquals(450L, later["heapUsedAfterGcBytes"])
+        assertEquals(550L, later["heapFreeBytesEstimate"])
+    }
+
+    private fun sparseLog(dir: File, name: String, bytes: Long) =
+        File(dir, name).also { f -> java.io.RandomAccessFile(f, "rw").use { it.setLength(bytes) } }
+
+    // A memory-only prompt (the file is under the size threshold but won't fit in the free heap) used to
+    // read `needsSplit: true, suggestedPartCount: 1` with no reason, and split_log_file defaulted to a
+    // 1-part "split".
+    @Test
+    fun splitPreviewAndOpenReportTheMemoryShortfallAndSuggestAtLeastTwoParts() {
+        val mb = 1024L * 1024L
+        val dir = kotlin.io.path.createTempDirectory("openlog-mcp-memory-split").toFile()
+        val file = sparseLog(dir, "small.log", 100 * mb) // needs 350 MB
+        state.heapFreeBytesProvider = { 200 * mb }
+
+        val preview = operations.toolGateway.execute("preview_split_log_file", mapOf("path" to file.absolutePath)) as Map<*, *>
+        assertEquals(true, preview["needsSplit"])
+        assertEquals(listOf("memory"), preview["reasons"])
+        assertEquals(mapOf("neededBytes" to 350 * mb, "freeBytes" to 200 * mb), preview["memoryShortfall"])
+        assertTrue((preview["suggestedPartCount"] as Int) >= 2, "a 1-part split would not help: $preview")
+
+        val opened = operations.toolGateway.execute("open_log_file", mapOf("path" to file.absolutePath)) as Map<*, *>
+        assertEquals(true, opened["needsSplit"])
+        assertEquals(mapOf("neededBytes" to 350 * mb, "freeBytes" to 200 * mb), opened["memoryShortfall"])
+        assertTrue((opened["suggestedPartCount"] as Int) >= 2)
+        assertNotNull(state.pendingSplitPrompt, "the prompt stays pending for the user")
+    }
+
+    @Test
+    fun splitWithoutPartCountUsesTheMemoryDrivenCountAndOpensOnlyThePartsThatFit() {
+        val dir = kotlin.io.path.createTempDirectory("openlog-mcp-memory-split-run").toFile()
+        val file = File(dir, "app.log").apply {
+            writeText((1..500).joinToString("") { "01-02 03:04:05.%03d  100  101 I Tag: message %d\n".format(it % 1000, it) })
+        }
+        // About 3.5x the file's size is needed; free room for roughly 1.4 of the parts it splits into.
+        val needed = (file.length() * 3.5).toLong()
+        state.heapFreeBytesProvider = { needed / 2 + needed / 5 }
+        val destination = File(dir, "parts")
+
+        val result = operations.toolGateway.execute(
+            "split_log_file",
+            mapOf("path" to file.absolutePath, "destinationDir" to destination.absolutePath),
+        ) as Map<*, *>
+
+        assertEquals(true, result["ok"])
+        val shortfall = result["memoryShortfall"] as Map<*, *>
+        assertEquals(needed, shortfall["neededBytes"])
+        val outputs = result["outputPaths"] as List<*>
+        assertTrue(outputs.size >= 2, "memory-driven default part count must be at least 2, got ${outputs.size}")
+        assertEquals(outputs.size, destination.listFiles()!!.size, "every part is written")
+        val tabs = result["tabs"] as List<*>
+        val unopened = result["unopenedPaths"] as List<*>
+        assertTrue(tabs.isNotEmpty(), "at least the first part opens")
+        assertEquals(outputs.size, tabs.size + unopened.size, "every part is either opened or reported as left on disk")
+        assertTrue(unopened.isNotEmpty(), "not everything fit: $result")
+    }
+
+    @Test
+    fun crashSitesOfALiveTailedTabShowTheAnalysedPrefixAndFlagItAsPartial() {
+        val rows = (1..6).map { LogEntry(it, "10:00:0$it.000", LogLevel.E, "AndroidRuntime", if (it == 1) "FATAL EXCEPTION: main" else "at x.Y(Y.java:$it)") }
+        val analysed = com.indagium.ui.buildLogAnalysis(rows.take(3))
+        assertEquals(1, analysed.crashSites.size)
+
+        fun crashSites() = operations.toolGateway.execute("get_crash_sites", mapOf("tabId" to "live")) as Map<*, *>
+
+        // Initial load: nothing analysed yet.
+        state.tabs = listOf(mkTab("live", "live.log", rows, analysis = com.indagium.model.LogAnalysis()))
+        assertEquals(true, crashSites()["pending"])
+
+        // During a live tail: the prefix's sites are returned, flagged as covering only up to id 3.
+        state.tabs = listOf(mkTab("live", "live.log", rows, analysis = analysed.copy(pending = false, analyzedThroughId = 3)))
+        val partial = crashSites()
+        assertNull(partial["pending"])
+        assertEquals(true, partial["partial"])
+        assertEquals(3, partial["analyzedThroughId"])
+        assertEquals(1, (partial["sites"] as List<*>).size)
+
+        // Complete: the plain shape.
+        state.tabs = listOf(mkTab("live", "live.log", rows, analysis = analysed.copy(pending = false)))
+        val complete = crashSites()
+        assertNull(complete["partial"])
+        assertEquals(1, (complete["sites"] as List<*>).size)
+    }
+
+    @Test
     fun listTabsAndSequenceSummaryFlagAPausedCaptureTab() {
         state.tabs = listOf(
             mkTab("t1", "sample.log", listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "hello")))

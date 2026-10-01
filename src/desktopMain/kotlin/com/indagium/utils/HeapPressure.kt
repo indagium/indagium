@@ -31,8 +31,25 @@ internal const val HEAP_CRITICAL_OCCUPANCY = 0.85
  */
 internal const val HEAP_HYSTERESIS = 0.05
 
-/** At most one confirming full GC is requested per this window. */
+/** At most one confirming full GC is requested per this window (the initial backoff step). */
 internal const val HEAP_CONFIRM_MIN_INTERVAL_MS = 60_000L
+
+/** Cap of the exponential confirmation backoff (60 s, 2 min, 4 min, ... up to this). */
+internal const val HEAP_CONFIRM_MAX_INTERVAL_MS = 15 * 60_000L
+
+/**
+ * A non-full-GC reading is only worth another confirming full GC when it exceeds the occupancy the
+ * last confirmed (full-GC) reading showed by at least this much; a young-GC reading at or below the
+ * confirmed baseline carries no new evidence and never overstates a live set that was already
+ * measured below CRITICAL.
+ */
+internal const val HEAP_CONFIRM_BASELINE_MARGIN = 0.03
+
+/** A full-GC reading this far from the previous full-GC reading restarts the backoff. */
+internal const val HEAP_CONFIRM_RESET_DELTA = 0.05
+
+/** At most one published after-GC reading per this window (see [HeapPressureMonitor.start]). */
+internal const val HEAP_READING_PUBLISH_INTERVAL_MS = 1_000L
 
 /**
  * Result of [nextHeapPressure]. [needsConfirmation] is true when the occupancy is in the CRITICAL
@@ -87,12 +104,24 @@ internal fun nextHeapPressure(
  * [HEAP_CONFIRM_MIN_INTERVAL_MS]; while the limit blocks one, the level stays at WARNING (never
  * escalates unconfirmed).
  *
+ * **Confirmations back off.** A live set just below CRITICAL makes every young GC read as "near
+ * critical" while each confirming full GC shows it is not. The monitor therefore remembers the last
+ * full-GC occupancy (the baseline): a young-GC reading is only confirmed again when it exceeds the
+ * baseline by [HEAP_CONFIRM_BASELINE_MARGIN], and the gap between confirmations doubles after every
+ * request (60 s, 2 min, 4 min ... capped at [HEAP_CONFIRM_MAX_INTERVAL_MS]). The backoff restarts on a
+ * level change and when a full GC shows a big change ([HEAP_CONFIRM_RESET_DELTA]). A genuinely
+ * rising live set is still caught: any full GC (including the JVM's own when the old generation
+ * fills) is authoritative and applied at once, and a young-GC reading well above the baseline is
+ * confirmed as soon as the current backoff gap (at most [HEAP_CONFIRM_MAX_INTERVAL_MS]) has elapsed.
+ * No confirmation is ever requested while the level is already CRITICAL.
+ *
  * **Full GC detection.** JDK 21 reports `gcAction == "end of major GC"` for a full collection (G1:
  * `gcName = "G1 Old Generation"`, cause `System.gc()`; Parallel/Serial likewise via their old-gen
  * collector) and `"end of minor GC"` for young ones (`"G1 Young Generation"`). G1 also emits
  * `"G1 Concurrent GC"` pause notifications, which are not full collections. So only "major" counts.
  *
- * **Hysteresis** is in [nextHeapPressure]. [onChange] runs only when the level changes, on the JMX
+ * **Hysteresis** is in [nextHeapPressure]. [onChange] runs only when the level changes (the optional `onReading` of [start] receives every
+ * after-GC reading instead, throttled to one per [HEAP_READING_PUBLISH_INTERVAL_MS]), on the JMX
  * notification thread and never while an internal lock is held (two beans may notify concurrently, so
  * callers must tolerate being called from different threads and should marshal to their own thread).
  *
@@ -108,7 +137,17 @@ internal class HeapPressureMonitor(
     private var level = HeapPressure.NORMAL
     private var snapshot: HeapSnapshot? = null
     private var lastConfirmRequestMs: Long? = null
+
+    // How long to wait after the last confirmation request before issuing another (the backoff
+    // step that applied when it was issued), and the step the next request will apply.
+    private var lastConfirmGapMs = HEAP_CONFIRM_MIN_INTERVAL_MS
+    private var nextConfirmGapMs = HEAP_CONFIRM_MIN_INTERVAL_MS
+
+    // Occupancy shown by the last full GC (null until one has been observed).
+    private var fullGcBaselineOccupancy: Double? = null
+    private var lastReadingPublishMs: Long? = null
     private var onChange: ((HeapPressure, HeapSnapshot) -> Unit)? = null
+    private var onReading: ((HeapSnapshot) -> Unit)? = null
     private val registered = mutableListOf<Pair<NotificationEmitter, NotificationListener>>()
 
     // Lock-free evidence for diagnostics (see [diagnosticSummary]): were GC notifications arriving at all?
@@ -126,9 +165,12 @@ internal class HeapPressureMonitor(
      * (a second call replaces the callback and re-registers). Never throws.
      */
     @Suppress("TooGenericExceptionCaught")
-    fun start(onChange: (HeapPressure, HeapSnapshot) -> Unit) {
+    fun start(onReading: ((HeapSnapshot) -> Unit)? = null, onChange: (HeapPressure, HeapSnapshot) -> Unit) {
         stop()
-        synchronized(lock) { this.onChange = onChange }
+        synchronized(lock) {
+            this.onChange = onChange
+            this.onReading = onReading
+        }
         try {
             val heapPools = ManagementFactory.getMemoryPoolMXBeans()
                 .filter { it.type == MemoryType.HEAP }
@@ -156,11 +198,17 @@ internal class HeapPressureMonitor(
         synchronized(lock) { onChange = callback }
     }
 
+    /** Test seam: sets the throttled per-reading callback without touching JMX. */
+    internal fun setOnReading(callback: ((HeapSnapshot) -> Unit)?) {
+        synchronized(lock) { onReading = callback }
+    }
+
     /** Removes the listeners added by [start]. Safe to call repeatedly or without [start]. */
     fun stop() {
         if (activeMonitor === this) activeMonitor = null
         val toRemove = synchronized(lock) {
             onChange = null
+            onReading = null
             registered.toList().also { registered.clear() }
         }
         toRemove.forEach { (emitter, listener) -> runCatching { emitter.removeNotificationListener(listener) } }
@@ -186,35 +234,72 @@ internal class HeapPressureMonitor(
         try {
             var changeTo: Pair<HeapPressure, HeapSnapshot>? = null
             var callback: ((HeapPressure, HeapSnapshot) -> Unit)? = null
+            var readingCallback: ((HeapSnapshot) -> Unit)? = null
+            var readingSnapshot: HeapSnapshot? = null
             var confirm = false
             synchronized(lock) {
                 val snap = HeapSnapshot(usedAfterGcBytes.coerceAtLeast(0L), maxBytes())
                 snapshot = snap
+                val now = nowMs()
                 val decision = nextHeapPressure(level, snap.occupancy, isFullGc)
-                if (decision.needsConfirmation) {
-                    val now = nowMs()
-                    val last = lastConfirmRequestMs
-                    if (last == null || now - last >= HEAP_CONFIRM_MIN_INTERVAL_MS) {
-                        lastConfirmRequestMs = now
-                        confirm = true
-                    }
+                if (isFullGc) noteFullGcReading(snap.occupancy)
+                if (decision.needsConfirmation && level != HeapPressure.CRITICAL && shouldConfirm(snap.occupancy, now)) {
+                    lastConfirmRequestMs = now
+                    lastConfirmGapMs = nextConfirmGapMs
+                    nextConfirmGapMs = (nextConfirmGapMs * 2).coerceAtMost(HEAP_CONFIRM_MAX_INTERVAL_MS)
+                    confirm = true
                 }
                 if (decision.level != level) {
                     level = decision.level
+                    resetConfirmBackoff()
                     changeTo = decision.level to snap
                     callback = onChange
+                }
+                val lastPublished = lastReadingPublishMs
+                if (onReading != null && (lastPublished == null || now - lastPublished >= HEAP_READING_PUBLISH_INTERVAL_MS)) {
+                    lastReadingPublishMs = now
+                    readingCallback = onReading
+                    readingSnapshot = snap
                 }
             }
             changeTo?.let { (newLevel, snap) ->
                 log("heap pressure -> $newLevel (occupancy ${"%.2f".format(snap.occupancy)}, fullGc=$isFullGc)")
                 callback?.invoke(newLevel, snap)
             }
+            readingSnapshot?.let { readingCallback?.invoke(it) }
             if (confirm) {
                 log("heap near critical after non-full GC; requesting confirming full GC")
                 requestFullGc()
             }
         } catch (t: Throwable) {
             log("heap pressure handling failed: $t")
+        }
+    }
+
+    // Records a full-GC reading as the new baseline; a big jump from the previous one means the
+    // old backoff no longer describes the situation. Caller holds [lock].
+    private fun noteFullGcReading(occupancy: Double) {
+        val previous = fullGcBaselineOccupancy
+        if (previous == null || kotlin.math.abs(occupancy - previous) >= HEAP_CONFIRM_RESET_DELTA) resetConfirmBackoff()
+        fullGcBaselineOccupancy = occupancy
+    }
+
+    // Caller holds [lock].
+    private fun resetConfirmBackoff() {
+        nextConfirmGapMs = HEAP_CONFIRM_MIN_INTERVAL_MS
+        lastConfirmGapMs = HEAP_CONFIRM_MIN_INTERVAL_MS
+    }
+
+    // Whether a young-GC reading in the CRITICAL band should be confirmed by a full GC now. Caller
+    // holds [lock].
+    private fun shouldConfirm(occupancy: Double, now: Long): Boolean {
+        val last = lastConfirmRequestMs ?: return true
+        val baseline = fullGcBaselineOccupancy
+        val elapsed = now - last
+        return when {
+            baseline == null -> elapsed >= lastConfirmGapMs
+            occupancy < baseline + HEAP_CONFIRM_BASELINE_MARGIN -> false
+            else -> elapsed >= lastConfirmGapMs
         }
     }
 

@@ -4,7 +4,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
 
 // Debounce for the tailing-triggered full analysis refresh (P-04) — buildLogAnalysis costs as
 // much as the initial parse on a large file, so re-running it on every ~500ms FileTailer batch
@@ -28,6 +27,15 @@ internal const val TAIL_ANALYSIS_MAX_WAIT_MS = 30_000L
  * unless the pending job's first batch is already [maxWaitMs] old — then it is left alone and runs.
  * The next batch after that job completes starts a fresh window.
  *
+ * A batch that arrives while the refresh is already RUNNING (it reads the rows as they were when it
+ * started) cannot be folded into that run, and must not be dropped either: it marks the tab dirty,
+ * and when the running refresh completes a follow-up refresh is scheduled. Dropping it left a tab
+ * whose last batches landed mid-refresh (a capture Stop's final drain) with rows no refresh ever
+ * covered, and, before coverage tracking, with `analysis.pending = true` forever.
+ *
+ * [onBatch], [cancel] and [clear] all decide under one lock, so a [cancel] for a closed tab can
+ * neither lose to nor re-create an entry from a concurrent [onBatch]/completion.
+ *
  * [nowMs] is injectable so tests can drive it from a virtual clock.
  */
 internal class TailAnalysisDebouncer(
@@ -37,42 +45,68 @@ internal class TailAnalysisDebouncer(
     private val nowMs: () -> Long = { System.nanoTime() / NANOS_PER_MS },
     private val refresh: suspend (tabId: String) -> Unit,
 ) {
-    private class Pending(val job: Job, val firstBatchAtMs: Long)
+    // One scheduled-or-running refresh. [running] flips once the debounce delay has elapsed and the
+    // refresh body is about to read its snapshot; [dirty] records a batch that arrived after that.
+    private class Pending(val firstBatchAtMs: Long) {
+        var job: Job? = null
+        var running = false
+        var dirty = false
+    }
 
-    // ConcurrentHashMap for the same cross-thread reason TailCoordinator's activeTails is one:
-    // written from the flush coroutine, removed via cancel() from whichever thread closes the tab.
-    // Schedule decisions themselves are serialized by the lock below.
-    private val pending = ConcurrentHashMap<String, Pending>()
+    // Every read and write happens under [lock]; plain map, no ConcurrentHashMap needed.
+    private val pending = HashMap<String, Pending>()
     private val lock = Any()
 
     fun onBatch(tabId: String) {
         synchronized(lock) {
             val now = nowMs()
             val existing = pending[tabId]
-            val firstBatchAtMs = if (existing != null && existing.job.isActive) {
-                if (now - existing.firstBatchAtMs >= maxWaitMs) return
-                existing.job.cancel()
-                existing.firstBatchAtMs
-            } else {
-                now
+            when {
+                existing == null -> schedule(tabId, now)
+                existing.running -> existing.dirty = true
+                now - existing.firstBatchAtMs >= maxWaitMs -> Unit // due: let it run
+                else -> {
+                    existing.job?.cancel()
+                    schedule(tabId, existing.firstBatchAtMs)
+                }
             }
-            pending[tabId] = Pending(
-                scope.launch {
-                    delay(debounceMs)
-                    refresh(tabId)
-                },
-                firstBatchAtMs,
-            )
         }
     }
 
     fun cancel(tabId: String) {
-        pending.remove(tabId)?.job?.cancel()
+        synchronized(lock) { pending.remove(tabId)?.job?.cancel() }
     }
 
     fun clear() {
-        pending.values.forEach { it.job.cancel() }
-        pending.clear()
+        synchronized(lock) {
+            pending.values.forEach { it.job?.cancel() }
+            pending.clear()
+        }
+    }
+
+    // Caller holds [lock].
+    private fun schedule(tabId: String, firstBatchAtMs: Long) {
+        val entry = Pending(firstBatchAtMs)
+        pending[tabId] = entry
+        entry.job = scope.launch {
+            delay(debounceMs)
+            val proceed = synchronized(lock) {
+                // Cancelled or replaced while the delay was ending: this run is no longer wanted.
+                (pending[tabId] === entry).also { if (it) entry.running = true }
+            }
+            if (!proceed) return@launch
+            try {
+                refresh(tabId)
+            } finally {
+                synchronized(lock) {
+                    if (pending[tabId] === entry) {
+                        pending.remove(tabId)
+                        // Batches that landed during the run were not part of its snapshot.
+                        if (entry.dirty) schedule(tabId, nowMs())
+                    }
+                }
+            }
+        }
     }
 
     private companion object {

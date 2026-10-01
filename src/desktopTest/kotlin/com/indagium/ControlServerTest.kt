@@ -28,6 +28,7 @@ import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -1002,12 +1003,17 @@ class ControlServerTest {
         val dir = kotlin.io.path.createTempDirectory("openlog-control-split-open").toFile()
         val file = File(dir, "large.log")
         RandomAccessFile(file, "rw").use { it.setLength(SPLIT_PROMPT_BYTES) }
+        // Pin plenty of free heap: this is the pure-size prompt. (With a memory shortfall the same call
+        // reports it and suggests at least 2 parts; see IndagiumToolGatewayTest.)
+        state.heapFreeBytesProvider = { Long.MAX_VALUE }
 
         val body = post("/open", """{"path":"${file.absolutePath.replace("\\", "\\\\")}"}""")
 
         assertTrue(body.contains("\"needsSplit\":true"))
         assertTrue(body.contains("\"displayName\":\"large.log\""))
         assertTrue(body.contains("\"suggestedPartCount\":1"))
+        assertTrue(body.contains("\"reasons\":[\"size\"]"), body)
+        assertFalse(body.contains("memoryShortfall"), body)
         assertTrue(state.tabs.isEmpty())
     }
 

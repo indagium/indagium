@@ -16,6 +16,7 @@ import com.indagium.model.LogTab
 import com.indagium.model.VideoAttachment
 import com.indagium.utils.HeapPressure
 import com.indagium.utils.HeapSnapshot
+import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.computeItems
 import java.io.File
 import java.nio.file.Files
@@ -24,6 +25,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -318,5 +320,154 @@ class CaptureLogPauseTest {
         assertFalse(captureLogResumeEnabled(HeapPressure.CRITICAL))
         assertTrue(captureLogResumeEnabled(HeapPressure.WARNING))
         assertTrue(captureLogResumeEnabled(HeapPressure.NORMAL))
+        // The one predicate also refuses a backlog that would not fit in the free heap.
+        val tooBig = MemoryShortfall(neededBytes = 3 * gb, freeBytes = gb)
+        assertFalse(captureLogResumeEnabled(HeapPressure.NORMAL, tooBig))
+        assertFalse(captureLogResumeEnabled(HeapPressure.WARNING, tooBig))
+        assertEquals(CAPTURE_LOG_RESUME_BLOCKED_HINT, captureLogResumeBlockedReason(HeapPressure.CRITICAL, null))
+        assertEquals(
+            "Loading the rows recorded while paused needs about 3.0 GB of memory; about 1.0 GB is free. " +
+                "Close other tabs first",
+            captureLogResumeBlockedReason(HeapPressure.NORMAL, tooBig),
+        )
+    }
+
+    // Resume used to look only at the heap level: a long pause at WARNING could then load a backlog far
+    // bigger than the free heap and push the app straight back to critical.
+    @Test
+    fun resumeIsRefusedWhenThePausedBacklogWouldNotFitAndAllowedOnceItDoes() {
+        val file = File(tempDir(), "capture.log").apply { writeText("") }
+        val app = newApp()
+        val tabId = app.openLiveCaptureTab(file)
+        file.appendLines(1..3)
+        waitUntil { app.tab(tabId)!!.logData.size == 3 }
+        assertTrue(app.pauseTailing(tabId))
+        file.appendLines(4..2_000) // ~90 KB recorded while paused
+
+        app.heapFreeBytesProvider = { 10_000L } // 3.5x of the backlog does not fit
+        val shortfall = assertNotNull(app.captureLogResumeBacklogShortfall(tabId))
+        assertTrue(shortfall.neededBytes > shortfall.freeBytes)
+        assertFalse(captureLogResumeEnabled(app.heapPressure, shortfall), "the strip's Resume button is disabled")
+        assertFalse(app.resumeCaptureLogView(tabId))
+        assertTrue(app.isCaptureLogViewPaused(tabId), "a refused resume leaves the tab paused")
+        assertEquals(3, app.tab(tabId)!!.logData.size)
+
+        app.heapFreeBytesProvider = { Long.MAX_VALUE }
+        assertNull(app.captureLogResumeBacklogShortfall(tabId))
+        assertTrue(app.resumeCaptureLogView(tabId))
+        waitUntil { app.tab(tabId)!!.logData.size == 2_000 }
+        app.stopTailing(tabId)
+    }
+
+    // --- Pause vs Stop: the tailer is claimed atomically, never peeked ---
+
+    // Holds stateLock so the tailer's in-flight append (offset already advanced) blocks inside
+    // appendTailedLines: the state a Pause's join and a Stop's drain have to resolve between them.
+    private inner class StateLockHolder(private val app: AppState) {
+        private val acquired = java.util.concurrent.CountDownLatch(1)
+        private val release = java.util.concurrent.CountDownLatch(1)
+        private val thread = Thread {
+            synchronized(app.stateLock) {
+                acquired.countDown()
+                release.await(15, java.util.concurrent.TimeUnit.SECONDS)
+            }
+        }.apply { isDaemon = true }
+
+        fun hold() {
+            thread.start()
+            assertTrue(acquired.await(15, java.util.concurrent.TimeUnit.SECONDS))
+        }
+
+        fun release() {
+            release.countDown()
+            thread.join(15_000)
+        }
+    }
+
+    @Test
+    fun stopArrivingWhilePauseIsJoiningTakesTheTailerOverAndDrainsEverything() {
+        val file = File(tempDir(), "capture.log").apply { writeText("") }
+        val app = newApp()
+        val tabId = app.openLiveCaptureTab(file)
+        val holder = StateLockHolder(app).also { it.hold() }
+        file.appendLines(1..2)
+        Thread.sleep(2_000) // the tailer has read rows 1..2 and is blocked appending them
+        var pauseResult: Boolean? = null
+        val pause = Thread { pauseResult = app.pauseTailing(tabId) }.also { it.start() }
+        Thread.sleep(300) // the pause has claimed the tailer and is blocked in its join
+        file.appendLines(3..4)
+        val stop = Thread { app.drainAndStopTailing(tabId, includeTrailingPartialLine = true) }.also { it.start() }
+        Thread.sleep(300)
+
+        holder.release()
+        pause.join(15_000)
+        stop.join(15_000)
+
+        assertEquals(false, pauseResult, "the pause gives up once Stop owns the tailer")
+        assertFalse(app.isCaptureLogViewPaused(tabId), "no stale pausedTails entry")
+        val tab = app.tab(tabId)!!
+        assertNull(tab.tailPausedAtRow, "a fully drained tab carries no truncation marker")
+        assertFalse(tab.tailing)
+        assertEquals(listOf("msg1", "msg2", "msg3", "msg4"), app.messages(tabId), "Stop drained every row, in order")
+        // startTailing is not blocked by anything left over.
+        app.startTailing(tabId)
+        assertTrue(app.tab(tabId)!!.tailing)
+        app.stopTailing(tabId)
+    }
+
+    @Test
+    fun pauseArrivingWhileStopIsDrainingIsRefused() {
+        val file = File(tempDir(), "capture.log").apply { writeText("") }
+        val app = newApp()
+        val tabId = app.openLiveCaptureTab(file)
+        val holder = StateLockHolder(app).also { it.hold() }
+        file.appendLines(1..2)
+        Thread.sleep(2_000)
+        val stop = Thread { app.drainAndStopTailing(tabId, includeTrailingPartialLine = true) }.also { it.start() }
+        Thread.sleep(300) // Stop has claimed the tailer and is blocked in its join
+
+        assertFalse(app.pauseTailing(tabId), "Stop owns the tailer; a late pause must not park it")
+        assertFalse(app.isCaptureLogViewPaused(tabId))
+
+        holder.release()
+        stop.join(15_000)
+
+        val tab = app.tab(tabId)!!
+        assertNull(tab.tailPausedAtRow)
+        assertFalse(tab.tailing)
+        assertFalse(app.isCaptureLogViewPaused(tabId))
+        assertEquals(listOf("msg1", "msg2"), app.messages(tabId))
+    }
+
+    @Test
+    fun pauseVetoedByTheCallerLeavesTheTabTailing() {
+        val file = File(tempDir(), "capture.log").apply { writeText("") }
+        val app = newApp()
+        val tabId = app.openLiveCaptureTab(file)
+
+        assertFalse(app.pauseTailing(tabId, mayPause = { false }), "e.g. the capture started finalizing")
+
+        assertTrue(app.tab(tabId)!!.tailing)
+        assertNull(app.tab(tabId)!!.tailPausedAtRow)
+        assertFalse(app.isCaptureLogViewPaused(tabId))
+        app.stopTailing(tabId)
+    }
+
+    @Test
+    fun aPausedTabCanBeResumedAgainAfterAPauseThatLostItsClaim() {
+        // Pause -> Stop(drain) race lost by the pause, then the user starts watching the tab again.
+        val file = File(tempDir(), "capture.log").apply { writeText("") }
+        val app = newApp()
+        val tabId = app.openLiveCaptureTab(file)
+        file.appendLines(1..2)
+        waitUntil { app.tab(tabId)!!.logData.size == 2 }
+        app.drainAndStopTailing(tabId)
+
+        assertFalse(app.pauseTailing(tabId), "nothing to pause once the tab is stopped")
+        assertFalse(app.isCaptureLogViewPaused(tabId))
+        assertNull(app.tab(tabId)!!.tailPausedAtRow)
+        app.startCaptureTailing(tabId)
+        assertTrue(app.tab(tabId)!!.tailing)
+        app.stopTailing(tabId)
     }
 }

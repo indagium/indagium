@@ -4906,12 +4906,12 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun tailedCrashDataStaysPendingDuringABurstThenResolvesOnceItSettles() {
+    fun tailedCrashDataIsReportedAsNotYetAnalysedDuringABurstThenResolvesOnceItSettles() {
         // P-04: appendTailedLines used to call buildLogAnalysis() — the full crash/stack-trace
-        // scan — on every single tail batch. It's now debounced instead, reusing the same
-        // pending=true "still analyzing" state Task 04 already wired FilterPanel/Filter.kt to
-        // render correctly, so a batch landing must not immediately show a stale/empty crash-site
-        // list that looks indistinguishable from "analyzed, found nothing."
+        // scan — on every single tail batch. It's now debounced instead. A batch must not make the
+        // new rows look "analyzed, found nothing": the analysis records how far it reaches
+        // (LogAnalysis.analyzedThroughId), the already analysed prefix stays visible (it is NOT
+        // flipped back to pending), and the rows beyond it read as stale until the refresh fires.
         val dir = createTempDirectory("openlog-tailing-analysis").toFile()
         val file = File(dir, "tail.log").apply { writeText("06-26 10:00:00.000  100  100 I App: first\n") }
         val state = AppState(autosaveFile = File(dir, "state.cache"))
@@ -4933,9 +4933,17 @@ class AppStateBehaviorTest {
         )
         waitUntil { state.tab(tabId)!!.logData.size == 3 }
 
-        assertTrue(state.tab(tabId)!!.analysis.pending, "analysis must stay pending until the debounced refresh fires")
+        val duringBurst = state.tab(tabId)!!
+        assertFalse(duringBurst.analysis.pending, "the analysed prefix stays visible while rows keep arriving")
+        assertTrue(
+            duringBurst.analysis.isStaleFor(duringBurst.logData.last().id),
+            "the new rows must read as not analysed until the debounced refresh fires",
+        )
 
-        waitUntil(timeoutMs = 5_000) { !state.tab(tabId)!!.analysis.pending }
+        waitUntil(timeoutMs = 5_000) {
+            val tab = state.tab(tabId)!!
+            !tab.analysis.isStaleFor(tab.logData.last().id)
+        }
         assertTrue(
             state.tab(tabId)!!.analysis.crashSites.isNotEmpty(),
             "the debounced refresh must eventually pick up the crash"

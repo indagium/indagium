@@ -654,6 +654,9 @@ internal fun FilterPanel(
     // Once complete (pending == false), tab.analysis.crashSites is trusted directly, even when
     // empty — LogAnalysis.pending defaults to true precisely so "genuinely zero crash sites"
     // can never be mistaken for "not yet analyzed" here (see the field's doc in Model.kt / P-02).
+    // During a live tail the analysis keeps `pending == false` and records how far it reaches
+    // (LogAnalysis.analyzedThroughId), so the analysed prefix's sites stay listed while newer rows
+    // are still unanalysed; only the "Analyzing crashes…" empty-state text consults that coverage.
     // Note for tailing: analysis re-runs wholesale on a debounce rather than incrementally, so an
     // occurrence count (and a group's ×N badge) jumps on each re-analysis instead of ticking up one
     // at a time as new lines arrive. Acceptable — same tradeoff tagCounts and every other
@@ -2375,7 +2378,7 @@ internal fun FilterPanel(
                 ) {
                     AppText("◆", color = tc.td.copy(.33f), fontSize = 18.sp)
                     AppText(
-                        if (tab.analysis.pending) "Analyzing crashes…" else "None found in this category",
+                        if (tab.analysis.isStaleFor(tab.logData.lastOrNull()?.id)) "Analyzing crashes…" else "None found in this category",
                         color = tc.td,
                         fontSize = 10.sp,
                         maxLines = 2,

@@ -14,7 +14,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
-import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 /** The decision `TailCoordinator.refreshAnalysis` makes when a slow full analysis finishes. */
@@ -35,22 +34,37 @@ class MergeTailAnalysisTest {
     )
 
     @Test
-    fun identicalLogDataAppliesTheFullResultUnchanged() {
+    fun identicalLogDataAppliesTheFullResultCompleteAndKeepsTheLiveCounts() {
         val snapshot = appendLogEntries(entries(1..3), entries(4..5))
         val tab = mkTab("t", "f", snapshot, analysis = incremental)
-        assertSame(full, mergeTailAnalysis(tab, snapshot, full))
-        assertFalse(mergeTailAnalysis(tab, snapshot, full)!!.pending)
+        val merged = mergeTailAnalysis(tab, snapshot, full)!!
+        assertEquals(listOf(group), merged.stackTraceGroups)
+        assertEquals(incremental.tagCounts, merged.tagCounts, "the refresh does not even compute the counts")
+        assertEquals(incremental.processNames, merged.processNames)
+        assertFalse(merged.pending)
+        assertNull(merged.analyzedThroughId, "complete: it covers every row the tab holds")
+        assertFalse(merged.isStaleFor(snapshot.last().id))
     }
 
     @Test
-    fun appendedRowsKeepTheLiveCountsAndStayPending() {
+    fun appendedRowsKeepTheLiveCountsAndRecordHowFarTheResultsReach() {
         val snapshot = appendLogEntries(entries(1..3), entries(4..5))
         val current = appendLogEntries(snapshot, entries(6..9))
         val merged = mergeTailAnalysis(mkTab("t", "f", current, analysis = incremental), snapshot, full)!!
         assertEquals(listOf(group), merged.stackTraceGroups)
         assertEquals(incremental.tagCounts, merged.tagCounts)
         assertEquals(incremental.processNames, merged.processNames)
-        assertTrue(merged.pending, "the appended rows are not analysed yet")
+        // The analysed prefix's results are visible; only the appended rows (ids 6..9) are unanalysed.
+        assertFalse(merged.pending, "the prefix's results must not be hidden while rows keep arriving")
+        assertEquals(5, merged.analyzedThroughId)
+        assertFalse(merged.isStaleFor(5))
+        assertTrue(merged.isStaleFor(9))
+    }
+
+    @Test
+    fun aPendingAnalysisIsStaleUntilItIsReplaced() {
+        assertTrue(LogAnalysis().isStaleFor(null), "nothing analysed yet: the initial load still shows analyzing")
+        assertTrue(LogAnalysis().isStaleFor(3))
     }
 
     @Test
@@ -61,7 +75,8 @@ class MergeTailAnalysisTest {
         assertTrue(extendsSnapshot(current, snapshot))
         val merged = mergeTailAnalysis(mkTab("t", "f", current, analysis = incremental), snapshot, full)!!
         assertEquals(listOf(group), merged.stackTraceGroups)
-        assertTrue(merged.pending)
+        assertFalse(merged.pending)
+        assertEquals(5, merged.analyzedThroughId)
     }
 
     @Test

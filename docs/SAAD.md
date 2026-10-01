@@ -2487,7 +2487,7 @@ enough that a naive implementation does not merely run slowly, it exhausts heap.
 | Heap return to the OS + JVM flags | `utils/HeapTrim.kt`, `build.gradle.kts` (`-XX:G1PeriodicGCInterval`, `-XX:+ExplicitGCInvokesConcurrent`, `-XX:MaxRAMPercentage`) | A coalesced concurrent `System.gc()` after a big tab, capture or export is released, so G1 uncommits freed gigabytes instead of holding them while idle |
 | `AppendOnlyLogList` (tail path) | `utils/AppendOnlyLogList.kt` | Tail/live-capture appends share one growable backing array: O(batch) per append instead of copying every row each second, which had inflated committed heap ~20x over live data |
 | Allocation-free capture-index parser | `capture/CaptureArchive.kt` `parseIndexRecord` | Canonical index lines are parsed without a JSON tree per line; any deviation falls back to `parseIndexRecordJson` |
-| Heap-pressure watchdog | `utils/HeapPressure.kt` (`HeapPressureMonitor`), `ui/HeapBanner.kt`, `ui/TailCoordinator.kt` (`pauseTailing`/`resumeTailing`), `utils/LogMemoryEstimate.kt` | Turns "freeze then `OutOfMemoryError`" into a message: GC-notification occupancy after GC (NORMAL / WARNING at 70% / CRITICAL at 85%, CRITICAL confirmed by one rate-limited full GC) drives a banner; CRITICAL pauses live capture log views (recording continues on disk; Resume once pressure drops; Stop while paused keeps the full log in the session files and archive, the tab stays a prefix); a pre-open estimate (~3.5x file size vs. free heap) adds a memory line to the split prompt. Exposed read-only via the `get_memory_status` tool |
+| Heap-pressure watchdog | `utils/HeapPressure.kt` (`HeapPressureMonitor`), `ui/HeapBanner.kt`, `ui/TailCoordinator.kt` (`pauseTailing`/`resumeTailing`), `utils/LogMemoryEstimate.kt` | Turns "freeze then `OutOfMemoryError`" into a message: GC-notification occupancy after GC (NORMAL / WARNING at 70% / CRITICAL at 85%, CRITICAL confirmed by a full GC whose requests back off 60 s -> 15 min and need a young-GC reading above the last confirmed occupancy) drives a banner whose figures track every GC reading; CRITICAL pauses live capture log views (recording continues on disk; Resume once pressure drops; Stop while paused keeps the full log in the session files and archive, the tab stays a prefix); Resume is refused while the paused backlog would not fit in the free heap; a pre-open estimate (~3.5x file size vs. free heap) adds a memory line to the split prompt, and a memory-driven Split writes every part but opens only those that fit (the rest stay in the split folder). Exposed read-only via the `get_memory_status` tool |
 
 ### 19.2 CPU strategy
 
@@ -2822,7 +2822,7 @@ to minutes) and finally an `OutOfMemoryError` hits whichever thread allocates ne
 **Impact:** high on small machines (about 7M rows on an 8 GB Mac), but recording data is never lost:
 the capture session files on disk are authoritative. **Mitigations in place:** the heap-pressure
 watchdog and banner (§19.1), pausing live capture log views at CRITICAL, and the pre-open estimate in
-the split prompt. **Follow-ups:** a compact `LogEntry` (numeric `ts`, DLT/source fields in a side
+the split prompt (Split then opens only the parts that fit). **Follow-ups:** a compact `LogEntry` (numeric `ts`, DLT/source fields in a side
 table, roughly 2x more rows per GB) and disk-backed rows (an offset index plus lazy parsing, which
 removes the limit but reworks the engine).
 

@@ -42,6 +42,7 @@ import com.indagium.ui.SEQ_COLORS
 import com.indagium.ui.SplitSource
 import com.indagium.ui.imageBytesFromFile
 import com.indagium.ui.rotatedFramePng
+import com.indagium.utils.MemoryShortfall
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.ZipLogCandidate
 import com.indagium.utils.computeItems
@@ -52,6 +53,7 @@ import com.indagium.utils.indexOfEntryId
 import com.indagium.utils.isSupportedArchiveFile
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.newId
+import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.viewDefiningKey
 import com.indagium.utils.visibleEntries
 import java.awt.image.BufferedImage
@@ -593,7 +595,7 @@ internal class IndagiumToolOperations(
         tab.tailPausedAtRow?.let { mapOf("captureLogPausedAtRow" to it) } ?: emptyMap()
 
     private fun memoryStatus(): Map<String, Any?> {
-        val snapshot = appState.heapSnapshot
+        val snapshot = appState.currentHeapSnapshot()
         return mapOf(
             "heapPressure" to appState.heapPressure.name,
             "heapUsedAfterGcBytes" to snapshot?.usedAfterGcBytes,
@@ -708,22 +710,47 @@ internal class IndagiumToolOperations(
             )
         }
         val destination = destinationDir?.takeIf { it.isNotBlank() }?.let(::File) ?: appState.defaultSplitDestination(source)
-        val count = (partCount ?: appState.defaultSplitPartCount(source)).coerceAtLeast(1)
+        // The memory shortfall that blocked (or would block) opening this source whole: the pending
+        // prompt's own when one is waiting, else a fresh estimate. It lifts the default part count to
+        // at least 2 and limits how many parts are opened.
+        val shortfall = splitMemoryShortfall(source)
+        val count = (partCount ?: appState.defaultSplitPartCount(source, shortfall)).coerceAtLeast(1)
         if (appState.pendingSplitPrompt?.sources?.any { it.id == source.id } == true) {
             appState.cancelSplitPrompt()
         }
         val before = appState.tabs.size
-        val outputs = appState.splitSourceAndOpen(source, destination, postfix, count)
+        val result = appState.splitSourceAndOpenWithinMemory(source, destination, postfix, count, shortfall)
         awaitLoad()
         val openedTabs = appState.tabs.drop(before).map { tab ->
             mapOf("tabId" to tab.id, "filename" to tab.filename, "entryCount" to tab.logData.size, "sourcePath" to tab.sourcePath)
         }
         return mapOf(
             "ok" to true,
-            "outputPaths" to outputs.map { it.absolutePath },
+            "outputPaths" to result.written.map { it.absolutePath },
             "tabs" to openedTabs,
-        )
+        ) + memoryShortfallFields(shortfall) + if (result.unopened.isEmpty()) {
+            emptyMap()
+        } else {
+            mapOf(
+                "unopenedPaths" to result.unopened.map { it.absolutePath },
+                "unopenedReason" to "Not opened because the parts would not all fit in free memory; " +
+                    "open them with open_log_file once memory is free.",
+            )
+        }
     }
+
+    // The memory shortfall behind [source]'s split prompt: the pending prompt's own when one holds
+    // this source (it may cover a whole batch), else what opening the source alone would need now.
+    private fun splitMemoryShortfall(source: SplitSource): MemoryShortfall? =
+        appState.pendingSplitPrompt?.takeIf { prompt -> prompt.sources.any { it.id == source.id } }?.memoryShortfall
+            ?: appState.memoryShortfallForSource(source)
+
+    private fun memoryShortfallFields(shortfall: MemoryShortfall?): Map<String, Any?> =
+        if (shortfall == null) {
+            emptyMap()
+        } else {
+            mapOf("memoryShortfall" to mapOf("neededBytes" to shortfall.neededBytes, "freeBytes" to shortfall.freeBytes))
+        }
 
     private fun splitPreviewRoute(path: String, entryPath: String?): Map<String, Any?> {
         if (invalidPath(path)) return mapOf("error" to "invalid or missing path")
@@ -1996,11 +2023,19 @@ internal class IndagiumToolOperations(
     // recomputing on every call (P-02) — analysis costs as much as the parse itself on
     // multi-GB files, and repeated polling reads (a client waiting for analysis to land) must
     // not pay that cost again on each request. While still pending, `pending: true` lets a
-    // client distinguish "still analyzing" from "analyzed, found nothing."
+    // client distinguish "still analyzing" from "analyzed, found nothing." During a live tail the
+    // analysis covers a prefix (LogAnalysis.analyzedThroughId): its sites are returned, with
+    // `partial: true` and `analyzedThroughId` saying that rows after that id are not analysed yet.
     private fun getCrashSites(tabId: String): Map<String, Any?> {
         val tab = appState.tab(tabId) ?: return mapOf("error" to "no such tab: $tabId")
-        if (tab.analysis.pending) return mapOf("tabId" to tabId, "sites" to emptyList<Map<String, Any?>>(), "pending" to true)
-        return mapOf("tabId" to tabId, "sites" to tab.analysis.crashSites.map { crashSiteToMap(it) })
+        val analysis = tab.analysis
+        if (analysis.pending) return mapOf("tabId" to tabId, "sites" to emptyList<Map<String, Any?>>(), "pending" to true)
+        val sites = analysis.crashSites.map { crashSiteToMap(it) }
+        return if (analysis.isStaleFor(tab.logData.lastOrNull()?.id)) {
+            mapOf("tabId" to tabId, "sites" to sites, "partial" to true, "analyzedThroughId" to analysis.analyzedThroughId)
+        } else {
+            mapOf("tabId" to tabId, "sites" to sites)
+        }
     }
 
     // Returns a real inline image (see ControlServer.toCallToolResult's imageBase64 special-case),
@@ -2360,15 +2395,28 @@ internal class IndagiumToolOperations(
         "kind" to candidate.kind.name,
     )
 
-    private fun splitSourceToMap(source: SplitSource): Map<String, Any?> = mapOf(
-        "needsSplit" to true,
-        "id" to source.id,
-        "displayName" to source.displayName,
-        "sizeBytes" to source.sizeBytes,
-        "suggestedPartCount" to appState.defaultSplitPartCount(source),
-        "defaultDestinationDir" to appState.defaultSplitDestination(source).absolutePath,
-        "defaultPostfix" to "part",
-    ) + when (source) {
+    // A split prompt is raised for size (over the threshold), for memory (the estimated heap need
+    // exceeds the free heap), or both. `memoryShortfall` appears only when memory is part of it, and
+    // lifts suggestedPartCount to at least 2 (a 1-part "split" would not help).
+    private fun splitSourceToMap(source: SplitSource): Map<String, Any?> {
+        val shortfall = splitMemoryShortfall(source)
+        val reasons = listOfNotNull(
+            "size".takeIf { requiresSplitPrompt(source.sizeBytes) },
+            "memory".takeIf { shortfall != null },
+        )
+        return mapOf(
+            "needsSplit" to true,
+            "id" to source.id,
+            "displayName" to source.displayName,
+            "sizeBytes" to source.sizeBytes,
+            "suggestedPartCount" to appState.defaultSplitPartCount(source, shortfall),
+            "reasons" to reasons,
+            "defaultDestinationDir" to appState.defaultSplitDestination(source).absolutePath,
+            "defaultPostfix" to "part",
+        ) + memoryShortfallFields(shortfall) + sourceLocationFields(source)
+    }
+
+    private fun sourceLocationFields(source: SplitSource): Map<String, Any?> = when (source) {
         is SplitSource.RealFile -> mapOf("path" to source.file.absolutePath)
         is SplitSource.ArchiveEntry -> mapOf(
             "path" to source.archiveFile.absolutePath,

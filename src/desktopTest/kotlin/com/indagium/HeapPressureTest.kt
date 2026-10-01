@@ -1,5 +1,7 @@
 package com.indagium
 
+import com.indagium.utils.HEAP_CONFIRM_MAX_INTERVAL_MS
+import com.indagium.utils.HEAP_CONFIRM_MIN_INTERVAL_MS
 import com.indagium.utils.HeapPressure
 import com.indagium.utils.HeapPressureDecision
 import com.indagium.utils.HeapPressureMonitor
@@ -53,11 +55,15 @@ class HeapPressureTest {
     private class Fixture(val max: Long = 1_000L) {
         var now = 1_000_000L
         var gcRequests = 0
+        val gcRequestTimes = mutableListOf<Long>()
         val changes = mutableListOf<Pair<HeapPressure, HeapSnapshot>>()
         var heapUsedNow = 0L
         val monitor = HeapPressureMonitor(
             maxBytes = { max },
-            requestFullGc = { gcRequests++ },
+            requestFullGc = {
+                gcRequests++
+                gcRequestTimes += now
+            },
             nowMs = { now },
             currentHeapUsedBytes = { heapUsedNow },
         )
@@ -117,6 +123,110 @@ class HeapPressureTest {
         f.monitor.onGc(700, true) // confirming GC shows garbage was the cause
         assertEquals(HeapPressure.WARNING, f.monitor.pressure)
         assertEquals(1, f.changes.size)
+    }
+
+    // The live set sits at 0.82 (below CRITICAL) while every young GC reads 0.86: each confirming full
+    // GC proves it is not critical, yet the old rule asked for another one every 60 s, forever.
+    @Test
+    fun aLiveSetJustBelowCriticalDoesNotGetAFullGcEveryMinute() {
+        val f = Fixture()
+        var seenRequests = 0
+        repeat(360) { // one young GC every 10 s for an hour
+            f.now += 10_000
+            f.monitor.onGc(860, isFullGc = false)
+            if (f.gcRequests > seenRequests) { // the requested confirming GC runs and reports the real live set
+                seenRequests = f.gcRequests
+                f.monitor.onGc(820, isFullGc = true)
+            }
+        }
+        assertEquals(HeapPressure.WARNING, f.monitor.pressure, "never escalates: the confirmed live set is 0.82")
+        assertTrue(f.gcRequests in 2..10, "expected a handful of backed-off confirmations in an hour, got ${f.gcRequests}")
+        val gaps = f.gcRequestTimes.zipWithNext { a, b -> b - a }
+        assertTrue(gaps.first() >= HEAP_CONFIRM_MIN_INTERVAL_MS, "first gap $gaps")
+        assertEquals(gaps.sorted(), gaps, "the gap never shrinks while nothing changes: $gaps")
+        assertTrue(gaps.last() >= 2 * HEAP_CONFIRM_MIN_INTERVAL_MS, "the backoff escalated: $gaps")
+        assertTrue(gaps.all { it <= HEAP_CONFIRM_MAX_INTERVAL_MS + 10_000 }, "capped at 15 min: $gaps")
+    }
+
+    @Test
+    fun youngReadingsAtOrBelowTheConfirmedBaselineNeverAskAgain() {
+        val f = Fixture()
+        f.monitor.onGc(900, false)
+        assertEquals(1, f.gcRequests)
+        f.monitor.onGc(840, true) // the confirming GC: live set 0.84
+        f.now += 10 * HEAP_CONFIRM_MAX_INTERVAL_MS
+        f.monitor.onGc(860, false) // 0.86 < 0.84 + 0.03: no new evidence
+        f.monitor.onGc(855, false)
+        assertEquals(1, f.gcRequests)
+    }
+
+    @Test
+    fun aRisingLiveSetStillReachesCriticalOnceTheBackoffAllows() {
+        val f = Fixture()
+        f.monitor.onGc(900, false)
+        f.monitor.onGc(820, true) // confirmed OK, baseline 0.82, backoff escalates after each request
+        repeat(3) {
+            f.now += HEAP_CONFIRM_MAX_INTERVAL_MS
+            f.monitor.onGc(860, false)
+            f.monitor.onGc(820, true)
+        }
+        // Now the live set genuinely grows: the next young reading is confirmed (backoff elapsed) ...
+        f.now += HEAP_CONFIRM_MAX_INTERVAL_MS
+        val before = f.gcRequests
+        f.monitor.onGc(950, false)
+        assertEquals(before + 1, f.gcRequests)
+        // ... and the full GC shows it is real.
+        f.monitor.onGc(910, true)
+        assertEquals(HeapPressure.CRITICAL, f.monitor.pressure)
+    }
+
+    @Test
+    fun aFullGcAtCriticalReachesItWithoutAnyBackoffWaiting() {
+        val f = Fixture()
+        f.monitor.onGc(900, false)
+        f.monitor.onGc(820, true)
+        f.monitor.onGc(950, true) // the JVM's own full GC: authoritative at once
+        assertEquals(HeapPressure.CRITICAL, f.monitor.pressure)
+    }
+
+    @Test
+    fun noConfirmationIsRequestedWhileAlreadyCritical() {
+        val f = Fixture()
+        f.monitor.onGc(900, false)
+        f.monitor.onGc(900, true) // CRITICAL
+        val requests = f.gcRequests
+        f.now += 10 * HEAP_CONFIRM_MAX_INTERVAL_MS
+        f.monitor.onGc(950, false)
+        f.monitor.onGc(990, false)
+        assertEquals(requests, f.gcRequests)
+        assertEquals(HeapPressure.CRITICAL, f.monitor.pressure)
+    }
+
+    @Test
+    fun aLevelChangeRestartsTheBackoff() {
+        val f = Fixture()
+        f.monitor.onGc(900, false) // request 1
+        f.monitor.onGc(820, true)
+        f.now += HEAP_CONFIRM_MIN_INTERVAL_MS
+        f.monitor.onGc(860, false) // request 2: the gap is now 120 s
+        f.monitor.onGc(820, true)
+        f.monitor.onGc(300, true) // WARNING -> NORMAL: a level change, backoff restarts
+        f.now += HEAP_CONFIRM_MIN_INTERVAL_MS
+        f.monitor.onGc(900, false)
+        assertEquals(3, f.gcRequests, "after a level change the first gap is the base interval again")
+    }
+
+    @Test
+    fun readingsArePublishedThrottledToOnePerSecond() {
+        val f = Fixture()
+        val readings = mutableListOf<HeapSnapshot>()
+        f.monitor.setOnReading { readings += it }
+        f.monitor.onGc(100, false)
+        f.now += 500
+        f.monitor.onGc(110, false) // within 1 s of the last published reading: throttled
+        f.now += 600
+        f.monitor.onGc(120, false)
+        assertEquals(listOf(100L, 120L), readings.map { it.usedAfterGcBytes })
     }
 
     @Test
