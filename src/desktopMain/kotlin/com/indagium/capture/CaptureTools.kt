@@ -54,8 +54,7 @@ class CaptureTools(
             // An auxiliary mirror is explicitly visible even when recording was configured with
             // --no-window. It deliberately carries no --record flag, so it cannot overwrite or
             // race the canonical session MKV.
-            val supportsAudioFlags = validatedScrcpyVersion?.let { it >= ScrcpyVersion(2, 0) } ?: true
-            if (supportsAudioFlags) {
+            if (scrcpySupportsAudioFlags()) {
                 if (!settings.audio) add("--no-audio") else addAll(audioCliArgs)
             }
         }
@@ -67,6 +66,12 @@ class CaptureTools(
             CaptureProcessSpec(executable.command(arguments), environment = mapOf("ADB" to adb.path))
         }
     }
+
+    private fun scrcpySupportsAudioFlags(): Boolean = validatedScrcpyVersion?.let { it >= ScrcpyVersion(2, 0) } ?: true
+
+    /** Whether [scrcpyMirrorSpec] leaves audio ON for the visible window: the setting is on and this
+     *  host scrcpy has audio flags at all (1.x has none, so it can never be the audio that crashed). */
+    fun scrcpyMirrorUsesAudio(settings: CaptureSettings): Boolean = settings.audio && scrcpySupportsAudioFlags()
 
     fun legacyScrcpyAudioWarning(): String? = validatedScrcpyVersion
         ?.takeIf { it < ScrcpyVersion(2, 0) }

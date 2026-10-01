@@ -473,7 +473,14 @@ class CaptureRecorder internal constructor(
     internal fun activeEmbeddedSession(): EmbeddedDeviceSession? = synchronized(lock) { embeddedSession }
 
     /** Opens at most one auxiliary, visible, non-recording scrcpy process for this session. */
-    fun openMirror(): Boolean {
+    fun openMirror(): Boolean = openMirror(forceNoAudio = false)
+
+    /**
+     * [forceNoAudio] builds the argument list from a copy of the settings with audio off (yielding
+     * `--no-audio`) for the one-shot retry after an audio crash; the session's own settings are never
+     * touched or persisted.
+     */
+    private fun openMirror(forceNoAudio: Boolean): Boolean {
         val (session, tools) = synchronized(lock) {
             check(active.get()) { "Mirror requires an active capture session" }
             requireNotNull(currentSession) to requireNotNull(currentTools)
@@ -485,9 +492,12 @@ class CaptureRecorder internal constructor(
         }
         var stillOpening = true
         try {
-            if (session.settings.audio) tools.legacyScrcpyAudioWarning()?.let(::addDiagnostic)
-            val audioPlan = resolveAudioPlan(tools, session.device.serial, session.settings)
-            val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, session.settings, audioPlan.cliArgs))
+            val settings = if (forceNoAudio) session.settings.copy(audio = false) else session.settings
+            if (settings.audio) tools.legacyScrcpyAudioWarning()?.let(::addDiagnostic)
+            val audioPlan = resolveAudioPlan(tools, session.device.serial, settings)
+            val audioRequested = tools.scrcpyMirrorUsesAudio(settings)
+            val process = runner.start(tools.scrcpyMirrorSpec(session.device.serial, settings, audioPlan.cliArgs))
+            val launchedAtNanos = System.nanoTime()
             val accepted = synchronized(lock) {
                 mirrorOpening = false
                 stillOpening = false
@@ -503,7 +513,9 @@ class CaptureRecorder internal constructor(
                 process.close()
                 return false
             }
-            thread(name = "capture-mirror-${session.id}", isDaemon = true) { monitorMirror(process) }
+            thread(name = "capture-mirror-${session.id}", isDaemon = true) {
+                monitorMirror(process, launchedAtNanos, audioRequested, retried = forceNoAudio)
+            }
             return true
         } finally {
             // Only the failure path (legacy warning, audio plan or runner.start threw) still owns the flag.
@@ -706,18 +718,42 @@ class CaptureRecorder internal constructor(
         }
     }
 
-    private fun monitorMirror(process: RunningCaptureProcess) {
-        drainDiagnostics(process.errorStream, "scrcpy mirror")
+    @Suppress("TooGenericExceptionCaught")
+    private fun monitorMirror(process: RunningCaptureProcess, launchedAtNanos: Long, audioRequested: Boolean, retried: Boolean) {
+        val recentStderr = ArrayDeque<String>()
+        val stderrReader = drainDiagnostics(process.errorStream, "scrcpy mirror") { line ->
+            synchronized(recentStderr) {
+                if (recentStderr.size == MIRROR_STDERR_TAIL_LINES) recentStderr.removeFirst()
+                recentStderr.addLast(line)
+            }
+        }
         discardOutput(process.inputStream, "scrcpy mirror")
         process.waitFor(Duration.ofDays(VIDEO_MONITOR_MAX_WAIT_DAYS))
-        process.exitCode()?.takeIf { it != 0 }?.let { exitCode ->
-            addDiagnostic("scrcpy mirror exited with status $exitCode; see the scrcpy mirror output above.")
+        // The reader runs on its own thread and may still hold the last lines (the audio error is
+        // typically the very last thing scrcpy prints); collect them before deciding anything. Bounded,
+        // because a grandchild that inherited the pipe could keep it open after scrcpy itself is gone.
+        stderrReader.join(MIRROR_STDERR_JOIN_MS)
+        val exitCode = process.exitCode()
+        exitCode?.takeIf { it != 0 }?.let {
+            addDiagnostic("scrcpy mirror exited with status $it; see the scrcpy mirror output above.")
         }
         synchronized(lock) {
             if (mirrorProcess === process) mirrorProcess = null
             if (active.get()) publishLocked(RecorderState.RECORDING, force = true)
         }
         process.close()
+        val uptimeMs = (System.nanoTime() - launchedAtNanos) / NANOS_PER_MILLI
+        val stderrLines = synchronized(recentStderr) { recentStderr.toList() }
+        if (!shouldRetryMirrorWithoutAudio(exitCode, stderrLines, audioRequested, retried, uptimeMs) || !active.get()) return
+        addDiagnostic(MIRROR_AUDIO_FALLBACK_DIAGNOSTIC)
+        // mirrorProcess is already cleared above and the lock is released, so this goes through the
+        // same openMirror guard as a user click: whichever of the two takes the lock first starts the
+        // one process and the other sees mirrorOpening / a live process and no-ops.
+        try {
+            openMirror(forceNoAudio = true)
+        } catch (failure: Throwable) {
+            addDiagnostic("scrcpy mirror could not reopen without audio: ${failure.message ?: failure::class.simpleName}")
+        }
     }
 
     // Storage failures while stopping (disk full) must never stop the teardown: processes are
@@ -905,13 +941,17 @@ class CaptureRecorder internal constructor(
         AppLogger.info("capture", message.take(MAX_DIAGNOSTIC_CHARS))
     }
 
-    private fun drainDiagnostics(input: InputStream, source: String) {
+    private fun drainDiagnostics(input: InputStream, source: String, onLine: (String) -> Unit = {}): Thread =
         thread(name = "capture-$source-diagnostics", isDaemon = true) {
             input.bufferedReader().useLines { lines ->
-                lines.forEach { line -> if (line.isNotBlank()) addDiagnostic("$source: $line") }
+                lines.forEach { line ->
+                    if (line.isNotBlank()) {
+                        onLine(line)
+                        addDiagnostic("$source: $line")
+                    }
+                }
             }
         }
-    }
 
     /** Reads and drops [input] so a chatty child can never block on a full stdout pipe. */
     private fun discardOutput(input: InputStream, source: String) {
@@ -1160,6 +1200,40 @@ private const val SCREENSHOT_TIMEOUT_SECONDS = 15L
 private const val VIDEO_MONITOR_MAX_WAIT_DAYS = 3_650L
 private const val PROCESS_JOIN_TIMEOUT_MS = 3_000L
 private const val WATCHDOG_JOIN_TIMEOUT_MS = 1_000L
+private const val MIRROR_STDERR_TAIL_LINES = 50
+private const val MIRROR_STDERR_JOIN_MS = 2_000L
+private const val NANOS_PER_MILLI = 1_000_000L
+
+/** A scrcpy window that dies this soon after launch never got going, which is how a broken host audio
+ *  device shows up when its error line is not recognisable. */
+internal const val MIRROR_EARLY_EXIT_MS = 5_000L
+
+/** Diagnostic added when the visible mirror is reopened with `--no-audio`; the strip keys its short
+ *  notice off this prefix (see latestMirrorAudioFallbackNotice). */
+internal const val MIRROR_AUDIO_FALLBACK_DIAGNOSTIC =
+    "scrcpy window crashed while opening audio; reopened without sound (--no-audio)."
+
+private val MIRROR_LOG_LEVEL_WORD = Regex("\\b(error|warn|warning)\\b")
+
+/**
+ * Whether a visible scrcpy window that just exited should be reopened once with `--no-audio`: it must
+ * have failed (non-zero exit), have had audio on ([audioRequested]), not already be that retry, and
+ * either logged an ERROR/WARN line mentioning audio or died within [MIRROR_EARLY_EXIT_MS] of launch.
+ */
+internal fun shouldRetryMirrorWithoutAudio(
+    exitCode: Int?,
+    stderrLines: List<String>,
+    audioRequested: Boolean,
+    alreadyRetried: Boolean,
+    uptimeMs: Long,
+): Boolean {
+    if (alreadyRetried || !audioRequested || exitCode == null || exitCode == 0) return false
+    val audioError = stderrLines.any { line ->
+        val lower = line.lowercase()
+        "audio" in lower && MIRROR_LOG_LEVEL_WORD.containsMatchIn(lower)
+    }
+    return audioError || uptimeMs < MIRROR_EARLY_EXIT_MS
+}
 
 /**
  * Directories of capture sessions that a [CaptureRecorder] in THIS process is recording right now:

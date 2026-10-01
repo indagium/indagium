@@ -735,6 +735,116 @@ class CaptureRecorderTest {
         }
     }
 
+    @Test
+    fun mirrorRetryRuleCoversAudioErrorsCleanExitsAndEarlyDeaths() {
+        val audioError = listOf("INFO: scrcpy 2.4", "ERROR: Could not open audio device")
+        val late = MIRROR_EARLY_EXIT_MS + 1
+        // An audio error line on a failed exit retries, even long after launch.
+        assertTrue(shouldRetryMirrorWithoutAudio(1, audioError, audioRequested = true, alreadyRetried = false, uptimeMs = late))
+        assertTrue(shouldRetryMirrorWithoutAudio(1, listOf("WARN: Audio capture failed"), true, false, late))
+        // A clean exit (the user closed the window) or a still-running process never retries.
+        assertFalse(shouldRetryMirrorWithoutAudio(0, audioError, true, false, 100))
+        assertFalse(shouldRetryMirrorWithoutAudio(null, audioError, true, false, 100))
+        // Audio was not on, or this already is the retry.
+        assertFalse(shouldRetryMirrorWithoutAudio(1, audioError, audioRequested = false, alreadyRetried = false, uptimeMs = 100))
+        assertFalse(shouldRetryMirrorWithoutAudio(1, audioError, audioRequested = true, alreadyRetried = true, uptimeMs = 100))
+        // No audio line: only an early death retries; a late crash with unrelated output does not.
+        assertTrue(shouldRetryMirrorWithoutAudio(1, listOf("ERROR: Server connection failed"), true, false, 1_000))
+        assertFalse(shouldRetryMirrorWithoutAudio(1, listOf("ERROR: Server connection failed"), true, false, late))
+        // "audio" without an ERROR/WARN level (e.g. an INFO line) is not evidence.
+        assertFalse(shouldRetryMirrorWithoutAudio(1, listOf("INFO: Audio enabled"), true, false, late))
+    }
+
+    @Test
+    fun mirrorAudioCrashReopensTheWindowOnceWithNoAudio() {
+        val root = Files.createTempDirectory("capture-mirror-audio-retry-test").toFile()
+        val scrcpyCommands = java.util.concurrent.CopyOnWriteArrayList<List<String>>()
+        val logcat = StreamingFakeProcess()
+        val retried = StreamingFakeProcess()
+        val runner = CaptureProcessRunner { spec ->
+            if (spec.command.first() == "scrcpy") {
+                scrcpyCommands += spec.command
+                if (scrcpyCommands.size == 1) CompletedFakeProcess("", "ERROR: Could not open audio device\n", 1) else retried
+            } else {
+                logcat
+            }
+        }
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(DEVICE, testSettings().copy(audio = true), CaptureTools(ADB, CaptureExecutable("scrcpy"), runner))
+            assertTrue(recorder.openMirror())
+
+            awaitCapture { scrcpyCommands.size == 2 }
+            assertFalse(scrcpyCommands[0].contains("--no-audio"), "the first window keeps its audio")
+            assertTrue(scrcpyCommands[1].contains("--no-audio"), "the retry must be silent")
+            awaitCapture { recorder.snapshot.value.diagnostics.any { it.startsWith(MIRROR_AUDIO_FALLBACK_DIAGNOSTIC) } }
+            // The audio line itself stays in the diagnostics, in the same form as before.
+            assertTrue(recorder.snapshot.value.diagnostics.any { it == "scrcpy mirror: ERROR: Could not open audio device" })
+            // The session's own settings are untouched by the forced no-audio copy.
+            assertTrue(recorder.snapshot.value.session?.settings?.audio == true)
+            // The retried window is alive, so a further open is a no-op.
+            assertTrue(recorder.openMirror())
+            assertEquals(2, scrcpyCommands.size)
+        } finally {
+            retried.finish()
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun mirrorThatKeepsCrashingIsRetriedOnlyOnce() {
+        val root = Files.createTempDirectory("capture-mirror-retry-once-test").toFile()
+        val scrcpyStarts = AtomicInteger(0)
+        val logcat = StreamingFakeProcess()
+        val runner = CaptureProcessRunner { spec ->
+            if (spec.command.first() == "scrcpy") {
+                scrcpyStarts.incrementAndGet()
+                CompletedFakeProcess("", "ERROR: Could not open audio device\n", 1)
+            } else {
+                logcat
+            }
+        }
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(DEVICE, testSettings().copy(audio = true), CaptureTools(ADB, CaptureExecutable("scrcpy"), runner))
+            assertTrue(recorder.openMirror())
+            awaitCapture { scrcpyStarts.get() >= 2 }
+            // Give a (buggy) third launch time to show up.
+            Thread.sleep(500)
+            assertEquals(2, scrcpyStarts.get())
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun mirrorWithAudioOffIsNotRetriedAfterACrash() {
+        val root = Files.createTempDirectory("capture-mirror-no-retry-test").toFile()
+        val scrcpyStarts = AtomicInteger(0)
+        val logcat = StreamingFakeProcess()
+        val runner = CaptureProcessRunner { spec ->
+            if (spec.command.first() == "scrcpy") {
+                scrcpyStarts.incrementAndGet()
+                CompletedFakeProcess("", "ERROR: Could not open audio device\n", 1)
+            } else {
+                logcat
+            }
+        }
+        val recorder = CaptureRecorder(root, runner)
+        try {
+            recorder.start(DEVICE, testSettings().copy(audio = false), CaptureTools(ADB, CaptureExecutable("scrcpy"), runner))
+            assertTrue(recorder.openMirror())
+            awaitCapture { recorder.snapshot.value.diagnostics.any { it.startsWith("scrcpy mirror exited with status 1") } }
+            Thread.sleep(300)
+            assertEquals(1, scrcpyStarts.get())
+        } finally {
+            recorder.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun testSettings(
         recordVideo: Boolean = false,
         sessionLimitBytes: Long = ONE_MIB,
