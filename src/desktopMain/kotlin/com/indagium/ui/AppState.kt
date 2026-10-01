@@ -891,6 +891,9 @@ private const val EMBEDDED_MIRROR_SESSION_WAIT_MS = 5_000L
  * function's doc for the race this closes. */
 private const val EMBEDDED_MIRROR_RECORDING_SESSION_WAIT_MS = 10_000L
 
+/** Upper bound a closed capture tab's recorder stop waits for that tab's mirror close to finish first. */
+private const val RECORDER_STOP_MIRROR_CLOSE_WAIT_MS = 10_000L
+
 /** Upper bound AppState.close() waits for mirror handles to finish closing on their lifecycle lanes. */
 private const val EMBEDDED_MIRROR_SHUTDOWN_WAIT_MS = 3_000L
 
@@ -2075,6 +2078,15 @@ class AppState(
     /** Embedded mirror handles are presentation resources, separate from recorder ownership. */
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
+
+    /** A tab-close's recorder stop that is waiting for that tab's mirror close (see closeTabsById);
+     * guarded by [stateLock]. Tracked so an app quit in that window still stops the recorder. */
+    private class DeferredRecorderStop(
+        val controller: TabCaptureController,
+        val mirrorClosed: java.util.concurrent.CompletableFuture<Unit>,
+    )
+
+    private val deferredRecorderStopsByTab = mutableMapOf<String, DeferredRecorderStop>()
 
     /** Tab-local overlay sources that must survive native decoder/surface recreation. */
     private val embeddedMirrorOverlaySourcesByTab = mutableMapOf<String, MutableSet<String>>()
@@ -3361,18 +3373,18 @@ class AppState(
      * lambda), so adjusting the Settings slider while audio is already playing takes effect without
      * retoggling. Off the calling thread for the same reason [stopEmbeddedMirror] is: attaching opens
      * an FFmpeg decoder context and a javax.sound.sampled line, neither of which should run on a
-     * Compose click handler's thread.
+     * Compose click handler's thread. Queued on the handle's lifecycle lane (not a free-standing
+     * `ioScope` job) so it is ordered with Connect/Disconnect/close and is skipped once the handle
+     * is closing — a late toggle can never attach a player to a mirror with no UI left to stop it.
      */
     internal fun setEmbeddedMirrorLiveAudioEnabled(tabId: String, enabled: Boolean) {
         updateSettings { it.copy(captureSettings = it.captureSettings.copy(playAudioLive = enabled)) }
         val handle = synchronized(stateLock) { embeddedMirrorsByTab[tabId] } ?: return
-        ioScope.launch {
-            handle.setLiveAudioEnabled(
-                enabled,
-                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
-                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
-            )
-        }
+        handle.requestSetLiveAudioEnabled(
+            enabled,
+            volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+            onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+        )
     }
 
     /**
@@ -3447,20 +3459,20 @@ class AppState(
         }
     }
 
+    /** Runs from a start's `afterStart` (on the handle's lane); the toggle itself is queued behind
+     * it on that same lane and skipped if the handle is closing by then. */
     private fun applyEmbeddedMirrorLiveAudioPreference(tabId: String, handle: EmbeddedMirrorHandle) {
-        ioScope.launch {
-            if (synchronized(stateLock) { embeddedMirrorsByTab[tabId] } !== handle) return@launch
-            val captureSettings = settings.captureSettings
-            handle.setLiveAudioEnabled(
-                enabled = captureSettings.playAudioLive && handle.hasLiveAudio,
-                volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
-                onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
-            )
-        }
+        if (synchronized(stateLock) { embeddedMirrorsByTab[tabId] } !== handle) return
+        val captureSettings = settings.captureSettings
+        handle.requestSetLiveAudioEnabled(
+            enabled = captureSettings.playAudioLive && handle.hasLiveAudio,
+            volume = { settings.captureSettings.liveAudioVolume.coerceIn(0, 100) / 100f },
+            onDiagnostic = { message -> AppLogger.info("embedded-mirror-audio", message) },
+        )
     }
 
-    /** Blocking close, for the IO-lane stop path only (never the UI thread — see
-     * [EmbeddedMirrorHandle]'s threading invariant). */
+    /** Close for the IO-lane stop path (never the UI thread — see [EmbeddedMirrorHandle]'s
+     * threading invariant): goes through the handle's lane and waits for it, bounded. */
     private fun closeEmbeddedMirror(tabId: String) {
         detachedEmbeddedMirrorTabs.remove(tabId)
         val handle = synchronized(stateLock) {
@@ -4318,14 +4330,26 @@ class AppState(
                 embeddedMirrorVersion++
             }
         }
-        // Closes run on each handle's lifecycle lane (never blocking on its lifecycle lock from this
-        // possibly-UI thread); wait a bounded time so adb cleanup still normally finishes at exit.
-        val closes = mirrors.map { (_, mirror) -> mirror.requestClose() }
+        // Ordering at exit, which runs on the EDT (Main.kt's onCloseRequest):
+        //  1. requestClose() tears each native surface down INLINE on this thread (the only EDT-bound
+        //     part of a mirror close), so the EDT never blocks on lane work that itself needs the EDT
+        //     (that used to cost ~3 s of frozen window, one timed-out surface close per mirror).
+        //  2. The lanes then run the EDT-free rest (decoder detach, adb forward/scrcpy cleanup); we
+        //     wait a bounded time for them so that cleanup normally finishes before the process exits.
+        //  3. Only then are the recorders stopped, so a recorder stop never overlaps a mirror close
+        //     that is still detaching/attaching a decoder on the same device session (a close that
+        //     timed out is simply abandoned to its lane).
+        val deferred = synchronized(stateLock) { deferredRecorderStopsByTab.toList().also { deferredRecorderStopsByTab.clear() } }
+        val closes = mirrors.map { (_, mirror) -> mirror.requestClose() } + deferred.map { (_, stop) -> stop.mirrorClosed }
         val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(EMBEDDED_MIRROR_SHUTDOWN_WAIT_MS)
         closes.forEach { close ->
             runCatching { close.get((deadlineNanos - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS) }
         }
         live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
+        // Recorders whose tab was closed moments ago and whose stop is still waiting behind that tab's
+        // mirror close (closeTabsById): their mirror close was awaited above too. The stop is
+        // idempotent, so racing the deferred job is safe.
+        deferred.forEach { (tabId, stop) -> stopControllerNow(tabId, stop.controller) }
     }
 
     private fun stopControllerNow(tabId: String, controller: TabCaptureController) {
@@ -8265,29 +8289,46 @@ class AppState(
         if (tabIds.isEmpty()) return
         // Recorder shutdown can terminate adb/scrcpy and fsync files. Capture controllers are
         // captured under stateLock, but stopped before entering the tab-removal lock below so a
-        // close action never performs process/file IO while stateLock is held.
-        val liveControllers = synchronized(stateLock) {
-            tabIds.mapNotNull { tabId -> captureControllersByTab[tabId]?.let { tabId to it } }
-        }
-        val liveMirrors = synchronized(stateLock) {
-            tabIds.mapNotNull { tabId -> embeddedMirrorsByTab[tabId]?.let { tabId to it } }
-        }
-        liveMirrors.forEach { (tabId, mirror) ->
-            // requestClose, not close(): this runs on the calling (often UI) thread, and a blocking
-            // close waits on the mirror's lifecycle lock behind any Disconnect still in flight —
-            // the UI-thread-waits-on-a-mirror-lock deadlock (see EmbeddedMirrorHandle's invariant).
-            // The close is queued on the handle's own lane, ordered after that Disconnect.
-            mirror.requestClose()
-            synchronized(stateLock) {
-                embeddedMirrorsByTab.remove(tabId, mirror)
-                embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
-                detachedEmbeddedMirrorTabs.remove(tabId)
-                embeddedMirrorVersion++
+        // close action never performs process/file IO while stateLock is held. Controllers are taken
+        // out of captureControllersByTab in the SAME critical section as the mirror handles, so a
+        // mirror that is still being created for one of these tabs can no longer register itself
+        // (ensureEmbeddedMirror requires its controller to be registered) and cannot slip past
+        // this close.
+        val (liveControllers, liveMirrors) = synchronized(stateLock) {
+            val controllers = tabIds.mapNotNull { tabId -> captureControllersByTab.remove(tabId)?.let { tabId to it } }
+            val mirrors = tabIds.mapNotNull { tabId ->
+                embeddedMirrorsByTab.remove(tabId)?.let { mirror ->
+                    embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
+                    detachedEmbeddedMirrorTabs.remove(tabId)
+                    embeddedMirrorVersion++
+                    tabId to mirror
+                }
             }
+            controllers to mirrors
         }
+        // requestClose, not close(): this runs on the calling (often UI) thread. It tears the native
+        // surface down inline when we ARE the EDT — so the surface is gone before the tab's
+        // SwingPanel is disposed (see hideMacSurface) and nothing here ever waits on the EDT or on a
+        // mirror lifecycle lock — and queues the EDT-free remainder (decoder detach, adb cleanup) on
+        // the handle's own lane, ordered after any Disconnect still in flight.
+        val mirrorCloses = liveMirrors.associate { (tabId, mirror) -> tabId to mirror.requestClose() }
         liveControllers.forEach { (tabId, controller) ->
-            synchronized(stateLock) { captureControllersByTab.remove(tabId) }
-            stopControllerNow(tabId, controller)
+            val mirrorClosed = mirrorCloses[tabId]
+            if (mirrorClosed == null) {
+                stopControllerNow(tabId, controller)
+            } else {
+                // The recorder owns the shared device session the mirror's decoder is attached to:
+                // stopping it while the lane is still detaching/attaching that decoder races the
+                // two. Wait for the mirror close (bounded; a stuck close is abandoned to its lane)
+                // on the IO scope instead of the UI thread, then stop the recorder. The tab is being
+                // removed, so the final tail drain inside stopControllerNow has nothing left to feed.
+                synchronized(stateLock) { deferredRecorderStopsByTab[tabId] = DeferredRecorderStop(controller, mirrorClosed) }
+                ioScope.launch {
+                    runCatching { mirrorClosed.get(RECORDER_STOP_MIRROR_CLOSE_WAIT_MS, TimeUnit.MILLISECONDS) }
+                    stopControllerNow(tabId, controller)
+                    synchronized(stateLock) { deferredRecorderStopsByTab.remove(tabId) }
+                }
+            }
         }
         // A handle can still be present here even after the liveMirrors pass above: a new one can
         // register (the async create job in ensureEmbeddedMirror) in the window between that

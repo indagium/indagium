@@ -47,6 +47,10 @@ class EmbeddedMirrorLifecycleTest {
     private class LockingFakeBackend(
         private val fakeEdt: ExecutorService,
         private val detachDelayMs: Long,
+        private val closeDelayMs: Long = 0,
+        /** Models a native surface: its close needs the real EDT ([runOnEdtBounded]), like
+         * [EmbeddedMirrorMacSurface.close], and is idempotent with the same already-closed fast path. */
+        private val hasEdtSurface: Boolean = false,
     ) : MirrorBackend {
         private val lifecycleLock = Any()
         private val decoderCount = AtomicInteger()
@@ -57,6 +61,15 @@ class EmbeddedMirrorLifecycleTest {
         val closes = AtomicInteger()
         val maxAttachedDecoders = AtomicInteger()
         val stopEntered = CountDownLatch(1)
+        val startsAfterClose = AtomicInteger()
+        val liveAudioEnables = AtomicInteger()
+        val surfaceCloseTimeouts = AtomicInteger()
+
+        @Volatile var surfaceClosed = false
+
+        @Volatile var closeFinished = false
+
+        @Volatile var onCloseFinished: () -> Unit = {}
 
         override fun snapshot() = EmbeddedMirrorSnapshot(
             if (attached) EmbeddedMirrorState.LIVE else EmbeddedMirrorState.DISCONNECTED,
@@ -65,6 +78,7 @@ class EmbeddedMirrorLifecycleTest {
         override fun isAlreadyStarted(serial: String) = attached
 
         override fun start(serial: String, options: MirrorStreamOptions) = synchronized(lifecycleLock) {
+            if (closeFinished) startsAfterClose.incrementAndGet()
             if (attached) return@synchronized
             attached = true
             starts.incrementAndGet()
@@ -83,21 +97,35 @@ class EmbeddedMirrorLifecycleTest {
 
         override fun send(command: MirrorControlCommand) = false
 
+        override fun setLiveAudioEnabled(enabled: Boolean, volume: () -> Float, onDiagnostic: (String) -> Unit) {
+            if (enabled) liveAudioEnables.incrementAndGet()
+        }
+
+        override fun closeNativeSurfaces() {
+            if (!hasEdtSurface || surfaceClosed) return
+            if (!runOnEdtBounded(EDT_CLOSE_WAIT_MS) { surfaceClosed = true }) surfaceCloseTimeouts.incrementAndGet()
+        }
+
         override fun close() {
             synchronized(lifecycleLock) {
                 attached = false
                 closes.incrementAndGet()
+                closeNativeSurfaces()
+                if (closeDelayMs > 0) Thread.sleep(closeDelayMs) // adb/scrcpy cleanup, decoder join
+                closeFinished = true
+                onCloseFinished()
             }
         }
     }
 
-    private class Harness(detachDelayMs: Long) : AutoCloseable {
+    private class Harness(detachDelayMs: Long, closeDelayMs: Long = 0, hasEdtSurface: Boolean = false) : AutoCloseable {
         val root = createTempDirectory("embedded-mirror-lifecycle").toFile()
         val fakeEdt: ExecutorService = Executors.newSingleThreadExecutor { task ->
             Thread(task, "fake-edt").apply { isDaemon = true }
         }
-        val backend = LockingFakeBackend(fakeEdt, detachDelayMs)
-        private val runner = FakeCaptureRunner().also { it.enqueue(StreamingFakeProcess()) }
+        val backend = LockingFakeBackend(fakeEdt, detachDelayMs, closeDelayMs, hasEdtSurface)
+        val recorderProcess = StreamingFakeProcess()
+        private val runner = FakeCaptureRunner().also { it.enqueue(recorderProcess) }
         val controller = TabCaptureController(root, runner = runner)
         val app = AppState(
             autosaveFile = Files.createTempFile("embedded-mirror-lifecycle-autosave", "").toFile(),
@@ -195,8 +223,11 @@ class EmbeddedMirrorLifecycleTest {
             }
 
             val handle = requireNotNull(h.app.embeddedMirrorFor(h.tabId))
+            // The mirror was already LIVE before the clicks, so "LIVE" alone proves nothing: the last
+            // Connect supersedes the Disconnects and must really tear down and re-attach (starts == 2).
+            awaitCondition(5_000) { h.backend.starts.get() == 2 }
             awaitCondition(5_000) { handle.snapshot.value.state == EmbeddedMirrorState.LIVE }
-            Thread.sleep(500)
+            Thread.sleep(300)
             assertTrue(h.backend.attached, "the LAST click (Connect) must win")
             assertEquals(1, h.backend.maxAttachedDecoders.get())
         }
@@ -333,6 +364,327 @@ class EmbeddedMirrorLifecycleTest {
         } finally {
             session.close()
             mkvFile.delete()
+        }
+    }
+
+    // ---- Close from the real EDT (quit / tab close) ------------------------------------------
+
+    /** Runs [block] on the REAL EDT (the one runOnEdtBounded targets) and returns its elapsed ms. */
+    private fun onRealEdt(block: () -> Unit): Long {
+        var elapsedMs = 0L
+        EventQueue.invokeAndWait {
+            val started = System.nanoTime()
+            block()
+            elapsedMs = (System.nanoTime() - started) / 1_000_000
+        }
+        return elapsedMs
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun closeCalledOnTheEdtTearsTheSurfaceDownInlineAndDoesNotWaitOnTheLane() {
+        val fakeEdt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            // The surface close needs the EDT, and the lane's remaining close work takes 1 s.
+            val backend = LockingFakeBackend(fakeEdt, detachDelayMs = 0, closeDelayMs = 1_000, hasEdtSurface = true)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+
+            val ms = onRealEdt { handle.close() }
+            assertTrue(ms < 500, "close() on the EDT took $ms ms; it must not wait for the lane")
+            assertTrue(backend.surfaceClosed, "the surface must already be closed when close() returns on the EDT")
+            awaitCondition(10_000) { backend.closeFinished }
+            assertEquals(0, backend.surfaceCloseTimeouts.get(), "no surface close may time out waiting for the EDT")
+            assertEquals(1, backend.closes.get())
+        } finally {
+            fakeEdt.shutdownNow()
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun theEdtCanWaitForARequestedCloseWithoutTheLaneNeedingTheEdt() {
+        val fakeEdt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            val backend = LockingFakeBackend(fakeEdt, detachDelayMs = 0, closeDelayMs = 200, hasEdtSurface = true)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+
+            // What AppState.stopAllLiveCaptures does at quit: requestClose, then a bounded wait, all on
+            // the EDT. Before the fix the lane's surface close queued behind this very wait and timed
+            // out after EDT_CLOSE_WAIT_MS (1.5 s) per mirror.
+            val ms = onRealEdt { handle.requestClose().get(5, TimeUnit.SECONDS) }
+            assertTrue(ms < 1_000, "waiting for a close on the EDT took $ms ms")
+            assertTrue(backend.surfaceClosed)
+            assertEquals(0, backend.surfaceCloseTimeouts.get())
+            assertTrue(backend.closeFinished)
+        } finally {
+            fakeEdt.shutdownNow()
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun quittingTheAppOnTheEdtDoesNotFreezeForTheMirrorCloseTimeout() {
+        Harness(detachDelayMs = 0, closeDelayMs = 100, hasEdtSurface = true).use { h ->
+            h.connectAndWaitUntilAttached()
+
+            val ms = onRealEdt { h.app.close() }
+            assertTrue(ms < 1_000, "AppState.close() on the EDT froze the window for $ms ms")
+            assertTrue(h.backend.surfaceClosed)
+            assertEquals(0, h.backend.surfaceCloseTimeouts.get())
+            assertEquals(1, h.backend.closes.get())
+            assertFalse(h.recorderProcess.isAlive, "the recorder is stopped after the mirror close")
+        }
+    }
+
+    // ---- start racing close -------------------------------------------------------------------
+
+    @org.junit.Test(timeout = 30_000)
+    fun aStartRacingABlockingCloseIsNeverRunAfterTheClose() {
+        val edt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            val backend = LockingFakeBackend(edt, detachDelayMs = 0, closeDelayMs = 50)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+            handle.stop()
+
+            val parked = CountDownLatch(1)
+            val gate = CountDownLatch(1)
+            val first = handle.requestStart("s", MirrorStreamOptions()) {
+                parked.countDown()
+                gate.await(10, TimeUnit.SECONDS)
+            }
+            assertTrue(parked.await(5, TimeUnit.SECONDS))
+            // A start that is already queued (it passed no check yet) when the blocking close arrives
+            // from another thread, plus more starts racing in afterwards.
+            val queuedStart = handle.requestStart("s", MirrorStreamOptions())
+            val closer = Thread { handle.close() }.apply { isDaemon = true; start() }
+            Thread.sleep(100) // the close is now requested and waiting behind the parked job
+            val lateStart = handle.requestStart("s", MirrorStreamOptions())
+            gate.countDown()
+            closer.join(10_000)
+            assertFalse(closer.isAlive, "the blocking close must return")
+            first.get(5, TimeUnit.SECONDS)
+            queuedStart.get(5, TimeUnit.SECONDS)
+            lateStart.get(5, TimeUnit.SECONDS)
+
+            assertEquals(1, backend.closes.get())
+            handle.start("s", MirrorStreamOptions()) // a blocking start after close is a no-op, not an error
+            handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            assertEquals(0, backend.startsAfterClose.get(), "no start may reach the backend after the close")
+            assertFalse(backend.attached)
+        } finally {
+            edt.shutdownNow()
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun aStandaloneRuntimeNeverOpensANewConnectionAfterClose() {
+        val opens = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            opens.incrementAndGet()
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = InputStream.nullInputStream()
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                while (!Thread.currentThread().isInterrupted) if (input.read() < 0) return
+            }
+        }
+        val handle = EmbeddedMirrorHandle.createAroundRuntime { listener ->
+            com.indagium.capture.mirror.EmbeddedMirrorRuntime(transport, decoder, listener = listener)
+        }
+        handle.close()
+        handle.start("serial", MirrorStreamOptions())
+        handle.requestStart("serial", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+        Thread.sleep(200)
+        assertEquals(0, opens.get(), "a start after close must not open an adb forward / scrcpy server")
+        assertEquals(EmbeddedMirrorState.DISCONNECTED, handle.snapshot.value.state)
+    }
+
+    // ---- Disconnect -> Connect on a busy lane ---------------------------------------------------
+
+    @org.junit.Test(timeout = 30_000)
+    fun disconnectThenConnectQueuedBehindASlowJobIsARealReconnect() {
+        val edt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            val backend = LockingFakeBackend(edt, detachDelayMs = 50)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+            assertEquals(1, backend.starts.get())
+
+            val parked = CountDownLatch(1)
+            val gate = CountDownLatch(1)
+            val slow = handle.requestStart("s", MirrorStreamOptions()) {
+                parked.countDown()
+                gate.await(10, TimeUnit.SECONDS)
+            }
+            assertTrue(parked.await(5, TimeUnit.SECONDS))
+            val afterReconnect = AtomicInteger()
+            val stop = handle.requestStop()
+            val start = handle.requestStart("s", MirrorStreamOptions()) { afterReconnect.incrementAndGet() }
+            gate.countDown()
+            slow.get(5, TimeUnit.SECONDS)
+            stop.get(5, TimeUnit.SECONDS)
+            start.get(5, TimeUnit.SECONDS)
+
+            assertEquals(1, backend.stops.get(), "the Disconnect must really tear the stream down")
+            assertEquals(2, backend.starts.get(), "the Connect must really re-attach the decoder (once)")
+            assertTrue(backend.attached)
+            assertEquals(1, backend.maxAttachedDecoders.get(), "never two decoders at once")
+            assertEquals(1, afterReconnect.get())
+
+            // And a plain Connect on an already attached mirror stays a no-op (no spurious restart).
+            handle.requestStart("s", MirrorStreamOptions()).get(5, TimeUnit.SECONDS)
+            assertEquals(1, backend.stops.get())
+            assertEquals(2, backend.starts.get())
+        } finally {
+            edt.shutdownNow()
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun disconnectConnectDisconnectOnABusyLaneEndsDisconnectedWithoutAFlashOfConnect() {
+        val edt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            val backend = LockingFakeBackend(edt, detachDelayMs = 50)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+
+            val parked = CountDownLatch(1)
+            val gate = CountDownLatch(1)
+            val slow = handle.requestStart("s", MirrorStreamOptions()) {
+                parked.countDown()
+                gate.await(10, TimeUnit.SECONDS)
+            }
+            assertTrue(parked.await(5, TimeUnit.SECONDS))
+            val all = listOf(
+                handle.requestStop(),
+                handle.requestStart("s", MirrorStreamOptions()),
+                handle.requestStop(),
+            )
+            gate.countDown()
+            slow.get(5, TimeUnit.SECONDS)
+            all.forEach { it.get(5, TimeUnit.SECONDS) }
+
+            assertFalse(backend.attached, "the LAST click (Disconnect) wins")
+            assertEquals(1, backend.stops.get(), "only the final Disconnect runs")
+            assertEquals(1, backend.starts.get(), "the superseded Connect never ran")
+        } finally {
+            edt.shutdownNow()
+        }
+    }
+
+    // ---- live audio after close -----------------------------------------------------------------
+
+    @org.junit.Test(timeout = 30_000)
+    fun liveAudioToggledOnAfterCloseOrQueuedBehindCloseAttachesNothing() {
+        val edt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        try {
+            val backend = LockingFakeBackend(edt, detachDelayMs = 0)
+            val handle = EmbeddedMirrorHandle.forBackend(backend)
+            handle.start("s", MirrorStreamOptions())
+
+            handle.requestSetLiveAudioEnabled(true).get(5, TimeUnit.SECONDS)
+            assertEquals(1, backend.liveAudioEnables.get(), "while open the toggle reaches the backend")
+
+            val parked = CountDownLatch(1)
+            val gate = CountDownLatch(1)
+            val slow = handle.requestStart("s", MirrorStreamOptions()) {
+                parked.countDown()
+                gate.await(10, TimeUnit.SECONDS)
+            }
+            assertTrue(parked.await(5, TimeUnit.SECONDS))
+            val queuedBeforeClose = handle.requestSetLiveAudioEnabled(true)
+            val close = handle.requestClose()
+            val afterClose = handle.requestSetLiveAudioEnabled(true)
+            gate.countDown()
+            listOf(slow, queuedBeforeClose, close, afterClose).forEach { it.get(5, TimeUnit.SECONDS) }
+            handle.requestSetLiveAudioEnabled(true).get(5, TimeUnit.SECONDS)
+
+            assertEquals(1, backend.liveAudioEnables.get(), "no toggle may reach the backend once a close was requested")
+        } finally {
+            edt.shutdownNow()
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun sharedRecordingSessionAttachesNoLiveAudioPlayerAfterClose() {
+        val transport = EmbeddedMirrorTransport { _, _ -> error("the session is never started in this test") }
+        val mkvFile = Files.createTempFile("mirror-lifecycle-audio", ".mkv").toFile().apply { deleteOnExit() }
+        val session = EmbeddedDeviceSession(transport, StreamingMkvWriter(mkvFile), elapsedMillis = { 0L })
+        val sinkCreations = AtomicInteger()
+        val sinksClosed = AtomicInteger()
+        try {
+            val backend = MirrorBackend.SharedRecordingSession(
+                session = session,
+                decoder = object : H264Decoder {
+                    override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) = Unit
+                },
+                liveAudioSinkFactory = { _, _ ->
+                    sinkCreations.incrementAndGet()
+                    object : com.indagium.capture.mirror.LiveAudioSink {
+                        override fun onAudioConfig(extradata: ByteArray) = Unit
+
+                        override fun onAudioPacket(ptsUs: Long, data: ByteArray) = Unit
+
+                        override fun close() {
+                            sinksClosed.incrementAndGet()
+                        }
+                    }
+                },
+                onSnapshotChanged = {},
+            )
+            backend.setLiveAudioEnabled(true, volume = { 1f }, onDiagnostic = {})
+            assertEquals(1, sinkCreations.get())
+            backend.close()
+            assertEquals(1, sinksClosed.get(), "close detaches the player it had attached")
+
+            backend.setLiveAudioEnabled(true, volume = { 1f }, onDiagnostic = {})
+            assertEquals(1, sinkCreations.get(), "enabling live audio after close must be a no-op")
+        } finally {
+            session.close()
+            mkvFile.delete()
+        }
+    }
+
+    // ---- tab close ordering ---------------------------------------------------------------------
+
+    @org.junit.Test(timeout = 30_000)
+    fun closingATabStopsTheRecorderOnlyAfterTheMirrorCloseFinishedAndNeverBlocksTheCaller() {
+        Harness(detachDelayMs = 0, closeDelayMs = 800).use { h ->
+            h.connectAndWaitUntilAttached()
+            assertTrue(h.recorderProcess.isAlive)
+            val recorderAliveWhenMirrorCloseFinished = AtomicBoolean()
+            h.backend.onCloseFinished = { recorderAliveWhenMirrorCloseFinished.set(h.recorderProcess.isAlive) }
+
+            val ms = h.onUiThread { h.app.closeTab(h.tabId) }
+            assertTrue(ms < 400, "closing the tab blocked the UI thread for $ms ms")
+            assertTrue(h.recorderProcess.isAlive, "the recorder must keep running while the mirror close is in flight")
+
+            awaitCondition(10_000) { !h.recorderProcess.isAlive }
+            assertTrue(h.backend.closeFinished)
+            assertTrue(
+                recorderAliveWhenMirrorCloseFinished.get(),
+                "the recorder was stopped before the mirror finished closing",
+            )
+        }
+    }
+
+    @org.junit.Test(timeout = 30_000)
+    fun closingATabOnTheEdtClosesTheSurfaceBeforeReturning() {
+        Harness(detachDelayMs = 0, closeDelayMs = 300, hasEdtSurface = true).use { h ->
+            h.connectAndWaitUntilAttached()
+
+            val ms = onRealEdt { h.app.closeTab(h.tabId) }
+            assertTrue(ms < 500, "closing the tab on the EDT took $ms ms")
+            assertTrue(h.backend.surfaceClosed, "the surface must be torn down before the tab's SwingPanel is disposed")
+            awaitCondition(10_000) { !h.recorderProcess.isAlive }
+            assertEquals(0, h.backend.surfaceCloseTimeouts.get())
         }
     }
 

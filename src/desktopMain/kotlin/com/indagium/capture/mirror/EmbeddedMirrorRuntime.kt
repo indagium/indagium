@@ -177,6 +177,10 @@ internal class EmbeddedMirrorRuntime(
     private var worker: Thread? = null
     private var stopping = false
 
+    // Terminal: set by close() under [lock]; a start() after it is a no-op, so a start racing a close
+    // can never open a fresh adb forward + scrcpy server that nothing will ever tear down.
+    private var closed = false
+
     init {
         require(maxReconnectAttempts >= 0)
         require((decoder == null) xor (directDecoder == null)) {
@@ -193,6 +197,7 @@ internal class EmbeddedMirrorRuntime(
     fun start(deviceSerial: String, options: MirrorStreamOptions = MirrorStreamOptions()) {
         require(deviceSerial.isNotBlank()) { "device serial cannot be blank" }
         val previousConnection = synchronized(lock) {
+            if (closed) return
             val previous = detachLocked()
             stopping = false
             val runId = generation.incrementAndGet()
@@ -274,6 +279,7 @@ internal class EmbeddedMirrorRuntime(
     }
 
     override fun close() {
+        synchronized(lock) { closed = true }
         stop()
         frameBuffer.close()
         decoder?.close()

@@ -1487,12 +1487,34 @@ mirror lifecycle lock may be held while waiting for the EDT. Native surface tear
 (`EmbeddedMirrorMacSurface.close`); a Disconnect on an IO thread used to hold
 `SharedRecordingSession.lifecycleLock` across it while a Connect on the EDT waited for that lock — a
 permanent app freeze (seen when no video packet ever arrived, because the decoder-thread join then
-runs its full timeout inside the window). The design: UI callers use `EmbeddedMirrorHandle.requestStart/
-requestStop/requestClose`, which return immediately and run in order on the handle's single-thread
-lifecycle lane (a superseded start/stop is skipped, so the last click wins, and `AppState.closeTabsById`/
-`stopEmbeddedMirror`/`startEmbeddedMirror` never block); `SharedRecordingSession.stop` replaces the
-native surface outside `lifecycleLock`; and a non-EDT caller waits for an EDT teardown at most
-`EDT_CLOSE_WAIT_MS` (`runOnEdtBounded`, never `invokeAndWait`). Pinned by `EmbeddedMirrorLifecycleTest`.
+runs its full timeout inside the window). The design:
+
+- **One lane.** Every lifecycle transition (start, stop, close, live-audio toggle) runs on the handle's
+  single-thread lifecycle lane, in order. UI callers use `EmbeddedMirrorHandle.requestStart/requestStop/
+  requestClose/requestSetLiveAudioEnabled`, which return immediately; the blocking `start/stop/close` are
+  `request*` plus a wait (close: bounded, and never waiting on the EDT or the lane itself). Because
+  nothing reaches the backend around the lane, a start can never interleave with, or run after, a close
+  (the backends also refuse it: `EmbeddedMirrorRuntime`/`StandaloneRuntime` and `SharedRecordingSession`
+  carry a terminal `closed` flag checked under the lock their `start` takes).
+- **Supersede rules.** A queued start/stop is skipped when a later start/stop exists (last click wins), a
+  close is never skipped and skips everything queued, and a Connect that superseded a still-pending
+  Disconnect runs as a restart (stop, then start) so a recovery Disconnect -> Connect on a busy lane is a
+  real reconnect rather than a no-op against an already-attached backend.
+- **Close ordering.** `requestClose` first calls `MirrorBackend.closeNativeSurfaces` (the only EDT-bound
+  part; lock-free, idempotent, terminal): inline when the caller is the EDT, otherwise `invokeLater`.
+  The lane then does the EDT-free rest (decoder detach, adb/scrcpy cleanup), and
+  `EmbeddedMirrorMacSurface.close` returns immediately for an already-closed surface instead of hopping
+  to the EDT. So `AppState.close()` (on the EDT, from `onCloseRequest`) can wait a bounded
+  `EMBEDDED_MIRROR_SHUTDOWN_WAIT_MS` for adb cleanup without the lane waiting on the EDT, and only then
+  stops the recorders. `closeTabsById` closes the surface inline, and stops a tab's recorder on
+  `ioScope` only after that tab's mirror-close future completes (bounded by
+  `RECORDER_STOP_MIRROR_CLOSE_WAIT_MS`; tracked in `deferredRecorderStopsByTab` so a quit in that window
+  still stops it).
+- **Remaining bounded EDT waits.** `SharedRecordingSession.stop` replaces the native surface outside
+  `lifecycleLock`, and a non-EDT caller waits for an EDT teardown at most `EDT_CLOSE_WAIT_MS`
+  (`runOnEdtBounded`, never `invokeAndWait`).
+
+Pinned by `EmbeddedMirrorLifecycleTest`.
 
 Plus atomics and concurrent collections: `AtomicLong` for id generation (`utils/Ids.kt:7`),
 `AtomicInteger` generation counters, `ConcurrentHashMap` for the compute memo, the AI credential
