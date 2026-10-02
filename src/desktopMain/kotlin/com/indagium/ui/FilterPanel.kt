@@ -273,25 +273,12 @@ internal fun computeUnifiedCandidatesSync(
             )
         }
         .filter { Triple(it.label, it.pattern, it.tag) !in contextualKeys }
-    val contextualCandidates = (inScopeContextual + outOfScopeContextual).take(8)
+    val allContextual = inScopeContextual + outOfScopeContextual
 
-    // PIDs only when the search looks like a number
-    val pidCandidates = if (msgRuleSearch.any { it.isDigit() })
-        scan.relaxedPassingEntries
-            .filter { it.pid != 0 }
-            .map { it.pid.toString() }.distinct()
-            .filter { it.contains(msgRuleSearch) }
-            .take(3)
-            .map { pid ->
-                // The stored rule pattern stays the bare pid (matching still keys off the
-                // number — a process can be renamed/recycled), but the suggestion itself
-                // shows the resolved name when known, so picking from the list doesn't
-                // require already knowing which pid belongs to which process.
-                val name = tab.analysis.processNames[pid.toIntOrNull()]
-                val label = if (name != null) "$pid · $name" else pid
-                MsgCandidate(pid, RuleTarget.PID_TID, inScope = true, label = label)
-            }
-    else emptyList()
+    // PID candidates are reserved slots that lead the list: a number that also occurs inside many
+    // messages used to fill all 8 slots with contextual/message candidates and push the PID out.
+    val pidCandidates = pidSuggestions(tab, scan.relaxedPassingEntries, msgRuleSearch)
+    val contextualCandidates = allContextual.take((CANDIDATE_TOTAL_SLOTS - pidCandidates.size).coerceAtLeast(0))
 
     // In regex mode, lead with what the pattern actually matched (e.g. "avc.*denied"
     // against "avc: denied : word 1 word 2" proposes "avc: denied" first) instead of
@@ -316,11 +303,48 @@ internal fun computeUnifiedCandidatesSync(
     val outOfScopeCandidates = stemsAndFulls(outOfScopeAcc.msgs)
         .filter { it !in inScopePatterns }
         .map { MsgCandidate(it, RuleTarget.MESSAGE, inScope = false) }
-    val remainingSlots = (8 - contextualCandidates.size).coerceAtLeast(0)
-    val visiblePidCandidates = pidCandidates.take(remainingSlots)
-    val msgCandidates = (inScopeCandidates + outOfScopeCandidates)
-        .take((remainingSlots - visiblePidCandidates.size).coerceAtLeast(0))
-    return contextualCandidates + visiblePidCandidates + msgCandidates
+    val remainingSlots = (CANDIDATE_TOTAL_SLOTS - pidCandidates.size - contextualCandidates.size).coerceAtLeast(0)
+    val msgCandidates = (inScopeCandidates + outOfScopeCandidates).take(remainingSlots)
+    return pidCandidates + contextualCandidates + msgCandidates
+}
+
+private const val CANDIDATE_TOTAL_SLOTS = 8
+private const val MAX_PID_NUMBER_CANDIDATES = 3
+private const val MAX_PID_NAME_CANDIDATES = 2
+private const val MIN_PID_NAME_QUERY_CHARS = 2
+private val PID_QUERY_PREFIX = Regex("^pid(?:\\s*[:=]\\s*|\\s+)", RegexOption.IGNORE_CASE)
+
+// PID suggestions for the search box: a numeric query matches known pids (exact, then prefix, then
+// substring), a non-numeric query of 2+ chars matches resolved process names. An optional "pid"/"pid:"
+// prefix is accepted. The stored rule pattern stays the bare pid (matching keys off the number — a
+// process can be renamed/recycled) but the label shows the resolved name when known, so picking from
+// the list doesn't require already knowing which pid belongs to which process.
+private fun pidSuggestions(tab: LogTab, entries: List<LogEntry>, rawSearch: String): List<MsgCandidate> {
+    val query = rawSearch.trim().replace(PID_QUERY_PREFIX, "").trim()
+    if (query.isEmpty()) return emptyList()
+    val pids = entries.asSequence().map { it.pid }.filter { it != 0 }.distinct().toList()
+
+    fun candidate(pid: Int): MsgCandidate {
+        val name = tab.analysis.processNames[pid]
+        val label = if (name != null) "$pid · $name" else pid.toString()
+        return MsgCandidate(pid.toString(), RuleTarget.PID_TID, inScope = true, label = label)
+    }
+    if (query.all { it.isDigit() }) {
+        val ranked = pids.filter { it.toString().contains(query) }.sortedBy { pid ->
+            val text = pid.toString()
+            when {
+                text == query -> 0
+                text.startsWith(query) -> 1
+                else -> 2
+            }
+        }
+        return ranked.take(MAX_PID_NUMBER_CANDIDATES).map(::candidate)
+    }
+    if (query.length < MIN_PID_NAME_QUERY_CHARS) return emptyList()
+    return pids
+        .filter { pid -> tab.analysis.processNames[pid]?.contains(query, ignoreCase = true) == true }
+        .take(MAX_PID_NAME_CANDIDATES)
+        .map(::candidate)
 }
 
 // Off-thread body of relevantScopeTags (composable wrapper further down) — same single-pass
