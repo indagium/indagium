@@ -385,7 +385,15 @@ compose.desktop {
         // (a short stop-the-world pause, ~0.1-0.3 s with a few hundred MB live) only at moments the
         // user just triggered (closing a big tab, Stop, export), because a concurrent cycle cannot
         // compact old regions that still hold garbage in an idle app, leaving gigabytes committed.
-        jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000")
+        // Max/MinHeapFreeRatio: after that full GC, G1 by default keeps up to 70% of the heap free
+        // (measured: 272 MB committed for 60 MB live after a closed capture). 30/10 lets it shrink
+        // close to the live set; resizing only happens at GC time, so streaming is unaffected.
+        jvmArgs(
+            "-XX:MaxRAMPercentage=50",
+            "-XX:G1PeriodicGCInterval=30000",
+            "-XX:MaxHeapFreeRatio=30",
+            "-XX:MinHeapFreeRatio=10",
+        )
 
         // Company TLS-inspection roots are often installed only in the Windows certificate store,
         // not in the bundled JRE's static cacerts file. Let the Windows installer trust the same
@@ -575,7 +583,7 @@ tasks.register<Exec>("packageFlatpak") {
 // the real ~/Library/Application Support/Indagium (or platform equivalent) session state.
 tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     // Same heap-return flags as compose.desktop.application.jvmArgs above (see the comment there).
-    jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000")
+    jvmArgs("-XX:MaxRAMPercentage=50", "-XX:G1PeriodicGCInterval=30000", "-XX:MaxHeapFreeRatio=30", "-XX:MinHeapFreeRatio=10")
     if (org.gradle.internal.os.OperatingSystem.current().isLinux) {
         jvmArgs("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
     }
