@@ -261,7 +261,12 @@ private data class MarkerPressContext(
 // then simply stops growing (later paths still resolve, just uncached).
 private const val CANONICAL_PATH_CACHE_MAX = 200_000
 
-/** Closing tabs holding at least this many log rows together requests a heap trim (utils/HeapTrim). */
+/**
+ * Closing tabs requests a heap trim (utils/HeapTrim) once the rows closed since the last trim reach
+ * this many. Counted cumulatively: on Linux each small open-then-close left a few MB of native
+ * memory unreturned until some later trim, so a single small tab still skips the full-GC pause,
+ * but a run of them eventually pays it.
+ */
 private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
 
 /**
@@ -2775,6 +2780,11 @@ class AppState(
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
     }
 
+    /** Test seam: the stop/close-path counterpart of [registerCaptureControllerForTest]. */
+    internal fun unregisterCaptureControllerForTest(tabId: String) {
+        synchronized(stateLock) { captureControllersByTab.remove(tabId) }
+    }
+
     /** Sink for [requestHeapTrim]; replaced in tests so no real GC is scheduled. */
     internal var heapTrimRequester: (String) -> Unit = HeapTrim::request
 
@@ -2787,9 +2797,18 @@ class AppState(
      * counts as live while its controller is registered; stop/close paths unregister it first.
      */
     internal fun requestHeapTrim(reason: String) {
-        val recording = synchronized(stateLock) { captureControllersByTab.isNotEmpty() }
+        val recording = synchronized(stateLock) {
+            val live = captureControllersByTab.isNotEmpty()
+            // A trim that is actually forwarded clears the closed-row tally, whatever asked for it;
+            // one skipped for a live capture frees nothing, so the tally keeps counting.
+            if (!live) closedRowsSinceTrim = 0L
+            live
+        }
         if (!recording) heapTrimRequester(reason)
     }
+
+    /** Rows of closed tabs since the last forwarded heap trim; see [HEAP_TRIM_CLOSED_ROWS]. Guarded by [stateLock]. */
+    private var closedRowsSinceTrim = 0L
 
     /** JVM heap pressure (occupancy after GC) as last reported by [heapPressureMonitor]; drives the
      *  global memory banner. Written from the JMX notification thread, which is fine for snapshot state. */
@@ -8457,10 +8476,17 @@ class AppState(
         cancelAllLoads()
     }
 
-    /** Large (>= [HEAP_TRIM_CLOSED_ROWS] rows together) or capture/video tabs free enough to be worth a trim. */
-    private fun shouldTrimHeapAfterClosing(closing: List<LogTab>): Boolean =
-        closing.sumOf { it.logData.size.toLong() } >= HEAP_TRIM_CLOSED_ROWS ||
+    /**
+     * Capture/video tabs, or closed rows since the last trim ([closedRowsSinceTrim], cumulative
+     * including [closing]) reaching [HEAP_TRIM_CLOSED_ROWS], free enough to be worth a trim.
+     * A lone small tab does not, but several in a row add up (they leave memory unreturned on Linux).
+     * Call under [stateLock]; it adds [closing]'s rows to the tally.
+     */
+    private fun shouldTrimHeapAfterClosing(closing: List<LogTab>): Boolean {
+        closedRowsSinceTrim += closing.sumOf { it.logData.size.toLong() }
+        return closedRowsSinceTrim >= HEAP_TRIM_CLOSED_ROWS ||
             closing.any { it.captureSessionId != null || it.captureSourceSessionId != null || it.attachedVideo != null }
+    }
 
     // Resource cleanup and the tabs-list removal used to be two separate phases — cleanup
     // unguarded, then a synchronized(stateLock) block removing the tab — leaving a window where a
