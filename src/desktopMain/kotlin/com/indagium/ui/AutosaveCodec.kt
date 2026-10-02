@@ -1243,10 +1243,6 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     logCompositionExpanded.toString(),
     // Field index 12: the full Highlighters section. Keep it after every existing positional field.
     highlightersExpanded.toString(),
-    // Field index 13: the resizable sections' height weights, as `NAME:weight` pairs joined by
-    // commas. Appended after every existing positional field (append-last versioning); a legacy
-    // token has no field 13 and restores at the default weights.
-    sectionWeightsToken(),
 )
 
 internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -1269,7 +1265,6 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
     logCompositionExpanded = p.getOrNull(11)?.toBooleanStrictOrNull() ?: logCompositionExpanded
     highlightersExpanded = p.getOrNull(12)?.toBooleanStrictOrNull() ?: highlightersExpanded
-    restoreSectionWeights(p.getOrNull(13))
 }
 
 private fun IssueCategorySelection.token(): String = when (this) {

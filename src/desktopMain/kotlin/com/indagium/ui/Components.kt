@@ -201,13 +201,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
 }
 
 @Composable
-fun VDivider(
-    // Fired once when a drag finishes (not on cancel, not per movement) — for callers that want to
-    // persist the result of a drag once instead of on every delta. Optional so every other caller
-    // is unchanged.
-    onDragEnd: () -> Unit = {},
-    onDelta: (Float) -> Unit,
-) {
+fun VDivider(onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
@@ -216,7 +210,6 @@ fun VDivider(
     // See HDivider's identical comment: keeps the drag gesture (launched once, never relaunched)
     // calling the latest `onDelta` instead of whichever closure existed at first composition.
     val currentOnDelta by rememberUpdatedState(onDelta)
-    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -225,10 +218,7 @@ fun VDivider(
             .pointerInput(density) {
                 detectDragGestures(
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
-                    onDragEnd    = {
-                        dragging = false; dragCursorOverride.value = null; activeWindow()?.cursor = AwtCursor.getDefaultCursor()
-                        currentOnDragEnd()
-                    },
+                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.y / density) },
                 )
@@ -434,16 +424,6 @@ internal fun ScrollableItems(
     }
 }
 
-/**
- * True inside a Filters-panel section body (ui/FilterPanel.kt's FilterSectionSlot). There the
- * section itself owns the height (a resizable splitter slot) and scrolls its whole body, so the
- * row-count caps below must not apply: a capped, internally-scrolling box would stay at its cap
- * however tall the user drags the section, and a second verticalScroll nested in the slot's own
- * would be measured with infinite height (a Compose crash). Defaults to false so every other
- * BoundedScrollBox user (FilterBar, capture launcher, Seq3 panels) behaves exactly as before.
- */
-internal val LocalFilterSectionFill = compositionLocalOf { false }
-
 @Composable
 internal fun BoundedScrollBox(
     rowLimit: Int,
@@ -470,12 +450,6 @@ internal fun BoundedScrollBoxDp(
     // height, and a fixed height clips real content that's taller than the guess (e.g. a wrapping
     // message line). heightIn(max) makes it a cap for many rows while letting fewer/shorter rows
     // size to their own content instead of being stretched-then-clipped to it.
-    if (LocalFilterSectionFill.current) {
-        // Hosted in a resizable Filters-panel section: no cap and no scroll of our own — see
-        // LocalFilterSectionFill. The slot's scroll handles overflow.
-        Column(modifier.fillMaxWidth(), content = content)
-        return
-    }
     val h = maxHeightDp.dp
     Box(modifier.fillMaxWidth().heightIn(max = h)) {
         // fillMaxWidth, not fillMaxSize: fillMaxSize would claim the full `h` cap regardless of
