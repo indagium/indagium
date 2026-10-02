@@ -115,6 +115,16 @@ internal class MacVideoToolboxMirrorNative(
     }
 
     companion object {
+        /**
+         * Best-effort `malloc_zone_pressure_relief`: asks the macOS allocator to return freed pages
+         * to the OS. Returns the bytes released, or 0 when not on macOS / the dylib cannot load.
+         * Never throws. Independent of any mirror instance, so safe from any thread.
+         */
+        fun releaseFreedMemory(): Long {
+            if (!isMac() || !load()) return 0L
+            return runCatching { nativePressureRelief().coerceAtLeast(0L) }.getOrDefault(0L)
+        }
+
         /** Length of the `LongArray` `nativeReadMetrics` returns — see its `values[49]{}` in
          * `native/macos/indagium_mirror.mm`. */
         private const val METRICS_ARRAY_SIZE = 49
@@ -182,6 +192,8 @@ internal class MacVideoToolboxMirrorNative(
         @JvmStatic private external fun nativeReadMetrics(handle: Long): LongArray?
 
         @JvmStatic private external fun nativeClose(handle: Long)
+
+        @JvmStatic private external fun nativePressureRelief(): Long
     }
 }
 

@@ -25,7 +25,7 @@ class HeapTrimTest {
     }
 
     private fun scheduler(executor: ManualExecutor, gcCalls: AtomicInteger) =
-        HeapTrimScheduler(delayMs = 3_000, gc = { gcCalls.incrementAndGet() }, executor = executor)
+        HeapTrimScheduler(delayMs = 3_000, gc = { gcCalls.incrementAndGet() }, nativeRelief = { 0L }, executor = executor)
 
     @Test
     fun rapidRequestsCoalesceIntoOneGc() {
@@ -67,13 +67,62 @@ class HeapTrimTest {
     fun throwingGcNeitherPropagatesNorBlocksLaterRequests() {
         val executor = ManualExecutor()
         val calls = AtomicInteger()
-        val trim = HeapTrimScheduler(delayMs = 1, gc = { calls.incrementAndGet(); error("boom") }, executor = executor)
+        val trim = HeapTrimScheduler(
+            delayMs = 1,
+            gc = { calls.incrementAndGet(); error("boom") },
+            nativeRelief = { 0L },
+            executor = executor,
+        )
         try {
             trim.request("a")
             executor.runNext()
             trim.request("b")
             executor.runNext()
             assertEquals(2, calls.get())
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun nativeReliefRunsAfterGcOnEveryTrim() {
+        val executor = ManualExecutor()
+        val events = mutableListOf<String>()
+        val trim = HeapTrimScheduler(
+            delayMs = 1,
+            gc = { events += "gc" },
+            nativeRelief = { events += "relief"; 4_096L },
+            executor = executor,
+        )
+        try {
+            trim.request("a")
+            executor.runNext()
+            trim.request("b")
+            executor.runNext()
+            assertEquals(listOf("gc", "relief", "gc", "relief"), events)
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun throwingNativeReliefNeitherPropagatesNorBlocksLaterRequests() {
+        val executor = ManualExecutor()
+        val gcCalls = AtomicInteger()
+        val reliefCalls = AtomicInteger()
+        val trim = HeapTrimScheduler(
+            delayMs = 1,
+            gc = { gcCalls.incrementAndGet() },
+            nativeRelief = { reliefCalls.incrementAndGet(); error("boom") },
+            executor = executor,
+        )
+        try {
+            trim.request("a")
+            executor.runNext()
+            trim.request("b")
+            executor.runNext()
+            assertEquals(2, gcCalls.get())
+            assertEquals(2, reliefCalls.get())
         } finally {
             executor.shutdownNow()
         }

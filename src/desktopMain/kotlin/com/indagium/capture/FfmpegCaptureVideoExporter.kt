@@ -81,6 +81,18 @@ private const val SEEK_VERIFY_TOLERANCE_US = 200_000L
  */
 private val EXACT_START_ENCODER_CANDIDATES = listOf("libopenh264", "libx264", "h264_videotoolbox")
 private const val REENCODE_FALLBACK_FRAME_RATE = 30.0
+
+/**
+ * Decoder AND encoder thread count for [reencodeFromRequestedStart]. JavaCV's `FFmpegFrameGrabber`
+ * and `FFmpegFrameRecorder` both hard-code `thread_count(0)` (javacv 1.5.13), i.e. FFmpeg's auto =
+ * one thread per core, and FFmpeg's frame threading keeps a decoded frame, a packet and per-thread
+ * scratch buffers alive per thread. On a 10-core Mac that turned a Save into a transient native
+ * peak the allocator then held on to for the rest of the session. This is a background export, not
+ * playback, so 2 threads still overlap decode with encode while bounding that peak. JavaCV applies
+ * the `"threads"` AVOption dictionary entry inside `avcodec_open2`, after its own `thread_count(0)`,
+ * so the option wins.
+ */
+private const val EXPORT_FFMPEG_THREADS = "2"
 private const val REENCODE_FALLBACK_BITRATE = 8_000_000
 
 /**
@@ -298,7 +310,7 @@ private fun reencodeWithEncoder(
     mp4: Boolean,
     onDiagnostics: ((ReencodeDiagnostics) -> Unit)?,
 ): CaptureVideoClip? {
-    var grabber = FFmpegFrameGrabber(snapshot)
+    var grabber = boundedSnapshotGrabber(snapshot)
     try {
         grabber.start()
         if (grabber.videoStream < 0 || grabber.imageWidth <= 0 || grabber.imageHeight <= 0) return null
@@ -322,6 +334,9 @@ private fun reencodeWithEncoder(
         runCatching { grabber.release() }
     }
 }
+
+private fun boundedSnapshotGrabber(snapshot: File): FFmpegFrameGrabber =
+    FFmpegFrameGrabber(snapshot).apply { setVideoOption("threads", EXPORT_FFMPEG_THREADS) }
 
 private class PositionedGrabber(val grabber: FFmpegFrameGrabber, val usedSeek: Boolean, val landedFrame: Frame?)
 
@@ -354,8 +369,16 @@ private fun positionAtOrBeforeKeyframe(grabber: FFmpegFrameGrabber, snapshot: Fi
     if (verified) return PositionedGrabber(grabber, usedSeek = true, landedFrame = landed)
     runCatching { grabber.stop() }
     runCatching { grabber.release() }
-    val fresh = FFmpegFrameGrabber(snapshot)
-    fresh.start()
+    val fresh = boundedSnapshotGrabber(snapshot)
+    var started = false
+    try {
+        fresh.start()
+        started = true
+    } finally {
+        // [fresh] is not yet owned by the caller (its finally only releases the grabber it holds),
+        // so a failed start would otherwise leak the half-opened demuxer and decoder context.
+        if (!started) runCatching { fresh.release() }
+    }
     return PositionedGrabber(fresh, usedSeek = false, landedFrame = null)
 }
 
@@ -379,6 +402,7 @@ private fun configureReencodeRecorder(
     recorder.videoCodecName = encoderName
     recorder.frameRate = grabber.videoFrameRate.takeIf { it > 0.0 } ?: REENCODE_FALLBACK_FRAME_RATE
     recorder.videoBitrate = REENCODE_FALLBACK_BITRATE
+    recorder.setVideoOption("threads", EXPORT_FFMPEG_THREADS)
     recorder.setDisplayRotation(grabber.displayRotation)
     // MP4 export (archive v3): without +faststart the moov atom (the file's index) lands at the
     // very END of the file, so nothing can start playback until the whole download/copy finishes —

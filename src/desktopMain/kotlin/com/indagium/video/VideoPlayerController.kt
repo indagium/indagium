@@ -57,6 +57,26 @@ private const val MICROS_PER_MS = 1_000L
 // milliseconds — kept distinct from MICROS_PER_MS so that conversion's intent reads standalone.
 private const val MICROS_PER_SECOND = 1_000_000L
 
+// JavaCV's FFmpegFrameGrabber hard-codes `thread_count(0)` on every decoder it opens (javacv 1.5.13),
+// i.e. FFmpeg auto = one thread per core, and FFmpeg frame threading keeps a frame, a packet and
+// scratch buffers alive per thread. Passing the "threads" AVOption in the grabber's option map wins
+// over that (JavaCV hands the map to avcodec_open2 after setting thread_count). The values below
+// bound the native footprint of each grabber role; none of them run the live hardware mirror decoder.
+//
+// Interactive playback keeps a few threads: Indagium plays up to 8x and relies on decode speed to
+// drop late frames, and a high-resolution capture is the slowest thing it decodes.
+private const val PLAYBACK_DECODE_THREADS = "4"
+
+// One-shot decodes (a single frame for MCP/notes, the last-resort timestamp scan) are neither
+// latency- nor throughput-critical.
+private const val ONE_SHOT_DECODE_THREADS = "2"
+
+// scanPackets only walks demuxed packets. The grabber still opens its decoders in start(), but
+// nothing is ever decoded, so more than one thread would only allocate idle thread contexts.
+private const val PACKET_SCAN_DECODE_THREADS = "1"
+
+private fun FFmpegFrameGrabber.boundDecoderThreads(threads: String) = setVideoOption("threads", threads)
+
 /**
  * Bundled FFmpeg ships both its native `opus` decoder and `libopus`. Android's scrcpy Opus encoder
  * emits a compact 3-byte DTX packet for silence; the native decoder logs a parse error for those
@@ -610,6 +630,7 @@ internal data class DurationRecoveryResult(
 internal fun scanPackets(path: String, isCancelled: () -> Boolean = { false }): PacketScanResult {
     if (isCancelled()) return PacketScanResult(0L, 0L, 0.0)
     FFmpegFrameGrabber(path).use { grabber ->
+        grabber.boundDecoderThreads(PACKET_SCAN_DECODE_THREADS)
         grabber.start()
         var lastEndUs = 0L
         var videoPacketCount = 0L
@@ -690,6 +711,7 @@ internal fun scanDecodedTimestampDurationMs(path: String, isCancelled: () -> Boo
     if (isCancelled()) return 0L
     FFmpegFrameGrabber(path).use { grabber ->
         configureCaptureMkvOpusDecoder(grabber, path)
+        grabber.boundDecoderThreads(ONE_SHOT_DECODE_THREADS)
         grabber.start()
         var latestTimestampUs = 0L
         while (!isCancelled()) {
@@ -1143,6 +1165,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
     override fun grabFrameAt(ms: Long): ByteArray? = runCatching {
         FFmpegFrameGrabber(path).use { g ->
             configureCaptureMkvOpusDecoder(g, path)
+            g.boundDecoderThreads(ONE_SHOT_DECODE_THREADS)
             g.start()
             publishUiState { sourceRotationDegreesState = detectDisplayRotation(g) }
             g.setTimestamp((ms * MICROS_PER_MS).coerceAtLeast(0))
@@ -1439,6 +1462,7 @@ private class FfmpegVideoPlayerController(private val path: String) :
         )
         grabber.setSampleFormat(avutil.AV_SAMPLE_FMT_S16)
         configureCaptureMkvOpusDecoder(grabber, path)
+        grabber.boundDecoderThreads(PLAYBACK_DECODE_THREADS)
         grabber.start()
         AppLogger.info("video", "openGrabber: grabber.start() returned")
         // FFmpegFrameGrabber's image conversion does not apply the stream Display Matrix; it

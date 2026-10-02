@@ -361,43 +361,52 @@ internal fun audioFramesReady(elapsedMs: Long, anchorMs: Long, playoutDelayMs: L
 internal class OpusPcmEncoder(
     private val targetBitRateBps: Long = MIXED_AUDIO_OPUS_BITRATE_BPS,
 ) : Closeable {
-    private val codecContext: AVCodecContext
-    private val frame: AVFrame
+    // Nullable only so a constructor that throws part-way can free whatever it already allocated
+    // ([freeNative]); after construction succeeds both are non-null for the object's life.
+    private var codecContextOrNull: AVCodecContext? = null
+    private var frameOrNull: AVFrame? = null
+    private val codecContext: AVCodecContext get() = checkNotNull(codecContextOrNull)
+    private val frame: AVFrame get() = checkNotNull(frameOrNull)
     private val packet = av_packet_alloc() ?: throw IOException("FFmpeg could not allocate an Opus packet")
     val frameSize: Int
     val extradata: ByteArray
 
+    // libopus is a single-threaded encoder and libavcodec's context default is one thread, so no
+    // thread_count is set here (unlike JavaCV's recorder, which forces auto = one per core).
     init {
-        val codec = listOf("libopus", "opus").firstNotNullOfOrNull { name ->
-            avcodec_find_encoder_by_name(name)?.takeUnless { it.isNull }
-        } ?: avcodec_find_encoder(AV_CODEC_ID_OPUS)?.takeUnless { it.isNull }
-            ?: throw IOException("Bundled FFmpeg has no Opus encoder")
-        val context = avcodec_alloc_context3(codec)
-        if (context == null || context.isNull) throw IOException("FFmpeg could not allocate an Opus encoder")
-        codecContext = context
-        context.sample_rate(LIVE_AUDIO_SAMPLE_RATE_HZ)
-        av_channel_layout_default(context.ch_layout(), LIVE_AUDIO_CHANNELS)
-        context.sample_fmt(AV_SAMPLE_FMT_S16)
-        context.bit_rate(targetBitRateBps)
-        context.time_base(AVRational().num(1).den(LIVE_AUDIO_SAMPLE_RATE_HZ))
-        if (avcodec_open2(context, codec, null as org.bytedeco.ffmpeg.avutil.AVDictionary?) < 0) {
-            avcodec_free_context(context)
-            throw IOException("FFmpeg could not open the Opus encoder")
+        var constructed = false
+        try {
+            val codec = listOf("libopus", "opus").firstNotNullOfOrNull { name ->
+                avcodec_find_encoder_by_name(name)?.takeUnless { it.isNull }
+            } ?: avcodec_find_encoder(AV_CODEC_ID_OPUS)?.takeUnless { it.isNull }
+                ?: throw IOException("Bundled FFmpeg has no Opus encoder")
+            val context = avcodec_alloc_context3(codec)
+            if (context == null || context.isNull) throw IOException("FFmpeg could not allocate an Opus encoder")
+            codecContextOrNull = context
+            context.sample_rate(LIVE_AUDIO_SAMPLE_RATE_HZ)
+            av_channel_layout_default(context.ch_layout(), LIVE_AUDIO_CHANNELS)
+            context.sample_fmt(AV_SAMPLE_FMT_S16)
+            context.bit_rate(targetBitRateBps)
+            context.time_base(AVRational().num(1).den(LIVE_AUDIO_SAMPLE_RATE_HZ))
+            if (avcodec_open2(context, codec, null as org.bytedeco.ffmpeg.avutil.AVDictionary?) < 0) {
+                throw IOException("FFmpeg could not open the Opus encoder")
+            }
+            frameSize = context.frame_size().takeIf { it > 0 } ?: DEFAULT_OPUS_FRAME_SIZE
+            extradata = ByteArray(context.extradata_size()).also { bytes ->
+                if (bytes.isNotEmpty()) context.extradata().position(0L).get(bytes, 0, bytes.size)
+            }
+            if (extradata.isEmpty()) throw IOException("FFmpeg Opus encoder did not provide stream metadata")
+            val newFrame = av_frame_alloc() ?: throw IOException("FFmpeg could not allocate an Opus frame")
+            frameOrNull = newFrame
+            newFrame.format(AV_SAMPLE_FMT_S16)
+            newFrame.sample_rate(LIVE_AUDIO_SAMPLE_RATE_HZ)
+            av_channel_layout_default(newFrame.ch_layout(), LIVE_AUDIO_CHANNELS)
+            newFrame.nb_samples(frameSize)
+            if (av_frame_get_buffer(newFrame, 0) < 0) throw IOException("FFmpeg could not allocate Opus frame samples")
+            constructed = true
+        } finally {
+            if (!constructed) freeNative()
         }
-        frameSize = context.frame_size().takeIf { it > 0 } ?: DEFAULT_OPUS_FRAME_SIZE
-        extradata = ByteArray(context.extradata_size()).also { bytes ->
-            if (bytes.isNotEmpty()) context.extradata().position(0L).get(bytes, 0, bytes.size)
-        }
-        if (extradata.isEmpty()) {
-            avcodec_free_context(context)
-            throw IOException("FFmpeg Opus encoder did not provide stream metadata")
-        }
-        frame = av_frame_alloc() ?: throw IOException("FFmpeg could not allocate an Opus frame")
-        frame.format(AV_SAMPLE_FMT_S16)
-        frame.sample_rate(LIVE_AUDIO_SAMPLE_RATE_HZ)
-        av_channel_layout_default(frame.ch_layout(), LIVE_AUDIO_CHANNELS)
-        frame.nb_samples(frameSize)
-        if (av_frame_get_buffer(frame, 0) < 0) throw IOException("FFmpeg could not allocate Opus frame samples")
     }
 
     fun encode(samples: ShortArray, ptsSamples: Long): List<EncodedPacket> {
@@ -442,10 +451,14 @@ internal class OpusPcmEncoder(
         return result
     }
 
-    override fun close() {
+    override fun close() = freeNative()
+
+    private fun freeNative() {
         av_packet_free(packet)
-        av_frame_free(frame)
-        avcodec_free_context(codecContext)
+        frameOrNull?.let { av_frame_free(it) }
+        frameOrNull = null
+        codecContextOrNull?.let { avcodec_free_context(it) }
+        codecContextOrNull = null
     }
 
     internal data class EncodedPacket(val ptsUs: Long?, val data: ByteArray)

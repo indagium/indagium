@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <malloc/malloc.h>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -1789,4 +1790,12 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
     shutdownMirror(mirror);
     if (mirror->canvas) env->DeleteGlobalRef(mirror->canvas);
     delete mirror;
+}
+
+// Returns freed-but-retained malloc pages to the OS. The macOS magazine allocator keeps pages freed
+// by transient FFmpeg buffers (capture finalize, ZIP export) dirty until system memory pressure, so
+// an idle app's footprint stays at the peak. Zone nullptr = every zone, goal 0 = as much as
+// possible; the result is the number of bytes handed back (best effort, never throws).
+extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativePressureRelief(JNIEnv *, jclass) {
+    return (jlong)malloc_zone_pressure_relief(nullptr, 0);
 }
