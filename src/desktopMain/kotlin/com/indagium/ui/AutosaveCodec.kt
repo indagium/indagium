@@ -1040,7 +1040,7 @@ internal fun AppState.restoreCompareState(token: String) {
     compareFilterRight = p[2].toBoolean()
     filterVisible = p[3].toBoolean()
     annotationVisible = p[4].toBoolean()
-    filterPanelWidth = p[5].toFloatOrNull() ?: filterPanelWidth
+    filterPanelWidth = (p[5].toFloatOrNull() ?: filterPanelWidth).coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
     annotationPanelWidth = (p[6].toFloatOrNull() ?: annotationPanelWidth).coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
     compareSplit = p[7].toFloatOrNull() ?: compareSplit
     // Trailing fields: absent on tokens from before the AI panel became independently toggleable.
@@ -1243,6 +1243,10 @@ internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(
     logCompositionExpanded.toString(),
     // Field index 12: the full Highlighters section. Keep it after every existing positional field.
     highlightersExpanded.toString(),
+    // Field index 13: the resizable sections' height weights, as `NAME:weight` pairs joined by
+    // commas. Appended after every existing positional field (append-last versioning); a legacy
+    // token has no field 13 and restores at the default weights.
+    sectionWeightsToken(),
 )
 
 internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
@@ -1265,6 +1269,7 @@ internal fun FilterPanelUiState.restoreFilterPanelToken(token: String) {
     sfFavoritesExpanded = p.getOrNull(10)?.toBooleanStrictOrNull() ?: sfFavoritesExpanded
     logCompositionExpanded = p.getOrNull(11)?.toBooleanStrictOrNull() ?: logCompositionExpanded
     highlightersExpanded = p.getOrNull(12)?.toBooleanStrictOrNull() ?: highlightersExpanded
+    restoreSectionWeights(p.getOrNull(13))
 }
 
 private fun IssueCategorySelection.token(): String = when (this) {

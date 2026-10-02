@@ -446,7 +446,12 @@ internal const val ANNOTATION_PANEL_MIN_WIDTH = 360f
 // constant is just the stored ceiling, reached on a wide-enough window.
 internal const val ANNOTATION_PANEL_MAX_WIDTH = 1400f
 internal const val FILTER_PANEL_MIN_WIDTH = 140f
-internal const val FILTER_PANEL_MAX_WIDTH = 420f
+
+// Raised from 420f so the Filters panel can be dragged as wide as the right sidebar (long tags,
+// message rules and saved-filter names get room instead of ellipsizing). Like
+// ANNOTATION_PANEL_MAX_WIDTH this is only the stored ceiling: filterPanelEffectiveMaxWidth below is
+// the window-relative guard that decides what is actually rendered right now.
+internal const val FILTER_PANEL_MAX_WIDTH = 1400f
 
 // Width reserved for the log view so the right sidebar (and, when visible, the filter panel) can
 // never squeeze it out entirely. Matches the sidebar/filter dividers' own hit width (HDivider,
@@ -480,6 +485,33 @@ internal fun annotationPanelEffectiveMaxWidth(
     val sidebarDividerReserved = PANEL_DIVIDER_WIDTH
     val available = availableRowWidth - filterReserved - sidebarDividerReserved - minLogViewWidth
     return available.coerceIn(ANNOTATION_PANEL_MIN_WIDTH, ANNOTATION_PANEL_MAX_WIDTH)
+}
+
+/**
+ * The largest the left Filters panel is allowed to render at *right now*, given the row's actual
+ * measured width. The filter-panel counterpart of [annotationPanelEffectiveMaxWidth]; as there, the
+ * stored `filterPanelWidth` is never rewritten — callers render `min(filterPanelWidth, this)` so
+ * widening the window later restores the larger size without a redrag.
+ *
+ * The two guards are deliberately asymmetric to avoid a circular dependency: this one reserves only
+ * the sidebar's *minimum* width ([ANNOTATION_PANEL_MIN_WIDTH]) when the sidebar is visible, while
+ * [annotationPanelEffectiveMaxWidth] is then fed this panel's *rendered* width and shrinks the
+ * sidebar into whatever is left. So the filter panel can never push the sidebar below its own
+ * floor, and the sidebar can still grow into any space the filter panel isn't using.
+ *
+ * Never returns less than [FILTER_PANEL_MIN_WIDTH]: on an extremely narrow window the panel keeps
+ * its own floor even if that leaves the log view narrower than [LOG_VIEW_MIN_WIDTH].
+ */
+internal fun filterPanelEffectiveMaxWidth(
+    availableRowWidth: Float,
+    rightSidebarVisible: Boolean,
+    minLogViewWidth: Float = LOG_VIEW_MIN_WIDTH,
+): Float {
+    // One divider between the filter panel and the log view (always drawn while this panel is
+    // showing), plus — only while the sidebar is showing — its minimum width and its own divider.
+    val sidebarReserved = if (rightSidebarVisible) ANNOTATION_PANEL_MIN_WIDTH + PANEL_DIVIDER_WIDTH else 0f
+    val available = availableRowWidth - PANEL_DIVIDER_WIDTH - sidebarReserved - minLogViewWidth
+    return available.coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
 }
 
 internal const val COMPARE_SPLIT_MIN = 0.2f
