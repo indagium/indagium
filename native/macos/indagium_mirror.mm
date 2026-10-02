@@ -75,6 +75,12 @@ template <typename T> struct CfOwner {
 struct Mirror {
     jobject canvas = nullptr;
     CAMetalLayer *layer = nil;
+    // The JDK's AWTSurfaceLayers object (the Canvas peer's JAWT_SurfaceLayers) we last assigned
+    // `layer` to. We keep our own strong reference on purpose: the JDK leaks the layer it was handed
+    // (see bindLayerToSurfaceLayers), and the only way to balance that leak is to clear the layer
+    // through the same object later, which is only safe if the object outlives the disposed peer.
+    // Written and cleared on AppKit's main thread (or handed out under `lock` by nativeClose).
+    id<JAWT_SurfaceLayers> surfaceLayers = nil;
     CAShapeLayer *clipMask = nil;
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> commands = nil;
@@ -340,6 +346,72 @@ static void detachLayerFromTree(CAMetalLayer *layer) {
         // surface here: Compose may already have disposed the Canvas peer before close runs.
         __strong CAMetalLayer *retainedLayer = layer;
         dispatch_async(dispatch_get_main_queue(), ^{ [retainedLayer removeFromSuperlayer]; });
+    }
+}
+
+// Clears `layer` from a JAWT surface-layers object if it still holds it. Main thread only.
+//
+// Why we do this at all: OpenJDK 21 / JBR (libawt_lwawt/awt/AWTSurfaceLayers.m, manual retain/release)
+// implements `setLayer:` as "[layer removeFromSuperlayer]; [layer release]; layer = [newLayer retain];
+// [windowLayer addSublayer: layer]", but `dealloc` only does "self.windowLayer = nil; [super dealloc]"
+// and never releases `layer`. When a Canvas peer is disposed, the CAMetalLayer we assigned (with its
+// drawable IOSurfaces) is therefore retained forever. Calling setLayer:nil ourselves while we still
+// hold the AWTSurfaceLayers object makes the JDK's own setter perform the matching release.
+static void clearSurfaceLayersLayer(id<JAWT_SurfaceLayers> surfaceLayers, CAMetalLayer *layer) {
+    if (surfaceLayers && layer && surfaceLayers.layer == layer) {
+        surfaceLayers.layer = nil;
+    }
+}
+
+// Main thread only. Hands `layer` to `surfaceLayers` (the JDK peer of the Canvas we attach to) and
+// remembers that object in the Mirror. When the Mirror was last attached to a DIFFERENT peer, that
+// one is cleared first so its retain is balanced. Returns false, leaving nothing assigned, when the
+// mirror is (or becomes) closed, so a late-running attach block can never assign after nativeClose.
+static bool bindLayerToSurfaceLayers(
+    Mirror *mirror,
+    id<JAWT_SurfaceLayers> surfaceLayers,
+    CAMetalLayer *layer) {
+    id<JAWT_SurfaceLayers> previous = nil;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        if (mirror->closed) return false;
+        previous = mirror->surfaceLayers;
+    }
+    if (previous && previous != surfaceLayers) {
+        clearSurfaceLayersLayer(previous, layer);
+    }
+    surfaceLayers.layer = layer;
+    bool closedMeanwhile = false;
+    {
+        std::lock_guard<std::mutex> guard(mirror->lock);
+        closedMeanwhile = mirror->closed;
+        if (!closedMeanwhile) mirror->surfaceLayers = surfaceLayers;
+    }
+    if (closedMeanwhile) {
+        // nativeClose ran between the check above and the assignment, so it could not see this
+        // peer. Undo here; we are already on the main thread.
+        clearSurfaceLayersLayer(surfaceLayers, layer);
+        return false;
+    }
+    return true;
+}
+
+// Removes our layer from the tree and releases the JDK's retain on it (see clearSurfaceLayersLayer).
+// Called from nativeClose, which may run on the EDT or any Java thread, so it never blocks on AppKit:
+// off the main thread the work is queued with the layer and surface-layers object retained by the
+// block, and it never touches the (possibly already disposed) Canvas peer itself.
+static void detachLayerFromSurfaceLayers(id<JAWT_SurfaceLayers> surfaceLayers, CAMetalLayer *layer) {
+    if (!layer) return;
+    if ([NSThread isMainThread]) {
+        clearSurfaceLayersLayer(surfaceLayers, layer);
+        [layer removeFromSuperlayer];
+    } else {
+        __strong id<JAWT_SurfaceLayers> retainedSurfaceLayers = surfaceLayers;
+        __strong CAMetalLayer *retainedLayer = layer;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            clearSurfaceLayersLayer(retainedSurfaceLayers, retainedLayer);
+            [retainedLayer removeFromSuperlayer];
+        });
     }
 }
 
@@ -1296,7 +1368,13 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoTo
                         // directly. Keep this, initial placement and z-order on the AppKit thread.
                         [CATransaction begin];
                         [CATransaction setDisableActions:YES];
-                        platformLayers.layer = layer;
+                        if (!bindLayerToSurfaceLayers(mirror, platformLayers, layer)) {
+                            // Closed while attaching: nothing was assigned, report a failed attach.
+                            [CATransaction commit];
+                            layer = nil;
+                            attachResult = 6;
+                            return;
+                        }
                         // AWTSurfaceLayers.setLayer is a no-op when handed the layer it already holds,
                         // and nativeDetach removes our layer from the tree without clearing JAWT's
                         // reference (the peer may be gone by then). So every re-attach to a Canvas we
@@ -1815,17 +1893,22 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
         Mirror *mirror = (Mirror *)handle;
         if (!mirror) return;
         CAMetalLayer *layer = nil;
+        id<JAWT_SurfaceLayers> surfaceLayers = nil;
         {
             std::lock_guard<std::mutex> guard(mirror->lock);
             mirror->closed = true;
             mirror->decodeCompleted.notify_all();
             layer = mirror->layer;
+            surfaceLayers = mirror->surfaceLayers;
+            mirror->surfaceLayers = nil;
         }
         closeLayerAttachmentState(mirror->layerAttachment);
         // Compose can dispose the Canvas peer before it calls close. Never ask JAWT for a new drawing
         // surface here; that dereferences the invalid peer. The CAMetalLayer is ours, so detach the
-        // retained layer directly on AppKit's main queue without touching the dead peer.
-        detachLayerFromTree(layer);
+        // retained layer directly on AppKit's main queue without touching the dead peer. The
+        // AWTSurfaceLayers object we kept is cleared there too (balancing the JDK's leaked retain),
+        // and our reference to it is dropped when that block finishes.
+        detachLayerFromSurfaceLayers(surfaceLayers, layer);
         shutdownMirror(mirror);
         if (mirror->canvas) env->DeleteGlobalRef(mirror->canvas);
         delete mirror;
