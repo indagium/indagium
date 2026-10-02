@@ -349,17 +349,31 @@ static void detachLayerFromTree(CAMetalLayer *layer) {
     }
 }
 
-// Clears `layer` from a JAWT surface-layers object if it still holds it. Main thread only.
+// Releases the JDK's retain on `layer` if the JAWT surface-layers object still holds it. Main thread only.
 //
-// Why we do this at all: OpenJDK 21 / JBR (libawt_lwawt/awt/AWTSurfaceLayers.m, manual retain/release)
-// implements `setLayer:` as "[layer removeFromSuperlayer]; [layer release]; layer = [newLayer retain];
-// [windowLayer addSublayer: layer]", but `dealloc` only does "self.windowLayer = nil; [super dealloc]"
-// and never releases `layer`. When a Canvas peer is disposed, the CAMetalLayer we assigned (with its
-// drawable IOSurfaces) is therefore retained forever. Calling setLayer:nil ourselves while we still
-// hold the AWTSurfaceLayers object makes the JDK's own setter perform the matching release.
+// Two bugs in OpenJDK 21 / JBR (libawt_lwawt/awt/AWTSurfaceLayers.m, manual retain/release) shape this:
+//  1. `dealloc` only does "self.windowLayer = nil; [super dealloc]" and never releases `layer`, so
+//     when a Canvas peer is disposed the CAMetalLayer we assigned (with its drawable IOSurfaces) is
+//     retained forever. We must therefore balance the retain ourselves, while we still hold the peer.
+//  2. `setLayer:` is "if (layer != newLayer) { if (layer != nil || newLayer == nil) { [layer
+//     removeFromSuperlayer]; [layer release]; } if (newLayer != nil) { layer = [newLayer retain];
+//     [windowLayer addSublayer: layer]; } }". Passing nil releases the old layer but never assigns
+//     `layer = nil`, leaving the ivar dangling; a live peer's next setBounds: then crashes
+//     (EXC_BAD_ACCESS in -[AWTSurfaceLayers setBounds:]). So we NEVER pass nil.
+// Instead we assign an empty, hidden placeholder CALayer: the setter takes the non-nil path, releases
+// our layer (so it and its drawables can be freed) and keeps the ivar valid, then we pull the
+// placeholder back out of the window layer. The placeholder is deliberately leaked with its peer
+// (bug 1 again): a few dozen bytes with no backing store, versus the CAMetalLayer plus IOSurfaces
+// that were leaked before. Re-assigning our own layer to such a peer later still works: the setter
+// releases the placeholder and retains ours.
 static void clearSurfaceLayersLayer(id<JAWT_SurfaceLayers> surfaceLayers, CAMetalLayer *layer) {
     if (surfaceLayers && layer && surfaceLayers.layer == layer) {
-        surfaceLayers.layer = nil;
+        CALayer *placeholder = [CALayer layer];
+        placeholder.hidden = YES;
+        placeholder.bounds = CGRectZero;
+        disableImplicitAnimations(placeholder);
+        surfaceLayers.layer = placeholder;
+        [placeholder removeFromSuperlayer];
     }
 }
 
