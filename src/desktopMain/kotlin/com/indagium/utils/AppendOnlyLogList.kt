@@ -1,6 +1,7 @@
 package com.indagium.utils
 
 import com.indagium.model.LogEntry
+import kotlinx.coroutines.CancellationException
 
 private const val MIN_CAPACITY = 1024
 
@@ -31,27 +32,71 @@ private const val MAX_CAPACITY = Int.MAX_VALUE - 8
  * `AppState.stateLock`; the store monitor makes concurrent appends safe on their own too.
  *
  * The view keeps the whole store alive (including slots newer than its own size) for as long as it
- * is referenced. Extends [AbstractList], so `equals`/`hashCode`/`iterator`/`subList` keep standard
+ * is referenced. [release] drops the slots explicitly for the one case where that is not good enough:
+ * a closed capture tab whose old `tabs` value can stay reachable from an invalid Compose snapshot
+ * record that nothing reuses until much later (see [release]). Extends [AbstractList], so `equals`/`hashCode`/`iterator`/`subList` keep standard
  * list semantics (`equals` compares sizes first, so differently-sized views are unequal in O(1)).
  */
 class AppendOnlyLogList private constructor(
     private val store: Store,
     override val size: Int,
 ) : AbstractList<LogEntry>(), RandomAccess {
-    private class Store(val slots: Array<LogEntry?>) {
+    private class Store(slots: Array<LogEntry?>) {
+        // Volatile: [release] swaps in an empty array while lock-free readers are mid-iteration.
+        @Volatile
+        var slots: Array<LogEntry?> = slots
+
         /** Number of leading slots written so far. Guarded by `synchronized(this)`. */
         var committed: Int = 0
+
+        // Written under `synchronized(this)` (before `slots` is swapped, see [release]) but volatile
+        // because [get] reads it without the lock: a reader that sees the emptied array must also see
+        // this flag, so it reports a release rather than a corrupt "unwritten slot".
+        @Volatile
+        var released: Boolean = false
     }
 
     /** Test hook: two views return the same object iff they share a backing store. */
     internal val storeIdentity: Any get() = store
 
-    /** Test hook: slot count of the backing store. */
+    /** Test hook: slot count of the backing store (0 once released). */
     internal val capacity: Int get() = store.slots.size
+
+    /** Test hook: whether [release] has been called on this view's store. */
+    internal val isReleased: Boolean get() = store.released
+
+    /**
+     * Drops the backing array of this view's store, and with it every [LogEntry] only it referenced.
+     * Idempotent. EVERY view of the store (this one and any older or branched-from-here sibling)
+     * becomes unreadable: [get] and anything built on it (iteration, `equals` against a different
+     * list, `hashCode`) throws [ReleasedLogListException] from then on, and appends no longer share
+     * the store. [size] is a plain `val` and keeps reporting the pre-release size.
+     *
+     * Why this exists: once a capture tab closes nothing of ours should reach its rows, but Compose
+     * can keep the pre-close `tabs` list alive in an invalid snapshot record until a later write
+     * happens to reuse that record, and an idle app never does. Releasing the store makes such a
+     * record pin a small `LogTab` instead of the whole capture.
+     *
+     * Callers must only release a store that no live tab (and no reader that cannot tolerate the
+     * exception) uses; the AppState close path checks that under `stateLock`.
+     */
+    fun release() {
+        synchronized(store) {
+            // Flag first: see Store.released for why a reader of the empty array must see it.
+            store.released = true
+            store.slots = arrayOfNulls(0)
+            store.committed = 0
+        }
+    }
 
     override fun get(index: Int): LogEntry {
         if (index < 0 || index >= size) throw IndexOutOfBoundsException("index: $index, size: $size")
-        return store.slots[index] ?: error("unwritten slot $index below size $size")
+        val slots = store.slots
+        // `index < size <= slots.size` for a live store; a released one swapped in an empty array.
+        val entry = if (index < slots.size) slots[index] else null
+        if (entry != null) return entry
+        if (store.released) throw ReleasedLogListException()
+        error("unwritten slot $index below size $size")
     }
 
     // Two views over the same store and size are identical in content by construction, so the
@@ -63,6 +108,7 @@ class AppendOnlyLogList private constructor(
 
     /** In-place append, or null when this view is not the newest of its store or it has no room. */
     private fun tryAppend(batch: List<LogEntry>): AppendOnlyLogList? = synchronized(store) {
+        if (store.released) return null
         val slots = store.slots
         if (size != store.committed || batch.size > slots.size - size) return null
         var i = size
@@ -79,7 +125,11 @@ class AppendOnlyLogList private constructor(
             val slots = arrayOfNulls<LogEntry>(capacity)
             var i = 0
             if (base is AppendOnlyLogList) {
-                System.arraycopy(base.store.slots, 0, slots, 0, base.size)
+                // Read the array BEFORE the flag: a released store always shows the flag once its
+                // empty array is visible, so an empty `source` can never reach arraycopy below.
+                val source = base.store.slots
+                if (base.store.released) throw ReleasedLogListException()
+                System.arraycopy(source, 0, slots, 0, base.size)
                 i = base.size
             } else {
                 for (entry in base) slots[i++] = entry
@@ -108,3 +158,13 @@ fun appendLogEntries(base: List<LogEntry>, batch: List<LogEntry>): List<LogEntry
     }
     return AppendOnlyLogList.copyOf(base, batch)
 }
+
+/**
+ * Thrown when an element of an [AppendOnlyLogList] whose store was [released][AppendOnlyLogList.release]
+ * is read. It is a [CancellationException] on purpose: the only readers still running after a tab
+ * closes are background jobs that were (or should have been) cancelled with it, and a coroutine that
+ * ends with a CancellationException finishes quietly. `AppState.ioScope` has no exception handler,
+ * so any other type escaping such a job would reach the uncaught-exception handler as a crash-style
+ * error for what is just a late reader of a closed tab.
+ */
+class ReleasedLogListException : CancellationException("log rows were released after their tab closed")
