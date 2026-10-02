@@ -314,6 +314,15 @@ internal fun String.tokenFields(): List<String> = split("|", limit = Int.MAX_VAL
 internal fun String.tokenFieldAt(index: Int): String? =
     split("|", limit = Int.MAX_VALUE).getOrNull(index)?.fieldValue()?.takeIf { it.isNotBlank() }
 
+// The fence-marker line shapes buildMd() emits for Jira Cloud/Markdown code blocks.
+private val CLOUD_FENCE_MARKER = Regex("^(?:`{3,}|~{3,})(?:java)?$")
+
+// Whole-word regex per mask target, compiled once: maskWordForCopy runs per fragment (and per line)
+// of a note copy, and rebuilding the Regex for every line made large copies needlessly slow. Targets
+// are user-configured and few; the map is cleared rather than growing if it ever gets large.
+private val maskWordRegexes = java.util.concurrent.ConcurrentHashMap<String, Regex>()
+private const val MAX_CACHED_MASK_REGEXES = 64
+
 // Some issue trackers (certain Jira instances) reject a comment containing the literal word
 // "java" outside a code block. Masks a configurable whole word (default "java") when copying a
 // note's Markdown — skips the {code:java}/{code} fence marker lines buildMd() emits for
@@ -322,15 +331,17 @@ internal fun maskWordForCopy(text: String, settings: AppSettings): String {
     if (!settings.maskWordOnCopy) return text
     val rules = settings.effectiveCopyMaskRules().filter { it.target.isNotBlank() }
     if (rules.isEmpty()) return text
+    if (maskWordRegexes.size > MAX_CACHED_MASK_REGEXES) maskWordRegexes.clear()
     return text.lines().joinToString("\n") { line ->
         val trimmed = line.trim()
         val isScreenshotMarker = trimmed.startsWith("[screenshot: ") && trimmed.endsWith("]")
-        val isCloudFenceMarker = Regex("^(?:`{3,}|~{3,})(?:java)?$").matches(trimmed)
+        val isCloudFenceMarker = CLOUD_FENCE_MARKER.matches(trimmed)
         if (trimmed == "{code:java}" || trimmed == "{code}" || isCloudFenceMarker || isScreenshotMarker) {
             line
         } else {
             rules.fold(line) { masked, rule ->
-                Regex("\\b${Regex.escape(rule.target)}\\b").replace(masked, rule.replacement)
+                maskWordRegexes.getOrPut(rule.target) { Regex("\\b${Regex.escape(rule.target)}\\b") }
+                    .replace(masked, rule.replacement)
             }
         }
     }

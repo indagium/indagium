@@ -19,6 +19,9 @@ import java.util.Base64
  * copy masking the plain-text flavor uses. The identity default keeps non-clipboard callers
  * unchanged.
  *
+ * [lineContext] is shared by every log block (and, for a clipboard copy, by the Markdown flavor too)
+ * so the visible-row scan behind Δt runs at most once per copy.
+ *
  * [renderDiagramPng] rasterizes a diagram note for inline embedding. It is injected rather than
  * called directly because rendering needs the active colour theme, which lives in `ui` — this
  * package has no access to it, and shouldn't. The default returns null, which degrades a diagram
@@ -29,6 +32,7 @@ fun buildAnnotationsHtml(
     tab: LogTab,
     settings: AppSettings = AppSettings(),
     maskText: (String) -> String = { it },
+    lineContext: Lazy<LogLinePresentationContext> = sharedLogLineContext(tab, settings),
     renderDiagramPng: (com.indagium.diagram3.Seq3Document) -> ByteArray? = { null },
 ): String = buildString {
     append("<div>")
@@ -39,7 +43,7 @@ fun buildAnnotationsHtml(
     for (block in tab.annotations.blocks) {
         blockNumber = when (block) {
             is AnnBlock.Note -> appendNoteHtml(block, settings, blockNumber, maskText, renderDiagramPng)
-            is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber, maskText)
+            is AnnBlock.LogRef -> appendLogRefHtml(tab, block, settings, blockNumber, maskText, lineContext)
             is AnnBlock.Image -> appendImageHtml(block, settings, blockNumber, maskText)
         }
     }
@@ -99,6 +103,7 @@ private fun StringBuilder.appendLogRefHtml(
     settings: AppSettings,
     blockNumber: Int,
     maskText: (String) -> String,
+    lineContext: Lazy<LogLinePresentationContext>,
 ): Int {
     var num = blockNumber
     if (block.caption.isNotBlank() || settings.numberAnnotationBlocks) {
@@ -112,7 +117,7 @@ private fun StringBuilder.appendLogRefHtml(
     // See buildMd's LogRef branch: persisted/cross-tab rows retain numeric PID/TID but cannot
     // safely inherit this tab's process-name mapping or Δt baseline.
     val localSource = block.sourceTabId == null && rows.all { tab.rmap[it.id] == it }
-    val context = if (localSource) LogLinePresentationContext(tab, settings, visibleEntries(tab)) else null
+    val context = annotationLogLineContext(tab, settings, localSource, lineContext)
     append("<pre><code>")
     rows.forEach { row -> appendLine(escapeHtml(maskText(presentLogLine(tab, row, settings, context, allowProcessName = localSource)))) }
     append("</code></pre>")

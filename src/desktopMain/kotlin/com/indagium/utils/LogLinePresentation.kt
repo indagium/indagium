@@ -38,6 +38,24 @@ data class LogLinePresentationContext(
     }
 }
 
+/**
+ * One line-presentation context for a whole copy/export build, created lazily so the full-log
+ * [visibleEntries] re-filter runs at most once (and not at all when no block needs Δt). The HTML and
+ * Markdown builders of one clipboard copy share the same instance.
+ */
+fun sharedLogLineContext(tab: LogTab, settings: AppSettings): Lazy<LogLinePresentationContext> =
+    lazy { LogLinePresentationContext(tab, settings, visibleEntries(tab)) }
+
+/** The context a local-source log block needs, or null when it cannot affect the output: Δt is the
+ * only thing the context contributes, so skip it (and its visible-row scan) unless that is on. */
+internal fun annotationLogLineContext(
+    tab: LogTab,
+    settings: AppSettings,
+    localSource: Boolean,
+    shared: Lazy<LogLinePresentationContext>,
+): LogLinePresentationContext? =
+    if (localSource && settings.copyTimeDelta && tab.showTimeDelta) shared.value else null
+
 /** Text form in the same left-to-right order as the log viewer: number, Δt, timestamp, PID/TID,
  * level/tag, then message.  A missing PID is a real absence in logcat, not a zero value to copy. */
 fun presentLogLine(

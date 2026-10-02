@@ -129,7 +129,6 @@ class AnnotationInlineFieldsUiTest {
                 tab = tab,
                 settings = AppSettings(renderAnnotationMarkdownInline = true),
                 onToggleMd = {},
-                onCopy = {},
                 onCopyImage = {},
                 onExportFrames = {},
                 onSave = {},
