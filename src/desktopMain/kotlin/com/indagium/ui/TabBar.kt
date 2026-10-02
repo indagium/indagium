@@ -223,9 +223,13 @@ internal fun TabRef.rawId(): String = when (this) {
  * Reconciles the strip's last known interleaved order against the CURRENT contents of both
  * backing stores. An entry present in [previousOrder] that's still live keeps its old relative
  * position — this is what lets a user's manual drag survive an unrelated tab/diagram opening or
- * closing elsewhere. An id in [logTabIds]/[diagramSessionIds] that isn't in [previousOrder] yet (a
- * newly opened tab or diagram) is appended at the end, in its own store's order. An id that WAS in
- * [previousOrder] but is no longer live in its store (closed) is dropped.
+ * closing elsewhere. An id in [diagramSessionIds] that isn't in [previousOrder] yet (a newly opened
+ * diagram) is appended at the end, in its store's order. A new log id in [logTabIds] is placed where
+ * the store put it: right after the nearest preceding log tab (in [logTabIds] order) already in the
+ * order, else before the first following one, else appended — so a tab that replaces another one in
+ * the middle (a file opened from the New tab) takes that slot, while a plain append still appends.
+ * An id that WAS in [previousOrder] but is no longer live in its store (closed) is dropped. The
+ * relative order of the surviving entries never changes.
  *
  * Broader than the plain `takeIf { it.toSet() == ids.toSet() } ?: ids` staleness guard this file
  * already uses for `liveVisualTabIds` below — that guard only ever falls all the way back to a
@@ -247,9 +251,24 @@ internal fun reconcileTabOrder(
     }
     val keptLogIds = kept.filterIsInstance<TabRef.Log>().mapTo(mutableSetOf()) { it.tabId }
     val keptDiagramIds = kept.filterIsInstance<TabRef.Diagram>().mapTo(mutableSetOf()) { it.sessionId }
-    val newRefs = logTabIds.filterNot { it in keptLogIds }.map(TabRef::Log) +
-        diagramSessionIds.filterNot { it in keptDiagramIds }.map(TabRef::Diagram)
-    return kept + newRefs
+    val result = kept.toMutableList()
+    logTabIds.forEachIndexed { i, id ->
+        if (id in keptLogIds) return@forEachIndexed
+        val ref = TabRef.Log(id)
+        val after = (i - 1 downTo 0).firstNotNullOfOrNull { j -> result.indexOf(TabRef.Log(logTabIds[j])).takeIf { it >= 0 } }
+        val before = if (after == null) {
+            (i + 1 until logTabIds.size).firstNotNullOfOrNull { j -> result.indexOf(TabRef.Log(logTabIds[j])).takeIf { it >= 0 } }
+        } else {
+            null
+        }
+        when {
+            after != null -> result.add(after + 1, ref)
+            before != null -> result.add(before, ref)
+            else -> result.add(ref)
+        }
+    }
+    diagramSessionIds.filterNot { it in keptDiagramIds }.mapTo(result, TabRef::Diagram)
+    return result
 }
 
 /**
@@ -418,10 +437,22 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
         }
     }
 
+    // The order the strip actually draws. The LaunchedEffect above only lands a frame AFTER the store
+    // changed, so rendering straight from unifiedOrder would draw one frame without a just-opened tab
+    // (an empty slot where a replaced New tab used to be). Reconciling synchronously here, with the
+    // same pure function, makes the first frame already right; the effect then writes the identical
+    // result back. Mid-drag the in-flight optimistic order is rendered untouched (same gating as the
+    // effect), so a membership change landing mid-gesture still can't clobber it.
+    val renderOrder = if (dragTabId == null) {
+        remember(unifiedOrder, logTabIds, diagramSessionIds) { reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds) }
+    } else {
+        unifiedOrder
+    }
+
     val visibleTabLimit = state.settings.visibleTabLimit
-    val (visibleRefs, overflowRefs) = remember(unifiedOrder, containerPx, visibleTabLimit) {
+    val (visibleRefs, overflowRefs) = remember(renderOrder, containerPx, visibleTabLimit) {
         splitTabsForVisibility(
-            tabs = unifiedOrder,
+            tabs = renderOrder,
             containerPx = containerPx,
             minTabPx = minTabPx,
             overflowButtonPx = ovBtnPx,
@@ -450,7 +481,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
             ?: visibleTabIds
     val currentVisualOrderIds by rememberUpdatedState(visualOrderIds)
     val currentOverflowTabIds by rememberUpdatedState(overflowTabIds)
-    val currentUnifiedOrder by rememberUpdatedState(unifiedOrder)
+    val currentUnifiedOrder by rememberUpdatedState(renderOrder)
 
     // Commits a drag release: resolves the reordered raw ids back to TabRefs, updates the strip's
     // own unifiedOrder, then partitions and writes BOTH backing stores — state.tabs via the same
@@ -673,7 +704,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                             // have no independent "into view" concept of their own
                                             // (unlike the deleted diagramWorkspaceIdsForWidth sliding
                                             // window), so this strip's own unifiedOrder is what moves.
-                                            unifiedOrder = unifiedOrder.filterNot { it == ref } + ref
+                                            unifiedOrder = renderOrder.filterNot { it == ref } + ref
                                             state.tabOrder = unifiedOrder
                                             when (ref) {
                                                 is TabRef.Log -> state.activateOverflowTab(ref.tabId)
