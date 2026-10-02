@@ -4,27 +4,48 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
+import com.indagium.model.LogTab
 import com.indagium.utils.TagProcessInfo
 import com.indagium.utils.canFollowTagByToken
+import com.indagium.utils.defaultTagProcessSelection
+import com.indagium.utils.tagProcessInfo
+import com.indagium.utils.tagProcessRulePattern
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.semantics.selected as cursorSelected
 
 // Rows show two lines (pid + name, then the time span), about this tall; the list scrolls past
@@ -202,5 +223,239 @@ private fun ProcessRow(info: TagProcessInfo, checked: Boolean, onCursor: Boolean
             }
             AppText("${info.totalLines} lines", color = tc.td, fontSize = 10.sp, fontFamily = MONO)
         }
+    }
+}
+
+/**
+ * The state of one "follow the process" popover opened from a tag row's pid button, shared by the
+ * Filters panel's tag dropdown and the filter bar's tag dropdown. [tag] is the tag it is open for
+ * (null = closed); [infos] is the scan result (null while scanning); the pid checkboxes, the
+ * keep-following choice and the keyboard [cursor] live here so [TagProcessPopover] stays stateless.
+ *
+ * The owner assigns [refocus] (hands keyboard focus back to its tag field: the popup's clickable pid
+ * button steals it, and the field's key handler is what drives the popover) and [commitRule] (turns
+ * the built pattern into the PID_TID message rule) on every composition.
+ */
+internal class TagPidPopoverState {
+    var tag by mutableStateOf<String?>(null)
+        private set
+    var infos by mutableStateOf<List<TagProcessInfo>?>(null)
+        private set
+    var selected by mutableStateOf<Set<Int>>(emptySet())
+        private set
+    var keepFollowing by mutableStateOf(true)
+    var cursor by mutableStateOf(-1)
+        private set
+
+    // The tag row the pointer is on: its pid button is only drawn for the hovered row.
+    var hoveredTag by mutableStateOf<String?>(null)
+
+    var refocus: () -> Unit = {}
+    var commitRule: (String) -> Unit = {}
+
+    // Dismissing the popup by clicking its own pid button would otherwise be followed by that same
+    // click re-opening it (the IssueCategoryDropdown race), so toggles are ignored just after a dismiss.
+    private var toggleSuppressedUntilMs = 0L
+
+    val isOpen: Boolean get() = tag != null
+
+    /** Every close path (Cancel, outside click, Esc, after Add) hands focus back to the tag field. */
+    fun close() {
+        tag = null
+        infos = null
+        runCatching { refocus() }
+    }
+
+    /** Shared by the pid button's click and Enter on a row whose keyboard action is the pid button. */
+    fun open(tag: String) {
+        infos = null
+        cursor = -1
+        this.tag = tag
+        runCatching { refocus() }
+    }
+
+    /** The popup was dismissed by an outside click; swallows an immediately following toggle click. */
+    fun dismissByOutsideClick(nowMs: Long = System.currentTimeMillis()) {
+        toggleSuppressedUntilMs = nowMs + TOGGLE_SUPPRESS_MS
+        close()
+    }
+
+    /** The pid button was clicked: opens the popover, or closes it if open for [forTag]. */
+    fun toggleFor(forTag: String, nowMs: Long = System.currentTimeMillis()) {
+        if (nowMs < toggleSuppressedUntilMs) return
+        if (tag == forTag) close() else open(forTag)
+    }
+
+    fun togglePid(pid: Int) {
+        selected = if (pid in selected) selected - pid else selected + pid
+    }
+
+    /** Closes the popover when its anchor tag is no longer among the dropdown's tag rows. */
+    fun closeIfMissing(candidates: List<Pair<String, Boolean>>) {
+        val open = tag ?: return
+        if (candidates.none { (value, isPkg) -> !isPkg && value == open }) close()
+    }
+
+    /** Applies a scan result: the first one seeds the checkboxes, later ones (live tail) keep them. */
+    fun onScanResult(result: List<TagProcessInfo>) {
+        val seed = infos == null
+        infos = result
+        if (seed) {
+            selected = defaultTagProcessSelection(result)
+            keepFollowing = true
+            cursor = 0
+        } else {
+            cursor = clampPopoverCursor(cursor, popoverItemCount(result))
+        }
+    }
+
+    /** Builds the PID_TID rule for the open tag, hands it to [commitRule] and closes. */
+    fun add() {
+        val open = tag ?: return
+        val list = infos.orEmpty()
+        val pattern = tagProcessRulePattern(open, selected, list.mapTo(HashSet()) { it.pid }, keepFollowing)
+        commitRule(pattern)
+        close()
+    }
+
+    /**
+     * Keys while the popover is open (↑↓ move, Space toggle, Enter add, Esc close). Returns whether
+     * the key was consumed; false when closed. [onTab] runs after closing on Tab: Tab leaves the
+     * field as usual, and an open popover with focus elsewhere would no longer receive its keys.
+     */
+    fun handleKey(key: Key, onTab: () -> Unit): Boolean {
+        val openTag = tag ?: return false
+        val list = infos
+        val itemCount = popoverItemCount(list)
+        when (key) {
+            Key.DirectionDown -> cursor = movePopoverCursor(cursor, +1, itemCount)
+            Key.DirectionUp -> cursor = movePopoverCursor(cursor, -1, itemCount)
+            Key.Spacebar -> {
+                val item = list?.getOrNull(cursor)
+                if (item != null) {
+                    togglePid(item.pid)
+                } else if (list != null && cursor == list.size && canKeepFollowing(openTag, list, selected)) {
+                    keepFollowing = !keepFollowing
+                }
+            }
+            Key.Enter, Key.NumPadEnter -> if (canAddTagProcess(list, selected)) add()
+            Key.Escape -> close()
+            Key.Tab -> { close(); onTab() }
+            Key.DirectionLeft, Key.DirectionRight -> Unit
+            else -> return false
+        }
+        return true
+    }
+
+    private companion object {
+        const val TOGGLE_SUPPRESS_MS = 200L
+    }
+}
+
+/**
+ * Scans the open tag's processes. Full scan, not the large-file cap: the line counts in the popover
+ * must be right. Re-runs when logData changes (a live tail), keeping the user's checkboxes.
+ */
+@Composable
+internal fun TagPidPopoverScanEffect(state: TagPidPopoverState, tab: LogTab) {
+    LaunchedEffect(state.tag, tab.logData) {
+        val scanTag = state.tag ?: return@LaunchedEffect
+        val data = tab.logData
+        val names = tab.analysis.processNames
+        val result = withContext(Dispatchers.Default) { tagProcessInfo(data, scanTag, names) { ensureActive() } }
+        state.onScanResult(result)
+    }
+}
+
+/** The small "pid" box on a tag row of a tag dropdown (matches the +/− boxes' footprint). */
+@Composable
+internal fun TagPidButton(open: Boolean, kbd: Boolean = false, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val tc = tc()
+    Box(
+        modifier.size(20.dp)
+            .background(if (open) tc.ac.copy(.2f) else if (kbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
+            .border(1.dp, if (open || kbd) tc.ac else tc.br, CORNER_SM)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        AppText("pid", color = if (open || kbd) tc.ac else tc.ts, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/**
+ * The fixed 20dp pid slot of a tag row: the pid button (when [hasPids] and the row is hovered,
+ * keyboard-selected or its popover is open) plus the popover itself. Always 20dp wide so showing or
+ * hiding the button never shifts the row.
+ */
+@Composable
+internal fun TagPidSlot(
+    tag: String,
+    state: TagPidPopoverState,
+    hasPids: Boolean,
+    rowSelected: Boolean,
+    kbd: Boolean,
+    positionProvider: PopupPositionProvider,
+    buttonModifier: Modifier = Modifier,
+) {
+    val open = state.tag == tag
+    Box(Modifier.size(20.dp)) {
+        if (hasPids && (state.hoveredTag == tag || rowSelected || open)) {
+            TagPidButton(open = open, kbd = kbd, modifier = buttonModifier) { state.toggleFor(tag) }
+        }
+        if (open) {
+            Popup(
+                popupPositionProvider = positionProvider,
+                onDismissRequest = { state.dismissByOutsideClick() },
+                properties = PopupProperties(focusable = false),
+            ) {
+                TagProcessPopover(
+                    tag = tag,
+                    infos = state.infos,
+                    selected = state.selected,
+                    keepFollowing = state.keepFollowing,
+                    onToggle = { pid -> state.togglePid(pid) },
+                    onKeepFollowingChange = { state.keepFollowing = it },
+                    onAdd = { state.add() },
+                    onCancel = { state.close() },
+                    cursor = state.cursor,
+                )
+            }
+        }
+    }
+}
+
+private const val POPOVER_EDGE_GAP_PX = 6
+
+/**
+ * Left x of the popover: just right of [rightEdgePx]; when that would not fit in the window and a
+ * [leftEdgePx] is given with room to its left, just left of that edge instead; else clamped into the
+ * window. Either way it avoids covering the list it was opened from whenever the window allows.
+ */
+internal fun tagPopoverX(rightEdgePx: Int, leftEdgePx: Int?, popupWidthPx: Int, windowWidthPx: Int): Int {
+    val right = rightEdgePx + POPOVER_EDGE_GAP_PX
+    if (right + popupWidthPx > windowWidthPx && leftEdgePx != null) {
+        val left = leftEdgePx - POPOVER_EDGE_GAP_PX - popupWidthPx
+        if (left >= 0) return left
+    }
+    return right.coerceAtMost(windowWidthPx - popupWidthPx).coerceAtLeast(0)
+}
+
+/**
+ * Opens the pid popover just right of the list it was opened from (a panel or a dropdown), so it
+ * never covers that list, top-aligned with its anchor row and clamped into the window.
+ */
+internal class RightOfEdgePositionProvider(
+    private val rightEdgePx: Int,
+    private val leftEdgePx: Int? = null,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val x = tagPopoverX(rightEdgePx, leftEdgePx, popupContentSize.width, windowSize.width)
+        val y = anchorBounds.top.coerceAtMost(windowSize.height - popupContentSize.height).coerceAtLeast(0)
+        return IntOffset(x, y)
     }
 }

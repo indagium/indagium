@@ -66,6 +66,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlin.math.roundToInt
 
 // ── Horizontal filter bar — exploratory v1 ──────────────────────────────────────────────────────
 //
@@ -370,6 +371,7 @@ private const val FILTER_BAR_REGEX_BLUR_REMEMBER_MS = 500L
 private enum class FilterFieldPopup { NONE, PILLS }
 
 private const val FILTER_BAR_BADGE_POPUP_MAX_HEIGHT_DP = 220
+private const val FILTER_BAR_TAG_DROPDOWN_MIN_WIDTH_DP = 200
 private const val FILTER_BAR_BADGE_POPUP_GAP_DP = 4
 
 private data class FilterBarBadgePopupPlacement(
@@ -977,7 +979,16 @@ private fun TagAndPkgField(
     // one of that effect's keys.
     var showCandidates by remember { mutableStateOf(false) }
     var selectedIdx by remember { mutableStateOf(-1) }
-    var selectedAction by remember { mutableStateOf(0) } // 0 = include, 1 = exclude
+    var selectedAction by remember { mutableStateOf(0) } // -1 = pid popover (TAG_ACTION_PID), 0 = include, 1 = exclude
+    // "Follow the process" popover opened from a tag row's pid button — same shared state, button and
+    // popover as the Filters panel's tag dropdown (TagProcessPopover.kt).
+    val pidPopover = remember(tab.id) { TagPidPopoverState() }
+    pidPopover.refocus = { fr.requestFocus() }
+    // Unscoped, so the whole process shows, not just this tag's lines.
+    pidPopover.commitRule = { pattern -> actions.onAddMessageRule(true, pattern, false, null, null, RuleTarget.PID_TID) }
+    // The dropdown's window-x edges, so the popover opens beside the list instead of over it.
+    var dropdownLeftPx by remember { mutableStateOf(0) }
+    var dropdownRightPx by remember { mutableStateOf(0) }
     var fieldWidthDp by remember { mutableStateOf(0.dp) }
     // Bug fix (popup covered the field) — see TagFieldBadge's own badgeHeightPx doc for why
     // BottomStart-with-no-offset was wrong; this is the same fix applied to the field itself.
@@ -993,8 +1004,10 @@ private fun TagAndPkgField(
     // the PILLS popup is enforced separately, at the render site below (`showCandidates &&
     // popupState != PILLS`) rather than by folding PILLS into this effect's own key — see
     // FilterFieldPopup's doc for why the old 3-way-enum-as-key shape was the actual bug.
-    LaunchedEffect(fieldFocused, candidatesHovered) {
-        if (fieldFocused || candidatesHovered) {
+    // The open pid popover also keeps the dropdown (and so its anchor row) mounted: clicking the pid
+    // button moves keyboard focus off the field, which would otherwise hide the list.
+    LaunchedEffect(fieldFocused, candidatesHovered, pidPopover.tag) {
+        if (fieldFocused || candidatesHovered || pidPopover.isOpen) {
             showCandidates = true
         } else {
             delay(100)
@@ -1005,6 +1018,12 @@ private fun TagAndPkgField(
     val candidates = remember(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit) {
         combinedTagCandidates(model.sortedTags, search, filter.pkgPrefixes, model.tagUsage, model.mostUsedTagLimit)
     }
+    // Typing can drop the anchor row while the popover is open; close it then.
+    LaunchedEffect(candidates, pidPopover.tag) { pidPopover.closeIfMissing(candidates) }
+    TagPidPopoverScanEffect(pidPopover, tab)
+
+    fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean =
+        candidate != null && !candidate.second && !tab.analysis.tagPids[candidate.first].isNullOrEmpty()
 
     // Escape is the panel's explicit cancel path: clear the query, clear the debounced search
     // immediately, and hide candidates even though the field itself keeps focus. The field's
@@ -1035,6 +1054,10 @@ private fun TagAndPkgField(
         Modifier.onGloballyPositioned { coords ->
             fieldWidthDp = with(density) { coords.size.width.toDp() }
             fieldHeightPx = coords.size.height
+            // The dropdown starts at the field's left edge and is at least 200dp wide (see its Box).
+            val leftPx = coords.positionInWindow().x.roundToInt()
+            dropdownLeftPx = leftPx
+            dropdownRightPx = leftPx + maxOf(coords.size.width, with(density) { FILTER_BAR_TAG_DROPDOWN_MIN_WIDTH_DP.dp.roundToPx() })
         },
     ) {
         InlineField(
@@ -1047,10 +1070,23 @@ private fun TagAndPkgField(
                 .onFocusChanged { fieldFocused = it.isFocused }
                 .onPreviewKeyEvent { ev ->
                     if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // While the pid popover is open the field's keys drive it (↑↓ move, Space toggle,
+                    // Enter add, Esc close), exactly like the Filters panel's tag field.
+                    if (pidPopover.isOpen) {
+                        return@onPreviewKeyEvent pidPopover.handleKey(ev.key) { runCatching { nextFr.requestFocus() } }
+                    }
                     when (ev.key) {
                         Key.Tab -> { runCatching { nextFr.requestFocus() }; true }
-                        Key.DirectionDown -> { selectedIdx = (selectedIdx + 1).coerceAtMost(candidates.lastIndex); true }
-                        Key.DirectionUp -> { selectedIdx = (selectedIdx - 1).coerceAtLeast(-1); true }
+                        Key.DirectionDown, Key.DirectionUp -> {
+                            selectedIdx = if (ev.key == Key.DirectionDown) {
+                                (selectedIdx + 1).coerceAtMost(candidates.lastIndex)
+                            } else {
+                                (selectedIdx - 1).coerceAtLeast(-1)
+                            }
+                            // The new row may not have a pid button to rest on.
+                            selectedAction = clampTagRowAction(selectedAction, pidAvailableFor(candidates.getOrNull(selectedIdx)))
+                            true
+                        }
                         Key.Escape -> {
                             // The pills popup is a bar-only presentation detail. Close it as UI
                             // cleanup, then perform the panel's actual Escape behavior (clear and
@@ -1060,19 +1096,23 @@ private fun TagAndPkgField(
                             true
                         }
                         Key.DirectionRight -> {
-                            if (candidates.getOrNull(selectedIdx) != null) { selectedAction = 1; true } else {
+                            val c = candidates.getOrNull(selectedIdx)
+                            if (c != null) { selectedAction = nextTagRowAction(selectedAction, +1, pidAvailableFor(c)); true } else {
                                 false
                             }
                         }
                         Key.DirectionLeft -> {
-                            if (candidates.getOrNull(selectedIdx) != null) { selectedAction = 0; true } else {
+                            val c = candidates.getOrNull(selectedIdx)
+                            if (c != null) { selectedAction = nextTagRowAction(selectedAction, -1, pidAvailableFor(c)); true } else {
                                 false
                             }
                         }
                         Key.Enter, Key.NumPadEnter -> {
                             val c = candidates.getOrNull(selectedIdx)
                             if (c != null) {
-                                if (c.second) {
+                                if (selectedAction == TAG_ACTION_PID && pidAvailableFor(c)) {
+                                    pidPopover.open(c.first)
+                                } else if (c.second) {
                                     if (selectedAction == 0) actions.onAddPkgPrefix(c.first) else actions.onAddExcludePkgPrefix(c.first)
                                 } else if (selectedAction == 0) {
                                     actions.onToggleTag(c.first)
@@ -1114,14 +1154,15 @@ private fun TagAndPkgField(
                 // The panel keeps its inline candidates visible in that state, so only dismiss
                 // when neither the field nor the popup content is still active; the focus/hover
                 // effect below handles the normal focus-loss path.
+                // A click inside the pid popover (its own popup) is an outside click for this one too.
                 onDismissRequest = {
-                    if (!filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = false
+                    if (!pidPopover.isOpen && !filterBarCandidatesStayVisible(fieldFocused, candidatesHovered)) showCandidates = false
                 },
             ) {
                 DisableSelection {
                     Box(
                         Modifier
-                            .widthIn(min = 200.dp)
+                            .widthIn(min = FILTER_BAR_TAG_DROPDOWN_MIN_WIDTH_DP.dp)
                             .width(fieldWidthDp)
                             .background(tc.p, CORNER_SM)
                             .border(1.dp, tc.br, CORNER_SM),
@@ -1144,7 +1185,18 @@ private fun TagAndPkgField(
                                 // row does NOT — only its own +/- boxes do.
                                 HoverBox(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
-                                        .testTag("filter-bar-tags-candidate-$idx"),
+                                        .testTag("filter-bar-tags-candidate-$idx")
+                                        .then(
+                                            if (isPkg) {
+                                                Modifier
+                                            } else {
+                                                Modifier
+                                                    .onPointerEvent(PointerEventType.Enter) { pidPopover.hoveredTag = value }
+                                                    .onPointerEvent(PointerEventType.Exit) {
+                                                        if (pidPopover.hoveredTag == value) pidPopover.hoveredTag = null
+                                                    }
+                                            },
+                                        ),
                                     baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                     hoverBg = tc.hv,
                                     onClick = if (isPkg) {
@@ -1280,6 +1332,17 @@ private fun TagAndPkgField(
                                             AppText(
                                                 (tab.analysis.tagCounts[value] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
                                                 modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip,
+                                            )
+                                            TagPidSlot(
+                                                tag = value,
+                                                state = pidPopover,
+                                                hasPids = !tab.analysis.tagPids[value].isNullOrEmpty(),
+                                                rowSelected = isRowSelected,
+                                                kbd = isRowSelected && selectedAction == TAG_ACTION_PID,
+                                                positionProvider = remember(dropdownLeftPx, dropdownRightPx) {
+                                                    RightOfEdgePositionProvider(dropdownRightPx, dropdownLeftPx)
+                                                },
+                                                buttonModifier = Modifier.testTag("filter-bar-tags-candidate-$idx-pid"),
                                             )
                                             val incKbd = isRowSelected && selectedAction == 0
                                             Box(
