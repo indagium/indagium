@@ -269,32 +269,7 @@ class CaptureAppRoundTripTest {
         val root = createTempDirectory("capture-retained-notes").toFile()
         try {
             val sessionId = "session-notes"
-            val session = CaptureSession(
-                id = sessionId,
-                directory = File(root, "captures/$sessionId"),
-                device = CaptureDevice("emulator-5554", "device"),
-                settings = CaptureSettings(recordVideo = false, freeSpaceReserveBytes = NO_FREE_SPACE_RESERVE_BYTES),
-                startedEpochMs = FIXTURE_EPOCH_MS,
-                elapsedMs = FIXTURE_ROW_COUNT * ROW_INTERVAL_MS,
-                status = CaptureStatus.STOPPED,
-            )
-            session.logFile.parentFile.mkdirs()
-            session.indexFile.parentFile.mkdirs()
-            var offset = 0L
-            session.logFile.outputStream().use { log ->
-                session.indexFile.bufferedWriter().use { index ->
-                    for (i in FIRST_ROW_ORDINAL..FIXTURE_ROW_COUNT) {
-                        val bytes = "09-19 12:00:00.000  100  101 I Tag: row $i\n".toByteArray()
-                        log.write(bytes)
-                        index.appendLine(
-                            "{\"byteOffset\":$offset,\"byteLength\":${bytes.size}," +
-                                "\"elapsedMs\":${i * ROW_INTERVAL_MS},\"rowOrdinal\":$i}",
-                        )
-                        offset += bytes.size
-                    }
-                }
-            }
-            writeRetainedSessionMetadata(session)
+            val session = writeRetainedFixture(root, sessionId)
 
             val app = AppState(autosaveFile = File(root, "autosave"), autoExportNotes = false)
             try {
@@ -344,6 +319,72 @@ class CaptureAppRoundTripTest {
         } finally {
             root.deleteRecursively()
         }
+    }
+
+    // Save ZIP pressed twice on a retained session: the filename is deterministic, so the second press
+    // used to throw "destination already exists" into captureExportError and paint the session red.
+    // It must now be a plain warning notice that leaves the error untouched.
+    @Test
+    fun secondRetainedSaveWarnsInsteadOfFailing() = runBlocking {
+        val root = createTempDirectory("capture-retained-twice").toFile()
+        try {
+            val sessionId = "session-twice"
+            writeRetainedFixture(root, sessionId)
+            val app = AppState(autosaveFile = File(root, "autosave"), autoExportNotes = false)
+            try {
+                app.saveRetainedCapture(sessionId)
+                withTimeout(WAIT_TIMEOUT_MS) { while (app.captureExportBusy) delay(POLL_INTERVAL_MS) }
+                val saved = assertNotNull(app.captureExportResult).file
+                assertNull(app.captureExportWarning)
+
+                app.saveRetainedCapture(sessionId)
+                withTimeout(WAIT_TIMEOUT_MS) { while (app.captureExportBusy) delay(POLL_INTERVAL_MS) }
+                assertNull(app.captureExportError, "an already-saved ZIP is not a failure")
+                assertNull(app.captureExportResult)
+                val warning = assertNotNull(app.captureExportWarning)
+                assertEquals(saved, warning.file)
+                assertEquals("Already saved: ${saved.name}", warning.message)
+                assertEquals(sessionId, app.captureExportOwner)
+
+                app.clearCaptureExportStatus()
+                assertNull(app.captureExportWarning)
+            } finally {
+                app.close()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    /** A stopped session on disk (log + index + metadata) that CaptureService.retainedSession recognizes. */
+    private fun writeRetainedFixture(root: File, sessionId: String): CaptureSession {
+        val session = CaptureSession(
+            id = sessionId,
+            directory = File(root, "captures/$sessionId"),
+            device = CaptureDevice("emulator-5554", "device"),
+            settings = CaptureSettings(recordVideo = false, freeSpaceReserveBytes = NO_FREE_SPACE_RESERVE_BYTES),
+            startedEpochMs = FIXTURE_EPOCH_MS,
+            elapsedMs = FIXTURE_ROW_COUNT * ROW_INTERVAL_MS,
+            status = CaptureStatus.STOPPED,
+        )
+        session.logFile.parentFile.mkdirs()
+        session.indexFile.parentFile.mkdirs()
+        var offset = 0L
+        session.logFile.outputStream().use { log ->
+            session.indexFile.bufferedWriter().use { index ->
+                for (i in FIRST_ROW_ORDINAL..FIXTURE_ROW_COUNT) {
+                    val bytes = "09-19 12:00:00.000  100  101 I Tag: row $i\n".toByteArray()
+                    log.write(bytes)
+                    index.appendLine(
+                        "{\"byteOffset\":$offset,\"byteLength\":${bytes.size}," +
+                            "\"elapsedMs\":${i * ROW_INTERVAL_MS},\"rowOrdinal\":$i}",
+                    )
+                    offset += bytes.size
+                }
+            }
+        }
+        writeRetainedSessionMetadata(session)
+        return session
     }
 
     /** Mirrors CaptureRecorder's own private `sessionJson` format closely enough for

@@ -780,6 +780,7 @@ private fun UnfinishedSessionRow(
     val tc = tc()
     val exportStatus = captureExportStatusFor(
         session.id, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+        state.captureExportWarning,
     )
     Column {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -812,6 +813,7 @@ private fun UnfinishedSessionRow(
             error = exportStatus.error,
             onClose = { state.clearCaptureExportStatus() },
             onReclaimFocus = {},
+            warning = exportStatus.warning,
         )
         if (discardId == session.id) {
             AppText("Discard this retained capture? The raw session directory will be removed.", color = DANGER_RED, fontSize = 10.sp)
