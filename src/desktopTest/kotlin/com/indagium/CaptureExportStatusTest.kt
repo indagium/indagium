@@ -2,6 +2,7 @@ package com.indagium
 
 import com.indagium.capture.CaptureExportResult
 import com.indagium.ui.CaptureExportStatusView
+import com.indagium.ui.CaptureExportWarning
 import com.indagium.ui.captureExportStatusFor
 import java.io.File
 import kotlin.test.Test
@@ -25,6 +26,16 @@ class CaptureExportStatusTest {
             CaptureExportStatusView(busy = false, result = null, error = "disk full"),
             captureExportStatusFor("s1", "s1", busy = false, result = null, error = "disk full"),
         )
+    }
+
+    @Test
+    fun warningIsScopedToItsOwnerAndIsNotAnError() {
+        val warning = CaptureExportWarning("Already saved: saved.zip", File("saved.zip"))
+        assertEquals(
+            CaptureExportStatusView(busy = false, result = null, error = null, warning = warning),
+            captureExportStatusFor("s1", "s1", busy = false, result = null, error = null, warning = warning),
+        )
+        assertEquals(hidden, captureExportStatusFor("s2", "s1", busy = false, result = null, error = null, warning = warning))
     }
 
     @Test

@@ -934,6 +934,7 @@ private fun CaptureStoppedStrip(
     val colors = tc()
     val exportStatus = captureExportStatusFor(
         sessionId, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,
+        state.captureExportWarning,
     )
     val (deviceModel, deviceSerial) = captureSessionDeviceParts(session, tab.filename.removePrefix("Capture — "))
     Column(Modifier.fillMaxWidth().background(colors.p2)) {
@@ -1019,6 +1020,7 @@ private fun CaptureStoppedStrip(
             error = exportStatus.error,
             onClose = { state.clearCaptureExportStatus() },
             onReclaimFocus = onReturnFocus,
+            warning = exportStatus.warning,
         )
     }
 }
@@ -1026,12 +1028,17 @@ private fun CaptureStoppedStrip(
 /** How long a successful ZIP save's "Saved …" line stays before it hides itself; errors never auto-hide. */
 internal const val CAPTURE_EXPORT_NOTICE_MS = 8_000L
 
+/** A Save ZIP that did nothing because [file] was already there: shown like a result (file name +
+ * "Open folder", auto-hides) but styled as a warning, never as a failure. */
+internal data class CaptureExportWarning(val message: String, val file: File)
+
 /** What one surface (a stopped tab's strip, a launcher row, the snapshot popover) shows of the global
  * export status. */
 internal data class CaptureExportStatusView(
     val busy: Boolean,
     val result: CaptureExportResult?,
     val error: String?,
+    val warning: CaptureExportWarning? = null,
 )
 
 /**
@@ -1045,12 +1052,14 @@ internal fun captureExportStatusFor(
     busy: Boolean,
     result: CaptureExportResult?,
     error: String?,
+    warning: CaptureExportWarning? = null,
 ): CaptureExportStatusView =
-    if (sessionId == owner) CaptureExportStatusView(busy, result, error) else CaptureExportStatusView(false, null, null)
+    if (sessionId == owner) CaptureExportStatusView(busy, result, error, warning) else CaptureExportStatusView(false, null, null)
 
 /**
  * The saved/failed line under a ZIP save: success shows the file name, "Open folder" and ×, and hides
- * itself after [CAPTURE_EXPORT_NOTICE_MS]; a failure stays until × is clicked. [onClose] clears the
+ * itself after [CAPTURE_EXPORT_NOTICE_MS], as does the amber "Already saved" [warning]; a failure stays
+ * until × is clicked. [onClose] clears the
  * status; [onReclaimFocus] runs only for a click, because a clicked control keeps keyboard focus (see
  * CLAUDE.md's Popup/clickable note) — an auto-hide has no click and must not steal focus from
  * whatever the user has since started typing in.
@@ -1061,12 +1070,13 @@ internal fun CaptureExportNotice(
     error: String?,
     onClose: () -> Unit,
     onReclaimFocus: () -> Unit,
+    warning: CaptureExportWarning? = null,
 ) {
-    if (result == null && error == null) return
+    if (result == null && error == null && warning == null) return
     val colors = tc()
     val latestOnClose by rememberUpdatedState(onClose)
-    LaunchedEffect(result) {
-        if (result != null) {
+    LaunchedEffect(result, warning) {
+        if (result != null || (error == null && warning != null)) {
             delay(CAPTURE_EXPORT_NOTICE_MS)
             latestOnClose()
         }
@@ -1087,6 +1097,12 @@ internal fun CaptureExportNotice(
                 maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
             )
             AccentLink("Open folder", { revealInFileManager(result.file); onReclaimFocus() })
+        } else if (warning != null) {
+            AppText(
+                warning.message, color = colors.warn, fontSize = 10.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+            )
+            AccentLink("Open folder", { revealInFileManager(warning.file); onReclaimFocus() })
         }
         // Right after the text (not pushed to the row's far end), so it reads as this notice's close.
         CloseButton(onClick = { onClose(); onReclaimFocus() })

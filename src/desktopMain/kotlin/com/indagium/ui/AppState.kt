@@ -2331,6 +2331,11 @@ class AppState(
     internal var captureExportError by mutableStateOf<String?>(null)
         private set
 
+    /** A non-failure notice for a retained Save ZIP that had nothing to do (the destination already
+     * exists). Same ownership and auto-hide as [captureExportResult]; deliberately not an error. */
+    internal var captureExportWarning by mutableStateOf<CaptureExportWarning?>(null)
+        private set
+
     /** Who the busy/result/error above belong to: the retained session id of a [saveRetainedCapture]
      * run, or null for a live [exportCaptureSnapshot] (owned by the snapshot popover). The status is
      * global, so each surface compares this against its own id (see [captureExportStatusFor]) to avoid
@@ -3716,6 +3721,7 @@ class AppState(
         captureExportResult = null
         captureExportPreview = null
         captureExportError = null
+        captureExportWarning = null
         // Captured once, at click time, from the tab's CURRENT notes — same "one fixed snapshot of
         // the request" treatment `request` itself already gets. preparedForSave resolves LogRef
         // sourceEntries against this tab's own live rmap, exactly like an ordinary .ann sidecar save.
@@ -3796,6 +3802,7 @@ class AppState(
         captureExportResult = null
         captureExportPreview = null
         captureExportError = null
+        captureExportWarning = null
     }
 
     private fun cancelCapturePreview(tabId: String) {
@@ -3882,6 +3889,7 @@ class AppState(
         captureExportOwner = sessionId
         captureExportResult = null
         captureExportError = null
+        captureExportWarning = null
         val preparedNotes = tabId?.let { id -> tab(id)?.let { t -> t.annotations.preparedForSave(t) } }
         captureExportJob = ioScope.launch {
             try {
@@ -3901,10 +3909,18 @@ class AppState(
                         session.exportCounter,
                         session.settings.label,
                     )
-                    // runInterruptible so cancelCaptureSnapshot() interrupts the blocking export
-                    // (the exporter checks for interruption and removes its temp archive).
-                    captureExportResult = runInterruptible {
-                        captureService.exportRetainedSession(sessionId, File(directory, filename), notes = preparedNotes)
+                    val destination = File(directory, filename)
+                    if (destination.exists()) {
+                        // A retained session's filename is deterministic (the counter never advances),
+                        // so a second Save ZIP would only fail with "destination already exists".
+                        // Say so as a notice instead of a red error that marks the session as failed.
+                        captureExportWarning = CaptureExportWarning("Already saved: ${destination.name}", destination)
+                    } else {
+                        // runInterruptible so cancelCaptureSnapshot() interrupts the blocking export
+                        // (the exporter checks for interruption and removes its temp archive).
+                        captureExportResult = runInterruptible {
+                            captureService.exportRetainedSession(sessionId, destination, notes = preparedNotes)
+                        }
                     }
                 }
             } catch (cancelled: CancellationException) {
