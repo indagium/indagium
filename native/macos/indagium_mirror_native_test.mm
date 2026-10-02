@@ -95,6 +95,82 @@ static void verifyStaleQueuedDetachCannotRemoveAReattachedLayer() {
     }
 }
 
+// Stand-in for the JDK's AWTSurfaceLayers: records every setLayer: so the tests can see the clears.
+@interface FakeSurfaceLayers : NSObject <JAWT_SurfaceLayers> {
+    CALayer *_layer;
+}
+@property (nonatomic, strong) CALayer *windowLayer;
+@property (nonatomic) int clearCount;
+@end
+@implementation FakeSurfaceLayers
+@synthesize windowLayer = _windowLayer;
+- (CALayer *)layer { return _layer; }
+- (void)setLayer:(CALayer *)newLayer {
+    if (newLayer == nil && _layer != nil) {
+        ++_clearCount;
+        [_layer removeFromSuperlayer];
+    }
+    _layer = newLayer;
+    if (newLayer) [self.windowLayer addSublayer:newLayer];
+}
+@end
+
+static void drainMainQueue();
+
+static void verifySurfaceLayersAreClearedOnReattachAndClose() {
+    Mirror mirror{};
+    mirror.layer = [CAMetalLayer layer];
+    FakeSurfaceLayers *first = [FakeSurfaceLayers new];
+    first.windowLayer = [CALayer layer];
+    FakeSurfaceLayers *second = [FakeSurfaceLayers new];
+    second.windowLayer = [CALayer layer];
+
+    if (!bindLayerToSurfaceLayers(&mirror, first, mirror.layer)) fail("first bind was refused");
+    if (first.layer != mirror.layer || mirror.surfaceLayers != first) fail("first bind did not store the peer");
+
+    // Same peer again: setLayer: is a no-op for the layer it already holds, nothing may be cleared.
+    if (!bindLayerToSurfaceLayers(&mirror, first, mirror.layer)) fail("rebind to the same peer was refused");
+    if (first.clearCount != 0 || first.layer != mirror.layer) fail("rebinding to the same peer cleared it");
+
+    // Different peer: the old one must be cleared before the new one is assigned.
+    if (!bindLayerToSurfaceLayers(&mirror, second, mirror.layer)) fail("bind to a second peer was refused");
+    if (first.clearCount != 1 || first.layer != nil) fail("the previous peer kept our layer after a re-attach");
+    if (second.layer != mirror.layer || mirror.surfaceLayers != second) fail("the new peer was not assigned/stored");
+    if (mirror.layer.superlayer != second.windowLayer) fail("layer is not in the new peer's window layer");
+
+    // Close from a background thread: queued to the main queue, never blocking, then cleared there.
+    id<JAWT_SurfaceLayers> taken = mirror.surfaceLayers;
+    CAMetalLayer *layer = mirror.layer;
+    mirror.surfaceLayers = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        detachLayerFromSurfaceLayers(taken, layer);
+        dispatch_semaphore_signal(done);
+    });
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)) != 0) {
+        fail("detachLayerFromSurfaceLayers blocked off the main thread");
+    }
+    drainMainQueue();
+    if (second.clearCount != 1 || second.layer != nil || layer.superlayer != nil) {
+        fail("close did not clear the surface layers object on the main queue");
+    }
+
+    // Close on the main thread runs inline.
+    FakeSurfaceLayers *third = [FakeSurfaceLayers new];
+    third.windowLayer = [CALayer layer];
+    third.layer = layer;
+    detachLayerFromSurfaceLayers(third, layer);
+    if (third.clearCount != 1 || third.layer != nil) fail("inline close did not clear the surface layers object");
+
+    // A closed mirror never accepts a late bind.
+    mirror.closed = true;
+    FakeSurfaceLayers *late = [FakeSurfaceLayers new];
+    late.windowLayer = [CALayer layer];
+    if (bindLayerToSurfaceLayers(&mirror, late, layer) || late.layer != nil || mirror.surfaceLayers != nil) {
+        fail("a closed mirror accepted a late attach");
+    }
+}
+
 static void verifyJawtManagedLayerPlacement() {
     CALayer *firstWindow = [CALayer layer];
     CALayer *secondWindow = [CALayer layer];
@@ -291,6 +367,7 @@ int main() {
     }
     verifyLayerDetachWithoutJAWT();
     verifyStaleQueuedDetachCannotRemoveAReattachedLayer();
+    verifySurfaceLayersAreClearedOnReattachAndClose();
     verifyJawtManagedLayerPlacement();
     verifyViewportClipMaskCoordinates();
     verifyMirrorLayerOrderForComposeOverlays();
