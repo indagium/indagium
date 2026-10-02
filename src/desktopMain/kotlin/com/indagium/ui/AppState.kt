@@ -276,6 +276,31 @@ private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
  */
 private const val CLOSED_TAB_ROWS_RELEASE_DELAY_MS = 1_500L
 
+/**
+ * A reader's claim on a tab's row store (see [AppState.pinRows]): while any pin on a store is open,
+ * closing the tab does not release the rows (they stay readable); the last [close] performs the
+ * release that was deferred. [close] is idempotent, so a job may unpin early (merge does, as soon as
+ * its sources are consumed) and still have a completion-handler backstop.
+ */
+internal class RowsPin internal constructor(private val onClose: (() -> Unit)?) : AutoCloseable {
+    private val closed = AtomicBoolean(false)
+
+    override fun close() {
+        if (closed.compareAndSet(false, true)) onClose?.invoke()
+    }
+
+    internal companion object {
+        /** Handle for a tab whose rows are a plain list: nothing to protect, closing does nothing. */
+        val NONE = RowsPin(null)
+    }
+}
+
+/** A closed tab's store that could not be released at the delay because a reader still pinned it. */
+private class PendingRowRelease(val rows: AppendOnlyLogList, var trimAfterwards: Boolean)
+
+private const val RELEASED_ROWS_TRIM_REASON = "released closed capture rows"
+private const val CLOSED_TAB_TRIM_REASON = "closed large or capture tab"
+
 // Minimum gap between two "Do you like Indagium?" support popups (see supportPromptDue,
 // maybeShowSupportPromptOnStartup below).
 private const val SUPPORT_PROMPT_INTERVAL_MS = 10L * 24 * 60 * 60 * 1000
@@ -4235,10 +4260,14 @@ class AppState(
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
 
-    // Row stores that an in-flight mergeTabs() is still reading. Guarded by stateLock. A merge keeps
-    // the source tabs' logData and is not cancelled when a source tab closes, so releaseClosedTabRowsLater
-    // must not release these stores out from under it (the merge would silently end half-done).
-    private val mergeSourceStores = mutableListOf<Any>()
+    // Reader-pin registry (see pinRows). Both guarded by stateLock. A background job (merge, export,
+    // Save analysis, note auto-export) captures a LogTab snapshot and reads its rows later; it is not
+    // cancelled when the tab closes, so releaseClosedTabRowsLater must not release a store out from
+    // under it (the job would silently end half-done). Pinned stores that were closed meanwhile wait
+    // in rowsPendingRelease, and the last unpin performs the release, otherwise the closed capture's
+    // rows would stay reachable for good.
+    private val rowsPinCounts = HashMap<Any, Int>()
+    private val rowsPendingRelease = HashMap<Any, PendingRowRelease>()
 
     // Latest filtered item summary per tab, pushed by LogViewer whenever its (possibly
     // background-computed) item list lands. Selection ops reuse it instead of recomputing the
@@ -8617,7 +8646,7 @@ class AppState(
             // would run first, and HeapTrim's coalescing would then absorb the later request.
             releaseClosedTabRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
         } else if (trimHeapAfterClose) {
-            requestHeapTrim("closed large or capture tab")
+            requestHeapTrim(CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -8628,21 +8657,99 @@ class AppState(
      * lazily, and an idle app never gets there. We cannot flush those records, so instead of
      * relying on unreachability we make the stale reference cheap (a [LogTab] plus an empty store).
      *
-     * A store is skipped when a remaining tab, a not-yet-loaded restored tab, or an in-flight merge
-     * still uses it; that list is read under [stateLock] together with the release itself so a
-     * reader cannot register in between. [trimAfterwards] carries the close-time trim decision: the
-     * GC has to run after the release to free anything.
+     * A store is skipped when a remaining tab or a not-yet-loaded restored tab still uses it; that
+     * list is read under [stateLock] together with the release itself so a reader cannot register in
+     * between. A store a background job still pins ([pinRows]) is not dropped either but parked in
+     * [rowsPendingRelease]: the last unpin releases it ([unpinRows]). [trimAfterwards] carries the
+     * close-time trim decision: the GC has to run after the release to free anything.
      */
     private fun releaseClosedTabRowsLater(rows: List<AppendOnlyLogList>, trimAfterwards: Boolean) {
         ioScope.launch {
             delay(closedTabRowsReleaseDelayMs)
-            val released = synchronized(stateLock) {
-                val inUse = HashSet<Any>(mergeSourceStores)
-                tabs.forEach { tab -> (tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
-                pendingRestoredLoads.forEach { shell -> (shell.tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
-                rows.filter { it.storeIdentity !in inUse }.onEach(AppendOnlyLogList::release).isNotEmpty()
+            var released = false
+            var deferred = false
+            synchronized(stateLock) {
+                val inUse = storesInUseLocked()
+                for (list in rows) {
+                    val store = list.storeIdentity
+                    when {
+                        store in inUse -> Unit
+                        rowsPinCounts.containsKey(store) -> {
+                            deferred = true
+                            val pending = rowsPendingRelease.getOrPut(store) { PendingRowRelease(list, false) }
+                            pending.trimAfterwards = pending.trimAfterwards || trimAfterwards
+                        }
+                        else -> {
+                            list.release()
+                            released = true
+                        }
+                    }
+                }
             }
-            if (trimAfterwards) requestHeapTrim(if (released) "released closed capture rows" else "closed large or capture tab")
+            // Nothing released and something deferred: this trim would free nothing yet, and the
+            // deferred store's own release issues it (with the same decision) once its readers finish.
+            if (trimAfterwards && (released || !deferred)) {
+                requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
+            }
+        }
+    }
+
+    /** Stores some tab (open or still waiting to be restored) reads. Caller must hold [stateLock]. */
+    private fun storesInUseLocked(): Set<Any> {
+        val inUse = HashSet<Any>()
+        tabs.forEach { tab -> (tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
+        pendingRestoredLoads.forEach { shell -> (shell.tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
+        return inUse
+    }
+
+    /**
+     * Claims [tab]'s row store for a reader that will read it after this call returns, typically a
+     * background job that captured the snapshot (export, Save analysis, merge, note auto-export).
+     * Take it synchronously, where the snapshot is taken and before the job is launched or queued,
+     * and close it when the job finishes: [releaseClosedTabRowsLater] skips a pinned store, and the
+     * last close releases a store whose tab was closed meanwhile. Without it closing a capture tab
+     * right after Save would release the rows 1.5 s later and fail the half-written export.
+     * Idempotent to close; a no-op for a tab whose rows are a plain list. Takes [stateLock] only
+     * briefly. Synchronous code that finishes before returning needs no pin.
+     */
+    internal fun pinRows(tab: LogTab): RowsPin {
+        val store = (tab.logData as? AppendOnlyLogList)?.storeIdentity ?: return RowsPin.NONE
+        synchronized(stateLock) { rowsPinCounts.merge(store, 1, Int::plus) }
+        return RowsPin { unpinRows(store) }
+    }
+
+    /** Runs [block] with [tab]'s rows pinned; try/finally so cancellation and exceptions always unpin. */
+    internal inline fun <T> withPinnedRows(tab: LogTab, block: () -> T): T = pinRows(tab).use { block() }
+
+    /**
+     * Launches [block] on [ioScope] holding [pin]. The pin is closed from the job's completion
+     * handler rather than a `finally` inside the body: a job cancelled before it ever starts runs no
+     * body at all, and its pin would otherwise leak and keep the closed capture's rows alive for good.
+     */
+    private fun launchPinned(pin: RowsPin, block: suspend CoroutineScope.() -> Unit): Job =
+        ioScope.launch(block = block).also { job -> job.invokeOnCompletion { pin.close() } }
+
+    private fun unpinRows(store: Any) {
+        var pending: PendingRowRelease? = null
+        var released = false
+        synchronized(stateLock) {
+            val remaining = (rowsPinCounts[store] ?: 0) - 1
+            if (remaining > 0) {
+                rowsPinCounts[store] = remaining
+                return
+            }
+            rowsPinCounts.remove(store)
+            pending = rowsPendingRelease.remove(store)
+            // Re-checked: the store could have become a tab's rows while the closed one waited. Same
+            // critical section as the release, so a reader cannot register in between.
+            pending?.takeIf { store !in storesInUseLocked() }?.let {
+                it.rows.release()
+                released = true
+            }
+        }
+        // Outside stateLock, and after the release: the GC only frees the rows once they are dropped.
+        if (pending?.trimAfterwards == true) {
+            requestHeapTrim(if (released) RELEASED_ROWS_TRIM_REASON else CLOSED_TAB_TRIM_REASON)
         }
     }
 
@@ -8664,18 +8771,18 @@ class AppState(
         val sources = tabsToMerge.map { MergeSourceFile(it.filename, it.logData) }
         if (sources.size < 2) return
         val n = tabCounter.getAndIncrement()
-        val pinnedStores = tabsToMerge.mapNotNull { (it.logData as? AppendOnlyLogList)?.storeIdentity }
-        synchronized(stateLock) { mergeSourceStores.addAll(pinnedStores) }
+        // One pin per source, taken before the job is queued and released as soon as mergeLogs has
+        // consumed the sources, so a closed source tab's rows are neither released under the merge
+        // nor kept for the (long) analysis pass over `merged`. launchPinned backstops an early exit.
+        val pins = tabsToMerge.map(::pinRows)
         beginLoading("Merging logs...")
-        ioScope.launch {
+        launchPinned(RowsPin { pins.forEach(RowsPin::close) }) {
             var published = false
             try {
-                // The sources are only read here; unpin as soon as mergeLogs is done with them so a
-                // closed source tab's rows are not kept for the (long) analysis pass over `merged`.
                 val merged = try {
                     mergeLogs(sources)
                 } finally {
-                    synchronized(stateLock) { pinnedStores.forEach { mergeSourceStores.remove(it) } }
+                    pins.forEach(RowsPin::close)
                 }
                 ensureActive()
                 val t = mkTab(
@@ -10303,7 +10410,9 @@ class AppState(
         // of the same file can never interleave or land out of order: the later request wins.
         val writer = noteExportWriters.computeIfAbsent(saved.absolutePath) { NoteExportWriter() }
         val revision = writer.revision.incrementAndGet()
-        ioScope.launch {
+        // The write waits on the lane above and then reads `t`'s rows (buildMd, preparedForSave): pin
+        // them now so closing a capture tab right after Save cannot release them under the job.
+        launchPinned(pinRows(t)) {
             writer.mutex.withLock {
                 if (revision != writer.revision.get()) return@withLock
                 runCatching {
@@ -10362,9 +10471,9 @@ class AppState(
     }
 
     fun exportFilteredTxt(tabId: String) {
-        val t = tab(tabId) ?: return
+        val initial = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
-            file = t.filename.substringBeforeLast('.') + "_filtered.txt"
+            file = initial.filename.substringBeforeLast('.') + "_filtered.txt"
             initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
@@ -10372,7 +10481,12 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
-        ioScope.launch {
+        // Re-read the tab only now (like saveAnalysis): the modal dialog can stay open for a long
+        // time, and a tab closed meanwhile has nothing left to export. Pinned before the job
+        // starts so closing a capture tab right after choosing the file cannot release the rows
+        // the export is still streaming.
+        val t = tab(tabId) ?: return
+        launchPinned(pinRows(t)) {
             runCatching { exportFilteredToFile(t, saved, csv = false, settings = settings) }.fold(
                 onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
@@ -10381,9 +10495,9 @@ class AppState(
     }
 
     fun exportFilteredCsv(tabId: String) {
-        val t = tab(tabId) ?: return
+        val initial = tab(tabId) ?: return
         val dlg = FileDialog(null as Frame?, "Export Filtered Log", FileDialog.SAVE).apply {
-            file = t.filename.substringBeforeLast('.') + "_filtered.csv"
+            file = initial.filename.substringBeforeLast('.') + "_filtered.csv"
             initialSaveDialogDir()?.let { directory = it.absolutePath }
             isVisible = true
         }
@@ -10391,7 +10505,12 @@ class AppState(
         val dir = dlg.directory ?: return
         settings = settings.copy(lastSaveDialogDir = dir)
         val saved = File(dir, path)
-        ioScope.launch {
+        // Re-read the tab only now (like saveAnalysis): the modal dialog can stay open for a long
+        // time, and a tab closed meanwhile has nothing left to export. Pinned before the job
+        // starts so closing a capture tab right after choosing the file cannot release the rows
+        // the export is still streaming.
+        val t = tab(tabId) ?: return
+        launchPinned(pinRows(t)) {
             runCatching { exportFilteredToFile(t, saved, csv = true, settings = settings) }.fold(
                 onSuccess = { AppLogger.info("export", "Exported filtered log to ${saved.absolutePath}") },
                 onFailure = { e -> AppLogger.error("export", "Failed to export filtered log to ${saved.absolutePath}", e) },
@@ -11371,7 +11490,9 @@ class AppState(
         }
         val writer = reserved?.writer ?: noteExportWriters.computeIfAbsent(mdFile.absolutePath) { NoteExportWriter() }
         val revision = reserved?.revision ?: writer.revision.incrementAndGet()
-        ioScope.launch {
+        // Queued on the write lane and reads `tab`'s rows later (buildMd, preparedForSave): an edit
+        // right before closing a capture tab must not lose its export to the row release.
+        launchPinned(pinRows(tab)) {
             writer.mutex.withLock {
                 // A newer mutation was already queued while this coroutine waited for the file's
                 // write lane. Only the latest snapshot may be written; otherwise an old annotation
