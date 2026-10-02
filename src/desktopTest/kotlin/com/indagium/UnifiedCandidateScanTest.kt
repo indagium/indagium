@@ -84,6 +84,51 @@ class UnifiedCandidateScanTest {
     }
 
     @Test
+    fun pidCandidatesSurviveWhenManyMessagesContainTheNumber() {
+        val logs = (1..20).map { id ->
+            LogEntry(id, "10:00:00.000", LogLevel.I, "App", "worker $id for process 1234 started", pid = if (id == 1) 1234 else 99)
+        }
+        val tab = mkTab("t", "f.log", logs)
+
+        val candidates = computeUnifiedCandidatesSync(tab, tab.filter, "1234", noCancellation)
+
+        assertEquals("1234", candidates.first().pattern)
+        assertEquals(RuleTarget.PID_TID, candidates.first().target)
+        assertTrue(candidates.size <= 8)
+    }
+
+    @Test
+    fun pidCandidatesRankExactThenPrefixThenSubstringAndAcceptPidPrefix() {
+        val pids = listOf(51234, 12345, 1234, 7123)
+        val logs = pids.mapIndexed { i, pid -> LogEntry(i + 1, "10:00:00.000", LogLevel.I, "App", "line", pid = pid) }
+        val tab = mkTab("t", "f.log", logs)
+
+        val plain = computeUnifiedCandidatesSync(tab, tab.filter, " 1234 ", noCancellation)
+            .filter { it.target == RuleTarget.PID_TID }
+        val prefixed = computeUnifiedCandidatesSync(tab, tab.filter, "pid:1234", noCancellation)
+            .filter { it.target == RuleTarget.PID_TID }
+
+        assertEquals(listOf("1234", "12345", "51234"), plain.map { it.pattern })
+        assertEquals(plain.map { it.pattern }, prefixed.map { it.pattern })
+    }
+
+    @Test
+    fun processNameQuerySuggestsItsPidWithTheNameInTheLabel() {
+        val logs = listOf(
+            LogEntry(1, "10:00:00.000", LogLevel.I, "App", "line one", pid = 4321),
+            LogEntry(2, "10:00:00.100", LogLevel.I, "App", "line two", pid = 8765),
+        )
+        val base = mkTab("t", "f.log", logs)
+        val tab = base.copy(analysis = base.analysis.copy(processNames = mapOf(4321 to "com.example.camera", 8765 to "system_server")))
+
+        val candidates = computeUnifiedCandidatesSync(tab, tab.filter, "camera", noCancellation)
+
+        val pidCandidates = candidates.filter { it.target == RuleTarget.PID_TID }
+        assertEquals(listOf("4321"), pidCandidates.map { it.pattern })
+        assertEquals("4321 · com.example.camera", pidCandidates.single().label)
+    }
+
+    @Test
     fun blankSearchProducesNoCandidatesWithoutScanningAnything() {
         val logs = listOf(LogEntry(1, "10:00:00.000", LogLevel.I, "App", "anything"))
         val tab = mkTab("t", "f.log", logs)
