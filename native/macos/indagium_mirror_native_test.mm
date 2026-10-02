@@ -95,27 +95,45 @@ static void verifyStaleQueuedDetachCannotRemoveAReattachedLayer() {
     }
 }
 
-// Stand-in for the JDK's AWTSurfaceLayers: records every setLayer: so the tests can see the clears.
+// Stand-in for the JDK's AWTSurfaceLayers with its real (buggy) setLayer: semantics:
+//   if (layer != newLayer) {
+//     if (layer != nil || newLayer == nil) { [layer removeFromSuperlayer]; [layer release]; }
+//     if (newLayer != nil) { layer = [newLayer retain]; [windowLayer addSublayer: layer]; }
+//   }
+// so setLayer:nil releases the old layer but leaves the ivar dangling. Here the "dangling" state is
+// modelled by remembering that nil was passed (nilCount) and keeping the stale pointer, which the
+// tests treat as a crash waiting to happen: we must never pass nil.
 @interface FakeSurfaceLayers : NSObject <JAWT_SurfaceLayers> {
     CALayer *_layer;
 }
 @property (nonatomic, strong) CALayer *windowLayer;
-@property (nonatomic) int clearCount;
+@property (nonatomic) int nilCount;
+@property (nonatomic) int releaseCount;
 @end
 @implementation FakeSurfaceLayers
 @synthesize windowLayer = _windowLayer;
 - (CALayer *)layer { return _layer; }
 - (void)setLayer:(CALayer *)newLayer {
-    if (newLayer == nil && _layer != nil) {
-        ++_clearCount;
+    if (_layer == newLayer) return;
+    if (newLayer == nil) ++_nilCount;
+    if (_layer != nil || newLayer == nil) {
+        ++_releaseCount;
         [_layer removeFromSuperlayer];
     }
-    _layer = newLayer;
-    if (newLayer) [self.windowLayer addSublayer:newLayer];
+    if (newLayer != nil) {
+        _layer = newLayer;
+        [self.windowLayer addSublayer:newLayer];
+    }
 }
 @end
 
 static void drainMainQueue();
+
+static void verifyPeerHoldsPlaceholder(FakeSurfaceLayers *peer, CALayer *ours, const char *what) {
+    if (peer.nilCount != 0) fail(what);
+    if (peer.layer == nil || peer.layer == ours) fail(what);
+    if (peer.layer.superlayer != nil || !peer.layer.hidden) fail(what);
+}
 
 static void verifySurfaceLayersAreClearedOnReattachAndClose() {
     Mirror mirror{};
@@ -128,15 +146,26 @@ static void verifySurfaceLayersAreClearedOnReattachAndClose() {
     if (!bindLayerToSurfaceLayers(&mirror, first, mirror.layer)) fail("first bind was refused");
     if (first.layer != mirror.layer || mirror.surfaceLayers != first) fail("first bind did not store the peer");
 
-    // Same peer again: setLayer: is a no-op for the layer it already holds, nothing may be cleared.
+    // Same peer again: setLayer: is a no-op for the layer it already holds, nothing may be released.
     if (!bindLayerToSurfaceLayers(&mirror, first, mirror.layer)) fail("rebind to the same peer was refused");
-    if (first.clearCount != 0 || first.layer != mirror.layer) fail("rebinding to the same peer cleared it");
+    if (first.releaseCount != 0 || first.layer != mirror.layer) fail("rebinding to the same peer cleared it");
 
-    // Different peer: the old one must be cleared before the new one is assigned.
+    // Different peer: the old one is cleared (through a placeholder, never nil) before the new one.
     if (!bindLayerToSurfaceLayers(&mirror, second, mirror.layer)) fail("bind to a second peer was refused");
-    if (first.clearCount != 1 || first.layer != nil) fail("the previous peer kept our layer after a re-attach");
+    if (first.releaseCount != 1) fail("the previous peer did not release our layer after a re-attach");
+    verifyPeerHoldsPlaceholder(first, mirror.layer, "previous peer must hold a placeholder, never nil or our layer");
     if (second.layer != mirror.layer || mirror.surfaceLayers != second) fail("the new peer was not assigned/stored");
     if (mirror.layer.superlayer != second.windowLayer) fail("layer is not in the new peer's window layer");
+
+    // Going back to a peer that holds a placeholder works: the setter releases it and retains ours.
+    CALayer *firstPlaceholder = first.layer;
+    if (!bindLayerToSurfaceLayers(&mirror, first, mirror.layer)) fail("bind back to a cleared peer was refused");
+    if (first.layer != mirror.layer || mirror.surfaceLayers != first || firstPlaceholder.superlayer != nil) {
+        fail("re-binding a peer that held a placeholder did not install our layer");
+    }
+    if (second.releaseCount != 1 || second.nilCount != 0) fail("leaving the second peer did not release once, via placeholder");
+    if (mirror.layer.superlayer != first.windowLayer) fail("layer is not back in the first peer's window layer");
+    if (!bindLayerToSurfaceLayers(&mirror, second, mirror.layer)) fail("bind to the second peer again was refused");
 
     // Close from a background thread: queued to the main queue, never blocking, then cleared there.
     id<JAWT_SurfaceLayers> taken = mirror.surfaceLayers;
@@ -151,16 +180,21 @@ static void verifySurfaceLayersAreClearedOnReattachAndClose() {
         fail("detachLayerFromSurfaceLayers blocked off the main thread");
     }
     drainMainQueue();
-    if (second.clearCount != 1 || second.layer != nil || layer.superlayer != nil) {
+    if (second.releaseCount != 3 || layer.superlayer != nil) {
         fail("close did not clear the surface layers object on the main queue");
     }
+    verifyPeerHoldsPlaceholder(second, layer, "closed peer must hold a placeholder, never nil or our layer");
 
     // Close on the main thread runs inline.
     FakeSurfaceLayers *third = [FakeSurfaceLayers new];
     third.windowLayer = [CALayer layer];
     third.layer = layer;
     detachLayerFromSurfaceLayers(third, layer);
-    if (third.clearCount != 1 || third.layer != nil) fail("inline close did not clear the surface layers object");
+    if (third.releaseCount != 1) fail("inline close did not release our layer");
+    verifyPeerHoldsPlaceholder(third, layer, "inline-closed peer must hold a placeholder");
+    // A second close finds a placeholder, not our layer, and must not touch the peer again.
+    detachLayerFromSurfaceLayers(third, layer);
+    if (third.releaseCount != 1) fail("clearing twice released twice");
 
     // A closed mirror never accepts a late bind.
     mirror.closed = true;
