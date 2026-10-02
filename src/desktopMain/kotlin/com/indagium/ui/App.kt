@@ -78,6 +78,10 @@ private fun appHasOpenContextMenuOrPicker(state: AppState): Boolean =
 private const val IMPORT_ROW_NOTES_SHOWN = 3
 private const val IMPORT_TARGET_NAME_MAX = 28
 
+// How long isLoading must stay continuously true before the "Loading file…" cover is drawn. Opening
+// a small file takes a few frames; covering the window for that long is a flash, not feedback.
+internal const val LOADING_OVERLAY_DELAY_MS = 250L
+
 private fun appHasOpenFilterDialog(state: AppState): Boolean =
     state.sfDialog || state.pendingDuplicateFilterSave != null || state.pendingClearFilterTabId != null ||
         state.pendingTagPrefixConflict != null || state.pendingDeleteFilterId != null ||
@@ -379,50 +383,55 @@ fun App(
                     )
                 }
         ) {
+            // The visible "Loading file…" cover only appears once loading has been continuously true
+            // for LOADING_OVERLAY_DELAY_MS, so a quick open (a small file from the New tab) never
+            // flashes it. Input is blocked from the very start of loading by the transparent layer
+            // below, so the grace period only defers the visuals.
+            var showLoadingOverlay by remember { mutableStateOf(false) }
+            LaunchedEffect(state.isLoading) {
+                if (state.isLoading) {
+                    kotlinx.coroutines.delay(LOADING_OVERLAY_DELAY_MS)
+                    showLoadingOverlay = true
+                } else {
+                    showLoadingOverlay = false
+                }
+            }
             Column(Modifier.fillMaxSize()) {
                 TabBar(state)
                 HeapPressureBanner(state, onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } })
                 val activeTab = state.activeTab()
                 val activeSurface = state.activeSurface ?: activeTab?.id?.let(ActiveSurface::Log)
-                when {
-                    // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
-                    // is nothing else to show, so this only ever paints for the one frame between
-                    // that condition becoming true and the LaunchedEffect below reacting to it —
-                    // an empty Box, not the old static text, since the text would otherwise flash
-                    // and immediately be replaced by the home tab.
-                    state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
-                        Box(Modifier.fillMaxSize())
+                // The content area. The loading cover lives inside it (not at the window root) so the
+                // tab bar stays visible while a file loads.
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    when {
+                        // The home tab (see AppState.ensureHomeTab) now opens itself the instant there
+                        // is nothing else to show, so this only ever paints for the one frame between
+                        // that condition becoming true and the LaunchedEffect below reacting to it —
+                        // an empty Box, not the old static text, since the text would otherwise flash
+                        // and immediately be replaced by the home tab.
+                        state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
+                            Box(Modifier.fillMaxSize())
 
-                    // Keyed on the session id — matching the log path's key(activeTab.id) just
-                    // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
-                    // per-session instead of leaking whatever the previously active diagram tab
-                    // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
-                    activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
-                        Seq3Workspace(state, activeSurface.sessionId)
-                    }
-                    // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
-                    // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
-                    // (step 7), this is the only place that still knows about the home tab at all.
-                    activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
-                        HomeScreen(
+                        // Keyed on the session id — matching the log path's key(activeTab.id) just
+                        // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
+                        // per-session instead of leaking whatever the previously active diagram tab
+                        // left behind (Part B task note, carried over from the v1/v2 surface it replaces).
+                        activeSurface is ActiveSurface.Diagram3 -> key(activeSurface.sessionId) {
+                            Seq3Workspace(state, activeSurface.sessionId)
+                        }
+                        // Routed here (not inside FileView) so filter/notes/capture-strip chrome never
+                        // mounts for the home tab — FileView's own isCaptureLauncher branches are gone
+                        // (step 7), this is the only place that still knows about the home tab at all.
+                        activeTab != null && activeTab.isCaptureLauncher -> key(activeTab.id) {
+                            HomeScreen(
+                                state = state,
+                                tab = activeTab,
+                                onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
+                            )
+                        }
+                        state.compareMode -> CompareView(
                             state = state,
-                            tab = activeTab,
-                            onReclaimFocus = { runCatching { rootFocusRequester.requestFocus() } },
-                        )
-                    }
-                    state.compareMode -> CompareView(
-                        state = state,
-                        requestedPanelFocus = pendingPanelFocus,
-                        filterSearchRequest = pendingFilterSearchRequest,
-                        onFilterSearchRequestConsumed = { request ->
-                            pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
-                        },
-                        onPanelFocusConsumed = { pendingPanelFocus = null },
-                    )
-                    activeTab != null -> key(activeTab.id) {
-                        FileView(
-                            state = state,
-                            tab = activeTab,
                             requestedPanelFocus = pendingPanelFocus,
                             filterSearchRequest = pendingFilterSearchRequest,
                             onFilterSearchRequestConsumed = { request ->
@@ -430,6 +439,30 @@ fun App(
                             },
                             onPanelFocusConsumed = { pendingPanelFocus = null },
                         )
+                        activeTab != null -> key(activeTab.id) {
+                            FileView(
+                                state = state,
+                                tab = activeTab,
+                                requestedPanelFocus = pendingPanelFocus,
+                                filterSearchRequest = pendingFilterSearchRequest,
+                                onFilterSearchRequestConsumed = { request ->
+                                    pendingFilterSearchRequest = consumeFilterSearchRequest(pendingFilterSearchRequest, request)
+                                },
+                                onPanelFocusConsumed = { pendingPanelFocus = null },
+                            )
+                        }
+                    }
+                    if (showLoadingOverlay) {
+                        Box(
+                            Modifier.fillMaxSize().background(loadingOverlayBackground(tc)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
+                                Spacer(Modifier.height(12.dp))
+                                IndeterminateLoadingLine(Modifier.width(180.dp))
+                            }
+                        }
                     }
                 }
             }
@@ -438,18 +471,18 @@ fun App(
             // Canvas while the user moves through other tabs or hides the sidebar.
             DetachedEmbeddedMirrorWindows(state)
 
-            // ── Loading overlay ───────────────────────────────────────
+            // ── Loading input block ───────────────────────────────────
+            // Transparent, over the tab bar and the content alike, for the whole of isLoading
+            // (including the grace period before the cover above is drawn): pointer input stays
+            // blocked while a file loads, only the visuals are deferred and kept off the tab bar.
             if (state.isLoading) {
                 Box(
-                    Modifier.fillMaxSize().background(loadingOverlayBackground(tc)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        AppText("Loading file…", color = tc.ts, fontSize = 14.sp)
-                        Spacer(Modifier.height(12.dp))
-                        IndeterminateLoadingLine(Modifier.width(180.dp))
-                    }
-                }
+                    Modifier.fillMaxSize().pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                        }
+                    },
+                )
             }
 
             // ── Stuck-loading watchdog ─────────────────────────────────
