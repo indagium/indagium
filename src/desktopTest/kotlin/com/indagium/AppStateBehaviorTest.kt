@@ -84,6 +84,7 @@ import com.indagium.utils.computeItems
 import com.indagium.utils.computeSeqGroups
 import com.indagium.utils.listArchiveLogCandidates
 import com.indagium.utils.listArchiveVideoCandidates
+import com.indagium.utils.parseLogFileResult
 import com.indagium.utils.passesFilter
 import com.indagium.utils.resolveProcessDisplayName
 import com.indagium.utils.visibleEntries
@@ -194,7 +195,7 @@ class AppStateBehaviorTest {
     }
 
     @Test
-    fun openNoteFileInNewTabCreatesLoglessTabAndLeavesHomeTabUntouched() {
+    fun openNoteFileInNewTabFromHomeReplacesTheHomeTabWithALoglessTab() {
         val state = AppState(
             autosaveFile = Files.createTempFile("home-tab-notes", ".json").toFile(),
             autoExportNotes = false,
@@ -206,13 +207,133 @@ class AppStateBehaviorTest {
             val noteFile = Files.createTempFile("home-tab-note", ".ann").toFile()
             val newTabId = requireNotNull(state.openNoteFileInNewTab(noteFile))
 
-            assertEquals(2, state.tabs.size)
+            assertEquals(listOf(newTabId), state.tabs.map { it.id })
             val newTab = requireNotNull(state.tab(newTabId))
             assertTrue(newTab.logData.isEmpty())
             assertFalse(newTab.isCaptureLauncher)
+            assertNull(state.tab(homeTabId))
+            assertEquals(newTabId, state.activeTabId)
+        } finally {
+            state.close()
+        }
+    }
 
-            val home = requireNotNull(state.tab(homeTabId))
-            assertTrue(home.isCaptureLauncher)
+    // ── Opening from the New (home) tab replaces it in place ────────────
+
+    private fun openFixtureLog(dir: File, name: String) = File(dir, name).apply {
+        writeText("06-26 10:00:00.000  123  456 I App: hello from $name\n")
+    }
+
+    @Test
+    fun openingAFileFromTheHomeTabReplacesItInPlace() {
+        val dir = createTempDirectory("openlog-home-replace").toFile()
+        val state = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            state.tabs = listOf(mkTab("first", "first.log", emptyList()))
+            state.openHomeTab()
+            state.tabs += mkTab("last", "last.log", emptyList())
+            val homeId = state.tabs.single { it.isCaptureLauncher }.id
+            state.activeTabId = homeId
+            state.activeSurface = com.indagium.ui.ActiveSurface.Log(homeId)
+
+            state.openFile(openFixtureLog(dir, "from-home.log"))
+            waitUntil { state.tabs.size == 3 && !state.isLoading && state.tabs.none { it.isCaptureLauncher } }
+
+            // The opened tab sits exactly where the New tab was, between its neighbours, and is active.
+            assertEquals(listOf("first.log", "from-home.log", "last.log"), state.tabs.map { it.filename })
+            assertEquals(state.tabs[1].id, state.activeTabId)
+            assertEquals(com.indagium.ui.ActiveSurface.Log(state.tabs[1].id), state.activeSurface)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun openingAFileFromANormalTabAppendsAndKeepsTheHomeTab() {
+        val dir = createTempDirectory("openlog-home-keep").toFile()
+        val state = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            state.openHomeTab()
+            val homeId = state.tabs.single().id
+            state.tabs += mkTab("log", "log.log", emptyList())
+            state.activeTabId = "log"
+            state.activeSurface = com.indagium.ui.ActiveSurface.Log("log")
+
+            state.openFile(openFixtureLog(dir, "appended.log"))
+            waitUntil { state.tabs.size == 3 && !state.isLoading }
+
+            assertEquals(listOf(homeId, "log"), state.tabs.take(2).map { it.id })
+            assertEquals("appended.log", state.tabs.last().filename)
+            assertEquals(state.tabs.last().id, state.activeTabId)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun openingAFileWithNoHomeTabIsUnchanged() {
+        val dir = createTempDirectory("openlog-home-none").toFile()
+        val state = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            state.openFile(openFixtureLog(dir, "only.log"))
+            waitUntil { state.tabs.size == 1 && !state.isLoading }
+
+            assertEquals(listOf("only.log"), state.tabs.map { it.filename })
+            assertEquals(state.tabs.single().id, state.activeTabId)
+        } finally {
+            state.close()
+        }
+    }
+
+    @Test
+    fun aLoadFinishingAfterTheUserLeftTheHomeTabAppendsInsteadOfReplacing() {
+        val dir = createTempDirectory("openlog-home-switched").toFile()
+        val release = CountDownLatch(1)
+        val state = AppState(
+            File(dir, "state.cache"),
+            parser = { file ->
+                release.await(10, TimeUnit.SECONDS)
+                parseLogFileResult(file)
+            },
+            autoExportNotes = false,
+        )
+        try {
+            state.openHomeTab()
+            val homeId = state.tabs.single().id
+            state.tabs += mkTab("log", "log.log", emptyList())
+
+            // The open starts from the home tab, but the user has moved to another tab before the
+            // (held-back) load publishes: the home tab must survive.
+            state.openFile(openFixtureLog(dir, "late.log"))
+            state.activeTabId = "log"
+            state.activeSurface = com.indagium.ui.ActiveSurface.Log("log")
+            release.countDown()
+            waitUntil { state.tabs.size == 3 && !state.isLoading }
+
+            assertTrue(state.tabs.any { it.id == homeId })
+            assertEquals(1, state.tabs.count { it.isCaptureLauncher })
+        } finally {
+            release.countDown()
+            state.close()
+        }
+    }
+
+    @Test
+    fun reopeningAnAlreadyOpenFileFromTheHomeTabActivatesItAndClosesTheHomeTab() {
+        val dir = createTempDirectory("openlog-home-existing").toFile()
+        val state = AppState(File(dir, "state.cache"), autoExportNotes = false)
+        try {
+            val file = openFixtureLog(dir, "dup.log")
+            state.openFile(file)
+            waitUntil { state.tabs.size == 1 && !state.isLoading }
+            val openId = state.tabs.single().id
+            state.openHomeTab()
+            assertEquals(2, state.tabs.size)
+
+            state.openFile(file)
+
+            assertEquals(listOf(openId), state.tabs.map { it.id })
+            assertEquals(openId, state.activeTabId)
         } finally {
             state.close()
         }
