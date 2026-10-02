@@ -80,7 +80,10 @@ internal class HeapTrimScheduler(
             log("heap trim ($reason)")
             gc()
             val released = nativeRelief()
-            if (released > 0) log("heap trim ($reason): released ${released / BYTES_PER_MB} MB of native memory")
+            // macOS routinely reports a few KB here; a "released 0 MB" line on every trim is just noise.
+            if (released >= BYTES_PER_MB) {
+                log("heap trim ($reason): released ${released / BYTES_PER_MB} MB of native memory")
+            }
         } catch (ignored: Throwable) {
             // Best effort: a failed hint must never disturb the caller or kill the executor thread.
         }

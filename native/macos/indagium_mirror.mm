@@ -670,253 +670,262 @@ static void replayLastPresentedLocked(Mirror *mirror) {
 static void renderLoop(Mirror *mirror) {
     dispatch_async(mirror->renderQueue, ^{
         while (true) {
-            CVPixelBufferRef pixel = nullptr;
-            CAMetalLayer *layer = nil;
-            int64_t ingressNs = 0;
-            {
-                std::lock_guard<std::mutex> guard(mirror->lock);
-                if (mirror->closed || !mirror->latest || !mirror->layer) {
-                    mirror->renderScheduled = false;
-                    return;
-                }
-                pixel = (CVPixelBufferRef)CFRetain(mirror->latest);
-                ingressNs = mirror->latestIngressNs;
-                layer = mirror->layer;
-            }
-
-            CVMetalTextureRef textureRef = nullptr;
-            CVReturn textureStatus = CVMetalTextureCacheCreateTextureFromImage(
-                kCFAllocatorDefault, mirror->textureCache, pixel, nullptr, MTLPixelFormatBGRA8Unorm,
-                CVPixelBufferGetWidth(pixel), CVPixelBufferGetHeight(pixel), 0, &textureRef);
-            id<MTLTexture> sourceTexture = textureStatus == kCVReturnSuccess && textureRef
-                ? CVMetalTextureGetTexture(textureRef) : nil;
-            id<CAMetalDrawable> drawable = sourceTexture ? [layer nextDrawable] : nil;
-            bool renderFailed = textureStatus != kCVReturnSuccess || !sourceTexture;
-            OSStatus renderStatus = textureStatus != kCVReturnSuccess ? (OSStatus)textureStatus : noErr;
-            if (!drawable && !renderFailed) {
-                std::lock_guard<std::mutex> guard(mirror->lock);
-                ++mirror->drawableMisses;
-            }
-            if (!renderFailed && drawable) {
-                bool readbackThisFrame = false;
-                int64_t readbackStatus = -1;
-                int64_t pixelMin = -1;
-                int64_t pixelMax = -1;
-                int64_t nonBlackGridSamples = -1;
-                int64_t alphaMin = -1;
-                int64_t alphaMax = -1;
+            // One pool per frame, not per queue work item: this block loops for as long as frames keep
+            // arriving, so a work-item pool alone would not drain until the stream goes quiet.
+            // nextDrawable/commandBuffer return autoreleased objects; every drawable retains its
+            // CAMetalLayer and IOSurface, so undrained ones keep a closed mirror's layer alive.
+            @autoreleasepool {
+                CVPixelBufferRef pixel = nullptr;
+                CAMetalLayer *layer = nil;
+                int64_t ingressNs = 0;
                 {
                     std::lock_guard<std::mutex> guard(mirror->lock);
-                    if (!mirror->drawableReadbackDone && mirror->decodedImageCount >= 60) {
-                        mirror->drawableReadbackDone = true;
-                        readbackThisFrame = true;
+                    if (mirror->closed || !mirror->latest || !mirror->layer) {
+                        mirror->renderScheduled = false;
+                        return;
                     }
+                    pixel = (CVPixelBufferRef)CFRetain(mirror->latest);
+                    ingressNs = mirror->latestIngressNs;
+                    layer = mirror->layer;
                 }
-                id<MTLBuffer> readback = nil;
-                NSUInteger readbackBytesPerRow = 0;
-                NSUInteger readbackSize = 0;
-                if (readbackThisFrame) {
-                    const NSUInteger tightRow = drawable.texture.width * 4;
-                    readbackBytesPerRow = (tightRow + 255) & ~((NSUInteger)255);
-                    readbackSize = readbackBytesPerRow * drawable.texture.height;
-                    readback = [mirror->device newBufferWithLength:readbackSize options:MTLResourceStorageModeShared];
+
+                CVMetalTextureRef textureRef = nullptr;
+                CVReturn textureStatus = CVMetalTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault, mirror->textureCache, pixel, nullptr, MTLPixelFormatBGRA8Unorm,
+                    CVPixelBufferGetWidth(pixel), CVPixelBufferGetHeight(pixel), 0, &textureRef);
+                id<MTLTexture> sourceTexture = textureStatus == kCVReturnSuccess && textureRef
+                    ? CVMetalTextureGetTexture(textureRef) : nil;
+                id<CAMetalDrawable> drawable = sourceTexture ? [layer nextDrawable] : nil;
+                bool renderFailed = textureStatus != kCVReturnSuccess || !sourceTexture;
+                OSStatus renderStatus = textureStatus != kCVReturnSuccess ? (OSStatus)textureStatus : noErr;
+                if (!drawable && !renderFailed) {
+                    std::lock_guard<std::mutex> guard(mirror->lock);
+                    ++mirror->drawableMisses;
                 }
-                id<MTLCommandBuffer> command = [mirror->commands commandBuffer];
-                if (!command) {
-                    renderFailed = true;
-                    renderStatus = -1;
-                } else {
-                    @try {
-                        MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-                        pass.colorAttachments[0].texture = drawable.texture;
-                        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-                        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-                        id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
-                        if (!encoder || !mirror->renderPipeline) {
-                            renderFailed = true;
-                            renderStatus = -1;
-                        } else {
-                            [encoder setRenderPipelineState:mirror->renderPipeline];
-                            [encoder setFragmentTexture:sourceTexture atIndex:0];
-                            const uint32_t testPattern = mirror->testPattern ? 1 : 0;
-                            [encoder setFragmentBytes:&testPattern length:sizeof(testPattern) atIndex:0];
-                            [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-                            [encoder endEncoding];
-                            bool readbackEncoded = false;
-                            if (readbackThisFrame && readback) {
-                                id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-                                if (blit) {
-                                    [blit copyFromTexture:drawable.texture
-                                             sourceSlice:0
-                                             sourceLevel:0
-                                            sourceOrigin:MTLOriginMake(0, 0, 0)
-                                              sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
-                                                toBuffer:readback
-                                       destinationOffset:0
-                                  destinationBytesPerRow:readbackBytesPerRow
-                                destinationBytesPerImage:readbackSize];
-                                    [blit endEncoding];
-                                    readbackEncoded = true;
-                                }
-                            }
-                            [command presentDrawable:drawable];
-                            [command commit];
-                            [command waitUntilCompleted];
-                            renderFailed = command.status != MTLCommandBufferStatusCompleted || command.error != nil;
-                            if (renderFailed) renderStatus = command.error ? (OSStatus)command.error.code : (OSStatus)-1;
-                            if (readbackThisFrame && readbackEncoded && !renderFailed && readback) {
-                                readbackStatus = 1;
-                                sampleDrawableGrid(
-                                    (const uint8_t *)readback.contents,
-                                    drawable.texture.width,
-                                    drawable.texture.height,
-                                    readbackBytesPerRow,
-                                    &pixelMin,
-                                    &pixelMax,
-                                    &nonBlackGridSamples,
-                                    &alphaMin,
-                                    &alphaMax);
-                            }
+                if (!renderFailed && drawable) {
+                    bool readbackThisFrame = false;
+                    int64_t readbackStatus = -1;
+                    int64_t pixelMin = -1;
+                    int64_t pixelMax = -1;
+                    int64_t nonBlackGridSamples = -1;
+                    int64_t alphaMin = -1;
+                    int64_t alphaMax = -1;
+                    {
+                        std::lock_guard<std::mutex> guard(mirror->lock);
+                        if (!mirror->drawableReadbackDone && mirror->decodedImageCount >= 60) {
+                            mirror->drawableReadbackDone = true;
+                            readbackThisFrame = true;
                         }
-                    } @catch (NSException *exception) {
-                        (void)exception;
+                    }
+                    id<MTLBuffer> readback = nil;
+                    NSUInteger readbackBytesPerRow = 0;
+                    NSUInteger readbackSize = 0;
+                    if (readbackThisFrame) {
+                        const NSUInteger tightRow = drawable.texture.width * 4;
+                        readbackBytesPerRow = (tightRow + 255) & ~((NSUInteger)255);
+                        readbackSize = readbackBytesPerRow * drawable.texture.height;
+                        readback = [mirror->device newBufferWithLength:readbackSize options:MTLResourceStorageModeShared];
+                    }
+                    id<MTLCommandBuffer> command = [mirror->commands commandBuffer];
+                    if (!command) {
                         renderFailed = true;
                         renderStatus = -1;
+                    } else {
+                        @try {
+                            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                            pass.colorAttachments[0].texture = drawable.texture;
+                            pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                            id<MTLRenderCommandEncoder> encoder = [command renderCommandEncoderWithDescriptor:pass];
+                            if (!encoder || !mirror->renderPipeline) {
+                                renderFailed = true;
+                                renderStatus = -1;
+                            } else {
+                                [encoder setRenderPipelineState:mirror->renderPipeline];
+                                [encoder setFragmentTexture:sourceTexture atIndex:0];
+                                const uint32_t testPattern = mirror->testPattern ? 1 : 0;
+                                [encoder setFragmentBytes:&testPattern length:sizeof(testPattern) atIndex:0];
+                                [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                                [encoder endEncoding];
+                                bool readbackEncoded = false;
+                                if (readbackThisFrame && readback) {
+                                    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+                                    if (blit) {
+                                        [blit copyFromTexture:drawable.texture
+                                                 sourceSlice:0
+                                                 sourceLevel:0
+                                                sourceOrigin:MTLOriginMake(0, 0, 0)
+                                                  sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+                                                    toBuffer:readback
+                                           destinationOffset:0
+                                      destinationBytesPerRow:readbackBytesPerRow
+                                    destinationBytesPerImage:readbackSize];
+                                        [blit endEncoding];
+                                        readbackEncoded = true;
+                                    }
+                                }
+                                [command presentDrawable:drawable];
+                                [command commit];
+                                [command waitUntilCompleted];
+                                renderFailed = command.status != MTLCommandBufferStatusCompleted || command.error != nil;
+                                if (renderFailed) renderStatus = command.error ? (OSStatus)command.error.code : (OSStatus)-1;
+                                if (readbackThisFrame && readbackEncoded && !renderFailed && readback) {
+                                    readbackStatus = 1;
+                                    sampleDrawableGrid(
+                                        (const uint8_t *)readback.contents,
+                                        drawable.texture.width,
+                                        drawable.texture.height,
+                                        readbackBytesPerRow,
+                                        &pixelMin,
+                                        &pixelMax,
+                                        &nonBlackGridSamples,
+                                        &alphaMin,
+                                        &alphaMax);
+                                }
+                            }
+                        } @catch (NSException *exception) {
+                            (void)exception;
+                            renderFailed = true;
+                            renderStatus = -1;
+                        }
+                    }
+                    if (readbackThisFrame) {
+                        std::lock_guard<std::mutex> guard(mirror->lock);
+                        mirror->drawableReadbackStatus = readbackStatus;
+                        mirror->drawablePixelMin = pixelMin;
+                        mirror->drawablePixelMax = pixelMax;
+                        mirror->drawableNonBlackGridSamples = nonBlackGridSamples;
+                        mirror->drawableAlphaMin = alphaMin;
+                        mirror->drawableAlphaMax = alphaMax;
                     }
                 }
-                if (readbackThisFrame) {
+                if (textureRef) CFRelease(textureRef);
+                int64_t presentedAtNs = steadyNowNs();
+                {
                     std::lock_guard<std::mutex> guard(mirror->lock);
-                    mirror->drawableReadbackStatus = readbackStatus;
-                    mirror->drawablePixelMin = pixelMin;
-                    mirror->drawablePixelMax = pixelMax;
-                    mirror->drawableNonBlackGridSamples = nonBlackGridSamples;
-                    mirror->drawableAlphaMin = alphaMin;
-                    mirror->drawableAlphaMax = alphaMax;
-                }
-            }
-            if (textureRef) CFRelease(textureRef);
-            int64_t presentedAtNs = steadyNowNs();
-            {
-                std::lock_guard<std::mutex> guard(mirror->lock);
-                if (renderFailed) {
-                    ++mirror->renderErrors;
-                    setFailureLocked(mirror, 9, renderStatus);
-                } else if (drawable && !mirror->closed && ingressNs > 0) {
-                    int64_t ageNs = std::max<int64_t>(0, presentedAtNs - ingressNs);
-                    ++mirror->presentCount;
-                    mirror->presentAgeTotalNs += ageNs;
-                    mirror->presentAgeMaxNs = std::max(mirror->presentAgeMaxNs, ageNs);
-                    size_t bucket = (size_t)std::min<int64_t>(25, ageNs / 10000000);
-                    ++mirror->presentAgeHistogram[bucket];
-                }
-                if (!renderFailed && !drawable) {
-                    // A hidden or just-resized CAMetalLayer may temporarily have no drawable.
-                    // Keep the newest pixel alive and let the next attach/resize or decoded frame
-                    // schedule another attempt; do not spin or turn a transient into fallback.
+                    if (renderFailed) {
+                        ++mirror->renderErrors;
+                        setFailureLocked(mirror, 9, renderStatus);
+                    } else if (drawable && !mirror->closed && ingressNs > 0) {
+                        int64_t ageNs = std::max<int64_t>(0, presentedAtNs - ingressNs);
+                        ++mirror->presentCount;
+                        mirror->presentAgeTotalNs += ageNs;
+                        mirror->presentAgeMaxNs = std::max(mirror->presentAgeMaxNs, ageNs);
+                        size_t bucket = (size_t)std::min<int64_t>(25, ageNs / 10000000);
+                        ++mirror->presentAgeHistogram[bucket];
+                    }
+                    if (!renderFailed && !drawable) {
+                        // A hidden or just-resized CAMetalLayer may temporarily have no drawable.
+                        // Keep the newest pixel alive and let the next attach/resize or decoded frame
+                        // schedule another attempt; do not spin or turn a transient into fallback.
+                        CFRelease(pixel);
+                        mirror->renderScheduled = false;
+                        return;
+                    }
+                    if (!renderFailed && drawable && mirror->lastPresented != pixel) {
+                        if (mirror->lastPresented) CFRelease(mirror->lastPresented);
+                        mirror->lastPresented = (CVPixelBufferRef)CFRetain(pixel);
+                    }
+                    if (mirror->latest == pixel) { CFRelease(mirror->latest); mirror->latest = nullptr; }
+                    bool again = !mirror->closed && mirror->latest != nullptr && mirror->layer != nil;
                     CFRelease(pixel);
-                    mirror->renderScheduled = false;
-                    return;
+                    if (!again) { mirror->renderScheduled = false; return; }
                 }
-                if (!renderFailed && drawable && mirror->lastPresented != pixel) {
-                    if (mirror->lastPresented) CFRelease(mirror->lastPresented);
-                    mirror->lastPresented = (CVPixelBufferRef)CFRetain(pixel);
-                }
-                if (mirror->latest == pixel) { CFRelease(mirror->latest); mirror->latest = nullptr; }
-                bool again = !mirror->closed && mirror->latest != nullptr && mirror->layer != nil;
-                CFRelease(pixel);
-                if (!again) { mirror->renderScheduled = false; return; }
             }
         }
     });
 }
 
 static void decoded(void *reference, void *, OSStatus status, VTDecodeInfoFlags, CVImageBufferRef image, CMTime, CMTime) {
-    auto *context = static_cast<DecoderContext *>(reference);
-    Mirror *mirror = context->mirror;
-    const int64_t callbackNs = steadyNowNs();
-    bool samplePixels = false;
-    if (status == noErr && image) {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (!mirror->closed && context->generation == mirror->decoderGeneration) {
-            ++mirror->decodedCallbackCount;
+    // Runs on a VideoToolbox thread we do not own; drain whatever ObjC objects the CoreVideo calls autorelease.
+    @autoreleasepool {
+        auto *context = static_cast<DecoderContext *>(reference);
+        Mirror *mirror = context->mirror;
+        const int64_t callbackNs = steadyNowNs();
+        bool samplePixels = false;
+        if (status == noErr && image) {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (!mirror->closed && context->generation == mirror->decoderGeneration) {
+                ++mirror->decodedCallbackCount;
+            }
+            if (!mirror->closed && context->generation == mirror->decoderGeneration &&
+                !mirror->pixelSampled && mirror->decodedCallbackCount >= 60) {
+                mirror->pixelSampled = true;
+                samplePixels = true;
+            }
         }
-        if (!mirror->closed && context->generation == mirror->decoderGeneration &&
-            !mirror->pixelSampled && mirror->decodedCallbackCount >= 60) {
-            mirror->pixelSampled = true;
-            samplePixels = true;
-        }
-    }
-    int64_t pixelFormat = 0;
-    int64_t sampleMin = -1;
-    int64_t sampleMax = -1;
-    int64_t alphaMin = -1;
-    int64_t alphaMax = -1;
-    if (samplePixels) {
-        CVPixelBufferRef pixel = (CVPixelBufferRef)image;
-        pixelFormat = CVPixelBufferGetPixelFormatType(pixel);
-        if (CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
-            const size_t planeCount = CVPixelBufferGetPlaneCount(pixel);
-            uint8_t *base = planeCount == 0
-                ? (uint8_t *)CVPixelBufferGetBaseAddress(pixel)
-                : (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixel, 0);
-            const size_t width = planeCount == 0 ? CVPixelBufferGetWidth(pixel) : CVPixelBufferGetWidthOfPlane(pixel, 0);
-            const size_t height = planeCount == 0 ? CVPixelBufferGetHeight(pixel) : CVPixelBufferGetHeightOfPlane(pixel, 0);
-            const size_t rowBytes = planeCount == 0 ? CVPixelBufferGetBytesPerRow(pixel) : CVPixelBufferGetBytesPerRowOfPlane(pixel, 0);
-            const bool bgra = pixelFormat == kCVPixelFormatType_32BGRA;
-            const size_t pixelBytes = bgra ? 4 : 1; // For planar formats, sample the luma plane.
-            if (base && width > 0 && height > 0 && rowBytes >= width * pixelBytes) {
-                sampleMin = 255;
-                sampleMax = 0;
-                if (bgra) { alphaMin = 255; alphaMax = 0; }
-                for (size_t py = 0; py <= 8; ++py) {
-                    for (size_t px = 0; px <= 8; ++px) {
-                        const size_t x = px * (width - 1) / 8;
-                        const size_t y = py * (height - 1) / 8;
-                        const uint8_t *pixelBytesAt = base + y * rowBytes + x * pixelBytes;
-                        const size_t channels = bgra ? 3 : 1;
-                        for (size_t c = 0; c < channels; ++c) {
-                            sampleMin = std::min<int64_t>(sampleMin, pixelBytesAt[c]);
-                            sampleMax = std::max<int64_t>(sampleMax, pixelBytesAt[c]);
-                        }
-                        if (bgra) {
-                            alphaMin = std::min<int64_t>(alphaMin, pixelBytesAt[3]);
-                            alphaMax = std::max<int64_t>(alphaMax, pixelBytesAt[3]);
+        int64_t pixelFormat = 0;
+        int64_t sampleMin = -1;
+        int64_t sampleMax = -1;
+        int64_t alphaMin = -1;
+        int64_t alphaMax = -1;
+        if (samplePixels) {
+            CVPixelBufferRef pixel = (CVPixelBufferRef)image;
+            pixelFormat = CVPixelBufferGetPixelFormatType(pixel);
+            if (CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) == kCVReturnSuccess) {
+                const size_t planeCount = CVPixelBufferGetPlaneCount(pixel);
+                uint8_t *base = planeCount == 0
+                    ? (uint8_t *)CVPixelBufferGetBaseAddress(pixel)
+                    : (uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixel, 0);
+                const size_t width = planeCount == 0 ? CVPixelBufferGetWidth(pixel) : CVPixelBufferGetWidthOfPlane(pixel, 0);
+                const size_t height = planeCount == 0 ? CVPixelBufferGetHeight(pixel) : CVPixelBufferGetHeightOfPlane(pixel, 0);
+                const size_t rowBytes = planeCount == 0 ? CVPixelBufferGetBytesPerRow(pixel) : CVPixelBufferGetBytesPerRowOfPlane(pixel, 0);
+                const bool bgra = pixelFormat == kCVPixelFormatType_32BGRA;
+                const size_t pixelBytes = bgra ? 4 : 1; // For planar formats, sample the luma plane.
+                if (base && width > 0 && height > 0 && rowBytes >= width * pixelBytes) {
+                    sampleMin = 255;
+                    sampleMax = 0;
+                    if (bgra) { alphaMin = 255; alphaMax = 0; }
+                    for (size_t py = 0; py <= 8; ++py) {
+                        for (size_t px = 0; px <= 8; ++px) {
+                            const size_t x = px * (width - 1) / 8;
+                            const size_t y = py * (height - 1) / 8;
+                            const uint8_t *pixelBytesAt = base + y * rowBytes + x * pixelBytes;
+                            const size_t channels = bgra ? 3 : 1;
+                            for (size_t c = 0; c < channels; ++c) {
+                                sampleMin = std::min<int64_t>(sampleMin, pixelBytesAt[c]);
+                                sampleMax = std::max<int64_t>(sampleMax, pixelBytesAt[c]);
+                            }
+                            if (bgra) {
+                                alphaMin = std::min<int64_t>(alphaMin, pixelBytesAt[3]);
+                                alphaMax = std::max<int64_t>(alphaMax, pixelBytesAt[3]);
+                            }
                         }
                     }
                 }
+                CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
             }
-            CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
         }
+        bool schedule = false;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (context->generation == mirror->decoderGeneration && mirror->decodeInFlight) {
+                const int64_t latencyNs = std::max<int64_t>(0, callbackNs - mirror->decodeIngressNs);
+                ++mirror->decodeCount;
+                mirror->decodeLatencyTotalNs += latencyNs;
+                mirror->decodeLatencyMaxNs = std::max(mirror->decodeLatencyMaxNs, latencyNs);
+                mirror->decodeInFlight = false;
+                mirror->decodeCompleted.notify_all();
+            }
+            if (mirror->closed || context->generation != mirror->decoderGeneration) return;
+            if (status != noErr || image == nullptr) { setFailureLocked(mirror, 8, status); return; }
+            ++mirror->decodedImageCount;
+            if (samplePixels) {
+                mirror->decodedPixelFormat = pixelFormat;
+                mirror->decodedSampleMin = sampleMin;
+                mirror->decodedSampleMax = sampleMax;
+                mirror->decodedAlphaMin = alphaMin;
+                mirror->decodedAlphaMax = alphaMax;
+            }
+            if (mirror->latest) CFRelease(mirror->latest);
+            mirror->latest = (CVPixelBufferRef)CFRetain(image);
+            mirror->latestIngressNs = mirror->decodeIngressNs;
+            mirror->width = (int)CVPixelBufferGetWidth(image);
+            mirror->height = (int)CVPixelBufferGetHeight(image);
+            if (!mirror->renderScheduled && mirror->layer) { mirror->renderScheduled = true; schedule = true; }
+        }
+        if (schedule) renderLoop(mirror);
     }
-    bool schedule = false;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (context->generation == mirror->decoderGeneration && mirror->decodeInFlight) {
-            const int64_t latencyNs = std::max<int64_t>(0, callbackNs - mirror->decodeIngressNs);
-            ++mirror->decodeCount;
-            mirror->decodeLatencyTotalNs += latencyNs;
-            mirror->decodeLatencyMaxNs = std::max(mirror->decodeLatencyMaxNs, latencyNs);
-            mirror->decodeInFlight = false;
-            mirror->decodeCompleted.notify_all();
-        }
-        if (mirror->closed || context->generation != mirror->decoderGeneration) return;
-        if (status != noErr || image == nullptr) { setFailureLocked(mirror, 8, status); return; }
-        ++mirror->decodedImageCount;
-        if (samplePixels) {
-            mirror->decodedPixelFormat = pixelFormat;
-            mirror->decodedSampleMin = sampleMin;
-            mirror->decodedSampleMax = sampleMax;
-            mirror->decodedAlphaMin = alphaMin;
-            mirror->decodedAlphaMax = alphaMax;
-        }
-        if (mirror->latest) CFRelease(mirror->latest);
-        mirror->latest = (CVPixelBufferRef)CFRetain(image);
-        mirror->latestIngressNs = mirror->decodeIngressNs;
-        mirror->width = (int)CVPixelBufferGetWidth(image);
-        mirror->height = (int)CVPixelBufferGetHeight(image);
-        if (!mirror->renderScheduled && mirror->layer) { mirror->renderScheduled = true; schedule = true; }
-    }
-    if (schedule) renderLoop(mirror);
 }
 
 static bool createDecoder(Mirror *mirror, int *failureCode, OSStatus *failureStatus) {
@@ -1004,45 +1013,58 @@ static id<MTLRenderPipelineState> createRenderPipeline(id<MTLDevice> device) {
 
 extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeCreate(
     JNIEnv *env, jclass, jobject canvas, jboolean underlayOrdering) {
-    Mirror *mirror = new Mirror{};
-    mirror->canvas = env->NewGlobalRef(canvas);
-    mirror->underlayOrdering = underlayOrdering == JNI_TRUE;
-    mirror->device = MTLCreateSystemDefaultDevice();
-    if (!mirror->device) { env->DeleteGlobalRef(mirror->canvas); delete mirror; return 0; }
-    mirror->commands = [mirror->device newCommandQueue];
-    const char *testPattern = std::getenv("INDAGIUM_MIRROR_TEST_PATTERN");
-    mirror->testPattern = testPattern && std::string(testPattern) == "1";
-    mirror->renderPipeline = createRenderPipeline(mirror->device);
-    mirror->renderQueue = dispatch_queue_create("com.indagium.mirror.render", DISPATCH_QUEUE_SERIAL);
-    if (!mirror->commands || !mirror->renderPipeline || !mirror->renderQueue ||
-        CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, mirror->device, nullptr, &mirror->textureCache) != kCVReturnSuccess) {
-        if (mirror->textureCache) CFRelease(mirror->textureCache);
-        env->DeleteGlobalRef(mirror->canvas);
-        delete mirror;
-        return 0;
+    // Every JNI entry point below runs its ObjC/Metal/CoreAnimation work in its own pool: the calling
+    // Java threads (EDT, decoder, metrics poller) have none, so autoreleased layers, drawables and
+    // arrays would otherwise never be freed and keep a closed mirror's CAMetalLayer alive.
+    @autoreleasepool {
+        Mirror *mirror = new Mirror{};
+        mirror->canvas = env->NewGlobalRef(canvas);
+        mirror->underlayOrdering = underlayOrdering == JNI_TRUE;
+        mirror->device = MTLCreateSystemDefaultDevice();
+        if (!mirror->device) { env->DeleteGlobalRef(mirror->canvas); delete mirror; return 0; }
+        mirror->commands = [mirror->device newCommandQueue];
+        const char *testPattern = std::getenv("INDAGIUM_MIRROR_TEST_PATTERN");
+        mirror->testPattern = testPattern && std::string(testPattern) == "1";
+        mirror->renderPipeline = createRenderPipeline(mirror->device);
+        // A plain serial queue promises nothing about draining autorelease pools, and GCD workers are
+        // long-lived: the drawables/command buffers autoreleased per frame would pile up (each drawable
+        // retains the CAMetalLayer). WORK_ITEM drains after every block; renderLoop also pools per frame
+        // because its single block keeps looping while frames arrive.
+        dispatch_queue_attr_t renderQueueAttributes = dispatch_queue_attr_make_with_autorelease_frequency(
+            DISPATCH_QUEUE_SERIAL, DISPATCH_AUTORELEASE_FREQUENCY_WORK_ITEM);
+        mirror->renderQueue = dispatch_queue_create("com.indagium.mirror.render", renderQueueAttributes);
+        if (!mirror->commands || !mirror->renderPipeline || !mirror->renderQueue ||
+            CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, mirror->device, nullptr, &mirror->textureCache) != kCVReturnSuccess) {
+            if (mirror->textureCache) CFRelease(mirror->textureCache);
+            env->DeleteGlobalRef(mirror->canvas);
+            delete mirror;
+            return 0;
+        }
+        return (jlong)mirror;
     }
-    return (jlong)mirror;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeDetach(
     JNIEnv *, jclass, jlong handle) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return;
-    CAMetalLayer *layer = nil;
-    std::shared_ptr<LayerAttachmentState> attachmentState;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return;
-        layer = mirror->layer;
-        attachmentState = mirror->layerAttachment;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return;
+        CAMetalLayer *layer = nil;
+        std::shared_ptr<LayerAttachmentState> attachmentState;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return;
+            layer = mirror->layer;
+            attachmentState = mirror->layerAttachment;
+        }
+        // A tab-owned SwingPanel can leave the main window while its recorder and decoder remain
+        // alive. Remove our retained overlay layer directly instead of asking JAWT for a peer that
+        // may already have been disposed; nativeAttach will reparent it when the panel is shown again.
+        // The generation check lets hierarchy teardown return immediately and prevents a delayed
+        // AppKit removal from detaching a layer that was already reattached to a newer host.
+        const uint64_t generation = nextLayerAttachmentGeneration(attachmentState);
+        detachLayerFromTreeWhenCurrent(layer, attachmentState, generation);
     }
-    // A tab-owned SwingPanel can leave the main window while its recorder and decoder remain
-    // alive. Remove our retained overlay layer directly instead of asking JAWT for a peer that
-    // may already have been disposed; nativeAttach will reparent it when the panel is shown again.
-    // The generation check lets hierarchy teardown return immediately and prevents a delayed
-    // AppKit removal from detaching a layer that was already reattached to a newer host.
-    const uint64_t generation = nextLayerAttachmentGeneration(attachmentState);
-    detachLayerFromTreeWhenCurrent(layer, attachmentState, generation);
 }
 
 /** Whether our layer is currently in a Core Animation tree. An attach can return normally and still
@@ -1051,15 +1073,17 @@ extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolb
  *  hop: it is polled from the AWT thread, which must never block on AppKit. */
 extern "C" JNIEXPORT jboolean JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeLayerAttached(
     JNIEnv *, jclass, jlong handle) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return JNI_FALSE;
-    CAMetalLayer *layer = nil;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return JNI_FALSE;
-        layer = mirror->layer;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return JNI_FALSE;
+        CAMetalLayer *layer = nil;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return JNI_FALSE;
+            layer = mirror->layer;
+        }
+        return layer && layer.superlayer != nil ? JNI_TRUE : JNI_FALSE;
     }
-    return layer && layer.superlayer != nil ? JNI_TRUE : JNI_FALSE;
 }
 
 /** Packed bitfield the Kotlin side polls to decide whether the underlay can work here: bit0
@@ -1071,27 +1095,29 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_indagium_capture_mirror_MacVideoT
  *  AppKit. */
 extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeUnderlayStatus(
     JNIEnv *, jclass, jlong handle) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return 0;
-    CAMetalLayer *layer = nil;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return 0;
-        layer = mirror->layer;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return 0;
+        CAMetalLayer *layer = nil;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return 0;
+            layer = mirror->layer;
+        }
+        if (!layer) return 0;
+        CALayer *parent = layer.superlayer;
+        if (!parent) return 0;
+        jlong status = 0x1; // bit0: attached
+        NSArray<CALayer *> *siblings = parent.sublayers;
+        bool hasOtherSibling = false;
+        for (CALayer *sibling in siblings) {
+            if (sibling != layer) { hasOtherSibling = true; break; }
+        }
+        if (layerIsBelowAllSiblings(layer, siblings)) status |= 0x2; // bit1
+        if (hasOtherSibling) status |= 0x4; // bit2
+        if (otherSiblingsAreTransparent(layer, siblings)) status |= 0x8; // bit3
+        return status;
     }
-    if (!layer) return 0;
-    CALayer *parent = layer.superlayer;
-    if (!parent) return 0;
-    jlong status = 0x1; // bit0: attached
-    NSArray<CALayer *> *siblings = parent.sublayers;
-    bool hasOtherSibling = false;
-    for (CALayer *sibling in siblings) {
-        if (sibling != layer) { hasOtherSibling = true; break; }
-    }
-    if (layerIsBelowAllSiblings(layer, siblings)) status |= 0x2; // bit1
-    if (hasOtherSibling) status |= 0x4; // bit2
-    if (otherSiblingsAreTransparent(layer, siblings)) status |= 0x8; // bit3
-    return status;
 }
 
 /** Kotlin flips this after reading nativeUnderlayStatus, both to fall back (no longer supported)
@@ -1102,644 +1128,656 @@ extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoTool
  *  never block on AppKit (see performOnAppKitMainThreadSync's callers for the same rule). */
 extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetUnderlayOrdering(
     JNIEnv *, jclass, jlong handle, jboolean underlayOrdering) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return;
-    const bool requested = underlayOrdering == JNI_TRUE;
-    CAMetalLayer *layer = nil;
-    bool testPattern = false;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return;
-        mirror->underlayOrdering = requested;
-        layer = mirror->layer;
-        testPattern = mirror->testPattern;
-    }
-    if (!layer) return;
-    __strong CAMetalLayer *retainedLayer = layer;
-    dispatch_async(dispatch_get_main_queue(), ^{
-        CALayer *parentLayer = retainedLayer.superlayer;
-        if (!parentLayer) return;
-        NSArray<CALayer *> *siblings = parentLayer.sublayers;
-        CGFloat siblingMinZ = 0.0, siblingMaxZ = 0.0;
-        bool hasOtherSibling = false;
-        for (CALayer *sibling in siblings) {
-            if (sibling == retainedLayer) continue;
-            if (hasOtherSibling) {
-                siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
-                siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
-            } else {
-                siblingMinZ = siblingMaxZ = sibling.zPosition;
-            }
-            hasOtherSibling = true;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return;
+        const bool requested = underlayOrdering == JNI_TRUE;
+        CAMetalLayer *layer = nil;
+        bool testPattern = false;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return;
+            mirror->underlayOrdering = requested;
+            layer = mirror->layer;
+            testPattern = mirror->testPattern;
         }
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        retainedLayer.zPosition = mirrorLayerZPosition(requested, testPattern, hasOtherSibling, siblingMinZ, siblingMaxZ);
-        [CATransaction commit];
-    });
+        if (!layer) return;
+        __strong CAMetalLayer *retainedLayer = layer;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            CALayer *parentLayer = retainedLayer.superlayer;
+            if (!parentLayer) return;
+            NSArray<CALayer *> *siblings = parentLayer.sublayers;
+            CGFloat siblingMinZ = 0.0, siblingMaxZ = 0.0;
+            bool hasOtherSibling = false;
+            for (CALayer *sibling in siblings) {
+                if (sibling == retainedLayer) continue;
+                if (hasOtherSibling) {
+                    siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
+                    siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
+                } else {
+                    siblingMinZ = siblingMaxZ = sibling.zPosition;
+                }
+                hasOtherSibling = true;
+            }
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            retainedLayer.zPosition = mirrorLayerZPosition(requested, testPattern, hasOtherSibling, siblingMinZ, siblingMaxZ);
+            [CATransaction commit];
+        });
+    }
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeAttach(
     JNIEnv *env, jclass, jlong handle, jint windowX, jint windowY, jint insetLeft, jint insetTop) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return nullptr;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return nullptr;
-        ++mirror->attachAttempts;
-    }
-    JAWT awt{};
-    awt.version = JAWT_VERSION_1_7;
-    if (!JAWT_GetAWT(env, &awt)) {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        ++mirror->attachFailures;
-        mirror->lastAttachResult = 2;
-        return nullptr;
-    }
-    JAWT_DrawingSurface *surface = awt.GetDrawingSurface(env, mirror->canvas);
-    if (!surface) {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        ++mirror->attachFailures;
-        mirror->lastAttachResult = 3;
-        return nullptr;
-    }
-    __block CAMetalLayer *layer = nil;
-    __block CAShapeLayer *clipMask = nil;
-    __block CGFloat clipLeft = 0.0;
-    __block CGFloat clipTop = 0.0;
-    __block CGFloat clipRight = 1.0;
-    __block CGFloat clipBottom = 1.0;
-    bool locked = (surface->Lock(surface) & JAWT_LOCK_ERROR) == 0;
-    __block int64_t attachResult = locked ? 5 : 4;
-    __block int64_t attachWidth = 0;
-    __block int64_t attachHeight = 0;
-    __block int64_t hasSuperlayer = 0;
-    __block int64_t hasWindowLayer = 0;
-    __block int64_t layerHidden = 0;
-    __block int64_t layerOpacityMilli = 0;
-    __block int64_t layerDescendsFromWindow = 0;
-    __block int64_t parentHidden = 0;
-    __block int64_t parentOpacityMilli = 0;
-    __block int64_t layerZMilli = 0;
-    __block int64_t layerSiblingIndex = -1;
-    __block int64_t layerSiblingCount = 0;
-    __block int64_t layerSiblingMaxZMilli = 0;
-    __block int64_t layerFrameWidth = 0;
-    __block int64_t layerFrameHeight = 0;
-    __block int64_t layerFrameX = 0;
-    __block int64_t layerFrameY = 0;
-    __block int64_t componentBoundsX = 0;
-    __block int64_t componentBoundsY = 0;
-    __block int64_t canvasWindowX = windowX;
-    __block int64_t canvasWindowY = windowY;
-    __block int64_t parentFrameWidth = 0;
-    __block int64_t parentFrameHeight = 0;
-    __block NSString *appKitHierarchy = @"";
-    id<JAWT_SurfaceLayers> platformLayers = nil;
-    bool hasSurfaceInfo = false;
-    if (locked) {
-        JAWT_DrawingSurfaceInfo *info = surface->GetDrawingSurfaceInfo(surface);
-        if (info) {
-            hasSurfaceInfo = true;
-            attachWidth = (int64_t)info->bounds.width;
-            attachHeight = (int64_t)info->bounds.height;
-            componentBoundsX = (int64_t)info->bounds.x;
-            componentBoundsY = (int64_t)info->bounds.y;
-            platformLayers = (__bridge id<JAWT_SurfaceLayers>)info->platformInfo;
-            surface->FreeDrawingSurfaceInfo(info);
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return nullptr;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return nullptr;
+            ++mirror->attachAttempts;
         }
-        surface->Unlock(surface);
-    }
-    // Release the JAWT info and surface lock before synchronously entering AppKit. This avoids
-    // holding a peer lock across the EDT -> main-thread hop, which could deadlock a resize/close.
-    awt.FreeDrawingSurface(surface);
-    if (platformLayers) {
-        const auto attachmentState = mirror->layerAttachment;
-        const uint64_t attachmentGeneration = nextLayerAttachmentGeneration(attachmentState);
-        performOnAppKitMainThreadSync(^{
-                    if (!isCurrentLayerAttachmentGeneration(attachmentState, attachmentGeneration)) {
-                        attachResult = 6;
-                        return;
-                    }
-                    {
-                        std::lock_guard<std::mutex> guard(mirror->lock);
-                        if (!mirror->closed) {
-                            if (!mirror->layer) {
-                                mirror->layer = [CAMetalLayer layer];
-                                mirror->layer.device = mirror->device;
-                                mirror->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        JAWT awt{};
+        awt.version = JAWT_VERSION_1_7;
+        if (!JAWT_GetAWT(env, &awt)) {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            ++mirror->attachFailures;
+            mirror->lastAttachResult = 2;
+            return nullptr;
+        }
+        JAWT_DrawingSurface *surface = awt.GetDrawingSurface(env, mirror->canvas);
+        if (!surface) {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            ++mirror->attachFailures;
+            mirror->lastAttachResult = 3;
+            return nullptr;
+        }
+        __block CAMetalLayer *layer = nil;
+        __block CAShapeLayer *clipMask = nil;
+        __block CGFloat clipLeft = 0.0;
+        __block CGFloat clipTop = 0.0;
+        __block CGFloat clipRight = 1.0;
+        __block CGFloat clipBottom = 1.0;
+        bool locked = (surface->Lock(surface) & JAWT_LOCK_ERROR) == 0;
+        __block int64_t attachResult = locked ? 5 : 4;
+        __block int64_t attachWidth = 0;
+        __block int64_t attachHeight = 0;
+        __block int64_t hasSuperlayer = 0;
+        __block int64_t hasWindowLayer = 0;
+        __block int64_t layerHidden = 0;
+        __block int64_t layerOpacityMilli = 0;
+        __block int64_t layerDescendsFromWindow = 0;
+        __block int64_t parentHidden = 0;
+        __block int64_t parentOpacityMilli = 0;
+        __block int64_t layerZMilli = 0;
+        __block int64_t layerSiblingIndex = -1;
+        __block int64_t layerSiblingCount = 0;
+        __block int64_t layerSiblingMaxZMilli = 0;
+        __block int64_t layerFrameWidth = 0;
+        __block int64_t layerFrameHeight = 0;
+        __block int64_t layerFrameX = 0;
+        __block int64_t layerFrameY = 0;
+        __block int64_t componentBoundsX = 0;
+        __block int64_t componentBoundsY = 0;
+        __block int64_t canvasWindowX = windowX;
+        __block int64_t canvasWindowY = windowY;
+        __block int64_t parentFrameWidth = 0;
+        __block int64_t parentFrameHeight = 0;
+        __block NSString *appKitHierarchy = @"";
+        id<JAWT_SurfaceLayers> platformLayers = nil;
+        bool hasSurfaceInfo = false;
+        if (locked) {
+            JAWT_DrawingSurfaceInfo *info = surface->GetDrawingSurfaceInfo(surface);
+            if (info) {
+                hasSurfaceInfo = true;
+                attachWidth = (int64_t)info->bounds.width;
+                attachHeight = (int64_t)info->bounds.height;
+                componentBoundsX = (int64_t)info->bounds.x;
+                componentBoundsY = (int64_t)info->bounds.y;
+                platformLayers = (__bridge id<JAWT_SurfaceLayers>)info->platformInfo;
+                surface->FreeDrawingSurfaceInfo(info);
+            }
+            surface->Unlock(surface);
+        }
+        // Release the JAWT info and surface lock before synchronously entering AppKit. This avoids
+        // holding a peer lock across the EDT -> main-thread hop, which could deadlock a resize/close.
+        awt.FreeDrawingSurface(surface);
+        if (platformLayers) {
+            const auto attachmentState = mirror->layerAttachment;
+            const uint64_t attachmentGeneration = nextLayerAttachmentGeneration(attachmentState);
+            performOnAppKitMainThreadSync(^{
+                        if (!isCurrentLayerAttachmentGeneration(attachmentState, attachmentGeneration)) {
+                            attachResult = 6;
+                            return;
+                        }
+                        {
+                            std::lock_guard<std::mutex> guard(mirror->lock);
+                            if (!mirror->closed) {
+                                if (!mirror->layer) {
+                                    mirror->layer = [CAMetalLayer layer];
+                                    mirror->layer.device = mirror->device;
+                                    mirror->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+                                    mirror->layer.opaque = YES;
+                                    // The underlay starts behind siblings; attach will refine this
+                                    // against the actual parent layer's sibling depths.
+                                    mirror->layer.zPosition = mirror->underlayOrdering ? -1.0 : 1.0;
+                                    mirror->layer.framebufferOnly = NO;
+                                    mirror->layer.presentsWithTransaction = NO;
+                                    disableImplicitAnimations(mirror->layer);
+                                }
+                                if (!mirror->clipMask) {
+                                    mirror->clipMask = [CAShapeLayer layer];
+                                    mirror->clipMask.fillColor = NSColor.whiteColor.CGColor;
+                                    mirror->clipMask.strokeColor = nil;
+                                    disableImplicitAnimations(mirror->clipMask);
+                                }
                                 mirror->layer.opaque = YES;
-                                // The underlay starts behind siblings; attach will refine this
-                                // against the actual parent layer's sibling depths.
-                                mirror->layer.zPosition = mirror->underlayOrdering ? -1.0 : 1.0;
-                                mirror->layer.framebufferOnly = NO;
-                                mirror->layer.presentsWithTransaction = NO;
-                                disableImplicitAnimations(mirror->layer);
+                                updateDrawableGeometry(
+                                    mirror->layer,
+                                    attachWidth,
+                                    attachHeight,
+                                    attachWidth,
+                                    attachHeight);
+                                layer = mirror->layer;
+                                clipMask = mirror->clipMask;
+                                clipLeft = mirror->clipLeft;
+                                clipTop = mirror->clipTop;
+                                clipRight = mirror->clipRight;
+                                clipBottom = mirror->clipBottom;
                             }
-                            if (!mirror->clipMask) {
-                                mirror->clipMask = [CAShapeLayer layer];
-                                mirror->clipMask.fillColor = NSColor.whiteColor.CGColor;
-                                mirror->clipMask.strokeColor = nil;
-                                disableImplicitAnimations(mirror->clipMask);
-                            }
-                            mirror->layer.opaque = YES;
-                            updateDrawableGeometry(
-                                mirror->layer,
-                                attachWidth,
-                                attachHeight,
+                        }
+                        if (!layer) {
+                            attachResult = 6;
+                            return;
+                        }
+                        CALayer *previousParent = layer.superlayer;
+                        CALayer *windowLayer = platformLayers.windowLayer;
+                        // AWTSurfaceLayers.setLayer mutates the NSView-hosted Core Animation tree
+                        // directly. Keep this, initial placement and z-order on the AppKit thread.
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        platformLayers.layer = layer;
+                        // AWTSurfaceLayers.setLayer is a no-op when handed the layer it already holds,
+                        // and nativeDetach removes our layer from the tree without clearing JAWT's
+                        // reference (the peer may be gone by then). So every re-attach to a Canvas we
+                        // had detached from left the layer outside the window: decoding and touches
+                        // kept working behind a black hole, and Disconnect/Connect (same layer) could
+                        // not recover it. Re-add it ourselves; JAWT keeps its reference, so its later
+                        // bounds updates still move this layer.
+                        if (!layer.superlayer && windowLayer && platformLayers.layer == layer) {
+                            [windowLayer addSublayer:layer];
+                        }
+                        if (needsInitialLayerFrame(previousParent, windowLayer) && windowLayer &&
+                            windowLayer.bounds.size.height > 0 && attachWidth > 0 && attachHeight > 0) {
+                            // AWT peer bounds can be sent before JAWT attaches this new layer. Seed
+                            // its first frame in window coordinates, and repeat only if JAWT moves it
+                            // to another window layer. Later resizes remain owned by AWT.
+                            setInitialLayerFrame(
+                                layer,
+                                windowLayer.bounds.size.height,
+                                windowX,
+                                windowY,
+                                insetLeft,
+                                insetTop,
                                 attachWidth,
                                 attachHeight);
-                            layer = mirror->layer;
-                            clipMask = mirror->clipMask;
-                            clipLeft = mirror->clipLeft;
-                            clipTop = mirror->clipTop;
-                            clipRight = mirror->clipRight;
-                            clipBottom = mirror->clipBottom;
                         }
-                    }
-                    if (!layer) {
-                        attachResult = 6;
-                        return;
-                    }
-                    CALayer *previousParent = layer.superlayer;
-                    CALayer *windowLayer = platformLayers.windowLayer;
-                    // AWTSurfaceLayers.setLayer mutates the NSView-hosted Core Animation tree
-                    // directly. Keep this, initial placement and z-order on the AppKit thread.
-                    [CATransaction begin];
-                    [CATransaction setDisableActions:YES];
-                    platformLayers.layer = layer;
-                    // AWTSurfaceLayers.setLayer is a no-op when handed the layer it already holds,
-                    // and nativeDetach removes our layer from the tree without clearing JAWT's
-                    // reference (the peer may be gone by then). So every re-attach to a Canvas we
-                    // had detached from left the layer outside the window: decoding and touches
-                    // kept working behind a black hole, and Disconnect/Connect (same layer) could
-                    // not recover it. Re-add it ourselves; JAWT keeps its reference, so its later
-                    // bounds updates still move this layer.
-                    if (!layer.superlayer && windowLayer && platformLayers.layer == layer) {
-                        [windowLayer addSublayer:layer];
-                    }
-                    if (needsInitialLayerFrame(previousParent, windowLayer) && windowLayer &&
-                        windowLayer.bounds.size.height > 0 && attachWidth > 0 && attachHeight > 0) {
-                        // AWT peer bounds can be sent before JAWT attaches this new layer. Seed
-                        // its first frame in window coordinates, and repeat only if JAWT moves it
-                        // to another window layer. Later resizes remain owned by AWT.
-                        setInitialLayerFrame(
-                            layer,
-                            windowLayer.bounds.size.height,
-                            windowX,
-                            windowY,
-                            insetLeft,
-                            insetTop,
-                            attachWidth,
-                            attachHeight);
-                    }
-                    updateLayerClipMask(layer, clipMask, clipLeft, clipTop, clipRight, clipBottom);
-                    CALayer *parentLayer = layer.superlayer;
-                    bool descendsFromWindow = false;
-                    for (CALayer *ancestor = parentLayer; ancestor; ancestor = ancestor.superlayer) {
-                        if (ancestor == windowLayer) { descendsFromWindow = true; break; }
-                    }
-                    NSArray<CALayer *> *siblings = parentLayer.sublayers;
-                    if (siblings) {
-                        layerSiblingCount = (int64_t)siblings.count;
-                        CGFloat siblingMinZ = 0.0;
-                        CGFloat siblingMaxZ = 0.0;
-                        bool hasOtherSibling = false;
-                        for (NSUInteger index = 0; index < siblings.count; ++index) {
-                            CALayer *sibling = siblings[index];
-                            if (sibling == layer) {
-                                layerSiblingIndex = (int64_t)index;
-                            } else {
-                                if (hasOtherSibling) {
-                                    siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
-                                    siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
+                        updateLayerClipMask(layer, clipMask, clipLeft, clipTop, clipRight, clipBottom);
+                        CALayer *parentLayer = layer.superlayer;
+                        bool descendsFromWindow = false;
+                        for (CALayer *ancestor = parentLayer; ancestor; ancestor = ancestor.superlayer) {
+                            if (ancestor == windowLayer) { descendsFromWindow = true; break; }
+                        }
+                        NSArray<CALayer *> *siblings = parentLayer.sublayers;
+                        if (siblings) {
+                            layerSiblingCount = (int64_t)siblings.count;
+                            CGFloat siblingMinZ = 0.0;
+                            CGFloat siblingMaxZ = 0.0;
+                            bool hasOtherSibling = false;
+                            for (NSUInteger index = 0; index < siblings.count; ++index) {
+                                CALayer *sibling = siblings[index];
+                                if (sibling == layer) {
+                                    layerSiblingIndex = (int64_t)index;
                                 } else {
-                                    siblingMinZ = siblingMaxZ = sibling.zPosition;
+                                    if (hasOtherSibling) {
+                                        siblingMinZ = std::min(siblingMinZ, sibling.zPosition);
+                                        siblingMaxZ = std::max(siblingMaxZ, sibling.zPosition);
+                                    } else {
+                                        siblingMinZ = siblingMaxZ = sibling.zPosition;
+                                    }
+                                    hasOtherSibling = true;
                                 }
-                                hasOtherSibling = true;
                             }
+                            // The underlay leaves the live layer at natural depth so Compose content
+                            // can paint over it; the fallback keeps the prior above-siblings placement,
+                            // and the test pattern stays topmost for native diagnostics either way.
+                            layer.zPosition = mirrorLayerZPosition(
+                                mirror->underlayOrdering,
+                                mirror->testPattern,
+                                hasOtherSibling,
+                                siblingMinZ,
+                                siblingMaxZ);
+                            layerSiblingMaxZMilli = hasOtherSibling ? (int64_t)(siblingMaxZ * 1000.0) : 0;
                         }
-                        // The underlay leaves the live layer at natural depth so Compose content
-                        // can paint over it; the fallback keeps the prior above-siblings placement,
-                        // and the test pattern stays topmost for native diagnostics either way.
-                        layer.zPosition = mirrorLayerZPosition(
-                            mirror->underlayOrdering,
-                            mirror->testPattern,
-                            hasOtherSibling,
-                            siblingMinZ,
-                            siblingMaxZ);
-                        layerSiblingMaxZMilli = hasOtherSibling ? (int64_t)(siblingMaxZ * 1000.0) : 0;
-                    }
-                    hasSuperlayer = layer.superlayer != nil;
-                    hasWindowLayer = windowLayer != nil;
-                    layerHidden = layer.hidden;
-                    layerOpacityMilli = (int64_t)(layer.opacity * 1000.0f);
-                    layerDescendsFromWindow = descendsFromWindow;
-                    parentHidden = parentLayer.hidden;
-                    parentOpacityMilli = (int64_t)(parentLayer.opacity * 1000.0f);
-                    layerZMilli = (int64_t)(layer.zPosition * 1000.0f);
-                    layerFrameWidth = (int64_t)layer.frame.size.width;
-                    layerFrameHeight = (int64_t)layer.frame.size.height;
-                    layerFrameX = (int64_t)layer.frame.origin.x;
-                    layerFrameY = (int64_t)layer.frame.origin.y;
-                    parentFrameWidth = (int64_t)parentLayer.frame.size.width;
-                    parentFrameHeight = (int64_t)parentLayer.frame.size.height;
-                    [CATransaction commit];
-                    [CATransaction flush];
-                    appKitHierarchy = describeAppKitViewHierarchy(windowLayer, layer);
-                    attachResult = 1;
-        });
-    } else if (hasSurfaceInfo) {
-        attachResult = 6;
-    }
-    if (!layer) {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        ++mirror->attachFailures;
-        mirror->lastAttachResult = attachResult;
-        mirror->lastAttachWidth = attachWidth;
-        mirror->lastAttachHeight = attachHeight;
-        mirror->lastLayerHasSuperlayer = hasSuperlayer;
-        mirror->lastWindowLayerAvailable = hasWindowLayer;
-        mirror->lastLayerHidden = layerHidden;
-        mirror->lastLayerOpacityMilli = layerOpacityMilli;
-        mirror->lastLayerDescendsFromWindow = layerDescendsFromWindow;
-        mirror->lastParentHidden = parentHidden;
-        mirror->lastParentOpacityMilli = parentOpacityMilli;
-        mirror->lastLayerZMilli = layerZMilli;
-        mirror->lastLayerSiblingIndex = layerSiblingIndex;
-        mirror->lastLayerSiblingCount = layerSiblingCount;
-        mirror->lastLayerSiblingMaxZMilli = layerSiblingMaxZMilli;
-        mirror->lastLayerFrameWidth = layerFrameWidth;
-        mirror->lastLayerFrameHeight = layerFrameHeight;
-        mirror->lastLayerFrameX = layerFrameX;
-        mirror->lastLayerFrameY = layerFrameY;
-        mirror->lastComponentBoundsX = componentBoundsX;
-        mirror->lastComponentBoundsY = componentBoundsY;
-        mirror->lastCanvasWindowX = canvasWindowX;
-        mirror->lastCanvasWindowY = canvasWindowY;
-        mirror->lastParentFrameWidth = parentFrameWidth;
-        mirror->lastParentFrameHeight = parentFrameHeight;
+                        hasSuperlayer = layer.superlayer != nil;
+                        hasWindowLayer = windowLayer != nil;
+                        layerHidden = layer.hidden;
+                        layerOpacityMilli = (int64_t)(layer.opacity * 1000.0f);
+                        layerDescendsFromWindow = descendsFromWindow;
+                        parentHidden = parentLayer.hidden;
+                        parentOpacityMilli = (int64_t)(parentLayer.opacity * 1000.0f);
+                        layerZMilli = (int64_t)(layer.zPosition * 1000.0f);
+                        layerFrameWidth = (int64_t)layer.frame.size.width;
+                        layerFrameHeight = (int64_t)layer.frame.size.height;
+                        layerFrameX = (int64_t)layer.frame.origin.x;
+                        layerFrameY = (int64_t)layer.frame.origin.y;
+                        parentFrameWidth = (int64_t)parentLayer.frame.size.width;
+                        parentFrameHeight = (int64_t)parentLayer.frame.size.height;
+                        [CATransaction commit];
+                        [CATransaction flush];
+                        appKitHierarchy = describeAppKitViewHierarchy(windowLayer, layer);
+                        attachResult = 1;
+            });
+        } else if (hasSurfaceInfo) {
+            attachResult = 6;
+        }
+        if (!layer) {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            ++mirror->attachFailures;
+            mirror->lastAttachResult = attachResult;
+            mirror->lastAttachWidth = attachWidth;
+            mirror->lastAttachHeight = attachHeight;
+            mirror->lastLayerHasSuperlayer = hasSuperlayer;
+            mirror->lastWindowLayerAvailable = hasWindowLayer;
+            mirror->lastLayerHidden = layerHidden;
+            mirror->lastLayerOpacityMilli = layerOpacityMilli;
+            mirror->lastLayerDescendsFromWindow = layerDescendsFromWindow;
+            mirror->lastParentHidden = parentHidden;
+            mirror->lastParentOpacityMilli = parentOpacityMilli;
+            mirror->lastLayerZMilli = layerZMilli;
+            mirror->lastLayerSiblingIndex = layerSiblingIndex;
+            mirror->lastLayerSiblingCount = layerSiblingCount;
+            mirror->lastLayerSiblingMaxZMilli = layerSiblingMaxZMilli;
+            mirror->lastLayerFrameWidth = layerFrameWidth;
+            mirror->lastLayerFrameHeight = layerFrameHeight;
+            mirror->lastLayerFrameX = layerFrameX;
+            mirror->lastLayerFrameY = layerFrameY;
+            mirror->lastComponentBoundsX = componentBoundsX;
+            mirror->lastComponentBoundsY = componentBoundsY;
+            mirror->lastCanvasWindowX = canvasWindowX;
+            mirror->lastCanvasWindowY = canvasWindowY;
+            mirror->lastParentFrameWidth = parentFrameWidth;
+            mirror->lastParentFrameHeight = parentFrameHeight;
+            return env->NewStringUTF([appKitHierarchy UTF8String] ?: "");
+        }
+        bool schedule = false;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            replayLastPresentedLocked(mirror);
+            if (!mirror->closed && mirror->latest && !mirror->renderScheduled) {
+                mirror->renderScheduled = true;
+                schedule = true;
+            }
+        }
+        if (schedule) renderLoop(mirror);
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (layer) ++mirror->attachSuccesses;
+            else ++mirror->attachFailures;
+            mirror->lastAttachResult = 1;
+            mirror->lastAttachWidth = attachWidth;
+            mirror->lastAttachHeight = attachHeight;
+            mirror->lastLayerHasSuperlayer = hasSuperlayer;
+            mirror->lastWindowLayerAvailable = hasWindowLayer;
+            mirror->lastLayerHidden = layerHidden;
+            mirror->lastLayerOpacityMilli = layerOpacityMilli;
+            mirror->lastLayerDescendsFromWindow = layerDescendsFromWindow;
+            mirror->lastParentHidden = parentHidden;
+            mirror->lastParentOpacityMilli = parentOpacityMilli;
+            mirror->lastLayerZMilli = layerZMilli;
+            mirror->lastLayerSiblingIndex = layerSiblingIndex;
+            mirror->lastLayerSiblingCount = layerSiblingCount;
+            mirror->lastLayerSiblingMaxZMilli = layerSiblingMaxZMilli;
+            mirror->lastLayerFrameWidth = layerFrameWidth;
+            mirror->lastLayerFrameHeight = layerFrameHeight;
+            mirror->lastLayerFrameX = layerFrameX;
+            mirror->lastLayerFrameY = layerFrameY;
+            mirror->lastComponentBoundsX = componentBoundsX;
+            mirror->lastComponentBoundsY = componentBoundsY;
+            mirror->lastCanvasWindowX = canvasWindowX;
+            mirror->lastCanvasWindowY = canvasWindowY;
+            mirror->lastParentFrameWidth = parentFrameWidth;
+            mirror->lastParentFrameHeight = parentFrameHeight;
+        }
         return env->NewStringUTF([appKitHierarchy UTF8String] ?: "");
     }
-    bool schedule = false;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        replayLastPresentedLocked(mirror);
-        if (!mirror->closed && mirror->latest && !mirror->renderScheduled) {
-            mirror->renderScheduled = true;
-            schedule = true;
-        }
-    }
-    if (schedule) renderLoop(mirror);
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (layer) ++mirror->attachSuccesses;
-        else ++mirror->attachFailures;
-        mirror->lastAttachResult = 1;
-        mirror->lastAttachWidth = attachWidth;
-        mirror->lastAttachHeight = attachHeight;
-        mirror->lastLayerHasSuperlayer = hasSuperlayer;
-        mirror->lastWindowLayerAvailable = hasWindowLayer;
-        mirror->lastLayerHidden = layerHidden;
-        mirror->lastLayerOpacityMilli = layerOpacityMilli;
-        mirror->lastLayerDescendsFromWindow = layerDescendsFromWindow;
-        mirror->lastParentHidden = parentHidden;
-        mirror->lastParentOpacityMilli = parentOpacityMilli;
-        mirror->lastLayerZMilli = layerZMilli;
-        mirror->lastLayerSiblingIndex = layerSiblingIndex;
-        mirror->lastLayerSiblingCount = layerSiblingCount;
-        mirror->lastLayerSiblingMaxZMilli = layerSiblingMaxZMilli;
-        mirror->lastLayerFrameWidth = layerFrameWidth;
-        mirror->lastLayerFrameHeight = layerFrameHeight;
-        mirror->lastLayerFrameX = layerFrameX;
-        mirror->lastLayerFrameY = layerFrameY;
-        mirror->lastComponentBoundsX = componentBoundsX;
-        mirror->lastComponentBoundsY = componentBoundsY;
-        mirror->lastCanvasWindowX = canvasWindowX;
-        mirror->lastCanvasWindowY = canvasWindowY;
-        mirror->lastParentFrameWidth = parentFrameWidth;
-        mirror->lastParentFrameHeight = parentFrameHeight;
-    }
-    return env->NewStringUTF([appKitHierarchy UTF8String] ?: "");
 }
 
 extern "C" JNIEXPORT jlong JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeDecode(
     JNIEnv *env, jclass, jlong handle, jbyteArray bytes, jint count, jlong pts, jboolean config, jboolean keyFrame, jlong queueAgeNs) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return failureValue(1);
-    {
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return failureValue(1);
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return failureValue(1);
+            if (mirror->failed) return failureValue(mirror->failureCode == 0 ? 10 : mirror->failureCode, mirror->failureStatus);
+        }
+        if (!bytes || count <= 0 || count > env->GetArrayLength(bytes)) return failureValue(1);
+        jbyte *raw = env->GetByteArrayElements(bytes, nullptr);
+        if (!raw) return failureValue(1);
+        std::vector<Nalu> units = parseAnnexB((const uint8_t *)raw, (size_t)count);
+        env->ReleaseByteArrayElements(bytes, raw, JNI_ABORT);
+
+        std::vector<uint8_t> avcc;
+        for (const auto &unit : units) {
+            if (unit.bytes.empty()) continue;
+            uint32_t size = CFSwapInt32HostToBig((uint32_t)unit.bytes.size());
+            const uint8_t *sizeBytes = reinterpret_cast<const uint8_t *>(&size);
+            avcc.insert(avcc.end(), sizeBytes, sizeBytes + sizeof(size));
+            avcc.insert(avcc.end(), unit.bytes.begin(), unit.bytes.end());
+        }
+        if (avcc.empty()) return failureValue(1);
+
+        if (config) {
+            const Nalu *sps = nullptr;
+            const Nalu *pps = nullptr;
+            for (const auto &unit : units) { if (unit.type == 7) sps = &unit; else if (unit.type == 8) pps = &unit; }
+            if (!sps || !pps) return failureValue(2);
+            std::unique_lock<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return failureValue(1);
+            if (!mirror->decodeCompleted.wait_for(
+                    guard, std::chrono::milliseconds(500), [&] { return !mirror->decodeInFlight || mirror->closed; })) {
+                setFailureLocked(mirror, 10);
+                return failureValue(10);
+            }
+            mirror->stagedSps = sps->bytes;
+            mirror->stagedPps = pps->bytes;
+            return ((jlong)mirror->width << 32) | (uint32_t)mirror->height;
+        }
+
+        CfOwner<CMBlockBufferRef> block;
+        CfOwner<CMSampleBufferRef> sample;
+        OSStatus blockStatus = CMBlockBufferCreateEmpty(kCFAllocatorDefault, 0, 0, block.out());
+        if (blockStatus == noErr) blockStatus = CMBlockBufferAppendMemoryBlock(
+            block.value, nullptr, avcc.size(), kCFAllocatorDefault, nullptr, 0, avcc.size(), 0);
+        if (blockStatus == noErr) blockStatus = CMBlockBufferReplaceDataBytes(avcc.data(), block.value, 0, avcc.size());
+        if (blockStatus != noErr) return failureValue(4, blockStatus);
+
+        VTDecompressionSessionRef session = nullptr;
+        CMVideoFormatDescriptionRef format = nullptr;
+        uint64_t generation = 0;
+        {
+            std::unique_lock<std::mutex> guard(mirror->lock);
+            if (mirror->closed || mirror->failed || !mirror->decodeCompleted.wait_for(
+                    guard, std::chrono::milliseconds(500), [&] { return !mirror->decodeInFlight || mirror->closed || mirror->failed; })) {
+                setFailureLocked(mirror, 10);
+                return failureValue(10);
+            }
+            if (mirror->closed) return failureValue(1);
+            if (mirror->failed) return failureValue(mirror->failureCode == 0 ? 10 : mirror->failureCode, mirror->failureStatus);
+            if (keyFrame && !mirror->stagedSps.empty() && !mirror->stagedPps.empty() &&
+                (mirror->decoder == nullptr || mirror->stagedSps != mirror->activeSps || mirror->stagedPps != mirror->activePps)) {
+                int stage = 0;
+                OSStatus status = noErr;
+                if (!createDecoder(mirror, &stage, &status)) {
+                    setFailureLocked(mirror, stage, status);
+                    return failureValue(stage, status);
+                }
+            }
+            if (!mirror->decoder || !mirror->format) return failureValue(5);
+            session = (VTDecompressionSessionRef)CFRetain(mirror->decoder);
+            format = (CMVideoFormatDescriptionRef)CFRetain(mirror->format);
+            generation = mirror->decoderGeneration;
+        }
+
+        CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts, 1000000), kCMTimeInvalid};
+        size_t sampleSize = avcc.size();
+        OSStatus sampleStatus = CMSampleBufferCreateReady(
+            kCFAllocatorDefault, block.value, format, 1, 1, &timing, 1, &sampleSize, sample.out());
+        CFRelease(format);
+        if (sampleStatus != noErr || !sample.value) { CFRelease(session); return failureValue(6, sampleStatus); }
+
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed || mirror->failed || mirror->decoderGeneration != generation || mirror->decodeInFlight) {
+                CFRelease(session);
+                return failureValue(10);
+            }
+            mirror->decodeInFlight = true;
+            mirror->decodeIngressNs = steadyNowNs() - std::max<jlong>(0, queueAgeNs);
+        }
+
+        // Do not hold Mirror::lock here: VideoToolbox is permitted to invoke its output callback
+        // before DecodeFrame returns. The extra retain keeps this session alive while close/reconfigure
+        // waits for the in-flight callback.
+        OSStatus decodeStatus = VTDecompressionSessionDecodeFrame(
+            session, sample.value, kVTDecodeFrame_EnableAsynchronousDecompression, nullptr, nullptr);
+        CFRelease(session);
+        if (decodeStatus != noErr) {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->decoderGeneration == generation) {
+                mirror->decodeInFlight = false;
+                setFailureLocked(mirror, 7, decodeStatus);
+                mirror->decodeCompleted.notify_all();
+            }
+            return failureValue(7, decodeStatus);
+        }
         std::lock_guard<std::mutex> guard(mirror->lock);
         if (mirror->closed) return failureValue(1);
         if (mirror->failed) return failureValue(mirror->failureCode == 0 ? 10 : mirror->failureCode, mirror->failureStatus);
-    }
-    if (!bytes || count <= 0 || count > env->GetArrayLength(bytes)) return failureValue(1);
-    jbyte *raw = env->GetByteArrayElements(bytes, nullptr);
-    if (!raw) return failureValue(1);
-    std::vector<Nalu> units = parseAnnexB((const uint8_t *)raw, (size_t)count);
-    env->ReleaseByteArrayElements(bytes, raw, JNI_ABORT);
-
-    std::vector<uint8_t> avcc;
-    for (const auto &unit : units) {
-        if (unit.bytes.empty()) continue;
-        uint32_t size = CFSwapInt32HostToBig((uint32_t)unit.bytes.size());
-        const uint8_t *sizeBytes = reinterpret_cast<const uint8_t *>(&size);
-        avcc.insert(avcc.end(), sizeBytes, sizeBytes + sizeof(size));
-        avcc.insert(avcc.end(), unit.bytes.begin(), unit.bytes.end());
-    }
-    if (avcc.empty()) return failureValue(1);
-
-    if (config) {
-        const Nalu *sps = nullptr;
-        const Nalu *pps = nullptr;
-        for (const auto &unit : units) { if (unit.type == 7) sps = &unit; else if (unit.type == 8) pps = &unit; }
-        if (!sps || !pps) return failureValue(2);
-        std::unique_lock<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return failureValue(1);
-        if (!mirror->decodeCompleted.wait_for(
-                guard, std::chrono::milliseconds(500), [&] { return !mirror->decodeInFlight || mirror->closed; })) {
-            setFailureLocked(mirror, 10);
-            return failureValue(10);
-        }
-        mirror->stagedSps = sps->bytes;
-        mirror->stagedPps = pps->bytes;
         return ((jlong)mirror->width << 32) | (uint32_t)mirror->height;
     }
-
-    CfOwner<CMBlockBufferRef> block;
-    CfOwner<CMSampleBufferRef> sample;
-    OSStatus blockStatus = CMBlockBufferCreateEmpty(kCFAllocatorDefault, 0, 0, block.out());
-    if (blockStatus == noErr) blockStatus = CMBlockBufferAppendMemoryBlock(
-        block.value, nullptr, avcc.size(), kCFAllocatorDefault, nullptr, 0, avcc.size(), 0);
-    if (blockStatus == noErr) blockStatus = CMBlockBufferReplaceDataBytes(avcc.data(), block.value, 0, avcc.size());
-    if (blockStatus != noErr) return failureValue(4, blockStatus);
-
-    VTDecompressionSessionRef session = nullptr;
-    CMVideoFormatDescriptionRef format = nullptr;
-    uint64_t generation = 0;
-    {
-        std::unique_lock<std::mutex> guard(mirror->lock);
-        if (mirror->closed || mirror->failed || !mirror->decodeCompleted.wait_for(
-                guard, std::chrono::milliseconds(500), [&] { return !mirror->decodeInFlight || mirror->closed || mirror->failed; })) {
-            setFailureLocked(mirror, 10);
-            return failureValue(10);
-        }
-        if (mirror->closed) return failureValue(1);
-        if (mirror->failed) return failureValue(mirror->failureCode == 0 ? 10 : mirror->failureCode, mirror->failureStatus);
-        if (keyFrame && !mirror->stagedSps.empty() && !mirror->stagedPps.empty() &&
-            (mirror->decoder == nullptr || mirror->stagedSps != mirror->activeSps || mirror->stagedPps != mirror->activePps)) {
-            int stage = 0;
-            OSStatus status = noErr;
-            if (!createDecoder(mirror, &stage, &status)) {
-                setFailureLocked(mirror, stage, status);
-                return failureValue(stage, status);
-            }
-        }
-        if (!mirror->decoder || !mirror->format) return failureValue(5);
-        session = (VTDecompressionSessionRef)CFRetain(mirror->decoder);
-        format = (CMVideoFormatDescriptionRef)CFRetain(mirror->format);
-        generation = mirror->decoderGeneration;
-    }
-
-    CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts, 1000000), kCMTimeInvalid};
-    size_t sampleSize = avcc.size();
-    OSStatus sampleStatus = CMSampleBufferCreateReady(
-        kCFAllocatorDefault, block.value, format, 1, 1, &timing, 1, &sampleSize, sample.out());
-    CFRelease(format);
-    if (sampleStatus != noErr || !sample.value) { CFRelease(session); return failureValue(6, sampleStatus); }
-
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed || mirror->failed || mirror->decoderGeneration != generation || mirror->decodeInFlight) {
-            CFRelease(session);
-            return failureValue(10);
-        }
-        mirror->decodeInFlight = true;
-        mirror->decodeIngressNs = steadyNowNs() - std::max<jlong>(0, queueAgeNs);
-    }
-
-    // Do not hold Mirror::lock here: VideoToolbox is permitted to invoke its output callback
-    // before DecodeFrame returns. The extra retain keeps this session alive while close/reconfigure
-    // waits for the in-flight callback.
-    OSStatus decodeStatus = VTDecompressionSessionDecodeFrame(
-        session, sample.value, kVTDecodeFrame_EnableAsynchronousDecompression, nullptr, nullptr);
-    CFRelease(session);
-    if (decodeStatus != noErr) {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->decoderGeneration == generation) {
-            mirror->decodeInFlight = false;
-            setFailureLocked(mirror, 7, decodeStatus);
-            mirror->decodeCompleted.notify_all();
-        }
-        return failureValue(7, decodeStatus);
-    }
-    std::lock_guard<std::mutex> guard(mirror->lock);
-    if (mirror->closed) return failureValue(1);
-    if (mirror->failed) return failureValue(mirror->failureCode == 0 ? 10 : mirror->failureCode, mirror->failureStatus);
-    return ((jlong)mirror->width << 32) | (uint32_t)mirror->height;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetBounds(
     JNIEnv *, jclass, jlong handle, jint width, jint height, jint pixelWidth, jint pixelHeight,
     jboolean hasOrigin, jint windowX, jint windowY, jint insetLeft, jint insetTop) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror || width <= 0 || height <= 0 || pixelWidth <= 0 || pixelHeight <= 0) return;
-    bool schedule = false;
-    __strong CAMetalLayer *layer = nil;
-    __strong CAShapeLayer *clipMask = nil;
-    std::shared_ptr<PendingGeometryUpdate> pending;
-    CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (!mirror->closed && mirror->layer) {
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror || width <= 0 || height <= 0 || pixelWidth <= 0 || pixelHeight <= 0) return;
+        bool schedule = false;
+        __strong CAMetalLayer *layer = nil;
+        __strong CAShapeLayer *clipMask = nil;
+        std::shared_ptr<PendingGeometryUpdate> pending;
+        CGFloat clipLeft = 0.0, clipTop = 0.0, clipRight = 1.0, clipBottom = 1.0;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (!mirror->closed && mirror->layer) {
+                layer = mirror->layer;
+                clipMask = mirror->clipMask;
+                pending = mirror->pendingGeometry;
+                clipLeft = mirror->clipLeft;
+                clipTop = mirror->clipTop;
+                clipRight = mirror->clipRight;
+                clipBottom = mirror->clipBottom;
+                replayLastPresentedLocked(mirror);
+                if (mirror->latest && !mirror->renderScheduled) {
+                    mirror->renderScheduled = true;
+                    schedule = true;
+                }
+            }
+        }
+        if (layer && clipMask && pending) {
+            bool shouldSchedule = false;
+            {
+                std::lock_guard<std::mutex> guard(pending->lock);
+                if (!pending->closed) {
+                    pending->width = width;
+                    pending->height = height;
+                    pending->pixelWidth = pixelWidth;
+                    pending->pixelHeight = pixelHeight;
+                    pending->hasOrigin = hasOrigin == JNI_TRUE;
+                    pending->windowX = windowX;
+                    pending->windowY = windowY;
+                    pending->insetLeft = insetLeft;
+                    pending->insetTop = insetTop;
+                    pending->clipLeft = clipLeft;
+                    pending->clipTop = clipTop;
+                    pending->clipRight = clipRight;
+                    pending->clipBottom = clipBottom;
+                    ++pending->generation;
+                    if (!pending->scheduled) {
+                        pending->scheduled = true;
+                        shouldSchedule = true;
+                    }
+                }
+            }
+            // Component resize notifications run on the AWT event-dispatch thread. Waiting for the
+            // AppKit main queue from that thread can deadlock while a detached window is being
+            // resized: AppKit is waiting for AWT to finish the resize that is itself waiting here.
+            // The latest geometry is coalesced above and applied asynchronously after the current
+            // resize transaction; no explicit transaction flush is needed during a live resize.
+            if (shouldSchedule) schedulePendingGeometryUpdate(pending, layer, clipMask);
+        }
+        if (schedule) renderLoop(mirror);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetClip(
+    JNIEnv *, jclass, jlong handle, jfloat left, jfloat top, jfloat right, jfloat bottom) {
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return;
+        const CGFloat normalizedLeft = std::clamp<CGFloat>(left, 0.0, 1.0);
+        const CGFloat normalizedTop = std::clamp<CGFloat>(top, 0.0, 1.0);
+        const CGFloat normalizedRight = std::clamp<CGFloat>(right, 0.0, 1.0);
+        const CGFloat normalizedBottom = std::clamp<CGFloat>(bottom, 0.0, 1.0);
+        __strong CAMetalLayer *layer = nil;
+        __strong CAShapeLayer *clipMask = nil;
+        std::shared_ptr<PendingGeometryUpdate> pending;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            if (mirror->closed) return;
+            mirror->clipLeft = normalizedLeft;
+            mirror->clipTop = normalizedTop;
+            mirror->clipRight = normalizedRight;
+            mirror->clipBottom = normalizedBottom;
             layer = mirror->layer;
             clipMask = mirror->clipMask;
             pending = mirror->pendingGeometry;
-            clipLeft = mirror->clipLeft;
-            clipTop = mirror->clipTop;
-            clipRight = mirror->clipRight;
-            clipBottom = mirror->clipBottom;
-            replayLastPresentedLocked(mirror);
-            if (mirror->latest && !mirror->renderScheduled) {
-                mirror->renderScheduled = true;
-                schedule = true;
-            }
         }
-    }
-    if (layer && clipMask && pending) {
         bool shouldSchedule = false;
-        {
+        if (pending) {
             std::lock_guard<std::mutex> guard(pending->lock);
             if (!pending->closed) {
-                pending->width = width;
-                pending->height = height;
-                pending->pixelWidth = pixelWidth;
-                pending->pixelHeight = pixelHeight;
-                pending->hasOrigin = hasOrigin == JNI_TRUE;
-                pending->windowX = windowX;
-                pending->windowY = windowY;
-                pending->insetLeft = insetLeft;
-                pending->insetTop = insetTop;
-                pending->clipLeft = clipLeft;
-                pending->clipTop = clipTop;
-                pending->clipRight = clipRight;
-                pending->clipBottom = clipBottom;
+                pending->clipLeft = normalizedLeft;
+                pending->clipTop = normalizedTop;
+                pending->clipRight = normalizedRight;
+                pending->clipBottom = normalizedBottom;
                 ++pending->generation;
-                if (!pending->scheduled) {
+                // Before JAWT attaches the layer there is nowhere to post this update. Keep the
+                // latest clip here; nativeSetBounds will schedule it once the layer is available.
+                if (layer && clipMask && !pending->scheduled) {
                     pending->scheduled = true;
                     shouldSchedule = true;
                 }
             }
         }
-        // Component resize notifications run on the AWT event-dispatch thread. Waiting for the
-        // AppKit main queue from that thread can deadlock while a detached window is being
-        // resized: AppKit is waiting for AWT to finish the resize that is itself waiting here.
-        // The latest geometry is coalesced above and applied asynchronously after the current
-        // resize transaction; no explicit transaction flush is needed during a live resize.
+        if (!layer || !clipMask) return;
         if (shouldSchedule) schedulePendingGeometryUpdate(pending, layer, clipMask);
     }
-    if (schedule) renderLoop(mirror);
-}
-
-extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeSetClip(
-    JNIEnv *, jclass, jlong handle, jfloat left, jfloat top, jfloat right, jfloat bottom) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return;
-    const CGFloat normalizedLeft = std::clamp<CGFloat>(left, 0.0, 1.0);
-    const CGFloat normalizedTop = std::clamp<CGFloat>(top, 0.0, 1.0);
-    const CGFloat normalizedRight = std::clamp<CGFloat>(right, 0.0, 1.0);
-    const CGFloat normalizedBottom = std::clamp<CGFloat>(bottom, 0.0, 1.0);
-    __strong CAMetalLayer *layer = nil;
-    __strong CAShapeLayer *clipMask = nil;
-    std::shared_ptr<PendingGeometryUpdate> pending;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        if (mirror->closed) return;
-        mirror->clipLeft = normalizedLeft;
-        mirror->clipTop = normalizedTop;
-        mirror->clipRight = normalizedRight;
-        mirror->clipBottom = normalizedBottom;
-        layer = mirror->layer;
-        clipMask = mirror->clipMask;
-        pending = mirror->pendingGeometry;
-    }
-    bool shouldSchedule = false;
-    if (pending) {
-        std::lock_guard<std::mutex> guard(pending->lock);
-        if (!pending->closed) {
-            pending->clipLeft = normalizedLeft;
-            pending->clipTop = normalizedTop;
-            pending->clipRight = normalizedRight;
-            pending->clipBottom = normalizedBottom;
-            ++pending->generation;
-            // Before JAWT attaches the layer there is nowhere to post this update. Keep the
-            // latest clip here; nativeSetBounds will schedule it once the layer is available.
-            if (layer && clipMask && !pending->scheduled) {
-                pending->scheduled = true;
-                shouldSchedule = true;
-            }
-        }
-    }
-    if (!layer || !clipMask) return;
-    if (shouldSchedule) schedulePendingGeometryUpdate(pending, layer, clipMask);
 }
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeReadMetrics(
     JNIEnv *env, jclass, jlong handle) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return nullptr;
-    CAMetalLayer *layer = nil;
-    std::shared_ptr<LayerFrameSnapshot> frameSnapshot;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        layer = mirror->layer;
-        frameSnapshot = mirror->layerFrameSnapshot;
-    }
-    CGRect currentLayerFrame = CGRectZero;
-    CGRect currentParentFrame = CGRectZero;
-    readCurrentLayerFrames(layer, frameSnapshot, &currentLayerFrame, &currentParentFrame);
-    jlong values[49]{};
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        // JAWT schedules its frame writes asynchronously on AppKit's main queue. The snapshot
-        // helper samples there without blocking; only replace attach data after a sized frame is
-        // available, so the first metrics read cannot erase useful initial placement evidence.
-        if (layer && mirror->layer == layer && currentLayerFrame.size.width > 0 && currentLayerFrame.size.height > 0) {
-            mirror->lastLayerFrameX = (int64_t)currentLayerFrame.origin.x;
-            mirror->lastLayerFrameY = (int64_t)currentLayerFrame.origin.y;
-            mirror->lastLayerFrameWidth = (int64_t)currentLayerFrame.size.width;
-            mirror->lastLayerFrameHeight = (int64_t)currentLayerFrame.size.height;
-            mirror->lastParentFrameWidth = (int64_t)currentParentFrame.size.width;
-            mirror->lastParentFrameHeight = (int64_t)currentParentFrame.size.height;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return nullptr;
+        CAMetalLayer *layer = nil;
+        std::shared_ptr<LayerFrameSnapshot> frameSnapshot;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            layer = mirror->layer;
+            frameSnapshot = mirror->layerFrameSnapshot;
         }
-        values[0] = mirror->decodeCount;
-        values[1] = mirror->decodeLatencyTotalNs;
-        values[2] = mirror->decodeLatencyMaxNs;
-        values[3] = mirror->presentCount;
-        values[4] = mirror->presentAgeTotalNs;
-        values[5] = mirror->presentAgeMaxNs;
-        values[6] = mirror->renderErrors;
-        if (mirror->presentCount > 0) {
-            int64_t target = (mirror->presentCount * 95 + 99) / 100;
-            int64_t accumulated = 0;
-            for (size_t i = 0; i < 26; ++i) {
-                accumulated += mirror->presentAgeHistogram[i];
-                if (accumulated >= target) {
-        values[7] = (jlong)((i + 1) * 10000000);
-                    break;
+        CGRect currentLayerFrame = CGRectZero;
+        CGRect currentParentFrame = CGRectZero;
+        readCurrentLayerFrames(layer, frameSnapshot, &currentLayerFrame, &currentParentFrame);
+        jlong values[49]{};
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            // JAWT schedules its frame writes asynchronously on AppKit's main queue. The snapshot
+            // helper samples there without blocking; only replace attach data after a sized frame is
+            // available, so the first metrics read cannot erase useful initial placement evidence.
+            if (layer && mirror->layer == layer && currentLayerFrame.size.width > 0 && currentLayerFrame.size.height > 0) {
+                mirror->lastLayerFrameX = (int64_t)currentLayerFrame.origin.x;
+                mirror->lastLayerFrameY = (int64_t)currentLayerFrame.origin.y;
+                mirror->lastLayerFrameWidth = (int64_t)currentLayerFrame.size.width;
+                mirror->lastLayerFrameHeight = (int64_t)currentLayerFrame.size.height;
+                mirror->lastParentFrameWidth = (int64_t)currentParentFrame.size.width;
+                mirror->lastParentFrameHeight = (int64_t)currentParentFrame.size.height;
+            }
+            values[0] = mirror->decodeCount;
+            values[1] = mirror->decodeLatencyTotalNs;
+            values[2] = mirror->decodeLatencyMaxNs;
+            values[3] = mirror->presentCount;
+            values[4] = mirror->presentAgeTotalNs;
+            values[5] = mirror->presentAgeMaxNs;
+            values[6] = mirror->renderErrors;
+            if (mirror->presentCount > 0) {
+                int64_t target = (mirror->presentCount * 95 + 99) / 100;
+                int64_t accumulated = 0;
+                for (size_t i = 0; i < 26; ++i) {
+                    accumulated += mirror->presentAgeHistogram[i];
+                    if (accumulated >= target) {
+            values[7] = (jlong)((i + 1) * 10000000);
+                        break;
+                    }
                 }
             }
+            mirror->decodeCount = mirror->decodeLatencyTotalNs = mirror->decodeLatencyMaxNs = 0;
+            mirror->presentCount = mirror->presentAgeTotalNs = mirror->presentAgeMaxNs = 0;
+            std::fill(std::begin(mirror->presentAgeHistogram), std::end(mirror->presentAgeHistogram), 0);
+            mirror->renderErrors = 0;
+            values[8] = mirror->decodedImageCount;
+            values[9] = mirror->attachAttempts;
+            values[10] = mirror->attachSuccesses;
+            values[11] = mirror->attachFailures;
+            values[12] = mirror->drawableMisses;
+            values[13] = mirror->lastAttachResult;
+            values[14] = mirror->lastAttachWidth;
+            values[15] = mirror->lastAttachHeight;
+            values[16] = mirror->decodedPixelFormat;
+            values[17] = mirror->decodedSampleMin;
+            values[18] = mirror->decodedSampleMax;
+            values[19] = mirror->lastLayerHasSuperlayer;
+            values[20] = mirror->lastWindowLayerAvailable;
+            values[21] = mirror->lastLayerHidden;
+            values[22] = mirror->lastLayerOpacityMilli;
+            values[23] = mirror->testPattern ? 1 : 0;
+            values[24] = mirror->lastLayerDescendsFromWindow;
+            values[25] = mirror->lastParentHidden;
+            values[26] = mirror->lastParentOpacityMilli;
+            values[27] = mirror->lastLayerZMilli;
+            values[28] = mirror->lastLayerSiblingIndex;
+            values[29] = mirror->lastLayerSiblingCount;
+            values[30] = mirror->lastLayerFrameWidth;
+            values[31] = mirror->lastLayerFrameHeight;
+            values[32] = mirror->lastParentFrameWidth;
+            values[33] = mirror->lastParentFrameHeight;
+            values[34] = mirror->drawableReadbackStatus;
+            values[35] = mirror->drawablePixelMin;
+            values[36] = mirror->drawablePixelMax;
+            values[37] = mirror->lastLayerFrameX;
+            values[38] = mirror->lastLayerFrameY;
+            values[39] = mirror->lastComponentBoundsX;
+            values[40] = mirror->lastComponentBoundsY;
+            values[41] = mirror->lastCanvasWindowX;
+            values[42] = mirror->lastCanvasWindowY;
+            values[43] = mirror->drawableNonBlackGridSamples;
+            values[44] = mirror->lastLayerSiblingMaxZMilli;
+            values[45] = mirror->drawableAlphaMin;
+            values[46] = mirror->drawableAlphaMax;
+            values[47] = mirror->decodedAlphaMin;
+            values[48] = mirror->decodedAlphaMax;
+            mirror->decodedImageCount = 0;
+            mirror->attachAttempts = mirror->attachSuccesses = mirror->attachFailures = mirror->drawableMisses = 0;
         }
-        mirror->decodeCount = mirror->decodeLatencyTotalNs = mirror->decodeLatencyMaxNs = 0;
-        mirror->presentCount = mirror->presentAgeTotalNs = mirror->presentAgeMaxNs = 0;
-        std::fill(std::begin(mirror->presentAgeHistogram), std::end(mirror->presentAgeHistogram), 0);
-        mirror->renderErrors = 0;
-        values[8] = mirror->decodedImageCount;
-        values[9] = mirror->attachAttempts;
-        values[10] = mirror->attachSuccesses;
-        values[11] = mirror->attachFailures;
-        values[12] = mirror->drawableMisses;
-        values[13] = mirror->lastAttachResult;
-        values[14] = mirror->lastAttachWidth;
-        values[15] = mirror->lastAttachHeight;
-        values[16] = mirror->decodedPixelFormat;
-        values[17] = mirror->decodedSampleMin;
-        values[18] = mirror->decodedSampleMax;
-        values[19] = mirror->lastLayerHasSuperlayer;
-        values[20] = mirror->lastWindowLayerAvailable;
-        values[21] = mirror->lastLayerHidden;
-        values[22] = mirror->lastLayerOpacityMilli;
-        values[23] = mirror->testPattern ? 1 : 0;
-        values[24] = mirror->lastLayerDescendsFromWindow;
-        values[25] = mirror->lastParentHidden;
-        values[26] = mirror->lastParentOpacityMilli;
-        values[27] = mirror->lastLayerZMilli;
-        values[28] = mirror->lastLayerSiblingIndex;
-        values[29] = mirror->lastLayerSiblingCount;
-        values[30] = mirror->lastLayerFrameWidth;
-        values[31] = mirror->lastLayerFrameHeight;
-        values[32] = mirror->lastParentFrameWidth;
-        values[33] = mirror->lastParentFrameHeight;
-        values[34] = mirror->drawableReadbackStatus;
-        values[35] = mirror->drawablePixelMin;
-        values[36] = mirror->drawablePixelMax;
-        values[37] = mirror->lastLayerFrameX;
-        values[38] = mirror->lastLayerFrameY;
-        values[39] = mirror->lastComponentBoundsX;
-        values[40] = mirror->lastComponentBoundsY;
-        values[41] = mirror->lastCanvasWindowX;
-        values[42] = mirror->lastCanvasWindowY;
-        values[43] = mirror->drawableNonBlackGridSamples;
-        values[44] = mirror->lastLayerSiblingMaxZMilli;
-        values[45] = mirror->drawableAlphaMin;
-        values[46] = mirror->drawableAlphaMax;
-        values[47] = mirror->decodedAlphaMin;
-        values[48] = mirror->decodedAlphaMax;
-        mirror->decodedImageCount = 0;
-        mirror->attachAttempts = mirror->attachSuccesses = mirror->attachFailures = mirror->drawableMisses = 0;
+        jlongArray result = env->NewLongArray(49);
+        if (result) env->SetLongArrayRegion(result, 0, 49, values);
+        return result;
     }
-    jlongArray result = env->NewLongArray(49);
-    if (result) env->SetLongArrayRegion(result, 0, 49, values);
-    return result;
 }
 
 static void shutdownMirror(Mirror *mirror) {
@@ -1773,23 +1811,25 @@ static void shutdownMirror(Mirror *mirror) {
 }
 
 extern "C" JNIEXPORT void JNICALL Java_com_indagium_capture_mirror_MacVideoToolboxMirrorNative_nativeClose(JNIEnv *env, jclass, jlong handle) {
-    Mirror *mirror = (Mirror *)handle;
-    if (!mirror) return;
-    CAMetalLayer *layer = nil;
-    {
-        std::lock_guard<std::mutex> guard(mirror->lock);
-        mirror->closed = true;
-        mirror->decodeCompleted.notify_all();
-        layer = mirror->layer;
+    @autoreleasepool {
+        Mirror *mirror = (Mirror *)handle;
+        if (!mirror) return;
+        CAMetalLayer *layer = nil;
+        {
+            std::lock_guard<std::mutex> guard(mirror->lock);
+            mirror->closed = true;
+            mirror->decodeCompleted.notify_all();
+            layer = mirror->layer;
+        }
+        closeLayerAttachmentState(mirror->layerAttachment);
+        // Compose can dispose the Canvas peer before it calls close. Never ask JAWT for a new drawing
+        // surface here; that dereferences the invalid peer. The CAMetalLayer is ours, so detach the
+        // retained layer directly on AppKit's main queue without touching the dead peer.
+        detachLayerFromTree(layer);
+        shutdownMirror(mirror);
+        if (mirror->canvas) env->DeleteGlobalRef(mirror->canvas);
+        delete mirror;
     }
-    closeLayerAttachmentState(mirror->layerAttachment);
-    // Compose can dispose the Canvas peer before it calls close. Never ask JAWT for a new drawing
-    // surface here; that dereferences the invalid peer. The CAMetalLayer is ours, so detach the
-    // retained layer directly on AppKit's main queue without touching the dead peer.
-    detachLayerFromTree(layer);
-    shutdownMirror(mirror);
-    if (mirror->canvas) env->DeleteGlobalRef(mirror->canvas);
-    delete mirror;
 }
 
 // Returns freed-but-retained malloc pages to the OS. The macOS magazine allocator keeps pages freed
