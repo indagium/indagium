@@ -1366,8 +1366,9 @@ data class AppSettings(
     // the other settings-JSON-only fields above.
     val homeRecentGridColumns: Int = DEFAULT_HOME_RECENT_GRID_COLUMNS,
     // Main annotation Copy action. Explicit choices in its menu do not rewrite this preference.
-    // JSON-only so the frozen positional settings token remains compatible.
-    val annotationCopyFormat: AnnotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD,
+    // JSON-only so the frozen positional settings token remains compatible. Jira wiki is the default;
+    // an explicitly stored choice is never rewritten.
+    val annotationCopyFormat: AnnotationCopyFormat = AnnotationCopyFormat.JIRA_WIKI,
     // Shows a compact inventory of retained selectors above the Regex input. Off by default and
     // informational only; it never changes filter behavior.
     val showRegexFilterSummary: Boolean = false,
