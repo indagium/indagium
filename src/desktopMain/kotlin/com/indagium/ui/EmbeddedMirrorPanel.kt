@@ -42,12 +42,14 @@ import androidx.compose.material.icons.outlined.PowerSettingsNew
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.awt.SwingPanel
@@ -86,6 +88,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.rememberWindowState
@@ -109,8 +112,11 @@ import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.capture.mirror.ScrcpyControlEncoder
 import com.indagium.debug.AppLogger
 import com.indagium.model.LogTab
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import java.awt.EventQueue
 import java.awt.Toolkit
 import java.awt.datatransfer.DataFlavor
@@ -2115,6 +2121,10 @@ private fun MirrorTextRow(handle: EmbeddedMirrorHandle?, live: Boolean, clipboar
     }
 }
 
+private const val DETACHED_MIRROR_WIDTH_DP = 620f
+private const val DETACHED_MIRROR_HEIGHT_DP = 760f
+private const val DETACHED_MIRROR_SIZE_SAVE_DELAY_MS = 600L
+
 /**
  * Detached windows live at App scope rather than inside FileView: FileView is keyed to the active
  * tab, and disposing it during a tab switch must not dispose the sole SwingPanel hosting the
@@ -2131,10 +2141,32 @@ internal fun DetachedEmbeddedMirrorWindows(state: AppState) {
 
 @Composable
 private fun DetachedEmbeddedMirrorWindow(state: AppState, tab: LogTab) {
+    // Seeded once from the size last used for this device; resizes are written back (debounced) and on
+    // close, so the next capture's detached window opens the way this one was left.
+    val windowState = rememberWindowState(
+        size = state.captureMirrorLayoutFor(tab.id).let { layout ->
+            DpSize((layout.detachedWidth ?: DETACHED_MIRROR_WIDTH_DP).dp, (layout.detachedHeight ?: DETACHED_MIRROR_HEIGHT_DP).dp)
+        },
+    )
+    val rememberSize = {
+        val size = windowState.size
+        if (size.isSpecified) {
+            state.rememberCaptureMirrorLayout(tab.id) { it.copy(detachedWidth = size.width.value, detachedHeight = size.height.value) }
+        }
+    }
+    LaunchedEffect(tab.id, windowState) {
+        snapshotFlow { windowState.size }.drop(1).collectLatest {
+            delay(DETACHED_MIRROR_SIZE_SAVE_DELAY_MS)
+            rememberSize()
+        }
+    }
     Window(
-        onCloseRequest = { state.returnEmbeddedMirrorToSidebar(tab.id) },
+        onCloseRequest = {
+            rememberSize()
+            state.returnEmbeddedMirrorToSidebar(tab.id)
+        },
         title = "Device mirror — ${tab.filename.removePrefix("Capture — ")}",
-        state = rememberWindowState(size = DpSize(620.dp, 760.dp)),
+        state = windowState,
         resizable = true,
     ) {
         androidx.compose.runtime.CompositionLocalProvider(

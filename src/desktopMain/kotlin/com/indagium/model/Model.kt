@@ -1386,7 +1386,25 @@ data class AppSettings(
     // Workspace profiles the user saved or imported (Settings → General); `workspaceProfileId` may
     // point at one of these as well as at a built-in profile. JSON-only, same rule as above.
     val customWorkspaceProfiles: List<CustomWorkspaceProfile> = emptyList(),
+    // The mirror/Notes height split and detached-mirror-window size last used per capture device
+    // (key: ui/CaptureMirrorLayout.kt's captureMirrorDeviceKey), plus the most recent one for a
+    // device not seen yet. JSON-only, same rule as above.
+    val captureMirrorLayouts: Map<String, CaptureMirrorLayout> = emptyMap(),
+    val lastCaptureMirrorLayout: CaptureMirrorLayout? = null,
 )
+
+/** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,
+ * when the mirror has been detached, that window's size in dp (null until it was resized). */
+data class CaptureMirrorLayout(
+    val videoSplit: Float = DEFAULT_CAPTURE_MIRROR_SPLIT,
+    val detachedWidth: Float? = null,
+    val detachedHeight: Float? = null,
+)
+
+const val DEFAULT_CAPTURE_MIRROR_SPLIT: Float = 0.42f
+const val MIN_CAPTURE_MIRROR_SPLIT: Float = 0.18f
+const val MAX_CAPTURE_MIRROR_SPLIT: Float = 0.82f
+const val MAX_CAPTURE_MIRROR_LAYOUTS: Int = 32
 
 /** The settings and layout values a workspace profile applies (ui/WorkspaceProfiles.kt). */
 data class ProfileSpec(
