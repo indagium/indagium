@@ -448,7 +448,12 @@ class Seq3Session(
     fun sourceTabClosed(tabId: String) {
         sessions.filter { it.sourceTabId == tabId }.forEach { s ->
             generateJobs.remove(s.id)?.cancel()
-            replace(s.id) { it.copy(sourceTabId = null, generating = false) }
+            // Regen-review and revert jobs also read the source tab's rows (they looked the tab up
+            // once, at launch). Cancel them too so none outlives the tab into the release of its rows;
+            // regenBuilding is cleared here because a cancelled job never reaches its own reset.
+            regenJobs.remove(s.id)?.cancel()
+            revertJobs.remove(s.id)?.cancel()
+            replace(s.id) { it.copy(sourceTabId = null, generating = false, regenBuilding = false) }
         }
     }
 

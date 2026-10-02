@@ -70,6 +70,7 @@ import com.indagium.update.assetForCurrentOs
 import com.indagium.update.openFolderInFileManager
 import com.indagium.update.revealInFileManager
 import com.indagium.update.runtimePackageForCurrentProcess
+import com.indagium.utils.AppendOnlyLogList
 import com.indagium.utils.ArchiveBudgetExceededException
 import com.indagium.utils.ArchiveFormat
 import com.indagium.utils.CONTENT_SNIFF_BYTES
@@ -262,6 +263,13 @@ private const val CANONICAL_PATH_CACHE_MAX = 200_000
 
 /** Closing tabs holding at least this many log rows together requests a heap trim (utils/HeapTrim). */
 private const val HEAP_TRIM_CLOSED_ROWS = 50_000L
+
+/**
+ * How long after a tab closes its [AppendOnlyLogList] rows are released (see [AppState.closeTabsById]).
+ * The tab's own jobs are cancelled at close; this grace only lets a reader that was already past its
+ * last cancellation check finish, or hit [com.indagium.utils.ReleasedLogListException] and end quietly.
+ */
+private const val CLOSED_TAB_ROWS_RELEASE_DELAY_MS = 1_500L
 
 // Minimum gap between two "Do you like Indagium?" support popups (see supportPromptDue,
 // maybeShowSupportPromptOnStartup below).
@@ -2770,6 +2778,9 @@ class AppState(
     /** Sink for [requestHeapTrim]; replaced in tests so no real GC is scheduled. */
     internal var heapTrimRequester: (String) -> Unit = HeapTrim::request
 
+    /** Grace before a closed tab's rows are released; tests shorten it so they need not sleep 1.5 s. */
+    internal var closedTabRowsReleaseDelayMs: Long = CLOSED_TAB_ROWS_RELEASE_DELAY_MS
+
     /**
      * Asks for a heap trim (utils/HeapTrim: a real full GC, i.e. a short stop-the-world pause) unless
      * a capture is recording: the pause could stall the tail/mirror threads that feed it. A capture
@@ -4204,6 +4215,11 @@ class AppState(
 
     private val activeLoads = ConcurrentHashMap<String, ActiveLoad>()
     private val pendingRestoredLoads = mutableListOf<RestoredTabShell>()
+
+    // Row stores that an in-flight mergeTabs() is still reading. Guarded by stateLock. A merge keeps
+    // the source tabs' logData and is not cancelled when a source tab closes, so releaseClosedTabRowsLater
+    // must not release these stores out from under it (the merge would silently end half-done).
+    private val mergeSourceStores = mutableListOf<Any>()
 
     // Latest filtered item summary per tab, pushed by LogViewer whenever its (possibly
     // background-computed) item list lands. Selection ops reuse it instead of recomputing the
@@ -8510,10 +8526,15 @@ class AppState(
         // other call sites across this class, so blocking IO/joins must never run while holding it.
         val stragglerMirrors = mutableListOf<EmbeddedMirrorHandle>()
         var trimHeapAfterClose = false
+        var rowsToRelease: List<AppendOnlyLogList> = emptyList()
         synchronized(stateLock) {
             // Decided from the tabs about to disappear, before `tabs = next` below drops them. Cheap
             // counting only; the GC request itself is issued after the lock is released.
-            trimHeapAfterClose = shouldTrimHeapAfterClosing(tabs.filter { it.id in tabIds })
+            val closing = tabs.filter { it.id in tabIds }
+            trimHeapAfterClose = shouldTrimHeapAfterClosing(closing)
+            // Taken in the same critical section as cancelTailingFor below, and appendTailedLines
+            // also needs stateLock, so no tail batch can extend these lists once we are past here.
+            rowsToRelease = closing.mapNotNull { it.logData as? AppendOnlyLogList }.distinctBy { it.storeIdentity }
             tabIds.forEach { tabId ->
                 seq3Sessions.sourceTabClosed(tabId)
                 aiSessions.remove(tabId)
@@ -8521,6 +8542,10 @@ class AppState(
                 tailCoordinator.cancelTailingFor(tabId)
                 videoControllers.remove(tabId)?.close()
                 captureMonitorJobsByTab.remove(tabId)?.cancel()
+                // These two scan the tab's rows off-thread and were never cancelled at close, so a
+                // late one would run into the row release below (or just burn CPU on a dead tab).
+                searchJobs.remove(tabId)?.cancel()
+                compositionJobs.remove(tabId)?.cancel()
                 embeddedMirrorStartJobsByTab.remove(tabId)?.cancel()
                 embeddedMirrorsByTab.remove(tabId)?.let(stragglerMirrors::add)
                 detachedEmbeddedMirrorTabs.remove(tabId)
@@ -8561,7 +8586,38 @@ class AppState(
         pruneArchiveVideoCache()
         // A closed big/capture tab leaves gigabytes of freed-but-committed heap that an idle G1
         // never hands back; see utils/HeapTrim for why this asks for a full GC.
-        if (trimHeapAfterClose) requestHeapTrim("closed large or capture tab")
+        if (rowsToRelease.isNotEmpty()) {
+            // The release job issues the trim itself, AFTER dropping the rows: a trim requested here
+            // would run first, and HeapTrim's coalescing would then absorb the later request.
+            releaseClosedTabRowsLater(rowsToRelease, trimAfterwards = trimHeapAfterClose)
+        } else if (trimHeapAfterClose) {
+            requestHeapTrim("closed large or capture tab")
+        }
+    }
+
+    /**
+     * Explicitly releases the row stores of closed tabs after [closedTabRowsReleaseDelayMs]. Closing
+     * a stopped capture tab used to keep its whole log (1.4M rows measured) live: an invalid Compose
+     * snapshot record of [tabs] still holds the pre-close list, Compose reuses invalid records
+     * lazily, and an idle app never gets there. We cannot flush those records, so instead of
+     * relying on unreachability we make the stale reference cheap (a [LogTab] plus an empty store).
+     *
+     * A store is skipped when a remaining tab, a not-yet-loaded restored tab, or an in-flight merge
+     * still uses it; that list is read under [stateLock] together with the release itself so a
+     * reader cannot register in between. [trimAfterwards] carries the close-time trim decision: the
+     * GC has to run after the release to free anything.
+     */
+    private fun releaseClosedTabRowsLater(rows: List<AppendOnlyLogList>, trimAfterwards: Boolean) {
+        ioScope.launch {
+            delay(closedTabRowsReleaseDelayMs)
+            val released = synchronized(stateLock) {
+                val inUse = HashSet<Any>(mergeSourceStores)
+                tabs.forEach { tab -> (tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
+                pendingRestoredLoads.forEach { shell -> (shell.tab.logData as? AppendOnlyLogList)?.let { inUse += it.storeIdentity } }
+                rows.filter { it.storeIdentity !in inUse }.onEach(AppendOnlyLogList::release).isNotEmpty()
+            }
+            if (trimAfterwards) requestHeapTrim(if (released) "released closed capture rows" else "closed large or capture tab")
+        }
     }
 
     // Ships "merge already-open tabs" (v1) — data's already in memory, no re-parsing needed.
@@ -8582,11 +8638,19 @@ class AppState(
         val sources = tabsToMerge.map { MergeSourceFile(it.filename, it.logData) }
         if (sources.size < 2) return
         val n = tabCounter.getAndIncrement()
+        val pinnedStores = tabsToMerge.mapNotNull { (it.logData as? AppendOnlyLogList)?.storeIdentity }
+        synchronized(stateLock) { mergeSourceStores.addAll(pinnedStores) }
         beginLoading("Merging logs...")
         ioScope.launch {
             var published = false
             try {
-                val merged = mergeLogs(sources)
+                // The sources are only read here; unpin as soon as mergeLogs is done with them so a
+                // closed source tab's rows are not kept for the (long) analysis pass over `merged`.
+                val merged = try {
+                    mergeLogs(sources)
+                } finally {
+                    synchronized(stateLock) { pinnedStores.forEach { mergeSourceStores.remove(it) } }
+                }
                 ensureActive()
                 val t = mkTab(
                     "t$n", newTabName, merged,

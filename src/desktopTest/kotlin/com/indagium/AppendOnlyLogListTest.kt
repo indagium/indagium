@@ -5,7 +5,9 @@ package com.indagium
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.utils.AppendOnlyLogList
+import com.indagium.utils.ReleasedLogListException
 import com.indagium.utils.appendLogEntries
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -13,6 +15,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -141,6 +144,60 @@ class AppendOnlyLogListTest {
         assertFailsWith<IndexOutOfBoundsException> { v1[4] }
         assertFailsWith<IndexOutOfBoundsException> { v1[-1] }
         assertEquals(4, v1[3].id)
+    }
+
+    @Test
+    fun releaseEmptiesTheStoreAndKeepsReportingTheOldSize() {
+        val list = appendLogEntries(entries(1..10), entries(11..12)) as AppendOnlyLogList
+        assertFalse(list.isReleased)
+        assertTrue(list.capacity >= 12)
+        list.release()
+        assertTrue(list.isReleased)
+        assertEquals(0, list.capacity)
+        assertEquals(12, list.size, "size is a plain val and keeps its pre-release value")
+    }
+
+    @Test
+    fun readingAReleasedListThrowsACancellationException() {
+        val v1 = appendLogEntries(entries(1..5), entries(6..7)) as AppendOnlyLogList
+        val v2 = appendLogEntries(v1, entries(8..9)) as AppendOnlyLogList
+        v2.release()
+        // Every view of the store is unreadable, older ones included.
+        val failure: Throwable = assertFailsWith<ReleasedLogListException> { v2[0] }
+        assertTrue(failure is CancellationException, "a late reader must end like a cancelled job")
+        assertFailsWith<ReleasedLogListException> { v1[3] }
+        assertFailsWith<ReleasedLogListException> { v1.iterator().next() }
+        // Index validation still comes first.
+        assertFailsWith<IndexOutOfBoundsException> { v2[v2.size] }
+    }
+
+    @Test
+    fun releaseIsIdempotent() {
+        val list = appendLogEntries(entries(1..3), entries(4..4)) as AppendOnlyLogList
+        list.release()
+        list.release()
+        assertTrue(list.isReleased)
+        assertEquals(0, list.capacity)
+        assertFailsWith<ReleasedLogListException> { list[0] }
+    }
+
+    @Test
+    fun releasingOneStoreLeavesAnIndependentStoreReadable() {
+        val released = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        val other = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        assertNotSame(store(released), store(other))
+        released.release()
+        assertFalse(other.isReleased)
+        assertEquals(entries(1..5), other)
+    }
+
+    @Test
+    fun appendingToAReleasedBaseThrowsTheDedicatedException() {
+        val base = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        base.release()
+        assertFailsWith<ReleasedLogListException> { appendLogEntries(base, entries(6..6)) }
+        // An empty batch still returns the base untouched, released or not.
+        assertSame(base, appendLogEntries(base, emptyList()))
     }
 
     @Test
