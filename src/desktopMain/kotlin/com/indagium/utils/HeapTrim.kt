@@ -97,15 +97,29 @@ internal class HeapTrimScheduler(
         const val DEFAULT_DELAY_MS = 3_000L
         const val BYTES_PER_MB = 1024L * 1024L
 
-        // macOS only: its magazine allocator is the one that hoards freed pages (measured); the
-        // Linux and Windows mirror libraries have no equivalent hook and are deliberately not loaded
-        // just for a trim.
-        fun defaultNativeRelief(): Long =
-            if (System.getProperty("os.name").orEmpty().contains("mac", ignoreCase = true)) {
-                MacVideoToolboxMirrorNative.releaseFreedMemory()
-            } else {
-                0L
+        // macOS: the magazine allocator hoards freed pages (measured) -> malloc_zone_pressure_relief
+        // through our mirror dylib. Linux: glibc keeps freed memory in its arenas the same way;
+        // JavaCPP (already bundled and loaded for FFmpeg) exposes malloc_trim(0) as
+        // Pointer.trimMemory(), so no new native code or Linux build step is needed. It reports
+        // success, not bytes, hence 0 (nothing to log). Windows returns large freed blocks itself.
+        @Suppress("TooGenericExceptionCaught", "SwallowedException")
+        fun defaultNativeRelief(): Long {
+            val os = System.getProperty("os.name").orEmpty()
+            return when {
+                os.contains("mac", ignoreCase = true) -> MacVideoToolboxMirrorNative.releaseFreedMemory()
+                os.contains("linux", ignoreCase = true) -> {
+                    // Throwable, not Exception: a missing JavaCPP native lib is an UnsatisfiedLinkError,
+                    // and a best-effort trim must never break the caller.
+                    try {
+                        org.bytedeco.javacpp.Pointer.trimMemory()
+                    } catch (ignored: Throwable) {
+                        // Best effort only.
+                    }
+                    0L
+                }
+                else -> 0L
             }
+        }
 
         fun defaultExecutor(): ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "indagium-heap-trim").apply { isDaemon = true }
