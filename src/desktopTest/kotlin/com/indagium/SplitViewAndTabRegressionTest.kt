@@ -756,6 +756,88 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
+    fun reconcileTabOrderPutsAReplacementTabInTheSlotOfTheOneItReplaced() {
+        // The New tab "new" sat in the middle; opening a file replaces it with "f" at the same index.
+        val previous = listOf(TabRef.Log("a"), TabRef.Log("new"), TabRef.Log("b"))
+
+        val reconciled = reconcileTabOrder(previous, logTabIds = listOf("a", "f", "b"), diagramSessionIds = emptyList())
+
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("f"), TabRef.Log("b")), reconciled)
+    }
+
+    @Test
+    fun reconcileTabOrderReplacementKeepsTheFirstAndLastSlots() {
+        val first = reconcileTabOrder(
+            listOf(TabRef.Log("new"), TabRef.Log("a"), TabRef.Log("b")),
+            logTabIds = listOf("f", "a", "b"),
+            diagramSessionIds = emptyList(),
+        )
+        assertEquals(listOf(TabRef.Log("f"), TabRef.Log("a"), TabRef.Log("b")), first)
+
+        val last = reconcileTabOrder(
+            listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("new")),
+            logTabIds = listOf("a", "b", "f"),
+            diagramSessionIds = emptyList(),
+        )
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("b"), TabRef.Log("f")), last)
+    }
+
+    @Test
+    fun reconcileTabOrderReplacementKeepsItsSlotNextToAnInterleavedDiagram() {
+        val previous = listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("new"), TabRef.Log("b"))
+
+        val reconciled = reconcileTabOrder(previous, logTabIds = listOf("a", "f", "b"), diagramSessionIds = listOf("seq3-1"))
+
+        // Right after its nearest preceding log tab "a" (and so before the diagram the user put there):
+        // a log tab's slot is defined relative to the log tabs, the diagram keeps its own neighbours.
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Log("f"), TabRef.Diagram("seq3-1"), TabRef.Log("b")), reconciled)
+    }
+
+    @Test
+    fun reconcileTabOrderStillAppendsAPlainNewLogTabAtTheEnd() {
+        val previous = listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"))
+
+        val reconciled = reconcileTabOrder(previous, logTabIds = listOf("a", "b", "c"), diagramSessionIds = listOf("seq3-1"))
+
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"), TabRef.Log("c")), reconciled)
+    }
+
+    @Test
+    fun reconcileTabOrderNeverReordersKeptTabsEvenWhenTheStoreOrderDiffers() {
+        // The strip's order (b before a) is the user's; the store order (a, b) must not undo it.
+        val previous = listOf(TabRef.Log("b"), TabRef.Log("a"))
+
+        val reconciled = reconcileTabOrder(previous, logTabIds = listOf("a", "x", "b"), diagramSessionIds = emptyList())
+
+        assertEquals(listOf(TabRef.Log("b"), TabRef.Log("a"), TabRef.Log("x")), reconciled)
+    }
+
+    @Test
+    fun reconcileTabOrderPlacesSeveralNewLogTabsInStoreOrderAndDiagramsAtTheEnd() {
+        val previous = listOf(TabRef.Log("a"), TabRef.Log("b"))
+
+        val reconciled = reconcileTabOrder(
+            previous,
+            logTabIds = listOf("a", "n1", "n2", "b"),
+            diagramSessionIds = listOf("seq3-1"),
+        )
+
+        assertEquals(
+            listOf(TabRef.Log("a"), TabRef.Log("n1"), TabRef.Log("n2"), TabRef.Log("b"), TabRef.Diagram("seq3-1")),
+            reconciled,
+        )
+    }
+
+    @Test
+    fun reconcileTabOrderWithNoKeptLogTabsAppendsNewOnes() {
+        val previous = listOf(TabRef.Diagram("seq3-1"), TabRef.Log("gone"))
+
+        val reconciled = reconcileTabOrder(previous, logTabIds = listOf("n"), diagramSessionIds = listOf("seq3-1"))
+
+        assertEquals(listOf(TabRef.Diagram("seq3-1"), TabRef.Log("n")), reconciled)
+    }
+
+    @Test
     fun partitionTabOrderSeparatesLogAndDiagramIdsPreservingEachKindsRelativeOrder() {
         val order = listOf(
             TabRef.Log("a"),
