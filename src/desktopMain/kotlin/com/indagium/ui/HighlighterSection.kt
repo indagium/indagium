@@ -213,6 +213,10 @@ internal fun HighlighterSection(
     onTabOut: () -> Unit,
     onReclaimFocus: () -> Unit,
     onUiStateChanged: () -> Unit,
+    // When non-null, receives the expanded body (list + add form) so the Filters panel can place it
+    // in its resizable splitter slot; the header stays where it is. Null (the default, and what the
+    // standalone UI tests use) composes the body inline exactly as before.
+    bodyHost: (@Composable (body: @Composable () -> Unit) -> Unit)? = null,
 ) {
     val tc = tc()
     val filter = tab.filter
@@ -290,91 +294,94 @@ internal fun HighlighterSection(
             },
         )
     }
-    if (fpState.highlightersExpanded && displayedCount > 0 && fpState.hlListExpanded) {
-        val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
-        BoundedScrollBoxDp(rows) {
-            if (regexHighlightAvailable) {
-                KeywordHighlightRow(filter, kwPickerOpen, { kwPickerOpen = it }, actions)
-            }
-            filter.highlighters.forEach { hl ->
-                Column {
-                    HighlighterRow(
-                        hl = hl,
-                        countText = counts.counts[hl.id]?.let { formatHighlightCount(it, counts.capped) },
-                        colorPicker = {
-                            HighlighterColorPicker(
-                                color = hl.color,
-                                onColorChange = { actions.onSetColor(hl.id, it) },
-                                customColors = actions.customColors,
-                                onSaveCustomColor = actions.onSaveCustomColor,
-                                onDeleteCustomColor = actions.onDeleteCustomColor,
-                                paletteColumns = actions.paletteColumns,
-                                onPaletteColumnsChange = actions.onPaletteColumnsChange,
-                                pickerOpen = sectionState.rowColorPickerId == hl.id,
-                                onPickerOpenChange = { open -> sectionState.rowColorPickerId = if (open) hl.id else null },
-                                testTagPrefix = "highlighter-row-color",
-                                customColorEditorExpanded = actions.customColorEditorExpanded,
-                                onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
-                            )
-                        },
-                        editing = editingId == hl.id,
-                        onEdit = { editingId = if (editingId == hl.id) null else hl.id },
-                        onToggleMode = { actions.onUpdate(hl.id) { it.copy(wholeLine = !it.wholeLine) } },
-                        onToggleOn = { actions.onToggle(hl.id) },
-                        onRemove = { actions.onRemove(hl.id) },
-                    )
-                    if (editingId == hl.id) {
-                        HighlighterEditor(
-                            tab = tab,
-                            original = hl,
-                            sortedTags = sortedTags,
-                            actions = actions,
-                            onDone = { edited ->
-                                actions.onUpdate(hl.id) { current ->
-                                    current.copy(
-                                        pattern = edited.pattern,
-                                        regex = edited.regex,
-                                        caseSensitive = edited.caseSensitive,
-                                        wholeLine = edited.wholeLine,
-                                        target = edited.target,
-                                        tag = edited.tag,
-                                        color = edited.color,
-                                        textColor = edited.textColor,
-                                        backgroundEnabled = edited.backgroundEnabled,
-                                        fontFamily = edited.fontFamily,
-                                        bold = edited.bold,
-                                        italic = edited.italic,
+    if (fpState.highlightersExpanded) {
+        val body: @Composable () -> Unit = {
+            if (displayedCount > 0 && fpState.hlListExpanded) {
+                val rows = minOf(displayedCount, filterListRows) * HL_ROW_DP + if (editing != null) HL_EDITOR_EXTRA_DP else 0
+                BoundedScrollBoxDp(rows) {
+                    if (regexHighlightAvailable) {
+                        KeywordHighlightRow(filter, kwPickerOpen, { kwPickerOpen = it }, actions)
+                    }
+                    filter.highlighters.forEach { hl ->
+                        Column {
+                            HighlighterRow(
+                                hl = hl,
+                                countText = counts.counts[hl.id]?.let { formatHighlightCount(it, counts.capped) },
+                                colorPicker = {
+                                    HighlighterColorPicker(
+                                        color = hl.color,
+                                        onColorChange = { actions.onSetColor(hl.id, it) },
+                                        customColors = actions.customColors,
+                                        onSaveCustomColor = actions.onSaveCustomColor,
+                                        onDeleteCustomColor = actions.onDeleteCustomColor,
+                                        paletteColumns = actions.paletteColumns,
+                                        onPaletteColumnsChange = actions.onPaletteColumnsChange,
+                                        pickerOpen = sectionState.rowColorPickerId == hl.id,
+                                        onPickerOpenChange = { open -> sectionState.rowColorPickerId = if (open) hl.id else null },
+                                        testTagPrefix = "highlighter-row-color",
+                                        customColorEditorExpanded = actions.customColorEditorExpanded,
+                                        onCustomColorEditorExpandedChange = actions.onCustomColorEditorExpandedChange,
                                     )
-                                }
-                                editingId = null
-                                onReclaimFocus()
-                            },
-                            onCancel = { editingId = null; onReclaimFocus() },
-                            onDelete = { editingId = null; actions.onRemove(hl.id); onReclaimFocus() },
-                        )
+                                },
+                                editing = editingId == hl.id,
+                                onEdit = { editingId = if (editingId == hl.id) null else hl.id },
+                                onToggleMode = { actions.onUpdate(hl.id) { it.copy(wholeLine = !it.wholeLine) } },
+                                onToggleOn = { actions.onToggle(hl.id) },
+                                onRemove = { actions.onRemove(hl.id) },
+                            )
+                            if (editingId == hl.id) {
+                                HighlighterEditor(
+                                    tab = tab,
+                                    original = hl,
+                                    sortedTags = sortedTags,
+                                    actions = actions,
+                                    onDone = { edited ->
+                                        actions.onUpdate(hl.id) { current ->
+                                            current.copy(
+                                                pattern = edited.pattern,
+                                                regex = edited.regex,
+                                                caseSensitive = edited.caseSensitive,
+                                                wholeLine = edited.wholeLine,
+                                                target = edited.target,
+                                                tag = edited.tag,
+                                                color = edited.color,
+                                                textColor = edited.textColor,
+                                                backgroundEnabled = edited.backgroundEnabled,
+                                                fontFamily = edited.fontFamily,
+                                                bold = edited.bold,
+                                                italic = edited.italic,
+                                            )
+                                        }
+                                        editingId = null
+                                        onReclaimFocus()
+                                    },
+                                    onCancel = { editingId = null; onReclaimFocus() },
+                                    onDelete = { editingId = null; actions.onRemove(hl.id); onReclaimFocus() },
+                                )
+                            }
+                        }
                     }
                 }
             }
+            HighlighterAddForm(
+                tab = tab,
+                sectionState = sectionState,
+                actions = actions,
+                sortedTags = sortedTags,
+                tagUsage = tagUsage,
+                mostUsedTagLimit = mostUsedTagLimit,
+                newHlPat = newHlPat,
+                newHlRx = newHlRx,
+                newHlColor = newHlColor,
+                inputFocusRequester = inputFocusRequester,
+                onFocusedChange = { focused ->
+                    addFocused = focused
+                    onInputFocusedChange(focused || editing != null)
+                },
+                onTabOut = onTabOut,
+            )
         }
-    }
-    if (fpState.highlightersExpanded) {
-        HighlighterAddForm(
-            tab = tab,
-            sectionState = sectionState,
-            actions = actions,
-            sortedTags = sortedTags,
-            tagUsage = tagUsage,
-            mostUsedTagLimit = mostUsedTagLimit,
-            newHlPat = newHlPat,
-            newHlRx = newHlRx,
-            newHlColor = newHlColor,
-            inputFocusRequester = inputFocusRequester,
-            onFocusedChange = { focused ->
-                addFocused = focused
-                onInputFocusedChange(focused || editing != null)
-            },
-            onTabOut = onTabOut,
-        )
+        if (bodyHost != null) bodyHost(body) else body()
     }
 }
 

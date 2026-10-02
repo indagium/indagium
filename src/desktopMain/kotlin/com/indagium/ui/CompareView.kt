@@ -128,9 +128,17 @@ internal fun CompareView(
                 // at the same vertical offset — this is a side-by-side diff view.
                 Box(Modifier.fillMaxWidth().height(22.dp).background(tc.p2))
                 Row(Modifier.weight(1f).fillMaxWidth()) {
+                    // The left column has no sidebar; the panel only has to leave the log view its
+                    // minimum inside this column. Read live (state.compareSplit) so the divider drag
+                    // and a compare-split change both see the current column width.
+                    fun filterEffectiveMaxNow(): Float =
+                        (totalWidthDp * state.compareSplit - PANEL_DIVIDER_WIDTH - LOG_VIEW_MIN_WIDTH)
+                            .coerceIn(FILTER_PANEL_MIN_WIDTH, FILTER_PANEL_MAX_WIDTH)
                     BoundFilterPanel(
                         state = state,
                         tab = leftTab,
+                        width = minOf(state.filterPanelWidth, filterEffectiveMaxNow()),
+                        liveMaxWidth = ::filterEffectiveMaxNow,
                         focusRequester = filterFr,
                         filterSearchRequest = filterSearchRequest,
                         onFilterSearchRequestConsumed = onFilterSearchRequestConsumed,

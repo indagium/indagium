@@ -34,6 +34,13 @@ internal fun consumeFilterSearchRequest(
 internal fun BoundFilterPanel(
     state: AppState,
     tab: LogTab,
+    // The width this panel actually renders at: min(state.filterPanelWidth, the window-relative
+    // guard). The stored value is never rewritten by the guard, same as the annotation sidebar.
+    width: Float,
+    // The window-relative max RIGHT NOW, re-evaluated on every call. The divider drag below calls
+    // this instead of closing over a value computed at the last recomposition — see the comment
+    // on the divider callback.
+    liveMaxWidth: () -> Float,
     focusRequester: FocusRequester? = null,
     filterBarVisible: Boolean = false,
     filterSearchRequest: FilterSearchRequest? = null,
@@ -207,7 +214,7 @@ internal fun BoundFilterPanel(
         mostUsedTagLimit = state.settings.mostUsedTagLimit,
         filterListRows = state.settings.filterListRows,
         customIssueRules = state.settings.customIssueRules,
-        width = state.filterPanelWidth,
+        width = width,
         focusRequester = focusRequester,
         filterBarVisible = filterBarVisible,
         filterSearchRequest = filterSearchRequest,
@@ -215,7 +222,16 @@ internal fun BoundFilterPanel(
         onPanelFocusChanged = onPanelFocusChanged,
         keyboardFocusVisible = state.keyboardFocusVisible,
     )
-    HDivider { delta -> state.updateFilterPanelWidth(state.filterPanelWidth + delta) }
+    HDivider { delta ->
+        // Recompute live instead of closing over `width`/`liveMaxWidth()` as of the last
+        // recomposition: the drag gesture can deliver several deltas before recomposition catches
+        // up, and state.filterPanelWidth already reflects each prior delta (mutableStateOf writes
+        // are synchronous). Starting from the stale rendered width would land every delta on the
+        // pre-drag base — the jitter/snap-back FileView's sidebar divider documents.
+        val liveMax = liveMaxWidth()
+        val liveRendered = minOf(state.filterPanelWidth, liveMax)
+        state.updateFilterPanelWidth((liveRendered + delta).coerceAtMost(liveMax))
+    }
 }
 
 // ── FileView ──────────────────────────────────────────────────────────
@@ -282,9 +298,33 @@ internal fun FileView(
         // otherwise happily squeeze LogViewer's weight(1f) share to nothing on a narrow window.
         var rowWidthPx by remember { mutableStateOf(0) }
         val rowDensity = LocalDensity.current
+        // Hoisted above the Row so the Filters panel can reserve the sidebar's minimum width the
+        // same way the sidebar reserves the filter panel's rendered width below.
+        val liveStatusSidebarVisible = state.videoPanelVisible &&
+            (tab.attachedVideo != null || tab.captureSessionId != null)
+        val notesVisibleForTab = state.annotationVisible
+        val rightSidebarVisible = notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible
+
+        // Evaluated live (reads state, not recomposition-time locals) because HDivider drag
+        // callbacks call these between recompositions. Before the first layout pass
+        // rowWidthPx is 0; treating that as "no guard yet" keeps the panel at its stored width for
+        // that frame instead of flashing at FILTER_PANEL_MIN_WIDTH.
+        fun filterEffectiveMaxNow(): Float =
+            if (rowWidthPx <= 0) {
+                FILTER_PANEL_MAX_WIDTH
+            } else {
+                filterPanelEffectiveMaxWidth(
+                    availableRowWidth = with(rowDensity) { rowWidthPx.toDp().value },
+                    rightSidebarVisible = rightSidebarVisible,
+                )
+            }
+
+        fun filterRenderedWidthNow(): Float = minOf(state.filterPanelWidth, filterEffectiveMaxNow())
         Row(Modifier.weight(1f).fillMaxWidth().onSizeChanged { rowWidthPx = it.width }) {
             BoundFilterPanel(
                 state, tab,
+                width = filterRenderedWidthNow(),
+                liveMaxWidth = ::filterEffectiveMaxNow,
                 focusRequester = filterFr,
                 filterBarVisible = state.filterBarVisible,
                 filterSearchRequest = filterSearchRequest,
@@ -392,15 +432,15 @@ internal fun FileView(
                 filterBarVisible = state.filterBarVisible,
                 onToggleFilterBar = { state.updateFilterBarVisible(!state.filterBarVisible) },
             )
-            val liveStatusSidebarVisible = state.videoPanelVisible &&
-                (tab.attachedVideo != null || tab.captureSessionId != null)
-            val notesVisibleForTab = state.annotationVisible
-            if (notesVisibleForTab || state.aiPanelVisible || liveStatusSidebarVisible) {
+            if (rightSidebarVisible) {
                 val rowWidthDp = with(rowDensity) { rowWidthPx.toDp().value }
+                // The sidebar is clamped from the filter panel's RENDERED width, not its stored
+                // one (which may now be far larger than the window allows) — see
+                // filterPanelEffectiveMaxWidth for why the two guards are ordered this way.
                 val annotationEffectiveMax = annotationPanelEffectiveMaxWidth(
                     availableRowWidth = rowWidthDp,
                     filterVisible = state.filterVisible,
-                    filterPanelWidth = state.filterPanelWidth,
+                    filterPanelWidth = filterRenderedWidthNow(),
                 )
                 // The rendered width only ever clamps DOWN from the stored value — the stored
                 // value itself is left alone so widening the window again restores it without a
@@ -422,7 +462,7 @@ internal fun FileView(
                     val liveEffectiveMax = annotationPanelEffectiveMaxWidth(
                         availableRowWidth = with(rowDensity) { rowWidthPx.toDp().value },
                         filterVisible = state.filterVisible,
-                        filterPanelWidth = state.filterPanelWidth,
+                        filterPanelWidth = filterRenderedWidthNow(),
                     )
                     val liveRenderedWidth = minOf(state.annotationPanelWidth, liveEffectiveMax)
                     state.updateAnnotationPanelWidth((liveRenderedWidth - delta).coerceAtMost(liveEffectiveMax))
