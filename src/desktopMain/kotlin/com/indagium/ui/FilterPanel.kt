@@ -43,12 +43,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.zIndex
 import com.indagium.model.*
@@ -59,10 +55,8 @@ import com.indagium.utils.IssueSiteGroup
 import com.indagium.utils.MAX_DISTINCT_TEMPLATES
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.TAG_PID_TOKEN_PREFIX
-import com.indagium.utils.TagProcessInfo
 import com.indagium.utils.cachedCrossingThreadHintsFor
 import com.indagium.utils.containsPattern
-import com.indagium.utils.defaultTagProcessSelection
 import com.indagium.utils.firstRegexMatch
 import com.indagium.utils.groupIssueSites
 import com.indagium.utils.issueSitesForCategory
@@ -72,8 +66,6 @@ import com.indagium.utils.matchingMessageRule
 import com.indagium.utils.messageRuleSpecForTemplate
 import com.indagium.utils.passesFilter
 import com.indagium.utils.resolvePidTidTokens
-import com.indagium.utils.tagProcessInfo
-import com.indagium.utils.tagProcessRulePattern
 import com.indagium.utils.viewDefiningKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -699,19 +691,8 @@ internal fun FilterPanel(
     var showTagCandidates by remember { mutableStateOf(false) }
     var tagSelectedIdx by remember { mutableStateOf(-1) }
     var tagSelectedAction by remember { mutableStateOf(0) } // -1 = pid popover (TAG_ACTION_PID), 0 = include, 1 = exclude
-    // "Follow the process" popover opened from a tag row's pid button. The tag it is open for (null
-    // = closed), the scan result (null while scanning), the user's pid checkboxes and the
-    // keep-following choice live here so the popover itself stays stateless (TagProcessPopover.kt).
-    var pidPopoverTag by remember(tab.id) { mutableStateOf<String?>(null) }
-    var pidPopoverInfos by remember(tab.id) { mutableStateOf<List<TagProcessInfo>?>(null) }
-    var pidPopoverSelected by remember(tab.id) { mutableStateOf<Set<Int>>(emptySet()) }
-    var pidPopoverKeepFollowing by remember(tab.id) { mutableStateOf(true) }
-    // Keyboard cursor over the popover's pid rows plus its final "Keep following" row (-1 = none).
-    var pidPopoverCursor by remember(tab.id) { mutableStateOf(-1) }
-    var hoveredPidTag by remember(tab.id) { mutableStateOf<String?>(null) }
-    // Dismissing the popup by clicking its own pid button would otherwise be followed by that same
-    // click re-opening it (the IssueCategoryDropdown race), so toggles are ignored just after a dismiss.
-    var pidToggleSuppressedUntilMs by remember { mutableStateOf(0L) }
+    // "Follow the process" popover opened from a tag row's pid button (TagProcessPopover.kt).
+    val pidPopover = remember(tab.id) { TagPidPopoverState() }
     var panelRightPx by remember { mutableStateOf(0) }
     var colorPickerSeqId by remember { mutableStateOf<String?>(null) }
     // Task 3: transient "no log line matches this sequence's start pattern" notice shown under a
@@ -734,8 +715,8 @@ internal fun FilterPanel(
     }
     // The open pid popover keeps the dropdown (and so its anchor row) mounted: clicking the pid
     // button moves keyboard focus off the tag field, which would otherwise hide the list.
-    LaunchedEffect(tagFieldFocused, tagCandidatesHovered, pidPopoverTag) {
-        if (tagFieldFocused || tagCandidatesHovered || pidPopoverTag != null) {
+    LaunchedEffect(tagFieldFocused, tagCandidatesHovered, pidPopover.tag) {
+        if (tagFieldFocused || tagCandidatesHovered || pidPopover.isOpen) {
             showTagCandidates = true
         } else { kotlinx.coroutines.delay(100); if (!tagFieldFocused && !tagCandidatesHovered) showTagCandidates = false }
     }
@@ -762,62 +743,19 @@ internal fun FilterPanel(
         pkgs + tags
     }
 
-    // Every close path (Cancel, outside click, Esc, after Add) hands focus back to the tag field: the
-    // popup's clickable pid button stole it, and the panel's key handler would otherwise go deaf.
-    fun closePidPopover() {
-        pidPopoverTag = null
-        pidPopoverInfos = null
-        runCatching { tagFr.requestFocus() }
-    }
-
-    // Shared by the pid button's click and Enter on a row whose keyboard action is the pid button. The
-    // popup is not focusable, so focus is pulled back to the tag field either way: its key handler
-    // drives the popover.
-    fun openPidPopover(tag: String) {
-        pidPopoverInfos = null
-        pidPopoverCursor = -1
-        pidPopoverTag = tag
-        runCatching { tagFr.requestFocus() }
-    }
-
-    fun addPidFilter(tag: String) {
-        val infos = pidPopoverInfos.orEmpty()
-        val pattern = tagProcessRulePattern(tag, pidPopoverSelected, infos.mapTo(HashSet()) { it.pid }, pidPopoverKeepFollowing)
-        // Unscoped, so the whole process shows, not just this tag's lines.
-        onAddMessageRule(true, pattern, false, null, null, RuleTarget.PID_TID)
-        closePidPopover()
-    }
+    // The popup's clickable pid button steals focus and the panel's key handler would go deaf, so
+    // every open/close hands it back to the tag field (the field's key handler drives the popover).
+    pidPopover.refocus = { tagFr.requestFocus() }
+    // Unscoped, so the whole process shows, not just this tag's lines.
+    pidPopover.commitRule = { pattern -> onAddMessageRule(true, pattern, false, null, null, RuleTarget.PID_TID) }
 
     fun pidAvailableFor(candidate: Pair<String, Boolean>?): Boolean =
         candidate != null && !candidate.second && !tab.analysis.tagPids[candidate.first].isNullOrEmpty()
 
-    fun togglePidPopoverPid(pid: Int) {
-        pidPopoverSelected = if (pid in pidPopoverSelected) pidPopoverSelected - pid else pidPopoverSelected + pid
-    }
-
     // Typing in the tag field can drop the anchor row while the popover is open; close it then
     // instead of leaving it (and the keep-alive above) stranded.
-    LaunchedEffect(combinedTagCandidates, pidPopoverTag) {
-        val open = pidPopoverTag
-        if (open != null && combinedTagCandidates.none { (value, isPkg) -> !isPkg && value == open }) closePidPopover()
-    }
-    // Full scan, not the large-file cap: the line counts in the popover must be right. Re-runs when
-    // logData changes (a live tail), keeping the user's checkboxes; only the first result seeds them.
-    LaunchedEffect(pidPopoverTag, tab.logData) {
-        val scanTag = pidPopoverTag ?: return@LaunchedEffect
-        val seed = pidPopoverInfos == null
-        val data = tab.logData
-        val names = tab.analysis.processNames
-        val result = withContext(Dispatchers.Default) { tagProcessInfo(data, scanTag, names) { ensureActive() } }
-        pidPopoverInfos = result
-        if (seed) {
-            pidPopoverSelected = defaultTagProcessSelection(result)
-            pidPopoverKeepFollowing = true
-            pidPopoverCursor = 0
-        } else {
-            pidPopoverCursor = clampPopoverCursor(pidPopoverCursor, popoverItemCount(result))
-        }
-    }
+    LaunchedEffect(combinedTagCandidates, pidPopover.tag) { pidPopover.closeIfMissing(combinedTagCandidates) }
+    TagPidPopoverScanEffect(pidPopover, tab)
 
     // Debounced keyword state — display updates immediately, filter applies after 150ms pause.
     // kwLastSent tracks the last value we pushed so we don't sync our own debounce back as an external change.
@@ -1160,8 +1098,8 @@ internal fun FilterPanel(
             .onFocusChanged { panelFocused = it.hasFocus; onPanelFocusChanged(it.hasFocus) }
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                if (ev.key == Key.Escape && pidPopoverTag != null) {
-                    closePidPopover()
+                if (ev.key == Key.Escape && pidPopover.isOpen) {
+                    pidPopover.close()
                     return@onPreviewKeyEvent true
                 }
                 val fieldFocused = tagFieldFocused || msgRuleFieldFocused || msgRuleScopeFieldFocused || hlFieldFocused || kwFieldFocused
@@ -1286,32 +1224,9 @@ internal fun FilterPanel(
                         .onFocusChanged { tagFieldFocused = it.isFocused }
                         .onPreviewKeyEvent { ev ->
                             if (ev.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                            val popoverTag = pidPopoverTag
-                            if (popoverTag != null) {
-                                val infos = pidPopoverInfos
-                                val itemCount = popoverItemCount(infos)
-                                when (ev.key) {
-                                    Key.DirectionDown -> pidPopoverCursor = movePopoverCursor(pidPopoverCursor, +1, itemCount)
-                                    Key.DirectionUp -> pidPopoverCursor = movePopoverCursor(pidPopoverCursor, -1, itemCount)
-                                    Key.Spacebar -> {
-                                        val item = infos?.getOrNull(pidPopoverCursor)
-                                        if (item != null) {
-                                            togglePidPopoverPid(item.pid)
-                                        } else if (infos != null && pidPopoverCursor == infos.size &&
-                                            canKeepFollowing(popoverTag, infos, pidPopoverSelected)
-                                        ) {
-                                            pidPopoverKeepFollowing = !pidPopoverKeepFollowing
-                                        }
-                                    }
-                                    Key.Enter, Key.NumPadEnter -> if (canAddTagProcess(infos, pidPopoverSelected)) addPidFilter(popoverTag)
-                                    Key.Escape -> closePidPopover()
-                                    // Tab leaves the field as usual, so close first: an open popover
-                                    // with focus elsewhere would no longer receive its keys.
-                                    Key.Tab -> { closePidPopover(); runCatching { msgRuleFr.requestFocus() } }
-                                    Key.DirectionLeft, Key.DirectionRight -> Unit
-                                    else -> return@onPreviewKeyEvent false
-                                }
-                                return@onPreviewKeyEvent true
+                            if (pidPopover.isOpen) {
+                                // Tab leaves the field as usual, once the popover closed.
+                                return@onPreviewKeyEvent pidPopover.handleKey(ev.key) { runCatching { msgRuleFr.requestFocus() } }
                             }
                             when (ev.key) {
                                 Key.Tab -> { runCatching { msgRuleFr.requestFocus() }; true }
@@ -1342,7 +1257,7 @@ internal fun FilterPanel(
                                     val c = combinedTagCandidates.getOrNull(tagSelectedIdx)
                                     if (c != null) {
                                         if (tagSelectedAction == TAG_ACTION_PID && pidAvailableFor(c)) {
-                                            openPidPopover(c.first)
+                                            pidPopover.open(c.first)
                                         } else if (c.second) {
                                             if (tagSelectedAction == 0) onAddPkgPrefix(c.first) else onAddExcludePkgPrefix(c.first)
                                         } else if (tagSelectedAction == 0) {
@@ -1439,8 +1354,8 @@ internal fun FilterPanel(
                                 val (label, packageLabel) = displayTagForPrefix(tag, filter.pkgPrefixes)
                                 HoverBox(
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 1.dp)
-                                        .onPointerEvent(PointerEventType.Enter) { hoveredPidTag = tag }
-                                        .onPointerEvent(PointerEventType.Exit) { if (hoveredPidTag == tag) hoveredPidTag = null },
+                                        .onPointerEvent(PointerEventType.Enter) { pidPopover.hoveredTag = tag }
+                                        .onPointerEvent(PointerEventType.Exit) { if (pidPopover.hoveredTag == tag) pidPopover.hoveredTag = null },
                                     baseBg = if (isRowSelected) tc.abg else Color.Transparent,
                                     hoverBg = tc.hv,
                                 ) {
@@ -1472,38 +1387,14 @@ internal fun FilterPanel(
                                         }
                                         AppText((tagCounts[tag] ?: 0).toString(), color = tc.td, fontSize = 10.sp, fontFamily = MONO,
                                             modifier = Modifier.width(26.dp), overflow = TextOverflow.Clip)
-                                        // Always 20dp wide so showing/hiding the button never shifts the row.
-                                        val pidOpen = pidPopoverTag == tag
-                                        Box(Modifier.size(20.dp)) {
-                                            if (!tab.analysis.tagPids[tag].isNullOrEmpty() && (hoveredPidTag == tag || isRowSelected || pidOpen)) {
-                                                TagPidButton(open = pidOpen, kbd = isRowSelected && tagSelectedAction == TAG_ACTION_PID) {
-                                                    if (System.currentTimeMillis() < pidToggleSuppressedUntilMs) return@TagPidButton
-                                                    if (pidOpen) closePidPopover() else openPidPopover(tag)
-                                                }
-                                            }
-                                            if (pidOpen) {
-                                                Popup(
-                                                    popupPositionProvider = remember(panelRightPx) { RightOfPanelPositionProvider(panelRightPx) },
-                                                    onDismissRequest = {
-                                                        pidToggleSuppressedUntilMs = System.currentTimeMillis() + 200
-                                                        closePidPopover()
-                                                    },
-                                                    properties = PopupProperties(focusable = false),
-                                                ) {
-                                                    TagProcessPopover(
-                                                        tag = tag,
-                                                        infos = pidPopoverInfos,
-                                                        selected = pidPopoverSelected,
-                                                        keepFollowing = pidPopoverKeepFollowing,
-                                                        onToggle = { pid -> togglePidPopoverPid(pid) },
-                                                        onKeepFollowingChange = { pidPopoverKeepFollowing = it },
-                                                        onAdd = { addPidFilter(tag) },
-                                                        onCancel = { closePidPopover() },
-                                                        cursor = pidPopoverCursor,
-                                                    )
-                                                }
-                                            }
-                                        }
+                                        TagPidSlot(
+                                            tag = tag,
+                                            state = pidPopover,
+                                            hasPids = !tab.analysis.tagPids[tag].isNullOrEmpty(),
+                                            rowSelected = isRowSelected,
+                                            kbd = isRowSelected && tagSelectedAction == TAG_ACTION_PID,
+                                            positionProvider = remember(panelRightPx) { RightOfEdgePositionProvider(panelRightPx) },
+                                        )
                                         val incHighlight = isIncluded
                                         val incKbd = isRowSelected && tagSelectedAction == 0
                                         Box(
@@ -4018,36 +3909,6 @@ internal fun messageRuleScopeOptions(
     return listOf(messageRuleAllScope()) +
         prefixes.map { prefix -> MessageRuleScopeOption(label = "$prefix.*", packagePrefix = prefix) } +
         tags
-}
-
-// The small "pid" box on a tag row of the Tags search dropdown (matches the +/− boxes' footprint).
-@Composable
-private fun TagPidButton(open: Boolean, kbd: Boolean = false, onClick: () -> Unit) {
-    val tc = tc()
-    Box(
-        Modifier.size(20.dp)
-            .background(if (open) tc.ac.copy(.2f) else if (kbd) tc.ac.copy(.1f) else Color.Transparent, CORNER_SM)
-            .border(1.dp, if (open || kbd) tc.ac else tc.br, CORNER_SM)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        AppText("pid", color = if (open || kbd) tc.ac else tc.ts, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
-    }
-}
-
-// Opens the pid popover just right of the filter panel (so it never covers the tag list it was
-// opened from), top-aligned with its anchor row and clamped into the window.
-private class RightOfPanelPositionProvider(private val panelRightPx: Int) : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset {
-        val x = (panelRightPx + 6).coerceAtMost(windowSize.width - popupContentSize.width).coerceAtLeast(0)
-        val y = anchorBounds.top.coerceAtMost(windowSize.height - popupContentSize.height).coerceAtLeast(0)
-        return IntOffset(x, y)
-    }
 }
 
 private fun ruleTargetPatternLabel(pattern: String, regex: Boolean, target: RuleTarget): String = when (target) {

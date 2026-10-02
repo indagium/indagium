@@ -356,6 +356,87 @@ class FilterBarUiTest {
         assertEquals("initial", latestFilter.kwText)
     }
 
+    @Test
+    fun tagRowPidButtonOpensThePopoverAndAddsAPidRule() {
+        var latestFilter = Filter(mode = TAGS)
+        installBar(latestFilter, SAMPLE_LOG) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        waitForTagCandidates()
+        // Keyboard-select the first tag row so its pid button is drawn (hover is not simulated).
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.DirectionDown) }
+        rule.waitUntilAtLeastOneExists(hasTestTag("filter-bar-tags-candidate-0-pid"), 2_000)
+
+        rule.onNodeWithTag("filter-bar-tags-candidate-0-pid").performClick()
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-add"), POPUP_TIMEOUT_MS)
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-item-1234"), POPUP_TIMEOUT_MS)
+        rule.onNodeWithTag("tag-process-add").performClick()
+
+        rule.waitUntil(2_000) { latestFilter.messageRules.isNotEmpty() }
+        val added = latestFilter.messageRules.single()
+        assertEquals(com.indagium.model.RuleTarget.PID_TID, added.target)
+        assertTrue(added.include)
+        rule.waitUntil(2_000) { rule.onAllNodes(hasTestTag("tag-process-add")).fetchSemanticsNodes().isEmpty() }
+    }
+
+    @Test
+    fun tagRowKeyboardCyclesToPidAndEnterOpensThePopoverDrivenByTheField() {
+        var latestFilter = Filter(mode = TAGS)
+        installBar(latestFilter, SAMPLE_LOG) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        waitForTagCandidates()
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionLeft) // include -> pid
+            pressKey(Key.Enter)
+        }
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-add"), POPUP_TIMEOUT_MS)
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-item-1234"), POPUP_TIMEOUT_MS)
+        assertTrue(latestFilter.activeTags.isEmpty(), "opening the popover must not toggle the tag")
+
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.Enter) } // add
+        rule.waitUntil(2_000) { latestFilter.messageRules.isNotEmpty() }
+        assertEquals(com.indagium.model.RuleTarget.PID_TID, latestFilter.messageRules.single().target)
+    }
+
+    @Test
+    fun escapeInsideThePidPopoverClosesOnlyThePopover() {
+        var latestFilter = Filter(mode = TAGS)
+        installBar(latestFilter, SAMPLE_LOG) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        waitForTagCandidates()
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionLeft)
+            pressKey(Key.Enter)
+        }
+        rule.waitUntilAtLeastOneExists(hasTestTag("tag-process-add"), POPUP_TIMEOUT_MS)
+
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput { pressKey(Key.Escape) }
+        rule.waitUntil(2_000) { rule.onAllNodes(hasTestTag("tag-process-add")).fetchSemanticsNodes().isEmpty() }
+        assertTrue(latestFilter.messageRules.isEmpty())
+        rule.onNodeWithTag(TAG_CANDIDATES).assertExists()
+    }
+
+    @Test
+    fun tagRowWithoutKnownPidsHasNoPidButtonAndLeftStaysOnInclude() {
+        var latestFilter = Filter(mode = TAGS)
+        // No log data: no tag has pids.
+        installBar(latestFilter) { latestFilter = it }
+
+        rule.onNodeWithTag(TAG_INPUT).performClick()
+        waitForTagCandidates()
+        rule.onNodeWithTag(TAG_INPUT).performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionLeft)
+            pressKey(Key.Enter)
+        }
+        rule.waitUntil(2_000) { "com.example.Alpha" in latestFilter.activeTags }
+        assertTrue(rule.onAllNodes(hasTestTag("filter-bar-tags-candidate-0-pid")).fetchSemanticsNodes().isEmpty())
+    }
+
     private fun installBar(
         initialFilter: Filter,
         logData: List<LogEntry> = emptyList(),
@@ -448,6 +529,7 @@ class FilterBarUiTest {
         filter = filter,
         analysis = com.indagium.model.LogAnalysis(
             tagCounts = logData.groupingBy { it.tag }.eachCount(),
+            tagPids = logData.groupBy({ it.tag }, { it.pid }).mapValues { (_, pids) -> pids.filterNotNull().toSet() },
             pending = false,
         ),
     )
