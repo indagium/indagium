@@ -997,7 +997,7 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             .coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS),
         annotationCopyFormat = o.stringOrNull("annotationCopyFormat")
             ?.let { raw -> runCatching { AnnotationCopyFormat.valueOf(raw) }.getOrNull() }
-            ?: AnnotationCopyFormat.JIRA_CLOUD,
+            ?: AnnotationCopyFormat.JIRA_WIKI,
         showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
         deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),

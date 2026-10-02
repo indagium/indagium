@@ -12,8 +12,8 @@ import kotlin.test.assertTrue
 
 class AnnotationSettingsCodecTest {
     @Test
-    fun copyDefaultAndRegexSummaryRoundTripAndKeepCloudDefaultOffForSummary() {
-        assertEquals(AnnotationCopyFormat.JIRA_CLOUD, AppSettings().annotationCopyFormat)
+    fun copyDefaultAndRegexSummaryRoundTripAndKeepWikiDefaultOffForSummary() {
+        assertEquals(AnnotationCopyFormat.JIRA_WIKI, AppSettings().annotationCopyFormat)
         assertFalse(AppSettings().showRegexFilterSummary)
 
         val configured = AppSettings(
@@ -33,7 +33,16 @@ class AnnotationSettingsCodecTest {
         val restored = settingsFromJson("""{"annotationLogBlockStyle":"JIRA_JAVA"}""")!!
 
         assertEquals(AnnotationLogBlockStyle.JIRA_JAVA, restored.annotationLogBlockStyle)
-        assertEquals(AnnotationCopyFormat.JIRA_CLOUD, restored.annotationCopyFormat)
+        assertEquals(AnnotationCopyFormat.JIRA_WIKI, restored.annotationCopyFormat)
         assertFalse(restored.showRegexFilterSummary)
+    }
+
+    @Test
+    fun invalidStoredCopyFormatFallsBackToWikiButExplicitCloudIsKept() {
+        val invalid = settingsFromJson("""{"annotationCopyFormat":"NOPE"}""")!!
+        assertEquals(AnnotationCopyFormat.JIRA_WIKI, invalid.annotationCopyFormat)
+
+        val cloud = settingsFromJson(AppSettings(annotationCopyFormat = AnnotationCopyFormat.JIRA_CLOUD).settingsJson())!!
+        assertEquals(AnnotationCopyFormat.JIRA_CLOUD, cloud.annotationCopyFormat)
     }
 }
