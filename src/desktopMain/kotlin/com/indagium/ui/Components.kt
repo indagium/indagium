@@ -201,7 +201,7 @@ fun HDivider(onDelta: (Float) -> Unit) {
 }
 
 @Composable
-fun VDivider(onDelta: (Float) -> Unit) {
+fun VDivider(onDragEnd: () -> Unit = {}, onDelta: (Float) -> Unit) {
     val tc = tc()
     val density = LocalDensity.current.density
     val cursor  = remember { AwtCursor.getPredefinedCursor(AwtCursor.S_RESIZE_CURSOR) }
@@ -209,7 +209,9 @@ fun VDivider(onDelta: (Float) -> Unit) {
     var dragging by remember { mutableStateOf(false) }
     // See HDivider's identical comment: keeps the drag gesture (launched once, never relaunched)
     // calling the latest `onDelta` instead of whichever closure existed at first composition.
+    // [onDragEnd] fires once when a drag is released (not per pixel) — for persisting the final size.
     val currentOnDelta by rememberUpdatedState(onDelta)
+    val currentOnDragEnd by rememberUpdatedState(onDragEnd)
     Box(
         Modifier
             .height(10.dp).fillMaxWidth()
@@ -218,7 +220,10 @@ fun VDivider(onDelta: (Float) -> Unit) {
             .pointerInput(density) {
                 detectDragGestures(
                     onDragStart  = { dragging = true;  dragCursorOverride.value = cursor; activeWindow()?.cursor = cursor },
-                    onDragEnd    = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
+                    onDragEnd    = {
+                        dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor()
+                        currentOnDragEnd()
+                    },
                     onDragCancel = { dragging = false; dragCursorOverride.value = null;   activeWindow()?.cursor = AwtCursor.getDefaultCursor() },
                     onDrag = { change, dragAmount -> change.consume(); currentOnDelta(dragAmount.y / density) },
                 )

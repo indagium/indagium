@@ -677,6 +677,8 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     workspaceProfileId?.let { put("workspaceProfileId", it) }
     put("setupAssistantDone", setupAssistantDone)
     put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
+    put("captureMirrorLayouts", captureMirrorLayoutsJson(captureMirrorLayouts))
+    lastCaptureMirrorLayout?.let { put("lastCaptureMirrorLayout", captureMirrorLayoutJson(it)) }
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -1000,6 +1002,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
             ?: AnnotationCopyFormat.JIRA_WIKI,
         showRegexFilterSummary = o.boolOrDefault("showRegexFilterSummary", false),
         deviceLoggingPanelExpanded = o.boolOrDefault("deviceLoggingPanelExpanded", true),
+        captureMirrorLayouts = o.captureMirrorLayoutsFromJson("captureMirrorLayouts"),
+        lastCaptureMirrorLayout = (o["lastCaptureMirrorLayout"] as? JsonObject)?.captureMirrorLayoutFromJson(),
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
         setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),

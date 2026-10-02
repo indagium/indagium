@@ -3795,6 +3795,26 @@ class AppState(
         synchronized(stateLock) { capturePreviewJobsByTab[tabId] = job }
     }
 
+    /** The device a capture tab belongs to: its live recorder's session, else the retained session
+     * (a stopped tab). Null when neither is known yet. */
+    private fun captureDeviceFor(tabId: String): CaptureDevice? {
+        val tab = tab(tabId) ?: return null
+        captureControllerFor(tabId)?.snapshot?.value?.session?.let { return it.device }
+        val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
+        return captureService.sessions.firstOrNull { it.id == sessionId }?.device
+    }
+
+    /** The remembered mirror/Notes split and detached-window size for a capture tab: this device's
+     * own entry, else the last layout used for any device, else the default. */
+    internal fun captureMirrorLayoutFor(tabId: String): CaptureMirrorLayout =
+        settings.captureMirrorLayoutFor(captureDeviceFor(tabId)?.let(::captureMirrorDeviceKey))
+
+    /** Stores [update] applied to the tab's layout, for its device and as the last layout used. */
+    internal fun rememberCaptureMirrorLayout(tabId: String, update: (CaptureMirrorLayout) -> CaptureMirrorLayout) {
+        val key = captureDeviceFor(tabId)?.let(::captureMirrorDeviceKey)
+        updateSettings { it.withCaptureMirrorLayout(key, update) }
+    }
+
     /** Cancels only the export job; the per-tab recorder remains active. */
     internal fun cancelCaptureSnapshot() {
         captureExportJob?.cancel()

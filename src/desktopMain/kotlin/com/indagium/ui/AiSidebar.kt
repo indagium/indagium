@@ -101,7 +101,10 @@ import com.indagium.ai.isLoopbackHost
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
+import com.indagium.model.DEFAULT_CAPTURE_MIRROR_SPLIT
 import com.indagium.model.LogTab
+import com.indagium.model.MAX_CAPTURE_MIRROR_SPLIT
+import com.indagium.model.MIN_CAPTURE_MIRROR_SPLIT
 import com.indagium.model.VoiceRecognitionEngine
 import com.indagium.utils.formatDuration
 import com.indagium.voice.AppleSpeechNative
@@ -180,7 +183,12 @@ internal fun RightSidebarPanel(
     val videoOn = videoContent != null
     val density = LocalDensity.current
     var totalHeightPx by remember { mutableStateOf(0) }
-    var videoSplit by remember(tab.id) { mutableStateOf(0.42f) }
+    // A capture tab starts from the split last used for its device (see AppState.captureMirrorLayoutFor);
+    // anything else keeps the default.
+    val isCaptureTab = tab.captureSessionId != null || tab.captureSourceSessionId != null
+    var videoSplit by remember(tab.id) {
+        mutableStateOf(if (isCaptureTab) state.captureMirrorLayoutFor(tab.id).videoSplit else DEFAULT_CAPTURE_MIRROR_SPLIT)
+    }
     var videoSidebarVisible by remember(tab.id) { mutableStateOf(true) }
     CompositionLocalProvider(LocalVideoSidebarExpandedChange provides { videoSidebarVisible = it }) {
         Column(Modifier.width(width.dp).fillMaxHeight().background(tc().p)) {
@@ -217,9 +225,14 @@ internal fun RightSidebarPanel(
                     }
                 }
                 if (videoOn && videoSidebarVisible && (notesOn || aiOn)) {
-                    VDivider { delta ->
+                    VDivider(
+                        // Once per drag, not per pixel: each remember rewrites the settings and autosaves.
+                        onDragEnd = {
+                            if (isCaptureTab) state.rememberCaptureMirrorLayout(tab.id) { it.copy(videoSplit = videoSplit) }
+                        },
+                    ) { delta ->
                         val next = (videoSplit * totalHeightDp + delta) / totalHeightDp
-                        videoSplit = next.coerceIn(0.18f, 0.82f)
+                        videoSplit = next.coerceIn(MIN_CAPTURE_MIRROR_SPLIT, MAX_CAPTURE_MIRROR_SPLIT)
                     }
                 }
                 if (notesOn || aiOn) {
