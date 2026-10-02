@@ -4065,6 +4065,8 @@ class AppState(
         val settings = this.settings.captureSettings.let { base -> settingsOverride?.invoke(base) ?: base }
         val controller = captureService.newController()
         val tabId = "t${tabCounter.getAndIncrement()}"
+        // Where Start was pressed: the live tab takes the launcher's place (see publishOpenedTab).
+        val originLauncherId = activeLauncherTabId()
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
         ioScope.launch {
             var published = false
@@ -4097,8 +4099,7 @@ class AppState(
                     )
                     synchronized(stateLock) {
                         check(tabs.none { it.captureSessionId != null }) { "A capture is already recording" }
-                        tabs = tabs + liveTab
-                        setActiveSurfaceToTab(tabId)
+                        publishOpenedTab(liveTab, originLauncherId)
                     }
                     published = true
                     // FileTailer captures this offset synchronously before its coroutine is scheduled.
@@ -8504,6 +8505,46 @@ class AppState(
         activeSurface = ActiveSurface.Log(tabId)
     }
 
+    /** The home/launcher ("New tab") tab's id when it is the tab the user is looking at right now.
+     * An open action captures this when it starts and hands it to [publishOpenedTab], so the opened
+     * file takes the launcher's place instead of leaving a stray New tab behind. */
+    internal fun activeLauncherTabId(): String? = synchronized(stateLock) {
+        val surface = activeSurface
+        tabs.firstOrNull { it.id == activeTabId && it.isCaptureLauncher }?.id
+            ?.takeIf { id -> surface == null || (surface is ActiveSurface.Log && surface.tabId == id) }
+    }
+
+    /**
+     * Publishes a tab produced by a user "open" action. When [originLauncherId] (see
+     * [activeLauncherTabId]) still exists and is still the active tab, the new tab takes the
+     * launcher's position and the launcher is closed — one atomic edit under [stateLock]. Otherwise
+     * (opened from a normal tab, or the user switched away while it loaded) the tab is appended as
+     * before. Sync callers rely on the default, which reads the launcher at the moment of publishing.
+     */
+    private fun publishOpenedTab(tab: LogTab, originLauncherId: String? = activeLauncherTabId()) {
+        synchronized(stateLock) {
+            val launcherIndex = originLauncherId?.takeIf { it == activeLauncherTabId() }
+                ?.let { id -> tabs.indexOfFirst { it.id == id } } ?: -1
+            if (launcherIndex < 0) {
+                tabs = tabs + tab
+                setActiveSurfaceToTab(tab.id)
+                return
+            }
+            tabs = tabs.toMutableList().apply { add(launcherIndex + 1, tab) }
+            setActiveSurfaceToTab(tab.id)
+            // Reentrant: runs the launcher's normal close cleanup, now that the new tab is active.
+            closeTabsById(setOf(tabs[launcherIndex].id), preferredActiveId = tab.id)
+        }
+    }
+
+    /** Activates a tab that an open action found already open and, if that action came from the
+     * launcher, closes the launcher too (same "no stray New tab" rule as [publishOpenedTab]). */
+    private fun activateAlreadyOpenTab(existingId: String) {
+        val launcherId = activeLauncherTabId()
+        setActiveSurfaceToTab(existingId)
+        if (launcherId != null) closeTabsById(setOf(launcherId), preferredActiveId = existingId)
+    }
+
     fun activateOverflowTab(tabId: String): Unit = synchronized(stateLock) {
         val tab = tabs.find { it.id == tabId } ?: return
         tabs = tabs.filter { it.id != tabId } + tab
@@ -9095,7 +9136,7 @@ class AppState(
         // Switch to existing tab if this file is already open
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            setActiveSurfaceToTab(existing.id); return existing.id
+            activateAlreadyOpenTab(existing.id); return existing.id
         }
         // ArchiveFormat.None, not a raw length check: see openPaths' identical guard for why a
         // bare compressed log is exempt (its on-disk size under-reports real content, and it has
@@ -9109,6 +9150,7 @@ class AppState(
         }
         val n = tabCounter.getAndIncrement() // capture on calling thread before launching
         val tabId = "t$n"
+        val originLauncherId = activeLauncherTabId() // same: the launcher this open came from, if any
         // file.length() is the on-disk (compressed) size for a bare compressed log — often ~10x
         // smaller than what it actually decompresses to, which is what largeFileMode's rendering
         // shortcuts care about. There's no cheap way to know the real decompressed size before
@@ -9154,8 +9196,7 @@ class AppState(
                     )
                 synchronized(stateLock) {
                     ensureActive()
-                    tabs = tabs + t
-                    setActiveSurfaceToTab(t.id)
+                    publishOpenedTab(t, originLauncherId)
                 }
                 AppLogger.info("open", "Opened ${file.name} (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -9273,11 +9314,12 @@ class AppState(
     fun openCaptureFile(file: File): String {
         val existing = tabs.firstOrNull { it.attachedVideo?.captureSourcePath == file.absolutePath }
         if (existing != null) {
-            setActiveSurfaceToTab(existing.id)
+            activateAlreadyOpenTab(existing.id)
             offerCaptureNotesReimportIfNeeded(existing, file)
             return existing.id
         }
         val tabId = "t${tabCounter.getAndIncrement()}"
+        val originLauncherId = activeLauncherTabId()
         beginLoading("Opening capture session...")
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
             var published = false
@@ -9336,8 +9378,7 @@ class AppState(
                 if (importedNotes != null) captureTab = captureTab.copy(annotations = importedNotes)
                 synchronized(stateLock) {
                     ensureActive()
-                    tabs = tabs + captureTab
-                    setActiveSurfaceToTab(tabId)
+                    publishOpenedTab(captureTab, originLauncherId)
                     if (video != null) videoPanelVisible = true
                 }
                 rememberRecentFile(file)
@@ -9718,7 +9759,7 @@ class AppState(
         val path = "${zipFile.absolutePath}!${candidate.entryPath}"
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            activateTab(existing.id); return existing.id
+            activateAlreadyOpenTab(existing.id); return existing.id
         }
         if (!bypassSplitPrompt) {
             val shortfall = if (bypassMemoryCheck) null else memoryShortfallFor(listOf(candidate.sizeBytes))
@@ -9734,6 +9775,7 @@ class AppState(
         }
         val n = tabCounter.getAndIncrement()
         val tabId = "t$n"
+        val originLauncherId = activeLauncherTabId()
         val largeFile = candidate.sizeBytes >= LARGE_FILE_MODE_BYTES
         beginLoading()
         val job = ioScope.launch(start = CoroutineStart.LAZY) {
@@ -9785,8 +9827,7 @@ class AppState(
                     )
                 synchronized(stateLock) {
                     ensureActive()
-                    tabs = tabs + t
-                    setActiveSurfaceToTab(t.id)
+                    publishOpenedTab(t, originLauncherId)
                 }
                 AppLogger.info("open", "Opened ${candidate.displayName} from archive (${logData.size} entries)")
                 markActiveLoadFinished(tabId)
@@ -10086,7 +10127,7 @@ class AppState(
         val path = file.absolutePath
         val existing = tabs.find { it.sourcePath == path }
         if (existing != null) {
-            setActiveSurfaceToTab(existing.id)
+            activateAlreadyOpenTab(existing.id)
             return existing.id
         }
         rememberRecentFile(file)
@@ -10116,10 +10157,7 @@ class AppState(
                 largeFileMode = file.length() >= LARGE_FILE_MODE_BYTES,
                 showUnfiltered = settings.openNewFilesWithUnfiltered,
             )
-        synchronized(stateLock) {
-            tabs = tabs + t
-            setActiveSurfaceToTab(t.id)
-        }
+        publishOpenedTab(t)
         autoLoadOwnNotesIfAny(tabId)
         return tabId
     }
@@ -10685,10 +10723,7 @@ class AppState(
         if (!file.isFile) return null
         val n = tabCounter.getAndIncrement()
         val t = emptyWorkspaceTab().copy(id = "t$n", filename = file.nameWithoutExtension)
-        synchronized(stateLock) {
-            tabs = tabs + t
-            setActiveSurfaceToTab(t.id)
-        }
+        publishOpenedTab(t)
         openNoteFileAsync(t.id, file)
         return t.id
     }
@@ -11147,6 +11182,7 @@ class AppState(
         val preview = caseLibraryPreview?.takeIf { it.id == id } ?: return
         val seq = ++caseReopenRequestSeq
         caseLibraryNotesOnlyLoadingId = id
+        val originLauncherId = activeLauncherTabId()
         ioScope.launch {
             val record = caseSearch.getCase(id)
             val noteFile = record?.mdPath?.let(::File) ?: record?.annPath?.let(::File)
@@ -11158,10 +11194,7 @@ class AppState(
             }
             val n = tabCounter.getAndIncrement()
             val t = emptyWorkspaceTab().copy(id = "t$n", filename = preview.title)
-            synchronized(stateLock) {
-                tabs = tabs + t
-                setActiveSurfaceToTab(t.id)
-            }
+            publishOpenedTab(t, originLauncherId)
             caseLibraryNotesOnlyLoadingId = null
             openNoteFile(t.id, noteFile)
             closeCaseLibrary()
