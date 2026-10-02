@@ -1,5 +1,6 @@
 package com.indagium.utils
 
+import com.indagium.capture.mirror.MacVideoToolboxMirrorNative
 import com.indagium.debug.AppLogger
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -25,6 +26,11 @@ import java.util.concurrent.atomic.AtomicBoolean
  * and never while a capture is recording (see AppState.requestHeapTrim). `-XX:G1PeriodicGCInterval`
  * stays as the cheap, concurrent idle backstop.
  *
+ * The JVM heap is only half of it. Capture finalization and ZIP export run FFmpeg, whose transient
+ * native buffers the macOS magazine allocator keeps dirty after `free` until system memory
+ * pressure (hundreds of MB in a measured capture -> Stop -> export cycle, with live malloc flat).
+ * So on macOS the trim also calls `malloc_zone_pressure_relief` right after the GC.
+ *
  * Requests are coalesced: the first one schedules a single GC a few seconds out (so the caller's
  * references have dropped and a burst of closes costs one cycle), later ones while it is pending
  * are absorbed.
@@ -39,6 +45,8 @@ internal object HeapTrim {
 internal class HeapTrimScheduler(
     private val delayMs: Long = DEFAULT_DELAY_MS,
     private val gc: () -> Unit = System::gc,
+    /** Returns freed native memory to the OS after [gc]; yields the bytes released (0 = no-op). */
+    private val nativeRelief: () -> Long = ::defaultNativeRelief,
     private val executor: ScheduledExecutorService = defaultExecutor(),
 ) {
     private val pending = AtomicBoolean(false)
@@ -71,6 +79,8 @@ internal class HeapTrimScheduler(
         try {
             log("heap trim ($reason)")
             gc()
+            val released = nativeRelief()
+            if (released > 0) log("heap trim ($reason): released ${released / BYTES_PER_MB} MB of native memory")
         } catch (ignored: Throwable) {
             // Best effort: a failed hint must never disturb the caller or kill the executor thread.
         }
@@ -82,6 +92,17 @@ internal class HeapTrimScheduler(
 
     private companion object {
         const val DEFAULT_DELAY_MS = 3_000L
+        const val BYTES_PER_MB = 1024L * 1024L
+
+        // macOS only: its magazine allocator is the one that hoards freed pages (measured); the
+        // Linux and Windows mirror libraries have no equivalent hook and are deliberately not loaded
+        // just for a trim.
+        fun defaultNativeRelief(): Long =
+            if (System.getProperty("os.name").orEmpty().contains("mac", ignoreCase = true)) {
+                MacVideoToolboxMirrorNative.releaseFreedMemory()
+            } else {
+                0L
+            }
 
         fun defaultExecutor(): ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor { runnable ->
             Thread(runnable, "indagium-heap-trim").apply { isDaemon = true }
