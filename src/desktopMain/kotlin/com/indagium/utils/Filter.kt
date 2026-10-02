@@ -1227,14 +1227,17 @@ internal fun computeItems(
 private fun sourcePrefixLabel(settings: AppSettings): String =
     settings.annotationPrefixLabel.trim().ifBlank { "From" }
 
-private fun annotationLineContext(tab: LogTab, settings: AppSettings): LogLinePresentationContext =
-    LogLinePresentationContext(tab, settings, visibleEntries(tab))
-
 // Extracted out of buildMd() purely to keep that function's cyclomatic complexity under the
 // detekt gate — same behavior as when it was inlined in the AnnBlock.LogRef branch. Returns the
 // next block number (only advanced when numbering is on, mirroring the original inline
 // `blockNumber++` which was itself gated on settings.numberAnnotationBlocks).
-private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, block: AnnBlock.LogRef, blockNumber: Int): Int {
+private fun StringBuilder.appendLogRefBlock(
+    tab: LogTab,
+    settings: AppSettings,
+    block: AnnBlock.LogRef,
+    blockNumber: Int,
+    lineContext: Lazy<LogLinePresentationContext>,
+): Int {
     if (settings.numberAnnotationBlocks) append("$blockNumber. ")
     if (block.caption.isNotBlank()) {
         appendLine(block.caption); appendLine()
@@ -1246,7 +1249,7 @@ private fun StringBuilder.appendLogRefBlock(tab: LogTab, settings: AppSettings, 
     // A recovered/cross-tab LogRef has no reliable current viewer baseline or process-name map.
     // It still copies its own PID/TID data, but deliberately falls back to numeric PID and omits Δt.
     val localSource = block.sourceTabId == null && rows.all { tab.hasSameRow(it) }
-    val context = if (localSource) annotationLineContext(tab, settings) else null
+    val context = annotationLogLineContext(tab, settings, localSource, lineContext)
     when (settings.annotationLogBlockStyle) {
         AnnotationLogBlockStyle.INDENTED ->
             rows.forEach { row -> appendLine("    ${presentLogLine(tab, row, settings, context, allowProcessName = localSource)}") }
@@ -1339,7 +1342,11 @@ private fun StringBuilder.appendDiagramNote(
 // with no attachment behind them yet. JIRA_JAVA is the only style shown these anchors (Jira Cloud
 // users on Indented would otherwise see broken `!filename!` syntax); INDENTED keeps the older
 // plain-text `[screenshot]` marker.
-fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildString {
+fun buildMd(
+    tab: LogTab,
+    settings: AppSettings = AppSettings(),
+    lineContext: Lazy<LogLinePresentationContext> = sharedLogLineContext(tab, settings),
+): String = buildString {
     if (tab.annotations.prefix.isNotBlank()) {
         appendLine(tab.annotations.prefix); appendLine()
     }
@@ -1369,7 +1376,7 @@ fun buildMd(tab: LogTab, settings: AppSettings = AppSettings()): String = buildS
                 }
             }
 
-            is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber)
+            is AnnBlock.LogRef -> blockNumber = appendLogRefBlock(tab, settings, block, blockNumber, lineContext)
 
             is AnnBlock.Image -> {
                 imageOrdinal += 1

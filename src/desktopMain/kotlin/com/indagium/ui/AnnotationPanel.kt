@@ -557,8 +557,10 @@ fun AnnotationPanel(
     // own comment for why this must be a full path, not just tab.noteTargetName's bare filename.
     activeNotePath: String? = null,
     onToggleMd: () -> Unit,
-    onCopy: () -> Unit,
-    onCopyFormat: (AnnotationCopyFormat) -> Unit = {},
+    // Builds and sets the clipboard off the UI thread; reports success on the EDT. The panel owns the
+    // Copying…/Copied! feedback (see rememberCopyFeedback), shared by the header, the preview dialog
+    // and the keyboard shortcut.
+    onCopyFormat: (AnnotationCopyFormat, (Boolean) -> Unit) -> Unit = { _, done -> done(true) },
     onCopyImage: (AnnBlock.Image) -> Unit,
     // Diagram PNGs are rendered from the model in the active theme. The app owns the platform
     // clipboard; the panel only supplies bytes plus useful plain-text fallback.
@@ -635,6 +637,7 @@ fun AnnotationPanel(
 ) {
     val tc = tc()
     val notesLocked = LocalNotesEditLocked.current
+    val copyFeedback = rememberCopyFeedback(tab.id, onCopyFormat)
 
     fun mutate(action: () -> Unit) {
         if (notesMutationAllowed(notesLocked)) action()
@@ -881,7 +884,7 @@ fun AnnotationPanel(
         val target = noteTargets.getOrNull(navIndex) ?: return
         when (target.kind) {
             KeyboardTargetKind.NotePreview -> if (hasAnnotationBlocks) onToggleMd()
-            KeyboardTargetKind.NoteCopy -> onCopy()
+            KeyboardTargetKind.NoteCopy -> copyFeedback.start(settings.annotationCopyFormat)
             KeyboardTargetKind.NoteSave -> mutate(onSave)
             KeyboardTargetKind.NoteOpen -> mutate(::openNotePicker)
             KeyboardTargetKind.NoteRecentNotes -> if (hasRecentNotes) onToggleRecentNotes()
@@ -1051,7 +1054,7 @@ fun AnnotationPanel(
                             false
                         }
                     }
-                    annotationPreviewCopyShortcutHandled(actionPressed, ev.key, textFieldFocused) -> { onCopy(); true }
+                    annotationPreviewCopyShortcutHandled(actionPressed, ev.key, textFieldFocused) -> { copyFeedback.start(settings.annotationCopyFormat); true }
                     actionPressed && ev.key == Key.O -> { mutate(::openNotePicker); true }
                     textFieldFocused -> {
                         if (ev.key == Key.Escape) {
@@ -1105,7 +1108,7 @@ fun AnnotationPanel(
                 AppButton("Preview", onClick = onToggleMd, enabled = hasAnnotationBlocks, modifier = headerButtonModifier)
                 CopyFormatSplitButton(
                     defaultFormat = settings.annotationCopyFormat,
-                    onChoose = onCopyFormat,
+                    feedback = copyFeedback,
                     modifier = headerButtonModifier,
                 )
                 AppButton("Save", onClick = { mutate(onSave) }, enabled = !notesLocked, modifier = headerButtonModifier)
@@ -1189,7 +1192,7 @@ fun AnnotationPanel(
             MdPreviewDialog(
                 tab = tab, settings = settings, mono = mono,
                 defaultCopyFormat = settings.annotationCopyFormat,
-                onCopyFormat = onCopyFormat,
+                copyFeedback = copyFeedback,
                 onExportFrames = onExportFrames,
                 onDismiss = onToggleMd,
             )
@@ -2056,7 +2059,7 @@ private fun MdPreviewDialog(
     settings: AppSettings,
     mono: FontFamily,
     defaultCopyFormat: AnnotationCopyFormat,
-    onCopyFormat: (AnnotationCopyFormat) -> Unit,
+    copyFeedback: CopyFeedbackState,
     onExportFrames: () -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -2077,7 +2080,7 @@ private fun MdPreviewDialog(
                 AppText("Markdown Preview", color = tc.ts, fontSize = 13.sp, modifier = Modifier.weight(1f))
                 CopyFormatSplitButton(
                     defaultFormat = defaultCopyFormat,
-                    onChoose = onCopyFormat,
+                    feedback = copyFeedback,
                     modifier = Modifier.height(28.dp),
                 )
                 TooltipArea(
@@ -2122,10 +2125,55 @@ private fun MdPreviewDialog(
     }
 }
 
+private enum class CopyPhase(val label: String) {
+    Idle("Copy"),
+    Copying("Copying…"),
+    Copied("Copied!"),
+    Failed("Copy failed"),
+}
+
+/** The Copy button's Idle → Copying… → Copied!/Copy failed → Idle cycle for one tab's notes. One
+ * instance serves every copy surface of the panel, so a keyboard copy lights the same button up. */
+@Stable
+private class CopyFeedbackState(
+    private val request: (AnnotationCopyFormat, (Boolean) -> Unit) -> Unit,
+) {
+    var phase by mutableStateOf(CopyPhase.Idle)
+        private set
+
+    // Ignored while a copy is in flight: a second build of the same (possibly large) payload would
+    // only queue behind the first and race it onto the clipboard.
+    fun start(format: AnnotationCopyFormat) {
+        if (phase == CopyPhase.Copying) return
+        phase = CopyPhase.Copying
+        request(format) { ok -> phase = if (ok) CopyPhase.Copied else CopyPhase.Failed }
+    }
+
+    fun reset() {
+        if (phase != CopyPhase.Copying) phase = CopyPhase.Idle
+    }
+}
+
+@Composable
+private fun rememberCopyFeedback(
+    tabId: String,
+    onCopyFormat: (AnnotationCopyFormat, (Boolean) -> Unit) -> Unit,
+): CopyFeedbackState {
+    val latestRequest by rememberUpdatedState(onCopyFormat)
+    val state = remember(tabId) { CopyFeedbackState { format, done -> latestRequest(format, done) } }
+    LaunchedEffect(state.phase) {
+        if (state.phase == CopyPhase.Copied || state.phase == CopyPhase.Failed) {
+            delay(COPIED_FEEDBACK_MS)
+            state.reset()
+        }
+    }
+    return state
+}
+
 @Composable
 private fun CopyFormatSplitButton(
     defaultFormat: AnnotationCopyFormat,
-    onChoose: (AnnotationCopyFormat) -> Unit,
+    feedback: CopyFeedbackState,
     modifier: Modifier = Modifier,
 ) {
     val tc = tc()
@@ -2136,8 +2184,9 @@ private fun CopyFormatSplitButton(
     Box {
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
             AppButton(
-                "Copy",
-                onClick = { onChoose(defaultFormat) },
+                feedback.phase.label,
+                onClick = { feedback.start(defaultFormat) },
+                enabled = feedback.phase != CopyPhase.Copying,
                 modifier = modifier,
                 horizontalPadding = 8.dp,
                 shape = leftShape,
@@ -2145,6 +2194,7 @@ private fun CopyFormatSplitButton(
             AppButton(
                 "▾",
                 onClick = { expanded = !expanded },
+                enabled = feedback.phase != CopyPhase.Copying,
                 modifier = modifier.height(28.dp).width(18.dp),
                 horizontalPadding = 0.dp,
                 shape = rightShape,
@@ -2168,7 +2218,7 @@ private fun CopyFormatSplitButton(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = {
                                 expanded = false
-                                onChoose(format)
+                                feedback.start(format)
                             },
                         ) {
                             Row(

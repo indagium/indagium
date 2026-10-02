@@ -146,6 +146,7 @@ import com.indagium.utils.requiresSplitPrompt
 import com.indagium.utils.resolveSequenceStartTid
 import com.indagium.utils.scanArchiveCandidates
 import com.indagium.utils.scanFolderForLogs
+import com.indagium.utils.sharedLogLineContext
 import com.indagium.utils.splitDltStreamToFiles
 import com.indagium.utils.splitStreamToFiles
 import com.indagium.utils.suggestedSplitPartCount
@@ -164,10 +165,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.add
+import java.awt.EventQueue
 import java.awt.FileDialog
 import java.awt.Frame
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
+import java.awt.datatransfer.Transferable
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
@@ -10184,15 +10187,22 @@ class AppState(
         copyAnnotationFormat(tabId, settings.annotationCopyFormat)
     }
 
-    /** One explicit annotation clipboard format. Choosing a menu item never changes the saved default. */
-    fun copyAnnotationFormat(tabId: String, format: AnnotationCopyFormat) {
-        val t = tab(tabId) ?: return
+    /**
+     * Builds one explicit annotation clipboard payload from the tab's current notes and settings, or
+     * null when the tab is gone. Pure computation (HTML + Markdown + diagram PNGs): safe off the UI
+     * thread, and the one place that decides what a copy contains. The visible-row scan behind Δt is
+     * shared by the HTML and Markdown builders so a copy pays for it at most once.
+     */
+    internal fun buildAnnotationClipboardTransferable(tabId: String, format: AnnotationCopyFormat): Transferable? {
+        val t = tab(tabId) ?: return null
         val currentSettings = settings
+        val lineContext = sharedLogLineContext(t, currentSettings)
         val html = if (format == AnnotationCopyFormat.JIRA_CLOUD || format == AnnotationCopyFormat.HTML) {
             buildAnnotationsHtml(
                 t,
                 currentSettings,
                 maskText = { maskWordForCopy(it, currentSettings) },
+                lineContext = lineContext,
             ) { document ->
                 Seq3RenderCache.brandedPngBytes(
                     Seq3RenderCache.layout(document),
@@ -10202,10 +10212,43 @@ class AppState(
         } else {
             ""
         }
-        Toolkit.getDefaultToolkit().systemClipboard.setContents(
-            annotationClipboardTransferable(t, currentSettings, format, html),
-            null,
-        )
+        return annotationClipboardTransferable(t, currentSettings, format, html, lineContext)
+    }
+
+    /** One explicit annotation clipboard format. Choosing a menu item never changes the saved default.
+     * Synchronous (builds on the calling thread); the UI uses [copyAnnotationFormatAsync]. */
+    fun copyAnnotationFormat(tabId: String, format: AnnotationCopyFormat) {
+        val transferable = buildAnnotationClipboardTransferable(tabId, format) ?: return
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(transferable, null)
+    }
+
+    /**
+     * Like [copyAnnotationFormat] but builds the payload on [ioScope] and only touches the system
+     * clipboard on the EDT, so a large note (many log blocks, embedded screenshots, diagram PNGs)
+     * never freezes the UI. [onDone] runs on the EDT with whether the clipboard was actually set.
+     */
+    @Suppress("TooGenericExceptionCaught")
+    fun copyAnnotationFormatAsync(tabId: String, format: AnnotationCopyFormat, onDone: (Boolean) -> Unit) {
+        ioScope.launch {
+            val transferable = try {
+                buildAnnotationClipboardTransferable(tabId, format)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                AppLogger.error("export", "Building the annotation clipboard payload failed", failure)
+                null
+            }
+            EventQueue.invokeLater {
+                val ok = transferable != null && try {
+                    Toolkit.getDefaultToolkit().systemClipboard.setContents(transferable, null)
+                    true
+                } catch (failure: Throwable) {
+                    AppLogger.error("export", "Setting the annotation clipboard failed", failure)
+                    false
+                }
+                onDone(ok)
+            }
+        }
     }
 
     // Per-image "Copy image" (AnnotationPanel's ImageBlockView) — puts real image bytes on the

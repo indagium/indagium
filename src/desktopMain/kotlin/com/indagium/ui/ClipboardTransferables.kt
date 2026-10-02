@@ -4,8 +4,10 @@ import com.indagium.model.AnnotationCopyFormat
 import com.indagium.model.AnnotationLogBlockStyle
 import com.indagium.model.AppSettings
 import com.indagium.model.LogTab
+import com.indagium.utils.LogLinePresentationContext
 import com.indagium.utils.annotationMarkdownToJiraWiki
 import com.indagium.utils.buildMd
+import com.indagium.utils.sharedLogLineContext
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.StringSelection
 import java.awt.datatransfer.Transferable
@@ -110,8 +112,10 @@ internal fun annotationClipboardTransferable(
     settings: AppSettings,
     format: AnnotationCopyFormat,
     html: String = "",
+    lineContext: Lazy<LogLinePresentationContext> = sharedLogLineContext(tab, settings),
 ): Transferable {
-    fun markdown(style: AnnotationLogBlockStyle): String = buildMd(tab, settings.copy(annotationLogBlockStyle = style))
+    fun markdown(style: AnnotationLogBlockStyle): String =
+        buildMd(tab, settings.copy(annotationLogBlockStyle = style), lineContext)
     return when (format) {
         AnnotationCopyFormat.JIRA_CLOUD -> HtmlTransferable(
             html = html,
