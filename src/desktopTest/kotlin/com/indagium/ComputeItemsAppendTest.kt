@@ -20,6 +20,7 @@ import com.indagium.ui.mkRmap
 import com.indagium.ui.mkTab
 import com.indagium.ui.spliceSummarize
 import com.indagium.ui.summarizeItems
+import com.indagium.utils.AppendOnlyList
 import com.indagium.utils.AppendOnlyLogList
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.appendFastPathHits
@@ -425,5 +426,92 @@ class ComputeItemsAppendTest {
         // The timed-out extension was dropped, not stored: the same tab recomputes in full.
         computeItems(grown, true, RegexEvaluationContext(matchBudgetNanos = 1L))
         assertEquals(before + 1, appendFastPathHits.get())
+    }
+
+    // ---- append-only item list (the items live in a shared backing store) ----
+
+    private fun storeOf(items: List<LogItem>): Any = (items as AppendOnlyList<*>).storeIdentity
+
+    @Test
+    fun theFullComputeReturnsAnAppendOnlyListForEveryRenderPath() {
+        // Plain rows (no stack groups / sequences / manual blocks) ...
+        val plain = mixedTab("ap-store-plain")
+        invalidateComputeCache(plain.id)
+        assertTrue(computeItems(plain, true) is AppendOnlyList<*>)
+        // ... and the renderRange path (a stack-trace group is present).
+        val stacks = crashTab("ap-store-stack")
+        invalidateComputeCache(stacks.id)
+        assertTrue(computeItems(stacks, true) is AppendOnlyList<*>)
+        // An empty log too (nothing to share yet, but the contract is uniform).
+        val empty = mkTab("ap-store-empty", "a.log", emptyList())
+        invalidateComputeCache(empty.id)
+        assertTrue(computeItems(empty, true) is AppendOnlyList<*>)
+    }
+
+    private fun stackGroup() = StackTraceGroup(gid = "st_2", rid = 2, memberIds = listOf(3, 4))
+
+    private fun crashTab(id: String): LogTab {
+        val entries = crashEntries()
+        return mkTab(id, "a.log", entries).copy(
+            analysis = LogAnalysis(stackTraceGroups = listOf(stackGroup()), pending = false),
+        )
+    }
+
+    @Test
+    fun consecutiveFastBatchesShareOneBackingStoreAndNeverCopy() {
+        val start = mixedTab("ap-share")
+        invalidateComputeCache(start.id)
+        val initial = computeItems(start, true)
+        val store = storeOf(initial)
+        var tab = start
+        var previous = initial
+        var next = 13
+        repeat(6) {
+            val batch = mixed(next, 7).also { next += 7 }
+            tab = append(tab, batch)
+            val result = checkedCompute(tab, true, true, "share batch $it")
+            assertEquals(store, storeOf(result), "batch $it copied the item list instead of extending it")
+            assertTrue(result.size > previous.size)
+            // The previous view is untouched by the in-place extension.
+            for (i in previous.indices) assertSame(previous[i], result[i])
+            previous = result
+        }
+    }
+
+    @Test
+    fun aBatchWhereNothingPassesTheFilterReturnsThePreviousListInstance() {
+        val tab = mixedTab("ap-nothing", Filter(mode = FilterMode.KEYWORD, kwText = "key"))
+        invalidateComputeCache(tab.id)
+        val before = computeItems(tab, true)
+        // Odd ids render as "m <id>", which the keyword filter drops.
+        val grown = append(tab, listOf(LogEntry(13, "10:00:01.013", LogLevel.I, "A", "m 13", pid = 5)))
+        val hits = appendFastPathHits.get()
+        val after = computeItems(grown, true)
+        assertEquals(hits + 1, appendFastPathHits.get())
+        assertSame(before, after)
+    }
+
+    @Test
+    fun aFastBatchOnAPlainListBaseFromASpliceConvertsOnceAndKeepsExtendingInPlace() {
+        // spliceStackToggle returns a plain ArrayList; the next append batch must convert it (one
+        // copy) and the batches after that must share the converted store.
+        val entries = crashEntries()
+        val base = mkTab("ap-splice-base", "a.log", entries).copy(
+            analysis = LogAnalysis(stackTraceGroups = listOf(stackGroup()), pending = false),
+        )
+        invalidateComputeCache(base.id)
+        computeItems(base, true)
+        val toggled = base.copy(expanded = setOf("st_2"))
+        val spliced = computeItems(toggled, true)
+        assertEquals(false, spliced is AppendOnlyList<*>, "the splice result is a plain list; this test pins the mixed case")
+        var tab = toggled
+        var next = 9
+        var firstStore: Any? = null
+        repeat(3) {
+            tab = append(tab, listOf(LogEntry(next, "10:00:02.000", LogLevel.I, "App", "later $next", pid = 5)).also { next += 1 })
+            val result = checkedCompute(tab, true, true, "splice base batch $it")
+            val store = storeOf(result)
+            if (firstStore == null) firstStore = store else assertSame(firstStore, store)
+        }
     }
 }

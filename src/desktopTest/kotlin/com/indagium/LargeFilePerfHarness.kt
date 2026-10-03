@@ -27,6 +27,7 @@ import kotlin.test.Test
 private const val BYTES_PER_MB = 1024L * 1024L
 private const val GC_PASSES = 3
 private const val NANOS_PER_MILLI = 1_000_000L
+private const val NANOS_PER_MICRO = 1_000L
 
 // How long the cancellation-response scenario lets computeItems run before cancelling it — long
 // enough that it's genuinely mid-computation on a multi-GB fixture, short relative to the full
@@ -198,6 +199,11 @@ class LargeFilePerfHarness {
             if (id % 10 == 0) "request denied id=$id" else "frame $id rendered ok",
             pid = 1000 + id % 7,
         )
+        // A realistic highlighter set so each resolved minimap bar pays line-text + regex cost.
+        val minimapHighlighters = listOf(
+            com.indagium.model.Highlighter("h1", "denied|error", true, androidx.compose.ui.graphics.Color.Red, true),
+            com.indagium.model.Highlighter("h2", "frame \\d+5 ", true, androidx.compose.ui.graphics.Color.Blue, true),
+        )
         println("PERF append: rows=$rows batches=$batches batchSize=$batchSize")
         val scenarios = listOf(
             "noFilter" to Filter(),
@@ -212,6 +218,7 @@ class LargeFilePerfHarness {
             var prevItems = computeItems(tab, applyFilter = true)
             val fastMs = ArrayList<Long>()
             val summaryMs = ArrayList<Long>()
+            val minimapMs = ArrayList<Long>()
             val fullMs = ArrayList<Long>()
             val fullSummaryMs = ArrayList<Long>()
             var nextId = rows + 1
@@ -222,10 +229,19 @@ class LargeFilePerfHarness {
                 tab = tab.copy(logData = data, rmap = com.indagium.ui.mkRmap(data))
                 val t0 = System.nanoTime()
                 val fast = computeItems(tab, applyFilter = true)
-                fastMs += (System.nanoTime() - t0) / NANOS_PER_MILLI
+                fastMs += (System.nanoTime() - t0) / NANOS_PER_MICRO
                 val t1 = System.nanoTime()
                 summary = com.indagium.ui.spliceSummarize(prevItems, summary, fast) ?: com.indagium.ui.summarizeItems(fast)
-                summaryMs += (System.nanoTime() - t1) / NANOS_PER_MILLI
+                summaryMs += (System.nanoTime() - t1) / NANOS_PER_MICRO
+                val t4 = System.nanoTime()
+                com.indagium.ui.computeMinimapBars(
+                    fast,
+                    java.util.BitSet(),
+                    fast.size.coerceAtMost(com.indagium.ui.MINIMAP_MAX_BUCKETS),
+                    minimapHighlighters,
+                    androidx.compose.ui.graphics.Color.Gray,
+                )
+                minimapMs += (System.nanoTime() - t4) / NANOS_PER_MICRO
                 prevItems = fast
                 if (b % FULL_SAMPLE_EVERY == 0) {
                     val coldTab = tab.copy(id = tab.id + "~full")
@@ -241,12 +257,16 @@ class LargeFilePerfHarness {
                 }
             }
 
-            fun stats(label: String, xs: List<Long>) {
+            fun stats(label: String, xs: List<Long>, unit: String = "ms") {
                 val sorted = xs.sorted()
-                println("PERF append[$name] $label: n=${xs.size} median=${sorted[sorted.size / 2]}ms mean=${xs.average().toLong()}ms max=${sorted.last()}ms")
+                println(
+                    "PERF append[$name] $label: n=${xs.size} median=${sorted[sorted.size / 2]}$unit " +
+                        "mean=${xs.average().toLong()}$unit max=${sorted.last()}$unit",
+                )
             }
-            stats("fast computeItems per batch", fastMs)
-            stats("spliceSummarize per batch", summaryMs)
+            stats("fast computeItems per batch", fastMs, "us")
+            stats("spliceSummarize per batch", summaryMs, "us")
+            stats("minimap bars per batch", minimapMs, "us")
             stats("full computeItems per batch", fullMs)
             stats("full summarizeItems per batch (what a full rebuild forces)", fullSummaryMs)
             invalidateComputeCache(tab.id)
