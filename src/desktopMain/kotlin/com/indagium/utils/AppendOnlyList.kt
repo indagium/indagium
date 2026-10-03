@@ -72,6 +72,14 @@ class AppendOnlyList<T : Any> private constructor(
     /** Test hook: two views return the same object iff they share a backing store. */
     internal val storeIdentity: Any get() = store
 
+    /**
+     * True when [older] is an [AppendOnlyList] over the same backing store and this view is at least
+     * as long: then every element of [older] is, by identity, the element at the same index here.
+     * O(1); false for any other kind of list (callers then compare element-wise).
+     */
+    internal fun isSameStoreExtensionOf(older: List<*>): Boolean =
+        older is AppendOnlyList<*> && older.store === store && older.size <= size
+
     /** Test hook: slot count of the backing store (0 once released). */
     internal val capacity: Int get() = store.slots.size
 
@@ -227,6 +235,10 @@ fun <S : Any, T : Any> appendMapped(base: List<S>, src: List<T>, map: (T) -> S):
         for (element in src) slots[i++] = map(element)
     }
 }
+
+/** See [AppendOnlyList.isSameStoreExtensionOf]; false unless the receiver is an [AppendOnlyList]. */
+internal fun List<*>.isAppendOnlyExtensionOf(older: List<*>): Boolean =
+    this is AppendOnlyList<*> && isSameStoreExtensionOf(older)
 
 /**
  * Thrown when an element of an [AppendOnlyList] whose store was [released][AppendOnlyList.release]

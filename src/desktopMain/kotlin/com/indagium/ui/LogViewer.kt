@@ -64,6 +64,7 @@ import com.indagium.utils.deltaAnchorId
 import com.indagium.utils.deltaMillis
 import com.indagium.utils.formatDelta
 import com.indagium.utils.formatSignedDelta
+import com.indagium.utils.isAppendOnlyExtensionOf
 import com.indagium.utils.isKloggStyle
 import com.indagium.utils.kloggVariedColors
 import com.indagium.utils.passesFilter
@@ -212,12 +213,21 @@ internal fun spliceSummarize(
     oldSummary: ItemsSummary,
     newItems: List<LogItem>,
 ): ItemsSummary? {
+    // A batch that added no visible rows hands back the very same list (computeItems' fast path).
+    if (newItems === oldItems && oldSummary.allIds.size == oldItems.size) return oldSummary
     val oldN = oldItems.size
     val newN = newItems.size
     if (oldN == 0 || newN == 0 || oldSummary.allIds.size != oldN) return null
     var head = 0
     var headRows = 0
     val maxHead = minOf(oldN, newN)
+    if (newN >= oldN && newItems.isAppendOnlyExtensionOf(oldItems)) {
+        // Two views of one append-only store never rewrite a slot below the older view's size, so
+        // every old item is the new list's same-index item: the head is the whole old list and the
+        // O(n) identity walk is unnecessary. Only the appended tail is summarized below.
+        head = oldN
+        headRows = oldSummary.rowCount
+    }
     while (head < maxHead && oldItems[head] === newItems[head]) {
         if (oldItems[head] is LogItem.Row) headRows++
         head++
