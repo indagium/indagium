@@ -647,6 +647,19 @@ tasks.withType<Test>().configureEach {
     }
 }
 
+// Opt-in synthetic append-fast-path scenario (LargeFilePerfHarness.appendFastPathBenchmark): needs
+// no fixture file. -Dindagium.perf.append=1 enables it; .rows/.batches/.batchSize tune it.
+val perfAppend: String? = System.getProperty("indagium.perf.append")
+tasks.withType<Test>().configureEach {
+    if (perfAppend != null) {
+        maxHeapSize = "6g"
+        systemProperty("indagium.perf.append", perfAppend)
+        listOf("indagium.perf.append.rows", "indagium.perf.append.batches", "indagium.perf.append.batchSize").forEach { key ->
+            System.getProperty(key)?.let { systemProperty(key, it) }
+        }
+    }
+}
+
 // ── Dependency locking ─────────────────────────────────────────────
 // Locks only the desktop target's own compile/runtime/test classpaths, not
 // dependencyLocking { lockAllConfigurations() }.

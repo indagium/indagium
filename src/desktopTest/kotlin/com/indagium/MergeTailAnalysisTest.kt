@@ -6,10 +6,10 @@ import com.indagium.model.LogAnalysis
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
 import com.indagium.model.StackTraceGroup
-import com.indagium.ui.extendsSnapshot
 import com.indagium.ui.mergeTailAnalysis
 import com.indagium.ui.mkTab
 import com.indagium.utils.appendLogEntries
+import com.indagium.utils.extendsSnapshot
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
