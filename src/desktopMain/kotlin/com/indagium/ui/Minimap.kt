@@ -17,6 +17,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -40,8 +41,10 @@ import com.indagium.model.LogLevel
 import com.indagium.model.entry
 import com.indagium.utils.RegexEvaluationContext
 import com.indagium.utils.highlighterMatches
+import com.indagium.utils.isAppendOnlyExtensionOf
 import com.indagium.utils.visibleLogLineText
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.BitSet
@@ -184,19 +187,25 @@ private fun headerColor(item: LogItem): Color? = when (item) {
 }
 
 /** Maps a display-order item index to the `[0, rowCount)` drawable row it falls in — the forward
- *  half of the pair with [minimapItemIndexOf]. Both floor-divide the same way so a row's own start
- *  index always maps back to that same row (see MinimapTest's round-trip case). */
+ *  half of the pair with [minimapItemIndexOf]. Row `b` covers the items `i` with
+ *  `floor(i * rowCount / itemCount) == b`, i.e. `[ceil(b * N / R), ceil((b + 1) * N / R))`, so a
+ *  row's own first item (see [minimapItemIndexOf]) always maps back to that same row (see
+ *  MinimapTest's round-trip case). */
 fun minimapBucketOf(itemIndex: Int, itemCount: Int, rowCount: Int): Int {
     if (itemCount <= 0 || rowCount <= 0) return 0
     return ((itemIndex.toLong() * rowCount) / itemCount).toInt().coerceIn(0, rowCount - 1)
 }
 
 /** Inverse direction, for click-to-jump: which item index a click on drawable `row` should scroll
- *  to. Resolves to the FIRST item that row covers (its floor-divide boundary), matching how a
- *  scrollbar jump lands at the top of the destination rather than centering on it. */
+ *  to. Resolves to the FIRST item that row covers, `ceil(row * N / R)` (the smallest `i` with
+ *  `minimapBucketOf(i) == row`), matching how a scrollbar jump lands at the top of the destination
+ *  rather than centering on it. This used to be a floor, which for a compressed list
+ *  (`N > R`) landed one item BEFORE the row, inside the previous one. Also the closed form of a
+ *  row's representative item, so computing the bars never needs a pass over every item. */
 fun minimapItemIndexOf(row: Int, itemCount: Int, rowCount: Int): Int {
     if (itemCount <= 0 || rowCount <= 0) return 0
-    return ((row.toLong() * itemCount) / rowCount).toInt().coerceIn(0, itemCount - 1)
+    val ceil = (row.toLong() * itemCount + rowCount - 1) / rowCount
+    return ceil.toInt().coerceIn(0, itemCount - 1)
 }
 
 /** Resolves the drawable minimap bar currently under [pointerY] back to its first represented
@@ -236,11 +245,36 @@ internal fun minimapFirstVisibleIndexForCenteredItem(
     return (itemIndex - visibleItemCount.coerceAtLeast(1) / 2).coerceIn(0, maxFirst)
 }
 
+/** Largest power of two not above `itemCount / rowCount` (>= 1): the spacing of the item samples
+ *  [MinimapSampler] resolves. Between `rowCount` and `2 * rowCount` samples exist for any list, and
+ *  every row — which spans at least `floor(itemCount / rowCount) >= stride` consecutive items —
+ *  contains at least one of them. */
+internal fun minimapSampleStride(itemCount: Int, rowCount: Int): Int {
+    if (itemCount <= 0 || rowCount <= 0) return 1
+    return Integer.highestOneBit((itemCount / rowCount).coerceAtLeast(1))
+}
+
+private fun resolveMinimapBar(
+    item: LogItem,
+    crashIds: BitSet,
+    highlighters: List<Highlighter>,
+    regexContext: RegexEvaluationContext,
+    mutedColor: Color,
+) = MinimapBar(
+    words = splitIntoWordBlocks(visibleLogLineText(item.entry)),
+    indent = item.indentOrZero(),
+    color = resolveMinimapColor(item, isCrashItem(item, crashIds), highlighters, regexContext, mutedColor),
+)
+
 /** Buckets [items] into at most [rowCount] drawable rows and resolves each row's word-shape +
- *  color from its representative (FIRST) item — see [MinimapBar]'s doc. [highlighters] should be
- *  the tab's `filter.highlighters`; matching runs here (via [resolveMinimapColor]) so it happens
- *  exactly once per drawable row, off the UI thread (see Minimap()'s LaunchedEffect) — never in
- *  the draw loop or during composition. */
+ *  color from a representative item inside the row — see [MinimapBar]'s doc. The representative is
+ *  the first item at or after the row's first item (`ceil(b * N / R)`) whose index is a multiple of
+ *  [minimapSampleStride]: it is always inside the row, and is the row's first item whenever the
+ *  stride is 1 (every list of up to 2 * [rowCount] - 1 items). [highlighters] should be the tab's
+ *  `filter.highlighters`; matching runs here (via [resolveMinimapColor]) so it happens exactly
+ *  once per sampled item, off the UI thread (see Minimap()'s LaunchedEffect) — never in the draw
+ *  loop or during composition. This is the from-scratch reference; [MinimapSampler] produces the
+ *  identical result incrementally. */
 internal fun computeMinimapBars(
     items: List<LogItem>,
     crashIds: BitSet,
@@ -248,23 +282,134 @@ internal fun computeMinimapBars(
     highlighters: List<Highlighter>,
     mutedColor: Color,
     regexContext: RegexEvaluationContext = RegexEvaluationContext(),
-): List<MinimapBar> {
-    if (items.isEmpty() || rowCount <= 0) return emptyList()
-    val effectiveRowCount = rowCount.coerceAtMost(items.size)
-    val representativeIdx = IntArray(effectiveRowCount) { -1 }
-    for (i in items.indices) {
-        val b = minimapBucketOf(i, items.size, effectiveRowCount)
-        if (representativeIdx[b] < 0) representativeIdx[b] = i
+): List<MinimapBar> = MinimapSampler().update(items, crashIds, rowCount, highlighters, mutedColor, regexContext)
+
+/**
+ * Remembers the resolved bars of every [minimapSampleStride]-th item between calls, so a live capture
+ * that only appended rows resolves just the NEW samples (O(batch / stride): line text, word split and
+ * highlighter regexes each) instead of re-resolving all 2000 bars every batch. Without it a
+ * 1M-row capture pays ~2000 regex-matched bars per second, because every append shifts every row's
+ * first item.
+ *
+ * Incremental only when it is provably equal to a fresh [computeMinimapBars]: [items] is a same-store
+ * extension of the previously processed list (identity of every old item is guaranteed by
+ * [AppendOnlyList]'s never-rewritten slots), the highlighters and the muted color are unchanged, the
+ * stride did not shrink, and no retained sample changed crash status. Everything else rebuilds from
+ * scratch, which is bounded (<= 2 * rowCount resolves). When the stride grows to the next power of
+ * two the retained samples are thinned (every other one) with no re-resolution.
+ *
+ * Thread-safe: one update runs at a time, and the remembered state only changes when an update
+ * completes, so a cancelled one (the LaunchedEffect restarted) leaves the previous state intact.
+ */
+internal class MinimapSampler {
+    private var lastItems: List<LogItem>? = null
+    private var stride = 1
+    private var samples: List<MinimapBar> = emptyList()
+    private var sampleEntryIds: IntArray = IntArray(0)
+    private var highlighters: List<Highlighter> = emptyList()
+    private var mutedColor: Color = Color.Unspecified
+    private var crashIds: BitSet = BitSet()
+
+    /** Test hook: how many items were resolved by the last [update] (not served from the memo). */
+    internal var lastResolvedCount = 0
+        private set
+
+    /** Test hook: whether the last [update] reused the memo. */
+    internal var lastWasIncremental = false
+        private set
+
+    @Suppress("LongParameterList", "ReturnCount")
+    fun update(
+        items: List<LogItem>,
+        crashIds: BitSet,
+        rowCount: Int,
+        highlighters: List<Highlighter>,
+        mutedColor: Color,
+        regexContext: RegexEvaluationContext = RegexEvaluationContext(),
+        cancellationCheck: () -> Unit = {},
+    ): List<MinimapBar> = synchronized(this) {
+        val n = items.size
+        val rows = rowCount.coerceAtMost(n)
+        if (n == 0 || rows <= 0) {
+            reset()
+            return emptyList()
+        }
+        val newStride = minimapSampleStride(n, rows)
+        val keptFactor = reusableFactor(items, crashIds, highlighters, mutedColor, newStride)
+        val sampleCount = (n + newStride - 1) / newStride
+        val newSamples = ArrayList<MinimapBar>(sampleCount)
+        val newIds = IntArray(sampleCount)
+        var kept = 0
+        if (keptFactor > 0) {
+            var k = 0
+            while (k < samples.size) {
+                newSamples += samples[k]
+                newIds[kept++] = sampleEntryIds[k]
+                k += keptFactor
+            }
+        }
+        for (j in kept until sampleCount) {
+            cancellationCheck()
+            val item = items[j * newStride]
+            newSamples += resolveMinimapBar(item, crashIds, highlighters, regexContext, mutedColor)
+            newIds[j] = item.entry.id
+        }
+        lastResolvedCount = sampleCount - kept
+        lastWasIncremental = keptFactor > 0
+        lastItems = items
+        stride = newStride
+        samples = newSamples
+        sampleEntryIds = newIds
+        this.highlighters = highlighters
+        this.mutedColor = mutedColor
+        this.crashIds = crashIds.clone() as BitSet
+        return barsFromSamples(newSamples, newStride, n, rows)
     }
-    return List(effectiveRowCount) { b ->
-        val item = items[representativeIdx[b]]
-        MinimapBar(
-            words = splitIntoWordBlocks(visibleLogLineText(item.entry)),
-            indent = item.indentOrZero(),
-            color = resolveMinimapColor(item, isCrashItem(item, crashIds), highlighters, regexContext, mutedColor),
-        )
+
+    /** How many old samples to skip per retained one (1 = keep all, 2 = every other), or 0 when the
+     *  memo cannot be reused for this call. */
+    private fun reusableFactor(
+        items: List<LogItem>,
+        newCrashIds: BitSet,
+        newHighlighters: List<Highlighter>,
+        newMutedColor: Color,
+        newStride: Int,
+    ): Int {
+        val previous = lastItems ?: return 0
+        val sameInputs = previous.isNotEmpty() && items.isAppendOnlyExtensionOf(previous) &&
+            newMutedColor == mutedColor && (newHighlighters === highlighters || newHighlighters == highlighters)
+        // Strides are powers of two and only grow on an append (N / R is non-decreasing), so a larger
+        // one is a multiple of the old one; anything else is not worth reasoning about.
+        val factor = if (sameInputs && newStride >= stride && newStride % stride == 0) newStride / stride else 0
+        if (factor == 0) return 0
+        var k = 0
+        while (k < samples.size) {
+            val id = sampleEntryIds[k]
+            if (newCrashIds.get(id) != crashIds.get(id)) return 0
+            k += factor
+        }
+        return factor
+    }
+
+    private fun reset() {
+        lastItems = null
+        stride = 1
+        samples = emptyList()
+        sampleEntryIds = IntArray(0)
+        highlighters = emptyList()
+        crashIds = BitSet()
+        lastResolvedCount = 0
+        lastWasIncremental = false
     }
 }
+
+// Row b shows the first sample at or after its first item. That item lies in row b: the row spans at
+// least `stride` consecutive items, so one of them is a multiple of `stride`.
+private fun barsFromSamples(samples: List<MinimapBar>, stride: Int, itemCount: Int, rowCount: Int): List<MinimapBar> =
+    List(rowCount) { b ->
+        val first = minimapItemIndexOf(b, itemCount, rowCount)
+        samples[(first + stride - 1) / stride]
+    }
 
 /** Fraction (`[0, 1]`) of the way through the document the LazyColumn has scrolled, used to derive
  *  the miniature's own Sublime-style scroll offset (see [minimapScrollOffsetPx]). 0 when the whole
@@ -476,6 +621,9 @@ fun Minimap(
     // off-thread, never in the draw loop below. Only built-in crash sites affect this strip;
     // custom Issues anchors intentionally do not trigger minimap work or receive crash priority.
     val crashSites = analysis.crashSites
+    // Remembers the resolved bars across live-capture batches, so each batch only resolves its new
+    // samples (see MinimapSampler). Falls back to a bounded full rebuild for anything but a pure append.
+    val sampler = remember { MinimapSampler() }
     LaunchedEffect(items, rowCount, crashSites, highlighters, tc) {
         bars = if (items.isEmpty() || rowCount <= 0) {
             emptyList()
@@ -483,25 +631,33 @@ fun Minimap(
             withContext(Dispatchers.Default) {
                 val crashIds = BitSet()
                 crashSites.forEach { crashIds.set(it.entry.id) }
-                computeMinimapBars(items, crashIds, rowCount, highlighters, tc.td)
+                sampler.update(items, crashIds, rowCount, highlighters, tc.td, cancellationCheck = { ensureActive() })
             }
         }
     }
 
+    // The pointer handler below must NOT be keyed on the item/row counts: those change on every
+    // live-capture batch, and a restarted pointerInput drops an in-progress drag. It reads the
+    // current values through these instead.
+    val currentItemCount by rememberUpdatedState(items.size)
+    val currentRowCount by rememberUpdatedState(rowCount)
+
     fun jumpTo(y: Float) {
         val h = heightPx
-        if (items.isEmpty() || h <= 0 || rowCount <= 0) return
+        val itemCount = currentItemCount
+        val rows = currentRowCount
+        if (itemCount == 0 || h <= 0 || rows <= 0) return
         val visibleCount = lazyState.layoutInfo.visibleItemsInfo.size
         val clickedItem = minimapItemIndexAtPointer(
             pointerY = y,
             firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
             visibleItemCount = visibleCount,
-            itemCount = items.size,
-            rowCount = rowCount,
+            itemCount = itemCount,
+            rowCount = rows,
             rowHeightPx = rowHeightPx,
             stripHeightPx = h.toFloat(),
         )
-        val targetFirst = minimapFirstVisibleIndexForCenteredItem(clickedItem, visibleCount, items.size)
+        val targetFirst = minimapFirstVisibleIndexForCenteredItem(clickedItem, visibleCount, itemCount)
         // Immediate (non-animated) jump, so the clicked bar's representative row lands centered.
         scope.launch { lazyState.scrollToItem(targetFirst) }
     }
@@ -519,7 +675,7 @@ fun Minimap(
                 // only moves it as the pointer moves; a press outside it jumps immediately. A raw
                 // pointer loop is intentional here: detectDragGestures waits for touch slop and would
                 // make an outside click appear unresponsive.
-                .pointerInput(items.size, rowCount) {
+                .pointerInput(lazyState, rowHeightPx) {
                     awaitPointerEventScope {
                         var viewportDragStartY: Float? = null
                         var viewportDragStartIndex = 0
@@ -539,11 +695,11 @@ fun Minimap(
                                 contextMenuOpen = true
                             } else if (ev.type == PointerEventType.Press && ev.buttons.isPrimaryPressed) {
                                 ch.consume()
-                                val miniatureHeightPx = rowCount * rowHeightPx
+                                val miniatureHeightPx = currentRowCount * rowHeightPx
                                 val bounds = minimapViewportBounds(
                                     firstVisibleItemIndex = lazyState.firstVisibleItemIndex,
                                     visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
-                                    itemCount = items.size,
+                                    itemCount = currentItemCount,
                                     miniatureHeightPx = miniatureHeightPx,
                                     stripHeightPx = heightPx.toFloat(),
                                     minViewportHeightPx = rowHeightPx,
@@ -565,8 +721,8 @@ fun Minimap(
                                         dragStartIndex = viewportDragStartIndex,
                                         dragDeltaPx = ch.position.y - dragStartY,
                                         visibleItemCount = lazyState.layoutInfo.visibleItemsInfo.size,
-                                        itemCount = items.size,
-                                        miniatureHeightPx = rowCount * rowHeightPx,
+                                        itemCount = currentItemCount,
+                                        miniatureHeightPx = currentRowCount * rowHeightPx,
                                         stripHeightPx = heightPx.toFloat(),
                                         minViewportHeightPx = rowHeightPx,
                                     )
