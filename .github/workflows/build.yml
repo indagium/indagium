@@ -432,9 +432,19 @@ jobs:
       contents: write
 
     steps:
+      # Only the package artifacts (named Indagium-*, see the build matrix) and the dependency
+      # report — never "everything in the run". A run can also hold failure-only test-report
+      # artifacts (desktop-test-report, video-duration-test-report-*), and after "Re-run failed
+      # jobs" those from the failed attempt are still there: v1.8.9's release downloaded one and
+      # tried to attach ~540 report files, hit GitHub's secondary rate limit and left a broken draft.
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
+          pattern: Indagium-*
           path: artifacts
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: dependency-report
+          path: artifacts/dependency-report
 
       # `body` is prepended to what generate_release_notes produces, so the download guidance sits
       # above the auto-generated commit list rather than replacing it. There are now three Linux
@@ -445,7 +455,15 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
-          files: artifacts/**/*
+          # Package types only, as a second guard on top of the download filter above.
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.flatpak
+            artifacts/**/*.msi
+            artifacts/**/*.dmg
+            artifacts/**/dependency-report.txt
+          fail_on_unmatched_files: true
           generate_release_notes: true
           body: |
             ### Which file do I need?
