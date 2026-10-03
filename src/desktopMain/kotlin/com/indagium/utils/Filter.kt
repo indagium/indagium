@@ -502,13 +502,14 @@ private fun appendComputeFast(
         tail
     }
     val visible = if (applyFilter) appendLogEntries(cached.visible, tailPassing) else logData
+    // O(batch): the new rows are written straight into the shared backing store of the previous
+    // item list (see appendMapped), which is what also keeps Compose key equality between
+    // consecutive lists O(1). A plain-list base (a splice result) is converted once. Nothing passing
+    // the filter returns the previous list untouched.
     val items: List<LogItem> = if (tailPassing.isEmpty()) {
         cachedItems
     } else {
-        ArrayList<LogItem>(cachedItems.size + tailPassing.size).also { out ->
-            out.addAll(cachedItems)
-            tailPassing.forEach { out += LogItem.Row(it, 0) }
-        }
+        appendMapped(cachedItems, tailPassing) { LogItem.Row(it, 0) }
     }
     return TabComputeCache(
         logData = logData,
@@ -920,7 +921,7 @@ internal fun computeItems(
 
     val manualBlocksEnabled = tab.manualBlocks.filter { it.enabled }
     if (seqGroups.isEmpty() && allStackGroups.isEmpty() && manualBlocksEnabled.isEmpty()) {
-        return data.map { LogItem.Row(it, 0) }.also { storeCache(it) }
+        return appendMapped<LogItem, LogEntry>(emptyList(), data) { LogItem.Row(it, 0) }.also { storeCache(it) }
     }
 
     val defMap = sequences.associateBy { it.id }
@@ -1380,7 +1381,10 @@ internal fun computeItems(
             topLevelManual.map { m -> ChildRef.ManualC(m, m.range.last + 1, manualEffectiveEnd(m)) }
     ).sortedBy { it.start }
 
-    val result = renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
+    // Wrapped in an append-only list (one O(n) copy next to the O(n) render above) so the first
+    // append fast path batch after this full compute extends it in place instead of copying it.
+    val rendered = renderRange(0, data.size, indent = 0, ambientColor = null, children = topChildren)
+    val result: List<LogItem> = appendMapped<LogItem, LogItem>(emptyList(), rendered) { it }
     storeCache(result)
     return result
 }

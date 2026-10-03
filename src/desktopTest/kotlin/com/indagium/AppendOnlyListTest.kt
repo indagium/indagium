@@ -4,9 +4,11 @@ package com.indagium
 
 import com.indagium.model.LogEntry
 import com.indagium.model.LogLevel
+import com.indagium.utils.AppendOnlyList
 import com.indagium.utils.AppendOnlyLogList
 import com.indagium.utils.ReleasedLogListException
 import com.indagium.utils.appendLogEntries
+import com.indagium.utils.appendMapped
 import java.util.concurrent.CancellationException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -20,7 +22,7 @@ import kotlin.test.assertNotSame
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
-class AppendOnlyLogListTest {
+class AppendOnlyListTest {
     private fun entries(range: IntRange) = range.map { LogEntry(it, "10:00:00.000", LogLevel.I, "Tag", "msg $it") }
 
     private fun store(list: List<LogEntry>): Any = (list as AppendOnlyLogList).storeIdentity
@@ -222,5 +224,170 @@ class AppendOnlyLogListTest {
         } finally {
             pool.shutdownNow()
         }
+    }
+
+    // ---- generic element type / appendMapped ----
+
+    private fun strings(range: IntRange) = range.map { "s$it" }
+
+    private fun storeOf(list: AppendOnlyList<*>): Any = list.storeIdentity
+
+    @Test
+    fun appendMappedConvertsAPlainBaseOnceAndThenExtendsInPlace() {
+        val first = appendMapped(strings(1..3), (4..6).toList()) { "s$it" }
+        assertEquals(strings(1..6), first)
+        val second = appendMapped(first, (7..9).toList()) { "s$it" }
+        val third = appendMapped(second, (10..10).toList()) { "s$it" }
+        assertSame(storeOf(first), storeOf(second))
+        assertSame(storeOf(first), storeOf(third))
+        assertEquals(strings(1..10), third)
+        assertEquals(strings(1..6), first, "an older view keeps its own contents")
+        assertEquals(strings(1..9), second)
+    }
+
+    @Test
+    fun appendMappedFromAnOlderViewCopiesAndLeavesBothViewsCorrect() {
+        val v1 = appendMapped(emptyList<String>(), (1..5).toList()) { "s$it" }
+        val v2 = appendMapped(v1, (6..8).toList()) { "s$it" }
+        val branch = appendMapped(v1, (100..101).toList()) { "b$it" }
+        assertTrue(storeOf(branch) !== storeOf(v1))
+        assertEquals(strings(1..5) + listOf("b100", "b101"), branch)
+        assertEquals(strings(1..8), v2)
+        assertEquals(strings(1..5), v1)
+    }
+
+    @Test
+    fun appendMappedWithAnEmptySourceReturnsTheAppendOnlyBaseItselfButConvertsAPlainOne() {
+        val view = appendMapped(emptyList<String>(), (1..3).toList()) { "s$it" }
+        assertSame(view, appendMapped(view, emptyList<Int>()) { "s$it" })
+        val plain = strings(1..3)
+        val converted = appendMapped(plain, emptyList<Int>()) { "s$it" }
+        assertEquals(plain, converted)
+        assertNotSame<Any>(plain, converted)
+    }
+
+    @Test
+    fun appendMappedGrowsPastCapacityAcrossStoresAndKeepsEveryViewReadable() {
+        var list: AppendOnlyList<Int> = appendMapped(emptyList<Int>(), listOf(1)) { it }
+        val views = mutableListOf(list)
+        for (i in 2..5000) {
+            list = appendMapped(list, listOf(i)) { it }
+            views += list
+        }
+        assertEquals((1..5000).toList(), list)
+        listOf(1, 1023, 1024, 1025, 4999).forEach { n -> assertEquals((1..n).toList(), views[n - 1]) }
+    }
+
+    @Test
+    fun aMappedListIsEqualToAnArrayListWithTheSameContentInBothDirections() {
+        val view = appendMapped(appendMapped(emptyList<String>(), (1..4).toList()) { "s$it" }, (5..8).toList()) { "s$it" }
+        val plain: List<String> = ArrayList(strings(1..8))
+        assertEquals(plain, view)
+        assertEquals(view, plain)
+        assertEquals(plain.hashCode(), view.hashCode())
+        assertTrue(view != ArrayList(strings(1..7)))
+        assertTrue(view != appendMapped(view, (9..9).toList()) { "s$it" })
+        // The same-store shortcut agrees with the element-wise contract.
+        val sameStoreSameSize = appendMapped(view, emptyList<Int>()) { "s$it" }
+        assertEquals(view, sameStoreSameSize)
+    }
+
+    @Test
+    fun sameStoreEqualsDoesNotReadAnyElement() {
+        // A store released after the views were built: element-wise equality would throw, the O(1)
+        // same-store check must not even try. (Compose compares consecutive item lists this way.)
+        val a = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        val b = appendLogEntries(a, emptyList()) as AppendOnlyLogList
+        a.release()
+        assertEquals(a, b)
+    }
+
+    @Test
+    fun iteratorMatchesGetAndForEachVisitsEveryElementInOrder() {
+        val view = appendLogEntries(entries(1..10), entries(11..2000)) as AppendOnlyLogList
+        val viaIterator = ArrayList<LogEntry>()
+        for (e in view) viaIterator += e
+        assertEquals(entries(1..2000), viaIterator)
+        val viaForEach = ArrayList<Int>()
+        view.forEach { viaForEach += it.id }
+        assertEquals((1..2000).toList(), viaForEach)
+        assertFailsWith<NoSuchElementException> {
+            val iter = view.iterator()
+            repeat(view.size + 1) { iter.next() }
+        }
+    }
+
+    @Test
+    fun anIteratorOfAnOlderViewStopsAtItsOwnSizeEvenAfterTheStoreGrew() {
+        val v1 = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        val iter = v1.iterator()
+        appendLogEntries(v1, entries(6..9)) // grows the shared store past v1.size
+        assertEquals(entries(1..5), iter.asSequence().toList())
+    }
+
+    @Test
+    fun anIteratorCreatedBeforeReleaseKeepsServingItsSnapshotAndOneCreatedAfterReportsTheRelease() {
+        val list = appendLogEntries(entries(1..3), entries(4..5)) as AppendOnlyLogList
+        val early = list.iterator()
+        list.release()
+        assertEquals(entries(1..5), early.asSequence().toList())
+        assertFailsWith<ReleasedLogListException> { list.iterator().next() }
+    }
+
+    @Test
+    fun concurrentMappedExtensionsOfTheSameViewOneInPlaceTheOtherCopied() {
+        val base = appendMapped(emptyList<String>(), (1..12).toList()) { "s$it" }
+        val threads = 8
+        val pool = Executors.newFixedThreadPool(threads)
+        try {
+            val start = CountDownLatch(1)
+            val futures = (0 until threads).map { t ->
+                pool.submit<AppendOnlyList<String>> {
+                    start.await()
+                    appendMapped(base, ((1000 * (t + 1))..(1000 * (t + 1) + 4)).toList()) { "s$it" }
+                }
+            }
+            start.countDown()
+            val results = futures.map { it.get(10, TimeUnit.SECONDS) }
+            results.forEachIndexed { t, r ->
+                assertEquals(strings(1..12) + strings((1000 * (t + 1))..(1000 * (t + 1) + 4)), r)
+            }
+            assertEquals(strings(1..12), base)
+            // Exactly one writer won the newest-view slot; every other one had to copy.
+            val inPlace = results.count { storeOf(it) === storeOf(base) }
+            assertEquals(1, inPlace)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun aReaderOnAnOlderViewNeverSeesElementsAppendedConcurrently() {
+        val base = appendMapped(emptyList<Int>(), (1..100).toList()) { it }
+        val pool = Executors.newFixedThreadPool(2)
+        try {
+            val writer = pool.submit {
+                var cur: AppendOnlyList<Int> = base
+                repeat(2000) { cur = appendMapped(cur, listOf(1000 + it)) { v -> v } }
+            }
+            val reader = pool.submit {
+                repeat(2000) {
+                    check(base.size == 100)
+                    var sum = 0L
+                    for (v in base) sum += v
+                    check(sum == 5050L) { "base view changed under a reader: $sum" }
+                }
+            }
+            writer.get(20, TimeUnit.SECONDS)
+            reader.get(20, TimeUnit.SECONDS)
+        } finally {
+            pool.shutdownNow()
+        }
+    }
+
+    @Test
+    fun appendLogEntriesStillReturnsTheTypedRowsAlias() {
+        val view = appendLogEntries(entries(1..2), entries(3..4))
+        assertTrue(view is AppendOnlyLogList)
     }
 }
