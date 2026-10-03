@@ -371,7 +371,7 @@ internal fun FileView(
                     onRemoveMessageRule = { state.removeMessageRule(tab.id, it) },
                     onRememberRegexPattern = { state.rememberRegexPattern(it) },
                     onClearRegexHistory = { state.clearRegexPatternHistory() },
-                    onOpenFilterPanel = { state.updateFilterVisible(true) },
+                    onOpenFilterPanel = { state.openFilterPanelRevealing(tab.id) },
                 )
             }
             LogViewer(

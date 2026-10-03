@@ -4801,6 +4801,20 @@ class AppState(
         autosaveNow()
     }
 
+    /**
+     * The filter bar's residual chip: show the Filters panel AND expand + scroll to the sections the
+     * chip summarizes for [tabId]'s filter (see [residualChipSectionsToReveal]). Opening alone left
+     * the Highlighters / Log level sections collapsed.
+     */
+    fun openFilterPanelRevealing(tabId: String) {
+        val filter = tab(tabId)?.filter
+        if (filter != null) {
+            val sections = residualChipSectionsToReveal(filter)
+            updateFilterPanelUiState { revealSections(sections) }
+        }
+        updateFilterVisible(true)
+    }
+
     fun updateFilterBarVisible(visible: Boolean) {
         if (filterBarVisible == visible) return
         filterBarVisible = visible
