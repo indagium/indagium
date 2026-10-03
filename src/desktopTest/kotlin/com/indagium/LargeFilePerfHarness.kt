@@ -219,6 +219,8 @@ class LargeFilePerfHarness {
             val fastMs = ArrayList<Long>()
             val summaryMs = ArrayList<Long>()
             val minimapMs = ArrayList<Long>()
+            val fullMinimapMs = ArrayList<Long>()
+            val minimapSampler = com.indagium.ui.MinimapSampler()
             val fullMs = ArrayList<Long>()
             val fullSummaryMs = ArrayList<Long>()
             var nextId = rows + 1
@@ -234,14 +236,27 @@ class LargeFilePerfHarness {
                 summary = com.indagium.ui.spliceSummarize(prevItems, summary, fast) ?: com.indagium.ui.summarizeItems(fast)
                 summaryMs += (System.nanoTime() - t1) / NANOS_PER_MICRO
                 val t4 = System.nanoTime()
-                com.indagium.ui.computeMinimapBars(
+                val rowCountForMinimap = fast.size.coerceAtMost(com.indagium.ui.MINIMAP_MAX_BUCKETS)
+                val bars = minimapSampler.update(
                     fast,
                     java.util.BitSet(),
-                    fast.size.coerceAtMost(com.indagium.ui.MINIMAP_MAX_BUCKETS),
+                    rowCountForMinimap,
                     minimapHighlighters,
                     androidx.compose.ui.graphics.Color.Gray,
                 )
                 minimapMs += (System.nanoTime() - t4) / NANOS_PER_MICRO
+                if (b % FULL_SAMPLE_EVERY == 0) {
+                    val t5 = System.nanoTime()
+                    val freshBars = com.indagium.ui.computeMinimapBars(
+                        fast,
+                        java.util.BitSet(),
+                        rowCountForMinimap,
+                        minimapHighlighters,
+                        androidx.compose.ui.graphics.Color.Gray,
+                    )
+                    fullMinimapMs += (System.nanoTime() - t5) / NANOS_PER_MICRO
+                    check(freshBars == bars) { "incremental minimap differs from a fresh one at batch $b" }
+                }
                 prevItems = fast
                 if (b % FULL_SAMPLE_EVERY == 0) {
                     val coldTab = tab.copy(id = tab.id + "~full")
@@ -266,7 +281,8 @@ class LargeFilePerfHarness {
             }
             stats("fast computeItems per batch", fastMs, "us")
             stats("spliceSummarize per batch", summaryMs, "us")
-            stats("minimap bars per batch", minimapMs, "us")
+            stats("minimap bars per batch (incremental)", minimapMs, "us")
+            stats("minimap bars from scratch", fullMinimapMs, "us")
             stats("full computeItems per batch", fullMs)
             stats("full summarizeItems per batch (what a full rebuild forces)", fullSummaryMs)
             invalidateComputeCache(tab.id)
