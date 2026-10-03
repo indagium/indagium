@@ -50,6 +50,7 @@ import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
@@ -3566,7 +3567,12 @@ private fun LogRow(
                     }
                     onSelectedTextChange(selectedText)
                 },
-                textStyle = TextStyle(color = tc.tx, fontFamily = mono, fontSize = fontSize, lineHeight = (fontSize.value + 4).sp),
+                textStyle = TextStyle(
+                    color = tc.tx,
+                    fontFamily = mono,
+                    fontSize = fontSize,
+                    lineHeight = rowLineHeightFor(annoLine, fontSize),
+                ),
                 selectionColor = tc.ac.copy(alpha = SELECTION_OVERLAY_ALPHA),
                 handleColor = tc.ac,
                 modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
@@ -3635,6 +3641,16 @@ internal fun rowSelectionOverlay(isSelected: Boolean, hasRowWash: Boolean, accen
 // repainting the selected range after the content keeps the selection visible over every highlight.
 // ~0.35 on top of the text reads like the old 0.4 default fill that sat underneath it.
 internal const val SELECTION_OVERLAY_ALPHA = 0.35f
+
+// A row's fixed line box (fontSize + 4) is fine for the mono base font, but a highlighter font
+// override (e.g. a script font whose ascent+descent is far taller) makes Compose trim/place wrapped
+// lines inside that box while Skia paints span backgrounds from the run's own font metrics, so the
+// backgrounds and glyphs of wrapped lines drift apart and neighbouring lines overlap. Rows that carry
+// such an override use the font's natural metrics instead; every other row keeps the fixed height
+// exactly (verified pixel-identical, and the unfixed alternative LineHeightStyle(Center, Trim.None)
+// still overlapped for tall fonts).
+internal fun rowLineHeightFor(text: AnnotatedString, fontSize: TextUnit): TextUnit =
+    if (text.spanStyles.any { it.item.fontFamily != null }) TextUnit.Unspecified else (fontSize.value + 4).sp
 
 @Composable
 internal fun SelectableLogLineField(
