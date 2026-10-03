@@ -285,6 +285,12 @@ private class TabComputeCache(
     val items: List<LogItem>?,
     val expanded: Set<String>,
     val manualBlocks: List<ManualCollapseBlock>,
+    // What the filter pass saw of the tab's analysis, kept for the append fast path
+    // (appendComputeFast): only a PID/TID-dependent filter can change the verdict on an OLD row when
+    // these change, and `analysisPending` switches stack folding on/off. Never persisted.
+    val processNames: Map<Int, String>,
+    val tagPids: Map<String, Set<Int>>,
+    val analysisPending: Boolean,
 )
 
 // Task 4: one crossing top-level-sequence pair (utils/Filter.kt's seqHostsSeqDirect resolution)
@@ -388,6 +394,143 @@ private fun spliceStackToggle(tab: LogTab, prior: TabComputeCache): List<LogItem
         result.addAll(priorItems.subList(end, priorItems.size))
     }
     return result
+}
+
+/** Test hook: number of computeItems calls that were answered by [appendComputeFast]. */
+internal val appendFastPathHits = java.util.concurrent.atomic.AtomicInteger()
+
+// True when the filter's verdict on a row can depend on LogAnalysis.processNames / tagPids: the
+// pid/tid selector, or an enabled TAGS-mode PID_TID message rule (positive or negative — see
+// passesFilter's `enabledRules` and `hasPosPidTid`). Mirrors exactly what passesFilter reads.
+private fun filterDependsOnPidMaps(filter: Filter): Boolean =
+    filter.pidTidFilter.isNotBlank() ||
+        (
+            filter.mode == FilterMode.TAGS &&
+                filter.messageRules.any {
+                    it.enabled && it.pattern.isNotBlank() && it.mode == FilterMode.TAGS && it.target == RuleTarget.PID_TID
+                }
+        )
+
+// True when no enabled manual block can resolve differently once rows are appended: a TO_END block
+// stretches to the (growing) last row, and a block whose anchor/end id is not yet in the log gets
+// dropped by manualRangesFor today but would resolve once that row arrives.
+private fun manualBlocksStableUnderAppend(blocks: List<ManualCollapseBlock>, lastCachedId: Int): Boolean =
+    blocks.all { b ->
+        !b.enabled || (
+            b.direction != ManualCollapseDirection.TO_END &&
+                b.anchorId <= lastCachedId &&
+                (b.endId ?: Int.MIN_VALUE) <= lastCachedId
+        )
+    }
+
+// Guard 2 of appendComputeFast: everything besides the appended rows that feeds an OLD row's output.
+private fun sameRenderInputs(tab: LogTab, cached: TabComputeCache): Boolean =
+    cached.filter == tab.filter &&
+        cached.stackGroupsRef === tab.analysis.stackTraceGroups &&
+        cached.expanded == tab.expanded &&
+        cached.manualBlocks == tab.manualBlocks &&
+        cached.analysisPending == tab.analysis.pending
+
+// Fast path for a live capture's per-batch recompute: the tab's logData is the previously computed
+// logData plus appended rows, and nothing else that feeds the result changed. Instead of
+// re-filtering the whole log and re-rendering every LogItem, filter just the appended rows and
+// extend the cached item list; prior Row objects keep their identity, which is also what lets
+// ui/LogViewer's spliceSummarize summarize only the tail. Returns the new cache entry (carrying the
+// extended items) or null whenever any condition below is not provably safe, in which case the
+// caller does the full rebuild — the fallback is exactly the previous behavior. The result must be
+// `==` to a fresh full compute (pinned by ComputeItemsAppendTest). Guards:
+//  1. a prior item list exists (a cache entry with items == null can't be extended);
+//  2. same filter (==), same stack-group list instance (===), same expanded set and manual blocks,
+//     same analysis.pending: every one of them changes how OLD rows render;
+//  3. tab.logData is the cached logData plus appended rows (extendsSnapshot, O(1)) and the first new
+//     row's id is above the cached last id (ids strictly ascend; guards the id-based reasoning below);
+//  4. a filter that reads processNames/tagPids needs those unchanged: a newly learned pid can
+//     re-admit OLD rows (FilterBehaviorTest.computeItemsPicksUpANewlyLearnedPidAfterTheLogDataIsReplaced);
+//  5. no active sequence folding: an open last group grows with each batch and a tail end-match can
+//     re-nest the prefix (SeqComputer), so sequences keep the full rebuild;
+//  6. manual blocks resolve entirely within the cached rows and none is TO_END (see
+//     manualBlocksStableUnderAppend);
+//  7. when stack folding is active (analysis not pending), no stack group references a row at or past
+//     the first appended id: groups are fixed at their analysis snapshot, so tail rows stay plain
+//     rows and no member/header placement changes. If a group did reach into the tail, fall back.
+// A regex timeout while filtering the tail is not special-cased here: the caller drops (rather than
+// stores) the entry exactly as the full path's storeCache does.
+@Suppress("ReturnCount", "CyclomaticComplexMethod")
+private fun appendComputeFast(
+    tab: LogTab,
+    applyFilter: Boolean,
+    cached: TabComputeCache,
+    cancellationCheck: CancellationCheck,
+    regexContext: RegexEvaluationContext,
+): TabComputeCache? {
+    val cachedItems = cached.items ?: return null
+    if (!sameRenderInputs(tab, cached)) return null
+    val logData = tab.logData
+    val oldSize = cached.logData.size
+    if (logData.size <= oldSize || !extendsSnapshot(logData, cached.logData)) return null
+    val lastCachedId = cached.logData[oldSize - 1].id
+    val tail = logData.subList(oldSize, logData.size)
+    val firstTailId = tail.first().id
+    if (firstTailId <= lastCachedId) return null
+
+    if (filterDependsOnPidMaps(tab.filter) &&
+        (cached.processNames != tab.analysis.processNames || cached.tagPids != tab.analysis.tagPids)
+    ) {
+        return null
+    }
+    if (tab.filter.seqOn && tab.filter.sequences.any { it.enabled }) return null
+    if (!manualBlocksStableUnderAppend(tab.manualBlocks, lastCachedId)) return null
+    if (!tab.analysis.pending) {
+        val reachesTail = tab.analysis.stackTraceGroups.any { g ->
+            g.rid >= firstTailId || (g.memberIds.lastOrNull() ?: 0) >= firstTailId
+        }
+        if (reachesTail) return null
+    }
+
+    val tailPassing: List<LogEntry> = if (applyFilter) {
+        val passing = ArrayList<LogEntry>()
+        var sinceCheck = 0
+        for (entry in tail) {
+            if (++sinceCheck >= CANCELLATION_CHECK_INTERVAL) {
+                sinceCheck = 0
+                cancellationCheck()
+            }
+            if (passesFilter(entry, tab.filter, tab.analysis.processNames, regexContext, tab.analysis.tagPids)) passing += entry
+        }
+        passing
+    } else {
+        tail
+    }
+    val visible = if (applyFilter) appendLogEntries(cached.visible, tailPassing) else logData
+    val items: List<LogItem> = if (tailPassing.isEmpty()) {
+        cachedItems
+    } else {
+        ArrayList<LogItem>(cachedItems.size + tailPassing.size).also { out ->
+            out.addAll(cachedItems)
+            tailPassing.forEach { out += LogItem.Row(it, 0) }
+        }
+    }
+    return TabComputeCache(
+        logData = logData,
+        stackGroupsRef = cached.stackGroupsRef,
+        filter = cached.filter,
+        visible = visible,
+        seqGroups = cached.seqGroups,
+        // Valid as carried: groups never reference tail rows (guard 7), so filtering them by the
+        // visible id set can't change even when the tail grows `visible`. If the prefix was fully
+        // visible (null here) and the tail is partly filtered out, the full path would derive an
+        // id-filtered list that is content-equal to the analysis list it uses instead.
+        filteredStackGroups = cached.filteredStackGroups,
+        seqOwnerBySwallowed = cached.seqOwnerBySwallowed,
+        seqChildBits = cached.seqChildBits,
+        crossingThreadHints = cached.crossingThreadHints,
+        items = items,
+        expanded = cached.expanded,
+        manualBlocks = cached.manualBlocks,
+        processNames = tab.analysis.processNames,
+        tagPids = tab.analysis.tagPids,
+        analysisPending = tab.analysis.pending,
+    )
 }
 
 // A child container to render within some range of `data`: either a top-level auto-detected
@@ -676,6 +819,21 @@ internal fun computeItems(
             it.stackGroupsRef === tab.analysis.stackTraceGroups &&
             it.filter == tab.filter
     }
+    // A live capture replaces logData with a longer view on every batch, which misses the strict
+    // `prior` lookup above. When only rows were appended (and nothing else changed in a way that can
+    // alter old rows' output) extend the previous result in O(batch) instead of re-filtering and
+    // re-rendering the whole log. Must run BEFORE `data` below, which would start a full filter pass.
+    if (prior == null) {
+        computeCacheByTab[cacheKey]?.let { cached ->
+            appendComputeFast(tab, applyFilter, cached, cancellationCheck, regexContext)
+        }?.let { extended ->
+            if (storeInCache) {
+                if (regexContext.hasTimedOut) computeCacheByTab.remove(cacheKey) else computeCacheByTab[cacheKey] = extended
+            }
+            appendFastPathHits.incrementAndGet()
+            return extended.items.orEmpty()
+        }
+    }
     val data = prior?.visible ?: visibleEntries(tab, applyFilter, regexContext)
     var fullSeqGroups: List<SeqGroup>? = prior?.seqGroups
     var fullFilteredStackGroups: List<StackTraceGroup>? = prior?.filteredStackGroups
@@ -707,6 +865,9 @@ internal fun computeItems(
             items = items,
             expanded = tab.expanded,
             manualBlocks = tab.manualBlocks,
+            processNames = tab.analysis.processNames,
+            tagPids = tab.analysis.tagPids,
+            analysisPending = tab.analysis.pending,
         )
     }
 

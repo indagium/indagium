@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.PopupProperties
+import com.indagium.debug.AppLogger
 import com.indagium.model.*
 import com.indagium.utils.HlSpan
 import com.indagium.utils.RegexEvaluationContext
@@ -291,6 +292,9 @@ internal class ComputedLogItems(
     val expandedAt: Set<String>?,
 )
 
+private const val NANOS_PER_MILLI = 1_000_000L
+private const val SLOW_COMPUTE_LOG_MS = 50L
+
 private val EMPTY_SUMMARY = summarizeItems(emptyList())
 
 // Returns the backing State object itself (read with `by`, not `=`, at call sites — see those
@@ -331,9 +335,15 @@ private fun rememberComputedLogItems(tab: LogTab, applyFilter: Boolean): State<C
                 // change lands — see the LaunchedEffect keys above) keeps running to full
                 // completion on its thread instead of actually stopping, wasting CPU under rapid
                 // filter edits even though the result was always going to be thrown away.
+                val startNanos = System.nanoTime()
                 val items = computeItems(snapshot, applyFilter, cancellationCheck = { ensureActive() })
+                val computeMs = (System.nanoTime() - startNanos) / NANOS_PER_MILLI
                 val summary = spliceSummarize(previous.items, previous.summary, items)
                     ?: summarizeItems(items)
+                val totalMs = (System.nanoTime() - startNanos) / NANOS_PER_MILLI
+                if (totalMs > SLOW_COMPUTE_LOG_MS) {
+                    AppLogger.debug("compute", "items=${items.size} rows=${snapshot.logData.size} compute=${computeMs}ms total=${totalMs}ms")
+                }
                 ComputedLogItems(items, summary, loading = false, expandedAt = snapshot.expanded)
             }
             // Grace period before flagging as loading: sub-quarter-second recomputes (the common

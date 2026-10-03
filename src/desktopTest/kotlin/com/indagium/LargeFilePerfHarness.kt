@@ -5,6 +5,7 @@ import com.indagium.model.FilterMode
 import com.indagium.model.SequenceDef
 import com.indagium.model.TemplateGranularity
 import com.indagium.ui.mkTab
+import com.indagium.utils.appendLogEntries
 import com.indagium.utils.computeCrashSites
 import com.indagium.utils.computeItems
 import com.indagium.utils.computeMessageTemplates
@@ -31,6 +32,11 @@ private const val NANOS_PER_MILLI = 1_000_000L
 // enough that it's genuinely mid-computation on a multi-GB fixture, short relative to the full
 // uncancelled run measured just above it.
 private const val CANCEL_AFTER_MS = 5L
+
+private const val DEFAULT_APPEND_ROWS = 1_000_000
+private const val DEFAULT_APPEND_BATCHES = 100
+private const val DEFAULT_APPEND_BATCH_SIZE = 200
+private const val FULL_SAMPLE_EVERY = 10
 
 // Manual performance harness — skipped unless -Dindagium.perf.file=<path> (or the legacy
 // -Dopenlog.perf.file spelling) points at a fixture
@@ -169,6 +175,81 @@ class LargeFilePerfHarness {
             checkNotNull(candidate) { "no log candidates in $archivePath" }
             val entries = timed("archive extract+parse") { extractCandidate(archive, candidate) }
             println("PERF archiveEntries: ${entries.size}")
+        }
+    }
+
+    // Opt-in (-Dindagium.perf.append=1), synthetic, no fixture: how much a live-capture batch costs
+    // when computeItems extends the previous result (append fast path) versus rebuilding it from
+    // scratch. "full" is a cold-cache compute of the identical tab under another id; "fast" chains
+    // on the main tab's own cache exactly like successive tail batches do.
+    @Test
+    fun appendFastPathBenchmark() {
+        if (System.getProperty("indagium.perf.append").isNullOrBlank()) return
+        val rows = System.getProperty("indagium.perf.append.rows")?.toIntOrNull() ?: DEFAULT_APPEND_ROWS
+        val batches = System.getProperty("indagium.perf.append.batches")?.toIntOrNull() ?: DEFAULT_APPEND_BATCHES
+        val batchSize = System.getProperty("indagium.perf.append.batchSize")?.toIntOrNull() ?: DEFAULT_APPEND_BATCH_SIZE
+        val tags = listOf("ActivityManager", "WifiService", "NetworkMonitor", "Vold", "SurfaceFlinger", "denied.Perm")
+
+        fun row(id: Int) = com.indagium.model.LogEntry(
+            id,
+            "10:00:%02d.%03d".format((id / 1000) % 60, id % 1000),
+            com.indagium.model.LogLevel.I,
+            tags[id % tags.size],
+            if (id % 10 == 0) "request denied id=$id" else "frame $id rendered ok",
+            pid = 1000 + id % 7,
+        )
+        println("PERF append: rows=$rows batches=$batches batchSize=$batchSize")
+        val scenarios = listOf(
+            "noFilter" to Filter(),
+            "keyword10pct" to Filter(mode = FilterMode.KEYWORD, kwText = "denied"),
+        )
+        for ((name, filter) in scenarios) {
+            var data: List<com.indagium.model.LogEntry> = appendLogEntries(emptyList(), (1..rows).map(::row))
+            var tab = mkTab("perf-append-$name", "synthetic.log", data).copy(filter = filter)
+            invalidateComputeCache(tab.id)
+            timed("append[$name] initial full compute (rows=$rows)") { computeItems(tab, applyFilter = true) }
+            var summary = com.indagium.ui.summarizeItems(computeItems(tab, applyFilter = true))
+            var prevItems = computeItems(tab, applyFilter = true)
+            val fastMs = ArrayList<Long>()
+            val summaryMs = ArrayList<Long>()
+            val fullMs = ArrayList<Long>()
+            val fullSummaryMs = ArrayList<Long>()
+            var nextId = rows + 1
+            repeat(batches) { b ->
+                val batch = (nextId until nextId + batchSize).map(::row)
+                nextId += batchSize
+                data = appendLogEntries(data, batch)
+                tab = tab.copy(logData = data, rmap = com.indagium.ui.mkRmap(data))
+                val t0 = System.nanoTime()
+                val fast = computeItems(tab, applyFilter = true)
+                fastMs += (System.nanoTime() - t0) / NANOS_PER_MILLI
+                val t1 = System.nanoTime()
+                summary = com.indagium.ui.spliceSummarize(prevItems, summary, fast) ?: com.indagium.ui.summarizeItems(fast)
+                summaryMs += (System.nanoTime() - t1) / NANOS_PER_MILLI
+                prevItems = fast
+                if (b % FULL_SAMPLE_EVERY == 0) {
+                    val coldTab = tab.copy(id = tab.id + "~full")
+                    invalidateComputeCache(coldTab.id)
+                    val t2 = System.nanoTime()
+                    val full = computeItems(coldTab, applyFilter = true)
+                    fullMs += (System.nanoTime() - t2) / NANOS_PER_MILLI
+                    val t3 = System.nanoTime()
+                    com.indagium.ui.summarizeItems(full)
+                    fullSummaryMs += (System.nanoTime() - t3) / NANOS_PER_MILLI
+                    check(full == fast) { "fast path result differs from a full recompute at batch $b" }
+                    invalidateComputeCache(coldTab.id)
+                }
+            }
+
+            fun stats(label: String, xs: List<Long>) {
+                val sorted = xs.sorted()
+                println("PERF append[$name] $label: n=${xs.size} median=${sorted[sorted.size / 2]}ms mean=${xs.average().toLong()}ms max=${sorted.last()}ms")
+            }
+            stats("fast computeItems per batch", fastMs)
+            stats("spliceSummarize per batch", summaryMs)
+            stats("full computeItems per batch", fullMs)
+            stats("full summarizeItems per batch (what a full rebuild forces)", fullSummaryMs)
+            invalidateComputeCache(tab.id)
         }
     }
 }

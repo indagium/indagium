@@ -168,3 +168,14 @@ fun appendLogEntries(base: List<LogEntry>, batch: List<LogEntry>): List<LogEntry
  * error for what is just a late reader of a closed tab.
  */
 class ReleasedLogListException : CancellationException("log rows were released after their tab closed")
+
+/**
+ * True when [current] is [snapshot] with rows appended (identical, or a strictly longer append-only
+ * continuation), in O(1). Tailing only ever appends and entry ids strictly increase, so comparing
+ * the snapshot's last row by identity with the same index of [current] is sufficient; it also works
+ * across backing-store regrowth, where the two lists no longer share a store. An empty [snapshot]
+ * is never considered extended.
+ */
+internal fun extendsSnapshot(current: List<LogEntry>, snapshot: List<LogEntry>): Boolean =
+    snapshot.isNotEmpty() && current.size >= snapshot.size &&
+        current[snapshot.size - 1] === snapshot[snapshot.size - 1]
