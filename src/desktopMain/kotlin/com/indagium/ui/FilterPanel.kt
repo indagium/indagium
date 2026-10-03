@@ -7,6 +7,8 @@ import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Folder
@@ -547,6 +549,10 @@ class FilterPanelUiState {
     // FilterPanel instance being hidden/reshown (same reasoning as every other field in this
     // class), not a full app restart.
     val dismissedCrossingThreadHints = mutableStateSetOf<String>()
+
+    // One-shot "scroll this section into view" request from the filter bar's residual chip (see
+    // FilterPanelReveal.kt). Transient on purpose: never persisted; the panel clears it once handled.
+    var revealSection by mutableStateOf<FilterPanelSection?>(null)
 }
 
 @OptIn(
@@ -1065,6 +1071,22 @@ internal fun FilterPanel(
         if (msgRuleScopeOpen) runCatching { msgRuleScopeFr.requestFocus() }
     }
     val scroll = rememberScrollState()
+    val highlightersReveal = remember { BringIntoViewRequester() }
+    val levelsReveal = remember { BringIntoViewRequester() }
+    val pendingReveal = fpState.revealSection
+    LaunchedEffect(pendingReveal) {
+        val target = pendingReveal ?: return@LaunchedEffect
+        // Let the just-expanded section (and a freshly mounted panel) lay out before measuring it.
+        withFrameNanos { }
+        withFrameNanos { }
+        runCatching {
+            when (target) {
+                FilterPanelSection.HIGHLIGHTERS -> highlightersReveal
+                FilterPanelSection.LOG_LEVEL -> levelsReveal
+            }.bringIntoView()
+        }
+        if (fpState.revealSection == target) fpState.revealSection = null
+    }
     val filterDropTarget = remember(onImportFiltersFromFiles, onUnhandledFileDrop) {
         object : DragAndDropTarget {
             override fun onDrop(event: DragAndDropEvent): Boolean {
@@ -1917,41 +1939,45 @@ internal fun FilterPanel(
         // ── Highlighters ──────────────────────────────────────────
         // List + search-to-add form live in HighlighterSection.kt; the panel keeps only what has to
         // outlive it (the add field's FocusRequester, its focus flag for the key handler above).
-        HighlighterSection(
-            tab = tab,
-            fpState = fpState,
-            sectionState = hlSection,
-            actions = highlighterActions,
-            sortedTags = sortedTags,
-            tagUsage = tagUsage,
-            mostUsedTagLimit = mostUsedTagLimit,
-            filterListRows = filterListRows,
-            newHlPat = newHlPat,
-            newHlRx = newHlRx,
-            newHlColor = newHlColor,
-            inputFocusRequester = hlFr,
-            onInputFocusedChange = { hlFieldFocused = it },
-            onTabOut = { runCatching { tagFr.requestFocus() } },
-            onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
-            onUiStateChanged = onUiStateChanged,
-        )
+        Column(Modifier.fillMaxWidth().bringIntoViewRequester(highlightersReveal)) {
+            HighlighterSection(
+                tab = tab,
+                fpState = fpState,
+                sectionState = hlSection,
+                actions = highlighterActions,
+                sortedTags = sortedTags,
+                tagUsage = tagUsage,
+                mostUsedTagLimit = mostUsedTagLimit,
+                filterListRows = filterListRows,
+                newHlPat = newHlPat,
+                newHlRx = newHlRx,
+                newHlColor = newHlColor,
+                inputFocusRequester = hlFr,
+                onInputFocusedChange = { hlFieldFocused = it },
+                onTabOut = { runCatching { tagFr.requestFocus() } },
+                onReclaimFocus = { runCatching { focusRequester?.requestFocus() } },
+                onUiStateChanged = onUiStateChanged,
+            )
+        }
         Divider()
 
         // ── Log Level ─────────────────────────────────────────────
-        SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = {
-            fpState.lvlExpanded = !fpState.lvlExpanded
-            onUiStateChanged()
-        })
-        if (fpState.lvlExpanded) {
-            val levels = LogLevel.entries
-            SegmentedControl(
-                options = levels.map { it.key.toString() },
-                selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
-                onToggle = { idx -> onToggleLevel(levels[idx]) },
-                selectedColors = levels.map { it.defaultColor },
-                fillWidth = true,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
-            )
+        Column(Modifier.fillMaxWidth().bringIntoViewRequester(levelsReveal)) {
+            SectionHeader("Log level", expanded = fpState.lvlExpanded, onToggle = {
+                fpState.lvlExpanded = !fpState.lvlExpanded
+                onUiStateChanged()
+            })
+            if (fpState.lvlExpanded) {
+                val levels = LogLevel.entries
+                SegmentedControl(
+                    options = levels.map { it.key.toString() },
+                    selectedIndices = filter.levels.map { levels.indexOf(it) }.toSet(),
+                    onToggle = { idx -> onToggleLevel(levels[idx]) },
+                    selectedColors = levels.map { it.defaultColor },
+                    fillWidth = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
         }
         Divider()
 
