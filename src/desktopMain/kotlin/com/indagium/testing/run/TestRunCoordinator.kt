@@ -14,6 +14,7 @@ import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.newRunId
 import com.indagium.testing.model.summary
 import com.indagium.testing.script.TestScriptRunner
@@ -35,9 +36,10 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 
-// Owns every AI test run of this launch. start() validates, freezes the suite into a TestRun and launches the engine on
-// the coordinator's OWN scope (SupervisorJob + IO), so nothing here ever runs on the UI thread or holds a UI lock. The
-// run's state is exposed as a StateFlow of immutable TestRun snapshots (AppState mirrors it into Compose state); what
+// Owns every AI test run of this launch (the lanes of a run work in parallel across devices; see TestRunEngine). start()
+// validates, freezes the suite into a TestRun and launches the engine on the coordinator's OWN scope (SupervisorJob + IO),
+// so nothing here ever runs on the UI thread or holds a UI lock. The run's state is exposed as a StateFlow of immutable
+// TestRun snapshots (AppState mirrors it into Compose state); what
 // is live and not part of the stored run (pending confirmation cards, a paused lane) is read from the lane handles.
 //
 // Locks: [registryLock] only guards the check-and-register of devices in use, and the publish lock the snapshot
@@ -55,6 +57,7 @@ sealed interface StartRunResult {
 }
 
 /** The owner's view of the world, as lambdas so the coordinator knows nothing of AppState. */
+@Suppress("LongParameterList") // The owner's whole view of the world, as lambdas; each has a default or a single use.
 internal class CoordinatorDeps(
     val library: () -> TestLibrary,
     val limits: () -> EditionLimits,
@@ -68,9 +71,16 @@ internal class CoordinatorDeps(
     val scriptRunner: TestScriptRunner = TestScriptRunner(),
     val tuning: EngineTuning = EngineTuning(),
     val wallClock: () -> Long = System::currentTimeMillis,
+    /** The image of a golden-screenshot example, for the judge. Blocking; called on IO. */
+    val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
 )
 
-private class RunEntry(val state: TestRunState, val handles: Map<String, LaneHandle>, val persister: RunPersister) {
+private class RunEntry(
+    val state: TestRunState,
+    val handles: Map<String, LaneHandle>,
+    val persister: RunPersister,
+    val gate: RunPauseGate,
+) {
     @Volatile var job: Job? = null
 }
 
@@ -128,11 +138,13 @@ internal class TestRunCoordinator(
         validation: RunValidation,
         profiles: List<AiProviderProfile>,
     ) {
+        val frozenSuite = suite.truncatedAfter(config.stopAfterStepId)
+        val plan = validation.plan.truncatedAfter(config.stopAfterStepId)
         val initial = TestRun(
             id = runId,
-            suite = suite,
+            suite = frozenSuite,
             scripts = library.scripts,
-            sharedSteps = referencedSharedSteps(suite, library),
+            sharedSteps = referencedSharedSteps(frozenSuite, library),
             config = config,
             lanes = config.lanes.map { LaneResult(it.id, it) },
             createdAt = deps.wallClock(),
@@ -145,7 +157,8 @@ internal class TestRunCoordinator(
             publish()
         }
         persister = RunPersister(deps.store, scope, { state.current }, deps.tuning.persistDebounceMs)
-        val entry = RunEntry(state, handles, persister)
+        val gate = RunPauseGate()
+        val entry = RunEntry(state, handles, persister, gate)
         runs[runId] = entry
         publish() // The run is listed the moment start() returns, before its job has run a single instruction.
         val agents = config.lanes.filter { it.kind == LaneKind.AGENT_PROFILE }
@@ -160,16 +173,27 @@ internal class TestRunCoordinator(
             store = deps.store,
             tuning = deps.tuning,
             wallClock = deps.wallClock,
+            judgeAgent = judgeAgentFactory(config, profiles),
+            goldenImage = deps.goldenImage,
+            pauseGate = gate,
         )
         // ATOMIC: a run cancelled before its first instruction must still reach the finally that frees its devices.
         entry.job = scope.launch(start = CoroutineStart.ATOMIC) {
             try {
                 persister.flush()
-                TestRunEngine(state, persister, engineDeps, validation.plan, handles).execute()
+                TestRunEngine(state, persister, engineDeps, plan, handles).execute()
             } finally {
                 release(runId, config)
             }
         }
+    }
+
+    /** The judge's agent builder, or null when the run has no judge. The judge uses the same launchers as a lane, whatever its profile kind. */
+    private fun judgeAgentFactory(config: RunConfig, profiles: List<AiProviderProfile>): (() -> LaneAgent)? {
+        if (!config.judgeActive) return null
+        val profile = profiles.profileOrNull(config.judgeProfileId) ?: return null
+        val key = deps.apiKey(profile.id)
+        return { deps.agentFactory.create(profile, key) }
     }
 
     private fun release(runId: String, config: RunConfig) {
@@ -217,6 +241,38 @@ internal class TestRunCoordinator(
         if (entry.state.current.isFinished) return false
         entry.job?.cancel()
         return true
+    }
+
+    /** Pause all: lanes of the run stop at their next step boundary until [paused] is false again. False for an unknown or finished run. */
+    fun setPaused(runId: String, paused: Boolean): Boolean {
+        val entry = runs[runId] ?: return false
+        if (entry.state.current.isFinished) return false
+        entry.gate.setPaused(paused)
+        entry.state.touch()
+        return true
+    }
+
+    fun isPaused(runId: String): Boolean = runs[runId]?.gate?.isPaused ?: false
+
+    /** The most recent tool calls of the lane's agent (newest last), as short lines for the live view. Empty when no agent is running. */
+    fun recentToolCalls(runId: String, laneId: String, max: Int): List<String> =
+        runs[runId]?.handles?.get(laneId)?.agentRun?.history?.let { toolCallLines(it, max) }.orEmpty()
+
+    /**
+     * Applies [transform] to a run, in memory when the run is held here (its persister then saves it) or, for a run of an
+     * earlier launch, on disk. Null for an unknown run; otherwise the updated run. Runs on IO.
+     */
+    suspend fun updateRun(runId: String, transform: (TestRun) -> TestRun): TestRun? {
+        val entry = runs[runId]
+        if (entry != null) {
+            entry.state.update(transform)
+            entry.persister.flush()
+            return entry.state.current
+        }
+        return withContext(Dispatchers.IO) {
+            val stored = deps.store.load(runId) ?: return@withContext null
+            transform(stored).also { deps.store.save(it) }
+        }
     }
 
     /** Waits for the run to end (tests, and callers that want the final report). Null for an unknown run. */

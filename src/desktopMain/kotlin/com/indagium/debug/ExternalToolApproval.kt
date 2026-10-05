@@ -13,16 +13,18 @@ import com.indagium.ui.ExternalActionDetails
 // different command. Device tools keep their own per-session approval (ControlServer.executeExternalDeviceTool).
 //
 // run_test_suite starts a run that drives devices and may run scripts, so it needs the user's yes for every call; so does
-// test_lane_tool_call when it runs a SCRIPT tool of an external lane (a built-in lane tool such as tap needs no approval:
-// the run itself was approved, and the lane's device is the one named in that approval).
+// rerun_test_step (a new run of one case); so does test_lane_tool_call when it runs a SCRIPT tool of an external lane (a
+// built-in lane tool such as tap needs no approval: the run itself was approved, and the lane's device is the one named
+// in that approval).
 
-internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf("try_test_script", "run_test_suite", "test_lane_tool_call")
+internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf("try_test_script", "run_test_suite", "rerun_test_step", "test_lane_tool_call")
 
 /** The approval dialog content for [toolName], or null when the call would be refused or needs no approval of its own. */
-internal fun describePerCallApproval(appState: AppState, toolName: String, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? =
+internal suspend fun describePerCallApproval(appState: AppState, toolName: String, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? =
     when (toolName) {
         "try_test_script" -> describeTryScriptCall(appState, arguments, clientName)
         "run_test_suite" -> describeRunSuiteCall(appState, arguments, clientName)
+        "rerun_test_step" -> describeRerunStepCall(appState, arguments, clientName)
         "test_lane_tool_call" -> describeLaneToolCall(appState, arguments, clientName)
         else -> null
     }

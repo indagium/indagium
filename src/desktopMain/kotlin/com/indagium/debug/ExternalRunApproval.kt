@@ -1,13 +1,18 @@
 package com.indagium.debug
 
+import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.HookItem
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.RESERVED_SCRIPT_TOOL_NAMES
+import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.run.rerunConfig
 import com.indagium.testing.script.ScriptArgsResult
 import com.indagium.testing.script.scriptArgsFromToolValues
 import com.indagium.testing.script.validateScriptArgs
@@ -65,32 +70,78 @@ private fun scriptLines(library: TestLibrary, suite: TestSuite): String {
     return if (more > 0) "$text\n+ $more more" else text
 }
 
+private fun judgeLine(appState: AppState, judgeProfileId: String?, judgeMode: String): String? {
+    val mode = JudgeMode.parse(judgeMode) ?: return null
+    if (mode == JudgeMode.OFF || judgeProfileId.isNullOrBlank()) return null
+    val name = appState.settings.aiProviderProfiles.firstOrNull { it.id == judgeProfileId }?.displayName ?: judgeProfileId
+    return "AI profile $name (${mode.label.lowercase()})"
+}
+
+private fun laneLine(appState: AppState, profileId: String, serial: String): String {
+    val profileName = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId }?.displayName ?: profileId
+    val driver = if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) "driven by you over MCP" else "AI profile $profileName"
+    return "device ${serial.ifBlank { "(no device)" }} — $driver"
+}
+
 internal fun describeRunSuiteCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
     val library = appState.testLibrary
     val suite = (arguments["suiteId"] as? String)?.let(library::suite) ?: return null
     val laneItems = (arguments["lanes"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
     if (laneItems.isEmpty()) return null
-    val profiles = appState.settings.aiProviderProfiles
-    val laneLines = laneItems.map { item ->
-        val profileId = (item["profileId"] as? String).orEmpty()
-        val serial = (item["deviceSerial"] as? String).orEmpty().ifBlank { "(no device)" }
-        val profileName = profiles.firstOrNull { it.id == profileId }?.displayName ?: profileId
-        val driver = if (profileId.equals("external", ignoreCase = true)) "driven by you over MCP" else "AI profile $profileName"
-        "device $serial — $driver"
-    }
+    val laneLines = laneItems.map { item -> laneLine(appState, (item["profileId"] as? String).orEmpty(), (item["deviceSerial"] as? String).orEmpty()) }
     val chosen = (arguments["caseIds"] as? List<*>)?.filterIsInstance<String>()
     val caseNames = suite.cases.filter { chosen == null || it.id in chosen }.map { it.name }
     val casesText = if (chosen == null) "All ${suite.cases.size} case(s)" else "${caseNames.size} of ${suite.cases.size} case(s)"
     val shownCases = caseNames.take(MAX_CASE_NAMES_SHOWN).joinToString(", ") + if (caseNames.size > MAX_CASE_NAMES_SHOWN) ", …" else ""
+    val judge = judgeLine(appState, arguments["judgeProfileId"] as? String, (arguments["judgeMode"] as? String).orEmpty())
     return ExternalActionDetails(
         title = "Start a test run?",
         summary = "$clientName wants to run the test suite \"${suite.name}\". The run drives the devices below and may run the scripts listed.",
-        fields = listOf(
+        fields = listOfNotNull(
             "Suite" to suite.name,
             "Cases" to "$casesText: $shownCases",
             "Lanes" to laneLines.joinToString("\n"),
             "Repeat" to ((arguments["repeat"] as? Number)?.toInt() ?: 1).toString(),
+            judge?.let { "Judge" to it },
             "Scripts that may run" to scriptLines(library, suite),
+        ),
+        allowLabel = "Start run",
+        declinedMessage = DECLINED_RUN_MESSAGE,
+    )
+}
+
+/** The case, step and lane of a re-run an external client asks for, as far as the library still has them. */
+private data class RerunTarget(val config: RunConfig, val suite: TestSuite, val case: TestCase, val stepNumber: Int)
+
+private suspend fun rerunTarget(appState: AppState, arguments: Map<String, Any?>): RerunTarget? {
+    val run = (arguments["runId"] as? String)?.let { appState.testRunCoordinator.loadRun(it) }
+    val laneId = arguments["laneId"] as? String
+    val caseId = arguments["caseId"] as? String
+    val stepId = arguments["stepId"] as? String
+    if (run == null || laneId == null || caseId == null || stepId == null) return null
+    val config = rerunConfig(run, laneId, caseId, stepId).getOrNull() ?: return null
+    val suite = appState.testLibrary.suite(config.suiteId) ?: return null
+    val case = suite.cases.firstOrNull { it.id == caseId } ?: return null
+    val stepNumber = case.steps.indexOfFirst { it.id == stepId } + 1
+    return if (stepNumber == 0) null else RerunTarget(config, suite, case, stepNumber)
+}
+
+/** What the user is asked before an external client may re-run a step: a new run of one case, on the lane's device. Null when it would be refused anyway. */
+internal suspend fun describeRerunStepCall(appState: AppState, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? {
+    val target = rerunTarget(appState, arguments) ?: return null
+    val (config, suite, case) = target
+    val stepNumber = target.stepNumber
+    val lane = config.lanes.single()
+    return ExternalActionDetails(
+        title = "Run a step again?",
+        summary = "$clientName wants to start a new test run of the case \"${case.name}\" in \"${suite.name}\", from its first step up to " +
+            "step $stepNumber. The run drives the device below and may run the scripts listed.",
+        fields = listOfNotNull(
+            "Suite" to suite.name,
+            "Case" to "${case.name} (steps 1–$stepNumber of ${case.steps.size})",
+            "Lane" to laneLine(appState, lane.profileId ?: EXTERNAL_LANE_PROFILE_ID, lane.deviceSerial),
+            judgeLine(appState, config.judgeProfileId, config.judgeMode)?.let { "Judge" to it },
+            "Scripts that may run" to scriptLines(appState.testLibrary, suite),
         ),
         allowLabel = "Start run",
         declinedMessage = DECLINED_RUN_MESSAGE,

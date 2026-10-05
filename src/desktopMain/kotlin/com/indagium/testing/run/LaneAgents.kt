@@ -15,12 +15,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
-// How a lane's agent is started. A lane has one [LaneAgent] for the whole run; each [start] is one agent RUN (a
+// How a lane's (or a judge's) agent is started. A lane has one [LaneAgent] for the whole run; each [start] is one agent RUN (a
 // "segment") that works through the lane's gateway until the case is over, the step times out or the agent fails —
 // then the engine starts a fresh segment. In-app HTTP profiles go through AiAgentRunner with the lane gateway; Claude
 // Code and Codex go through AccountAgentRunner, whose managed MCP server is bound to that same gateway.
 
-/** Everything one agent run needs. [toolCallLimit] is what is left of the case's budget; protocol tools are free. */
+/** Everything one agent run needs (a lane's segment or a judge's single run). [toolCallLimit] is what is left of the case's budget; protocol tools are free. */
 internal class AgentSegmentRequest(
     val session: AiSession,
     val prompt: String,
@@ -31,6 +31,10 @@ internal class AgentSegmentRequest(
     val maxTurns: Int,
     val freeTools: Set<String>,
     val confirmationTimeoutMs: Long,
+    /** The budget wording an in-app model gets; a judge run words its own. */
+    val budgetGuidance: (AiRun) -> String = ::laneBudgetGuidance,
+    /** What an account agent is told before the request; a judge run words its own. */
+    val promptPreamble: (AiRun) -> String = ::lanePromptPreamble,
 )
 
 internal interface LaneAgent : AutoCloseable {
@@ -61,7 +65,7 @@ internal class ProviderLaneAgent(private val provider: LlmProvider, private val 
             reasoningEffort = profile.reasoningEffort,
             freeTools = request.freeTools,
             confirmationTimeoutMs = request.confirmationTimeoutMs,
-            budgetGuidance = ::laneBudgetGuidance,
+            budgetGuidance = request.budgetGuidance,
         )
         run.job?.invokeOnCompletion { runner.close() }
         return run
@@ -84,7 +88,7 @@ internal fun laneAccountRunnerFactory(leaseFactory: (AiRun, IndagiumToolGateway)
             managedMcpServerFactory = { run -> leaseFactory(run, request.gateway) },
             maxToolRounds = request.toolCallLimit,
             maxTurns = request.maxTurns,
-            promptPreamble = ::lanePromptPreamble,
+            promptPreamble = request.promptPreamble,
         )
     }
 

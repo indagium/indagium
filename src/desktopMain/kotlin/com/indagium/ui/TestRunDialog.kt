@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -32,25 +33,28 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.capture.CaptureDevice
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
-import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.run.MAX_PARALLEL_DEVICES
 import com.indagium.testing.run.StartRunResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-// "Run suite…" / "Run this case": a cases checklist, one lane (what drives it and on which device), repeat, the tool-call
-// limit and the evidence to keep. Start validates through the coordinator (which refuses with every problem at once);
-// on success the Runs screen opens on the new run. The device list is read with adb off the UI thread and never offers
-// the device the live capture holds.
+// "Run suite…" / "Run this case": a cases checklist, lane rows (what drives each lane and on which device; add, remove and
+// reorder them), the judge, repeat, the tool-call limit and the evidence to keep. Lanes on different devices run at the same
+// time, lanes that share a device one after another (the dialog says so). Start validates through the coordinator (which refuses
+// with every problem at once); on success the Runs screen opens on the new run. The device list is read with adb off the UI thread
+// and never offers the device the live capture holds.
 
-private val DIALOG_WIDTH = 560.dp
-private val DIALOG_MAX_HEIGHT = 640.dp
+private val DIALOG_WIDTH = 640.dp
+private val DIALOG_MAX_HEIGHT = 720.dp
 private val DIALOG_SHAPE = RoundedCornerShape(8.dp)
 private val LIMIT_FIELD_WIDTH = 90.dp
 private val CASES_MAX_HEIGHT = 180.dp
+private val MENU_WIDTH = 300.dp
 
 /** What the dialog was opened for: a whole suite, or one case ([caseId]). */
 internal data class RunDialogTarget(val suiteId: String, val caseId: String? = null)
@@ -66,19 +70,24 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
         return
     }
     val runnable = suite.cases.filterNot { limits.isCaseLocked(it.id) }
-    var selected by remember { mutableStateOf(target.caseId?.let { setOf(it) } ?: runnable.map { it.id }.toSet()) }
-    val choices = remember(ui.state.settings.aiProviderProfiles) { laneChoices(ui.state.settings.aiProviderProfiles) }
-    var choice by remember { mutableStateOf(choices.firstOrNull { it.profileId == selectedProfileId(ui.state) } ?: choices.firstOrNull()) }
-    var serial by remember { mutableStateOf<String?>(null) }
+    val profiles = ui.state.settings.aiProviderProfiles
+    val choices = remember(profiles) { laneChoices(profiles) }
+    var model by remember {
+        mutableStateOf(
+            RunDialogModel(
+                suiteId = suite.id,
+                selectedCaseIds = target.caseId?.let { setOf(it) } ?: runnable.map { it.id }.toSet(),
+                choice = choices.firstOrNull { it.profileId == selectedProfileId(ui.state) } ?: choices.firstOrNull(),
+                deviceSerial = null,
+            ),
+        )
+    }
     var refresh by remember { mutableIntStateOf(0) }
     val devices by produceState<DevicesState>(DevicesState.Loading, refresh) { value = loadDevices(ui.state) }
-    var repeat by remember { mutableIntStateOf(1) }
-    var toolLimit by remember { mutableStateOf(DEFAULT_CASE_TOOL_CALL_LIMIT.toString()) }
-    var evidence by remember { mutableStateOf(EvidenceFlags()) }
     var problem by remember { mutableStateOf<String?>(null) }
     var starting by remember { mutableStateOf(false) }
     val deviceChoices = (devices as? DevicesState.Ready)?.choices.orEmpty()
-    if (serial == null || deviceChoices.none { it.serial == serial }) serial = deviceChoices.firstOrNull()?.serial
+    LaunchedEffect(deviceChoices) { model = model.withDefaultDevices(deviceChoices) }
 
     fun close() {
         onDismiss()
@@ -86,7 +95,6 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
     }
 
     fun start() {
-        val model = RunDialogModel(suite.id, selected, choice, serial, repeat, toolLimit, evidence)
         val config = model.toConfig(suite.cases.map { it.id }).getOrElse {
             problem = it.message
             return
@@ -116,9 +124,14 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
             val title = target.caseId?.let { id -> suite.cases.firstOrNull { it.id == id }?.name?.let { "Run case “$it”" } } ?: "Run suite “${suite.name}”"
             AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
-                CasesSection(suite, selected, limits, onChange = { selected = it })
-                LaneSection(choices, choice, { choice = it }, devices, deviceChoices, serial, { serial = it }, { refresh++ })
-                SettingsSection(repeat, { repeat = it }, toolLimit, { toolLimit = it }, evidence, { evidence = it })
+                CasesSection(suite, model.selectedCaseIds, limits, onChange = { model = model.copy(selectedCaseIds = it) })
+                LanesSection(model, { model = it }, choices, devices, deviceChoices) { refresh++ }
+                JudgeSection(model, { model = it }, choices.filterNot { it.isExternal })
+                SettingsSection(
+                    model.repeat, { model = model.copy(repeat = it) },
+                    model.toolLimitText, { model = model.copy(toolLimitText = it) },
+                    model.evidence, { model = model.copy(evidence = it) },
+                )
             }
             problem?.let {
                 Spacer(Modifier.padding(top = 8.dp))
@@ -131,6 +144,23 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
             }
         }
     }
+}
+
+/** Gives every lane row without a usable device the first free one (a device no other row uses), else the first device. */
+internal fun RunDialogModel.withDefaultDevices(devices: List<DeviceChoice>): RunDialogModel {
+    if (devices.isEmpty()) return this
+    val lanes = allLanes()
+    val taken = lanes.mapNotNull { it.deviceSerial }.filter { serial -> devices.any { it.serial == serial } }.toMutableList()
+    val fixed = lanes.map { draft ->
+        if (draft.deviceSerial != null && devices.any { it.serial == draft.deviceSerial }) {
+            draft
+        } else {
+            val pick = (devices.firstOrNull { it.serial !in taken } ?: devices.first()).serial
+            taken += pick
+            draft.copy(deviceSerial = pick)
+        }
+    }
+    return if (fixed == lanes) this else withLanes(fixed)
 }
 
 private fun selectedProfileId(state: AppState): String? = state.settings.aiProviderProfiles.firstOrNull { it.selected }?.id
@@ -173,47 +203,102 @@ private fun CaseCheckRow(case: TestCase, checked: Boolean, limits: TestsLimitsUi
 }
 
 @Composable
-private fun LaneSection(
+private fun LanesSection(
+    model: RunDialogModel,
+    onModel: (RunDialogModel) -> Unit,
     choices: List<LaneChoice>,
-    choice: LaneChoice?,
-    onChoice: (LaneChoice) -> Unit,
     devices: DevicesState,
     deviceChoices: List<DeviceChoice>,
-    serial: String?,
-    onSerial: (String) -> Unit,
     onRefresh: () -> Unit,
 ) {
-    TestsSectionTitle("Lane")
-    FlowRow(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        itemVerticalAlignment = Alignment.CenterVertically,
-    ) {
-        TestsDropdown(
-            selectedLabel = choice?.label ?: "Choose what drives the lane",
-            options = choices,
-            optionLabel = { it.label },
-            onSelect = onChoice,
-            menuWidth = 300.dp,
-            isSelected = { it == choice },
-        )
-        TestsDropdown(
-            selectedLabel = deviceChoices.firstOrNull { it.serial == serial }?.label ?: "Choose a device",
-            options = deviceChoices,
-            optionLabel = { it.label },
-            onSelect = { onSerial(it.serial) },
-            menuWidth = 300.dp,
-            isSelected = { it.serial == serial },
-            emptyText = "No ready device found",
-        )
-        AppButton("Refresh", onClick = onRefresh)
+    val lanes = model.allLanes()
+    TestsSectionTitle("Lanes")
+    TestsHint("Lanes on different devices run at the same time (up to $MAX_PARALLEL_DEVICES devices); lanes that share a device run one after another.")
+    ReorderableColumn(
+        items = lanes,
+        idOf = { it.id },
+        onMove = { id, to -> onModel(model.moveLane(id, to)) },
+        rowGap = 6.dp,
+        modifier = Modifier.padding(top = 6.dp),
+    ) { draft, row ->
+        ReorderRowCard(row, enabled = true, onRemove = if (lanes.size > 1) ({ onModel(model.removeLane(draft.id)) }) else null) {
+            LaneRow(draft, choices, deviceChoices, { updated -> onModel(model.updateLane(draft.id) { updated }) }, Modifier.weight(1f))
+        }
     }
+    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        AppButton("+ Add lane", onClick = { onModel(model.addLane(LaneDraft(choice = lanes.last().choice)).withDefaultDevices(deviceChoices)) })
+        AppButton("Refresh devices", onClick = onRefresh)
+    }
+    model.deviceWarnings().forEach { TestsLockedNotice(it, Modifier.padding(top = 6.dp)) }
     when (devices) {
         DevicesState.Loading -> TestsHint("Looking for devices…")
         is DevicesState.Failed -> TestsErrorText(devices.message)
         is DevicesState.Ready -> if (devices.choices.isEmpty()) TestsHint("No ready device. The device of the live capture tab is not offered.")
     }
-    if (choice?.isExternal == true) TestsHint("An external lane has no agent: drive it with the test_lane_tool_call MCP tool.")
+    if (lanes.any { it.choice?.isExternal == true }) TestsHint("An external lane has no agent: drive it with the test_lane_tool_call MCP tool.")
+}
+
+@Composable
+private fun LaneRow(draft: LaneDraft, choices: List<LaneChoice>, deviceChoices: List<DeviceChoice>, onChange: (LaneDraft) -> Unit, modifier: Modifier) {
+    FlowRow(
+        modifier,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        itemVerticalAlignment = Alignment.CenterVertically,
+    ) {
+        TestsDropdown(
+            selectedLabel = draft.choice?.label ?: "Choose what drives the lane",
+            options = choices,
+            optionLabel = { it.label },
+            onSelect = { onChange(draft.copy(choice = it)) },
+            menuWidth = MENU_WIDTH,
+            isSelected = { it == draft.choice },
+        )
+        TestsDropdown(
+            selectedLabel = deviceChoices.firstOrNull { it.serial == draft.deviceSerial }?.label ?: "Choose a device",
+            options = deviceChoices,
+            optionLabel = { it.label },
+            onSelect = { onChange(draft.copy(deviceSerial = it.serial)) },
+            menuWidth = MENU_WIDTH,
+            isSelected = { it.serial == draft.deviceSerial },
+            emptyText = "No ready device found",
+        )
+    }
+}
+
+/** The judge: which AI profile and when. Any profile kind works (Claude Code and Codex too); the judge never sees what an agent claimed. */
+@Composable
+private fun JudgeSection(model: RunDialogModel, onModel: (RunDialogModel) -> Unit, profileChoices: List<LaneChoice>) {
+    TestsSectionTitle("Judge")
+    TestsHint(
+        "A blind AI judge compares each step's expected result with the screenshot, the log and the check results, " +
+            "without seeing what the agent claimed.",
+    )
+    Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        JudgeMode.entries.forEach { mode ->
+            AppButton(
+                mode.label,
+                onClick = {
+                    val profile = model.judgeProfileId ?: profileChoices.firstOrNull()?.profileId
+                    onModel(model.copy(judgeMode = mode, judgeProfileId = profile))
+                },
+                variant = if (mode == model.judgeMode) ButtonVariant.Primary else ButtonVariant.Secondary,
+            )
+        }
+    }
+    if (model.judgeMode != JudgeMode.OFF) {
+        val selected = profileChoices.firstOrNull { it.profileId == model.judgeProfileId }
+        TestsDropdown(
+            selectedLabel = selected?.label ?: "Choose the judge's AI profile",
+            options = profileChoices,
+            optionLabel = { it.label },
+            onSelect = { onModel(model.copy(judgeProfileId = it.profileId)) },
+            menuWidth = MENU_WIDTH,
+            isSelected = { it.profileId == model.judgeProfileId },
+            modifier = Modifier.padding(top = 6.dp),
+            emptyText = "No AI profile configured (Settings > AI providers)",
+        )
+    }
 }
 
 @Composable

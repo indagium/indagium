@@ -145,6 +145,10 @@ internal class RunHarness(
     val deviceProblem: (String) -> String? = { null },
     val profile: AiProviderProfile = testProfile,
     agentFactory: LaneAgentFactory? = null,
+    /** More AI profiles known to the run (a judge's). */
+    extraProfiles: List<AiProviderProfile> = emptyList(),
+    /** How lanes open their device; the default is one fixture adb for [FIXTURE_SERIAL]. */
+    openDevice: LaneDeviceOpener? = null,
 ) {
     val dir: File = createTempDirectory("indagium-run-test").toFile()
     val adb = ScriptedAdbRunner()
@@ -154,10 +158,10 @@ internal class RunHarness(
             library = { library },
             limits = { limits },
             store = store,
-            profiles = { listOf(profile) },
+            profiles = { listOf(profile) + extraProfiles },
             apiKey = { "" },
             deviceProblem = { serial -> deviceProblem(serial) },
-            openDevice = LaneDeviceOpener { _, laneDir, _ -> openFixtureSession(adb, laneDir) },
+            openDevice = openDevice ?: LaneDeviceOpener { _, laneDir, _ -> openFixtureSession(adb, laneDir) },
             agentFactory = agentFactory ?: LaneAgentFactory { chosen, _ -> ProviderLaneAgent(provider, chosen) },
             scriptRunner = TestScriptRunner(hostShell = listOf("/bin/sh", "-c")),
             tuning = tuning.copy(persistDebounceMs = 50L),

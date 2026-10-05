@@ -5,7 +5,10 @@ import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.OnFailure
+import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestScript
@@ -14,10 +17,12 @@ import com.indagium.testing.script.ScriptRunContext
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -34,6 +39,10 @@ import java.util.concurrent.atomic.AtomicLong
 //   3. the answer names the next step, a redo, or that the case is over.
 // A step that outlives its timeout is closed by the watchdog (checkTimeout) as TIMEOUT and the same onFailure applies;
 // the sequence then reports a SequenceEvent so a running agent can be restarted at the next step.
+//
+// With a judge (see StepJudging.kt for the rules) finish_step also asks it, inline, after the deterministic checks; the
+// judge sees the evidence only, never the agent's claim. While the run is paused (RunPauseGate) finish_step holds its
+// answer, after the step is recorded, until the run is resumed; the step timer is frozen and restarted meanwhile.
 //
 // All state changes happen under [mutex]; `finishing` makes finish_step and the watchdog mutually exclusive, so the
 // timer never fires while a step is being finished and a second finish_step cannot start in parallel.
@@ -90,6 +99,7 @@ internal data class SequenceSpec(
 )
 
 /** What every sequence of a lane shares. [nanoTime] and [wallClock] are test seams. */
+@Suppress("LongParameterList") // Everything a lane's sequences share, built once per lane.
 internal class SequenceEnv(
     val session: TestDeviceSession,
     val scriptRunner: TestScriptRunner,
@@ -102,7 +112,14 @@ internal class SequenceEnv(
     val listener: SequenceListener,
     val nanoTime: () -> Long = System::nanoTime,
     val wallClock: () -> Long = System::currentTimeMillis,
+    /** The lane's judge, or null. */
+    val judge: StepJudge? = null,
+    val judgeMode: JudgeMode = JudgeMode.OFF,
+    val pauseGate: RunPauseGate? = null,
 )
+
+/** What a step's screenshot became: the file kept as evidence (relative to the run folder) and the image the judge looks at. */
+private class Shot(val path: String?, val jpeg: ByteArray?)
 
 private class Evaluation(val step: TestStep, val status: StepStatus, val result: StepResult, val failedChecks: List<String>)
 
@@ -261,7 +278,9 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!finishing.compareAndSet(false, true)) return mapOf("error" to "finish_step is already running; wait for its answer.")
         try {
             val evaluation = mutex.withLock { evaluateLocked(status, observation) } ?: return mapOf("error" to "No step is active.")
-            return decide(evaluation)
+            val answer = decide(evaluation)
+            if (!ended) holdWhilePaused()
+            return answer
         } finally {
             finishing.set(false)
         }
@@ -278,6 +297,19 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             OnFailure.CREATE_ISSUE_AND_CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = true) }
         }
         return respond(flow)
+    }
+
+    /** Pause all: the step is recorded, the next one started; the agent hears about it only once the run is resumed. */
+    private suspend fun holdWhilePaused() {
+        val gate = env.pauseGate ?: return
+        if (!gate.isPaused) return
+        awaitingUser = true
+        try {
+            gate.awaitResumed()
+        } finally {
+            awaitingUser = false
+        }
+        resetStepTimer()
     }
 
     private fun overMessage(): String = if (spec.setup) SETUP_OVER_MESSAGE else CASE_OVER_MESSAGE
@@ -309,17 +341,66 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String): Evaluation? {
         if (!active || ended) return null
         val step = spec.steps[index]
-        val screenshotPath = captureScreenshot()
-        val results = checks.evaluateAll(step.checks, attemptLogOffset)
+        val shot = captureScreenshot()
+        val automatic = checks.evaluateAll(step.checks, attemptLogOffset)
+        val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
+        val logEnd = runCatching { env.session.logMarker() }.getOrNull()
+        val judgement = judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd)
+        val results = applyJudgementToChecks(automatic, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
-        val status = when {
+        val base = when {
             claim == LaneStepStatus.PASS && failed.isEmpty() -> StepStatus.PASS
             claim == LaneStepStatus.BLOCKED -> StepStatus.BLOCKED
             else -> StepStatus.FAIL
         }
+        val settled = settleWithJudge(base, judgement)
+        if (judgement != null && base == StepStatus.PASS && settled.status == StepStatus.FAIL) {
+            attemptNotes += "The judge failed a step the agent reported as passed."
+        }
         val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
-        val result = buildResult(step, status, claim.name.lowercase(), reported, results, screenshotPath)
-        return Evaluation(step, status, result, failed.map { it.checkId })
+        val result = buildResult(step, settled.status, claim.name.lowercase(), reported, results, shot.path, logEnd, judgement, settled.inconclusive)
+        return Evaluation(step, settled.status, result, failed.map { it.checkId })
+    }
+
+    /** Asks the judge about this attempt when the mode says so. The judge is blind: it gets [JudgeEvidence], which has no agent words. */
+    @Suppress("TooGenericExceptionCaught", "LongParameterList") // A judge must never decide the step by throwing; whatever it throws is an inconclusive answer.
+    private suspend fun judgeAttempt(
+        step: TestStep,
+        claim: LaneStepStatus,
+        automatic: List<CheckResult>,
+        automaticFailed: Boolean,
+        shot: Shot,
+        logEnd: Long?,
+    ): StepJudgement? {
+        val judge = env.judge ?: return null
+        if (!shouldJudge(env.judgeMode, step, claim, automaticFailed)) return null
+        val site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt)
+        val judgement = try {
+            judge.judge(site, judgeEvidence(step, automatic, shot, logEnd))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            StepJudgement(
+                verdict = JudgeVerdict.INCONCLUSIVE, judgedAt = env.wallClock(),
+                error = "The judge failed: ${failure.message ?: failure::class.simpleName}",
+            )
+        }
+        judgement.error?.let { attemptNotes += "The judge could not finish: $it" }
+        return judgement
+    }
+
+    private fun judgeEvidence(step: TestStep, automatic: List<CheckResult>, shot: Shot, logEnd: Long?): JudgeEvidence {
+        val start = attemptLogOffset
+        val logFile = env.session.logFile
+        val lane = JudgeLaneEvidence(
+            label = JUDGE_LANE_LABEL,
+            laneId = "",
+            deterministic = deterministicOnly(automatic),
+            screenshot = { shot.jpeg?.let { JudgeImage(it, SCREEN_MIME_TYPE) } },
+            log = { offset, limit -> withContext(Dispatchers.IO) { readStepLogSlice(logFile, start, logEnd, offset, limit) } },
+            logBytes = logEnd?.minus(start),
+        )
+        return JudgeEvidence(spec.caseName, index + 1, spec.steps.size, step.action, step.expected, judgeChecksOf(step), step.examples, listOf(lane))
     }
 
     private suspend fun buildResult(
@@ -329,8 +410,11 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         observation: String,
         results: List<CheckResult>,
         screenshotPath: String?,
+        knownLogEnd: Long? = null,
+        judgement: StepJudgement? = null,
+        judgeInconclusive: Boolean = false,
     ): StepResult {
-        val logEnd = runCatching { env.session.logMarker() }.getOrNull()
+        val logEnd = knownLogEnd ?: runCatching { env.session.logMarker() }.getOrNull()
         return StepResult(
             stepId = step.id,
             stepNumber = index + 1,
@@ -350,25 +434,36 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             startedAt = firstAttemptWallMs,
             durationMs = env.wallClock() - firstAttemptWallMs,
             note = attemptNotes.takeIf { it.isNotEmpty() }?.joinToString(" "),
+            judge = judgement,
+            judgeInconclusive = judgeInconclusive,
         )
     }
 
-    /** Saves the screen as evidence (when asked for) and returns its path relative to the run folder; never fails the step. */
+    /**
+     * Takes the screen: saved as evidence when asked for (path relative to the run folder) and kept in memory for the judge
+     * (which needs it even when screenshots are not kept as evidence). Never fails the step.
+     */
     @Suppress("TooGenericExceptionCaught") // Evidence is best effort: whatever adb throws must not decide a step's outcome.
-    private suspend fun captureScreenshot(): String? {
-        if (!env.evidence.screenshots) return null
+    private suspend fun captureScreenshot(): Shot {
+        val keep = env.evidence.screenshots
+        if (!keep && env.judge == null) return Shot(null, null)
         return try {
             val shot = env.session.screenshot()
-            val file = File(File(env.laneDir, SCREENS_DIR), "${spec.evidencePrefix}-s${index + 1}-a$attempt.$SCREENSHOT_EXTENSION")
-            file.parentFile?.mkdirs()
-            file.writeBytes(shot.png)
-            file.relativeTo(env.runDir).invariantSeparatorsPath
+            val path = if (keep) saveScreenshot(shot.png) else null
+            Shot(path, shot.image.bytes.takeIf { env.judge != null })
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
             attemptNotes += "Screenshot failed: ${failure.message ?: failure::class.simpleName}."
-            null
+            Shot(null, null)
         }
+    }
+
+    private fun saveScreenshot(png: ByteArray): String {
+        val file = File(File(env.laneDir, SCREENS_DIR), "${spec.evidencePrefix}-s${index + 1}-a$attempt.$SCREENSHOT_EXTENSION")
+        file.parentFile?.mkdirs()
+        file.writeBytes(png)
+        return file.relativeTo(env.runDir).invariantSeparatorsPath
     }
 
     // ── Deciding what comes next ─────────────────────────────────────
@@ -457,7 +552,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     private suspend fun timeoutEvaluationLocked(step: TestStep): Evaluation? {
         if (!active || ended || elapsedMs() < step.timeoutMs) return null
-        val screenshotPath = captureScreenshot()
+        val screenshotPath = captureScreenshot().path
         val reported = observations.joinToString("\n").ifBlank { TIMEOUT_OBSERVATION }
         val result = buildResult(step, StepStatus.TIMEOUT, null, reported, emptyList(), screenshotPath)
             .copy(note = (attemptNotes + "The step timed out after ${step.timeoutMs} ms.").joinToString(" "))
@@ -480,6 +575,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private companion object {
         const val FINISH_STEP_TOOL = "finish_step"
         const val SCREENS_DIR = "screens"
+        const val JUDGE_LANE_LABEL = "Lane"
+        const val SCREEN_MIME_TYPE = "image/jpeg"
         const val MAX_OBSERVATION_CHARS = 2_000
     }
 }

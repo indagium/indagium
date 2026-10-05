@@ -9,15 +9,20 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.judgeActive
 import com.indagium.testing.store.RunPersister
+import com.indagium.testing.store.TEST_RUN_JUDGE_FILE_NAME
+import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import java.io.File
 
-// Executes one test run: its lanes one after another (the model has N lanes; running them in parallel is a later
-// feature), each through a LaneRunner. The run's status is derived from its lanes: ERROR when any lane had an
-// infrastructure problem or a case could not be judged, FAILED when any case failed or was blocked, CANCELLED after a
-// cancel, PASSED otherwise. However the run ends (even by cancellation) the final status is written and run.json flushed.
+// Executes one test run: its lanes through LaneRunners, in parallel across devices and one after another on a shared
+// device (LaneScheduler.kt), then, when a judge is configured, a comparison of the steps the lanes disagreed on. The run's
+// status is derived from its lanes: ERROR when any lane had an infrastructure problem or a case could not be judged,
+// FAILED when any case failed or was blocked, CANCELLED after a cancel, PASSED otherwise. However the run ends (even by
+// cancellation) the judge is closed, the final status written and run.json flushed.
 
 private const val LOCKED_CASE_NOTE = "Locked by the edition limit; it was not run."
 
@@ -54,29 +59,66 @@ internal class TestRunEngine(
         val snapshot = state.current
         state.update { it.copy(status = RunStatus.RUNNING, startedAt = deps.wallClock()) }
         var cancelled = false
+        var judge: JudgeService? = null
         try {
-            for (lane in snapshot.lanes) {
-                val handle = checkNotNull(handles[lane.laneId]) { "No lane handle for ${lane.laneId}" }
-                runLane(snapshot, lane.config, handle)
+            judge = prepareJudge(snapshot)
+            runLaneGroups(snapshot.lanes.map { it.config }, deps.tuning.maxParallelDevices) { config ->
+                runLane(snapshot, config, checkNotNull(handles[config.id]) { "No lane handle for ${config.id}" }, judge)
             }
+            if (judge != null) compareLanes(judge)
         } catch (stop: CancellationException) {
             cancelled = true
             throw stop
         } finally {
-            withContext(NonCancellable) { finish(cancelled) }
+            withContext(NonCancellable) {
+                judge?.close()
+                finish(cancelled)
+            }
         }
     }
 
+    /** The run's judge, or null when none is configured or it could not be prepared (then a warning says so and the run goes on without). */
+    private fun prepareJudge(snapshot: TestRun): JudgeService? {
+        val config = snapshot.config
+        val make = deps.judgeAgent
+        if (!config.judgeActive || make == null) return null
+        val agent = try {
+            make()
+        } catch (refused: IllegalStateException) {
+            return withoutJudge(refused.message)
+        } catch (refused: IllegalArgumentException) {
+            return withoutJudge(refused.message)
+        }
+        val transcript = if (config.evidence.transcript) {
+            TranscriptWriter(File(deps.store.runDir(snapshot.id), TEST_RUN_JUDGE_FILE_NAME), deps.wallClock)
+        } else {
+            null
+        }
+        return JudgeService(snapshot.id, snapshot.suite.id, agent, deps.tuning, transcript, deps.goldenImage, deps.wallClock)
+    }
+
+    private fun withoutJudge(reason: String?): JudgeService? {
+        val warning = "The judge could not be prepared (${reason ?: "unknown reason"}); the run goes on without it."
+        state.update { it.copy(warnings = it.warnings + warning) }
+        return null
+    }
+
     @Suppress("TooGenericExceptionCaught") // A lane that crashes must not take the run, or the other lanes, down with it.
-    private suspend fun runLane(snapshot: TestRun, config: LaneConfig, handle: LaneHandle) {
+    private suspend fun runLane(snapshot: TestRun, config: LaneConfig, handle: LaneHandle, judge: JudgeService?) {
         try {
-            LaneRunner(snapshot.id, snapshot, config, plan.cases, plan.locked, state, deps, handle).run()
+            LaneRunner(snapshot.id, snapshot, config, plan.cases, plan.locked, state, deps, handle, judge?.forLane(config.id)).run()
         } catch (stop: CancellationException) {
             throw stop
         } catch (crash: Exception) {
             val message = "The lane stopped unexpectedly: ${crash.message ?: crash::class.simpleName}"
             state.updateLane(config.id) { it.copy(status = RunStatus.ERROR, error = message, finishedAt = deps.wallClock()) }
         }
+    }
+
+    /** Every lane is done: the steps they disagreed on go to the comparison judge, one at a time. */
+    private suspend fun compareLanes(judge: JudgeService) {
+        val run = state.current
+        compareDisagreements(run, deps.store.runDir(run.id), judge) { comparison -> state.update { it.copy(comparisons = it.comparisons + comparison) } }
     }
 
     private suspend fun finish(cancelled: Boolean) {

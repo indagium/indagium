@@ -13,6 +13,7 @@ import java.io.IOException
 //   <base>/<runId>/lanes/<laneId>/capture/        the lane's recorded logcat (and video)
 //   <base>/<runId>/lanes/<laneId>/screens/        step screenshots
 //   <base>/<runId>/lanes/<laneId>/transcript.jsonl  the agent transcript, secrets redacted
+//   <base>/<runId>/judge.jsonl                    what the judge runs of the whole run said and did, secrets redacted
 // [baseDir] is evaluated on every use (the save folder is a user setting that can change); nothing is created until a
 // run starts. The store holds no lock: a run is written by one persister at a time (RunPersister), and readers only
 // ever see complete files because a write replaces run.json atomically.
@@ -21,6 +22,7 @@ const val TEST_RUN_FILE_NAME = "run.json"
 const val TEST_RUN_LANES_DIR_NAME = "lanes"
 const val TEST_RUN_SCREENS_DIR_NAME = "screens"
 const val TEST_RUN_TRANSCRIPT_FILE_NAME = "transcript.jsonl"
+const val TEST_RUN_JUDGE_FILE_NAME = "judge.jsonl"
 const val MAX_RUN_FILE_BYTES = 64L * 1024L * 1024L
 private const val MAX_LISTED_RUNS = 200
 

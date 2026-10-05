@@ -162,7 +162,7 @@ private fun targetPhrase(target: ScriptTarget): String = if (target == ScriptTar
 
 // ── Built-in tools ───────────────────────────────────────────────────
 
-private fun guarded(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any?>) -> Any? = { raw ->
+internal fun guarded(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any?>) -> Any? = { raw ->
     try {
         body(ToolArgs(raw))
     } catch (cancelled: CancellationException) {
@@ -434,7 +434,7 @@ private suspend fun readLog(context: LaneToolContext, args: ToolArgs): Map<Strin
         untrustedData("logcat", mapOf("rows" to read.rows.map(::formatLogRow)))
 }
 
-private fun formatLogRow(entry: LogEntry): String {
+internal fun formatLogRow(entry: LogEntry): String {
     val message = if (entry.msg.length <= MAX_LOG_ROW_MESSAGE_CHARS) entry.msg else entry.msg.take(MAX_LOG_ROW_MESSAGE_CHARS) + "…"
     return "${entry.ts} ${entry.level.key} ${entry.tag}(${entry.pid}): $message"
 }

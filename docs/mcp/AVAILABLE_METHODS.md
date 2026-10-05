@@ -288,14 +288,33 @@ and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `g
 
 A **run** drives one Android device per **lane**. A lane is driven either by an AI profile (Claude Code, Codex
 or an API profile configured in Settings) or by *you*: an `"external"` lane has no agent and is driven with
-`test_lane_tool_call`, which is how a developer's Claude can run, check and debug a suite over MCP. Lanes of
-one run execute one after another in this version. Every lane opens its own headless device session (it
-refuses the serial the live capture tab uses), runs the suite's setup hooks, then each case (setup, steps,
-teardown), then the suite's teardown, and records the evidence under `<save folder>/test-runs/<runId>/`.
+`test_lane_tool_call`, which is how a developer's Claude can run, check and debug a suite over MCP. Lanes on
+different devices run **in parallel** (at most 4 devices at once; the rest wait); lanes that share a device
+run one after another, and one lane failing or being cancelled never stops another (cancelling the run stops
+all of them). Every lane opens its own headless device session (it refuses the serial the live capture tab
+uses), runs the suite's setup hooks, then each case (setup, steps, teardown), then the suite's teardown, and
+records the evidence under `<save folder>/test-runs/<runId>/`.
+
+An optional **judge** (`judgeProfileId` + `judgeMode`) is a separate, *blind* AI run (any profile kind, started
+like a lane's agent) with its own judge-only tools: `get_step_brief` (action, expected result, the judge checks,
+the automatic check results, example captions; never the agent's claim or observation), `get_step_screenshot`,
+`get_example`, `read_step_log` and `submit_verdict` (`pass`|`fail`|`inconclusive`, reasoning, classification
+`app_defect`|`agent_or_step_problem`|`unknown`, optional `suggestedStepFix` `{ action?, expected?, note? }`). It has a
+budget of 8 evidence calls (submitting is free) and 60 seconds, and runs inline inside `finish_step`. `judgeMode`
+`every_step` judges every step after its automatic checks; `failures_only` judges steps whose automatic checks
+failed or that the agent reported as `fail`/`blocked`, and every step that has a `screenJudge`/`askJudge` check
+(those checks are `NOT_EVALUATED` without a judge and take the judge's verdict with one). **Final step status**:
+the status without a judge is `PASS` only when the agent claimed pass and no check failed, `BLOCKED` when it
+claimed blocked, `FAIL` otherwise; with a judge only a `PASS` is revisited: a `fail` verdict makes it `FAIL`, an
+`inconclusive` one (or a judge that timed out or failed) keeps it and sets `judgeInconclusive`, and a judge
+can never turn a failure into a pass. When the lanes of a run ended a step differently (status or judge
+verdict), one comparison judge (budget 12) looks at every lane's own evidence once all lanes are done and
+stores a comparison (`comparisons[]`: a verdict per lane, classification, explanation, `suggestedStepFix`) in the
+report. What the judges said is in `judge.jsonl` next to `run.json`.
 
 - `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
-  1..500, `evidence` `{ video, screenshots, logcat, transcript }`, and the reserved `judgeProfileId` /
-  `judgeMode`) — each lane is `{ "profileId": <AI profile id or "external">, "deviceSerial": ... }`.
+  1..500, `evidence` `{ video, screenshots, logcat, transcript }`, `judgeProfileId` and `judgeMode`
+  `off`|`failures_only`|`every_step`) — each lane is `{ "profileId": <AI profile id or "external">, "deviceSerial": ... }`.
   Returns `{ runId, laneIds, lanes, warnings }` at once; the run continues in the background. Refusals come
   back as data, `{ "error", "errors": [...] }` (plus `limit`, the same shape as above, when the edition
   refused): unknown suite or case, a locked suite, a device that is not connected, busy or held by the live
@@ -305,12 +324,14 @@ teardown), then the suite's teardown, and records the evidence under `<save fold
   with its exact command.
 - `get_test_run_status` (`runId`) — `status` (`QUEUED`, `RUNNING`, `PASSED`, `FAILED`, `CANCELLED`, `ERROR`),
   every lane with its status, the case and step it is on and its case results so far, `pendingConfirmations`
-  (cards an in-app agent waits on) and `pausedLanes` (a step with `onFailure` `PAUSE_FOR_USER` failed).
+  (cards an in-app agent waits on), `pausedLanes` (a step with `onFailure` `PAUSE_FOR_USER` failed), `paused`
+  (the run was paused from the live view) and the number of `comparisons`.
 - `list_test_runs` — the runs of this session and the stored ones, newest first.
 - `get_test_run_report` (`runId`; optional `format` `json`|`markdown`) — per lane and case every step with its
   status (`PASS`, `FAIL`, `BLOCKED`, `TIMEOUT`, `SKIPPED`, `ERROR`), `attempts`, the agent's `agentClaim` and
-  `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for judge checks, which do
-  not run in this version) and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
+  `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for a judge check nobody judged),
+  the step's `judge` verdict (`id`, `verdict`, `reasoning`, `classification`, `suggestedFix`), `judgeInconclusive`,
+  `agentError`, the run's `comparisons` and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
   lane's `logcat.log`) and the transcript range, all relative to the run folder. Agent, observation and
   script text in a report is untrusted data.
 - `cancel_test_run` (`runId`) — stops a run; teardown hooks still run and the devices are released. Asks for
@@ -320,6 +341,18 @@ teardown), then the suite's teardown, and records the evidence under `<save fold
   confirmation timeout (5 minutes) counts as denied.
 - `resume_paused_step` (`runId`, `laneId`, `decision` `retry`|`continue`|`stop`) — what a lane does after a
   `PAUSE_FOR_USER` step failed.
+- `apply_step_fix` (`runId`, `stepId`, `fixRef`) — applies the fix a judge suggested (the id of a step's `judge` or of
+  a comparison) to that step in the **library**: its action and/or expected text are replaced; the run's own frozen
+  copy is not touched. Refused with the usual `limit` shape when the step is locked by the edition limit, and when
+  the step was deleted, the fix has no replacement text or it was already applied. Asks for confirmation inside
+  the AI panel.
+- `mark_agent_error` (`runId`, `laneId`, `caseId`, `stepId`, `note`; optional `iteration`) — notes on the step's
+  result (`agentError`) that the agent, not the app, got it wrong.
+- `rerun_test_step` (`runId`, `laneId`, `caseId`, `stepId`) — starts a **new** run (same lane setup, judge and
+  settings, the library's current suite) of just that case, from its first step **up to and including** that
+  step (a step only makes sense in the state the earlier steps leave); returns like `run_test_suite`. Asks for
+  confirmation inside the AI panel; every call from an external MCP client waits for the user to allow it in a
+  dialog that shows the case, the lane's device and the scripts that may run.
 - `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
   runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `tap`, `swipe`, `press_key`,
   `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
@@ -330,7 +363,7 @@ teardown), then the suite's teardown, and records the evidence under `<save fold
   the user to allow that exact call; built-in lane tools do not ask.
 
 `finish_step` is where the engine works: it takes a screenshot and the log range of the step, runs the
-deterministic checks (`logAppears`, `logAbsent`, `scriptResult`), retries a step that did not pass while attempts
+deterministic checks (`logAppears`, `logAbsent`, `scriptResult`) and the judge, retries a step that did not pass while attempts
 remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CREATE_ISSUE_AND_CONTINUE` move on,
 `PAUSE_FOR_USER` waits for `resume_paused_step` or the user). A step that outlives its `timeoutMs` is closed as
 `TIMEOUT` and an agent run is restarted at the next step with a summary of the earlier ones.

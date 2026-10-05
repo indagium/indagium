@@ -35,7 +35,17 @@ internal data class EngineTuning(
     val persistDebounceMs: Long = RUN_SAVE_DEBOUNCE_MS,
     /** Claude Code's turn allowance on top of the tool budget, per step: protocol calls are free but are still turns. */
     val turnHeadroomPerStep: Int = 12,
+    /** How long a judge may take for one step or comparison; a judge that is slower is inconclusive. */
+    val judgeTimeoutMs: Long = JUDGE_TIMEOUT_MS,
+    /** Turns a judge run gets on top of its tool budget (submitting the verdict is free but is still a turn). */
+    val judgeTurnHeadroom: Int = JUDGE_TURN_HEADROOM,
+    /** How many different devices run at once; lanes that share a device always run one after another. */
+    val maxParallelDevices: Int = MAX_PARALLEL_DEVICES,
 )
+
+/** An inline judge blocks the agent's finish_step, so it is bounded; account agents' MCP clients give up on long tool calls. */
+const val JUDGE_TIMEOUT_MS = 60_000L
+const val JUDGE_TURN_HEADROOM = 4
 
 /** Everything the engine needs from its owner. */
 internal class EngineDeps(
@@ -46,6 +56,12 @@ internal class EngineDeps(
     val store: TestRunStore,
     val tuning: EngineTuning = EngineTuning(),
     val wallClock: () -> Long = System::currentTimeMillis,
+    /** The judge's agent, or null when no judge runs. Called once per run; may throw [IllegalStateException] to refuse. */
+    val judgeAgent: (() -> LaneAgent)? = null,
+    /** The image of a golden-screenshot example (suite id, asset path), or null when it is not available. Blocking: call on IO. */
+    val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
+    /** Pause all: lanes stop at their next step boundary until resumed. */
+    val pauseGate: RunPauseGate = RunPauseGate(),
 )
 
 /** The first profile with [profileId], or null. */
@@ -58,7 +74,12 @@ private const val MAX_LOGGED_RESULT_CHARS = 2_000
  * Copies the events of [run] into [writer] as JSON lines, in order. The run's history is read, not its event flow, so
  * nothing is lost to a late start. Assistant text arrives in many small deltas and is written as one line.
  */
-internal class TranscriptTail(private val run: AiRun, private val writer: TranscriptWriter) {
+internal class TranscriptTail(
+    private val run: AiRun,
+    private val writer: TranscriptWriter,
+    /** Fields added to every line (a judge's transcript says which step it judged). */
+    private val extra: Map<String, Any?> = emptyMap(),
+) {
     private var written = 0
     private val assistant = StringBuilder()
 
@@ -85,9 +106,11 @@ internal class TranscriptTail(private val run: AiRun, private val writer: Transc
     }
 
     private fun flushAssistant() {
-        if (assistant.isNotEmpty()) writer.append("assistant", mapOf("text" to assistant.toString()))
+        if (assistant.isNotEmpty()) append("assistant", mapOf("text" to assistant.toString()))
         assistant.clear()
     }
+
+    private fun append(kind: String, fields: Map<String, Any?> = emptyMap()) = writer.append(kind, extra + fields)
 
     private fun write(event: AiRunEvent) {
         if (event is AiRunEvent.AssistantDelta) {
@@ -96,23 +119,23 @@ internal class TranscriptTail(private val run: AiRun, private val writer: Transc
         }
         flushAssistant()
         when (event) {
-            is AiRunEvent.ToolRequested -> writer.append(
+            is AiRunEvent.ToolRequested -> append(
                 "tool_call",
                 mapOf("tool" to event.call.name, "arguments" to event.call.argumentsJson.take(MAX_LOGGED_ARGUMENT_CHARS)),
             )
-            is AiRunEvent.ToolCompleted -> writer.append(
+            is AiRunEvent.ToolCompleted -> append(
                 "tool_result",
                 mapOf("tool" to event.call.name, "result" to event.resultPreview.take(MAX_LOGGED_RESULT_CHARS), "truncated" to event.resultTruncated),
             )
-            is AiRunEvent.AgentProgress -> writer.append("assistant", mapOf("text" to event.text))
+            is AiRunEvent.AgentProgress -> append("assistant", mapOf("text" to event.text))
             is AiRunEvent.ConfirmationRequired ->
-                writer.append("confirmation", mapOf("tool" to event.confirmation.call.name, "description" to event.confirmation.description))
-            is AiRunEvent.Error -> writer.append("error", mapOf("message" to event.message))
-            is AiRunEvent.Status -> writer.append("status", mapOf("text" to event.text))
+                append("confirmation", mapOf("tool" to event.confirmation.call.name, "description" to event.confirmation.description))
+            is AiRunEvent.Error -> append("error", mapOf("message" to event.message))
+            is AiRunEvent.Status -> append("status", mapOf("text" to event.text))
             is AiRunEvent.Usage ->
-                writer.append("usage", mapOf("input" to event.inputTokens, "output" to event.outputTokens, "total" to event.totalTokens))
-            AiRunEvent.Cancelled -> writer.append("cancelled")
-            AiRunEvent.Done -> writer.append("done")
+                append("usage", mapOf("input" to event.inputTokens, "output" to event.outputTokens, "total" to event.totalTokens))
+            AiRunEvent.Cancelled -> append("cancelled")
+            AiRunEvent.Done -> append("done")
             is AiRunEvent.AssistantDelta -> Unit
         }
     }
