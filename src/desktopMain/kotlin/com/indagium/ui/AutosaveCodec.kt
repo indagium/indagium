@@ -1207,10 +1207,15 @@ internal fun AppState.restoreSeq3ViewToken(token: String) {
  *  the persisted order, same "nothing to save yet" contract [diagramTabsToken] itself already has. */
 internal fun AppState.tabOrderToken(): String {
     val libraryItemIdBySessionId = seq3Sessions.sessions.associate { it.id to it.libraryItemId }
-    return tabOrder.mapNotNull { ref ->
+    // The Tests workspace tab is a singleton written as a bare "T" entry (appended-last letter: a build
+    // that predates it drops the unknown letter). An open Tests tab the strip has not mirrored yet is
+    // still written, at the end, so a quit right after opening it does not lose it.
+    val order = if (testsTabOpen && TabRef.Tests !in tabOrder) tabOrder + TabRef.Tests else tabOrder
+    return order.mapNotNull { ref ->
         when (ref) {
             is TabRef.Log -> tokenFields("L", ref.tabId)
             is TabRef.Diagram -> libraryItemIdBySessionId[ref.sessionId]?.let { libId -> tokenFields("D", libId) }
+            TabRef.Tests -> if (testsTabOpen) tokenFields("T") else null
         }
     }.joinToString(",") { it.b64() }
 }
@@ -1235,9 +1240,12 @@ internal fun AppState.restoreTabOrder(token: String) {
         when (fields.getOrNull(0)) {
             "L" -> fields.getOrNull(1)?.takeIf { it in liveTabIds }?.let(TabRef::Log)
             "D" -> fields.getOrNull(1)?.let(sessionIdByLibraryItemId::get)?.let(TabRef::Diagram)
+            "T" -> TabRef.Tests
             else -> null
         }
-    }
+    }.distinct()
+    // A "T" entry means the Tests workspace tab was open at quit; reopen it (without activating it).
+    if (TabRef.Tests in tabOrder) testsTabOpen = true
 }
 
 internal fun FilterPanelUiState.filterPanelToken(): String = tokenFields(

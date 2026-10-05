@@ -19,6 +19,7 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.FilterList
 import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Movie
+import androidx.compose.material.icons.outlined.Science
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -168,6 +169,15 @@ internal fun TabBar(state: AppState) {
             shape = middleShape,
         ) { state.activeTab()?.id?.let(state::openCaseLibrary) }
         ToolbarBtn(
+            "Tests",
+            icon = Icons.Outlined.Science,
+            showLabel = showToolbarText,
+            tooltip = "Open AI test suites",
+            active = state.testsSurfaceActive,
+            modifier = Modifier.fillMaxHeight(),
+            shape = middleShape,
+        ) { state.openTestsTab() }
+        ToolbarBtn(
             "Open",
             icon = Icons.Outlined.FolderOpen,
             showLabel = showToolbarText,
@@ -208,7 +218,14 @@ internal sealed interface TabRef {
     data class Log(val tabId: String) : TabRef
 
     data class Diagram(val sessionId: String) : TabRef
+
+    /** The singleton AI test-suites workspace tab ([AppState.testsTabOpen]). */
+    data object Tests : TabRef
 }
+
+/** The raw id the Tests tab drags/renders under. Log tab ids are `t<n>`, UUIDs or `capture-launcher-<uuid>` and diagram
+ *  session ids `seq3-<uuid>`, so this constant can never collide with either. */
+internal const val TESTS_TAB_RAW_ID = "tests-workspace"
 
 /** The id a [TabRef] drags/renders under. Log tab ids are bare `UUID.randomUUID()` strings and
  *  diagram session ids are always `"seq3-<uuid>"` ([Seq3Session.begin]), so the two id spaces can
@@ -217,6 +234,7 @@ internal sealed interface TabRef {
 internal fun TabRef.rawId(): String = when (this) {
     is TabRef.Log -> tabId
     is TabRef.Diagram -> sessionId
+    TabRef.Tests -> TESTS_TAB_RAW_ID
 }
 
 /**
@@ -240,6 +258,7 @@ internal fun reconcileTabOrder(
     previousOrder: List<TabRef>,
     logTabIds: List<String>,
     diagramSessionIds: List<String>,
+    testsOpen: Boolean = false,
 ): List<TabRef> {
     val liveLogIds = logTabIds.toSet()
     val liveDiagramIds = diagramSessionIds.toSet()
@@ -247,6 +266,7 @@ internal fun reconcileTabOrder(
         when (ref) {
             is TabRef.Log -> ref.tabId in liveLogIds
             is TabRef.Diagram -> ref.sessionId in liveDiagramIds
+            TabRef.Tests -> testsOpen
         }
     }
     val keptLogIds = kept.filterIsInstance<TabRef.Log>().mapTo(mutableSetOf()) { it.tabId }
@@ -268,6 +288,8 @@ internal fun reconcileTabOrder(
         }
     }
     diagramSessionIds.filterNot { it in keptDiagramIds }.mapTo(result, TabRef::Diagram)
+    // A newly opened Tests tab is appended like a newly opened diagram; an already-placed one keeps its slot.
+    if (testsOpen && TabRef.Tests !in kept) result.add(TabRef.Tests)
     return result
 }
 
@@ -427,12 +449,13 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
 
     val logTabIds = state.tabs.map { it.id }
     val diagramSessionIds = state.seq3Sessions.sessions.map { it.id }
+    val testsOpen = state.testsTabOpen
     // Reconciled only while nothing is mid-drag — mirrors liveVisualTabIds' own dragTabId-gated
     // LaunchedEffect below, so a membership change landing mid-gesture can never clobber the
     // in-flight optimistic reorder.
-    LaunchedEffect(logTabIds, diagramSessionIds) {
+    LaunchedEffect(logTabIds, diagramSessionIds, testsOpen) {
         if (dragTabId == null) {
-            unifiedOrder = reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds)
+            unifiedOrder = reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds, testsOpen)
             state.tabOrder = unifiedOrder
         }
     }
@@ -444,7 +467,9 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
     // result back. Mid-drag the in-flight optimistic order is rendered untouched (same gating as the
     // effect), so a membership change landing mid-gesture still can't clobber it.
     val renderOrder = if (dragTabId == null) {
-        remember(unifiedOrder, logTabIds, diagramSessionIds) { reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds) }
+        remember(unifiedOrder, logTabIds, diagramSessionIds, testsOpen) {
+            reconcileTabOrder(unifiedOrder, logTabIds, diagramSessionIds, testsOpen)
+        }
     } else {
         unifiedOrder
     }
@@ -597,7 +622,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                 TabItem(
                                     tab = tab,
                                     label = tabDisplayLabel(tab, state.tabs),
-                                    isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive,
+                                    isActive = tab.id == state.activeTabId && !state.diagramSurfaceActive && !state.testsSurfaceActive,
                                     showClose = true,
                                     dragging = isDragging,
                                     onClick = { if (dragTabId == null) state.activateTab(tab.id) },
@@ -665,6 +690,17 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     }
                                 }
                             }
+
+                            TabRef.Tests -> TabShell(
+                                pointerKey = TESTS_TAB_RAW_ID,
+                                label = "Tests",
+                                tooltip = "AI test suites",
+                                isActive = state.testsSurfaceActive,
+                                showClose = true,
+                                dragging = isDragging,
+                                onClick = { if (dragTabId == null) state.openTestsTab() },
+                                onClose = { state.closeTestsTab() },
+                            )
                         }
                     }
                 }
@@ -694,6 +730,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                     val label = when (ref) {
                                         is TabRef.Log -> logById[ref.tabId]?.let { tabDisplayLabel(it, state.tabs) }
                                         is TabRef.Diagram -> diagramById[ref.sessionId]?.document?.title?.ifBlank { "Diagram" }
+                                        TabRef.Tests -> "Tests"
                                     } ?: return@forEach
                                     HoverBox(
                                         modifier = Modifier.fillMaxWidth(),
@@ -709,6 +746,7 @@ internal fun TabOverflowRow(state: AppState, modifier: Modifier) {
                                             when (ref) {
                                                 is TabRef.Log -> state.activateOverflowTab(ref.tabId)
                                                 is TabRef.Diagram -> state.seq3Sessions.activate(ref.sessionId)
+                                                TabRef.Tests -> state.openTestsTab()
                                             }
                                             overflowOpen = false
                                         },
