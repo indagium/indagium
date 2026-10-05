@@ -21,8 +21,6 @@ import com.indagium.testing.store.StoreResult
 // edition's per-suite limit) renders read-only with the lock notice; it can still be duplicated-out of the way
 // (deleted) from the suite table.
 
-private const val CASE_RUNS_LATER_HINT = "Runs arrive in a later phase"
-
 @Composable
 internal fun TestsCaseScreen(suiteId: String, caseId: String) {
     val ui = LocalTestsUi.current
@@ -63,6 +61,8 @@ internal fun TestsCaseScreen(suiteId: String, caseId: String) {
     }
 }
 
+private fun suiteIdOf(ui: TestsUi, caseId: String): String = ui.library.findCase(caseId)?.suite?.id.orEmpty()
+
 @Composable
 private fun CaseActions(case: TestCase, onDelete: () -> Unit) {
     val ui = LocalTestsUi.current
@@ -79,7 +79,13 @@ private fun CaseActions(case: TestCase, onDelete: () -> Unit) {
             disabledHint = if (!writable) LIBRARY_READ_ONLY_MESSAGE else limits.hint,
         )
         HintedButton("Delete", onClick = onDelete, enabled = writable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
-        HintedButton("Run case…", onClick = {}, enabled = false, disabledHint = CASE_RUNS_LATER_HINT)
+        HintedButton(
+            "Run this case…",
+            onClick = { ui.view.runDialog = RunDialogTarget(suiteIdOf(ui, case.id), case.id) },
+            enabled = !limits.isCaseLocked(case.id) && !limits.isSuiteLocked(suiteIdOf(ui, case.id)),
+            disabledHint = limits.hint,
+            variant = ButtonVariant.Primary,
+        )
     }
 }
 

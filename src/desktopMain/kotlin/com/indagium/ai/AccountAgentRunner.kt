@@ -37,6 +37,15 @@ internal class AccountAgentRunner(
     private val managedMcpServerFactory: (AiRun) -> ManagedMcpServerLease,
     private val maxToolRounds: Int,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /** Claude Code's `--max-turns`; null (the sidebar) uses [maxToolRounds]. */
+    private val maxTurns: Int? = null,
+    /** The paragraph between the system prompt and the request: budget wording and the MCP-server rules. */
+    private val promptPreamble: (AiRun) -> String = ::defaultAccountPromptPreamble,
+    // Seams so the runner can be exercised without a real CLI; the defaults are the production behaviour.
+    private val cliCheck: (AiProviderProfile) -> AccountCliCheck = { checkAccountCli(it) },
+    private val claudeProcessFactory: ClaudeCodeProcessFactory = SystemClaudeCodeProcessFactory,
+    private val codexLauncher: (List<String>, Map<String, String>, CoroutineScope) -> CodexAppServerClient =
+        { command, environment, launchScope -> CodexAppServerClient.launch(command, environment, launchScope) },
 ) : AutoCloseable {
     fun start(
         session: AiSession,
@@ -44,11 +53,22 @@ internal class AccountAgentRunner(
         prompt: String,
         systemPrompt: String,
         context: AiInvestigationContext,
+        /** Tools that never spend the call budget; empty for the sidebar. */
+        freeTools: Set<String> = emptySet(),
+        /** A confirmation nobody answers within this many ms counts as denied; null (the sidebar) waits indefinitely. */
+        confirmationTimeoutMs: Long? = null,
     ): AiRun {
         require(profile.kind == AiProviderKind.CODEX_ACCOUNT || profile.kind == AiProviderKind.CLAUDE_CODE_ACCOUNT)
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         session.activeRun?.cancel()
-        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context, maxToolCalls = maxToolRounds)
+        val run = AiRun(
+            tabId = session.tabId,
+            userPrompt = prompt,
+            context = context,
+            maxToolCalls = maxToolRounds,
+            freeTools = freeTools,
+            confirmationTimeoutMs = confirmationTimeoutMs,
+        )
         session.lastPrompt = prompt
         session.lastContext = context
         session.activeRun = run
@@ -58,7 +78,7 @@ internal class AccountAgentRunner(
             var lease: ManagedMcpServerLease? = null
             try {
                 run.emit(AiRunEvent.Status("Checking ${profile.kind.label}…"))
-                checkAccountCli(profile).takeIf { !it.isReady }?.let { check ->
+                cliCheck(profile).takeIf { !it.isReady }?.let { check ->
                     throw IllegalStateException(check.message)
                 }
                 lease = managedMcpServerFactory(run)
@@ -99,11 +119,7 @@ internal class AccountAgentRunner(
             codexDisableUserServersConfig() +
             codexManagedToolRestrictionConfig() +
             codexManagedMcpConfig(lease.url)
-        CodexAppServerClient.launch(
-            command = command,
-            environment = codexManagedMcpEnvironment(lease.token),
-            scope = scope,
-        ).use { client ->
+        codexLauncher(command, codexManagedMcpEnvironment(lease.token), scope).use { client ->
             client.initialize(capabilities = codexManagedMcpCapabilities())
             val thread = client.startThread(
                 CodexThreadOptions(
@@ -233,7 +249,7 @@ internal class AccountAgentRunner(
         // and only the last turn's text becomes the Assistant answer - mirroring runCodex below.
         var turnIndex = 0
         val turnMessages = AgentTurnMessageBuffer()
-        ClaudeCodeClient(executable = LocalAccountCli.executable(profile.kind, profile.executablePath)).stream(
+        ClaudeCodeClient(claudeProcessFactory, LocalAccountCli.executable(profile.kind, profile.executablePath)).stream(
             ClaudeCodeRequest(
                 prompt = accountPrompt(run, systemPrompt, prompt),
                 mcpServers = mapOf(
@@ -244,7 +260,7 @@ internal class AccountAgentRunner(
                 // that has to either re-investigate from scratch or admit it has no context.
                 sessionId = session.claudeCodeSessionId,
                 model = profile.model.takeIf(String::isNotBlank),
-                maxTurns = maxToolRounds,
+                maxTurns = maxTurns ?: maxToolRounds,
                 workingDirectory = workspace,
                 effort = profile.reasoningEffort.takeIf(String::isNotBlank),
             ),
@@ -286,11 +302,7 @@ internal class AccountAgentRunner(
     }
 
     private fun accountPrompt(run: AiRun, systemPrompt: String, prompt: String): String =
-        "$systemPrompt\n\n${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named " +
-            "$MANAGED_MCP_SERVER_NAME. Use only its tools for log, source, filter, " +
-            "tab, device, or note evidence and actions. Do not use host shell/browser/desktop actions, " +
-            "and do not inspect the local workspace; it is intentionally empty." +
-            "\n\nUser request:\n$prompt"
+        "$systemPrompt\n\n${promptPreamble(run)}\n\nUser request:\n$prompt"
 
     private fun deleteWorkspace(workspace: Path) {
         runCatching {
@@ -300,6 +312,13 @@ internal class AccountAgentRunner(
         }
     }
 }
+
+/** The sidebar's wording: the MCP budget sentence plus the rule to use only the managed MCP server's tools. */
+internal fun defaultAccountPromptPreamble(run: AiRun): String =
+    "${run.toolCallBudget.initialGuidance()}\n\nYou have one MCP server named " +
+        "$MANAGED_MCP_SERVER_NAME. Use only its tools for log, source, filter, " +
+        "tab, device, or note evidence and actions. Do not use host shell/browser/desktop actions, " +
+        "and do not inspect the local workspace; it is intentionally empty."
 
 /**
  * The workspace directory an account-agent run should use as its `cwd`. Codex gets a fresh one

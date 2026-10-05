@@ -556,7 +556,7 @@ class ControlServer(
         clientName: String?,
     ): Any? {
         val client = clientName?.takeIf(String::isNotBlank) ?: "MCP client"
-        val details = describeTryScriptCall(appState, arguments, client)
+        val details = describePerCallApproval(appState, name, arguments, client)
             ?: return runCatching { toolGateway.executeSuspending(name, arguments) }
                 .getOrElse { e -> mapOf("error" to (e.message ?: e.toString())) }
         return appState.executeExternalApprovedAction(sessionId, client, details) { toolGateway.executeSuspending(name, arguments) }
@@ -648,8 +648,9 @@ private const val EXTERNAL_APPROVAL_NOTE =
 //
 // [IMAGE_RESULT_TOOL_NAMES] is the set of tools whose success result becomes image content;
 // [SCREEN_IMAGE_TOOL_NAMES] are the ones among them that also get a leading text block with the
-// screenshot's dimensions and coordinate contract (a test lane's take_screenshot is one of them).
-internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot")
+// screenshot's dimensions and coordinate contract (a test lane's take_screenshot is one of them, and so is
+// test_lane_tool_call, which hands back a lane tool's result unchanged: only a screenshot has an imageBase64).
+internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot", "test_lane_tool_call")
 internal val IMAGE_RESULT_TOOL_NAMES: Set<String> = setOf("get_video_frame") + SCREEN_IMAGE_TOOL_NAMES
 
 internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
@@ -1684,7 +1685,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Check a device capture, marker, or snapshot operation by operationId.",
         schema("operationId" to "string", required = listOf("operationId")),
     ),
-) + TEST_SUITE_MCP_TOOLS
+) + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.

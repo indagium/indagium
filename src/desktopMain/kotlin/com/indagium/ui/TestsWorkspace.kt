@@ -82,6 +82,7 @@ internal fun TestsWorkspace(state: AppState) {
             limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true)) { } }
+            view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                 if (maxWidth < NARROW_BREAKPOINT) {
                     Column(Modifier.fillMaxSize()) {
@@ -144,7 +145,7 @@ private fun TestsCenter(modifier: Modifier) {
             }
             TestsNav.SharedSteps -> TestsSharedStepsScreen()
             TestsNav.Scripts -> TestsScriptsScreen()
-            TestsNav.Runs -> TestsPlaceholderScreen("Runs", "Run a suite on one or more devices and review the judged results here.")
+            TestsNav.Runs -> TestsRunsScreen()
             TestsNav.Issues -> TestsPlaceholderScreen("Issues", "Failed steps will become issues you can send to your tracker here.")
         }
     }
@@ -250,7 +251,10 @@ private fun TestsNavPane(modifier: Modifier) {
         TestsSectionTitle("Library")
         NavItem("Shared steps", library.sharedSteps.size.toString(), view.nav == TestsNav.SharedSteps) { view.nav = TestsNav.SharedSteps }
         NavItem("Scripts", library.scripts.size.toString(), view.nav == TestsNav.Scripts) { view.nav = TestsNav.Scripts }
-        NavItem("Runs", null, view.nav == TestsNav.Runs, subtitle = TESTS_LATER_VERSION_TEXT) { view.nav = TestsNav.Runs }
+        NavItem("Runs", ui.state.testRuns.size.takeIf { it > 0 }?.toString(), view.nav == TestsNav.Runs) {
+            view.nav = TestsNav.Runs
+            view.selectedRunId = null
+        }
         NavItem("Issues", null, view.nav == TestsNav.Issues, subtitle = TESTS_LATER_VERSION_TEXT) { view.nav = TestsNav.Issues }
     }
 }

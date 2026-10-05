@@ -23,6 +23,14 @@ internal fun interface AiProviderFactory {
     fun create(profile: AiProviderProfile, apiKey: String): LlmProvider
 }
 
+/** The production factory: Anthropic's API for an Anthropic profile, the OpenAI-compatible provider for every other HTTP profile. */
+internal val defaultAiProviderFactory: AiProviderFactory = AiProviderFactory { profile, key ->
+    when (profile.kind) {
+        AiProviderKind.ANTHROPIC_API -> AnthropicMessagesProvider(profile.baseUrl, key)
+        else -> OpenAiCompatibleProvider(profile, key)
+    }
+}
+
 internal sealed interface AiStartResult {
     data class Started(val run: AiRun) : AiStartResult
 
@@ -52,12 +60,7 @@ internal class AiSidebarRuntime(
     // Read fresh per run rather than captured once, so a mid-launch Settings change (Settings ->
     // AI providers -> Max MCP tool calls) applies to the next request without restarting the app.
     private val maxToolRounds: () -> Int = { com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS },
-    private val providerFactory: AiProviderFactory = AiProviderFactory { profile, key ->
-        when (profile.kind) {
-            AiProviderKind.ANTHROPIC_API -> AnthropicMessagesProvider(profile.baseUrl, key)
-            else -> OpenAiCompatibleProvider(profile, key)
-        }
-    },
+    private val providerFactory: AiProviderFactory = defaultAiProviderFactory,
     private val accountAgentRunnerFactory: (() -> AccountAgentRunner)? = null,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) : AutoCloseable {

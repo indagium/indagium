@@ -50,6 +50,12 @@ internal class TestsViewState {
     var selectedSharedStepId: String? by mutableStateOf(null)
     var search: String by mutableStateOf("")
 
+    /** Non-null while the run dialog is open. */
+    var runDialog: RunDialogTarget? by mutableStateOf(null)
+
+    /** The run whose report the Runs screen shows; null shows the list of runs. */
+    var selectedRunId: String? by mutableStateOf(null)
+
     /** Width of the left navigation column in dp; dragged through the shared HDivider, clamped by [clampTestsNavWidth]. */
     var navWidthDp: Float by mutableStateOf(TESTS_NAV_WIDTH_DEFAULT_DP)
 }

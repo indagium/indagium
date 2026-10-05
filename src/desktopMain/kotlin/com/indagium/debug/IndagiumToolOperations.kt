@@ -330,8 +330,11 @@ internal class IndagiumToolOperations(
 
     // The AI test-suite authoring tools live in TestSuiteToolOperations.kt / TestSuiteToolCatalog.kt.
     private val testSuiteOperations = TestSuiteToolOperations(appState)
+
+    // The AI test-run tools (start, status, report, cancel, external lanes) live in TestRunToolOperations.kt.
+    private val testRunOperations = TestRunToolOperations(appState)
     private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> =
-        coreOperationHandlers + testSuiteOperations.handlers
+        coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
 
     // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
     // Case Library dialog search, get, and reindex the exact same in-memory index/lock over
@@ -362,7 +365,11 @@ internal class IndagiumToolOperations(
     private var sequenceSummaryCache: SequenceSummaryCache? = null
 
     // Direct in-process entry point shared by MCP/REST and the future AI runner.
-    internal val toolGateway = IndagiumToolGateway(MCP_TOOLS, operationHandlers, testSuiteOperations.suspendHandlers)
+    internal val toolGateway = IndagiumToolGateway(
+        MCP_TOOLS,
+        operationHandlers,
+        testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers,
+    )
 
     internal fun openAiFunctionDefinitions() = toolGateway.openAiFunctions()
 

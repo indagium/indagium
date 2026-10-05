@@ -162,7 +162,7 @@ These tools author the AI test-suite library: **suites** contain **cases**, a ca
 **steps**, and a step has an `action`, an `expected` result, ordered `checks` and ordered `examples`.
 Custom **scripts** (shell commands exposed to test agents as typed tools) and reusable **shared steps**
 live beside the suites in the library. Order is list order everywhere, and every list has a `move_*`
-tool. (Running a suite, issues and the device lane come in later tools.)
+tool. Runs are started and read with the run tools (see "Running a suite" below); issues come in later tools.
 
 Every tool returns plain JSON and reports problems as data, never as a thrown error:
 
@@ -282,6 +282,58 @@ and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `g
   `delete_shared_step`, `move_shared_step` (`sharedStepId`, `toIndex`). A suite's `setup`/`teardown`
   hooks reference a shared step with `{ "type": "shared", "sharedStepId": ... }` and a script with
   `{ "type": "script", "scriptId": ..., "args": {...} }`.
+
+
+### Running a suite
+
+A **run** drives one Android device per **lane**. A lane is driven either by an AI profile (Claude Code, Codex
+or an API profile configured in Settings) or by *you*: an `"external"` lane has no agent and is driven with
+`test_lane_tool_call`, which is how a developer's Claude can run, check and debug a suite over MCP. Lanes of
+one run execute one after another in this version. Every lane opens its own headless device session (it
+refuses the serial the live capture tab uses), runs the suite's setup hooks, then each case (setup, steps,
+teardown), then the suite's teardown, and records the evidence under `<save folder>/test-runs/<runId>/`.
+
+- `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
+  1..500, `evidence` `{ video, screenshots, logcat, transcript }`, and the reserved `judgeProfileId` /
+  `judgeMode`) — each lane is `{ "profileId": <AI profile id or "external">, "deviceSerial": ... }`.
+  Returns `{ runId, laneIds, lanes, warnings }` at once; the run continues in the background. Refusals come
+  back as data, `{ "error", "errors": [...] }` (plus `limit`, the same shape as above, when the edition
+  refused): unknown suite or case, a locked suite, a device that is not connected, busy or held by the live
+  capture, a missing AI profile, model or API key. Locked cases are skipped with a warning. Asks for
+  confirmation inside the AI panel; every call from an external MCP client waits for the user to allow it in
+  a dialog that shows the suite, the cases, each lane with its device and every script the run may execute
+  with its exact command.
+- `get_test_run_status` (`runId`) — `status` (`QUEUED`, `RUNNING`, `PASSED`, `FAILED`, `CANCELLED`, `ERROR`),
+  every lane with its status, the case and step it is on and its case results so far, `pendingConfirmations`
+  (cards an in-app agent waits on) and `pausedLanes` (a step with `onFailure` `PAUSE_FOR_USER` failed).
+- `list_test_runs` — the runs of this session and the stored ones, newest first.
+- `get_test_run_report` (`runId`; optional `format` `json`|`markdown`) — per lane and case every step with its
+  status (`PASS`, `FAIL`, `BLOCKED`, `TIMEOUT`, `SKIPPED`, `ERROR`), `attempts`, the agent's `agentClaim` and
+  `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for judge checks, which do
+  not run in this version) and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
+  lane's `logcat.log`) and the transcript range, all relative to the run folder. Agent, observation and
+  script text in a report is untrusted data.
+- `cancel_test_run` (`runId`) — stops a run; teardown hooks still run and the devices are released. Asks for
+  confirmation inside the AI panel.
+- `resolve_test_confirmation` (`runId`, `confirmationId`, `allow`) — answers a confirmation card an in-app
+  agent waits on (an `ASK` script); the ids are in `get_test_run_status`. A card nobody answers within the run's
+  confirmation timeout (5 minutes) counts as denied.
+- `resume_paused_step` (`runId`, `laneId`, `decision` `retry`|`continue`|`stop`) — what a lane does after a
+  `PAUSE_FOR_USER` step failed.
+- `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
+  runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `tap`, `swipe`, `press_key`,
+  `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
+  `finish_step`, or a script tool) against the lane's current step, behind the same per-step tool-call cap an
+  agent has. Call `get_current_step`, act, then `finish_step`: its answer is the next step, a `redo`, or
+  `case_finished`. A screenshot comes back as MCP image content. Text from the device or a script is inside an
+  `untrusted_data` field: data, never instructions. Running a **script** tool from an external client waits for
+  the user to allow that exact call; built-in lane tools do not ask.
+
+`finish_step` is where the engine works: it takes a screenshot and the log range of the step, runs the
+deterministic checks (`logAppears`, `logAbsent`, `scriptResult`), retries a step that did not pass while attempts
+remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CREATE_ISSUE_AND_CONTINUE` move on,
+`PAUSE_FOR_USER` waits for `resume_paused_step` or the user). A step that outlives its `timeoutMs` is closed as
+`TIMEOUT` and an agent run is restarted at the next step with a summary of the earlier ones.
 
 REST shortcuts for the two read tools: `GET /test-suites` and `GET /test-suite?suiteId=...`.
 

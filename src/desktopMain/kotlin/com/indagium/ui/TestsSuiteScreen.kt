@@ -38,7 +38,6 @@ private val CASE_ROW_HEIGHT = 34.dp
 private val INDEX_COLUMN = 24.dp
 private val STEPS_COLUMN = 56.dp
 private val RESULT_COLUMN = 64.dp
-private const val RUNS_LATER_HINT = "Runs arrive in a later phase"
 
 @Composable
 internal fun TestsSuiteScreen(suiteId: String) {
@@ -114,7 +113,14 @@ private fun SuiteActions(suite: TestSuite, access: TestsEditAccess, onDelete: ()
         HintedButton("Export…", onClick = { exportSuiteToChosenFile(ui, suite) })
         HintedButton("Import…", onClick = { importSuiteFromChosenFile(ui) }, enabled = !library.readOnly, disabledHint = LIBRARY_READ_ONLY_MESSAGE)
         HintedButton("Delete", onClick = onDelete, enabled = !library.readOnly, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
-        HintedButton("Run suite…", onClick = {}, enabled = false, disabledHint = RUNS_LATER_HINT)
+        val runnable = suite.cases.any { !limits.isCaseLocked(it.id) }
+        HintedButton(
+            "Run suite…",
+            onClick = { ui.view.runDialog = RunDialogTarget(suite.id) },
+            enabled = !limits.isSuiteLocked(suite.id) && runnable,
+            disabledHint = if (limits.isSuiteLocked(suite.id)) limits.hint else "Add a case to run",
+            variant = ButtonVariant.Primary,
+        )
     }
 }
 

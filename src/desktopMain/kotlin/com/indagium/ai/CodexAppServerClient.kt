@@ -616,9 +616,7 @@ private class ProcessDiagnosticTail {
 
     @Synchronized
     fun append(line: String) {
-        val safeLine = line
-            .replace(Regex("(?i)(bearer\\s+)[^\\s,;]+"), "$1[REDACTED]")
-            .replace(Regex("(?i)((?:api[_-]?key|token|secret|password|authorization)\\s*[=:]\\s*)[^\\s,;]+"), "$1[REDACTED]")
+        val safeLine = redactDiagnosticSecrets(line)
             .trim()
             .take(MAX_LINE_CHARS)
         if (safeLine.isBlank()) return

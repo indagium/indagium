@@ -90,6 +90,8 @@ class IndagiumToolGatewayTest {
             "try_test_script",
             "list_shared_steps", "create_shared_step", "update_shared_step", "delete_shared_step", "move_shared_step",
             "get_edition", "set_edition",
+            "run_test_suite", "get_test_run_status", "list_test_runs", "get_test_run_report", "cancel_test_run",
+            "resolve_test_confirmation", "resume_paused_step", "test_lane_tool_call",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)

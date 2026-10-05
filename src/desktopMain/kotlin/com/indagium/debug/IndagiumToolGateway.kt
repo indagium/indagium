@@ -93,6 +93,8 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite", "set_edition",
     // try_test_script runs a user-authored shell command on the computer or the device.
     "try_test_script",
+    // Starting a run drives devices and may run scripts; cancelling one stops work in progress.
+    "run_test_suite", "cancel_test_run",
 )
 
 private fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =
