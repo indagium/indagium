@@ -6,6 +6,7 @@ import com.indagium.model.AiProviderProfile
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.script.TestScriptRunner
+import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RUN_SAVE_DEBOUNCE_MS
 import com.indagium.testing.store.TestRunStore
 import com.indagium.testing.store.TranscriptWriter
@@ -62,6 +63,10 @@ internal class EngineDeps(
     val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
     /** Pause all: lanes stop at their next step boundary until resumed. */
     val pauseGate: RunPauseGate = RunPauseGate(),
+    /** Where issues go. Null: no draft issue is made for a CREATE_ISSUE_AND_CONTINUE step and no linked issue is re-checked. */
+    val issues: IssueStore? = null,
+    /** The file of a golden-screenshot example (suite id, asset path), or null; its image becomes evidence of an issue. */
+    val goldenFile: (suiteId: String, assetPath: String) -> File? = { _, _ -> null },
 )
 
 /** The first profile with [profileId], or null. */

@@ -257,7 +257,27 @@ internal class LaneRunner(
     }
 
     override fun stepRecorded(result: StepResult) {
-        recorder?.add(result)
+        val owner = recorder ?: return
+        owner.add(if (result.issueRequested && !result.setup) withIssueDraft(owner, result) else result)
+    }
+
+    /**
+     * A step that asked for an issue (CREATE_ISSUE_AND_CONTINUE) gets a LOCAL draft now, while its evidence is on disk. The
+     * issue's id goes on the result; when no draft could be made, the reason goes into the result's note. Never fails the step.
+     */
+    @Suppress("TooGenericExceptionCaught") // Evidence is read from disk and copied; whatever that throws must not decide a step's outcome.
+    private fun withIssueDraft(owner: CaseRecorder, result: StepResult): StepResult {
+        val issues = deps.issues ?: return result
+        val drafter = IssueAutoDrafter(issues, deps.store.runDir(runId), deps.goldenFile)
+        val failure = try {
+            drafter.draft(state.current, lane.id, owner.caseId, owner.iteration, result).fold(
+                onSuccess = { return result.copy(issueId = it) },
+                onFailure = { it.message },
+            )
+        } catch (problem: Exception) {
+            problem.message ?: problem::class.simpleName
+        }
+        return result.copy(note = listOfNotNull(result.note, "No issue draft could be created: $failure").joinToString(" "))
     }
 
     override suspend fun awaitUser(paused: PausedStep): PauseDecision {
@@ -272,6 +292,8 @@ internal class LaneRunner(
     /** The result of the case being run, published to the run state on every change. */
     private inner class CaseRecorder(initial: CaseResult) {
         private var result = initial
+        val caseId: String = initial.caseId
+        val iteration: Int = initial.iteration
 
         init {
             publish()

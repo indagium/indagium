@@ -14,6 +14,7 @@ import com.indagium.testing.store.RunPersister
 import com.indagium.testing.store.TEST_RUN_JUDGE_FILE_NAME
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -139,5 +140,13 @@ internal class TestRunEngine(
             run.copy(lanes = lanes, status = status, finishedAt = deps.wallClock())
         }
         persister.flush()
+        recheckLinkedIssues()
+    }
+
+    /** Issues linked to a case of this run learn whether their step still fails. Best effort: a disk problem only means no mark. */
+    private suspend fun recheckLinkedIssues() {
+        val store = deps.issues ?: return
+        val run = state.current
+        withContext(Dispatchers.IO) { runCatching { markLinkedIssues(store, run, deps.wallClock()) } }
     }
 }

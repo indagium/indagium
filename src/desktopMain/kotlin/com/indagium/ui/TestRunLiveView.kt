@@ -106,6 +106,7 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, modif
                 AppText(it, color = tc.ts.copy(alpha = DETAIL_ALPHA), fontSize = 10.sp, fontFamily = MONO, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+        column.issues.forEach { IssueCreatedCard(it) }
         column.confirmations.forEach { ConfirmationCard(run.id, it) }
         column.pause?.let { PauseCard(run.id, it) }
     }
@@ -169,6 +170,22 @@ private fun ConfirmationCard(runId: String, card: PendingTestConfirmation) {
             )
             AppButton("Deny", onClick = { coordinator.resolveConfirmation(runId, card.confirmationId, false); ui.reclaimFocus() })
         }
+    }
+}
+
+/** "Issue draft created": the engine made a draft for a step set to create an issue; the card opens it for review. */
+@Composable
+private fun IssueCreatedCard(line: LiveIssueLine) {
+    val tc = tc()
+    val ui = LocalTestsUi.current
+    Column(Modifier.fillMaxWidth().padding(top = 6.dp).background(tc.warnBg, CORNER_MD).padding(8.dp)) {
+        AppText("Issue draft created for step ${line.stepNumber}: ${line.action}", color = tc.tx, fontSize = 11.sp, maxLines = 2)
+        AppText(line.caseName, color = tc.ts, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        AppButton(
+            "Review issue…",
+            onClick = { ui.view.issueDialog = IssueDialogTarget.Existing(line.issueId) },
+            modifier = Modifier.padding(top = 6.dp),
+        )
     }
 }
 

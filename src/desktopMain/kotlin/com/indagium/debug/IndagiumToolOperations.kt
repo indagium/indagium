@@ -333,6 +333,9 @@ internal class IndagiumToolOperations(
 
     // The AI test-run tools (start, status, report, cancel, external lanes) live in TestRunToolOperations.kt.
     private val testRunOperations = TestRunToolOperations(appState)
+
+    // The issue tools (create from a step, list, get, update, delete) live in IssueToolOperations.kt.
+    private val issueOperations = IssueToolOperations(appState)
     private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> =
         coreOperationHandlers + testSuiteOperations.handlers + testRunOperations.handlers
 
@@ -368,7 +371,7 @@ internal class IndagiumToolOperations(
     internal val toolGateway = IndagiumToolGateway(
         MCP_TOOLS,
         operationHandlers,
-        testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers,
+        testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
     )
 
     internal fun openAiFunctionDefinitions() = toolGateway.openAiFunctions()

@@ -96,6 +96,8 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // Starting a run (or re-running a step) drives devices and may run scripts; cancelling one stops work in progress;
     // apply_step_fix rewrites a step of the user's library.
     "run_test_suite", "cancel_test_run", "rerun_test_step", "apply_step_fix",
+    // delete_issue removes a stored issue and its copied evidence for good.
+    "delete_issue",
 )
 
 private fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =

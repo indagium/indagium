@@ -57,6 +57,8 @@ internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, base
             scriptRunner = overrides.scriptRunner ?: TestScriptRunner(),
             tuning = overrides.tuning,
             goldenImage = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.takeIf { it.isFile }?.readBytes() },
+            issues = issueStore,
+            goldenFile = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath) },
         ),
         onChanged = onChanged,
     )

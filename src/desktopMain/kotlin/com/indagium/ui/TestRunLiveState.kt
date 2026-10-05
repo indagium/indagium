@@ -33,6 +33,9 @@ private const val REASONING_EXCERPT_CHARS = 160
 /** One line of a lane's step checklist: [status] is null while the step has no result yet; [current] marks the step in progress. */
 internal data class LiveStepLine(val number: Int, val action: String, val status: StepStatus?, val current: Boolean)
 
+/** A draft issue the engine made for a step of this lane: the card in the live view opens it. */
+internal data class LiveIssueLine(val issueId: String, val caseName: String, val stepNumber: Int, val action: String)
+
 /** Everything one lane column shows. */
 internal data class LiveLaneColumn(
     val laneId: String,
@@ -49,6 +52,8 @@ internal data class LiveLaneColumn(
     val confirmations: List<PendingTestConfirmation>,
     val pause: PausedStepInfo?,
     val error: String?,
+    /** The draft issues the engine created on this lane so far (steps with onFailure CREATE_ISSUE_AND_CONTINUE), oldest first. */
+    val issues: List<LiveIssueLine> = emptyList(),
 )
 
 private fun laneTitle(lane: LaneResult, profiles: List<AiProviderProfile>): String {
@@ -76,6 +81,10 @@ private fun stepChecklist(run: TestRun, lane: LaneResult): List<LiveStepLine> {
 private fun latestScreenshot(lane: LaneResult): String? =
     lane.cases.asReversed().firstNotNullOfOrNull { case -> case.steps.asReversed().firstNotNullOfOrNull { it.screenshotPath } }
 
+private fun issueLines(lane: LaneResult): List<LiveIssueLine> = lane.cases.flatMap { case ->
+    case.steps.filter { !it.setup }.mapNotNull { step -> step.issueId?.let { LiveIssueLine(it, case.caseName, step.stepNumber, step.action) } }
+}
+
 /**
  * One column per lane, in lane order. [toolCalls] gives a lane's recent tool calls (newest last); [confirmations] and
  * [pauses] are the live cards of the whole coordinator and are filtered to this run and lane here.
@@ -100,6 +109,7 @@ internal fun liveColumns(
         confirmations = confirmations.filter { it.runId == run.id && it.laneId == lane.laneId },
         pause = pauses.firstOrNull { it.runId == run.id && it.laneId == lane.laneId },
         error = lane.error,
+        issues = issueLines(lane),
     )
 }
 

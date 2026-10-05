@@ -113,7 +113,7 @@ data class StepResult(
     val transcriptEndOffset: Long? = null,
     val startedAt: Long = 0L,
     val durationMs: Long = 0L,
-    /** The step asked for an issue to be created (CREATE_ISSUE_AND_CONTINUE); creating it is a later feature. */
+    /** The step asked for an issue to be created (CREATE_ISSUE_AND_CONTINUE); [issueId] is the draft the engine made for it. */
     val issueRequested: Boolean = false,
     val note: String? = null,
     /** The blind judge's verdict on this step, when one judged it. */
@@ -122,6 +122,8 @@ data class StepResult(
     val judgeInconclusive: Boolean = false,
     /** A person's note that the agent (not the app) got this step wrong; set by mark_agent_error. */
     val agentError: String? = null,
+    /** The draft issue the engine created for this step (CREATE_ISSUE_AND_CONTINUE), or null. Appended last: older run files decode as null. */
+    val issueId: String? = null,
 )
 
 /** [iteration] is 1-based (a run can repeat every case). [caseId] is [SUITE_SETUP_CASE_ID] or [SUITE_TEARDOWN_CASE_ID] for the suite-level hooks. */

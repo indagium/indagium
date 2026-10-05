@@ -368,6 +368,31 @@ remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CRE
 `PAUSE_FOR_USER` waits for `resume_paused_step` or the user). A step that outlives its `timeoutMs` is closed as
 `TIMEOUT` and an agent run is restarted at the next step with a summary of the earlier ones.
 
+### Issues from failed steps
+
+A step set to `CREATE_ISSUE_AND_CONTINUE` gets a **draft issue** the moment it fails (status `DRAFT`, kept under
+`<testing folder>/issues/<issueId>/` with its evidence copied next to it); the step's result carries its `issueId`.
+Any other non-passing step can become an issue on demand. A draft is built from the run alone and never invents
+anything: the title (case, step, failure), the reproduction steps (suite and case setup, then the case's steps up to
+and including the failing one), expected (the step's expected result and the checks that failed), actual (check
+results, the judge's reasoning, the agent's observation quoted as untrusted), the judge's notes, labels (the suite's
+tags and `found-by-agent`), the environment (app package, device, agent, run) and the evidence (screenshot, golden
+screenshot, log range, judge verdict, transcript slice, and the lane's whole video when one was recorded).
+Severity: judge `app_defect` and a crash in the step's log (`FATAL EXCEPTION`, `Fatal signal`, `ANR`) is
+`CRITICAL`; `app_defect` is `HIGH`; `agent_or_step_problem` is `LOW`; anything else `MEDIUM`.
+
+- `create_issue_from_step` (`runId`, `laneId`, `caseId`, `stepId`; optional `iteration`, `destination`
+  `local`|`notes`|`markdown`|`tracker`, `overrides`, `tabId`, `openLaneLog`) — builds (or reuses the engine's draft
+  for) the step's issue, applies `overrides` (`title`, `severity`, `labels`, `stepsToReproduce`, `expected`,
+  `actual`, `judgeNotes`, `linkToCase`) and sends it: `local` keeps it (status `SAVED`), `markdown` returns the
+  issue as Markdown in the answer (evidence listed by absolute path), `notes` adds an issue note and the screenshot
+  to the log tab of the lane (give `tabId`, or `openLaneLog: true` to open the lane's recorded logcat as a tab; with
+  neither the answer is `needsLogTab`), `tracker` is refused until an issue tracker can be configured in Settings.
+  `linkToCase` makes a later run of the case mark the issue `STILL_FAILING` or `PASSING_NOW` (`recheck`).
+- `list_issues` (optional `runId`, `status`, `limit`), `get_issue` (`issueId`; `format` `json`|`markdown`),
+  `update_issue` (`issueId` and the fields above; evidence is not changed), `delete_issue` (`issueId`; asks for
+  confirmation inside the AI panel and cannot be undone).
+
 REST shortcuts for the two read tools: `GET /test-suites` and `GET /test-suite?suiteId=...`.
 
 ## Prompt starters
