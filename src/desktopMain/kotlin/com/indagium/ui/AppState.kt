@@ -69,6 +69,8 @@ import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TestLibraryStore
+import com.indagium.testing.store.importGoldenImage
+import com.indagium.testing.store.resolveTestAsset
 import com.indagium.update.ReleaseInfo
 import com.indagium.update.RuntimePackage
 import com.indagium.update.SponsorChecker
@@ -1963,6 +1965,15 @@ class AppState(
     fun deleteSharedStep(sharedId: String): StoreResult<Unit> = testStoreOp { deleteSharedStep(sharedId) }
 
     fun moveSharedStep(sharedId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveSharedStep(sharedId, toIndex) }
+
+    /** Copies [source] into the suite's asset folder; the returned name is the golden-screenshot example's `assetPath`. */
+    internal fun importTestGoldenImage(suiteId: String, source: File): StoreResult<String> {
+        if (testLibrary.suite(suiteId) == null) return StoreResult.NotFound("suite", suiteId)
+        return importGoldenImage(testingDir, suiteId, source)
+    }
+
+    /** The image file a golden-screenshot example points at, or null when its path does not stay inside the asset folder. */
+    internal fun testGoldenImageFile(suiteId: String, assetPath: String): File? = resolveTestAsset(testingDir, suiteId, assetPath)
 
     private fun loadCustomAiCommands() {
         customAiCommands = customCommandsDir.listFiles { f -> f.isFile && f.extension.equals("md", ignoreCase = true) }
@@ -4117,7 +4128,7 @@ class AppState(
      */
     internal fun ensureHomeTab() {
         if (isLoading) return
-        if (tabs.isNotEmpty() || seq3Sessions.sessions.isNotEmpty()) return
+        if (tabs.isNotEmpty() || seq3Sessions.sessions.isNotEmpty() || testsTabOpen) return
         openHomeTab()
     }
 
@@ -4486,6 +4497,50 @@ class AppState(
      *  buttons, autosave, compare mode — so this exists purely to keep exactly one tab reading
      *  as selected in the tab bar. */
     val diagramSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Diagram3
+
+    // ── Tests workspace surface ─────────────────────────────────────
+    // One "Tests" workspace tab (ui/TestsWorkspace.kt), like a diagram workspace but a singleton. It owns
+    // no log tab and no AppState.tabs entry; whether it exists is [testsTabOpen], which the tab strip
+    // orders via TabRef.Tests and autosave persists as the "T" letter of the tab-order token.
+
+    /** True while the Tests workspace tab exists in the tab strip. */
+    var testsTabOpen by mutableStateOf(false)
+        internal set
+
+    /** True while the Tests workspace owns the content area. */
+    val testsSurfaceActive: Boolean get() = activeSurface is ActiveSurface.Tests
+
+    /** Selection / search state of the Tests workspace. Kept here (not in the composable) so it survives switching tabs. */
+    internal val testsView = TestsViewState()
+
+    /** The surface the user was on before opening Tests, so closing it puts them back there. */
+    private var surfaceBeforeTests: ActiveSurface? = null
+
+    /** Opens the Tests workspace tab, or just focuses it when it is already open. */
+    fun openTestsTab() {
+        val current = activeSurface
+        if (current !is ActiveSurface.Tests) surfaceBeforeTests = current
+        testsTabOpen = true
+        activeSurface = ActiveSurface.Tests
+    }
+
+    /** Closes the Tests workspace tab and returns to the surface it was opened from, when that still exists. */
+    fun closeTestsTab() {
+        if (!testsTabOpen) return
+        testsTabOpen = false
+        if (activeSurface !is ActiveSurface.Tests) return
+        val previous = surfaceBeforeTests
+        surfaceBeforeTests = null
+        val logId = (previous as? ActiveSurface.Log)?.tabId?.takeIf { id -> tabs.any { it.id == id } }
+        val diagramId = (previous as? ActiveSurface.Diagram3)?.sessionId?.takeIf { id -> seq3Sessions.sessions.any { it.id == id } }
+        when {
+            logId != null -> activateTab(logId)
+            diagramId != null -> seq3Sessions.activate(diagramId)
+            tabs.any { it.id == activeTabId } -> activateTab(activeTabId)
+            seq3Sessions.sessions.isNotEmpty() -> seq3Sessions.activate(seq3Sessions.sessions.last().id)
+            else -> activeSurface = null
+        }
+    }
 
     /** User-observed correction: a mirror of [TabBar]'s own `unifiedOrder` — the strip's
      *  interleaving of log tabs and diagram workspaces into one visual order. That composable's

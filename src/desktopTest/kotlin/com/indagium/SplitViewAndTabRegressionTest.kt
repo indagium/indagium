@@ -732,6 +732,23 @@ class SplitViewAndTabRegressionTest {
     }
 
     @Test
+    fun reconcileTabOrderPlacesTheTestsTabWithoutDisturbingLogAndDiagramEntries() {
+        // The Tests workspace tab is a third kind of entry: appended when it opens, kept where the user dragged it,
+        // dropped once it closes — and the surrounding log/diagram order never changes.
+        val opened = reconcileTabOrder(
+            previousOrder = listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b")),
+            logTabIds = listOf("a", "b"),
+            diagramSessionIds = listOf("seq3-1"),
+            testsOpen = true,
+        )
+        assertEquals(listOf(TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"), TabRef.Tests), opened)
+
+        val dragged = listOf(TabRef.Tests, TabRef.Log("a"), TabRef.Diagram("seq3-1"), TabRef.Log("b"))
+        assertEquals(dragged, reconcileTabOrder(dragged, listOf("a", "b"), listOf("seq3-1"), testsOpen = true))
+        assertEquals(dragged.drop(1), reconcileTabOrder(dragged, listOf("a", "b"), listOf("seq3-1"), testsOpen = false))
+    }
+
+    @Test
     fun reconcileTabOrderAppendsBrandNewTabsInEachStoresOwnOrder() {
         val reconciled = reconcileTabOrder(
             previousOrder = emptyList(),

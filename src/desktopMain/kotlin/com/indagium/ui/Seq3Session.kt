@@ -58,6 +58,9 @@ sealed interface ActiveSurface {
     data class Log(val tabId: String) : ActiveSurface
 
     data class Diagram3(val sessionId: String) : ActiveSurface
+
+    /** The AI test-suites workspace (ui/TestsWorkspace.kt): one workspace tab, owned by [AppState.testsTabOpen]. */
+    data object Tests : ActiveSurface
 }
 
 /** Every diagram note in [tab], paired with its block id — the one place that decides "is this
@@ -419,7 +422,10 @@ class Seq3Session(
         if (activeSessionId == id) {
             val next = sessions.lastOrNull()?.id
             activeSessionId = next
-            appState.activeSurface = next?.let(ActiveSurface::Diagram3) ?: appState.activeTab()?.id?.let(ActiveSurface::Log)
+            // The Tests workspace may be the surface on screen while this (background) session closes.
+            if (appState.activeSurface !is ActiveSurface.Tests) {
+                appState.activeSurface = next?.let(ActiveSurface::Diagram3) ?: appState.activeTab()?.id?.let(ActiveSurface::Log)
+            }
         }
     }
 

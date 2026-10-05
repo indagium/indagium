@@ -269,7 +269,7 @@ fun App(
         // restored, or the last tab/diagram just closed. Lives here, not inside AppState.init or
         // closeTabsById, deliberately — see ensureHomeTab's own KDoc for why. isLoading gates a
         // command-line file argument still being parsed, so home never flashes open underneath it.
-        LaunchedEffect(state.tabs.isEmpty(), state.seq3Sessions.sessions.isEmpty(), state.isLoading) {
+        LaunchedEffect(state.tabs.isEmpty(), state.seq3Sessions.sessions.isEmpty(), state.testsTabOpen, state.isLoading) {
             state.ensureHomeTab()
         }
         val dropTarget = remember(state, window) {
@@ -410,8 +410,13 @@ fun App(
                         // that condition becoming true and the LaunchedEffect below reacting to it —
                         // an empty Box, not the old static text, since the text would otherwise flash
                         // and immediately be replaced by the home tab.
-                        state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() ->
+                        state.tabs.isEmpty() && state.seq3Sessions.sessions.isEmpty() && !state.testsTabOpen ->
                             Box(Modifier.fillMaxSize())
+
+                        // The single AI test-suites workspace tab: like a diagram it owns the whole content area
+                        // and no log tab. Its selection/search state lives in AppState.testsView, so leaving
+                        // composition here (switching tabs) does not reset it.
+                        activeSurface is ActiveSurface.Tests && state.testsTabOpen -> TestsWorkspace(state)
 
                         // Keyed on the session id — matching the log path's key(activeTab.id) just
                         // below — so Seq3Workspace's remembered viewport/scroll/focus state is fully
@@ -2822,6 +2827,7 @@ private fun handleGlobalKey(
         ev.key == Key.Three                  -> { state.updateAnnotationVisible(true); onFocusPanel(KeyboardPanel.NOTES); true }
         ev.key == Key.RightBracket           -> { navigateTab(state, +1); true }
         ev.key == Key.LeftBracket            -> { navigateTab(state, -1); true }
+        ev.key == Key.W && state.testsSurfaceActive -> { state.closeTestsTab(); true }
         ev.key == Key.W                      -> { state.activeTab()?.id?.let(state::closeTab); true }
         ev.key == Key.Slash                  -> { state.shortcutsOpen = true; true }
         // Diagram-surface undo (ui/Seq3Session.kt): every mutation there is one applySeq3Command
