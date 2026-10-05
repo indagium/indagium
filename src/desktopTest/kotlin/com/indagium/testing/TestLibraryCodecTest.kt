@@ -94,6 +94,46 @@ class TestLibraryCodecTest {
     }
 
     @Test
+    fun filesWrittenBeforeTheNewFieldsLoadWithDefaults() {
+        val root = rootOf(encodeSuiteFile(fullSuite()))
+        val suiteObject = root["suite"] as JsonObject
+
+        fun JsonObject.without(vararg keys: String) = JsonObject(filterKeys { it !in keys })
+
+        fun stripStep(step: kotlinx.serialization.json.JsonElement) = (step as JsonObject).without("maxToolCalls")
+
+        fun stripCase(case: kotlinx.serialization.json.JsonElement): JsonObject {
+            val obj = (case as JsonObject).without("preconditions", "setup", "teardown")
+            return obj.withKey("steps", JsonArray((obj["steps"] as JsonArray).map { stripStep(it) }))
+        }
+        val old = suiteObject.without("targetPackage", "deviceProfileHint", "tags")
+            .withKey("cases", JsonArray((suiteObject["cases"] as JsonArray).map { stripCase(it) }))
+
+        val suite = decodeSuiteFile(root.withKey("suite", old).toString()).getOrThrow().suite
+
+        assertEquals("", suite.targetPackage)
+        assertEquals("", suite.deviceProfileHint)
+        assertEquals(emptyList(), suite.tags)
+        assertEquals("", suite.cases.first().preconditions)
+        assertEquals(emptyList(), suite.cases.first().setup)
+        assertEquals(emptyList(), suite.cases.first().teardown)
+        assertEquals(com.indagium.testing.model.DEFAULT_STEP_MAX_TOOL_CALLS, suite.cases.first().steps.first().maxToolCalls)
+    }
+
+    @Test
+    fun theNewFieldsRoundTrip() {
+        val suite = decodeSuiteFile(encodeSuiteFile(fullSuite())).getOrThrow().suite
+        assertEquals("com.example.app", suite.targetPackage)
+        assertEquals("Pixel 8, Android 15", suite.deviceProfileHint)
+        assertEquals(listOf("smoke", "settings"), suite.tags)
+        val case = suite.cases.first()
+        assertEquals("Signed in", case.preconditions)
+        assertTrue(case.setup.single() is HookItem.Shared)
+        assertTrue(case.teardown.single() is HookItem.Script)
+        assertEquals(30, case.steps.first().maxToolCalls)
+    }
+
+    @Test
     fun orderOfEveryListSurvivesARoundTrip() {
         val suite = fullSuite()
         val reordered = suite.copy(

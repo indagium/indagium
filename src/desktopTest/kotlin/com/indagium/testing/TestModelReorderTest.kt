@@ -157,6 +157,15 @@ class TestModelReorderTest {
         assertEquals(com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS, step.timeoutMs)
         assertEquals(com.indagium.testing.model.DEFAULT_STEP_RETRIES, step.retries)
         assertEquals(com.indagium.testing.model.OnFailure.STOP_CASE, step.onFailure)
+        assertEquals(com.indagium.testing.model.DEFAULT_STEP_MAX_TOOL_CALLS, step.maxToolCalls)
+    }
+
+    @Test
+    fun normalizeTagsTrimsDropsBlanksAndDeduplicatesIgnoringCase() {
+        assertEquals(
+            listOf("Smoke", "ui"),
+            com.indagium.testing.model.normalizeTags(listOf(" Smoke ", "", "smoke", "SMOKE", "ui", "  ")),
+        )
     }
 
     @Test
@@ -171,6 +180,8 @@ class TestModelReorderTest {
             suite.variables.forEach { add(it.id) }
             suite.cases.forEach { c ->
                 add(c.id)
+                c.setup.forEach { add(it.id) }
+                c.teardown.forEach { add(it.id) }
                 c.steps.forEach { s ->
                     add(s.id)
                     s.checks.forEach { add(it.id) }

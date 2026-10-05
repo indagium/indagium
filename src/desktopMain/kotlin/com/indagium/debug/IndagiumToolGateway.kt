@@ -58,6 +58,9 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // (and writes the filter backup to disk). set_highlighters / add_manual_collapse / add_sequence
     // are view-only mutations, left AUTOMATIC to match set_filter / toggle_group.
     "reindex_sources", "save_filter_preset",
+    // Test-suite authoring: deletes and file import/export ask first; set_edition is a development
+    // switch that changes what the whole feature allows, so an in-app AI run must never flip it unasked.
+    "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite", "set_edition",
 )
 
 private fun policyFor(name: String): IndagiumToolActionPolicy =
