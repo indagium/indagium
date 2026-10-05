@@ -52,7 +52,7 @@ Source sets are `desktopMain` and `desktopTest` (Kotlin Multiplatform with a sin
 
 ## Architecture
 
-Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~50k lines across 12 packages.
+Indagium is a Compose Multiplatform Desktop log viewer for Android logcat files. All code lives under `src/desktopMain/kotlin/com/indagium/` — ~155k lines across 16 packages.
 
 > **`docs/SAAD.md` is the authoritative architecture document.** It covers module boundaries, the
 > threading model, persistence formats, security posture, and known risks, with file:line citations.
@@ -85,8 +85,12 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `source` | Source indexing and bounded source-first log→execution-trace resolution. Pure text/regex/brace-matching, no compiler dep. Own store at `appDataDir()/source-index` (`indagium-source-index-v1`, schema v18; also accepts the legacy `openLog2-source-index-v1` magic). |
 | `cases` | Similarity index over previously written analysis notes; backs `search_similar_cases`. Store at `appDataDir()/case-index` (`indagium-case-index-v1`; also accepts the legacy `openLog2-case-index-v1` magic). |
 | `diagram3` | UML sequence-diagram generation (v3), UI-free: `Seq3Generator` (log range -> `Seq3Document`: ranks tag activity into lifelines, infers a message's target only from adjacent-entry thread-handoff/correlation-token evidence — no source-index enrichment), `Seq3Layout` (the one geometry source shared by the Compose canvas and the raster), `Seq3Raster` (Graphics2D -> `BufferedImage`, headless PNG export), `Seq3Emitters` (Mermaid/PlantUML text), `Seq3Codec` (the `<!-- indagium:diagram3 v1 ... -->` note header). Stored as an ordinary `AnnBlock.Note` — no `.ann` format change. |
-| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **76-tool** catalogue + handlers joined by `IndagiumToolGateway`, hand-rolled `Json`, `AppLogger`. |
+| `debug` | `ControlServer` (Ktor CIO, loopback-only, MCP over Streamable HTTP + REST, off by default), the **124-tool** catalogue + handlers joined by `IndagiumToolGateway`, hand-rolled `Json`, `AppLogger`. |
 | `ai` | `LlmProvider` (Anthropic + OpenAI-compatible over HTTP) and the subprocess account agents (Codex stdio JSON-RPC, Claude Code stream-json), `AiAgentRunner` loop, `AiToolExecutionCoordinator` (the single policy point: budget, tab pinning, confirmation gate). |
+| `testing` | AI test suites (suites → cases → steps run by AI agents on Android devices): UI-free model, disk stores under `testing/` and `<save root>/test-runs/`, edition limits, script runner, headless device lanes, the run engine, the blind judge, issue drafts and the issue-tracker MCP client. Never imports `ui`; see SAAD §26. |
+| `edition` | `Edition`/`EditionLimits`/`EditionService`: Free = 1 suite × 5 cases, others unlimited; builds default to Unlimited (`-Dindagium.edition=free` to test Free). |
+| `security` | `SecretStore`: OS-keychain secret storage (macOS `security`, Linux `secret-tool`, Windows Credential Manager) with a session-only fallback; secrets go on stdin, never argv. |
+| `capture` | Live device capture: adb logcat + embedded scrcpy recorder, session files, the versioned capture descriptor/ZIP codec. |
 | `video` | JavaCV/FFmpeg playback on a dedicated decode thread; per-tab controllers owned by `AppState`. |
 | `voice` | Dictation: Whisper JNI, Apple Speech (build-time-compiled JNI bridge), Windows Speech helper. |
 | `update` | GitHub Releases check and asset download. |
@@ -103,6 +107,7 @@ File → LogParser.parseLogcat()  ──→  List<LogEntry>          (sequential
 | `ui/AnnotationPanel.kt` + `ui/AnnotationManager.kt` | Notes UI and its block-model mutations |
 | `ui/AutosaveCodec.kt` | The on-disk format. **Append new token fields last** — see the versioning note below |
 | `debug/ControlServer.kt` + `debug/IndagiumToolOperations.kt` | Tool catalogue and handlers. Names must match or `IndagiumToolGateway`'s `init` throws |
+| `testing/run/TestRunCoordinator.kt` + `StepSequence.kt` | AI test runs: the coordinator (own IO scope, devices, cancel/close) and the per-step `finish_step` protocol. The tool catalogues are `debug/TestSuiteToolCatalog.kt`, `TestRunToolCatalog.kt`, `IssueToolCatalog.kt` (appended to `MCP_TOOLS`) |
 | `ui/Components.kt` / `ui/Theme.kt` | Shared widgets; `ThemeColors`, `themeColors()`, `HL_COLORS`, `SEQ_COLORS` |
 
 ### Two invariants worth knowing before editing

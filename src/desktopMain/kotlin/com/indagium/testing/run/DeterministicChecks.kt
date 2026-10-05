@@ -19,7 +19,8 @@ import java.io.IOException
 
 // The checks of a step that need no judge: they read the lane's recorded log or run a library script. Each answers with
 // a CheckResult and never throws for an expected problem (an invalid regular expression, a missing script, adb
-// failing) — that is an ERROR result the report shows. The two judge checks are NOT_EVALUATED in this version.
+// failing) — that is an ERROR result the report shows. The two judge checks are NOT_EVALUATED here: StepSequence fills them
+// in from the judge's verdict when a judge judged the step (see StepJudging.kt).
 //
 // Timing, all measured from the moment finish_step starts evaluating:
 //   LogAppears — rows written since the step began count at once; otherwise waits up to withinMs for one.
@@ -30,7 +31,7 @@ private const val MAX_CHECK_WAIT_MS = 10 * 60 * 1000L
 private const val ROW_EXCERPT_CHARS = 200
 private const val OUTPUT_EXCERPT_CHARS = 300
 private const val NANOS_PER_MILLI = 1_000_000L
-private const val JUDGE_PENDING_DETAIL = "Needs the judge, which does not run in this version."
+private const val JUDGE_PENDING_DETAIL = "Needs a judge; this run has none configured."
 
 internal fun StepCheck.kindName(): String = when (this) {
     is StepCheck.LogAppears -> "logAppears"

@@ -14,7 +14,7 @@ enum class IssueSeverity { LOW, MEDIUM, HIGH, CRITICAL }
 /** DRAFT: created automatically or saved unfinished. SAVED: kept locally. SENT: delivered to notes, Markdown or a tracker. */
 enum class IssueStatus { DRAFT, SAVED, SENT }
 
-/** TRACKER needs the issue tracker configuration that arrives in a later version; it is modelled so records and tools are stable. */
+/** TRACKER: an AI agent files the issue in the issue tracker configured in Settings, through the tracker's MCP tools (testing/tracker). */
 enum class IssueDestination { LOCAL, NOTES, MARKDOWN, TRACKER }
 
 enum class IssueAttachmentKind { VIDEO_CLIP, LOG_RANGE, SCREENSHOT, TRANSCRIPT, JUDGE_VERDICT, GOLDEN }
