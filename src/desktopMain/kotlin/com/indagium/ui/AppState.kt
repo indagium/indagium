@@ -44,6 +44,7 @@ import com.indagium.debug.AppLogger
 import com.indagium.debug.ControlServer
 import com.indagium.debug.IndagiumToolOperations
 import com.indagium.debug.loadOrCreateControlToken
+import com.indagium.edition.EditionService
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
 import com.indagium.source.FileMeta
@@ -61,6 +62,13 @@ import com.indagium.source.SourceIndexer
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
+import com.indagium.testing.model.SharedStep
+import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestScript
+import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.TestSuite
+import com.indagium.testing.store.StoreResult
+import com.indagium.testing.store.TestLibraryStore
 import com.indagium.update.ReleaseInfo
 import com.indagium.update.RuntimePackage
 import com.indagium.update.SponsorChecker
@@ -1796,6 +1804,13 @@ class AppState(
     // Lets saved-profile migration tests provide the current bundled executable independently of
     // the host running the test; production still requires the real bundled path to exist.
     private val bundledCodexExecutableProvider: () -> String? = LocalAccountCli::bundledCodexExecutable,
+    // Where the AI test-suite library lives (testing/store/TestLibraryStore.kt). Injectable like
+    // customCommandsDir/notesDir; a bare AppState() in tests resolves it under the sandboxed
+    // user.home build.gradle.kts sets for every test run, and nothing is written until a mutation.
+    private val testingDir: File = DesktopStorage.testingDir(),
+    // The edition that sets the test-suite limits. Defaults to Unlimited; Main.kt resolves the real
+    // one from -Dindagium.edition / INDAGIUM_EDITION. A per-AppState instance, never a global.
+    val editionService: EditionService = EditionService(),
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -1858,6 +1873,96 @@ class AppState(
 
     /** Source folder path whose SourceFolderInfoDialog is open; null means closed. */
     internal var sourceFolderInfoEditorTarget by mutableStateOf<String?>(null)
+
+    // ── AI test suites ──────────────────────────────────────────────
+    // The library is disk-backed by TestLibraryStore (its own leaf locks — never held together with
+    // stateLock, and the store never calls back into AppState). [testLibrary] mirrors the store's
+    // StateFlow for Compose: it is refreshed after every delegate below, reading the flow's value
+    // INSIDE testLibraryMirrorLock so the last assignment is always the freshest one even when several
+    // threads (UI, MCP) mutate at once. No collector is involved, so there is no async lag to test around.
+    private val testLibraryStore = TestLibraryStore(testingDir, limits = { editionService.limits() })
+    private val testLibraryMirrorLock = Any()
+
+    /** The test library in the user's order; observe this from composables. Mutate through the delegates below. */
+    var testLibrary by mutableStateOf(testLibraryStore.library.value)
+        private set
+
+    /** The last failure to write the test library to disk, or null. */
+    val testLibraryPersistError: String? get() = testLibraryStore.persistError.value
+
+    /** Files skipped while loading the test library (invalid, unreadable, mismatched name). */
+    val testLibraryLoadIssues: List<String> get() = testLibraryStore.loadIssues
+
+    private fun syncTestLibrary() {
+        synchronized(testLibraryMirrorLock) { testLibrary = testLibraryStore.library.value }
+    }
+
+    private inline fun <T> testStoreOp(op: TestLibraryStore.() -> StoreResult<T>): StoreResult<T> =
+        testLibraryStore.op().also { syncTestLibrary() }
+
+    fun createTestSuite(name: String, description: String = "", instructions: String = ""): StoreResult<TestSuite> =
+        testStoreOp { createSuite(name, description, instructions) }
+
+    fun updateTestSuite(suiteId: String, transform: (TestSuite) -> TestSuite): StoreResult<TestSuite> =
+        testStoreOp { updateSuite(suiteId, transform) }
+
+    fun deleteTestSuite(suiteId: String): StoreResult<Unit> = testStoreOp { deleteSuite(suiteId) }
+
+    fun duplicateTestSuite(suiteId: String): StoreResult<TestSuite> = testStoreOp { duplicateSuite(suiteId) }
+
+    fun moveTestSuite(suiteId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveSuite(suiteId, toIndex) }
+
+    fun importTestSuite(text: String): StoreResult<TestSuite> = testStoreOp { importSuite(text) }
+
+    fun importTestSuiteFromFile(source: File): StoreResult<TestSuite> = testStoreOp { importSuiteFromFile(source) }
+
+    fun exportTestSuite(suiteId: String): StoreResult<String> = testLibraryStore.exportSuite(suiteId)
+
+    fun exportTestSuiteToFile(suiteId: String, destination: File): StoreResult<File> =
+        testLibraryStore.exportSuiteToFile(suiteId, destination)
+
+    fun createTestCase(suiteId: String, case: TestCase, atIndex: Int? = null): StoreResult<TestCase> =
+        testStoreOp { createCase(suiteId, case, atIndex) }
+
+    fun updateTestCase(caseId: String, transform: (TestCase) -> TestCase): StoreResult<TestCase> =
+        testStoreOp { updateCase(caseId, transform) }
+
+    fun deleteTestCase(caseId: String): StoreResult<Unit> = testStoreOp { deleteCase(caseId) }
+
+    fun duplicateTestCase(caseId: String): StoreResult<TestCase> = testStoreOp { duplicateCase(caseId) }
+
+    fun moveTestCase(caseId: String, toIndex: Int, toSuiteId: String? = null): StoreResult<TestCase> =
+        testStoreOp { moveCase(caseId, toIndex, toSuiteId) }
+
+    fun createTestStep(caseId: String, step: TestStep, atIndex: Int? = null): StoreResult<TestStep> =
+        testStoreOp { createStep(caseId, step, atIndex) }
+
+    fun updateTestStep(stepId: String, transform: (TestStep) -> TestStep): StoreResult<TestStep> =
+        testStoreOp { updateStep(stepId, transform) }
+
+    fun deleteTestStep(stepId: String): StoreResult<Unit> = testStoreOp { deleteStep(stepId) }
+
+    fun duplicateTestStep(stepId: String): StoreResult<TestStep> = testStoreOp { duplicateStep(stepId) }
+
+    fun moveTestStep(stepId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveStep(stepId, toIndex) }
+
+    fun createTestScript(script: TestScript): StoreResult<TestScript> = testStoreOp { createScript(script) }
+
+    fun updateTestScript(scriptId: String, transform: (TestScript) -> TestScript): StoreResult<TestScript> =
+        testStoreOp { updateScript(scriptId, transform) }
+
+    fun deleteTestScript(scriptId: String): StoreResult<Unit> = testStoreOp { deleteScript(scriptId) }
+
+    fun moveTestScript(scriptId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveScript(scriptId, toIndex) }
+
+    fun createSharedStep(shared: SharedStep): StoreResult<SharedStep> = testStoreOp { createSharedStep(shared) }
+
+    fun updateSharedStep(sharedId: String, transform: (SharedStep) -> SharedStep): StoreResult<SharedStep> =
+        testStoreOp { updateSharedStep(sharedId, transform) }
+
+    fun deleteSharedStep(sharedId: String): StoreResult<Unit> = testStoreOp { deleteSharedStep(sharedId) }
+
+    fun moveSharedStep(sharedId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveSharedStep(sharedId, toIndex) }
 
     private fun loadCustomAiCommands() {
         customAiCommands = customCommandsDir.listFiles { f -> f.isFile && f.extension.equals("md", ignoreCase = true) }

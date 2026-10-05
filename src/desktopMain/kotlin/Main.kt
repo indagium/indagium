@@ -12,6 +12,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.indagium.edition.EditionService
 import com.indagium.singleinstance.SingleInstance
 import com.indagium.singleinstance.SingleInstanceHandle
 import com.indagium.ui.App
@@ -130,11 +131,16 @@ fun main(args: Array<String>) {
     val singleInstance: SingleInstanceHandle? =
         if (isMacOs) null else (SingleInstance.acquire(DesktopStorage.appDataDir(), args) ?: return)
 
+    // Builds default to the Unlimited edition; -Dindagium.edition=free (or INDAGIUM_EDITION=free)
+    // lowers the AI test-suite limits for testing the Free edition. Resolved once, outside application{}.
+    val editionService = EditionService().also { it.resolveStartup() }
+
     application {
         val windowState = rememberWindowState(size = DpSize(1440.dp, 900.dp))
         val appState = remember {
             AppState(
                 restoreOnCreate = true,
+                editionService = editionService,
                 filterBackupsDir = DesktopStorage.filterBackupsDir(),
                 platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
             )
