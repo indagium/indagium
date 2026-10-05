@@ -46,6 +46,7 @@ Android log viewer and logcat analyzer for Windows, macOS and Linux — investig
 **Extras**
 
 - **In-app AI assistant** — use LM Studio, OpenAI, Anthropic, Codex, Claude Code, or another compatible provider to investigate the active log tab with the same log, filter, source, and notes tools exposed through MCP; on-device voice dictation inserts editable text into the composer
+- **AI test suites** — describe Android tests as suites, cases and steps with checks and examples; AI agents drive real devices through them (several in parallel, one per device) while a blind judge compares expected with actual, with your own shell scripts as agent tools; failed steps become issues, filed in your tracker through its MCP server; every part is also authored and run over MCP
 - **Video sync** — attach a screen recording, anchor it to a log line, and scrub either from the other
 - **MCP control server** — drive Indagium from any MCP client over a local URL (off by default)
 - **Themes** — 20 built-in themes (light, dark, and paper variants)

@@ -26,7 +26,8 @@ This guide is task-oriented. If you want the architecture instead, see [SAAD.md]
 [19. Exporting the filtered log](#19-exporting-the-filtered-log)
 
 **Extras** — [20. Video sync](#20-video-sync) · [21. Voice dictation](#21-voice-dictation) ·
-[22. AI assistant](#22-ai-assistant) · [23. External MCP clients](#23-external-mcp-clients)
+[22. AI assistant](#22-ai-assistant) · [23. External MCP clients](#23-external-mcp-clients) ·
+[30. AI test suites](#30-ai-test-suites)
 
 **Reference** — [24. Settings](#24-settings) · [25. Keyboard shortcuts](#25-keyboard-shortcuts) ·
 [26. Where your data lives](#26-where-your-data-lives) ·
@@ -897,6 +898,8 @@ Prompt patterns: [mcp/ANALYSIS_PLAYBOOK.md](mcp/ANALYSIS_PLAYBOOK.md).
 | **AI commands** | Custom `/command` prompt library |
 | **Source code** | Source folders, log wrapper rules, auto-discovery, index status and reindex, editor command |
 | **Issues** | Custom issue rules (name + regex) |
+| **Testing** | What a new AI test run starts from (judge, evidence, how long an unanswered confirmation waits) and the edition; see [30. AI test suites](#30-ai-test-suites) |
+| **Issue tracker** | The tracker an AI test issue can be filed in: MCP URL, authentication header, access token, filing profile and prompt, connection test |
 
 **Interface font** and **Log font** are separate searchable dropdowns in Appearance. Opening a
 dropdown shows available installed families with the current choice marked; use its search field
@@ -1016,10 +1019,15 @@ One directory holds everything Indagium stores:
 | `voice-models/` | Downloaded Whisper models |
 | `archive-cache/` | Videos extracted from bug-report archives |
 | `control-token` | Bearer token for the MCP control server |
+| `testing/` | Your AI test suites (`library.json`, `suites/`, golden-screenshot `assets/`) and the issues made from failed steps (`issues/`) |
 | `indagium-debug.log` | Diagnostic log — only when you turn it on |
 
+AI test **runs** (their results, screenshots, logcat and agent transcripts) are written under your save
+folder in `test-runs/`, not here.
+
 **What is never stored:** AI API keys (memory only, for one launch), AI conversations (cleared on
-restart), voice recordings and transcripts.
+restart), voice recordings and transcripts. The one secret Indagium does keep is the issue tracker's access
+token, and only in your operating system's keychain (see [30. AI test suites](#30-ai-test-suites)).
 
 **Upgrading from openLog?** The first launch after upgrading copies your session, notes, custom AI
 commands, filter backups, and source/case indexes across from the old `openLog2`-named directory
@@ -1227,6 +1235,174 @@ Capture sessions, live snapshots, and Save ZIP exports can each use their own fo
 General → Storage. Live capture itself is not resumed after restart. If Indagium closes unexpectedly,
 the New capture launcher lists the interrupted session so you can recover or export its files. A
 stopped capture tab remains a normal tab and can be restored from its descriptor.
+
+---
+
+## 30. AI test suites
+
+An AI test suite describes how to check an Android app in plain language. **AI agents then carry it out on
+real devices** — tapping, typing, reading the screen and the logcat — while a separate **judge** decides,
+from the evidence alone, whether each step did what you expected. Anything that fails can become an
+issue, kept locally or filed in your issue tracker.
+
+Open the **Tests** tab from the toolbar. The left column lists **Suites**, **Shared steps**, **Scripts**,
+**Runs** and **Issues**.
+
+### Suites, cases and steps
+
+A **suite** groups the cases of one app. A **case** is one thing to verify and holds ordered **steps**; a step
+is one instruction.
+
+1. **New suite.** Give it a name, a description, *Instructions for the agent* (context every case shares), the
+   **Target package** (for example `com.example.app`) and optional tags. **Setup** and **Teardown** hooks run
+   a script or a shared step before and after the whole suite.
+2. **New case.** Fill in the **Goal** (what the case verifies), **Preconditions**, and *Instructions for the
+   agent*. A case can have its own setup/teardown hooks and, if you want to narrow it, a list of allowed tools.
+3. **Add steps.** Each step has an **Action** ("Open Settings and tap Wi-Fi") and an **Expected result**
+   ("The Wi-Fi list is shown"). Under *Settings*: **When it fails**, **Timeout** (default 60 s), **Retries**
+   (default 1, so a failing step is tried twice) and **Max tool calls** (default 15).
+4. **When it fails** decides what happens once the retries are used up: *Stop the case*, *Continue*,
+   *Create issue, continue* (a draft issue is made for you) or *Pause for me* (the run waits and you choose
+   retry, continue or stop).
+
+Every list — suites, cases, steps, checks, examples, scripts — can be reordered by dragging its handle,
+with `Alt+↑` / `Alt+↓`, or with the up/down buttons. Duplicate, export and import work on whole suites
+(**Duplicate**, **Export…**, **Import…** on the suite page).
+
+### Checks and examples
+
+A step can carry **checks** that are verified without trusting the agent:
+
+| Check | Passes when |
+|---|---|
+| **Log appears** | a log line matching your regex (optionally for one tag) shows up within the time you give it |
+| **Log absent** | no matching line appears during the window (a match fails it at once) |
+| **Script result** | a library script finishes with the exit code (and, optionally, output text) you expect |
+| **Screen judge** | the judge says the screen matches your description, optionally compared with an example |
+| **Ask the judge** | the judge answers your free-form question about the evidence with a pass |
+
+**Examples** give the judge something to compare against: a **Golden screenshot** (a png, jpg or webp
+copied into Indagium, at most 10 MB) or a **Reference log**.
+
+### Scripts: your own tools for the agent
+
+A **script** is a shell command that agents can call as a tool, such as "reset the app's database" or "fetch
+a build". On **Scripts**, set the **Tool name** (lowercase letters, digits and `_`), a description the agent
+reads, the **parameters** (text, whole number or true/false), and **Runs on** *this computer* or *the device
+(adb shell)*. The command receives its parameters **as environment variables** — `$name` in a shell script on
+macOS and Linux — never pasted into the command text, so a value can never change what the command does.
+The command also sees `DEVICE`, `PACKAGE`, `RUN_DIR`, `CASE_ID` and `STEP_ID`. On Windows a computer script runs in
+PowerShell. Every script has a time limit and an output limit, and everything it started is stopped when it
+times out or the run is cancelled.
+
+**Who may start it** is the important setting:
+
+| Permission | Meaning |
+|---|---|
+| **Ask me first** (default) | The agent can call it, but a card asks you to **Allow once** or **Deny** every time |
+| **Agent may run it** | The agent runs it without asking. Use only for scripts you are happy for any test agent to run |
+| **Setup and teardown only** | Never offered to an agent; only your setup/teardown hooks and *Script result* checks use it |
+
+**Try it** (below the command) runs a script once with the arguments you type, exactly as an agent's call
+would, and shows its exit code and output. Script output and device text are always shown to the agent as
+**data to read, never as instructions**.
+
+### Running
+
+Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
+
+- **Cases** — tick the cases to run.
+- **Lanes** — a lane is one device driven by one agent. Choose what drives it (a Claude Code, Codex or API
+  profile from *Settings → AI providers*, or *External (MCP)* if a developer's AI client will drive it) and
+  which connected device it uses. Add several lanes: lanes on **different devices run at the same time** (up to
+  four devices at once; the others wait), lanes that share a device run one after another. A device held by the
+  live capture tab is not offered.
+- **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. The judge sees the
+  step's expected result, the screenshot taken when the step ended, the log lines written during it and the
+  automatic check results — **never what the agent claimed**. It can turn a pass into a fail but never a fail
+  into a pass. Where lanes ended a step differently, it also compares their evidence and explains why.
+- **Settings** — repeat each case 1×, 3× or 5×, a **tool-call budget per case** (default 60), and the **evidence
+  to keep**: screenshots, logcat, the agent transcript and optionally screen video (recorded the same way as a
+  live capture's video).
+
+Press **Start**. The **Runs** screen opens on the new run with a **Live** view: each lane's latest screenshot,
+its recent tool calls, the judge feed, **Pause all** (lanes stop at the next step boundary) and **Stop**.
+A script that needs permission appears as a card — **Allow once** or **Deny** — and an unanswered card is
+denied after the confirmation timeout (5 minutes by default, *Settings → Testing*). A step set to *Pause for
+me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown scripts.
+
+### Reading the report
+
+When a run ends, **Runs → (the run)** shows a matrix: one row per case and step, one column per lane, and a
+judge/consensus column. Click a step to see its **Action** and **Expected** result, what the agent claimed
+and observed, each check's result, the screenshot, the log range and the judge's verdict and reasoning.
+Useful actions on a step:
+
+- **Apply fix…** — when the judge suggests that your step's wording is wrong, applies its new action or
+  expected text to the suite in your library (the run's own copy is not changed).
+- **Mark as agent error…** — records that the agent, not the app, got it wrong.
+- **Run again up to this step** — starts a new run of the case from its first step through this one.
+- **Create issue…** / **Open issue…** — see below.
+- **Open transcript** — the agent's tool calls and replies, with any secret removed.
+
+Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's `logcat.log`, `screens/`
+and `transcript.jsonl`, and `judge.jsonl`.
+
+### Issues
+
+A step set to *Create issue, continue* gets a **draft issue** as soon as it fails; any failing step can also
+**Create issue…**. A draft is built only from what the run recorded — a title, the steps to reproduce (setup
+plus the case's steps up to the failing one), expected and actual, the judge's notes, a severity and labels,
+the environment, and the evidence (screenshot, golden screenshot, log range, judge verdict, transcript slice
+and the lane's whole video when recorded; a video over 50 MB starts unticked). Review and edit it, tick the
+evidence you want, then **Send to**:
+
+| Destination | What happens |
+|---|---|
+| **Local** | The issue stays in Indagium under **Tests → Issues** |
+| **Notes** | A note with the issue and the step's screenshot is added to the log tab of that lane |
+| **Markdown** | The issue is copied to the clipboard as Markdown |
+| **Tracker** | An AI agent files it in your issue tracker (below) |
+
+Tick **Link to case and re-check on next run** and a later run of that case marks the issue **still failing** or **passing now**.
+
+### Filing issues in your tracker
+
+Indagium does not know any tracker's API. Instead you point it at **your tracker's MCP server** and tell an
+AI profile how to file an issue:
+
+1. **Settings → Issue tracker.** Turn it on, give it a name, and enter the tracker's **MCP URL** (`https://…`).
+2. Set the **Authentication header** (default `Authorization` with a `Bearer ` prefix; leave blank for none) and
+   paste the **Access token**, then **Save token**. The token goes into your **operating-system keychain**
+   (macOS Keychain, Windows Credential Manager, Linux Secret Service via `secret-tool`) and nowhere else — not
+   settings, notes, runs, issues or transcripts. If the keychain cannot be used, Settings says the token is
+   **kept for this session only**.
+3. Choose the **issue agent profile** (any AI profile, including Claude Code or Codex) and write the **prompt**:
+   the project, issue type, labels and how to map the fields.
+4. **Test connection** lists the tracker's tools.
+
+When you press **Create in <tracker>**, the profile calls the tracker's tools to create exactly one issue
+and Indagium records its URL and key. The agent talks to the tracker **through Indagium**, so the token never
+reaches the AI model or its process. The issue text and the evidence it uploads are visible to that AI profile
+and are sent to the tracker, so the dialog says so first. An issue that was already created is not sent again
+unless you ask for another one.
+
+### Editions and limits
+
+The **Free** edition allows **1 suite with 5 cases**. Everything past the limit (in the order you keep them) is
+**locked**: you can still read, export, delete and reorder it — reordering is how you choose which entries are
+active — but not edit, run or duplicate it, and nothing is ever deleted. Importing a suite with more than 5
+cases works; the extra cases arrive locked. Premium and Friends & Family have no limits, and so does a
+default build. To try the Free limits on your own build, start it with `-Dindagium.edition=free` (or the
+environment variable `INDAGIUM_EDITION=free`); *Settings → Testing* can switch the edition at runtime in an
+unpackaged build or with `-Dindagium.dev=true`.
+
+### From an MCP client
+
+Everything above — creating suites, cases, steps, checks and scripts, running a suite, reading the report,
+creating issues and sending them to the tracker — is also available as MCP tools, so a developer's AI client
+can build and run suites too; see [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md#ai-test-suites). An
+external client asks for your approval **for every call** that would run a script or start a run.
 
 ---
 
