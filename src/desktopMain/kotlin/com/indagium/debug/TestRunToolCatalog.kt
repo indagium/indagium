@@ -3,12 +3,14 @@ package com.indagium.debug
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
 
 // MCP catalogue of the AI test-RUN tools. Handlers: TestRunToolOperations.kt (the gateway's init throws if the two
 // drift). A run is started with run_test_suite and then observed with get_test_run_status / get_test_run_report; an
-// "external" lane has no agent and is driven by the caller through test_lane_tool_call.
+// "external" lane has no agent and is driven by the caller through test_lane_tool_call. apply_step_fix, mark_agent_error
+// and rerun_test_step act on a finished report.
 
 private val LANE_ITEM_SCHEMA = ObjectArrayItemSchema(
     props = listOf("profileId" to "string", "deviceSerial" to "string"),
@@ -28,7 +30,10 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "run_test_suite",
         "Start a run of a test suite (or of some of its cases) on one or more devices and return its runId and lane ids at once; " +
             "the run continues in the background. Poll get_test_run_status, then read get_test_run_report. Each lane drives one device; " +
-            "lanes run one after another. Cases locked by the edition limit are skipped with a warning. Refusals (unknown suite, " +
+            "lanes on different devices run in parallel (at most 4 devices at once), lanes that share a device run one after another. " +
+            "A judge (judgeProfileId + judgeMode) is a separate, blind AI run that compares each step's expected result with the " +
+            "evidence; where lanes disagree a comparison judge explains why. Cases locked by the edition limit are skipped with a warning. " +
+            "Refusals (unknown suite, " +
             "edition limit, a device that is busy or held by the live capture, a missing AI profile or API key) come back as " +
             "{ error, errors } and nothing starts. Asks for confirmation inside Indagium's AI panel; every call from an external " +
             "MCP client waits for the user to allow it.",
@@ -44,8 +49,9 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "caseToolCallLimit" to "Device-tool calls an agent may spend per case, $MIN_CASE_TOOL_CALL_LIMIT..$MAX_CASE_TOOL_CALL_LIMIT " +
                     "(default $DEFAULT_CASE_TOOL_CALL_LIMIT). The step protocol tools are free.",
                 "evidence" to "What to keep: { video (default false), screenshots, logcat, transcript } (each default true except video).",
-                "judgeProfileId" to "Reserved for the judge; ignored in this version.",
-                "judgeMode" to "Reserved for the judge; ignored in this version.",
+                "judgeProfileId" to "The id of the AI profile that judges steps (any kind, like a lane's); needed when judgeMode is not off.",
+                "judgeMode" to "When the judge runs: ${JudgeMode.entries.joinToString(", ") { it.wire }} (default off). failures_only asks it " +
+                    "for steps that failed a check or that the agent reported failed or blocked, and for steps with a judge check.",
             ),
             objectArrays = mapOf("lanes" to LANE_ITEM_SCHEMA),
         ),
@@ -93,6 +99,43 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
             "runId" to "string", "laneId" to "string", "decision" to "string",
             required = listOf("runId", "laneId", "decision"),
             enums = mapOf("decision" to DECISIONS),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "apply_step_fix",
+        "Apply the fix a judge suggested for a step (its judge verdict's or a comparison's suggestedFix, id in get_test_run_report) to " +
+            "that step in the LIBRARY: its action and/or expected text are replaced. The run's own copy of the suite is not changed. " +
+            "Refused when the step is locked by the edition limit, was deleted, or the fix was already applied or is advice only. " +
+            "Asks for confirmation inside Indagium's AI panel.",
+        schema(
+            "runId" to "string", "stepId" to "string", "fixRef" to "string",
+            required = listOf("runId", "stepId", "fixRef"),
+            descriptions = mapOf(
+                "stepId" to "The library step the fix is about.",
+                "fixRef" to "The id of the judge verdict (judge.id on a step result) or comparison (comparisons[].id) that holds the fix.",
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "mark_agent_error",
+        "Note on a step's result that the agent, not the app, got it wrong (it tapped the wrong thing, misread the screen). The note " +
+            "is kept in the run report as agentError.",
+        schema(
+            "runId" to "string", "laneId" to "string", "caseId" to "string", "stepId" to "string", "note" to "string", "iteration" to "integer",
+            required = listOf("runId", "laneId", "caseId", "stepId", "note"),
+            descriptions = mapOf("iteration" to "Which repeat of the case, 1-based (default 1)."),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "rerun_test_step",
+        "Run a step again: starts a NEW run (same lane setup, judge and settings, with the library's current suite) of just that case, " +
+            "up to and including that step. The case is run from its first step because a step only makes sense in the state the earlier " +
+            "steps leave; steps after it are not run. Returns like run_test_suite. Refusals (a busy device, a deleted case) come back " +
+            "as { error, errors }. Asks for confirmation inside Indagium's AI panel; every call from an external MCP client waits for " +
+            "the user to allow it.",
+        schema(
+            "runId" to "string", "laneId" to "string", "caseId" to "string", "stepId" to "string",
+            required = listOf("runId", "laneId", "caseId", "stepId"),
         ),
     ),
     IndagiumToolDescriptor(

@@ -7,6 +7,7 @@ import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
@@ -19,6 +20,9 @@ import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.moveById
+import com.indagium.testing.model.newLaneId
+import com.indagium.testing.run.deviceSharingWarnings
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -47,7 +51,13 @@ internal fun deviceChoices(devices: List<CaptureDevice>, liveCaptureSerial: Stri
     devices.filter { it.available && it.serial != liveCaptureSerial }
         .map { DeviceChoice(it.serial, if (it.model == it.serial) it.serial else "${it.model} (${it.serial})") }
 
-/** The dialog's inputs as the user left them. */
+/** One lane row of the dialog. [id] is stable so the row can be reordered; it becomes the lane's id in the run. */
+internal data class LaneDraft(val id: String = newLaneId(), val choice: LaneChoice? = null, val deviceSerial: String? = null)
+
+/**
+ * The dialog's inputs as the user left them. The first lane is [choice] + [deviceSerial]; the others are [moreLanes], in
+ * order ([allLanes] and [withLanes] treat them as one list). A judge is [judgeProfileId] + [judgeMode].
+ */
 internal data class RunDialogModel(
     val suiteId: String,
     val selectedCaseIds: Set<String>,
@@ -56,34 +66,78 @@ internal data class RunDialogModel(
     val repeat: Int = 1,
     val toolLimitText: String = DEFAULT_CASE_TOOL_CALL_LIMIT.toString(),
     val evidence: EvidenceFlags = EvidenceFlags(),
-)
+    val moreLanes: List<LaneDraft> = emptyList(),
+    val judgeProfileId: String? = null,
+    val judgeMode: JudgeMode = JudgeMode.OFF,
+    val firstLaneId: String = newLaneId(),
+) {
+    /** Every lane row, first lane first. */
+    fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial)) + moreLanes
+
+    /** The model with [lanes] as its lane rows (at least one: an empty list leaves the model as it is). */
+    fun withLanes(lanes: List<LaneDraft>): RunDialogModel {
+        val first = lanes.firstOrNull() ?: return this
+        return copy(choice = first.choice, deviceSerial = first.deviceSerial, firstLaneId = first.id, moreLanes = lanes.drop(1))
+    }
+
+    fun addLane(draft: LaneDraft): RunDialogModel = withLanes(allLanes() + draft)
+
+    /** Removes a lane row; the last one stays. */
+    fun removeLane(id: String): RunDialogModel = if (allLanes().size <= 1) this else withLanes(allLanes().filterNot { it.id == id })
+
+    fun moveLane(id: String, toIndex: Int): RunDialogModel = withLanes(allLanes().moveById(id, toIndex) { it.id })
+
+    fun updateLane(id: String, transform: (LaneDraft) -> LaneDraft): RunDialogModel = withLanes(allLanes().map { if (it.id == id) transform(it) else it })
+
+    /** Sentences about lanes sharing a device or more devices than run at once, for the dialog to show. */
+    fun deviceWarnings(): List<String> =
+        deviceSharingWarnings(allLanes().mapNotNull { draft -> draft.deviceSerial?.let { LaneConfig(draft.id, LaneKind.AGENT_PROFILE, null, it) } })
+}
+
+/** The first thing wrong with one lane row, or null. [label] is "Lane 2" style, empty for a single lane. */
+private fun laneProblem(draft: LaneDraft, label: String): String? {
+    val prefix = if (label.isEmpty()) "" else "$label: "
+    return when {
+        draft.choice == null -> prefix + (if (label.isEmpty()) "Choose what drives the lane." else "choose what drives the lane.")
+        draft.deviceSerial.isNullOrBlank() -> prefix + (if (label.isEmpty()) "Choose a device." else "choose a device.")
+        else -> null
+    }
+}
 
 /** The model as a config, or the first thing the user still has to fix. [allCaseIds] lets "every case" be sent as null. */
 internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig> {
+    val drafts = allLanes()
+    val laneProblem = drafts.withIndex().firstNotNullOfOrNull { (i, draft) -> laneProblem(draft, if (drafts.size == 1) "" else "Lane ${i + 1}") }
     val problem = when {
         selectedCaseIds.isEmpty() -> "Choose at least one case."
-        choice == null -> "Choose what drives the lane."
-        deviceSerial.isNullOrBlank() -> "Choose a device."
+        laneProblem != null -> laneProblem
         repeat !in ALLOWED_RUN_REPEATS -> "Repeat must be ${ALLOWED_RUN_REPEATS.joinToString(", ")}."
         toolLimitText.trim().toIntOrNull() !in MIN_CASE_TOOL_CALL_LIMIT..MAX_CASE_TOOL_CALL_LIMIT ->
             "The tool-call limit must be a whole number from $MIN_CASE_TOOL_CALL_LIMIT to $MAX_CASE_TOOL_CALL_LIMIT."
+        judgeMode != JudgeMode.OFF && judgeProfileId.isNullOrBlank() -> "Choose the AI profile that judges the steps, or turn the judge off."
         else -> null
     }
     if (problem != null) return Result.failure(IllegalArgumentException(problem))
-    val lane = LaneConfig(
-        kind = if (choice!!.isExternal) LaneKind.EXTERNAL else LaneKind.AGENT_PROFILE,
-        profileId = choice.profileId,
-        deviceSerial = deviceSerial!!,
-    )
+    val lanes = drafts.map { draft ->
+        val chosen = checkNotNull(draft.choice)
+        LaneConfig(
+            id = draft.id,
+            kind = if (chosen.isExternal) LaneKind.EXTERNAL else LaneKind.AGENT_PROFILE,
+            profileId = chosen.profileId,
+            deviceSerial = checkNotNull(draft.deviceSerial),
+        )
+    }
     val everyCase = selectedCaseIds.containsAll(allCaseIds)
     return Result.success(
         RunConfig(
             suiteId = suiteId,
             caseIds = if (everyCase) null else allCaseIds.filter { it in selectedCaseIds },
-            lanes = listOf(lane),
+            lanes = lanes,
             repeat = repeat,
             caseToolCallLimit = toolLimitText.trim().toInt(),
             evidence = evidence,
+            judgeProfileId = judgeProfileId?.takeIf { judgeMode != JudgeMode.OFF },
+            judgeMode = judgeMode.wire,
         ),
     )
 }
@@ -149,7 +203,16 @@ internal sealed interface MatrixRow {
     data class Case(val key: String, val caseId: String, val name: String, val iteration: Int, val cells: List<MatrixCaseCell>) : MatrixRow
 
     /** One step of the frozen suite (or one hook step), with the result of every lane. */
-    data class Step(val key: String, val stepId: String, val number: Int, val action: String, val setup: Boolean, val cells: List<MatrixStepCell>) : MatrixRow
+    data class Step(
+        val key: String,
+        val stepId: String,
+        val number: Int,
+        val action: String,
+        val setup: Boolean,
+        val cells: List<MatrixStepCell>,
+        val caseId: String = "",
+        val iteration: Int = 1,
+    ) : MatrixRow
 }
 
 private fun List<com.indagium.testing.model.LaneResult>.caseOf(laneIndex: Int, caseId: String, iteration: Int): CaseResult? =
@@ -185,6 +248,7 @@ internal fun buildMatrix(run: TestRun): List<MatrixRow> {
                     run.lanes.mapIndexed { i, lane ->
                         MatrixStepCell(lane.laneId, run.lanes.caseOf(i, case.id, iteration)?.steps?.firstOrNull { it.stepId == step.id && !it.setup })
                     },
+                    case.id, iteration,
                 )
             }
         }
@@ -196,6 +260,7 @@ internal fun buildMatrix(run: TestRun): List<MatrixRow> {
 private fun hookStepRow(run: TestRun, key: String, caseId: String, iteration: Int, sample: StepResult) = MatrixRow.Step(
     "$key/${sample.stepId}", sample.stepId, sample.stepNumber, sample.action, true,
     run.lanes.mapIndexed { i, lane -> MatrixStepCell(lane.laneId, run.lanes.caseOf(i, caseId, iteration)?.steps?.firstOrNull { it.stepId == sample.stepId }) },
+    caseId, iteration,
 )
 
 private fun hookRows(run: TestRun, caseId: String, title: String): List<MatrixRow>? {

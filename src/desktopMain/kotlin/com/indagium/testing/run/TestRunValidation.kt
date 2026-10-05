@@ -8,6 +8,7 @@ import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.decide
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
@@ -35,6 +36,18 @@ internal fun profileNeedsApiKey(profile: AiProviderProfile): Boolean {
     return host == null || !isLoopbackHost(host)
 }
 
+/** The problems of using [profile] as an agent (a lane or the judge), each starting with [label]. */
+private fun profileProblems(label: String, profile: AiProviderProfile, apiKey: (String) -> String): List<String> {
+    val validation = validateAiProviderProfile(profile)
+    return when {
+        !validation.isValid -> listOf("$label: ${validation.problem!!.message}")
+        profile.kind.usesHttpEndpoint && profile.model.isBlank() -> listOf("$label: choose a model for the profile '${profile.displayName}'.")
+        profileNeedsApiKey(profile) && apiKey(profile.id).isBlank() ->
+            listOf("$label: the profile '${profile.displayName}' needs an API key (enter it in Settings > AI providers).")
+        else -> emptyList()
+    }
+}
+
 private fun laneProblems(config: RunConfig, profiles: List<AiProviderProfile>, apiKey: (String) -> String): List<String> {
     val errors = ArrayList<String>()
     if (config.lanes.isEmpty()) errors += "A run needs at least one lane."
@@ -45,19 +58,24 @@ private fun laneProblems(config: RunConfig, profiles: List<AiProviderProfile>, a
         if (lane.deviceSerial.isBlank()) errors += "$label needs a device."
         if (lane.kind == LaneKind.EXTERNAL) continue
         val profile = profiles.profileOrNull(lane.profileId)
-        if (profile == null) {
-            errors += "$label: the AI profile '${lane.profileId}' does not exist."
-            continue
-        }
-        val validation = validateAiProviderProfile(profile)
-        when {
-            !validation.isValid -> errors += "$label: ${validation.problem!!.message}"
-            profile.kind.usesHttpEndpoint && profile.model.isBlank() -> errors += "$label: choose a model for the profile '${profile.displayName}'."
-            profileNeedsApiKey(profile) && apiKey(profile.id).isBlank() ->
-                errors += "$label: the profile '${profile.displayName}' needs an API key (enter it in Settings > AI providers)."
-        }
+        if (profile == null) errors += "$label: the AI profile '${lane.profileId}' does not exist." else errors += profileProblems(label, profile, apiKey)
     }
     return errors
+}
+
+/** The judge settings: an unknown mode, a mode without a profile, and a profile that cannot be used. A profile without a mode is only a warning. */
+private fun judgeProblems(config: RunConfig, profiles: List<AiProviderProfile>, apiKey: (String) -> String, warnings: MutableList<String>): List<String> {
+    val mode = JudgeMode.parse(config.judgeMode)
+    val profileId = config.judgeProfileId?.takeIf { it.isNotBlank() }
+    return when {
+        mode == null -> listOf("judgeMode must be one of ${JudgeMode.entries.joinToString(", ") { it.wire }}.")
+        mode == JudgeMode.OFF -> {
+            if (profileId != null) warnings += "A judge profile was chosen but the judge mode is off; no judge runs."
+            emptyList()
+        }
+        profileId == null -> listOf("The judge mode is ${mode.wire}, so a judge profile is needed.")
+        else -> profiles.profileOrNull(profileId)?.let { profileProblems("Judge", it, apiKey) } ?: listOf("The judge profile '$profileId' does not exist.")
+    }
 }
 
 @Suppress("LongParameterList")
@@ -95,5 +113,10 @@ internal fun validateRun(
         if (refusal == null && unknown.isEmpty() && plan.cases.isEmpty()) errors += "There is no runnable case to run."
     }
     errors += laneProblems(config, profiles, apiKey)
+    errors += judgeProblems(config, profiles, apiKey, warnings)
+    warnings += deviceSharingWarnings(config.lanes)
+    if (suite != null && config.stopAfterStepId != null && plan.cases.none { case -> case.steps.any { it.id == config.stopAfterStepId } }) {
+        errors += "Step '${config.stopAfterStepId}' is not in any of the cases to run."
+    }
     return RunValidation(suite, plan, errors, warnings, refusal)
 }

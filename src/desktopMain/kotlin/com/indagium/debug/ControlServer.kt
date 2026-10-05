@@ -651,7 +651,11 @@ private const val EXTERNAL_APPROVAL_NOTE =
 // screenshot's dimensions and coordinate contract (a test lane's take_screenshot is one of them, and so is
 // test_lane_tool_call, which hands back a lane tool's result unchanged: only a screenshot has an imageBase64).
 internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "take_screenshot", "test_lane_tool_call")
-internal val IMAGE_RESULT_TOOL_NAMES: Set<String> = setOf("get_video_frame") + SCREEN_IMAGE_TOOL_NAMES
+
+// A test judge's evidence tools (get_step_screenshot, get_example) return images too, for Claude Code and Codex judges that
+// reach the judge-only gateway over the managed MCP server.
+internal val IMAGE_RESULT_TOOL_NAMES: Set<String> =
+    setOf("get_video_frame", "get_step_screenshot", "get_example") + SCREEN_IMAGE_TOOL_NAMES
 
 internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
     val fields = rawResult as? Map<*, *>

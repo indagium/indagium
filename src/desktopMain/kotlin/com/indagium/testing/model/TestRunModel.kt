@@ -3,7 +3,7 @@ package com.indagium.testing.model
 // Domain types of an AI test RUN: what was asked for (RunConfig), the frozen copy of what was run (TestRun.suite and
 // friends) and what happened (lane, case and step results). Pure data and immutable: the engine replaces a result by
 // copying it, so a snapshot handed to the UI or written to run.json is never mutated underneath its reader.
-// A run has N lanes by design; this version runs them one after another.
+// A run has N lanes: lanes on different devices run in parallel, lanes that share a device one after another.
 
 const val RUN_ID_PREFIX = "run-"
 const val LANE_ID_PREFIX = "lane-"
@@ -46,7 +46,12 @@ data class EvidenceFlags(
     val transcript: Boolean = true,
 )
 
-/** The judge settings are reserved for a later version; they are stored and ignored. */
+/**
+ * [judgeProfileId] is the AI profile that judges steps (any profile kind) and [judgeMode] when it does (a [JudgeMode] wire
+ * name; kept as text so a run file written by a newer build with another mode still loads, and read as OFF here).
+ * [stopAfterStepId] ends the (single) chosen case after that step: a re-run of "this step and everything before it".
+ * [rerunOf] names the run such a re-run came from.
+ */
 data class RunConfig(
     val suiteId: String,
     /** null runs every (unlocked) case of the suite. */
@@ -57,14 +62,22 @@ data class RunConfig(
     val evidence: EvidenceFlags = EvidenceFlags(),
     val confirmationTimeoutMs: Long = DEFAULT_CONFIRMATION_TIMEOUT_MS,
     val judgeProfileId: String? = null,
-    val judgeMode: String = "off",
+    val judgeMode: String = JudgeMode.OFF.wire,
+    val stopAfterStepId: String? = null,
+    val rerunOf: String? = null,
 )
+
+/** The judge mode of this config; an unknown text counts as OFF. */
+val RunConfig.judge: JudgeMode get() = JudgeMode.parse(judgeMode) ?: JudgeMode.OFF
+
+/** A judge is configured: a profile and a mode other than OFF. */
+val RunConfig.judgeActive: Boolean get() = judge != JudgeMode.OFF && !judgeProfileId.isNullOrBlank()
 
 enum class StepStatus { PASS, FAIL, BLOCKED, TIMEOUT, SKIPPED, ERROR }
 
 enum class CaseStatus { PASS, FAIL, BLOCKED, SKIPPED, CANCELLED, ERROR }
 
-/** NOT_EVALUATED: the check needs the judge, which this version does not run. */
+/** NOT_EVALUATED: the check needs the judge and none judged this step (no judge configured, or it was inconclusive). */
 enum class CheckStatus { PASS, FAIL, NOT_EVALUATED, ERROR }
 
 data class CheckResult(
@@ -103,6 +116,12 @@ data class StepResult(
     /** The step asked for an issue to be created (CREATE_ISSUE_AND_CONTINUE); creating it is a later feature. */
     val issueRequested: Boolean = false,
     val note: String? = null,
+    /** The blind judge's verdict on this step, when one judged it. */
+    val judge: StepJudgement? = null,
+    /** The judge could not decide, so [status] is the agent's claim and the deterministic checks only. */
+    val judgeInconclusive: Boolean = false,
+    /** A person's note that the agent (not the app) got this step wrong; set by mark_agent_error. */
+    val agentError: String? = null,
 )
 
 /** [iteration] is 1-based (a run can repeat every case). [caseId] is [SUITE_SETUP_CASE_ID] or [SUITE_TEARDOWN_CASE_ID] for the suite-level hooks. */
@@ -148,6 +167,8 @@ data class TestRun(
     val finishedAt: Long? = null,
     val warnings: List<String> = emptyList(),
     val error: String? = null,
+    /** Where lanes disagreed on a step, what the comparison judge made of it. */
+    val comparisons: List<JudgeComparison> = emptyList(),
 ) {
     val isFinished: Boolean get() = status == RunStatus.PASSED || status == RunStatus.FAILED ||
         status == RunStatus.CANCELLED || status == RunStatus.ERROR
@@ -156,6 +177,11 @@ data class TestRun(
 
     fun withLane(laneId: String, transform: (LaneResult) -> LaneResult): TestRun =
         copy(lanes = lanes.map { if (it.laneId == laneId) transform(it) else it })
+
+    /** The result of step [stepId] of [caseId] (iteration [iteration]) on [laneId], or null. Hook steps are not matched. */
+    fun stepResult(laneId: String, caseId: String, iteration: Int, stepId: String): StepResult? =
+        lane(laneId)?.cases?.firstOrNull { it.caseId == caseId && it.iteration == iteration }?.steps
+            ?.firstOrNull { it.stepId == stepId && !it.setup }
 }
 
 /** A one-line view of a run for lists. */

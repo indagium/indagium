@@ -3,6 +3,7 @@ package com.indagium.debug
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
@@ -14,6 +15,10 @@ import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.toMarkdown
 import com.indagium.testing.store.runToJson
 import com.indagium.ui.AppState
+import com.indagium.ui.ReportActionResult
+import com.indagium.ui.applyStepFix
+import com.indagium.ui.markAgentError
+import com.indagium.ui.rerunStep
 import kotlinx.coroutines.CancellationException
 
 // Handlers of the AI test-RUN tools (catalogue: TestRunToolCatalog.kt), merged into IndagiumToolOperations like the
@@ -37,6 +42,9 @@ internal class TestRunToolOperations(private val appState: AppState) {
         "list_test_runs" to suspendTool { listRuns() },
         "get_test_run_report" to suspendTool { a -> report(a) },
         "test_lane_tool_call" to suspendTool { a -> laneToolCall(a) },
+        "apply_step_fix" to suspendTool { a -> applyFix(a) },
+        "mark_agent_error" to suspendTool { a -> markError(a) },
+        "rerun_test_step" to suspendTool { a -> rerunStep(a) },
     )
 
     private fun tool(body: (ToolArgs) -> Any?): (Map<String, Any?>) -> Any? = { raw ->
@@ -63,29 +71,32 @@ internal class TestRunToolOperations(private val appState: AppState) {
 
     private suspend fun runSuite(a: ToolArgs): Map<String, Any?> {
         val config = parseConfig(a)
-        return when (val started = coordinator.start(config)) {
-            is StartRunResult.Started -> mapOf(
-                "runId" to started.runId,
-                "laneIds" to started.laneIds,
-                "lanes" to config.lanes.map { mapOf("laneId" to it.id, "kind" to it.kind.name, "deviceSerial" to it.deviceSerial) },
-                "warnings" to started.warnings,
-            )
-            is StartRunResult.Rejected -> {
-                val limit = started.limit
-                buildMap {
-                    put("error", started.errors.joinToString(" "))
-                    put("errors", started.errors)
-                    if (limit != null) {
-                        put(
-                            "limit",
-                            mapOf(
-                                "kind" to limit.kind.name,
-                                "max" to limit.limit,
-                                "edition" to appState.editionService.current.value.name,
-                                "hint" to limit.hint,
-                            ),
-                        )
-                    }
+        return startedMap(config, coordinator.start(config))
+    }
+
+    /** What run_test_suite and rerun_test_step answer: the new run's ids, or the refusal as data. */
+    private fun startedMap(config: RunConfig, started: StartRunResult): Map<String, Any?> = when (started) {
+        is StartRunResult.Started -> mapOf(
+            "runId" to started.runId,
+            "laneIds" to started.laneIds,
+            "lanes" to config.lanes.map { mapOf("laneId" to it.id, "kind" to it.kind.name, "deviceSerial" to it.deviceSerial) },
+            "warnings" to started.warnings,
+        )
+        is StartRunResult.Rejected -> {
+            val limit = started.limit
+            buildMap {
+                put("error", started.errors.joinToString(" "))
+                put("errors", started.errors)
+                if (limit != null) {
+                    put(
+                        "limit",
+                        mapOf(
+                            "kind" to limit.kind.name,
+                            "max" to limit.limit,
+                            "edition" to appState.editionService.current.value.name,
+                            "hint" to limit.hint,
+                        ),
+                    )
                 }
             }
         }
@@ -119,9 +130,15 @@ internal class TestRunToolOperations(private val appState: AppState) {
                 logcat = evidence.flag("logcat", defaults.logcat),
                 transcript = evidence.flag("transcript", defaults.transcript),
             ),
-            judgeProfileId = a.string("judgeProfileId"),
-            judgeMode = a.string("judgeMode") ?: "off",
+            judgeProfileId = a.string("judgeProfileId")?.trim()?.takeIf { it.isNotEmpty() },
+            judgeMode = judgeModeOf(a),
         )
+    }
+
+    /** The wire name of the judge mode, or a refusal for an unknown one (the codec would read it as OFF and hide the mistake). */
+    private fun judgeModeOf(a: ToolArgs): String {
+        val raw = a.string("judgeMode")?.trim()?.takeIf { it.isNotEmpty() } ?: return JudgeMode.OFF.wire
+        return JudgeMode.parse(raw)?.wire ?: toolArgError("judgeMode must be one of ${JudgeMode.entries.joinToString(", ") { it.wire }}.")
     }
 
     private fun Map<String, Any?>?.flag(key: String, default: Boolean): Boolean = when (val v = this?.get(key)) {
@@ -148,6 +165,8 @@ internal class TestRunToolOperations(private val appState: AppState) {
         put("warnings", run.warnings)
         run.error?.let { put("error", it) }
         put("lanes", run.lanes.map(::laneMap))
+        put("paused", coordinator.isPaused(run.id))
+        put("comparisons", run.comparisons.size)
         put(
             "pendingConfirmations",
             coordinator.pendingConfirmations().filter { it.runId == run.id }.map {
@@ -236,6 +255,43 @@ internal class TestRunToolOperations(private val appState: AppState) {
         } else {
             errorMap("Lane '$laneId' of run '$runId' is not paused.")
         }
+    }
+
+    // ── Report actions ───────────────────────────────────────────────
+
+    private fun ReportActionResult.toMap(extra: Map<String, Any?> = emptyMap()): Map<String, Any?> = when (this) {
+        is ReportActionResult.Done -> extra + ("message" to message)
+        is ReportActionResult.Failed -> buildMap {
+            put("error", message)
+            limit?.let {
+                put(
+                    "limit",
+                    mapOf("kind" to it.kind.name, "max" to it.limit, "edition" to appState.editionService.current.value.name, "hint" to it.hint),
+                )
+            }
+        }
+    }
+
+    private suspend fun applyFix(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val stepId = a.requiredString("stepId")
+        val fixRef = a.requiredString("fixRef")
+        return appState.applyStepFix(runId, stepId, fixRef).toMap(mapOf("runId" to runId, "stepId" to stepId, "fixRef" to fixRef, "applied" to true))
+    }
+
+    private suspend fun markError(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val laneId = a.requiredString("laneId")
+        val caseId = a.requiredString("caseId")
+        val stepId = a.requiredString("stepId")
+        val result = appState.markAgentError(runId, laneId, caseId, a.int("iteration") ?: 1, stepId, a.requiredString("note"))
+        return result.toMap(mapOf("runId" to runId, "laneId" to laneId, "caseId" to caseId, "stepId" to stepId, "marked" to true))
+    }
+
+    private suspend fun rerunStep(a: ToolArgs): Map<String, Any?> {
+        val started = appState.rerunStep(a.requiredString("runId"), a.requiredString("laneId"), a.requiredString("caseId"), a.requiredString("stepId"))
+        val config = (started as? StartRunResult.Started)?.let { coordinator.run(it.runId)?.config }
+        return startedMap(config ?: RunConfig("", null, emptyList()), started)
     }
 
     private suspend fun laneToolCall(a: ToolArgs): Any? {

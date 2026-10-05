@@ -7,6 +7,7 @@ import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
@@ -77,6 +78,8 @@ private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
     put("confirmationTimeoutMs", config.confirmationTimeoutMs)
     putIfNotNull("judgeProfileId", config.judgeProfileId)
     put("judgeMode", config.judgeMode)
+    putIfNotNull("stopAfterStepId", config.stopAfterStepId)
+    putIfNotNull("rerunOf", config.rerunOf)
 }
 
 private fun checkResultToJson(check: CheckResult): JsonObject = buildJsonObject {
@@ -107,6 +110,9 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     put("durationMs", step.durationMs)
     put("issueRequested", step.issueRequested)
     putIfNotNull("note", step.note)
+    step.judge?.let { put("judge", judgementToJson(it)) }
+    put("judgeInconclusive", step.judgeInconclusive)
+    putIfNotNull("agentError", step.agentError)
 }
 
 private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
@@ -148,6 +154,7 @@ internal fun runToJson(run: TestRun): JsonObject = buildJsonObject {
     put("scripts", buildJsonArray { run.scripts.forEach { add(scriptToJson(it)) } })
     put("sharedSteps", buildJsonArray { run.sharedSteps.forEach { add(sharedStepToJson(it)) } })
     put("lanes", buildJsonArray { run.lanes.forEach { add(laneResultToJson(it)) } })
+    put("comparisons", buildJsonArray { run.comparisons.forEach { add(comparisonToJson(it)) } })
 }
 
 fun encodeRunFile(run: TestRun): String = prettyJson.encodeToString(
@@ -192,7 +199,9 @@ private fun decodeConfig(o: JsonObject): RunConfig {
         ),
         confirmationTimeoutMs = o.long("confirmationTimeoutMs", DEFAULT_CONFIRMATION_TIMEOUT_MS),
         judgeProfileId = o.optStr("judgeProfileId"),
-        judgeMode = o.str("judgeMode", "off"),
+        judgeMode = o.str("judgeMode", JudgeMode.OFF.wire),
+        stopAfterStepId = o.optStr("stopAfterStepId"),
+        rerunOf = o.optStr("rerunOf"),
     )
 }
 
@@ -224,6 +233,9 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     durationMs = o.long("durationMs", 0L),
     issueRequested = o.bool("issueRequested", false),
     note = o.optStr("note"),
+    judge = (o["judge"] as? JsonObject)?.let { decodeJudgement(it) },
+    judgeInconclusive = o.bool("judgeInconclusive", false),
+    agentError = o.optStr("agentError"),
 )
 
 private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(
@@ -271,6 +283,7 @@ private fun decodeRun(o: JsonObject): TestRun? {
         finishedAt = o.optLong("finishedAt"),
         warnings = o.strings("warnings"),
         error = o.optStr("error"),
+        comparisons = o.objects("comparisons").mapNotNull { decodeComparison(it) },
     )
 }
 

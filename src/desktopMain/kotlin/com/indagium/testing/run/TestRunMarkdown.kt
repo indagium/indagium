@@ -1,10 +1,14 @@
 package com.indagium.testing.run
 
 import com.indagium.testing.model.CaseResult
+import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.judge
+import com.indagium.testing.model.judgeActive
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -45,12 +49,39 @@ private fun StringBuilder.step(result: StepResult) {
         append("  - Check ").append(check.kind).append(": ").append(check.status.name)
             .append(" — ").append(check.detail.trim().take(MAX_CHECK_DETAIL)).append('\n')
     }
+    result.judge?.let { judge ->
+        append("  - Judge: **").append(judge.verdict.name).append("** (").append(judge.classification.name.lowercase()).append(")")
+        if (result.judgeInconclusive) append(" — the step status is the agent's claim and the checks alone")
+        append('\n')
+        judge.error?.let { append("    - Judge problem: ").append(it).append('\n') }
+        judge.reasoning.takeIf { it.isNotBlank() }?.let { append("    - Reasoning: ").append(it.trim().replace('\n', ' ')).append('\n') }
+        judge.suggestedFix?.let { fix -> appendFix(fix, judge.fixApplied, judge.id) }
+    }
+    result.agentError?.let { append("  - Marked as an agent error: ").append(it.trim().replace('\n', ' ')).append('\n') }
     result.screenshotPath?.let { append("  - Screenshot: `").append(it).append("`\n") }
     if (result.logStartOffset != null && result.logEndOffset != null) {
         append("  - Log bytes ").append(result.logStartOffset).append("–").append(result.logEndOffset).append('\n')
     }
     result.note?.let { append("  - Note: ").append(it).append('\n') }
     if (result.issueRequested) append("  - An issue was requested for this step.\n")
+}
+
+private fun StringBuilder.appendFix(fix: StepFix, applied: Boolean, ref: String) {
+    append("    - Suggested step fix (`").append(ref).append("`)").append(if (applied) " — applied" else "").append(":\n")
+    fix.action?.let { append("      - Action: ").append(it.trim().replace('\n', ' ')).append('\n') }
+    fix.expected?.let { append("      - Expected: ").append(it.trim().replace('\n', ' ')).append('\n') }
+    fix.note?.let { append("      - Note: ").append(it.trim().replace('\n', ' ')).append('\n') }
+}
+
+private fun StringBuilder.comparison(run: TestRun, comparison: JudgeComparison) {
+    append("- ").append(comparison.stepNumber).append(". ").append(comparison.action.trim()).append(" — ")
+    append(comparison.verdicts.entries.joinToString(", ") { (laneId, verdict) ->
+        "${run.lane(laneId)?.config?.deviceSerial ?: laneId}: ${verdict.name}"
+    })
+    append(" (").append(comparison.classification.name.lowercase()).append(")\n")
+    comparison.error?.let { append("  - Judge problem: ").append(it).append('\n') }
+    comparison.explanation.takeIf { it.isNotBlank() }?.let { append("  - ").append(it.trim().replace('\n', ' ')).append('\n') }
+    comparison.suggestedFix?.let { appendFix(it, comparison.fixApplied, comparison.id) }
 }
 
 private fun StringBuilder.case(case: CaseResult) {
@@ -74,9 +105,14 @@ internal fun TestRun.toMarkdown(): String = buildString {
     append("- Run id: `").append(id).append("`\n")
     append("- Started: ").append(format(startedAt)).append(" · finished: ").append(format(finishedAt)).append('\n')
     append("- Repeat: ").append(config.repeat).append(" · tool-call limit per case: ").append(config.caseToolCallLimit).append('\n')
+    if (config.judgeActive) append("- Judge: AI profile `").append(config.judgeProfileId).append("`, mode ").append(config.judge.wire).append('\n')
     warnings.forEach { append("- Warning: ").append(it).append('\n') }
     error?.let { append("- Error: ").append(it).append('\n') }
     lanes.forEach { lane(it) }
+    if (comparisons.isNotEmpty()) {
+        append("\n### Where the lanes disagreed\n")
+        comparisons.forEach { comparison(this@toMarkdown, it) }
+    }
 }
 
 private const val MAX_CHECK_DETAIL = 400

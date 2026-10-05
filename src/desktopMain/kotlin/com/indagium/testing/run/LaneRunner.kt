@@ -15,6 +15,7 @@ import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.judge
 import com.indagium.testing.store.TEST_RUN_TRANSCRIPT_FILE_NAME
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
@@ -40,6 +41,8 @@ internal class LaneRunner(
     private val state: TestRunState,
     private val deps: EngineDeps,
     private val handle: LaneHandle,
+    /** The judge of this lane, or null when the run has none. */
+    private val judge: StepJudge? = null,
 ) : SequenceListener {
     private val suite = snapshot.suite
     private val evidence = snapshot.config.evidence
@@ -119,6 +122,9 @@ internal class LaneRunner(
         val env = SequenceEnv(
             session, deps.scriptRunner, snapshot.scripts, runDir, laneDir, suite.targetPackage, evidence, transcript, this,
             wallClock = deps.wallClock,
+            judge = judge,
+            judgeMode = snapshot.config.judge,
+            pauseGate = deps.pauseGate,
         )
         val driver = LaneDriver(runId, lane.id, suite, deps.tuning, agent, handle, transcript, snapshot.config.confirmationTimeoutMs)
         val hooks = HookRunner(snapshot, env, driver) { step -> recorder?.add(step) }
@@ -188,6 +194,7 @@ internal class LaneRunner(
 
     @Suppress("LongParameterList")
     private suspend fun runCase(env: SequenceEnv, driver: LaneDriver, hooks: HookRunner, case: TestCase, iteration: Int, prefix: String) {
+        deps.pauseGate.awaitResumed()
         val owner = CaseRecorder(CaseResult(case.id, case.name, iteration, startedAt = now()))
         recorder = owner
         updateLane { it.copy(currentCase = case.name, currentStepNumber = null, currentStepAction = null) }
