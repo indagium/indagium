@@ -79,7 +79,7 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
                 selectedCaseIds = target.caseId?.let { setOf(it) } ?: runnable.map { it.id }.toSet(),
                 choice = choices.firstOrNull { it.profileId == selectedProfileId(ui.state) } ?: choices.firstOrNull(),
                 deviceSerial = null,
-            ),
+            ).withTestingDefaults(ui.state.settings.testing, profiles),
         )
     }
     var refresh by remember { mutableIntStateOf(0) }

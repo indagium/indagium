@@ -679,6 +679,9 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     put("customWorkspaceProfiles", customProfilesToJson(customWorkspaceProfiles))
     put("captureMirrorLayouts", captureMirrorLayoutsJson(captureMirrorLayouts))
     lastCaptureMirrorLayout?.let { put("lastCaptureMirrorLayout", captureMirrorLayoutJson(it)) }
+    // Appended last, JSON form only (see TestingSettingsCodec.kt). The tracker's access token is never part of settings.
+    put("tracker", trackerSettingsJson(tracker))
+    put("testing", testingSettingsJson(testing))
 }.toString()
 
 private fun sourceFolderInfoJson(info: Map<String, SourceFolderInfo>) = buildJsonObject {
@@ -1007,6 +1010,8 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         workspaceProfileId = o.stringOrNull("workspaceProfileId"),
         setupAssistantDone = o.boolOrDefault("setupAssistantDone", false),
         customWorkspaceProfiles = customProfilesFromJson(o["customWorkspaceProfiles"]),
+        tracker = trackerSettingsFromJson(o["tracker"]),
+        testing = testingSettingsFromJson(o["testing"]),
     )
 }.getOrNull()
 

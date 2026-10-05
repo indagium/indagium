@@ -47,6 +47,8 @@ import com.indagium.debug.loadOrCreateControlToken
 import com.indagium.edition.EditionService
 import com.indagium.generated.BuildInfo
 import com.indagium.model.*
+import com.indagium.security.SecretStore
+import com.indagium.security.defaultSecretStore
 import com.indagium.source.FileMeta
 import com.indagium.source.LogCallSite
 import com.indagium.source.LogSourceResolver
@@ -1833,6 +1835,9 @@ class AppState(
     // The edition that sets the test-suite limits. Defaults to Unlimited; Main.kt resolves the real
     // one from -Dindagium.edition / INDAGIUM_EDITION. A per-AppState instance, never a global.
     val editionService: EditionService = EditionService(),
+    // Where the issue tracker's access token lives (security/SecretStore.kt): the OS keychain, or memory for the session when
+    // that fails. Never touched until the tracker is configured or sent to, and always off the UI thread. Tests pass a fake.
+    internal val secretStore: SecretStore = defaultSecretStore(),
 ) {
     // ── Settings ────────────────────────────────────────────────────
     var settings by mutableStateOf(AppSettings())
@@ -2020,6 +2025,9 @@ class AppState(
     // The store has its own leaf lock (never held together with stateLock); the notes destination calls the annotation
     // mutators only after it released it (IssueNotes.kt).
     internal val issueStore = IssueStore(File(testingDir, ISSUES_DIR_NAME))
+
+    /** What is known about the issue tracker's stored token (ui/TrackerWiring.kt refreshes it on IO). Never holds the token itself. */
+    internal var trackerStatus by mutableStateOf(TrackerStatus())
 
     /** `<save root>/test-runs`, or `<testing dir>/runs` when no save root is configured (a bare test AppState). */
     private fun testRunsBaseDir(): File = effectiveSaveRootOrNull()?.let { File(it, "test-runs") } ?: File(testingDir, "runs")

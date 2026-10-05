@@ -65,6 +65,15 @@ internal class IndagiumToolGateway(
         catalog.firstOrNull { it.name == name }?.let { policyFor(it.name, extraConfirmationRequired) }
 
     /**
+     * The policy of one CALL: [actionPolicy] of the tool, raised to CONFIRMATION_REQUIRED when this call's arguments make an
+     * otherwise automatic tool send data to an external service (create_issue_from_step with destination tracker).
+     */
+    fun actionPolicy(name: String, arguments: Map<String, Any?>): IndagiumToolActionPolicy? =
+        actionPolicy(name)?.let { base ->
+            if (base == IndagiumToolActionPolicy.AUTOMATIC && sendsToExternalService(name, arguments)) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED else base
+        }
+
+    /**
      * OpenAI-compatible function definitions generated from the exact MCP schema.  This keeps
      * a model's function-call contract in lockstep with tools/list without a second hand-written
      * catalogue.
@@ -96,9 +105,14 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // Starting a run (or re-running a step) drives devices and may run scripts; cancelling one stops work in progress;
     // apply_step_fix rewrites a step of the user's library.
     "run_test_suite", "cancel_test_run", "rerun_test_step", "apply_step_fix",
-    // delete_issue removes a stored issue and its copied evidence for good.
-    "delete_issue",
+    // delete_issue removes a stored issue and its copied evidence for good. send_issue_to_tracker (and create_issue_from_step with
+    // destination tracker, see sendsToExternalService) hands the issue text and evidence to an AI agent and an external tracker.
+    "delete_issue", "send_issue_to_tracker",
 )
+
+/** Whether a call of the otherwise automatic [name] with [arguments] sends the user's data to an external service. */
+internal fun sendsToExternalService(name: String, arguments: Map<String, Any?>): Boolean =
+    name == "create_issue_from_step" && (arguments["destination"] as? String)?.trim().equals("tracker", ignoreCase = true)
 
 private fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =
     if (name in CONFIRMATION_REQUIRED_TOOLS || name in extraConfirmationRequired) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED

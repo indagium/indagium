@@ -70,7 +70,7 @@ internal class AiToolExecutionCoordinator(
         // ControlServer.executeExternalDeviceTool / AppState.executeExternalDeviceAiAction, which
         // this coordinator is never used for.
         val prepared = prepareCallArguments(run, call, arguments)
-        when (awaitConfirmationIfRequired(run, call)) {
+        when (awaitConfirmationIfRequired(run, call, arguments)) {
             ConfirmationOutcome.ACCEPTED -> Unit
             ConfirmationOutcome.DECLINED ->
                 return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
@@ -126,8 +126,8 @@ internal class AiToolExecutionCoordinator(
     private enum class ConfirmationOutcome { ACCEPTED, DECLINED, TIMED_OUT }
 
     /** ACCEPTED when no card was needed or the user accepted it. */
-    private suspend fun awaitConfirmationIfRequired(run: AiRun, call: LlmToolCall): ConfirmationOutcome {
-        if (toolGateway.actionPolicy(call.name) != IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) return ConfirmationOutcome.ACCEPTED
+    private suspend fun awaitConfirmationIfRequired(run: AiRun, call: LlmToolCall, arguments: Map<String, Any?>): ConfirmationOutcome {
+        if (toolGateway.actionPolicy(call.name, arguments) != IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) return ConfirmationOutcome.ACCEPTED
         val confirmation = AiToolConfirmation(
             id = UUID.randomUUID().toString(),
             call = call,
@@ -246,6 +246,7 @@ internal class AiToolExecutionCoordinator(
         "try_test_script" -> "Run a test script on this computer or a device"
         "run_test_suite" -> "Start an AI test run that drives devices and may run scripts"
         "cancel_test_run" -> "Cancel a running AI test run"
+        "send_issue_to_tracker", "create_issue_from_step" -> "Send an issue and its evidence to the issue tracker (an AI agent files it there)"
         else -> "Perform a confirmation-required action"
     }
 

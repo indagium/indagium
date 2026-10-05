@@ -1391,6 +1391,11 @@ data class AppSettings(
     // device not seen yet. JSON-only, same rule as above.
     val captureMirrorLayouts: Map<String, CaptureMirrorLayout> = emptyMap(),
     val lastCaptureMirrorLayout: CaptureMirrorLayout? = null,
+    // The AI test suites' issue tracker (an MCP server URL, how to authenticate, which AI profile files the issue and the
+    // prompt that says how) and the defaults a new test run starts from (Settings → Issue tracker / Testing). JSON-only,
+    // same rule as above. The tracker's access token is NOT a setting: it lives only in the SecretStore.
+    val tracker: com.indagium.testing.model.TrackerSettings = com.indagium.testing.model.TrackerSettings(),
+    val testing: com.indagium.testing.model.TestingSettings = com.indagium.testing.model.TestingSettings(),
 )
 
 /** How the capture tab's right sidebar was laid out: the mirror's share of the column height and,

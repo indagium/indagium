@@ -6,6 +6,7 @@ import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.DEFAULT_CONFIRMATION_TIMEOUT_MS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
@@ -20,6 +21,7 @@ import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.TestingSettings
 import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newLaneId
 import com.indagium.testing.run.deviceSharingWarnings
@@ -70,6 +72,8 @@ internal data class RunDialogModel(
     val judgeProfileId: String? = null,
     val judgeMode: JudgeMode = JudgeMode.OFF,
     val firstLaneId: String = newLaneId(),
+    /** From Settings > Testing; the dialog has no control for it. */
+    val confirmationTimeoutMs: Long = DEFAULT_CONFIRMATION_TIMEOUT_MS,
 ) {
     /** Every lane row, first lane first. */
     fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial)) + moreLanes
@@ -138,7 +142,23 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             evidence = evidence,
             judgeProfileId = judgeProfileId?.takeIf { judgeMode != JudgeMode.OFF },
             judgeMode = judgeMode.wire,
+            confirmationTimeoutMs = confirmationTimeoutMs,
         ),
+    )
+}
+
+/**
+ * The state a new run dialog starts from: the evidence, judge and confirmation timeout the user chose in Settings > Testing. A
+ * default judge whose AI profile no longer exists in [profiles] is ignored (the judge starts off).
+ */
+internal fun RunDialogModel.withTestingDefaults(testing: TestingSettings, profiles: List<AiProviderProfile>): RunDialogModel {
+    val judgeProfile = testing.defaultJudgeProfileId?.takeIf { id -> profiles.any { it.id == id } }
+    val mode = if (judgeProfile == null) JudgeMode.OFF else testing.judgeMode
+    return copy(
+        evidence = testing.evidence,
+        judgeProfileId = judgeProfile,
+        judgeMode = mode,
+        confirmationTimeoutMs = testing.confirmationTimeoutMs,
     )
 }
 

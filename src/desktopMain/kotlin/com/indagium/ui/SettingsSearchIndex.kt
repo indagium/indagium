@@ -533,9 +533,75 @@ private fun issues() = listOf(
     ),
 )
 
+private fun testing() = listOf(
+    entry(
+        SettingsSection.Testing, "Default judge",
+        "Whether a blind AI judge checks the steps of a new test run, and with which AI profile.",
+        listOf("test run", "judge", "verdict", "ai", "failed steps only", "every step"),
+    ),
+    entry(
+        SettingsSection.Testing, "Default evidence to keep",
+        "Screenshots, logcat, agent transcript and video a new test run keeps.",
+        listOf("test run", "screenshots", "logcat", "transcript", "video", "scrcpy"),
+    ),
+    entry(
+        SettingsSection.Testing, "Confirmation timeout (minutes)",
+        "How long a test agent waits for you to allow an action before it is denied.",
+        listOf("test run", "allow", "deny", "confirm", "wait", "timeout"),
+    ),
+    entry(
+        SettingsSection.Testing, "Edition",
+        "The edition and its limits on test suites and cases; development builds can switch it.",
+        listOf("free", "premium", "unlimited", "limits", "suites", "cases", "friends"),
+    ),
+)
+
+private fun issueTracker() = listOf(
+    entry(
+        SettingsSection.IssueTracker, "Use an issue tracker",
+        "Turn on sending issues from failed test steps to your own tracker.",
+        listOf("jira", "mcp", "issues", "tracker", "ticket", "bug", "send"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Tracker name",
+        "How the tracker is called in the issue dialog.",
+        listOf("jira", "linear", "github", "name"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Tracker MCP URL",
+        "The address of the tracker's MCP server (http or https).",
+        listOf("mcp", "url", "server", "endpoint", "https", "address"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Authentication header",
+        "The header that carries the access token, and whether it is sent as a Bearer token.",
+        listOf("authorization", "bearer", "header", "auth", "token", "api key"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Access token",
+        "The tracker's access token, kept in your system's secret store (keychain), never in settings.",
+        listOf("token", "secret", "keychain", "password", "credential", "save token", "remove token", "api key"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Issue agent profile",
+        "The AI profile that files the issue by calling the tracker's tools.",
+        listOf("ai", "profile", "agent", "claude", "codex", "model"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Issue instructions (prompt)",
+        "Tell the agent how to create an issue: project key, issue type, labels and field mapping.",
+        listOf("prompt", "project key", "issue type", "labels", "fields", "instructions"),
+    ),
+    entry(
+        SettingsSection.IssueTracker, "Test connection",
+        "Connect to the tracker and list the tools it offers.",
+        listOf("check", "connect", "tools", "verify", "mcp"),
+    ),
+)
+
 internal val SETTINGS_SEARCH_INDEX: List<SettingsSearchEntry> =
     general() + appearance() + editorBehavior() + exportAnnotations() + capture() +
-        automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues()
+        automation() + aiProviders() + voiceInput() + customAiCommands() + sourceCode() + issues() + testing() + issueTracker()
 
 // Bidirectional groups of interchangeable words. A query token that equals (or, from 3 letters on,
 // is a prefix of) a member also matches every other member of its group.

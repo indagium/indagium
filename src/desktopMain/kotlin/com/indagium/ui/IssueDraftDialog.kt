@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -38,7 +39,7 @@ import kotlinx.coroutines.withContext
 
 // "Create issue…" on a step of the report, the live view's "issue draft created" card and the Issues screen's Edit all open
 // this dialog: title, severity, labels, the description sections, the evidence checklist (with sizes), where the issue goes
-// (Local, Notes, Markdown; Tracker is shown but disabled until an issue tracker can be configured) and whether a later run of
+// (Local, Notes, Markdown, and the Tracker once it is configured in Settings) and whether a later run of
 // the case re-checks it. "Save draft" stores it as it is; "Create" stores it and sends it to the chosen destination. The
 // draft is built and stored off the UI thread; nothing here blocks it. Text that came from an agent, the device or the judge
 // is shown and edited, never acted on.
@@ -118,7 +119,7 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     var needsLog by remember(ready) { mutableStateOf<IssueActionResult.NeedsLogTab?>(null) }
 
     suspend fun deliver(issueId: String, openLaneLog: Boolean) {
-        when (val result = ui.state.deliverIssue(issueId, form.destination, copyMarkdown = true, openLaneLog = openLaneLog)) {
+        when (val result = ui.state.deliverIssue(issueId, form.destination, copyMarkdown = true, openLaneLog = openLaneLog, resendToTracker = true)) {
             is IssueActionResult.Done -> {
                 ui.info(result.message)
                 close()
@@ -160,16 +161,23 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         FormFields(form, ready.draft) { form = it }
         EvidenceChecklist(form) { form = form.toggleAttachment(it) }
-        DestinationSection(form) { form = form.copy(destination = it) }
+        DestinationSection(form, ready.existing, ui.state) { form = form.copy(destination = it) }
         CheckRow(checked = form.linkToCase, onToggle = { form = form.copy(linkToCase = !form.linkToCase) }) {
             AppText("Link to case and re-check on next run", color = tc.tx, fontSize = 12.sp)
         }
         if (form.linkToCase) TestsHint("A later run of this case marks the issue “still failing” or “passing now”.")
     }
     problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
+    if (busy && form.destination == IssueDestination.TRACKER) {
+        TestsHint("An AI agent is filing the issue in ${ui.state.settings.tracker.displayName}. This can take a minute.", Modifier.padding(top = 6.dp))
+    }
     Spacer(Modifier.padding(top = 10.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-        DialogActionButton(createLabel(form.destination), active = true, enabled = !busy) { submit(send = true) }
+        DialogActionButton(
+            if (busy && form.destination == IssueDestination.TRACKER) "Sending…" else createLabel(form.destination, ui.state.settings.tracker.displayName),
+            active = true,
+            enabled = !busy,
+        ) { submit(send = true) }
         DialogActionButton("Save draft", active = false, enabled = !busy) { submit(send = false) }
         DialogActionButton("Cancel", active = false) { close() }
     }
@@ -244,10 +252,15 @@ private fun EvidenceChecklist(form: IssueFormModel, onToggle: (Int) -> Unit) {
 }
 
 @Composable
-private fun DestinationSection(form: IssueFormModel, onDestination: (IssueDestination) -> Unit) {
+private fun DestinationSection(form: IssueFormModel, existing: IssueRecord?, state: AppState, onDestination: (IssueDestination) -> Unit) {
+    // The tracker's token is looked up (off the UI thread) only once a tracker is configured, so a user who never set one up never
+    // triggers a keychain read.
+    val tracker = state.settings.tracker
+    LaunchedEffect(tracker.enabled, tracker.needsToken) { if (tracker.enabled && tracker.needsToken) state.refreshTrackerStatus() }
+    val trackerProblem = state.trackerSendProblem()
     TestsSectionTitle("Send to")
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        destinationChoices().forEach { choice ->
+        destinationChoices(trackerProblem).forEach { choice ->
             HintedButton(
                 choice.label,
                 onClick = { onDestination(choice.destination) },
@@ -261,6 +274,19 @@ private fun DestinationSection(form: IssueFormModel, onDestination: (IssueDestin
         IssueDestination.LOCAL -> TestsHint("The issue stays in Indagium (Tests > Issues) with its evidence.")
         IssueDestination.NOTES -> TestsHint("A note with the issue and the step's screenshot is added to the log tab of the lane.")
         IssueDestination.MARKDOWN -> TestsHint("The issue is copied to the clipboard as Markdown; the evidence is listed by file path.")
-        IssueDestination.TRACKER -> TestsHint(TRACKER_DISABLED_HINT)
+        IssueDestination.TRACKER -> {
+            TestsHint(trackerProblem ?: trackerDisclosure(state))
+            existing?.destinationResults?.lastOrNull { it.destination == IssueDestination.TRACKER && it.ok }?.let {
+                TestsHint("Already created: ${it.message}${it.reference?.let { url -> " ($url)" }.orEmpty()}. Sending again creates another issue.")
+            }
+        }
     }
+}
+
+/** What sending to the tracker means, said before the user does it. */
+private fun trackerDisclosure(state: AppState): String {
+    val tracker = state.settings.tracker
+    val profile = state.settings.aiProviderProfiles.firstOrNull { it.id == tracker.agentProfileId }
+    return "An AI agent (${profile?.displayName ?: "the chosen profile"}) files the issue in ${tracker.displayName} with the tracker's tools. " +
+        "The issue text and the evidence it uploads are visible to that AI profile and are sent to the tracker."
 }
