@@ -369,6 +369,9 @@ object DesktopStorage {
 
     fun customCommandsDir(): File = File(appDataDir(), "custom-ai-commands")
 
+    /** AI test suites: `library.json` plus one `suites/<id>.json` per suite (see testing/store/TestLibraryStore.kt). */
+    fun testingDir(): File = File(appDataDir(), "testing")
+
     /** Locally installed, explicitly user-downloaded speech models. Never contains recordings. */
     fun voiceModelsDir(): File = File(appDataDir(), "voice-models")
 

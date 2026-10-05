@@ -589,6 +589,10 @@ tasks.withType<JavaExec>().matching { it.name == "desktopRun" }.configureEach {
     }
     System.getProperty("indagium.debugControl")?.let { systemProperty("indagium.debugControl", it) }
     System.getProperty("indagium.run.home")?.let { systemProperty("user.home", it) }
+    // AI test-suite edition limits: -Dindagium.edition=free|premium|friends_family|unlimited picks the
+    // edition, and -Dindagium.dev=true lets a packaged-style run switch it at runtime (see edition/Edition.kt).
+    System.getProperty("indagium.edition")?.let { systemProperty("indagium.edition", it) }
+    System.getProperty("indagium.dev")?.let { systemProperty("indagium.dev", it) }
     // Test aid for the memory watchdog: ./gradlew desktopRun -Dindagium.run.xmx=768m forces a small
     // heap so the WARNING/CRITICAL limits are reached quickly. -Xmx wins over MaxRAMPercentage above.
     System.getProperty("indagium.run.xmx")?.let { jvmArgs("-Xmx$it") }
