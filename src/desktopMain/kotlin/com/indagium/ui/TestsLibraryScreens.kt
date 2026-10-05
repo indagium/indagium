@@ -3,7 +3,6 @@
 package com.indagium.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -56,11 +55,9 @@ private val MASTER_LIST_WIDTH = 250.dp
 private val LIBRARY_ROW_HEIGHT = 34.dp
 private val LIBRARY_ROW_SHAPE = RoundedCornerShape(6.dp)
 private val SMALL_FIELD_WIDTH = 150.dp
-private val TRY_PANEL_PADDING = 10.dp
 private const val NEW_SCRIPT_BASE = "new_script"
 private const val NEW_SCRIPT_COMMAND = "echo hello"
 private const val NEW_SHARED_STEP_BASE = "New shared step"
-private const val TRY_IT_LATER_HINT = "Runs in a later phase"
 private const val SCRIPT_COMMAND_MIN_HEIGHT_DP = 90
 private const val SCRIPT_COMMAND_MAX_HEIGHT_DP = 280
 
@@ -191,7 +188,7 @@ private fun ScriptEditor(script: TestScript, editable: Boolean) {
     )
     TestsHint("Parameters are passed as environment variables; they are never pasted into the command text.", Modifier.padding(top = 4.dp))
     ScriptSettings(script, editable, update)
-    TryItPanel()
+    TryItPanel(script)
     Spacer(Modifier.height(12.dp))
     HintedButton("Delete script", onClick = { confirmDelete = true }, enabled = editable, disabledHint = LIBRARY_READ_ONLY_MESSAGE, isDanger = true)
     if (confirmDelete) {
@@ -251,20 +248,6 @@ private fun ScriptSettings(script: TestScript, editable: Boolean, update: ((Test
         )
     }
     if (script.timeoutMs != DEFAULT_SCRIPT_TIMEOUT_MS) TestsHint("Default timeout is $DEFAULT_SCRIPT_TIMEOUT_MS ms.", Modifier.padding(top = 2.dp))
-}
-
-/** The console that will run a script with sample arguments; present now so the screen's shape is final, disabled until runs exist. */
-@Composable
-private fun TryItPanel() {
-    val tc = tc()
-    TestsSectionTitle("Try it")
-    Column(
-        Modifier.fillMaxWidth().border(1.dp, tc.br, CORNER_MD).background(tc.p2, CORNER_MD).padding(TRY_PANEL_PADDING),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        TestsHint(TRY_IT_LATER_HINT)
-        HintedButton("Run with sample values", onClick = {}, enabled = false, disabledHint = TRY_IT_LATER_HINT)
-    }
 }
 
 // ── Shared steps ─────────────────────────────────────────────────────

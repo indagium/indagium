@@ -4,8 +4,11 @@ package com.indagium.ai
  * Thread-safe, per-request allowance for in-panel MCP invocations. The configured allowance is
  * intentionally spent only by analysis/operational tools. Notes and annotation reads/writes are
  * unlimited so an agent can always inspect, repair, and save its durable investigation output.
+ *
+ * [freeTools] names further tools that never spend the allowance (an AI test run uses this for its step
+ * protocol tools, which must stay callable after the action budget is used up). It is empty by default.
  */
-internal class AiToolCallBudget(totalCalls: Int) {
+internal class AiToolCallBudget(totalCalls: Int, private val freeTools: Set<String> = emptySet()) {
     init {
         require(totalCalls > 0) { "maxToolCalls must be positive" }
     }
@@ -18,6 +21,7 @@ internal class AiToolCallBudget(totalCalls: Int) {
 
     @Synchronized
     fun tryConsume(toolName: String): AiToolBudgetDecision {
+        if (toolName in freeTools) return AiToolBudgetDecision(allowed = true, isNotesWrite = false, snapshot = snapshotLocked())
         val isNotesWrite = toolName in NOTES_ANNOTATION_TOOLS
         val allowed = isNotesWrite || evidenceUsed < evidenceBudget
         if (allowed) {

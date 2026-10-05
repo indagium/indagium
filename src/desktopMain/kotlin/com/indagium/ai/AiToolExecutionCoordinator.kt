@@ -4,6 +4,7 @@ import com.indagium.debug.IndagiumToolActionPolicy
 import com.indagium.debug.IndagiumToolGateway
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -69,12 +70,18 @@ internal class AiToolExecutionCoordinator(
         // ControlServer.executeExternalDeviceTool / AppState.executeExternalDeviceAiAction, which
         // this coordinator is never used for.
         val prepared = prepareCallArguments(run, call, arguments)
-        if (!awaitConfirmationIfRequired(run, call)) {
-            return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
+        when (awaitConfirmationIfRequired(run, call)) {
+            ConfirmationOutcome.ACCEPTED -> Unit
+            ConfirmationOutcome.DECLINED ->
+                return completeCountedResult(run, call, AiToolExecutionResult.error("The user declined this action; no changes were made."))
+            ConfirmationOutcome.TIMED_OUT -> {
+                run.emit(AiRunEvent.Status("Confirmation for ${call.name} timed out and was denied."))
+                return completeCountedResult(run, call, AiToolExecutionResult.error(CONFIRMATION_TIMED_OUT_MESSAGE))
+            }
         }
 
         val result = try {
-            val rawResult = toolGateway.execute(call.name, prepared.arguments)
+            val rawResult = toolGateway.executeSuspending(call.name, prepared.arguments)
             AiToolExecutionResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -114,16 +121,29 @@ internal class AiToolExecutionCoordinator(
         return PreparedCall(deviceScoped, finalArguments)
     }
 
-    /** Returns false only when a CONFIRMATION_REQUIRED tool's card was declined; true when no
-     *  card was needed or the user accepted it. */
-    private suspend fun awaitConfirmationIfRequired(run: AiRun, call: LlmToolCall): Boolean {
-        if (toolGateway.actionPolicy(call.name) != IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) return true
-        val confirmation = AiToolConfirmation(id = UUID.randomUUID().toString(), call = call, description = confirmationDescription(call.name))
+    /** How a CONFIRMATION_REQUIRED tool's card ended: the user accepted it, declined it, or (only when the run
+     *  has a confirmation timeout) nobody answered in time, which counts as a denial. */
+    private enum class ConfirmationOutcome { ACCEPTED, DECLINED, TIMED_OUT }
+
+    /** ACCEPTED when no card was needed or the user accepted it. */
+    private suspend fun awaitConfirmationIfRequired(run: AiRun, call: LlmToolCall): ConfirmationOutcome {
+        if (toolGateway.actionPolicy(call.name) != IndagiumToolActionPolicy.CONFIRMATION_REQUIRED) return ConfirmationOutcome.ACCEPTED
+        val confirmation = AiToolConfirmation(
+            id = UUID.randomUUID().toString(),
+            call = call,
+            description = toolGateway.confirmationDescription(call.name) ?: confirmationDescription(call.name),
+        )
         val decision = CompletableDeferred<Boolean>()
         run.confirmations[confirmation.id] = decision
         run.emit(AiRunEvent.ConfirmationRequired(confirmation))
         return try {
-            decision.await()
+            val timeoutMs = run.confirmationTimeoutMs
+            val answer = if (timeoutMs == null) decision.await() else withTimeoutOrNull(timeoutMs) { decision.await() }
+            when (answer) {
+                true -> ConfirmationOutcome.ACCEPTED
+                false -> ConfirmationOutcome.DECLINED
+                null -> ConfirmationOutcome.TIMED_OUT
+            }
         } finally {
             run.confirmations.remove(confirmation.id, decision)
         }
@@ -223,11 +243,13 @@ internal class AiToolExecutionCoordinator(
         "delete_test_suite", "delete_test_case", "delete_test_script" -> "Delete AI test-suite data"
         "import_test_suite", "export_test_suite" -> "Read or write a test-suite file"
         "set_edition" -> "Switch the edition used for test-suite limits"
+        "try_test_script" -> "Run a test script on this computer or a device"
         else -> "Perform a confirmation-required action"
     }
 
     private companion object {
         const val DEFAULT_MAX_TOOL_RESULT_CHARS = 12_000
+        const val CONFIRMATION_TIMED_OUT_MESSAGE = "No decision was made in time, so this action was denied; no changes were made."
         val TAB_SCOPED_TOOL_NAMES = setOf(
             "build_sequence_diagram",
             "close_tab", "get_filter", "set_filter", "get_visible_lines", "get_line_context",

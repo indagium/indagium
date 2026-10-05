@@ -1,6 +1,7 @@
 package com.indagium.ai
 
 import com.indagium.debug.ControlServer
+import com.indagium.debug.IndagiumToolGateway
 import com.indagium.ui.AppState
 import java.io.Closeable
 
@@ -21,11 +22,12 @@ internal class ManagedMcpServerLease private constructor(
     }
 
     companion object {
-        fun start(appState: AppState, run: AiRun): ManagedMcpServerLease {
+        /** [gateway] null: the run sees the app's whole tool catalogue; otherwise exactly that gateway's tools. */
+        fun start(appState: AppState, run: AiRun, gateway: IndagiumToolGateway? = null): ManagedMcpServerLease {
             val server = ControlServer(appState, port = 0)
             server.start()
             val access = try {
-                checkNotNull(server.registerManagedMcpRun(run)) { "Managed MCP server did not start." }
+                checkNotNull(server.registerManagedMcpRun(run, gateway)) { "Managed MCP server did not start." }
             } catch (error: Exception) {
                 server.stop()
                 throw error

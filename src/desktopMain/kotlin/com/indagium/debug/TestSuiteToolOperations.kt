@@ -13,6 +13,9 @@ import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.script.ScriptRunOutcome
+import com.indagium.testing.script.scriptArgsFromToolValues
+import com.indagium.testing.script.toToolResult
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TEST_SUITE_FILE_FORMAT
 import com.indagium.testing.store.caseToJson
@@ -21,6 +24,8 @@ import com.indagium.testing.store.sharedStepToJson
 import com.indagium.testing.store.stepToJson
 import com.indagium.testing.store.suiteToJson
 import com.indagium.ui.AppState
+import com.indagium.ui.tryTestScript
+import kotlinx.coroutines.CancellationException
 import java.io.File
 
 // Handlers of the AI test-suite authoring tools (catalogue: TestSuiteToolCatalog.kt), merged into
@@ -37,11 +42,29 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
     val handlers: Map<String, (Map<String, Any?>) -> Any?> =
         suiteHandlers() + caseHandlers() + stepHandlers() + scriptHandlers() + sharedStepHandlers() + editionHandlers()
 
+    /**
+     * Handlers that wait (a script runs for up to its timeout). They are registered as suspending handlers so the
+     * transport never blocks a request thread on them; today that is `try_test_script` only.
+     */
+    val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "try_test_script" to suspendTool { a -> tryScript(a) },
+    )
+
     private val library: TestLibrary get() = appState.testLibrary
 
     private fun tool(body: (ToolArgs) -> Any?): (Map<String, Any?>) -> Any? = { raw ->
         try {
             body(ToolArgs(raw))
+        } catch (e: ToolArgException) {
+            errorMap(e.message ?: "Invalid arguments.")
+        }
+    }
+
+    private fun suspendTool(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any?>) -> Any? = { raw ->
+        try {
+            body(ToolArgs(raw))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (e: ToolArgException) {
             errorMap(e.message ?: "Invalid arguments.")
         }
@@ -249,6 +272,27 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             }
         },
     )
+
+    private suspend fun tryScript(a: ToolArgs): Map<String, Any?> {
+        val id = a.requiredString("scriptId")
+        val script = library.script(id) ?: return notFoundMap("script", id)
+        val rawArgs: Map<String, Any?> = a.map["args"]?.asObject("args") ?: emptyMap()
+        val arguments = try {
+            scriptArgsFromToolValues(rawArgs)
+        } catch (invalid: IllegalArgumentException) {
+            return errorMap(invalid.message ?: "Invalid arguments.")
+        }
+        val serial = a.string("deviceSerial")
+        return when (val outcome = appState.tryTestScript(script, arguments, serial)) {
+            is ScriptRunOutcome.Finished -> mapOf(
+                "scriptId" to script.id,
+                "toolName" to script.toolName,
+                "target" to script.target.name,
+                "deviceSerial" to serial?.trim()?.takeIf(String::isNotEmpty),
+            ) + outcome.result.toToolResult()
+            is ScriptRunOutcome.Rejected -> errorMap(outcome.message)
+        }
+    }
 
     // ── Shared steps ─────────────────────────────────────────────────
 
