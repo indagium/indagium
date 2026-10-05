@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AiToolCallBudgetTest {
@@ -77,5 +78,44 @@ class AiToolCallBudgetTest {
         assertTrue(decision.isNotesWrite)
         assertEquals(1, decision.snapshot.notesWritesUsed)
         assertTrue(decision.snapshot.notesWritesUnlimited)
+    }
+
+    @Test
+    fun freeToolsNeverSpendTheAllowanceAndStayCallableAfterItIsGone() {
+        val budget = AiToolCallBudget(1, freeTools = setOf("finish_step"))
+
+        assertTrue(budget.tryConsume("tap").allowed)
+        assertFalse(budget.tryConsume("tap").allowed, "the one allowed action is spent")
+        repeat(5) {
+            val free = budget.tryConsume("finish_step")
+            assertTrue(free.allowed)
+            assertFalse(free.isNotesWrite)
+        }
+        assertEquals(1, budget.snapshot().evidenceUsed)
+        assertEquals(0, budget.snapshot().notesWritesUsed)
+    }
+
+    @Test
+    fun withoutFreeToolsEveryToolSpendsTheAllowanceAsBefore() {
+        val budget = AiToolCallBudget(2)
+
+        assertTrue(budget.tryConsume("finish_step").allowed)
+        assertTrue(budget.tryConsume("finish_step").allowed)
+        assertFalse(budget.tryConsume("finish_step").allowed)
+        assertEquals(2, budget.snapshot().evidenceUsed)
+    }
+
+    @Test
+    fun aRunPassesItsFreeToolsToItsBudget() = runBlocking {
+        val gateway = IndagiumToolGateway(
+            listOf(IndagiumToolDescriptor("finish_step", "", ToolSchema(properties = buildJsonObject { }))),
+            mapOf("finish_step" to { _: Map<String, Any?> -> mapOf("ok" to true) }),
+        )
+        val coordinator = AiToolExecutionCoordinator(gateway)
+        val run = AiRun(tabId = "tab", maxToolCalls = 1, freeTools = setOf("finish_step"))
+
+        repeat(4) { assertTrue(coordinator.executeManaged(run, "finish_step", emptyMap()).content.contains("ok=true")) }
+
+        assertEquals(0, run.toolCallBudget.snapshot().evidenceUsed)
     }
 }

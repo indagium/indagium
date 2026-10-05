@@ -1107,6 +1107,22 @@ internal data class ExternalDeviceAiApproval(
     val sessionId: String,
     val clientName: String,
     val deviceLabel: String,
+    /** Null for the long-standing per-session device approval; set for a per-call action approval (see [ExternalActionDetails]). */
+    val action: ExternalActionDetails? = null,
+)
+
+/**
+ * What the approval dialog shows for ONE external MCP call that is approved every time it is made (not per session),
+ * such as running a user-authored script: a [title], a one-line [summary], labelled [fields] (the exact command, the
+ * arguments, ...) and the text of the allow button. [declinedMessage] is the tool error returned when it is denied
+ * or nobody answers.
+ */
+internal data class ExternalActionDetails(
+    val title: String,
+    val summary: String,
+    val fields: List<Pair<String, String>>,
+    val allowLabel: String,
+    val declinedMessage: String,
 )
 
 private data class DeviceAiOperationRecord(
@@ -2865,6 +2881,38 @@ class AppState(
         } finally {
             externalDeviceApprovalDecisions.remove(requestId, deferred)
             externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.requestId == requestId }
+        }
+    }
+
+    /**
+     * Asks the user about ONE external MCP call, every time: unlike [awaitExternalDeviceAiApproval] nothing is
+     * remembered, so a client that was allowed once cannot run a different command afterwards. Uses the same
+     * pending list, dialog, 5-minute timeout and session revocation as the device approval.
+     */
+    internal suspend fun awaitExternalActionApproval(sessionId: String, clientName: String, details: ExternalActionDetails): Boolean {
+        val requestId = "$sessionId\u0000action:${UUID.randomUUID()}"
+        val deferred = CompletableDeferred<Boolean>()
+        externalDeviceApprovalDecisions[requestId] = deferred
+        externalDeviceAiApprovals = externalDeviceAiApprovals + ExternalDeviceAiApproval(requestId, sessionId, clientName, "", details)
+        return try {
+            withTimeoutOrNull(DEVICE_AI_APPROVAL_TIMEOUT_MS) { deferred.await() } ?: false
+        } finally {
+            externalDeviceApprovalDecisions.remove(requestId, deferred)
+            externalDeviceAiApprovals = externalDeviceAiApprovals.filterNot { it.requestId == requestId }
+        }
+    }
+
+    /** Runs [action] only after the user allowed this exact call; a denial or timeout returns `{ "error": declinedMessage }`. */
+    internal suspend fun executeExternalApprovedAction(
+        sessionId: String,
+        clientName: String,
+        details: ExternalActionDetails,
+        action: suspend () -> Any?,
+    ): Any? {
+        if (!awaitExternalActionApproval(sessionId, clientName, details)) return mapOf("error" to details.declinedMessage)
+        return runCatching { action() }.getOrElse { error ->
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            mapOf("error" to (error.message ?: "The action failed"))
         }
     }
 

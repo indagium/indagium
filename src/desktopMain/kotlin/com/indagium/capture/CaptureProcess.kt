@@ -113,6 +113,25 @@ private fun normalizePath(path: String): String =
         .getOrDefault(File(path).absoluteFile.toPath().normalize().toString())
         .trimEnd('/')
 
+/**
+ * Politely stops [this] process and every descendant (children first), then force-kills whatever is still alive
+ * after [grace]. Shared by [JvmRunningCaptureProcess] and the test-suite HostCommandRunner so both use one
+ * descendant-kill implementation.
+ */
+internal fun Process.terminateProcessTree(grace: Duration) {
+    val descendants = toHandle().descendants().toList().asReversed()
+    descendants.forEach { child -> runCatching { child.destroy() } }
+    runCatching { destroy() }
+    if (!waitForExit(grace)) {
+        descendants.forEach { child -> if (child.isAlive) runCatching { child.destroyForcibly() } }
+        if (isAlive) runCatching { destroyForcibly() }
+        waitForExit(Duration.ofSeconds(1))
+    }
+}
+
+private fun Process.waitForExit(timeout: Duration): Boolean =
+    waitFor(timeout.toMillis().coerceAtLeast(0), TimeUnit.MILLISECONDS)
+
 private class JvmRunningCaptureProcess(private val process: Process) : RunningCaptureProcess {
     override val inputStream: InputStream get() = process.inputStream
     override val errorStream: InputStream get() = process.errorStream
@@ -123,17 +142,7 @@ private class JvmRunningCaptureProcess(private val process: Process) : RunningCa
 
     override fun exitCode(): Int? = if (process.isAlive) null else process.exitValue()
 
-    override fun terminate(grace: Duration) {
-        val handle = process.toHandle()
-        val descendants = handle.descendants().toList().asReversed()
-        descendants.forEach { child -> runCatching { child.destroy() } }
-        runCatching { process.destroy() }
-        if (!waitFor(grace)) {
-            descendants.forEach { child -> if (child.isAlive) runCatching { child.destroyForcibly() } }
-            if (process.isAlive) runCatching { process.destroyForcibly() }
-            waitFor(Duration.ofSeconds(1))
-        }
-    }
+    override fun terminate(grace: Duration) = process.terminateProcessTree(grace)
 
     override fun close() {
         if (process.isAlive) terminate()

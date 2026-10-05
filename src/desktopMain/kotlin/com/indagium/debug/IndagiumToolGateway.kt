@@ -2,6 +2,7 @@ package com.indagium.debug
 
 import com.indagium.ai.LlmToolDefinition
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -14,25 +15,54 @@ import kotlinx.serialization.json.put
  * The HTTP/MCP server and the future in-app agent both call this class instead of maintaining
  * their own lists of operations.  [executor] deliberately receives only plain Kotlin values:
  * protocol adapters are responsible for converting their request objects before this boundary.
+ *
+ * A gateway normally holds [handlers] only. A tool that has to wait (the test-suite lane tools:
+ * `wait_for_log`, `finish_step`, scripts) is registered as a suspending handler in [suspendHandlers]
+ * instead, and is reached through [executeSuspending] so no Ktor or Default thread blocks on it.
+ * [extraConfirmationRequired] adds tool names to the confirmation policy (used for per-lane tools whose
+ * names are only known at run time) and [confirmationDescriptions] gives such a tool its confirmation text.
  */
 internal class IndagiumToolGateway(
     private val catalog: List<IndagiumToolDescriptor>,
     private val handlers: Map<String, (arguments: Map<String, Any?>) -> Any?>,
+    private val suspendHandlers: Map<String, suspend (arguments: Map<String, Any?>) -> Any?> = emptyMap(),
+    private val extraConfirmationRequired: Set<String> = emptySet(),
+    private val confirmationDescriptions: Map<String, String> = emptyMap(),
 ) {
     init {
         require(catalog.map { it.name }.distinct().size == catalog.size) { "tool names must be unique" }
-        require(catalog.map { it.name }.toSet() == handlers.keys) { "catalog and handlers must stay in parity" }
+        require(handlers.keys.intersect(suspendHandlers.keys).isEmpty()) { "a tool has either a handler or a suspending handler" }
+        require(catalog.map { it.name }.toSet() == handlers.keys + suspendHandlers.keys) { "catalog and handlers must stay in parity" }
     }
 
     val tools: List<IndagiumToolDescriptor> get() = catalog
 
+    /**
+     * Synchronous entry point for callers that cannot suspend. A tool with a suspending handler is run to
+     * completion on the calling thread here, so production code on a request or UI thread must use
+     * [executeSuspending] instead.
+     */
     fun execute(name: String, arguments: Map<String, Any?>): Any? {
-        return handlers[name]?.invoke(arguments) ?: mapOf("error" to "unknown operation: $name")
+        handlers[name]?.let { handler -> return handler.invoke(arguments) ?: unknownOperation(name) }
+        val suspending = suspendHandlers[name] ?: return unknownOperation(name)
+        return runBlocking { suspending.invoke(arguments) } ?: unknownOperation(name)
     }
+
+    /** Runs a synchronous handler directly and a suspending handler as a suspension; same results as [execute]. */
+    suspend fun executeSuspending(name: String, arguments: Map<String, Any?>): Any? {
+        handlers[name]?.let { handler -> return handler.invoke(arguments) ?: unknownOperation(name) }
+        val suspending = suspendHandlers[name] ?: return unknownOperation(name)
+        return suspending.invoke(arguments) ?: unknownOperation(name)
+    }
+
+    private fun unknownOperation(name: String): Map<String, Any?> = mapOf("error" to "unknown operation: $name")
+
+    /** The text shown on this tool's confirmation card when it supplied one, else null (the coordinator's own wording applies). */
+    fun confirmationDescription(name: String): String? = confirmationDescriptions[name]
 
     /** Task 04 uses this classification before it invokes a mutation. */
     fun actionPolicy(name: String): IndagiumToolActionPolicy? =
-        catalog.firstOrNull { it.name == name }?.let { policyFor(it.name) }
+        catalog.firstOrNull { it.name == name }?.let { policyFor(it.name, extraConfirmationRequired) }
 
     /**
      * OpenAI-compatible function definitions generated from the exact MCP schema.  This keeps
@@ -61,10 +91,12 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     // Test-suite authoring: deletes and file import/export ask first; set_edition is a development
     // switch that changes what the whole feature allows, so an in-app AI run must never flip it unasked.
     "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite", "set_edition",
+    // try_test_script runs a user-authored shell command on the computer or the device.
+    "try_test_script",
 )
 
-private fun policyFor(name: String): IndagiumToolActionPolicy =
-    if (name in CONFIRMATION_REQUIRED_TOOLS) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED
+private fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =
+    if (name in CONFIRMATION_REQUIRED_TOOLS || name in extraConfirmationRequired) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED
     else IndagiumToolActionPolicy.AUTOMATIC
 
 /** A single operation descriptor shared by MCP, REST routing, and OpenAI-compatible providers. */

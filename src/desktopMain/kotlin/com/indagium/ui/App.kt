@@ -2672,14 +2672,19 @@ fun App(
                             .padding(22.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
-                        AppText("Allow device access?", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                        AppText(
-                            "${approval.clientName} wants to view and control ${approval.deviceLabel}. " +
-                                "Screen images may be sent to the connected AI provider. This approval lasts for this MCP session.",
-                            color = colors.td,
-                            fontSize = 12.sp,
-                            maxLines = 6,
-                        )
+                        val action = approval.action
+                        if (action == null) {
+                            AppText("Allow device access?", color = colors.tx, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                            AppText(
+                                "${approval.clientName} wants to view and control ${approval.deviceLabel}. " +
+                                    "Screen images may be sent to the connected AI provider. This approval lasts for this MCP session.",
+                                color = colors.td,
+                                fontSize = 12.sp,
+                                maxLines = 6,
+                            )
+                        } else {
+                            ExternalActionApprovalBody(action)
+                        }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                             AppButton(
                                 "Deny",
@@ -2692,7 +2697,7 @@ fun App(
                                 enabled = !answered,
                             )
                             AppButton(
-                                "Allow for this session",
+                                approval.action?.allowLabel ?: "Allow for this session",
                                 onClick = {
                                     if (!answered) {
                                         answered = true

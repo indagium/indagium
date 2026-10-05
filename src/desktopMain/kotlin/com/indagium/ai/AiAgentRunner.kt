@@ -137,11 +137,15 @@ internal class AiRun internal constructor(
     @Volatile var context: AiInvestigationContext = AiInvestigationContext(tabId),
     maxToolCalls: Int = com.indagium.model.DEFAULT_AI_MAX_TOOL_ROUNDS,
     val sentAt: Long = System.currentTimeMillis(),
+    /** Tools that never spend this run's call budget (see [AiToolCallBudget]); none by default. */
+    freeTools: Set<String> = emptySet(),
+    /** When set, a confirmation card nobody answered within this many milliseconds counts as denied; null waits indefinitely. */
+    val confirmationTimeoutMs: Long? = null,
 ) {
     private val _events = MutableSharedFlow<AiRunEvent>(replay = EVENT_REPLAY, extraBufferCapacity = EVENT_BUFFER)
     private val _history = mutableListOf<AiRunEvent>()
     internal val confirmations = ConcurrentHashMap<String, CompletableDeferred<Boolean>>()
-    internal val toolCallBudget = AiToolCallBudget(maxToolCalls)
+    internal val toolCallBudget = AiToolCallBudget(maxToolCalls, freeTools)
     internal var job: Job? = null
 
     /** The device serial this run's device tools are currently bound to, so a follow-up call that

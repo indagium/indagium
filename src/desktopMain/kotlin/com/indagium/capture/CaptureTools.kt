@@ -174,8 +174,12 @@ class CaptureTools(
      * device, or SELinux denying `setprop`) needs the raw stderr to show a useful inline error, not
      * an exception message.
      */
-    fun runAdb(serial: String?, arguments: List<String>, timeout: Duration = Duration.ofSeconds(5)): CaptureCommandResult =
-        runner.run(adbSpec(serial, arguments), timeout = timeout)
+    fun runAdb(
+        serial: String?,
+        arguments: List<String>,
+        timeout: Duration = Duration.ofSeconds(5),
+        outputLimitBytes: Int = DEFAULT_CAPTURE_COMMAND_OUTPUT_LIMIT,
+    ): CaptureCommandResult = runner.run(adbSpec(serial, arguments), timeout = timeout, outputLimitBytes = outputLimitBytes)
 
     /** Reads `ro.build.version.sdk` once — the "keep sound on the device" Android-13+ gate (see
      *  [captureAudioPlan]) — with the same plain synchronous shape as this class's other

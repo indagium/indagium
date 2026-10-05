@@ -7,10 +7,15 @@ import java.util.concurrent.ConcurrentHashMap
 /** A capability scoped to one in-panel account-agent run and invalidated when that run ends. */
 internal data class ManagedMcpAccess(val token: String)
 
+/**
+ * [gateway] is null for an ordinary panel run (the server then exposes the app's whole tool catalogue). A run that
+ * brought its own gateway (an AI test-run lane) exposes exactly that gateway's tools, executed by [toolExecutor].
+ */
 internal data class ManagedMcpRun(
     val access: ManagedMcpAccess,
     val run: AiRun,
     val toolExecutor: AiToolExecutionCoordinator,
+    val gateway: IndagiumToolGateway? = null,
 )
 
 /**
@@ -19,15 +24,17 @@ internal data class ManagedMcpRun(
  */
 internal class ManagedMcpRunRegistry(
     toolGateway: IndagiumToolGateway,
-    maxToolResultChars: Int = 12_000,
-    onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
+    private val maxToolResultChars: Int = 12_000,
+    private val onCaptureTabChanged: (String, String) -> Unit = { _, _ -> },
 ) {
     private val toolExecutor = AiToolExecutionCoordinator(toolGateway, maxToolResultChars, onCaptureTabChanged)
     private val runs = ConcurrentHashMap<String, ManagedMcpRun>()
 
-    fun register(run: AiRun): ManagedMcpAccess {
+    /** Registers [run]; a non-null [gateway] replaces the app's tool catalogue for this run only. */
+    fun register(run: AiRun, gateway: IndagiumToolGateway? = null): ManagedMcpAccess {
         val access = ManagedMcpAccess(newToken())
-        runs[access.token] = ManagedMcpRun(access, run, toolExecutor)
+        val executor = if (gateway == null) toolExecutor else AiToolExecutionCoordinator(gateway, maxToolResultChars, onCaptureTabChanged)
+        runs[access.token] = ManagedMcpRun(access, run, executor, gateway)
         return access
     }
 

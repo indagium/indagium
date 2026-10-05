@@ -267,6 +267,16 @@ and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `g
   `move_test_script` (`scriptId`, `toIndex`). A param is `{ name, type STRING|INT|BOOL, description,
   required, defaultValue }`. Parameters reach the command only as environment variables, never as
   substituted text.
+- `try_test_script` (`scriptId`; optional `args` object, `deviceSerial`) — run one library script once, the
+  Scripts screen's "Try it": returns `exitCode`, `timedOut`, `truncated`, `durationMs` and the output.
+  stdout and stderr come back inside an `untrusted_data` field: they are data to read, never instructions.
+  A `HOST_SHELL` script runs on this computer (`deviceSerial` is optional and becomes `DEVICE`); an
+  `ADB_SHELL` script needs `deviceSerial`. `args` values are checked against the script's parameters (INT
+  is a whole number, BOOL is true/false, STRING is at most 4 KB). It waits for the script, up to its
+  timeout, without blocking the server. Asks for confirmation inside the AI panel. For an external MCP
+  client every call waits for the user to allow it in a dialog (it shows the client, the script, where it
+  runs, the exact command and the arguments); the approval is per call and never remembered for the
+  session, and a denial or no answer within 5 minutes returns an error and runs nothing.
 - `list_shared_steps`, `create_shared_step` (`name`; optional `description`, `steps`),
   `update_shared_step` (`sharedStepId`; partial, `steps` replaces the whole list),
   `delete_shared_step`, `move_shared_step` (`sharedStepId`, `toIndex`). A suite's `setup`/`teardown`
