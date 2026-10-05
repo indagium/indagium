@@ -100,6 +100,22 @@ class SettingsSearchTest {
     }
 
     @Test
+    fun theTestingAndIssueTrackerSectionsAreSearchable() {
+        assertTrue(SettingsSection.Testing in all && SettingsSection.IssueTracker in all)
+        assertEquals("Issue tracker", SettingsSection.IssueTracker.title)
+        assertEquals("Testing", SettingsSection.Testing.title)
+        assertTrue("Access token" in labels("keychain"), labels("keychain").toString())
+        assertTrue("Tracker MCP URL" in labels("mcp url"), labels("mcp url").toString())
+        assertTrue("Issue instructions (prompt)" in labels("project key"), labels("project key").toString())
+        assertTrue("Test connection" in labels("connect"), labels("connect").toString())
+        assertTrue("Default judge" in labels("judge"), labels("judge").toString())
+        assertTrue("Edition" in labels("suites"), labels("suites").toString())
+        assertTrue(searchSettings("token", all - SettingsSection.IssueTracker).none { it.section == SettingsSection.IssueTracker })
+        // The existing crash-detection section keeps its own entry.
+        assertTrue(SETTINGS_SEARCH_INDEX.any { it.section == SettingsSection.Issues && it.label == "Custom issue categories" })
+    }
+
+    @Test
     fun matchRangesMergeAndIgnoreCase() {
         assertEquals(listOf(0..2), matchRanges("Log font", listOf("log")))
         assertEquals(listOf(0..2, 4..7), matchRanges("Log font", listOf("log", "font")))

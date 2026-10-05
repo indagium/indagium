@@ -242,9 +242,9 @@ class ControlServerMcpTest {
             "run_test_suite", "get_test_run_status", "list_test_runs", "get_test_run_report", "cancel_test_run",
             "resolve_test_confirmation", "resume_paused_step", "test_lane_tool_call",
             "apply_step_fix", "mark_agent_error", "rerun_test_step",
-            "create_issue_from_step", "list_issues", "get_issue", "update_issue", "delete_issue",
+            "create_issue_from_step", "list_issues", "get_issue", "update_issue", "delete_issue", "send_issue_to_tracker",
         )
-        assertEquals(123, expected.size)
+        assertEquals(124, expected.size)
         expected.forEach { name -> assertTrue(body.contains("\"$name\""), "tools/list missing $name:\n$body") }
         assertTrue(body.contains("mapped to physical pixels automatically"), "gesture tool descriptions need the image-coordinate contract:\n$body")
         assertTrue(body.contains("Wait for completion before starting another capture"), "stop/start ordering needs to be documented:\n$body")

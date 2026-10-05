@@ -17,7 +17,11 @@ import com.indagium.ui.ExternalActionDetails
 // built-in lane tool such as tap needs no approval: the run itself was approved, and the lane's device is the one named
 // in that approval).
 
-internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf("try_test_script", "run_test_suite", "rerun_test_step", "test_lane_tool_call")
+// send_issue_to_tracker, and create_issue_from_step when its destination is the tracker, hand the issue text and evidence to an AI
+// agent and an external service (ExternalTrackerApproval.kt); create_issue_from_step with any other destination needs no approval.
+internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf(
+    "try_test_script", "run_test_suite", "rerun_test_step", "test_lane_tool_call", "create_issue_from_step", "send_issue_to_tracker",
+)
 
 /** The approval dialog content for [toolName], or null when the call would be refused or needs no approval of its own. */
 internal suspend fun describePerCallApproval(appState: AppState, toolName: String, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? =
@@ -26,6 +30,7 @@ internal suspend fun describePerCallApproval(appState: AppState, toolName: Strin
         "run_test_suite" -> describeRunSuiteCall(appState, arguments, clientName)
         "rerun_test_step" -> describeRerunStepCall(appState, arguments, clientName)
         "test_lane_tool_call" -> describeLaneToolCall(appState, arguments, clientName)
+        "create_issue_from_step", "send_issue_to_tracker" -> describeTrackerSendCall(appState, toolName, arguments, clientName)
         else -> null
     }
 

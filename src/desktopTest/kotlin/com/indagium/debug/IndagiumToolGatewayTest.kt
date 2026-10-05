@@ -93,7 +93,7 @@ class IndagiumToolGatewayTest {
             "run_test_suite", "get_test_run_status", "list_test_runs", "get_test_run_report", "cancel_test_run",
             "resolve_test_confirmation", "resume_paused_step", "test_lane_tool_call",
             "apply_step_fix", "mark_agent_error", "rerun_test_step",
-            "create_issue_from_step", "list_issues", "get_issue", "update_issue", "delete_issue",
+            "create_issue_from_step", "list_issues", "get_issue", "update_issue", "delete_issue", "send_issue_to_tracker",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)

@@ -37,7 +37,7 @@ internal fun profileNeedsApiKey(profile: AiProviderProfile): Boolean {
 }
 
 /** The problems of using [profile] as an agent (a lane or the judge), each starting with [label]. */
-private fun profileProblems(label: String, profile: AiProviderProfile, apiKey: (String) -> String): List<String> {
+internal fun profileProblems(label: String, profile: AiProviderProfile, apiKey: (String) -> String): List<String> {
     val validation = validateAiProviderProfile(profile)
     return when {
         !validation.isValid -> listOf("$label: ${validation.problem!!.message}")

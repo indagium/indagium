@@ -22,22 +22,24 @@ import java.io.File
 // thing: build a draft from a step, store it, send it to a destination (the local store, a note in a log tab, Markdown),
 // edit and delete it. Expected problems come back as data ([IssueActionResult.Failed]); nothing here throws for them.
 // Everything runs on IO: nothing holds a store lock while it calls into AppState (the notes destination calls the annotation
-// mutators only after the issue store has released its lock), and nothing here holds stateLock.
+// mutators only after the issue store has released its lock), and nothing here holds stateLock. The tracker destination
+// (IssueTrackerActions.kt) starts an AI agent that files the issue through the tracker's MCP tools.
 
-internal const val TRACKER_UNAVAILABLE_MESSAGE = "Configure an issue tracker in Settings to send issues to it. That arrives in a later version."
 private const val MAX_DESTINATION_RESULTS = 20
 private const val SAVED_MESSAGE = "Saved locally."
 private const val MARKDOWN_COPIED_MESSAGE = "The issue as Markdown was copied to the clipboard."
 private const val MARKDOWN_RENDERED_MESSAGE = "The issue was rendered as Markdown."
 
 internal sealed interface IssueActionResult {
-    /** [markdown] is set for the Markdown destination; [tabId] for the notes destination. */
+    /** [markdown] is set for the Markdown destination; [tabId] for the notes destination; [trackerUrl] and [trackerKey] for the tracker. */
     data class Done(
         val record: IssueRecord,
         val message: String,
         val markdown: String? = null,
         val tabId: String? = null,
         val warnings: List<String> = emptyList(),
+        val trackerUrl: String? = null,
+        val trackerKey: String? = null,
     ) : IssueActionResult
 
     /** The notes destination found no tab of the lane's log; [logFile] is the lane's recorded log that could be opened as one. */
@@ -136,8 +138,10 @@ internal suspend fun AppState.createIssueFromStep(
     tabId: String? = null,
     openLaneLog: Boolean = false,
     copyMarkdown: Boolean = false,
+    resendToTracker: Boolean = false,
 ): IssueActionResult {
-    if (destination == IssueDestination.TRACKER) return IssueActionResult.Failed(TRACKER_UNAVAILABLE_MESSAGE)
+    // Nothing is created for a tracker that is not set up (the token itself is checked when the issue is sent).
+    if (destination == IssueDestination.TRACKER) trackerPreflightProblem()?.let { return IssueActionResult.Failed(it) }
     val run = testRunCoordinator.loadRun(runId) ?: return IssueActionResult.Failed("Run '$runId' was not found.")
     val existing = run.stepResult(laneId, caseId, iteration, stepId)?.issueId?.let { withContext(Dispatchers.IO) { issueStore.load(it) } }
     val saved = if (existing != null) {
@@ -149,18 +153,22 @@ internal suspend fun AppState.createIssueFromStep(
         saveIssue(null, seed.source, seed.draft.withOverrides(overrides), overrides.linkToCase ?: false)
     }
     val record = (saved as? IssueActionResult.Done)?.record ?: return saved
-    return deliverIssue(record.id, destination, copyMarkdown, tabId, openLaneLog)
+    return deliverIssue(record.id, destination, copyMarkdown, tabId, openLaneLog, resendToTracker)
 }
 
 // ── Delivering ───────────────────────────────────────────────────────
 
-/** Sends the stored issue [issueId] to [destination]; [copyMarkdown] puts the Markdown on the clipboard (the UI's choice, never an MCP call's). */
+/**
+ * Sends the stored issue [issueId] to [destination]; [copyMarkdown] puts the Markdown on the clipboard (the UI's choice, never an
+ * MCP call's). [resendToTracker]: create another tracker issue although this one was already sent (ui/IssueTrackerActions.kt).
+ */
 internal suspend fun AppState.deliverIssue(
     issueId: String,
     destination: IssueDestination,
     copyMarkdown: Boolean,
     tabId: String? = null,
     openLaneLog: Boolean = false,
+    resendToTracker: Boolean = false,
 ): IssueActionResult {
     val record = withContext(Dispatchers.IO) { issueStore.load(issueId) } ?: return IssueActionResult.Failed("Issue '$issueId' was not found.")
     return when (destination) {
@@ -171,7 +179,7 @@ internal suspend fun AppState.deliverIssue(
             recordDelivery(record, destination, if (copyMarkdown) MARKDOWN_COPIED_MESSAGE else MARKDOWN_RENDERED_MESSAGE, markdown = markdown)
         }
         IssueDestination.NOTES -> deliverToNotes(record, tabId, openLaneLog)
-        IssueDestination.TRACKER -> IssueActionResult.Failed(TRACKER_UNAVAILABLE_MESSAGE)
+        IssueDestination.TRACKER -> deliverToTracker(record, resendToTracker)
     }
 }
 
@@ -182,6 +190,7 @@ internal suspend fun AppState.recordDelivery(
     message: String,
     reference: String? = null,
     markdown: String? = null,
+    trackerKey: String? = null,
 ): IssueActionResult = withContext(Dispatchers.IO) {
     val entry = IssueDestinationResult(destination, ok = true, message = message, at = System.currentTimeMillis(), reference = reference)
     val reached = if (destination == IssueDestination.LOCAL) IssueStatus.SAVED else IssueStatus.SENT
@@ -191,7 +200,8 @@ internal suspend fun AppState.recordDelivery(
     when (result) {
         is StoreResult.Ok -> {
             val tabId = reference.takeIf { destination == IssueDestination.NOTES }
-            IssueActionResult.Done(result.value, message, markdown = markdown, tabId = tabId)
+            val trackerUrl = reference.takeIf { destination == IssueDestination.TRACKER }
+            IssueActionResult.Done(result.value, message, markdown = markdown, tabId = tabId, trackerUrl = trackerUrl, trackerKey = trackerKey)
         }
         else -> result.failure()
     }

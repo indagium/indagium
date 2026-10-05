@@ -387,11 +387,36 @@ Severity: judge `app_defect` and a crash in the step's log (`FATAL EXCEPTION`, `
   `actual`, `judgeNotes`, `linkToCase`) and sends it: `local` keeps it (status `SAVED`), `markdown` returns the
   issue as Markdown in the answer (evidence listed by absolute path), `notes` adds an issue note and the screenshot
   to the log tab of the lane (give `tabId`, or `openLaneLog: true` to open the lane's recorded logcat as a tab; with
-  neither the answer is `needsLogTab`), `tracker` is refused until an issue tracker can be configured in Settings.
+  neither the answer is `needsLogTab`), `tracker` files the issue in the issue tracker configured in Settings (see
+  "Issue tracker" below; `resend: true` creates another tracker issue although the step's issue was already sent).
   `linkToCase` makes a later run of the case mark the issue `STILL_FAILING` or `PASSING_NOW` (`recheck`).
 - `list_issues` (optional `runId`, `status`, `limit`), `get_issue` (`issueId`; `format` `json`|`markdown`),
   `update_issue` (`issueId` and the fields above; evidence is not changed), `delete_issue` (`issueId`; asks for
   confirmation inside the AI panel and cannot be undone).
+
+### Issue tracker
+
+Settings > Issue tracker holds a remote **MCP server** (URL, http or https), the header that carries its access token (default
+`Authorization: Bearer <token>`; blank means no authentication), the AI profile that files issues and a prompt that says how
+(project key, issue type, labels, field mapping). The token is typed once, saved to the operating system's secret store (macOS
+Keychain, Windows Credential Manager, Linux Secret Service through `secret-tool`) and never written to settings, notes, runs, issue
+files or transcripts; when the secret store is unavailable it is kept for the session only and Settings says so.
+
+- `send_issue_to_tracker` (`issueId`; optional `resend`) — an AI agent (the chosen profile, an in-app model, Claude Code or
+  Codex) files the stored issue by calling the tracker's own tools, following the user's prompt. The agent works behind a gateway of
+  its own: the tracker's tools re-exported as `tracker_<name>` with their schemas (the call goes through Indagium's own HTTP
+  connection, so the token never reaches the model or a CLI process; results come back as `untrusted_data`), `get_issue_draft`,
+  `read_issue_attachment` (only this issue's attachments, at most 2 MB, only small ones inline) and `report_issue_created`. A string
+  `indagium-attachment:<file name>` in a tracker tool's argument is replaced by that attachment's base64 content. The budget is 15
+  tracker calls; reading the draft and reporting are free. The answer carries `trackerUrl` and `trackerKey`, the issue becomes `SENT`
+  with the address as the destination's reference, and a failed attempt is noted on the issue (`ok: false`). The call can take a
+  minute. An issue that was already created in the tracker is refused unless `resend` is true.
+
+Sending an issue to the tracker (`send_issue_to_tracker`, and `create_issue_from_step` with `destination` `tracker`) hands the issue
+text and evidence to an AI agent and an external service, so it always needs the user's yes: a confirmation card in Indagium's AI
+panel, and for an external MCP client an approval dialog **per call** that names the tracker, the AI profile, the issue and every
+attachment the agent will be able to read. Both are refused, creating nothing, while no tracker is configured. All other destinations
+of `create_issue_from_step` need no approval.
 
 REST shortcuts for the two read tools: `GET /test-suites` and `GET /test-suite?suiteId=...`.
 

@@ -308,6 +308,9 @@ kotlin {
                 // so clients connect by URL with no Node bridge. The SDK's mcpStreamableHttp {}
                 // helper runs on Ktor (CIO engine); CORS lets browser-based MCP inspectors reach it.
                 implementation("io.modelcontextprotocol:kotlin-sdk-server:0.14.0")
+                // testing/tracker/SdkTrackerMcpClient.kt: the AI test suites' issue tracker is a user-configured remote
+                // MCP server reached over Streamable HTTP. Same SDK line as the server so one set of types is used.
+                implementation("io.modelcontextprotocol:kotlin-sdk-client:0.14.0")
                 implementation("io.ktor:ktor-server-cio:$ktorVersion")
                 implementation("io.ktor:ktor-server-cors:$ktorVersion")
                 // In-app AI providers use the same Ktor line as the MCP server. Keeping the

@@ -75,19 +75,23 @@ internal data class IssueFormModel(
 /** Whether [destination] can be chosen now, and the hint to show when it cannot. */
 internal data class DestinationChoice(val destination: IssueDestination, val label: String, val enabled: Boolean, val hint: String? = null)
 
-internal fun destinationChoices(): List<DestinationChoice> = listOf(
+/**
+ * The destinations on offer. [trackerProblem] is what still has to be set up for the tracker (AppState.trackerSendProblem), null
+ * when it can be chosen; the default is "not configured".
+ */
+internal fun destinationChoices(trackerProblem: String? = TRACKER_DISABLED_HINT): List<DestinationChoice> = listOf(
     DestinationChoice(IssueDestination.LOCAL, "Local", enabled = true),
     DestinationChoice(IssueDestination.NOTES, "Notes", enabled = true),
     DestinationChoice(IssueDestination.MARKDOWN, "Markdown", enabled = true),
-    DestinationChoice(IssueDestination.TRACKER, "Tracker", enabled = false, hint = TRACKER_DISABLED_HINT),
+    DestinationChoice(IssueDestination.TRACKER, "Tracker", enabled = trackerProblem == null, hint = trackerProblem),
 )
 
-/** The label of the dialog's create button for [destination]. */
-internal fun createLabel(destination: IssueDestination): String = when (destination) {
+/** The label of the dialog's create button for [destination]; [trackerName] names the configured tracker. */
+internal fun createLabel(destination: IssueDestination, trackerName: String = "tracker"): String = when (destination) {
     IssueDestination.LOCAL -> "Create"
     IssueDestination.NOTES -> "Create and add to notes"
     IssueDestination.MARKDOWN -> "Create and copy Markdown"
-    IssueDestination.TRACKER -> "Create"
+    IssueDestination.TRACKER -> "Create in $trackerName"
 }
 
 /** One line per evidence attachment for the checklist: label and size. */

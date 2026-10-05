@@ -13,6 +13,7 @@ import com.indagium.testing.run.defaultLaneAgentFactory
 import com.indagium.testing.run.laneAccountRunnerFactory
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TestRunStore
+import com.indagium.testing.tracker.TrackerMcpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -29,6 +30,14 @@ internal class TestRunOverrides(
     val deviceProblem: (suspend (serial: String) -> String?)? = null,
     val scriptRunner: TestScriptRunner? = null,
     val tuning: EngineTuning = EngineTuning(),
+    /** Replaces the MCP client of the issue tracker (Settings > Issue tracker): tests need no network. */
+    val trackerClients: TrackerMcpClientFactory? = null,
+)
+
+/** How an agent (a lane, the judge, the issue-filing job) is started: [TestRunOverrides.agentFactory] or the real launchers. */
+internal fun AppState.productionAgentFactory(overrides: TestRunOverrides): LaneAgentFactory = overrides.agentFactory ?: defaultLaneAgentFactory(
+    defaultAiProviderFactory,
+    laneAccountRunnerFactory { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
 )
 
 private const val LIVE_CAPTURE_PROBLEM = "is held by the live capture in the main window; stop that capture or choose another device."
@@ -39,10 +48,7 @@ internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, base
         val tools = withContext(Dispatchers.IO) { captureService.toolsForStart(settings.captureSettings) }
         TestDeviceSession.open(serial, laneDir, tools, recordVideo = recordVideo, isLiveCaptureSerial = { it == liveCaptureSerial() })
     }
-    val agentFactory = overrides.agentFactory ?: defaultLaneAgentFactory(
-        defaultAiProviderFactory,
-        laneAccountRunnerFactory { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
-    )
+    val agentFactory = productionAgentFactory(overrides)
     val deviceProblem = overrides.deviceProblem ?: { serial -> productionDeviceProblem(serial) }
     return TestRunCoordinator(
         CoordinatorDeps(

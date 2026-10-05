@@ -10,6 +10,7 @@ import com.indagium.ui.IssueActionResult
 import com.indagium.ui.IssueOverrides
 import com.indagium.ui.createIssueFromStep
 import com.indagium.ui.deleteIssue
+import com.indagium.ui.deliverIssue
 import com.indagium.ui.issueMarkdown
 import com.indagium.ui.updateIssueFields
 import kotlinx.coroutines.CancellationException
@@ -29,6 +30,7 @@ internal class IssueToolOperations(private val appState: AppState) {
         "list_issues" to suspendTool { a -> list(a) },
         "get_issue" to suspendTool { a -> get(a) },
         "update_issue" to suspendTool { a -> update(a) },
+        "send_issue_to_tracker" to suspendTool { a -> sendToTracker(a) },
         "delete_issue" to suspendTool { a -> delete(a.requiredString("issueId")) },
     )
 
@@ -64,6 +66,8 @@ internal class IssueToolOperations(private val appState: AppState) {
         if (warnings.isNotEmpty()) put("warnings", warnings)
         markdown?.let { put("markdown", it) }
         tabId?.let { put("tabId", it) }
+        trackerUrl?.let { put("trackerUrl", it) }
+        trackerKey?.let { put("trackerKey", it) }
         putAll(extra)
     }
 
@@ -93,6 +97,7 @@ internal class IssueToolOperations(private val appState: AppState) {
             overrides = overrides,
             tabId = a.string("tabId")?.trim()?.takeIf { it.isNotEmpty() },
             openLaneLog = a.bool("openLaneLog") ?: false,
+            resendToTracker = a.bool("resend") ?: false,
         ).toAnswer()
     }
 
@@ -138,6 +143,10 @@ internal class IssueToolOperations(private val appState: AppState) {
             else -> result.toAnswer()
         }
     }
+
+    private suspend fun sendToTracker(a: ToolArgs): Map<String, Any?> = appState.deliverIssue(
+        a.requiredString("issueId"), IssueDestination.TRACKER, copyMarkdown = false, resendToTracker = a.bool("resend") ?: false,
+    ).toAnswer()
 
     private suspend fun delete(issueId: String): Map<String, Any?> = when (val result = appState.deleteIssue(issueId)) {
         is IssueActionResult.Done -> mapOf("issueId" to issueId, "deleted" to true)

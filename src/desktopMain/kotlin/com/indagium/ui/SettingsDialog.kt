@@ -16,6 +16,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Dashboard
 import androidx.compose.material.icons.outlined.Description
@@ -23,6 +24,7 @@ import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.PhoneAndroid
 import androidx.compose.material.icons.outlined.Psychology
+import androidx.compose.material.icons.outlined.Science
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material.icons.outlined.Tune
@@ -123,6 +125,8 @@ internal enum class SettingsSection(val title: String, val icon: ImageVector) {
     CustomAiCommands("AI commands", Icons.Outlined.Terminal),
     SourceCode("Source code", Icons.Outlined.Code),
     Issues("Issues", Icons.Outlined.Bolt),
+    Testing("Testing", Icons.Outlined.Science),
+    IssueTracker("Issue tracker", Icons.Outlined.BugReport),
 }
 
 @Composable
@@ -367,6 +371,8 @@ internal fun SettingsDialog(state: AppState, onDismiss: () -> Unit, onRequestClo
                                 SettingsSection.VoiceInput -> VoiceInputSettingsSection(state)
                                 SettingsSection.CustomAiCommands -> CustomAiCommandsSettingsSection(state)
                                 SettingsSection.SourceCode -> SourceCodeSettingsSection(state)
+                                SettingsSection.Testing -> TestingSettingsSection(state)
+                                SettingsSection.IssueTracker -> IssueTrackerSettingsSection(state)
                             }
                         }
                     }
