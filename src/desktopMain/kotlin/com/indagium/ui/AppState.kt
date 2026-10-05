@@ -69,6 +69,8 @@ import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.run.TestRunCoordinator
+import com.indagium.testing.store.ISSUES_DIR_NAME
+import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.importGoldenImage
@@ -2013,6 +2015,11 @@ class AppState(
         if (!testRunCoordinatorDelegate.isInitialized()) return
         synchronized(testRunMirrorLock) { testRuns = testRunCoordinator.runsFlow.value }
     }
+
+    // The issues made from failed steps live in their own folders under <testing dir>/issues (testing/store/IssueStore.kt).
+    // The store has its own leaf lock (never held together with stateLock); the notes destination calls the annotation
+    // mutators only after it released it (IssueNotes.kt).
+    internal val issueStore = IssueStore(File(testingDir, ISSUES_DIR_NAME))
 
     /** `<save root>/test-runs`, or `<testing dir>/runs` when no save root is configured (a bare test AppState). */
     private fun testRunsBaseDir(): File = effectiveSaveRootOrNull()?.let { File(it, "test-runs") } ?: File(testingDir, "runs")

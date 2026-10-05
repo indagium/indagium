@@ -51,7 +51,7 @@ import java.awt.Frame
 import java.io.File
 
 // The AI test-suites workspace: a single full-width, non-log surface (ActiveSurface.Tests) shown in its own tab.
-// Left: navigation (suite search + list, shared steps, scripts, placeholders for runs/issues). Centre: the screen of
+// Left: navigation (suite search + list, shared steps, scripts, runs, issues). Centre: the screen of
 // the selected item. Selection lives in AppState.testsView so it survives switching tabs. Edits go straight
 // through the AppState delegates (which return StoreResult); failures show inline or in the banner.
 
@@ -60,7 +60,6 @@ private val NARROW_NAV_MAX_HEIGHT = 260.dp
 private val SUITE_ROW_HEIGHT = 34.dp
 private val NAV_ITEM_SHAPE = RoundedCornerShape(6.dp)
 internal val TESTS_CONTENT_MAX_WIDTH = 940.dp
-internal const val TESTS_LATER_VERSION_TEXT = "Available in a later version"
 private const val NEW_SUITE_NAME = "New suite"
 private const val EXPORT_NAME_MAX_CHARS = 60
 
@@ -83,6 +82,7 @@ internal fun TestsWorkspace(state: AppState) {
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true)) { } }
             view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
+            view.issueDialog?.let { target -> IssueDraftDialog(target) { view.issueDialog = null } }
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
                 if (maxWidth < NARROW_BREAKPOINT) {
                     Column(Modifier.fillMaxSize()) {
@@ -146,7 +146,7 @@ private fun TestsCenter(modifier: Modifier) {
             TestsNav.SharedSteps -> TestsSharedStepsScreen()
             TestsNav.Scripts -> TestsScriptsScreen()
             TestsNav.Runs -> TestsRunsScreen()
-            TestsNav.Issues -> TestsPlaceholderScreen("Issues", "Failed steps will become issues you can send to your tracker here.")
+            TestsNav.Issues -> TestsIssuesScreen()
         }
     }
 }
@@ -165,18 +165,6 @@ private fun TestsNoSuites() {
             disabledHint = limits.hint,
             variant = ButtonVariant.Primary,
         )
-    }
-}
-
-@Composable
-private fun TestsPlaceholderScreen(title: String, description: String) {
-    val tc = tc()
-    TestsScreenScaffold {
-        AppText(title, color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(6.dp))
-        AppText(TESTS_LATER_VERSION_TEXT, color = tc.warn, fontSize = 12.sp)
-        Spacer(Modifier.height(6.dp))
-        TestsHint(description)
     }
 }
 
@@ -255,7 +243,10 @@ private fun TestsNavPane(modifier: Modifier) {
             view.nav = TestsNav.Runs
             view.selectedRunId = null
         }
-        NavItem("Issues", null, view.nav == TestsNav.Issues, subtitle = TESTS_LATER_VERSION_TEXT) { view.nav = TestsNav.Issues }
+        NavItem("Issues", null, view.nav == TestsNav.Issues) {
+            view.nav = TestsNav.Issues
+            view.selectedIssueId = null
+        }
     }
 }
 

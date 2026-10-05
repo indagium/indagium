@@ -37,6 +37,7 @@ import com.indagium.testing.run.LaneDeviceOpener
 import com.indagium.testing.run.ProviderLaneAgent
 import com.indagium.testing.run.TestRunCoordinator
 import com.indagium.testing.script.TestScriptRunner
+import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.TestRunStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.FlowCollector
@@ -149,6 +150,8 @@ internal class RunHarness(
     extraProfiles: List<AiProviderProfile> = emptyList(),
     /** How lanes open their device; the default is one fixture adb for [FIXTURE_SERIAL]. */
     openDevice: LaneDeviceOpener? = null,
+    /** Where runs of this harness put their issues; null: none are made. */
+    val issues: IssueStore? = null,
 ) {
     val dir: File = createTempDirectory("indagium-run-test").toFile()
     val adb = ScriptedAdbRunner()
@@ -165,6 +168,7 @@ internal class RunHarness(
             agentFactory = agentFactory ?: LaneAgentFactory { chosen, _ -> ProviderLaneAgent(provider, chosen) },
             scriptRunner = TestScriptRunner(hostShell = listOf("/bin/sh", "-c")),
             tuning = tuning.copy(persistDebounceMs = 50L),
+            issues = issues,
         ),
     )
 

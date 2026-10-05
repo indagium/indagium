@@ -18,6 +18,7 @@ import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.newRunId
 import com.indagium.testing.model.summary
 import com.indagium.testing.script.TestScriptRunner
+import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RunPersister
 import com.indagium.testing.store.TestRunStore
 import kotlinx.coroutines.CoroutineScope
@@ -73,6 +74,10 @@ internal class CoordinatorDeps(
     val wallClock: () -> Long = System::currentTimeMillis,
     /** The image of a golden-screenshot example, for the judge. Blocking; called on IO. */
     val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
+    /** Where the issues of this app live; null (tests) means runs create no draft issues and re-check none. */
+    val issues: IssueStore? = null,
+    /** The file of a golden-screenshot example, for the evidence of an issue. */
+    val goldenFile: (suiteId: String, assetPath: String) -> java.io.File? = { _, _ -> null },
 )
 
 private class RunEntry(
@@ -176,6 +181,8 @@ internal class TestRunCoordinator(
             judgeAgent = judgeAgentFactory(config, profiles),
             goldenImage = deps.goldenImage,
             pauseGate = gate,
+            issues = deps.issues,
+            goldenFile = deps.goldenFile,
         )
         // ATOMIC: a run cancelled before its first instruction must still reach the finally that frees its devices.
         entry.job = scope.launch(start = CoroutineStart.ATOMIC) {

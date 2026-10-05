@@ -1689,7 +1689,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Check a device capture, marker, or snapshot operation by operationId.",
         schema("operationId" to "string", required = listOf("operationId")),
     ),
-) + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS
+) + TEST_SUITE_MCP_TOOLS + TEST_RUN_MCP_TOOLS + ISSUE_MCP_TOOLS
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.

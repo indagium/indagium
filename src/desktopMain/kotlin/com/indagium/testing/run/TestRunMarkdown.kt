@@ -63,7 +63,9 @@ private fun StringBuilder.step(result: StepResult) {
         append("  - Log bytes ").append(result.logStartOffset).append("–").append(result.logEndOffset).append('\n')
     }
     result.note?.let { append("  - Note: ").append(it).append('\n') }
-    if (result.issueRequested) append("  - An issue was requested for this step.\n")
+    if (result.issueRequested) {
+        append("  - An issue was requested for this step").append(result.issueId?.let { " (draft `$it`)" }.orEmpty()).append(".\n")
+    }
 }
 
 private fun StringBuilder.appendFix(fix: StepFix, applied: Boolean, ref: String) {

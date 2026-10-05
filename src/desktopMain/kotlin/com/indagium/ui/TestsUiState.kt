@@ -56,6 +56,12 @@ internal class TestsViewState {
     /** The run whose report the Runs screen shows; null shows the list of runs. */
     var selectedRunId: String? by mutableStateOf(null)
 
+    /** The issue whose detail the Issues screen shows; null shows the list of issues. */
+    var selectedIssueId: String? by mutableStateOf(null)
+
+    /** Non-null while the issue dialog is open. */
+    var issueDialog: IssueDialogTarget? by mutableStateOf(null)
+
     /** Width of the left navigation column in dp; dragged through the shared HDivider, clamped by [clampTestsNavWidth]. */
     var navWidthDp: Float by mutableStateOf(TESTS_NAV_WIDTH_DEFAULT_DP)
 }

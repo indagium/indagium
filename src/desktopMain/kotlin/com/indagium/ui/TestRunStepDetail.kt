@@ -38,6 +38,7 @@ import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
+import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.run.StartRunResult
@@ -83,7 +84,7 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             StatusChip(step.status.label(), stepColor(step.status))
             AppText("${step.attempts} attempt(s) · ${step.durationMs / MILLIS_PER_SECOND}s", color = tc.td, fontSize = 10.sp)
-            if (step.issueRequested) TestsBadge("issue requested")
+            if (step.issueId != null) TestsBadge("issue draft created") else if (step.issueRequested) TestsBadge("issue requested")
             if (step.judgeInconclusive) TestsBadge("judge inconclusive")
             if (step.agentError != null) TestsBadge("marked as agent error")
         }
@@ -104,7 +105,7 @@ private fun StepDetail(run: TestRun, row: MatrixRow.Step, step: StepResult, lane
             .forEach { ComparisonSection(run, row, it) }
         ExpectedVersusActual(run, row, step, runDir)
         StepEvidence(step, lane, runDir)
-        StepActions(run, row, lane)
+        StepActions(run, row, lane, step)
     }
 }
 
@@ -308,13 +309,19 @@ private fun openFile(file: File) {
 // ── Actions ──────────────────────────────────────────────────────────
 
 @Composable
-private fun StepActions(run: TestRun, row: MatrixRow.Step, lane: LaneResult) {
+private fun StepActions(run: TestRun, row: MatrixRow.Step, lane: LaneResult, step: StepResult) {
     if (row.setup) return
     val ui = LocalTestsUi.current
     var marking by remember(row.key, lane.laneId) { mutableStateOf(false) }
     var starting by remember(row.key, lane.laneId) { mutableStateOf(false) }
     Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         AppButton("Mark as agent error…", onClick = { marking = true })
+        if (step.status != StepStatus.PASS && step.status != StepStatus.SKIPPED) {
+            AppButton(
+                if (step.issueId != null) "Open issue…" else "Create issue…",
+                onClick = { ui.view.issueDialog = IssueDialogTarget.FromStep(run.id, lane.laneId, row.caseId, row.iteration, row.stepId) },
+            )
+        }
         AppButton(
             if (starting) "Starting…" else "Run again up to this step",
             enabled = !starting && run.isFinished,

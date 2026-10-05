@@ -113,6 +113,7 @@ private fun stepResultToJson(step: StepResult): JsonObject = buildJsonObject {
     step.judge?.let { put("judge", judgementToJson(it)) }
     put("judgeInconclusive", step.judgeInconclusive)
     putIfNotNull("agentError", step.agentError)
+    putIfNotNull("issueId", step.issueId)
 }
 
 private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
@@ -236,6 +237,7 @@ private fun decodeStepResult(o: JsonObject): StepResult = StepResult(
     judge = (o["judge"] as? JsonObject)?.let { decodeJudgement(it) },
     judgeInconclusive = o.bool("judgeInconclusive", false),
     agentError = o.optStr("agentError"),
+    issueId = o.optStr("issueId")?.takeIf { isSafeId(it) },
 )
 
 private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(
