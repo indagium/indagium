@@ -237,6 +237,47 @@ class TestLibraryStoreTest {
     }
 
     @Test
+    fun suiteTargetPackageAndTagsAreValidatedAndNormalised() {
+        val store = newStore()
+        val suite = store.createSuite("S").ok()
+
+        val updated = store.updateSuite(suite.id) {
+            it.copy(targetPackage = " com.example.app ", deviceProfileHint = "Pixel", tags = listOf(" a ", "A", "", "b"))
+        }.ok()
+        assertEquals("com.example.app", updated.targetPackage)
+        assertEquals(listOf("a", "b"), updated.tags)
+
+        assertIs<StoreResult.Invalid>(store.updateSuite(suite.id) { it.copy(targetPackage = "not a package") })
+        assertIs<StoreResult.Invalid>(store.updateSuite(suite.id) { it.copy(targetPackage = "com.example.app; rm -rf") })
+        assertIs<StoreResult.Invalid>(store.updateSuite(suite.id) { it.copy(tags = listOf("x".repeat(41))) })
+        assertEquals(updated.tags, store.suite(suite.id)!!.tags, "a refused update changes nothing")
+        assertEquals("", store.updateSuite(suite.id) { it.copy(targetPackage = "") }.ok().targetPackage)
+        assertEquals(40, store.updateSuite(suite.id) { it.copy(tags = listOf("x".repeat(40))) }.ok().tags.single().length)
+    }
+
+    @Test
+    fun stepMaxToolCallsMustBeBetweenOneAndOneHundred() {
+        val store = newStore()
+        val suite = store.createSuite("S").ok()
+        val case = store.createCase(suite.id, plainCase("c")).ok()
+        assertIs<StoreResult.Invalid>(store.createStep(case.id, plainStep().copy(maxToolCalls = 0)))
+        assertIs<StoreResult.Invalid>(store.createStep(case.id, plainStep().copy(maxToolCalls = 101)))
+        assertEquals(1, store.createStep(case.id, plainStep().copy(maxToolCalls = 1)).ok().maxToolCalls)
+        assertEquals(100, store.createStep(case.id, plainStep().copy(maxToolCalls = 100)).ok().maxToolCalls)
+    }
+
+    @Test
+    fun duplicatingACaseGivesItsHooksNewIds() {
+        val store = newStore()
+        val suite = store.createSuite("S").ok()
+        val original = fullSuite().cases.first()
+        val case = store.createCase(suite.id, original).ok()
+        val copy = store.duplicateCase(case.id).ok()
+        assertEquals(case.setup.size, copy.setup.size)
+        assertTrue((case.setup + case.teardown).map { it.id }.intersect((copy.setup + copy.teardown).map { it.id }.toSet()).isEmpty())
+    }
+
+    @Test
     fun aBlankIdOnCreateIsReplacedWithAFreshPrefixedId() {
         val store = newStore()
         val suite = store.createSuite("S").ok()

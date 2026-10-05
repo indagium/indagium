@@ -220,6 +220,9 @@ internal class AiToolExecutionCoordinator(
         "export_analysis", "export_filtered_log" -> "Write an export file"
         "save_annotations", "load_annotations" -> "Save or load annotation files"
         "clear_all_notes" -> "Clear all Notes sections and annotation blocks"
+        "delete_test_suite", "delete_test_case", "delete_test_script" -> "Delete AI test-suite data"
+        "import_test_suite", "export_test_suite" -> "Read or write a test-suite file"
+        "set_edition" -> "Switch the edition used for test-suite limits"
         else -> "Perform a confirmation-required action"
     }
 

@@ -1,11 +1,14 @@
 package com.indagium.testing.store
 
+import com.indagium.debug.requireValidAndroidPackageName
+import com.indagium.testing.model.MAX_TAG_CHARS
 import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.scriptParamNameError
 import com.indagium.testing.model.scriptToolNameError
@@ -17,6 +20,8 @@ import com.indagium.testing.model.scriptToolNameError
 const val MAX_NAME_CHARS = 200
 const val MAX_STEP_TIMEOUT_MS = 60L * 60L * 1000L
 const val MAX_STEP_RETRIES = 10
+const val MIN_STEP_MAX_TOOL_CALLS = 1
+const val MAX_STEP_MAX_TOOL_CALLS = 100
 const val MAX_SCRIPT_TIMEOUT_MS = 60L * 60L * 1000L
 const val MAX_SCRIPT_OUTPUT_CAP_BYTES = 8 * 1024 * 1024
 
@@ -24,6 +29,15 @@ internal fun validateName(label: String, name: String): String? = when {
     name.isBlank() -> "$label name must not be blank."
     name.length > MAX_NAME_CHARS -> "$label name is too long (max $MAX_NAME_CHARS characters)."
     else -> null
+}
+
+/** The suite's name, its target package (reusing the device tools' package-id rule) and its tags. */
+internal fun validateSuite(suite: TestSuite): String? {
+    validateName("Suite", suite.name)?.let { return it }
+    if (suite.targetPackage.isNotBlank() && runCatching { requireValidAndroidPackageName(suite.targetPackage) }.isFailure) {
+        return "Target package must be a reverse-domain Android package id, e.g. com.example.app."
+    }
+    return suite.tags.firstOrNull { it.length > MAX_TAG_CHARS }?.let { "Tag '$it' is too long (max $MAX_TAG_CHARS characters)." }
 }
 
 internal fun validateEntityId(label: String, id: String): String? =
@@ -48,6 +62,9 @@ private fun validateDuration(label: String, value: Long): String? =
 internal fun validateStep(step: TestStep): String? {
     if (step.timeoutMs !in 1..MAX_STEP_TIMEOUT_MS) return "Step timeout must be between 1 and $MAX_STEP_TIMEOUT_MS milliseconds."
     if (step.retries !in 0..MAX_STEP_RETRIES) return "Step retries must be between 0 and $MAX_STEP_RETRIES."
+    if (step.maxToolCalls !in MIN_STEP_MAX_TOOL_CALLS..MAX_STEP_MAX_TOOL_CALLS) {
+        return "Step max tool calls must be between $MIN_STEP_MAX_TOOL_CALLS and $MAX_STEP_MAX_TOOL_CALLS."
+    }
     if (step.checks.map { it.id }.distinct().size != step.checks.size) return "Check ids must be unique within a step."
     if (step.examples.map { it.id }.distinct().size != step.examples.size) return "Example ids must be unique within a step."
     return step.checks.firstNotNullOfOrNull { validateCheck(it) }

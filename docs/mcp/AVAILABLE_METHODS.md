@@ -156,6 +156,125 @@ at once; further requests return an error until one finishes.
   same device or the call is refused.
 - `get_capture_operation_status` checks any of the above asynchronous operations by `operationId`.
 
+## AI test suites
+
+These tools author the AI test-suite library: **suites** contain **cases**, a case contains ordered
+**steps**, and a step has an `action`, an `expected` result, ordered `checks` and ordered `examples`.
+Custom **scripts** (shell commands exposed to test agents as typed tools) and reusable **shared steps**
+live beside the suites in the library. Order is list order everywhere, and every list has a `move_*`
+tool. (Running a suite, issues and the device lane come in later tools.)
+
+Every tool returns plain JSON and reports problems as data, never as a thrown error:
+
+- `{ "error": "Suite 'x' not found." }` for an unknown id, an invalid value or a bad argument. Argument
+  mistakes name the field (`checks[1].regex is required for type 'logAppears'.`).
+- `warnings` (array of strings) next to the result when the call worked but needs attention, for
+  example a hook or `scriptResult` check that references a script or shared step that is not in the
+  library, or an imported suite whose extra cases arrive locked.
+- `{ "error": "...", "limit": { "kind", "max", "edition", "hint" } }` when the edition limits refuse the
+  call. `kind` is `SUITE_LIMIT`, `CASE_LIMIT` or `LOCKED`; `max` is the number that was exceeded (null
+  for `LOCKED`); `edition` is `FREE`/`PREMIUM`/`FRIENDS_FAMILY`/`UNLIMITED`; `hint` is the text the UI
+  shows ("Free edition: 1 suite / 5 cases").
+
+**Edition limits.** Builds default to Unlimited. The Free edition allows 1 suite with 5 cases. Entries
+past the limit (in the user's order) are *locked*: still readable, exportable, deletable and
+reorderable, but not editable, runnable or duplicable. `list_test_suites` and `get_test_suite` carry a
+`locked` flag on every suite and case. Data is never dropped; reordering is how the user picks which
+entries are active.
+
+### Edition
+
+- `get_edition` — `{ edition, label, limits: { maxSuites, maxCasesPerSuite }, devSwitchAllowed, hint }`
+  (`null` limits mean unlimited).
+- `set_edition` (`edition`) — development tool to try the limits: refused with an error unless the
+  build is unpackaged or started with `-Dindagium.dev=true` (`devSwitchAllowed`). The edition can also
+  be set at launch with `-Dindagium.edition=free` or `INDAGIUM_EDITION=free`. Asks for confirmation
+  inside the in-app AI panel.
+
+### Suites
+
+- `list_test_suites` — suites in order: `id`, `name`, `description`, `caseCount`, `stepCount`, `locked`,
+  `readOnly`, timestamps and each suite's cases (`id`, `name`, `stepCount`, `locked`), plus the edition
+  info, `scriptCount` and `sharedStepCount`. `readOnly` marks a suite written by a newer Indagium.
+- `get_test_suite` (`suiteId`) — the whole suite in the same JSON shape as the exported file: `name`,
+  `description`, `instructions`, `targetPackage`, `deviceProfileHint`, `tags`, `setup`/`teardown`
+  hooks, `variables` and every case with its steps, checks and examples, plus `locked` on the suite
+  and each case.
+- `create_test_suite` (`name`; optional `description`, `instructions`, `targetPackage`,
+  `deviceProfileHint`, `tags`, `setup`, `teardown`, `variables`) — appended to the library. Refused
+  with a `SUITE_LIMIT` error at the limit. `targetPackage` is the Android package under test (a
+  reverse-domain id such as `com.example.app`, validated like the device tools' package names; empty
+  means unspecified), `deviceProfileHint` is free text about the wanted device, and `tags` are short
+  labels (at most 40 characters each, trimmed and de-duplicated).
+- `update_test_suite` (`suiteId`; any of `name`, `description`, `instructions`, `targetPackage`,
+  `deviceProfileHint`, `tags`, `setup`, `teardown`, `variables`) — only the fields you send change;
+  `tags`, `setup`, `teardown` and `variables` replace the whole ordered list, and an empty
+  `targetPackage` clears it. Refused for a locked suite.
+- `delete_test_suite` (`suiteId`) — allowed even when locked. Asks for confirmation inside the AI panel.
+- `duplicate_test_suite` (`suiteId`) — deep copy with new ids, placed after the original, named
+  "<name> (copy)". Refused for a locked suite or at the suite limit.
+- `move_test_suite` (`suiteId`, `toIndex`) — returns the new `suiteIds` order. `toIndex` is the final
+  0-based position, clamped. Allowed for locked suites.
+- `import_test_suite` (exactly one of `path`, an absolute file path, or `text`) — adds a suite from an
+  exported `indagium-test-suite` file with fresh ids. A suite with more cases than the edition allows
+  imports with the extra cases locked and a warning; at the suite limit it is refused. Asks for
+  confirmation inside the AI panel.
+- `export_test_suite` (`suiteId`; optional absolute `path`, `overwrite`) — without `path` returns the
+  file's `text`; with `path` writes it (an existing file is only replaced when `overwrite` is true).
+  Asks for confirmation inside the AI panel.
+
+### Cases
+
+- `create_test_case` (`suiteId`, `name`; optional `description`, `preconditions`, `instructions`,
+  `setup`, `teardown`, `allowedTools`, `index`, `steps`) — `description` is the case's **goal** (what
+  it sets out to verify), `preconditions` is free text about the state the case expects, and
+  `setup`/`teardown` are hooks (same shape as the suite's) that run around just this case. `steps` creates the case with its ordered steps in one call (each step uses the
+  `create_test_step` fields). `allowedTools` lists the lane tools the agent may use; omit it to allow
+  all of them. Refused with a `CASE_LIMIT` error when the suite is full.
+- `update_test_case` (`caseId`; any of `name`, `description`, `preconditions`, `instructions`, `setup`,
+  `teardown`, `allowedTools`, `allowAllTools`) — `allowAllTools: true` removes the allow-list. Steps are edited with the step
+  tools. Refused for a locked case.
+- `delete_test_case` (`caseId`) — allowed even when locked. Asks for confirmation inside the AI panel.
+- `duplicate_test_case` (`caseId`) — deep copy placed after the original. Refused when locked or full.
+- `move_test_case` (`caseId`, `toIndex`; optional `toSuiteId`) — reorders inside the suite (always
+  allowed) or moves the case into another suite (refused when that suite is locked or full). Returns
+  the case with its new `suiteId` and `index`.
+
+### Steps
+
+- `create_test_step` (`caseId`, `action`; optional `expected`, `timeoutMs`, `retries`, `maxToolCalls`,
+  `onFailure`, `checks`, `examples`, `index`) — `maxToolCalls` (1..100, default 15) is the step's
+  lane-tool call budget; `onFailure` is `STOP_CASE` (default), `CONTINUE`,
+  `CREATE_ISSUE_AND_CONTINUE` or `PAUSE_FOR_USER`. Refused when the case or its suite is locked.
+- `update_test_step` (`stepId`; any of the create fields) — `checks` and `examples` **replace the whole
+  ordered lists**: send every entry you want to keep, re-sending an entry's `id` keeps its identity.
+- `delete_test_step` (`stepId`), `duplicate_test_step` (`stepId`; deep copy with new ids placed after the
+  original), `move_test_step` (`stepId`, `toIndex`; returns the case's `stepIds` order).
+
+Check entries have a `type`: `logAppears` (`regex`, optional `tag`, `withinMs`), `logAbsent` (`regex`,
+optional `tag`, `forMs`), `screenJudge` (`text`, optional `exampleRef` = the id of one of the step's
+examples), `scriptResult` (`scriptId`, optional `args` object, `exitCode` — default 0, `null` for any —
+and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `goldenScreenshot`
+(`assetPath` relative to the suite's asset folder; the image itself is not uploaded over MCP) or
+`referenceLog` (`text`), with an optional `caption`. Both accept an optional `id`.
+
+### Scripts and shared steps
+
+- `list_test_scripts`, `create_test_script` (`toolName`, `commandTemplate`; optional `description`,
+  `params`, `target` `HOST_SHELL`|`ADB_SHELL`, `timeoutMs`, `outputCapBytes`, `workingDir`,
+  `permission` `AUTO`|`ASK`|`SETUP_TEARDOWN_ONLY`), `update_test_script` (`scriptId`; partial, `params`
+  replaces the whole list), `delete_test_script` (asks for confirmation inside the AI panel),
+  `move_test_script` (`scriptId`, `toIndex`). A param is `{ name, type STRING|INT|BOOL, description,
+  required, defaultValue }`. Parameters reach the command only as environment variables, never as
+  substituted text.
+- `list_shared_steps`, `create_shared_step` (`name`; optional `description`, `steps`),
+  `update_shared_step` (`sharedStepId`; partial, `steps` replaces the whole list),
+  `delete_shared_step`, `move_shared_step` (`sharedStepId`, `toIndex`). A suite's `setup`/`teardown`
+  hooks reference a shared step with `{ "type": "shared", "sharedStepId": ... }` and a script with
+  `{ "type": "script", "scriptId": ..., "args": {...} }`.
+
+REST shortcuts for the two read tools: `GET /test-suites` and `GET /test-suite?suiteId=...`.
+
 ## Prompt starters
 
 > Investigate the crash in the active tab. Start with crash sites, narrow before reading rows,

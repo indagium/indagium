@@ -5,6 +5,7 @@ package com.indagium.testing.model
 const val MAX_SCRIPT_TOOL_NAME_CHARS = 41
 const val MAX_ID_CHARS = 128
 const val COPY_NAME_SUFFIX = " (copy)"
+const val MAX_TAG_CHARS = 40
 
 private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,${MAX_ID_CHARS - 1}}$")
 private val SCRIPT_TOOL_NAME_REGEX = Regex("^[a-z][a-z0-9_]{1,40}$")
@@ -72,6 +73,10 @@ fun scriptParamNameError(name: String): String? = when {
 
 fun isValidScriptParamName(name: String): Boolean = scriptParamNameError(name) == null
 
+/** Tags trimmed, blanks dropped and duplicates (ignoring case) removed, keeping the first spelling and the order. */
+fun normalizeTags(tags: List<String>): List<String> =
+    tags.map { it.trim() }.filter { it.isNotEmpty() }.distinctBy { it.lowercase() }
+
 /** "Name" becomes "Name (copy)". */
 fun copyName(name: String): String = name + COPY_NAME_SUFFIX
 
@@ -104,7 +109,12 @@ fun TestStep.withFreshIds(): TestStep {
     )
 }
 
-fun TestCase.withFreshIds(): TestCase = copy(id = newCaseId(), steps = steps.map { it.withFreshIds() })
+fun TestCase.withFreshIds(): TestCase = copy(
+    id = newCaseId(),
+    setup = setup.map { it.withId(newHookId()) },
+    teardown = teardown.map { it.withId(newHookId()) },
+    steps = steps.map { it.withFreshIds() },
+)
 
 /** A deep copy with new ids for the suite and everything inside it; [TestSuite.readOnly] is cleared. */
 fun TestSuite.withFreshIds(): TestSuite = copy(

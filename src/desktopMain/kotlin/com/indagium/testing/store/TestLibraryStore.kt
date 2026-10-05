@@ -21,6 +21,7 @@ import com.indagium.testing.model.newScriptId
 import com.indagium.testing.model.newSharedStepId
 import com.indagium.testing.model.newStepId
 import com.indagium.testing.model.newSuiteId
+import com.indagium.testing.model.normalizeTags
 import com.indagium.testing.model.withFreshIds
 import com.indagium.utils.writeFileAtomically
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -94,15 +95,19 @@ class TestLibraryStore(
         }
     }
 
-    /** Replaces the suite's own fields (name, description, instructions, hooks, variables). Its id, cases and creation time are kept. */
+    /** Replaces the suite's own fields (name, description, instructions, target, tags, hooks, variables). Its id, cases and creation time are kept. */
     fun updateSuite(suiteId: String, transform: (TestSuite) -> TestSuite): StoreResult<TestSuite> =
         editSuite(
             locate = { it.suite(suiteId) },
             notFound = StoreResult.NotFound("suite", suiteId),
             operation = { LimitOperation.EditSuite(suiteId) },
         ) { _, old ->
-            val updated = transform(old).copy(id = old.id, cases = old.cases, createdAt = old.createdAt, readOnly = false)
-            validateName("Suite", updated.name)?.let { return@editSuite SuiteEdit.Fail(it) }
+            val transformed = transform(old)
+            val updated = transformed.copy(
+                id = old.id, cases = old.cases, createdAt = old.createdAt, readOnly = false,
+                targetPackage = transformed.targetPackage.trim(), tags = normalizeTags(transformed.tags),
+            )
+            validateSuite(updated)?.let { return@editSuite SuiteEdit.Fail(it) }
             SuiteEdit.Done(updated, updated)
         }
 
@@ -504,7 +509,7 @@ class TestLibraryStore(
     }
 
     private fun danglingReferenceWarning(lib: TestLibrary, suite: TestSuite): String? {
-        val hooks = suite.setup + suite.teardown
+        val hooks = suite.setup + suite.teardown + suite.cases.flatMap { it.setup + it.teardown }
         val checks = suite.cases.flatMap { c -> c.steps.flatMap { it.checks } }
         val missingScripts = hooks.filterIsInstance<HookItem.Script>().count { lib.script(it.scriptId) == null } +
             checks.filterIsInstance<StepCheck.ScriptResult>().count { lib.script(it.scriptId) == null }

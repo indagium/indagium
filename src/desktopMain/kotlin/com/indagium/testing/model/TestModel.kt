@@ -19,6 +19,7 @@ const val VARIABLE_ID_PREFIX = "var-"
 
 const val DEFAULT_STEP_TIMEOUT_MS = 60_000L
 const val DEFAULT_STEP_RETRIES = 1
+const val DEFAULT_STEP_MAX_TOOL_CALLS = 15
 const val DEFAULT_LOG_WITHIN_MS = 10_000L
 const val DEFAULT_LOG_ABSENT_FOR_MS = 5_000L
 const val DEFAULT_SCRIPT_TIMEOUT_MS = 30_000L
@@ -160,20 +161,31 @@ data class TestStep(
     val examples: List<StepExample> = emptyList(),
     val timeoutMs: Long = DEFAULT_STEP_TIMEOUT_MS,
     val retries: Int = DEFAULT_STEP_RETRIES,
+    /** How many lane-tool calls the agent may spend on this step before the run gives up on it. */
+    val maxToolCalls: Int = DEFAULT_STEP_MAX_TOOL_CALLS,
     val onFailure: OnFailure = OnFailure.STOP_CASE,
 )
 
-/** [allowedTools] null means every lane tool is allowed; an empty set means none. */
+/**
+ * [description] is the case's GOAL (what it sets out to verify). [preconditions] is free text about the
+ * state the case expects; [setup]/[teardown] are hooks run around just this case.
+ * [allowedTools] null means every lane tool is allowed; an empty set means none.
+ */
 data class TestCase(
     val id: String,
     val name: String,
     val description: String = "",
     val instructions: String = "",
+    val preconditions: String = "",
+    val setup: List<HookItem> = emptyList(),
+    val teardown: List<HookItem> = emptyList(),
     val steps: List<TestStep> = emptyList(),
     val allowedTools: Set<String>? = null,
 )
 
 /**
+ * [targetPackage] is the Android package under test (blank = unspecified), [deviceProfileHint] free text
+ * about the device the suite wants, [tags] short labels (trimmed, unique, see [normalizeTags]).
  * [readOnly] is never persisted: it marks a suite that was loaded from a file written by a NEWER
  * version of Indagium. Such a suite can be read, exported and deleted, but is never rewritten, so
  * fields this build does not understand are not silently lost.
@@ -183,6 +195,9 @@ data class TestSuite(
     val name: String,
     val description: String = "",
     val instructions: String = "",
+    val targetPackage: String = "",
+    val deviceProfileHint: String = "",
+    val tags: List<String> = emptyList(),
     val setup: List<HookItem> = emptyList(),
     val teardown: List<HookItem> = emptyList(),
     val variables: List<TestVariable> = emptyList(),

@@ -35,7 +35,6 @@ import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
-import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
@@ -52,8 +51,6 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
@@ -677,95 +674,6 @@ private fun JsonElement.toAny(): Any? = when (this) {
 // One declaration per operation, shared by the MCP tool registry and the REST route table so the
 // two transports can never drift on tool name or path.
 private typealias McpTool = IndagiumToolDescriptor
-
-// "array" means array-of-string (tag lists, tab ids, ...); "array<integer>" means array-of-number
-// (line ids). Getting this right in the schema matters beyond cosmetics: a client model sees this
-// JSON Schema at tools/list time, and a schema that (wrongly) says "array of strings" measurably
-// nudges models toward quoting line ids as "73" instead of emitting bare 73 — observed with a
-// local Gemma build mangling its own tool-call syntax on a quoted lineIds element.
-// `enums` constrains a property to a fixed set of string values (for a scalar prop it goes on the
-// property; for an "array"/"array<integer>" prop it goes on the array items). `descriptions` adds a
-// per-property JSON-Schema description. Both are opt-in so untouched call sites are unaffected —
-// but for enum-shaped fields (levels, mode, format) declaring them lets a compliant client avoid
-// sending values the handler would otherwise reject (see setFilter's level/mode validation).
-// Item schema for an "array of objects" property (sequences, messageRules, ...) — plug one of
-// these into schema()'s `objectArrays` map to replace that property's default array-of-string
-// shape with a real object schema, so a client sees the actual fields it must send instead of
-// guessing (or, worse, quoting a whole object as a string).
-private data class ObjectArrayItemSchema(
-    val props: List<Pair<String, String>>,
-    val required: List<String> = emptyList(),
-    val enums: Map<String, List<String>> = emptyMap(),
-    val descriptions: Map<String, String> = emptyMap(),
-)
-
-private fun schema(
-    vararg props: Pair<String, String>,
-    required: List<String> = emptyList(),
-    enums: Map<String, List<String>> = emptyMap(),
-    descriptions: Map<String, String> = emptyMap(),
-    objectArrays: Map<String, ObjectArrayItemSchema> = emptyMap(),
-): ToolSchema =
-    ToolSchema(
-        properties = buildJsonObject {
-            props.forEach { (name, type) ->
-                put(
-                    name,
-                    buildJsonObject {
-                        when (type) {
-                            "array" -> objectArrays[name]?.let { arrayOfObjectItems(it) }
-                                ?: arrayOfItems("string", enums[name])
-                            "array<integer>" -> arrayOfItems("integer")
-                            else -> {
-                                put("type", type)
-                                enums[name]?.let { putEnum(it) }
-                            }
-                        }
-                        descriptions[name]?.let { put("description", it) }
-                    },
-                )
-            }
-        },
-        required = required.ifEmpty { null },
-    )
-
-private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfItems(itemType: String, itemEnum: List<String>? = null) {
-    put("type", "array")
-    put("items", buildJsonObject {
-        put("type", itemType)
-        itemEnum?.let { putEnum(it) }
-    })
-}
-
-private fun kotlinx.serialization.json.JsonObjectBuilder.arrayOfObjectItems(item: ObjectArrayItemSchema) {
-    put("type", "array")
-    put(
-        "items",
-        buildJsonObject {
-            put("type", "object")
-            put(
-                "properties",
-                buildJsonObject {
-                    item.props.forEach { (name, type) ->
-                        put(
-                            name,
-                            buildJsonObject {
-                                put("type", type)
-                                item.enums[name]?.let { putEnum(it) }
-                                item.descriptions[name]?.let { put("description", it) }
-                            },
-                        )
-                    }
-                },
-            )
-            if (item.required.isNotEmpty()) put("required", buildJsonArray { item.required.forEach { add(it) } })
-        },
-    )
-}
-
-private fun kotlinx.serialization.json.JsonObjectBuilder.putEnum(values: List<String>) {
-    put("enum", buildJsonArray { values.forEach { add(it) } })
-}
 
 // Object-array item schemas for set_filter's `sequences` / `messageRules` — kept beside schema()
 // so both the property list and its item shape live in one place. Property sets and semantics
@@ -1743,7 +1651,7 @@ internal val MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "Check a device capture, marker, or snapshot operation by operationId.",
         schema("operationId" to "string", required = listOf("operationId")),
     ),
-)
+) + TEST_SUITE_MCP_TOOLS
 
 // REST path/method per operation — the exact paths the JDK-HttpServer version served, so the curl
 // escape hatch and ControlServerTest are unaffected. Keyed to the same op names as MCP_TOOLS.
@@ -1802,4 +1710,6 @@ private val REST_ROUTES: List<Triple<HttpMethod, String, String>> = listOf(
     Triple(HttpMethod.Post, "/cases/metadata", "set_case_metadata"),
     Triple(HttpMethod.Get, "/video/frame", "get_video_frame"),
     Triple(HttpMethod.Get, "/video/follow-diagnostics", "get_follow_diagnostics"),
+    Triple(HttpMethod.Get, "/test-suites", "list_test_suites"),
+    Triple(HttpMethod.Get, "/test-suite", "get_test_suite"),
 )

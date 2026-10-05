@@ -124,7 +124,8 @@ private const val MAX_LOG_COMPOSITION_LIMIT = 500
  * This is deliberately constructible without a server so the in-app AI runner can execute the
  * exact same contract directly. ControlServer is only an HTTP/MCP adapter over [toolGateway].
  *
- * Genuinely large by nature: one handler method per entry in the 57-tool MCP catalog (see this
+ * Genuinely large by nature: one handler method per entry in the MCP catalog (the AI test-suite tools live in
+ * TestSuiteToolOperations and are merged in below; see this
  * file's own header doc and IndagiumToolGateway's name/handler parity check), not accumulated
  * duplication. Splitting it into multiple classes would touch every call site that currently
  * references `operations::someHandler` by name — a real architectural change with its own risk to
@@ -136,7 +137,7 @@ private const val MAX_LOG_COMPOSITION_LIMIT = 500
 internal class IndagiumToolOperations(
     private val appState: AppState,
 ) {
-    private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> = mapOf(
+    private val coreOperationHandlers: Map<String, (Map<String, Any?>) -> Any?> = mapOf(
         "list_tabs" to { listTabs() },
         "get_memory_status" to { memoryStatus() },
         "open_log_file" to { a ->
@@ -326,6 +327,10 @@ internal class IndagiumToolOperations(
         },
         "get_capture_operation_status" to { a -> appState.deviceAiOperationStatus(a.str("operationId") ?: "") },
     )
+
+    // The AI test-suite authoring tools live in TestSuiteToolOperations.kt / TestSuiteToolCatalog.kt.
+    private val operationHandlers: Map<String, (Map<String, Any?>) -> Any?> =
+        coreOperationHandlers + TestSuiteToolOperations(appState).handlers
 
     // Hoisted onto AppState (ui/AppState.kt's own `caseSearch`) so this MCP/AI tool surface and the
     // Case Library dialog search, get, and reindex the exact same in-memory index/lock over

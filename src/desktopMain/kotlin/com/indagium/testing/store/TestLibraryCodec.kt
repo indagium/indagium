@@ -7,6 +7,7 @@ import com.indagium.testing.model.DEFAULT_LOG_WITHIN_MS
 import com.indagium.testing.model.DEFAULT_SCRIPT_EXIT_CODE
 import com.indagium.testing.model.DEFAULT_SCRIPT_OUTPUT_CAP_BYTES
 import com.indagium.testing.model.DEFAULT_SCRIPT_TIMEOUT_MS
+import com.indagium.testing.model.DEFAULT_STEP_MAX_TOOL_CALLS
 import com.indagium.testing.model.DEFAULT_STEP_RETRIES
 import com.indagium.testing.model.DEFAULT_STEP_TIMEOUT_MS
 import com.indagium.testing.model.EXAMPLE_ID_PREFIX
@@ -63,6 +64,12 @@ const val TEST_LIBRARY_FILE_FORMAT = "indagium-test-library"
 const val TEST_SUITE_FILE_VERSION = 1
 const val TEST_LIBRARY_FILE_VERSION = 1
 
+// The `type` values of the polymorphic entries. A reader skips an entry of any other type, so a caller
+// that must not lose input silently (the MCP authoring tools) checks against these first.
+val CHECK_TYPE_NAMES: List<String> = listOf("logAppears", "logAbsent", "screenJudge", "scriptResult", "askJudge")
+val EXAMPLE_TYPE_NAMES: List<String> = listOf("goldenScreenshot", "referenceLog")
+val HOOK_TYPE_NAMES: List<String> = listOf("script", "shared")
+
 private val prettyJson = Json { prettyPrint = true }
 
 data class DecodedSuiteFile(val suite: TestSuite, val readOnly: Boolean)
@@ -99,7 +106,7 @@ private fun JsonObject.stringMap(key: String): Map<String, String> {
 }
 
 /** Hands out ids for one file: a stored id is kept when it is safe and not yet used, otherwise a fresh one is made. */
-private class IdAllocator {
+internal class IdAllocator {
     private val seen = HashSet<String>()
 
     fun next(raw: JsonElement?, prefix: String): String {
@@ -121,7 +128,7 @@ private fun JsonObjectBuilder.putStringMap(key: String, map: Map<String, String>
     put(key, buildJsonObject { map.forEach { (k, v) -> put(k, v) } })
 }
 
-private fun checkToJson(check: StepCheck): JsonObject = buildJsonObject {
+internal fun checkToJson(check: StepCheck): JsonObject = buildJsonObject {
     put("id", check.id)
     when (check) {
         is StepCheck.LogAppears -> {
@@ -155,7 +162,7 @@ private fun checkToJson(check: StepCheck): JsonObject = buildJsonObject {
     }
 }
 
-private fun exampleToJson(example: StepExample): JsonObject = buildJsonObject {
+internal fun exampleToJson(example: StepExample): JsonObject = buildJsonObject {
     put("id", example.id)
     put("caption", example.caption)
     when (example) {
@@ -170,27 +177,31 @@ private fun exampleToJson(example: StepExample): JsonObject = buildJsonObject {
     }
 }
 
-private fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
+internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     put("id", step.id)
     put("action", step.action)
     put("expected", step.expected)
     put("timeoutMs", step.timeoutMs)
     put("retries", step.retries)
+    put("maxToolCalls", step.maxToolCalls)
     put("onFailure", step.onFailure.name)
     put("checks", buildJsonArray { step.checks.forEach { add(checkToJson(it)) } })
     put("examples", buildJsonArray { step.examples.forEach { add(exampleToJson(it)) } })
 }
 
-private fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
+internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
     put("id", case.id)
     put("name", case.name)
     put("description", case.description)
     put("instructions", case.instructions)
+    put("preconditions", case.preconditions)
+    put("setup", buildJsonArray { case.setup.forEach { add(hookToJson(it)) } })
+    put("teardown", buildJsonArray { case.teardown.forEach { add(hookToJson(it)) } })
     case.allowedTools?.let { tools -> put("allowedTools", buildJsonArray { tools.forEach { add(JsonPrimitive(it)) } }) }
     put("steps", buildJsonArray { case.steps.forEach { add(stepToJson(it)) } })
 }
 
-private fun hookToJson(hook: HookItem): JsonObject = buildJsonObject {
+internal fun hookToJson(hook: HookItem): JsonObject = buildJsonObject {
     put("id", hook.id)
     when (hook) {
         is HookItem.Script -> {
@@ -205,18 +216,21 @@ private fun hookToJson(hook: HookItem): JsonObject = buildJsonObject {
     }
 }
 
-private fun variableToJson(variable: TestVariable): JsonObject = buildJsonObject {
+internal fun variableToJson(variable: TestVariable): JsonObject = buildJsonObject {
     put("id", variable.id)
     put("name", variable.name)
     put("value", variable.value)
     put("description", variable.description)
 }
 
-private fun suiteToJson(suite: TestSuite): JsonObject = buildJsonObject {
+internal fun suiteToJson(suite: TestSuite): JsonObject = buildJsonObject {
     put("id", suite.id)
     put("name", suite.name)
     put("description", suite.description)
     put("instructions", suite.instructions)
+    put("targetPackage", suite.targetPackage)
+    put("deviceProfileHint", suite.deviceProfileHint)
+    put("tags", buildJsonArray { suite.tags.forEach { add(JsonPrimitive(it)) } })
     put("createdAt", suite.createdAt)
     put("updatedAt", suite.updatedAt)
     put("setup", buildJsonArray { suite.setup.forEach { add(hookToJson(it)) } })
@@ -225,7 +239,7 @@ private fun suiteToJson(suite: TestSuite): JsonObject = buildJsonObject {
     put("cases", buildJsonArray { suite.cases.forEach { add(caseToJson(it)) } })
 }
 
-private fun paramToJson(param: ScriptParam): JsonObject = buildJsonObject {
+internal fun paramToJson(param: ScriptParam): JsonObject = buildJsonObject {
     put("name", param.name)
     put("type", param.type.name)
     put("description", param.description)
@@ -233,7 +247,7 @@ private fun paramToJson(param: ScriptParam): JsonObject = buildJsonObject {
     param.defaultValue?.let { put("defaultValue", it) }
 }
 
-private fun scriptToJson(script: TestScript): JsonObject = buildJsonObject {
+internal fun scriptToJson(script: TestScript): JsonObject = buildJsonObject {
     put("id", script.id)
     put("toolName", script.toolName)
     put("description", script.description)
@@ -246,7 +260,7 @@ private fun scriptToJson(script: TestScript): JsonObject = buildJsonObject {
     put("params", buildJsonArray { script.params.forEach { add(paramToJson(it)) } })
 }
 
-private fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject {
+internal fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject {
     put("id", shared.id)
     put("name", shared.name)
     put("description", shared.description)
@@ -276,7 +290,7 @@ fun encodeLibraryFile(suiteOrder: List<String>, scripts: List<TestScript>, share
 
 // ── Readers ──────────────────────────────────────────────────────────
 
-private fun decodeCheck(o: JsonObject, ids: IdAllocator): StepCheck? {
+internal fun decodeCheck(o: JsonObject, ids: IdAllocator): StepCheck? {
     val id by lazy { ids.next(o["id"], CHECK_ID_PREFIX) }
     return when (o.str("type")) {
         "logAppears" -> StepCheck.LogAppears(id, o.optStr("tag"), o.str("regex"), o.long("withinMs", DEFAULT_LOG_WITHIN_MS))
@@ -295,7 +309,7 @@ private fun decodeCheck(o: JsonObject, ids: IdAllocator): StepCheck? {
     }
 }
 
-private fun decodeExample(o: JsonObject, ids: IdAllocator): StepExample? {
+internal fun decodeExample(o: JsonObject, ids: IdAllocator): StepExample? {
     val id by lazy { ids.next(o["id"], EXAMPLE_ID_PREFIX) }
     return when (o.str("type")) {
         "goldenScreenshot" -> StepExample.GoldenScreenshot(id, o.str("assetPath"), o.str("caption"))
@@ -312,6 +326,7 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep = TestStep(
     examples = o.objects("examples").mapNotNull { decodeExample(it, ids) },
     timeoutMs = o.long("timeoutMs", DEFAULT_STEP_TIMEOUT_MS),
     retries = o.int("retries", DEFAULT_STEP_RETRIES),
+    maxToolCalls = o.int("maxToolCalls", DEFAULT_STEP_MAX_TOOL_CALLS),
     onFailure = o.enumOr("onFailure", OnFailure.STOP_CASE),
 )
 
@@ -320,11 +335,14 @@ private fun decodeCase(o: JsonObject, ids: IdAllocator): TestCase = TestCase(
     name = o.str("name"),
     description = o.str("description"),
     instructions = o.str("instructions"),
+    preconditions = o.str("preconditions"),
+    setup = o.objects("setup").mapNotNull { decodeHook(it, ids) },
+    teardown = o.objects("teardown").mapNotNull { decodeHook(it, ids) },
     steps = o.objects("steps").map { decodeStep(it, ids) },
     allowedTools = (o["allowedTools"] as? JsonArray)?.let { o.strings("allowedTools").toCollection(LinkedHashSet()) },
 )
 
-private fun decodeHook(o: JsonObject, ids: IdAllocator): HookItem? {
+internal fun decodeHook(o: JsonObject, ids: IdAllocator): HookItem? {
     val id by lazy { ids.next(o["id"], HOOK_ID_PREFIX) }
     return when (o.str("type")) {
         "script" -> HookItem.Script(id, o.str("scriptId"), o.stringMap("args"))
@@ -333,7 +351,7 @@ private fun decodeHook(o: JsonObject, ids: IdAllocator): HookItem? {
     }
 }
 
-private fun decodeVariable(o: JsonObject, ids: IdAllocator): TestVariable =
+internal fun decodeVariable(o: JsonObject, ids: IdAllocator): TestVariable =
     TestVariable(ids.next(o["id"], VARIABLE_ID_PREFIX), o.str("name"), o.str("value"), o.str("description"))
 
 private fun decodeSuite(o: JsonObject, readOnly: Boolean): TestSuite? {
@@ -346,6 +364,9 @@ private fun decodeSuite(o: JsonObject, readOnly: Boolean): TestSuite? {
         name = o.str("name"),
         description = o.str("description"),
         instructions = o.str("instructions"),
+        targetPackage = o.str("targetPackage"),
+        deviceProfileHint = o.str("deviceProfileHint"),
+        tags = o.strings("tags"),
         setup = o.objects("setup").mapNotNull { decodeHook(it, ids) },
         teardown = o.objects("teardown").mapNotNull { decodeHook(it, ids) },
         variables = o.objects("variables").map { decodeVariable(it, ids) },
@@ -356,7 +377,7 @@ private fun decodeSuite(o: JsonObject, readOnly: Boolean): TestSuite? {
     )
 }
 
-private fun decodeParam(o: JsonObject): ScriptParam? {
+internal fun decodeParam(o: JsonObject): ScriptParam? {
     val name = o.str("name").takeIf { it.isNotBlank() } ?: return null
     return ScriptParam(
         name = name,

@@ -80,6 +80,7 @@ internal fun fullSuite(script: TestScript = sampleScript(), shared: SharedStep =
         examples = listOf(golden, refLog),
         timeoutMs = 45_000L,
         retries = 2,
+        maxToolCalls = 30,
         onFailure = OnFailure.CREATE_ISSUE_AND_CONTINUE,
     )
     val case = TestCase(
@@ -87,6 +88,9 @@ internal fun fullSuite(script: TestScript = sampleScript(), shared: SharedStep =
         name = "Settings",
         description = "Opens settings",
         instructions = "Be careful",
+        preconditions = "Signed in",
+        setup = listOf(HookItem.Shared(newHookId(), shared.id)),
+        teardown = listOf(HookItem.Script(newHookId(), script.id, mapOf("package_name" to "com.example.app"))),
         steps = listOf(step, plainStep("Go back")),
         allowedTools = setOf("tap", "take_screenshot"),
     )
@@ -95,6 +99,9 @@ internal fun fullSuite(script: TestScript = sampleScript(), shared: SharedStep =
         name = "Smoke",
         description = "Quick check",
         instructions = "Use the test account",
+        targetPackage = "com.example.app",
+        deviceProfileHint = "Pixel 8, Android 15",
+        tags = listOf("smoke", "settings"),
         setup = listOf(HookItem.Script(newHookId(), script.id, mapOf("package_name" to "com.example.app")), HookItem.Shared(newHookId(), shared.id)),
         teardown = listOf(HookItem.Script(newHookId(), script.id)),
         variables = listOf(TestVariable(newVariableId(), "user", "tester", "Account name")),
