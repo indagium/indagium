@@ -83,22 +83,22 @@ data class DecodedLibraryFile(
 
 // ── Tolerant readers ─────────────────────────────────────────────────
 
-private fun JsonObject.str(key: String, default: String = ""): String = (this[key] as? JsonPrimitive)?.contentOrNull ?: default
+internal fun JsonObject.str(key: String, default: String = ""): String = (this[key] as? JsonPrimitive)?.contentOrNull ?: default
 
-private fun JsonObject.optStr(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+internal fun JsonObject.optStr(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
 
-private fun JsonObject.long(key: String, default: Long): Long = (this[key] as? JsonPrimitive)?.longOrNull ?: default
+internal fun JsonObject.long(key: String, default: Long): Long = (this[key] as? JsonPrimitive)?.longOrNull ?: default
 
-private fun JsonObject.int(key: String, default: Int): Int = (this[key] as? JsonPrimitive)?.intOrNull ?: default
+internal fun JsonObject.int(key: String, default: Int): Int = (this[key] as? JsonPrimitive)?.intOrNull ?: default
 
-private fun JsonObject.bool(key: String, default: Boolean): Boolean = (this[key] as? JsonPrimitive)?.booleanOrNull ?: default
+internal fun JsonObject.bool(key: String, default: Boolean): Boolean = (this[key] as? JsonPrimitive)?.booleanOrNull ?: default
 
-private fun JsonObject.objects(key: String): List<JsonObject> = (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
+internal fun JsonObject.objects(key: String): List<JsonObject> = (this[key] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
 
-private fun JsonObject.strings(key: String): List<String> =
+internal fun JsonObject.strings(key: String): List<String> =
     (this[key] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }.orEmpty()
 
-private fun JsonObject.stringMap(key: String): Map<String, String> {
+internal fun JsonObject.stringMap(key: String): Map<String, String> {
     val obj = this[key] as? JsonObject ?: return emptyMap()
     val out = LinkedHashMap<String, String>()
     obj.forEach { (k, v) -> (v as? JsonPrimitive)?.contentOrNull?.let { out[k] = it } }
@@ -119,7 +119,7 @@ internal class IdAllocator {
     }
 }
 
-private inline fun <reified E : Enum<E>> JsonObject.enumOr(key: String, default: E): E =
+internal inline fun <reified E : Enum<E>> JsonObject.enumOr(key: String, default: E): E =
     optStr(key)?.let { name -> enumValues<E>().firstOrNull { it.name == name } } ?: default
 
 // ── Writers ──────────────────────────────────────────────────────────
@@ -438,4 +438,20 @@ fun decodeLibraryFile(text: String): Result<DecodedLibraryFile> = runCatching {
         sharedSteps = root.objects("sharedSteps").map { decodeSharedStep(it, ids) },
         readOnly = newer,
     )
+}
+
+// ── Run snapshots ────────────────────────────────────────────────────
+// A test run freezes the suite, the library scripts and the shared steps it used inside run.json (TestRunCodec.kt),
+// in exactly the shape these files use; the helpers below let that codec read them back without exposing the privates.
+
+internal fun decodeSuiteObject(o: JsonObject): TestSuite? = decodeSuite(o, readOnly = false)
+
+internal fun decodeScriptObjects(objects: List<JsonObject>): List<TestScript> {
+    val ids = IdAllocator()
+    return objects.mapNotNull { decodeScript(it, ids) }
+}
+
+internal fun decodeSharedStepObjects(objects: List<JsonObject>): List<SharedStep> {
+    val ids = IdAllocator()
+    return objects.map { decodeSharedStep(it, ids) }
 }

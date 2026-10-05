@@ -108,7 +108,12 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
         rule.onNodeWithText("New shared step").assertExists()
 
+        // Runs is a real screen now (the run list); Issues is still a placeholder (nav subtitle + screen text).
         rule.onNodeWithText("Runs").performClick()
+        rule.waitForIdle()
+        assertEquals(TestsNav.Runs, state.testsView.nav)
+        rule.onNodeWithText("No runs yet.").assertExists()
+        rule.onNodeWithText("Issues").performClick()
         rule.waitForIdle()
         assertTrue(rule.onAllNodesWithText("Available in a later version").fetchSemanticsNodes().size >= 2)
     }

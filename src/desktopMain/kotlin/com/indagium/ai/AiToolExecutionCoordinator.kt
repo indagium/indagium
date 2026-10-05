@@ -244,6 +244,8 @@ internal class AiToolExecutionCoordinator(
         "import_test_suite", "export_test_suite" -> "Read or write a test-suite file"
         "set_edition" -> "Switch the edition used for test-suite limits"
         "try_test_script" -> "Run a test script on this computer or a device"
+        "run_test_suite" -> "Start an AI test run that drives devices and may run scripts"
+        "cancel_test_run" -> "Cancel a running AI test run"
         else -> "Perform a confirmation-required action"
     }
 

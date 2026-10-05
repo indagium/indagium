@@ -274,18 +274,31 @@ internal class AiAgentRunner(
         systemPrompt: String? = null,
         context: AiInvestigationContext = AiInvestigationContext(session.tabId),
         reasoningEffort: String? = null,
+        /** Tools that never spend the call budget; empty for the sidebar. */
+        freeTools: Set<String> = emptySet(),
+        /** A confirmation card nobody answers within this many ms counts as denied; null (the sidebar) waits indefinitely. */
+        confirmationTimeoutMs: Long? = null,
+        /** Replaces the budget sentence of the system prompt (an AI test run is not about notes); null keeps the default. */
+        budgetGuidance: ((AiRun) -> String)? = null,
     ): AiRun {
         require(prompt.isNotBlank()) { "AI prompt must not be blank" }
         require(context.tabId == session.tabId) { "AI context must belong to the session tab." }
         session.activeRun?.cancel()
-        val run = AiRun(tabId = session.tabId, userPrompt = prompt, context = context, maxToolCalls = maxToolRounds)
+        val run = AiRun(
+            tabId = session.tabId,
+            userPrompt = prompt,
+            context = context,
+            maxToolCalls = maxToolRounds,
+            freeTools = freeTools,
+            confirmationTimeoutMs = confirmationTimeoutMs,
+        )
         session.lastPrompt = prompt
         session.lastContext = context
         session.activeRun = run
         session.retain(run)
         run.job = scope.launch {
             try {
-                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort)
+                runLoop(session, run, model, prompt, systemPrompt, reasoningEffort, budgetGuidance)
             } catch (_: CancellationException) {
                 run.emit(AiRunEvent.Cancelled)
             } finally {
@@ -318,6 +331,7 @@ internal class AiAgentRunner(
         prompt: String,
         systemPrompt: String?,
         reasoningEffort: String?,
+        budgetGuidance: ((AiRun) -> String)?,
     ) {
         val conversation = session.messages.toMutableList()
         val initialMessageCount = session.messages.size
@@ -326,7 +340,7 @@ internal class AiAgentRunner(
         }
         // This is independent of the caller's provider: managed Codex/Claude MCP calls consume
         // the same per-run budget in AiToolExecutionCoordinator.
-        conversation += LlmMessage(LlmRole.SYSTEM, run.toolCallBudget.initialGuidance())
+        conversation += LlmMessage(LlmRole.SYSTEM, budgetGuidance?.invoke(run) ?: run.toolCallBudget.initialGuidance())
         conversation += LlmMessage(LlmRole.USER, prompt)
 
         try {

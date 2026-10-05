@@ -1,0 +1,245 @@
+package com.indagium.debug
+
+import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
+import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
+import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.LaneConfig
+import com.indagium.testing.model.LaneKind
+import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.summary
+import com.indagium.testing.run.PauseDecision
+import com.indagium.testing.run.StartRunResult
+import com.indagium.testing.run.toMarkdown
+import com.indagium.testing.store.runToJson
+import com.indagium.ui.AppState
+import kotlinx.coroutines.CancellationException
+
+// Handlers of the AI test-RUN tools (catalogue: TestRunToolCatalog.kt), merged into IndagiumToolOperations like the
+// authoring tools. Every handler returns a plain Map; every expected failure is DATA, `{ "error": message }`, never an
+// exception. Everything that waits on the disk or on a run is a suspending handler so no request thread blocks.
+
+private val RUN_JSON_DROPPED_KEYS = setOf("suite", "scripts", "sharedSteps")
+
+internal class TestRunToolOperations(private val appState: AppState) {
+    private val coordinator get() = appState.testRunCoordinator
+
+    val handlers: Map<String, (Map<String, Any?>) -> Any?> = mapOf(
+        "cancel_test_run" to tool { a -> cancelRun(a.requiredString("runId")) },
+        "resolve_test_confirmation" to tool { a -> resolveConfirmation(a) },
+        "resume_paused_step" to tool { a -> resume(a) },
+    )
+
+    val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
+        "run_test_suite" to suspendTool { a -> runSuite(a) },
+        "get_test_run_status" to suspendTool { a -> status(a.requiredString("runId")) },
+        "list_test_runs" to suspendTool { listRuns() },
+        "get_test_run_report" to suspendTool { a -> report(a) },
+        "test_lane_tool_call" to suspendTool { a -> laneToolCall(a) },
+    )
+
+    private fun tool(body: (ToolArgs) -> Any?): (Map<String, Any?>) -> Any? = { raw ->
+        try {
+            body(ToolArgs(raw))
+        } catch (e: ToolArgException) {
+            errorMap(e.message ?: "Invalid arguments.")
+        }
+    }
+
+    private fun suspendTool(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any?>) -> Any? = { raw ->
+        try {
+            body(ToolArgs(raw))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (e: ToolArgException) {
+            errorMap(e.message ?: "Invalid arguments.")
+        }
+    }
+
+    private fun errorMap(message: String): Map<String, Any?> = mapOf("error" to message)
+
+    // ── run_test_suite ───────────────────────────────────────────────
+
+    private suspend fun runSuite(a: ToolArgs): Map<String, Any?> {
+        val config = parseConfig(a)
+        return when (val started = coordinator.start(config)) {
+            is StartRunResult.Started -> mapOf(
+                "runId" to started.runId,
+                "laneIds" to started.laneIds,
+                "lanes" to config.lanes.map { mapOf("laneId" to it.id, "kind" to it.kind.name, "deviceSerial" to it.deviceSerial) },
+                "warnings" to started.warnings,
+            )
+            is StartRunResult.Rejected -> {
+                val limit = started.limit
+                buildMap {
+                    put("error", started.errors.joinToString(" "))
+                    put("errors", started.errors)
+                    if (limit != null) {
+                        put(
+                            "limit",
+                            mapOf(
+                                "kind" to limit.kind.name,
+                                "max" to limit.limit,
+                                "edition" to appState.editionService.current.value.name,
+                                "hint" to limit.hint,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun parseConfig(a: ToolArgs): RunConfig {
+        val lanes = (a.objects("lanes") ?: toolArgError("lanes is required.")).mapIndexed { index, item ->
+            val where = "lanes[$index]"
+            requireFieldTypes(item, where, strings = setOf("profileId", "deviceSerial"))
+            val profileId = (item["profileId"] as? String)?.trim().orEmpty()
+            val serial = (item["deviceSerial"] as? String)?.trim().orEmpty()
+            if (profileId.isEmpty()) toolArgError("$where.profileId is required (an AI profile id, or \"$EXTERNAL_LANE_PROFILE_ID\").")
+            if (serial.isEmpty()) toolArgError("$where.deviceSerial is required.")
+            if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) {
+                LaneConfig(kind = LaneKind.EXTERNAL, profileId = null, deviceSerial = serial)
+            } else {
+                LaneConfig(kind = LaneKind.AGENT_PROFILE, profileId = profileId, deviceSerial = serial)
+            }
+        }
+        val evidence = a.map["evidence"]?.asObject("evidence")
+        val defaults = EvidenceFlags()
+        return RunConfig(
+            suiteId = a.requiredString("suiteId"),
+            caseIds = a.strings("caseIds"),
+            lanes = lanes,
+            repeat = a.int("repeat") ?: 1,
+            caseToolCallLimit = a.int("caseToolCallLimit") ?: DEFAULT_CASE_TOOL_CALL_LIMIT,
+            evidence = EvidenceFlags(
+                video = evidence.flag("video", defaults.video),
+                screenshots = evidence.flag("screenshots", defaults.screenshots),
+                logcat = evidence.flag("logcat", defaults.logcat),
+                transcript = evidence.flag("transcript", defaults.transcript),
+            ),
+            judgeProfileId = a.string("judgeProfileId"),
+            judgeMode = a.string("judgeMode") ?: "off",
+        )
+    }
+
+    private fun Map<String, Any?>?.flag(key: String, default: Boolean): Boolean = when (val v = this?.get(key)) {
+        null -> default
+        is Boolean -> v
+        else -> toolArgError("evidence.$key must be true or false.")
+    }
+
+    // ── Reading ──────────────────────────────────────────────────────
+
+    private suspend fun status(runId: String): Map<String, Any?> {
+        val run = coordinator.loadRun(runId) ?: return errorMap("Run '$runId' was not found.")
+        return statusMap(run)
+    }
+
+    private fun statusMap(run: TestRun): Map<String, Any?> = buildMap {
+        put("runId", run.id)
+        put("suiteId", run.suite.id)
+        put("suiteName", run.suite.name)
+        put("status", run.status.name)
+        put("createdAt", run.createdAt)
+        put("startedAt", run.startedAt)
+        put("finishedAt", run.finishedAt)
+        put("warnings", run.warnings)
+        run.error?.let { put("error", it) }
+        put("lanes", run.lanes.map(::laneMap))
+        put(
+            "pendingConfirmations",
+            coordinator.pendingConfirmations().filter { it.runId == run.id }.map {
+                mapOf("confirmationId" to it.confirmationId, "laneId" to it.laneId, "tool" to it.toolName, "description" to it.description)
+            },
+        )
+        put(
+            "pausedLanes",
+            coordinator.pausedSteps().filter { it.runId == run.id }.map {
+                mapOf(
+                    "laneId" to it.laneId, "case" to it.step.caseName, "stepNumber" to it.step.stepNumber, "action" to it.step.action,
+                    "status" to it.step.status.name, "observation" to it.step.observation,
+                )
+            },
+        )
+        put("summary", run.summary().let { mapOf("passedSteps" to it.passedSteps, "totalSteps" to it.totalSteps, "cases" to it.caseCount) })
+    }
+
+    private fun laneMap(lane: LaneResult): Map<String, Any?> = buildMap {
+        put("laneId", lane.laneId)
+        put("kind", lane.config.kind.name)
+        put("profileId", lane.config.profileId)
+        put("deviceSerial", lane.config.deviceSerial)
+        put("status", lane.status.name)
+        lane.error?.let { put("error", it) }
+        lane.currentCase?.let { put("currentCase", it) }
+        lane.currentStepNumber?.let { put("currentStep", mapOf("number" to it, "action" to lane.currentStepAction)) }
+        put(
+            "cases",
+            lane.cases.map { case ->
+                mapOf(
+                    "caseId" to case.caseId, "name" to case.caseName, "iteration" to case.iteration, "status" to case.status?.name,
+                    "steps" to case.steps.map { it.status.name },
+                )
+            },
+        )
+    }
+
+    private suspend fun listRuns(): Map<String, Any?> = mapOf(
+        "runs" to coordinator.listRuns().map {
+            mapOf(
+                "runId" to it.id, "suiteName" to it.suiteName, "status" to it.status.name, "createdAt" to it.createdAt,
+                "finishedAt" to it.finishedAt, "lanes" to it.laneCount, "cases" to it.caseCount,
+                "passedSteps" to it.passedSteps, "totalSteps" to it.totalSteps,
+            )
+        },
+    )
+
+    private suspend fun report(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val format = a.string("format")?.trim()?.lowercase() ?: "json"
+        if (format != "json" && format != "markdown") toolArgError("format must be json or markdown.")
+        val run = coordinator.loadRun(runId) ?: return errorMap("Run '$runId' was not found.")
+        return if (format == "markdown") {
+            mapOf("runId" to run.id, "format" to "markdown", "status" to run.status.name, "markdown" to run.toMarkdown())
+        } else {
+            val plain = runToJson(run).toPlainMap().filterKeys { it !in RUN_JSON_DROPPED_KEYS }
+            mapOf("runId" to run.id, "format" to "json", "status" to run.status.name, "suiteName" to run.suite.name, "report" to plain)
+        }
+    }
+
+    // ── Controlling ──────────────────────────────────────────────────
+
+    private fun cancelRun(runId: String): Map<String, Any?> {
+        if (coordinator.run(runId) == null) return errorMap("Run '$runId' is not running in this session.")
+        return if (coordinator.cancel(runId)) mapOf("runId" to runId, "cancelling" to true) else errorMap("Run '$runId' is already over.")
+    }
+
+    private fun resolveConfirmation(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val id = a.requiredString("confirmationId")
+        val allow = a.bool("allow") ?: toolArgError("allow is required.")
+        return if (coordinator.resolveConfirmation(runId, id, allow)) {
+            mapOf("runId" to runId, "confirmationId" to id, "allowed" to allow)
+        } else {
+            errorMap("No pending confirmation '$id' in run '$runId'.")
+        }
+    }
+
+    private fun resume(a: ToolArgs): Map<String, Any?> {
+        val runId = a.requiredString("runId")
+        val laneId = a.requiredString("laneId")
+        val decision = a.enum("decision", PauseDecision.entries) ?: toolArgError("decision is required.")
+        return if (coordinator.resumePausedStep(runId, laneId, decision)) {
+            mapOf("runId" to runId, "laneId" to laneId, "decision" to decision.name.lowercase())
+        } else {
+            errorMap("Lane '$laneId' of run '$runId' is not paused.")
+        }
+    }
+
+    private suspend fun laneToolCall(a: ToolArgs): Any? {
+        val arguments = a.map["arguments"]?.asObject("arguments") ?: emptyMap()
+        return coordinator.laneToolCall(a.requiredString("runId"), a.requiredString("laneId"), a.requiredString("tool"), arguments)
+    }
+}

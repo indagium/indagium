@@ -64,9 +64,11 @@ import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.run.TestRunCoordinator
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.importGoldenImage
@@ -1990,6 +1992,34 @@ class AppState(
 
     /** The image file a golden-screenshot example points at, or null when its path does not stay inside the asset folder. */
     internal fun testGoldenImageFile(suiteId: String, assetPath: String): File? = resolveTestAsset(testingDir, suiteId, assetPath)
+
+    // ── AI test runs ────────────────────────────────────────────────
+    // The run coordinator (testing/run/TestRunCoordinator.kt) owns every run of this launch on its own scope; nothing
+    // in it holds stateLock or touches the UI thread. [testRuns] mirrors its snapshot flow for Compose, refreshed from
+    // the coordinator's change callback INSIDE testRunMirrorLock so the last assignment is the freshest one. The
+    // coordinator is created on first use, after tests had the chance to set [testRunOverrides].
+    internal var testRunOverrides: TestRunOverrides = TestRunOverrides()
+    private val testRunCoordinatorDelegate = lazy {
+        createTestRunCoordinator(testRunOverrides, ::testRunsBaseDir, ::syncTestRuns)
+    }
+    internal val testRunCoordinator: TestRunCoordinator get() = testRunCoordinatorDelegate.value
+    private val testRunMirrorLock = Any()
+
+    /** Every test run of this launch, newest first; observe this from composables. */
+    var testRuns by mutableStateOf<List<TestRun>>(emptyList())
+        private set
+
+    private fun syncTestRuns() {
+        if (!testRunCoordinatorDelegate.isInitialized()) return
+        synchronized(testRunMirrorLock) { testRuns = testRunCoordinator.runsFlow.value }
+    }
+
+    /** `<save root>/test-runs`, or `<testing dir>/runs` when no save root is configured (a bare test AppState). */
+    private fun testRunsBaseDir(): File = effectiveSaveRootOrNull()?.let { File(it, "test-runs") } ?: File(testingDir, "runs")
+
+    /** The serial of the device the live capture tab records, or null (no live capture, or one that is still starting). */
+    internal fun liveCaptureSerial(): String? =
+        liveCaptureTabId?.let { captureControllerFor(it)?.selectedSession?.value?.device?.serial }
 
     private fun loadCustomAiCommands() {
         customAiCommands = customCommandsDir.listFiles { f -> f.isFile && f.extension.equals("md", ignoreCase = true) }
@@ -4784,6 +4814,8 @@ class AppState(
             .forEach(::revokeExternalDeviceAiApproval)
         aiSidebarRuntime.close()
         aiSessions.clear()
+        // Cancels every test run and waits a bounded time for its lanes to stop their recorders (on IO).
+        if (testRunCoordinatorDelegate.isInitialized()) testRunCoordinator.close()
         controlServerManager.stopControlServer()
         stopAllLiveCaptures()
         if (captureServiceDelegate.isInitialized()) captureService.close()

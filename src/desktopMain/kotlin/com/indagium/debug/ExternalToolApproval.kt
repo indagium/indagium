@@ -12,11 +12,22 @@ import com.indagium.ui.ExternalActionDetails
 // holds with nobody asked. Approval is per call (never remembered for the session) because each call may run a
 // different command. Device tools keep their own per-session approval (ControlServer.executeExternalDeviceTool).
 //
-// A later phase's run_test_suite over MCP runs scripts and drives devices, so it must be added here as well.
+// run_test_suite starts a run that drives devices and may run scripts, so it needs the user's yes for every call; so does
+// test_lane_tool_call when it runs a SCRIPT tool of an external lane (a built-in lane tool such as tap needs no approval:
+// the run itself was approved, and the lane's device is the one named in that approval).
 
-internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf("try_test_script")
+internal val PER_CALL_APPROVAL_MCP_TOOLS: Set<String> = setOf("try_test_script", "run_test_suite", "test_lane_tool_call")
 
-private const val MAX_COMMAND_CHARS = 2_000
+/** The approval dialog content for [toolName], or null when the call would be refused or needs no approval of its own. */
+internal fun describePerCallApproval(appState: AppState, toolName: String, arguments: Map<String, Any?>, clientName: String): ExternalActionDetails? =
+    when (toolName) {
+        "try_test_script" -> describeTryScriptCall(appState, arguments, clientName)
+        "run_test_suite" -> describeRunSuiteCall(appState, arguments, clientName)
+        "test_lane_tool_call" -> describeLaneToolCall(appState, arguments, clientName)
+        else -> null
+    }
+
+internal const val MAX_COMMAND_CHARS = 2_000
 private const val MAX_ARG_VALUE_CHARS = 200
 private const val MAX_ARGS_SHOWN = 20
 private const val ELLIPSIS = "…"
@@ -61,11 +72,11 @@ internal fun describeTryScriptCall(appState: AppState, arguments: Map<String, An
     )
 }
 
-private fun argumentLines(values: Map<String, String>): String {
+internal fun argumentLines(values: Map<String, String>): String {
     if (values.isEmpty()) return "(none)"
     val shown = values.entries.take(MAX_ARGS_SHOWN).joinToString("\n") { (name, value) -> "$name = ${value.clip(MAX_ARG_VALUE_CHARS)}" }
     val hidden = values.size - MAX_ARGS_SHOWN
     return if (hidden > 0) "$shown\n+ $hidden more" else shown
 }
 
-private fun String.clip(max: Int): String = if (length <= max) this else take(max) + "$ELLIPSIS (${length - max} more characters)"
+internal fun String.clip(max: Int): String = if (length <= max) this else take(max) + "$ELLIPSIS (${length - max} more characters)"
