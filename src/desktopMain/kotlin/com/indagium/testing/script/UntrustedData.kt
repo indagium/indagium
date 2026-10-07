@@ -16,13 +16,17 @@ fun untrustedData(source: String, payload: Map<String, Any?>): Map<String, Any?>
     "untrusted_data_notice" to UNTRUSTED_DATA_NOTICE,
 )
 
-/** A [ScriptRunResult] as a tool result: exit status and timing outside the envelope, stdout and stderr inside it. */
+/**
+ * A [ScriptRunResult] as a tool result: exit status, timing and [ScriptRunResult.warnings] (text written by Indagium)
+ * outside the envelope, stdout and stderr inside it.
+ */
 fun ScriptRunResult.toToolResult(): Map<String, Any?> = mapOf(
     "exitCode" to exitCode,
     "timedOut" to timedOut,
     "truncated" to truncated,
     "durationMs" to durationMs,
-) + untrustedData("script_output", mapOf("stdout" to stdout, "stderr" to stderr))
+) + (if (warnings.isEmpty()) emptyMap() else mapOf("warnings" to warnings)) +
+    untrustedData("script_output", mapOf("stdout" to stdout, "stderr" to stderr))
 
 /**
  * Tool-call argument values (JSON numbers, booleans, strings) as the string map a script run takes.

@@ -36,6 +36,7 @@ import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.nativeMediaAdaptationNotice
 import com.indagium.capture.ordinalRangeForElapsedWindow
 import com.indagium.capture.parseMarkerHeader
+import com.indagium.capture.readScreencapPng
 import com.indagium.cases.CaseIndexer
 import com.indagium.cases.CaseRecord
 import com.indagium.cases.CaseSearch
@@ -260,6 +261,9 @@ private typealias CaptureSettingsOverride = (com.indagium.capture.CaptureSetting
 // short enough that a genuinely stuck capture still fails within one user-visible wait.
 private const val CAPTURE_START_TIMEOUT_SECONDS = 120L
 private const val CAPTURE_POLL_INTERVAL_MS = 100L
+
+/** Upper bound for the adb screencap PNG a recorded test step may read when the mirror carries no pixels. */
+private const val RECORDING_SCREENCAP_MAX_BYTES = 24 * 1024 * 1024
 
 // How long a fresh marker stays undoable (AppState.markerUndoByTab / undoMarkIssue).
 private const val MARKER_UNDO_WINDOW_MS = 10_000L
@@ -1966,7 +1970,11 @@ class AppState(
             is com.indagium.testing.limits.LimitDecision.Refused -> return StoreResult.LimitReached(decision)
             else -> Unit
         }
-        val session = TestStepRecordingSession(serial)
+        // GPU mirror paths publish no CPU pixels with an input, so the session falls back to adb on its own image worker.
+        val session = TestStepRecordingSession(
+            serial,
+            screencap = { captureService.toolsForStart(settings.captureSettings).readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) },
+        )
         synchronized(testStepRecordingLock) {
             if (testStepRecordingSession != null) {
                 return StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")

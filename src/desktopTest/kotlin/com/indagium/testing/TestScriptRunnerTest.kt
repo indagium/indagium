@@ -18,6 +18,7 @@ import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.script.buildAdbRemoteCommand
 import com.indagium.testing.script.posixSingleQuote
 import com.indagium.testing.script.scriptArgsFromToolValues
+import com.indagium.testing.script.toToolResult
 import com.indagium.testing.script.validateScriptArgs
 import kotlinx.coroutines.runBlocking
 import org.junit.Assume.assumeFalse
@@ -232,6 +233,19 @@ class TestScriptRunnerTest {
     }
 
     // ── Timeout, cap, exit codes ───────────────────────────────────
+
+    @Test
+    fun hostCommandWarningsReachTheScriptResultAndTheToolResult() {
+        val warning = "This script left background processes running; scripts must not start background processes."
+        val fake = object : HostCommandRunner {
+            override suspend fun run(spec: HostCommandSpec) =
+                HostCommandResult(0, "out".toByteArray(), ByteArray(0), timedOut = false, truncated = false, durationMs = 1, warnings = listOf(warning))
+        }
+        val result = finished(runBlocking { TestScriptRunner(fake, POSIX_SHELL).run(script("true"), emptyMap(), context()) })
+        assertEquals(listOf(warning), result.warnings)
+        assertEquals(listOf(warning), result.toToolResult()["warnings"])
+        assertFalse(finished(run(script("true"))).toToolResult().containsKey("warnings"))
+    }
 
     @Test
     fun aScriptThatOutlivesItsTimeoutIsKilled() {

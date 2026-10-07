@@ -107,7 +107,8 @@ internal class DeterministicChecks(
     }
 
     private fun judgeScript(check: StepCheck.ScriptResult, result: ScriptRunResult): Outcome {
-        val summary = "exit code ${result.exitCode}${if (result.timedOut) " (timed out)" else ""}, output: ${excerpt(result.stdout)}"
+        val warnings = result.warnings.joinToString("") { " Warning: $it" }
+        val summary = "exit code ${result.exitCode}${if (result.timedOut) " (timed out)" else ""}, output: ${excerpt(result.stdout)}$warnings"
         return when {
             result.timedOut -> Outcome(CheckStatus.FAIL, "The script timed out; $summary")
             check.exitCode != null && result.exitCode != check.exitCode ->

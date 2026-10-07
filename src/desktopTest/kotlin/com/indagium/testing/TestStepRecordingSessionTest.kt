@@ -6,16 +6,20 @@ import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.testing.authoring.TestStepRecordingSession
 import kotlinx.coroutines.runBlocking
+import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.Closeable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import javax.imageio.ImageIO
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TestStepRecordingSessionTest {
@@ -153,6 +157,103 @@ class TestStepRecordingSessionTest {
         kotlinx.coroutines.delay(50)
         assertEquals(0, session.snapshot.value.pendingSnapshots)
         assertTrue(session.snapshot.value.steps.all { it.screenshotJpeg == null })
+        session.close()
+    }
+
+    // ── GPU mirror paths: no CPU pixels with the input, so the image comes from adb screencap ──
+
+    private fun screencapPng(): ByteArray = ByteArrayOutputStream().also { out ->
+        ImageIO.write(BufferedImage(20, 30, BufferedImage.TYPE_INT_RGB), "png", out)
+    }.toByteArray()
+
+    private val noFrameWarning = "No screen frame was available for a recorded input; its step keeps device/screen context only."
+
+    @Test
+    fun aFramelessInputReadsItsImageThroughAdbOffTheCallerThread() = runBlocking {
+        val calls = AtomicInteger()
+        val callerThread = Thread.currentThread()
+        val adbThread = java.util.concurrent.atomic.AtomicReference<Thread>()
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            screencap = { calls.incrementAndGet(); adbThread.set(Thread.currentThread()); screencapPng() },
+        )
+        session.accept(MirrorControlCommand.Text("open settings"), frame = null)
+        val snapshot = session.stopAndDrain()
+
+        assertEquals(1, calls.get())
+        assertTrue(adbThread.get() !== callerThread, "adb must never be read on the thread that delivered the input")
+        val row = snapshot.steps.single()
+        val image = ImageIO.read(ByteArrayInputStream(assertNotNull(row.screenshotJpeg)))
+        assertEquals(20, image.width)
+        assertEquals(30, image.height)
+        assertTrue(row.screenshotFromAdb)
+        assertTrue("adb" in row.screenContext.orEmpty())
+        assertTrue(noFrameWarning !in snapshot.warnings)
+        assertEquals(0, snapshot.pendingSnapshots)
+        assertTrue(session.updateReviewedSteps(listOf("open settings" to "settings"), setOf(row.id)))
+        val golden = session.toTestSteps { "assets/adb.jpg" }.single().examples
+            .filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>().single()
+        assertTrue("adb" in golden.caption)
+        session.close()
+    }
+
+    @Test
+    fun aFrameFromTheMirrorNeverCallsAdb() = runBlocking {
+        val calls = AtomicInteger()
+        val session = TestStepRecordingSession("fixture-device", screencap = { calls.incrementAndGet(); screencapPng() })
+        session.accept(MirrorControlCommand.Text("has a frame"), frame())
+        val snapshot = session.stopAndDrain()
+
+        assertEquals(0, calls.get())
+        assertNotNull(snapshot.steps.single().screenshotJpeg)
+        assertFalse(snapshot.steps.single().screenshotFromAdb)
+        session.close()
+    }
+
+    @Test
+    fun anAdbFailureKeepsTheStepWithTheExistingWarning() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device", screencap = { error("adb offline") })
+        session.accept(MirrorControlCommand.Text("first"), frame = null)
+        session.accept(MirrorControlCommand.Text("second"), frame = null)
+        val snapshot = session.stopAndDrain()
+
+        assertEquals(2, snapshot.steps.size)
+        assertTrue(snapshot.steps.all { it.screenshotJpeg == null })
+        assertTrue(noFrameWarning in snapshot.warnings)
+        assertEquals(0, snapshot.pendingSnapshots)
+        session.close()
+    }
+
+    @Test
+    fun anUnreadableScreencapIsAnImageFreeStepNotACrash() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device", screencap = { byteArrayOf(1, 2, 3) })
+        session.accept(MirrorControlCommand.Text("garbage"), frame = null)
+        val snapshot = session.stopAndDrain()
+
+        assertNull(snapshot.steps.single().screenshotJpeg)
+        assertTrue(noFrameWarning in snapshot.warnings)
+        session.close()
+    }
+
+    @Test
+    fun adbReadsShareTheScreenshotQueueLimit() = runBlocking {
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val calls = AtomicInteger()
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            screencap = { calls.incrementAndGet(); started.countDown(); release.await(5, TimeUnit.SECONDS); screencapPng() },
+        )
+        repeat(6) { session.accept(MirrorControlCommand.Text("input $it"), frame = null) }
+        assertTrue(started.await(2, TimeUnit.SECONDS))
+        val queued = session.snapshot.value
+        assertEquals(6, queued.steps.size)
+        assertEquals(3, queued.pendingSnapshots)
+        assertTrue(queued.warnings.any { "queue is full" in it })
+        release.countDown()
+        val drained = session.stopAndDrain()
+        assertEquals(3, calls.get(), "inputs beyond the queue limit are recorded without any adb read")
+        assertEquals(3, drained.steps.count { it.screenshotJpeg != null })
         session.close()
     }
 }

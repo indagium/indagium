@@ -147,6 +147,7 @@ private fun describeResult(result: ScriptRunResult): String = buildString {
     append(if (result.timedOut) "Timed out and was stopped" else "Exit code ${result.exitCode}")
     append(" after ${result.durationMs} ms")
     if (result.truncated) append(" (output was cut at the script's output cap)")
+    result.warnings.forEach { append("\n\nWarning: ").append(it) }
     if (result.stdout.isNotEmpty()) append("\n\n--- output ---\n").append(result.stdout.trimEnd())
     if (result.stderr.isNotEmpty()) append("\n\n--- errors ---\n").append(result.stderr.trimEnd())
 }

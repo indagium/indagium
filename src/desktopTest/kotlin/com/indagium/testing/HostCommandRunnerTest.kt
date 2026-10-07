@@ -1,5 +1,6 @@
 package com.indagium.testing
 
+import com.indagium.testing.script.BACKGROUND_PROCESS_WARNING
 import com.indagium.testing.script.HostCommandSpec
 import com.indagium.testing.script.ProcessBuilderHostCommandRunner
 import kotlinx.coroutines.CoroutineStart
@@ -159,5 +160,52 @@ class HostCommandRunnerTest {
         assertFailsWith<IllegalArgumentException> { HostCommandSpec(emptyList()) }
         assertFailsWith<IllegalArgumentException> { HostCommandSpec(listOf(SH), timeoutMs = 0) }
         assertFailsWith<IllegalArgumentException> { HostCommandSpec(listOf(SH), outputCapBytes = 0) }
+    }
+
+    @Test
+    fun legitimate126And127ExitCodesAreReportedAsTheCommandsOwn() {
+        for (exitCode in listOf(0, 17, 126, 127)) {
+            val result = run(sh("exit $exitCode"))
+            assertEquals(exitCode, result.exitCode)
+            assertFalse(result.timedOut)
+        }
+    }
+
+    @Test
+    fun unicodeAndQuotesInTheEnvironmentSurviveUntouched() {
+        val value = "space quote \" backslash\\tail Unicode-\u0457 \uD83D\uDE80"
+        val result = run(sh("printf '%s' \"\$INDAGIUM_HOST_TEST\"", environment = mapOf("INDAGIUM_HOST_TEST" to value)))
+        assertEquals(value, result.stdoutText())
+    }
+
+    @Test
+    fun aCleanCommandHasNoWarnings() {
+        val result = run(sh("(sleep 0.1; true) & wait; printf ok"))
+        assertEquals("ok", result.stdoutText())
+        assertTrue(result.warnings.isEmpty(), result.warnings.toString())
+    }
+
+    @Test
+    fun aCommandThatLeavesABackgroundProcessRunningIsReportedAndTheLeftoverIsNotStopped() {
+        val pidFile = File(dir, "leftover.pid")
+        val result = run(sh("sleep 30 & echo \$! > '${pidFile.absolutePath}'; sleep 0.3", timeoutMs = DEFAULT_TIMEOUT_MS))
+        val pid = awaitPidFile(pidFile)
+        try {
+            assertEquals(0, result.exitCode)
+            assertFalse(result.timedOut)
+            assertEquals(listOf(BACKGROUND_PROCESS_WARNING), result.warnings)
+            assertTrue(isAlive(pid), "a command that ended on its own is only reported on, its leftover is not killed")
+        } finally {
+            ProcessHandle.of(pid).ifPresent { it.destroyForcibly() }
+        }
+    }
+
+    @Test
+    fun aTimedOutCommandWhoseChildrenAreKilledHasNoWarnings() {
+        val pidFile = File(dir, "child.pid")
+        val result = run(sh("sleep 60 & echo \$! > '${pidFile.absolutePath}'; wait", timeoutMs = 600))
+        assertTrue(result.timedOut)
+        awaitDead(awaitPidFile(pidFile))
+        assertTrue(result.warnings.isEmpty(), result.warnings.toString())
     }
 }

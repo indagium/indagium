@@ -116,13 +116,15 @@ private fun normalizePath(path: String): String =
 /**
  * Politely stops [this] process and every descendant (children first), then force-kills whatever is still alive
  * after [grace]. Shared by [JvmRunningCaptureProcess] and the test-suite HostCommandRunner so both use one
- * descendant-kill implementation.
+ * descendant-kill implementation. [knownDescendants] are handles sampled earlier (a descendant re-parented away
+ * from this process is no longer found by a fresh snapshot) that are stopped together with the fresh ones.
  */
-internal fun Process.terminateProcessTree(grace: Duration) {
+internal fun Process.terminateProcessTree(grace: Duration, knownDescendants: Collection<ProcessHandle> = emptyList()) {
     val interruptedBeforeCleanup = Thread.interrupted()
     var interruptedDuringCleanup = false
     try {
-        val descendants = toHandle().descendants().toList().asReversed()
+        val fresh = toHandle().descendants().toList().asReversed()
+        val descendants = (fresh + knownDescendants).distinctBy { it.pid() }
         descendants.forEach { child -> runCatching { child.destroy() } }
         runCatching { destroy() }
         val deadline = System.nanoTime() + grace.toNanos().coerceAtLeast(0L)

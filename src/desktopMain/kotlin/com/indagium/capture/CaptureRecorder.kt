@@ -433,26 +433,11 @@ class CaptureRecorder internal constructor(
 
     private fun readScreenPng(session: CaptureSession, tools: CaptureTools): ByteArray {
         val result = runner.run(
-            tools.adbSpec(session.device.serial, "exec-out", "screencap", "-p"),
+            tools.adbSpec(session.device.serial, SCREENCAP_ARGUMENTS),
             timeout = Duration.ofSeconds(SCREENSHOT_TIMEOUT_SECONDS),
             outputLimitBytes = MAX_SCREENSHOT_BYTES,
         )
-        check(!result.timedOut) { "Screenshot timed out" }
-        check(result.exitCode == 0 && result.stdout.isNotEmpty()) {
-            val detail = result.stderrText().trim().take(MAX_DIAGNOSTIC_CHARS)
-            if (detail.isEmpty()) "Screenshot failed (exit ${result.exitCode})" else "Screenshot failed: $detail"
-        }
-        // Multi-display devices may prefix a warning line to the PNG stream. Strip it in both the
-        // transient AI path and durable screenshot path before image consumers see the bytes.
-        val pngBytes = stripLeadingNonPngBytes(result.stdout)
-        checkNotNull(pngBytes) { "Screenshot did not contain PNG data" }
-        if (pngBytes.size != result.stdout.size) {
-            addDiagnostic(
-                "Screenshot: stripped ${result.stdout.size - pngBytes.size} byte(s) of device banner text " +
-                    "before the PNG signature",
-            )
-        }
-        return pngBytes
+        return screencapPngFrom(result, ::addDiagnostic)
     }
 
     /** Performs the per-session functional screenshot capability probe lazily. */
@@ -1171,6 +1156,33 @@ private val PNG_SIGNATURE = byteArrayOf(
 )
 
 /**
+ * One bounded `adb exec-out screencap -p` read for [serial], without a running capture session; the output is
+ * limited to [maxBytes]. Throws [IllegalStateException] with the adb diagnostic when it fails or times out.
+ */
+internal fun CaptureTools.readScreencapPng(serial: String, maxBytes: Int = MAX_SCREENSHOT_BYTES): ByteArray =
+    screencapPngFrom(runAdb(serial, SCREENCAP_ARGUMENTS, Duration.ofSeconds(SCREENSHOT_TIMEOUT_SECONDS), maxBytes))
+
+/** Validates a `screencap -p` [result] and returns its PNG bytes, stripping any banner text before the signature. */
+private fun screencapPngFrom(result: CaptureCommandResult, onDiagnostic: (String) -> Unit = {}): ByteArray {
+    check(!result.timedOut) { "Screenshot timed out" }
+    check(result.exitCode == 0 && result.stdout.isNotEmpty()) {
+        val detail = result.stderrText().trim().take(MAX_DIAGNOSTIC_CHARS)
+        if (detail.isEmpty()) "Screenshot failed (exit ${result.exitCode})" else "Screenshot failed: $detail"
+    }
+    // Multi-display devices may prefix a warning line to the PNG stream. Strip it in both the
+    // transient AI path and durable screenshot path before image consumers see the bytes.
+    val pngBytes = stripLeadingNonPngBytes(result.stdout)
+    checkNotNull(pngBytes) { "Screenshot did not contain PNG data" }
+    if (pngBytes.size != result.stdout.size) {
+        onDiagnostic(
+            "Screenshot: stripped ${result.stdout.size - pngBytes.size} byte(s) of device banner text " +
+                "before the PNG signature",
+        )
+    }
+    return pngBytes
+}
+
+/**
  * Finds the PNG signature in [bytes] and returns the data from there on, dropping any prefix
  * (see [CaptureRecorder.screenshotCapture]'s banner-stripping note above). Returns the original
  * array unchanged when the signature is already at offset 0 (the common case), and null when no
@@ -1197,6 +1209,7 @@ private const val MAX_SCREENSHOT_BYTES = 64 * 1024 * 1024
 private const val CAPTURE_WRITE_BUFFER_BYTES = 256 * 1024
 private const val STOP_WAIT_SECONDS = 8L
 private const val SCREENSHOT_TIMEOUT_SECONDS = 15L
+private val SCREENCAP_ARGUMENTS = listOf("exec-out", "screencap", "-p")
 private const val VIDEO_MONITOR_MAX_WAIT_DAYS = 3_650L
 private const val PROCESS_JOIN_TIMEOUT_MS = 3_000L
 private const val WATCHDOG_JOIN_TIMEOUT_MS = 1_000L

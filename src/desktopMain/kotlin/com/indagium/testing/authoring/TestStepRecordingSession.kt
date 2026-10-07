@@ -4,6 +4,7 @@ import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
+import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.newExampleId
@@ -30,6 +31,8 @@ data class RecordedTestStep(
     /** The pre-action frame becomes an oracle only after an explicit review choice. */
     val useScreenshotAsExpected: Boolean = false,
     val id: String = UUID.randomUUID().toString(),
+    /** True when the image came from an adb screencap taken just after the input, not from the mirror's own pre-action frame. */
+    val screenshotFromAdb: Boolean = false,
 )
 
 data class TestStepRecordingSnapshot(
@@ -43,12 +46,19 @@ private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
 private const val MAX_RECORDING_SNAPSHOT_BYTES = 2 * 1024 * 1024
 private const val MAX_RECORDING_SNAPSHOT_DIMENSION = 1_280
 
-/** Converts accepted mirror inputs to an ordered, review-only step draft. It never starts a device or sends input. */
+/**
+ * Converts accepted mirror inputs to an ordered, review-only step draft. It never starts a device or sends input.
+ *
+ * The GPU mirror paths (macOS Metal, Windows D3D, Linux VAAPI) carry no CPU pixels, so an input arrives without a
+ * [MirrorFrame]. When [screencap] is set, that input's image is read through it instead (PNG bytes, throws on failure)
+ * on the same background worker and under the same queue limit; it is never called on the caller's thread.
+ */
 class TestStepRecordingSession internal constructor(
     val deviceSerial: String,
     subscription: Closeable? = null,
     private val snapshotEncoder: (MirrorFrame) -> ByteArray? = ::encodeRecordingFrame,
     private val drainTimeoutMs: Long = SNAPSHOT_DRAIN_TIMEOUT_MS,
+    private val screencap: (() -> ByteArray)? = null,
 ) : Closeable {
     val id: String = UUID.randomUUID().toString()
 
@@ -207,7 +217,12 @@ class TestStepRecordingSession internal constructor(
         val examples = buildList {
             if (context != null) add(StepExample.ReferenceLog(newExampleId(), caption = "Input-time screen context (before this action)", text = context))
             if (assetPath != null && row.useScreenshotAsExpected) {
-                add(StepExample.GoldenScreenshot(newExampleId(), caption = "Reviewed expected screenshot; captured at input time", assetPath = assetPath))
+                val caption = if (row.screenshotFromAdb) {
+                    "Reviewed expected screenshot; read through adb just after the input"
+                } else {
+                    "Reviewed expected screenshot; captured at input time"
+                }
+                add(StepExample.GoldenScreenshot(newExampleId(), caption = caption, assetPath = assetPath))
             }
         }
         TestStep(
@@ -300,21 +315,24 @@ class TestStepRecordingSession internal constructor(
             return
         }
         val index = current.steps.size
-        val screenshotContext = if (frame == null) {
-            "$context Screenshot frame unavailable; UI hierarchy isn't exposed by the mirror."
-        } else {
-            "$context UI hierarchy isn't exposed by the mirror; a bounded screen snapshot is captured when supported."
+        val screenshotContext = when {
+            frame != null -> "$context UI hierarchy isn't exposed by the mirror; a bounded screen snapshot is captured when supported."
+            screencap != null ->
+                "$context UI hierarchy isn't exposed by the mirror; the screen image is read through adb just after the input, " +
+                    "so it may already show the result of this action."
+            else -> "$context Screenshot frame unavailable; UI hierarchy isn't exposed by the mirror."
         }
         val recorded = RecordedTestStep(action, screenContext = screenshotContext)
         mutableSnapshot.value = current.copy(steps = current.steps + recorded)
-        if (frame == null) {
-            warn("No screen frame was available for a recorded input; its step keeps device/screen context only.")
-        } else {
-            scheduleSnapshot(recorded.id, frame)
+        when {
+            frame != null -> scheduleSnapshot(recorded.id, fromAdb = false) { snapshotEncoder(frame) }
+            screencap != null -> scheduleSnapshot(recorded.id, fromAdb = true) { encodeRecordingScreencap(screencap.invoke()) }
+            else -> warn(NO_FRAME_WARNING)
         }
     }
 
-    private fun scheduleSnapshot(recordedId: String, frame: MirrorFrame) {
+    /** Queues [produce] on the image worker; null from it means no image (an adb failure or an over-limit frame). */
+    private fun scheduleSnapshot(recordedId: String, fromAdb: Boolean, produce: () -> ByteArray?) {
         if (queuedScreenshots.incrementAndGet() > MAX_PENDING_SCREENSHOTS) {
             queuedScreenshots.decrementAndGet()
             warn("Screen snapshot queue is full; this gesture was recorded without an image.")
@@ -324,15 +342,15 @@ class TestStepRecordingSession internal constructor(
         try {
             screenshotWorker.execute {
                 try {
-                    val bytes = snapshotEncoder(frame)
+                    val bytes = if (fromAdb) runCatching(produce).getOrNull() else produce()
                     synchronized(lock) {
                         if (disposed.get()) return@synchronized
                         val rows = mutableSnapshot.value.steps.toMutableList()
                         if (bytes == null) {
-                            warn("A screen frame exceeded the image size limits and was omitted.")
+                            warn(if (fromAdb) NO_FRAME_WARNING else "A screen frame exceeded the image size limits and was omitted.")
                         } else {
                             val index = rows.indexOfFirst { it.id == recordedId }
-                            if (index >= 0) rows[index] = rows[index].copy(screenshotJpeg = bytes)
+                            if (index >= 0) rows[index] = rows[index].copy(screenshotJpeg = bytes, screenshotFromAdb = fromAdb)
                             mutableSnapshot.value = mutableSnapshot.value.copy(steps = rows, pendingSnapshots = (queuedScreenshots.get() - 1).coerceAtLeast(0))
                         }
                     }
@@ -365,6 +383,7 @@ class TestStepRecordingSession internal constructor(
         const val TOUCH_MOVE_THRESHOLD = 24
         const val LONG_PRESS_MS = 650L
         const val MAX_PENDING_SCREENSHOTS = 3
+        const val NO_FRAME_WARNING = "No screen frame was available for a recorded input; its step keeps device/screen context only."
         const val SNAPSHOT_DRAIN_TIMEOUT_MS = 2_000L
         const val KEYCODE_TAB = 61
         const val KEYCODE_ENTER = 66
@@ -398,3 +417,8 @@ private fun encodeRecordingFrame(frame: MirrorFrame): ByteArray? {
         }
     }.getOrNull()
 }
+
+/** An adb screencap PNG as the bounded JPEG a recorded step keeps; null when it cannot be decoded or stays over the limits. */
+private fun encodeRecordingScreencap(png: ByteArray): ByteArray? = runCatching {
+    encodeBoundedDeviceScreen(png, MAX_RECORDING_SNAPSHOT_DIMENSION, MAX_RECORDING_SNAPSHOT_BYTES).bytes
+}.getOrNull()
