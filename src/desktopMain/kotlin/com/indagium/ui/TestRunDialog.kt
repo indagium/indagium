@@ -35,6 +35,7 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeMode
+import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.run.MAX_PARALLEL_DEVICES
@@ -57,8 +58,14 @@ private val CASES_MAX_HEIGHT = 180.dp
 private val MENU_WIDTH = 300.dp
 
 /** What the dialog was opened for: a whole suite, or one case ([caseId]). */
-internal data class RunDialogTarget(val suiteId: String, val caseId: String? = null)
+internal data class RunDialogTarget(
+    val suiteId: String,
+    val caseId: String? = null,
+    val initialCaseIds: Set<String>? = null,
+    val initialConfig: RunConfig? = null,
+)
 
+@Suppress("ktlint:standard:max-line-length", "MaxLineLength")
 @Composable
 internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
     val tc = tc()
@@ -72,14 +79,19 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
     val runnable = suite.cases.filterNot { limits.isCaseLocked(it.id) }
     val profiles = ui.state.settings.aiProviderProfiles
     val choices = remember(profiles) { laneChoices(profiles) }
-    var model by remember {
+    var model by remember(target, choices) {
         mutableStateOf(
             RunDialogModel(
                 suiteId = suite.id,
-                selectedCaseIds = target.caseId?.let { setOf(it) } ?: runnable.map { it.id }.toSet(),
+                selectedCaseIds = target.initialCaseIds
+                    ?: target.initialConfig?.caseIds?.toSet()
+                    ?: target.caseId?.let { setOf(it) }
+                    ?: runnable.map { it.id }.toSet(),
                 choice = choices.firstOrNull { it.profileId == selectedProfileId(ui.state) } ?: choices.firstOrNull(),
                 deviceSerial = null,
-            ).withTestingDefaults(ui.state.settings.testing, profiles),
+            ).withTestingDefaults(ui.state.settings.testing, profiles).let { initial ->
+                target.initialConfig?.let { initial.withRunConfig(it, choices) } ?: initial
+            },
         )
     }
     var refresh by remember { mutableIntStateOf(0) }
@@ -95,6 +107,18 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
     }
 
     fun start() {
+        if (target.initialConfig?.rerunOf != null) {
+            val currentCaseIds = suite.cases.mapTo(HashSet()) { it.id }
+            val deleted = model.selectedCaseIds.filterNot { it in currentCaseIds }
+            if (deleted.isNotEmpty()) {
+                problem = "Some cases selected for re-run were deleted from the current suite: ${deleted.joinToString()}. Refresh the report and choose the remaining cases."
+                return
+            }
+            if (model.selectedCaseIds.isEmpty()) {
+                problem = "No failed case remains selected; choose a current suite case before starting."
+                return
+            }
+        }
         val config = model.toConfig(suite.cases.map { it.id }).getOrElse {
             problem = it.message
             return
@@ -121,7 +145,11 @@ internal fun TestRunDialog(target: RunDialogTarget, onDismiss: () -> Unit) {
         Column(
             Modifier.width(DIALOG_WIDTH).heightIn(max = DIALOG_MAX_HEIGHT).background(tc.p, DIALOG_SHAPE).border(1.dp, tc.br, DIALOG_SHAPE).padding(20.dp),
         ) {
-            val title = target.caseId?.let { id -> suite.cases.firstOrNull { it.id == id }?.name?.let { "Run case “$it”" } } ?: "Run suite “${suite.name}”"
+            val title = when {
+                target.initialConfig?.rerunOf != null -> "Re-run failed cases · ${suite.name}"
+                target.caseId != null -> suite.cases.firstOrNull { it.id == target.caseId }?.name?.let { "Run case “$it”" } ?: "Run suite “${suite.name}”"
+                else -> "Run suite “${suite.name}”"
+            }
             AppText(title, color = tc.tx, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
             Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
                 CasesSection(suite, model.selectedCaseIds, limits, onChange = { model = model.copy(selectedCaseIds = it) })

@@ -9,14 +9,22 @@ import com.indagium.testing.model.IssueSource
 import com.indagium.testing.model.IssueStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.normalizeTags
+import com.indagium.testing.run.AndroidBugreportCollector
 import com.indagium.testing.run.IssueDraftContext
+import com.indagium.testing.run.IssueStepClipExport
+import com.indagium.testing.run.IssueStepClipRequest
 import com.indagium.testing.run.buildIssueDraft
+import com.indagium.testing.run.collectAndroidBugreport
+import com.indagium.testing.run.defaultIssueStepClipWindow
 import com.indagium.testing.run.toMarkdown
 import com.indagium.testing.run.withIssueId
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.time.Duration
+import com.indagium.testing.run.exportIssueStepClip as exportIssueStepClipService
 
 // The actions on issues, shared by the issue dialog, the Issues screen and the MCP tools so all of them do exactly the same
 // thing: build a draft from a step, store it, send it to a destination (the local store, a note in a log tab, Markdown),
@@ -26,6 +34,7 @@ import java.io.File
 // (IssueTrackerActions.kt) starts an AI agent that files the issue through the tracker's MCP tools.
 
 private const val MAX_DESTINATION_RESULTS = 20
+private const val MAX_BUGREPORT_ERROR_DETAIL_CHARS = 500
 private const val SAVED_MESSAGE = "Saved locally."
 private const val MARKDOWN_COPIED_MESSAGE = "The issue as Markdown was copied to the clipboard."
 private const val MARKDOWN_RENDERED_MESSAGE = "The issue was rendered as Markdown."
@@ -94,6 +103,45 @@ internal suspend fun AppState.buildIssueSeed(runId: String, laneId: String, case
         val context = IssueDraftContext(run, testRunCoordinator.runDir(runId)) { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath) }
         buildIssueDraft(context, laneId, caseId, iteration, step).map { IssueDraftSeed(it.draft, it.source) }
     }
+}
+
+/** Explicit, shared UI/MCP bugreport action. The host adb process is interruptible and the service owns staging cleanup. */
+internal suspend fun AppState.collectIssueBugreport(issueId: String, progress: (String) -> Unit = {}): Result<IssueRecord> =
+    collectAndroidBugreport(issueStore, issueId, AndroidBugreportCollector { serial, destination, report ->
+        val tools = withContext(Dispatchers.IO) { captureService.toolsForStart(settings.captureSettings) }
+        report("Running adb bugreport on $serial (five-minute limit)…")
+        val result = withContext(Dispatchers.IO) {
+            runInterruptible {
+                tools.runAdb(serial, listOf("bugreport", destination.absolutePath), Duration.ofMinutes(5), outputLimitBytes = 1024 * 1024)
+            }
+        }
+        check(!result.timedOut) { "adb bugreport timed out after five minutes." }
+        if (result.exitCode != 0) {
+            val detail = (result.stderrText().ifBlank { result.stdoutText() }).trim().take(MAX_BUGREPORT_ERROR_DETAIL_CHARS)
+            error("adb bugreport failed with exit code ${result.exitCode}${detail.takeIf(String::isNotBlank)?.let { ": $it" }.orEmpty()}")
+        }
+    }, progress)
+
+/** Explicit padded video-clip export shared by the issue editor and MCP. Blank bounds use the failed-step default. */
+internal suspend fun AppState.exportIssueStepClip(
+    issueId: String,
+    startMs: Long? = null,
+    endMs: Long? = null,
+    progress: (String) -> Unit = {},
+): Result<IssueStepClipExport> {
+    val issue = withContext(Dispatchers.IO) { issueStore.load(issueId) }
+        ?: return Result.failure(IllegalArgumentException("Issue '$issueId' was not found."))
+    val run = testRunCoordinator.loadRun(issue.source.runId)
+        ?: return Result.failure(IllegalArgumentException("Run '${issue.source.runId}' was not found."))
+    return withContext(Dispatchers.IO) {
+        exportIssueStepClipService(issueStore, issueId, run, testRunCoordinator.runDir(run.id), startMs, endMs, progress = progress)
+    }
+}
+
+internal suspend fun AppState.defaultIssueStepClipWindow(source: IssueSource): Result<IssueStepClipRequest> {
+    val run = testRunCoordinator.loadRun(source.runId)
+        ?: return Result.failure(IllegalArgumentException("Run '${source.runId}' was not found."))
+    return withContext(Dispatchers.IO) { defaultIssueStepClipWindow(run, testRunCoordinator.runDir(run.id), source) }
 }
 
 /**

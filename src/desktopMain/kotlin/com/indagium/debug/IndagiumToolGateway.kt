@@ -28,6 +28,7 @@ internal class IndagiumToolGateway(
     private val suspendHandlers: Map<String, suspend (arguments: Map<String, Any?>) -> Any?> = emptyMap(),
     private val extraConfirmationRequired: Set<String> = emptySet(),
     private val confirmationDescriptions: Map<String, String> = emptyMap(),
+    private val externalServiceCall: (name: String, arguments: Map<String, Any?>) -> Boolean = ::sendsToExternalService,
 ) {
     init {
         require(catalog.map { it.name }.distinct().size == catalog.size) { "tool names must be unique" }
@@ -70,7 +71,7 @@ internal class IndagiumToolGateway(
      */
     fun actionPolicy(name: String, arguments: Map<String, Any?>): IndagiumToolActionPolicy? =
         actionPolicy(name)?.let { base ->
-            if (base == IndagiumToolActionPolicy.AUTOMATIC && sendsToExternalService(name, arguments)) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED else base
+            if (base == IndagiumToolActionPolicy.AUTOMATIC && externalServiceCall(name, arguments)) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED else base
         }
 
     /**
@@ -99,12 +100,14 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
     "reindex_sources", "save_filter_preset",
     // Test-suite authoring: deletes and file import/export ask first; set_edition is a development
     // switch that changes what the whole feature allows, so an in-app AI run must never flip it unasked.
-    "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite", "set_edition",
+    "delete_test_suite", "delete_test_case", "delete_test_script", "import_test_suite", "export_test_suite",
+    "import_test_script", "export_test_script", "apply_test_step_draft", "set_edition",
     // try_test_script runs a user-authored shell command on the computer or the device.
     "try_test_script",
     // Starting a run (or re-running a step) drives devices and may run scripts; cancelling one stops work in progress;
     // apply_step_fix rewrites a step of the user's library.
-    "run_test_suite", "cancel_test_run", "rerun_test_step", "apply_step_fix",
+    "run_test_suite", "cancel_test_run", "rerun_test_step", "rerun_failed_test_cases", "export_test_run_report",
+    "collect_android_bugreport", "export_issue_step_clip", "apply_step_fix", "start_test_recording", "apply_test_recording",
     // delete_issue removes a stored issue and its copied evidence for good. send_issue_to_tracker (and create_issue_from_step with
     // destination tracker, see sendsToExternalService) hands the issue text and evidence to an AI agent and an external tracker.
     "delete_issue", "send_issue_to_tracker",
@@ -114,7 +117,7 @@ private val CONFIRMATION_REQUIRED_TOOLS = setOf(
 internal fun sendsToExternalService(name: String, arguments: Map<String, Any?>): Boolean =
     name == "create_issue_from_step" && (arguments["destination"] as? String)?.trim().equals("tracker", ignoreCase = true)
 
-private fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =
+internal fun policyFor(name: String, extraConfirmationRequired: Set<String>): IndagiumToolActionPolicy =
     if (name in CONFIRMATION_REQUIRED_TOOLS || name in extraConfirmationRequired) IndagiumToolActionPolicy.CONFIRMATION_REQUIRED
     else IndagiumToolActionPolicy.AUTOMATIC
 

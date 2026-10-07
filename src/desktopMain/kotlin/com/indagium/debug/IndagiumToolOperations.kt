@@ -372,6 +372,16 @@ internal class IndagiumToolOperations(
         MCP_TOOLS,
         operationHandlers,
         testSuiteOperations.suspendHandlers + testRunOperations.suspendHandlers + issueOperations.suspendHandlers,
+        externalServiceCall = { name, args ->
+            sendsToExternalService(name, args) || if (name == "draft_test_steps") {
+                val profileId = args["profileId"] as? String
+                val profile = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId }
+                profile != null && (!profile.kind.usesHttpEndpoint || runCatching { java.net.URI(profile.baseUrl).host.orEmpty() }
+                    .getOrDefault("").let { host -> host.isNotBlank() && !com.indagium.ai.isLoopbackHost(host) })
+            } else {
+                false
+            }
+        },
     )
 
     internal fun openAiFunctionDefinitions() = toolGateway.openAiFunctions()
@@ -2615,6 +2625,7 @@ internal fun encodeBoundedDeviceScreen(
     png: ByteArray,
     maxDimension: Int = MAX_AI_SCREEN_DIMENSION,
     maxBytes: Int = MAX_AI_SCREEN_IMAGE_BYTES,
+    maxSourcePixels: Long = MAX_AI_SCREEN_PIXELS,
 ): BoundedDeviceScreenImage {
     require(png.isNotEmpty()) { "Device screen image is empty" }
     require(maxDimension >= MIN_AI_SCREEN_DIMENSION && maxBytes >= MIN_AI_SCREEN_IMAGE_BYTES) {
@@ -2627,7 +2638,7 @@ internal fun encodeBoundedDeviceScreen(
         reader.input = stream
         val sourceWidth = reader.getWidth(0)
         val sourceHeight = reader.getHeight(0)
-        require(sourceWidth > 0 && sourceHeight > 0 && sourceWidth.toLong() * sourceHeight <= MAX_AI_SCREEN_PIXELS) {
+        require(sourceWidth > 0 && sourceHeight > 0 && sourceWidth.toLong() * sourceHeight <= maxSourcePixels) {
             "Device screen dimensions exceed the safe decode limit"
         }
         val sample = maxOf(1, kotlin.math.ceil(maxOf(sourceWidth, sourceHeight).toDouble() / maxDimension).toInt())

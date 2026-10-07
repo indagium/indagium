@@ -43,14 +43,8 @@ const val MAX_ISSUE_LOG_BYTES = 256 * 1024
 const val MAX_ISSUE_TRANSCRIPT_BYTES = 256 * 1024
 const val MAX_ISSUE_TITLE_CHARS = 160
 
-/** A video larger than this is attached unchecked: the user opts in, because it dominates the issue's size. */
-const val MAX_VIDEO_BYTES_INCLUDED_BY_DEFAULT = 50L * 1024L * 1024L
-
 private const val MAX_ACTION_IN_TITLE_CHARS = 80
 private const val MAX_ARG_VALUE_CHARS = 40
-private const val MILLIS_PER_SECOND = 1_000L
-private const val SECONDS_PER_MINUTE = 60L
-private const val VIDEO_RELATIVE_PATH = "video/screen.mkv"
 private val CRASH_MARKERS = Regex("FATAL EXCEPTION|Fatal signal|ANR in ")
 private val prettyJson = Json { prettyPrint = true }
 
@@ -268,11 +262,6 @@ private fun goldenOf(step: TestStep): StepExample.GoldenScreenshot? {
     return named ?: goldens.firstOrNull()
 }
 
-private fun clock(millis: Long): String {
-    val seconds = millis / MILLIS_PER_SECOND
-    return "%02d:%02d".format(java.util.Locale.ROOT, seconds / SECONDS_PER_MINUTE, seconds % SECONDS_PER_MINUTE)
-}
-
 private fun issueAttachments(context: IssueDraftContext, lane: LaneResult, step: StepResult, definition: TestStep, logText: String?): List<IssueAttachment> {
     val runDir = context.runDir
     return buildList {
@@ -290,18 +279,5 @@ private fun issueAttachments(context: IssueDraftContext, lane: LaneResult, step:
         lane.transcriptPath?.let { File(runDir, it) }
             ?.let { readByteRangeTail(it, step.transcriptStartOffset, step.transcriptEndOffset, MAX_ISSUE_TRANSCRIPT_BYTES) }
             ?.let { add(textAttachment(IssueAttachmentKind.TRANSCRIPT, "Agent transcript during the step", "transcript-slice.jsonl", it)) }
-        videoAttachment(runDir, lane, step)?.let { add(it) }
     }
-}
-
-/** The lane's whole recording (trimming a clip would need ffmpeg); the note says where the step starts in it. */
-private fun videoAttachment(runDir: File, lane: LaneResult, step: StepResult): IssueAttachment? {
-    val video = lane.logPath?.let { File(runDir, it).parentFile?.parentFile }?.let { File(it, VIDEO_RELATIVE_PATH) }?.takeIf { it.isFile && it.length() > 0 }
-        ?: return null
-    val offset = (step.startedAt - (lane.startedAt ?: step.startedAt)).coerceAtLeast(0L)
-    val note = "The whole recording of the lane; this step starts about ${clock(offset)} in and took ${step.durationMs / MILLIS_PER_SECOND} s."
-    return fileAttachment(
-        IssueAttachmentKind.VIDEO_CLIP, "Screen recording of the lane", "screen.mkv", video,
-        include = video.length() <= MAX_VIDEO_BYTES_INCLUDED_BY_DEFAULT, note = note,
-    )
 }

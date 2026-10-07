@@ -8,6 +8,8 @@ import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.LaneToolCall
+import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepResult
@@ -79,6 +81,12 @@ class TestRunStoreTest {
                     cases = listOf(CaseResult(suite.cases.first().id, "Settings", 2, CaseStatus.FAIL, listOf(step), 4_000L, 9_000L, "A note")),
                     startedAt = 3_000L, finishedAt = 9_500L, error = null, currentCase = "Settings", currentStepNumber = 1, currentStepAction = "Open settings",
                     logPath = "lanes/${lane.id}/capture/logcat.log", transcriptPath = "lanes/${lane.id}/transcript.jsonl",
+                    toolActivityPath = "lanes/${lane.id}/tool-activity.jsonl",
+                    toolCalls = listOf(LaneToolCall(
+                        id = "call-1", caseId = suite.cases.first().id, stepId = step.stepId, iteration = 2, attempt = 1,
+                        toolName = "tap", argumentsPreview = "{\"x\":4}", resultPreview = "{\"ok\":true}",
+                        status = LaneToolCallStatus.SUCCEEDED, startedAt = 5_100L, durationMs = 20L,
+                    )),
                 ),
                 LaneResult(external.id, external, RunStatus.CANCELLED),
             ),
@@ -116,6 +124,18 @@ class TestRunStoreTest {
         assertEquals(run, loaded)
         val text = File(store.runDir(run.id), TEST_RUN_FILE_NAME).readText()
         assertEquals("indagium-test-run", Json.parseToJsonElement(text).jsonObject["format"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+    }
+
+    @Test
+    fun fullRunListingCanRestoreSuiteHistoryAfterRestart() {
+        val run = sampleRun(RunStatus.CANCELLED)
+        assertTrue(store.save(run).isSuccess)
+
+        val listed = store.listRecords()
+
+        assertEquals(listOf(run), listed)
+        assertEquals(run.lanes, listed.single().lanes)
+        assertEquals(run.config, listed.single().config)
     }
 
     @Test
@@ -221,6 +241,31 @@ class TestRunStoreTest {
         assertEquals("Smoke", listed.first().suiteName)
         assertEquals(0, listed.first().passedSteps)
         assertEquals(1, listed.first().totalSteps)
+    }
+
+    @Test
+    fun suiteHistoryFindsPersistedRunsBeyondGlobalRecentWindowAfterReload() {
+        val targetSuiteId = "suite-target-history"
+
+        fun forSuite(id: String, suiteId: String, createdAt: Long): TestRun {
+            val sample = sampleRun(createdAt = createdAt)
+            return sample.copy(id = id, suite = sample.suite.copy(id = suiteId), config = sample.config.copy(suiteId = suiteId))
+        }
+        val targetRuns = (0 until 8).map { index -> forSuite("run-target-$index", targetSuiteId, 1_000L + index) }
+        targetRuns.forEach { run ->
+            assertTrue(store.save(run).isSuccess)
+            File(store.runDir(run.id), TEST_RUN_FILE_NAME).setLastModified(run.createdAt)
+        }
+        repeat(220) { index ->
+            val foreign = forSuite("run-foreign-$index", "suite-foreign-$index", 10_000L + index)
+            assertTrue(store.save(foreign).isSuccess)
+            File(store.runDir(foreign.id), TEST_RUN_FILE_NAME).setLastModified(10_000L + index)
+        }
+
+        val reloadedStore = TestRunStore { File(dir, "test-runs") }
+        assertTrue(reloadedStore.listRecords().none { it.suite.id == targetSuiteId }, "global newest-200 list is allowed to omit old target runs")
+        assertEquals(targetRuns.takeLast(5).asReversed().map { it.id }, reloadedStore.listRecordsForSuite(targetSuiteId).map { it.id })
+        assertEquals(targetRuns.asReversed().map { it.id }, reloadedStore.listSummariesForSuite(targetSuiteId).map { it.id })
     }
 
     // ── Transcript ──────────────────────────────────────────────────

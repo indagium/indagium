@@ -8,9 +8,11 @@ import com.indagium.testing.store.issueToJson
 import com.indagium.ui.AppState
 import com.indagium.ui.IssueActionResult
 import com.indagium.ui.IssueOverrides
+import com.indagium.ui.collectIssueBugreport
 import com.indagium.ui.createIssueFromStep
 import com.indagium.ui.deleteIssue
 import com.indagium.ui.deliverIssue
+import com.indagium.ui.exportIssueStepClip
 import com.indagium.ui.issueMarkdown
 import com.indagium.ui.updateIssueFields
 import kotlinx.coroutines.CancellationException
@@ -32,6 +34,8 @@ internal class IssueToolOperations(private val appState: AppState) {
         "update_issue" to suspendTool { a -> update(a) },
         "send_issue_to_tracker" to suspendTool { a -> sendToTracker(a) },
         "delete_issue" to suspendTool { a -> delete(a.requiredString("issueId")) },
+        "collect_android_bugreport" to suspendTool { a -> collectBugreport(a.requiredString("issueId")) },
+        "export_issue_step_clip" to suspendTool { a -> exportStepClip(a) },
     )
 
     private fun suspendTool(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any?>) -> Any? = { raw ->
@@ -152,4 +156,26 @@ internal class IssueToolOperations(private val appState: AppState) {
         is IssueActionResult.Done -> mapOf("issueId" to issueId, "deleted" to true)
         else -> result.toAnswer()
     }
+
+    private suspend fun collectBugreport(issueId: String): Map<String, Any?> = appState.collectIssueBugreport(issueId).fold(
+        onSuccess = { record -> mapOf("issueId" to record.id, "issue" to record.toMap(), "message" to "Bugreport collected as an unchecked attachment.") },
+        onFailure = { errorMap(it.message ?: "Could not collect the Android bugreport.") },
+    )
+
+    private suspend fun exportStepClip(a: ToolArgs): Map<String, Any?> = appState.exportIssueStepClip(
+        issueId = a.requiredString("issueId"),
+        startMs = a.long("startMs"),
+        endMs = a.long("endMs"),
+    ).fold(
+        onSuccess = { exported ->
+            mapOf(
+                "issueId" to exported.issue.id,
+                "actualStartMs" to exported.actualStartMs,
+                "actualEndMs" to exported.actualEndMs,
+                "fileBytes" to exported.fileBytes,
+                "message" to "Step clip added to the issue attachment checklist; the original recording was kept.",
+            )
+        },
+        onFailure = { errorMap(it.message ?: "Could not export the issue step clip.") },
+    )
 }

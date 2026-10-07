@@ -297,7 +297,7 @@ flowchart TB
 
     subgraph automation["Automation — package debug"]
         server["ControlServer<br/>Ktor CIO, MCP + REST"]
-        gateway["IndagiumToolGateway<br/>124-tool contract"]
+        gateway["IndagiumToolGateway<br/>catalog-derived tool contract"]
         ops["IndagiumToolOperations<br/>core handlers + test / run / issue operations"]
     end
 
@@ -1115,7 +1115,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `ControlServer.kt` | Ktor CIO server; `MCP_TOOLS` and `REST_ROUTES` catalogues; auth, CORS, device-tool approval, session reaping |
 | `IndagiumToolGateway.kt` | Joins catalogue to handlers, enforces parity, defines the confirmation policy, derives OpenAI function definitions |
 | `IndagiumToolOperations.kt` | Tool handler map — the actual behaviour behind each catalogue entry |
-| `TestSuiteToolCatalog.kt` / `TestRunToolCatalog.kt` / `IssueToolCatalog.kt` + the matching `*Operations.kt` | 32 + 11 + 6 tool descriptors and their handlers for the AI test suites, appended to `MCP_TOOLS` and the handler maps (§26.2) |
+| `TestSuiteToolCatalog.kt` / `TestRunToolCatalog.kt` / `IssueToolCatalog.kt` + matching `*Operations.kt` | Catalog-driven suite, authoring, script, run/report and issue-evidence tools; gateway startup enforces descriptor/handler parity and the tool index is generated from the current catalog (§26.2) |
 | `ExternalToolApproval.kt` / `ExternalRunApproval.kt` / `ExternalTrackerApproval.kt` | `PER_CALL_APPROVAL_MCP_TOOLS` and the dialog content for each call an external client must have approved (§26.9.2) |
 | `Json.kt` | Hand-rolled JSON encode/decode for flat DTOs |
 | `AppLogger.kt` | Opt-in diagnostic log, written in Android threadtime grammar so Indagium can open its own log |
@@ -2980,8 +2980,8 @@ removes the limit but reworks the engine).
 
 User-authored scripts run with the user's privileges, a lane agent can be prompt-injected by text on the
 device, and an `AUTO` script is reachable from such an agent. The structural defences (per-agent
-gateways, parameters only as environment variables, a judge that can only downgrade, per-call approval
-for external clients, the token never leaving the JVM) bound the damage but do not remove it. The Windows
+gateways, parameters only as environment variables, mandatory verdicts for explicit judge checks,
+per-call approval for external clients, the token never leaving the JVM) bound the damage but do not remove it. The Windows
 keychain backend has never run on real Windows, whole-video attachments are large, the account-agent
 judge path has no dedicated test, there is no MCP tool to pause a run, and library edits write on the
 caller's thread.
@@ -2998,10 +2998,10 @@ is `ASK`; the full list with owners is in [§26.11](#2611-known-risks-and-limita
 | **Annotation / note block** | One element of a tab's analysis document: text, a log-line reference, an image, or a video frame. Modelled by `AnnBlock`. |
 | **Case** | A previously written analysis note, indexed for similarity search so an engineer can find "have we seen this before?" |
 | **Compute cache** | The per-tab memoisation of `computeItems` output, keyed by tab id and filter-applied flag. |
-| **Confirmation-required tool** | One of 26 automation tools (plus any per-lane `ASK` script) that pauses for explicit user approval before executing inside Indagium's own AI panel. An external MCP client is gated separately, per call (`PER_CALL_APPROVAL_MCP_TOOLS`). |
+| **Confirmation-required tool** | A catalog-defined operation that pauses for explicit user approval before executing inside Indagium's own AI panel. Per-lane `ASK` scripts are also confirmed. An external MCP client is gated separately, per call (`PER_CALL_APPROVAL_MCP_TOOLS`). |
 | **Edition** | `FREE`, `PREMIUM`, `FRIENDS_FAMILY` or `UNLIMITED`: sets how many AI test suites and cases are *active*; the rest are locked (readable, never dropped). Builds default to `UNLIMITED` (§26.4). |
 | **Highlighter** | A pattern that colours matching text, or the whole line, without filtering anything out. Optionally limited to a tag, and matched against the tag, the message or the whole rendered line. |
-| **Judge** | A separate, *blind* AI run that decides whether one test step met its expected result from evidence alone (never the agent's words). It can only turn a pass into a fail (§26.7). |
+| **Judge** | A separate, *blind* AI run that decides whether one test step met its expected result from evidence alone (never the agent's words). A conclusive FAIL can downgrade a pass; explicit `ScreenJudge`/`AskJudge` checks require a usable judge, and an inconclusive mandatory verdict blocks the step (§26.7). |
 | **Lane** | One device driven through a test case by one agent (or by an MCP client, for an `external` lane). Lanes on different devices run in parallel; lanes sharing a device run in turn (§26.5). |
 | **Large-file mode** | A per-tab flag set above a size threshold that routes item computation onto the cancellable async path. |
 | **Managed MCP lease** | A short-lived, run-scoped MCP endpoint on an OS-assigned port, created so a subprocess AI agent can call Indagium's tools. |
@@ -3085,7 +3085,7 @@ everything below:
    which is also what lets the engine be driven by fake devices and fake agents in tests.
 2. **Agents only ever see a tool gateway built for them.** A lane's agent, the judge, and the
    tracker-filing agent each get their *own* `IndagiumToolGateway` holding only their own tools — never
-   the app's 124-tool catalogue — so there is no global filter that could be bypassed.
+   the app's full catalog-derived tool set — so there is no global filter that could be bypassed.
 3. **Everything that came from a device, a script, an agent or a tracker is data.** It is fenced as
    untrusted in every prompt and tool result (§26.9).
 
@@ -3145,15 +3145,16 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; the debounced run saver; the redacting transcript appender |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording, insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
 | `testing.device` | `TestDeviceSession.kt`, `CaptureLogReader.kt`, `UiTreeParser.kt` | One headless device lane: standalone recorder, adb input/screenshot/UI dump, byte-offset log reading and waiting |
-| `testing.run` | `TestRunCoordinator.kt`, `TestRunEngine.kt`, `LaneScheduler.kt`, `LaneRunner.kt`, `LaneDriver.kt`, `StepSequence.kt`, `HookRunner.kt`, `DeterministicChecks.kt`, `TestAgentTools.kt`, `LaneGateway.kt`, `LaneAgents.kt`, `LanePrompts.kt`, `TestRunValidation.kt`, `TestRunState.kt`, `EngineSupport.kt`, `JudgeService.kt`, `JudgeTools.kt`, `JudgeEvidence.kt`, `JudgePrompts.kt`, `StepJudging.kt`, `ComparisonRunner.kt`, `ReportActions.kt`, `IssueDraftBuilder.kt`, `IssueEngineHooks.kt`, `IssueMarkdown.kt`, `TestRunMarkdown.kt` | The run engine, the step protocol, the lane tools, the judge, report actions, and issue-draft building |
+| `testing.run` | `TestRunCoordinator.kt`, `TestRunEngine.kt`, `LaneScheduler.kt`, `LaneRunner.kt`, `LaneDriver.kt`, `StepSequence.kt`, `HookRunner.kt`, `DeterministicChecks.kt`, `TestAgentTools.kt`, `LaneGateway.kt`, `LaneAgents.kt`, `LanePrompts.kt`, `TestRunValidation.kt`, `TestRunState.kt`, `EngineSupport.kt`, `JudgeService.kt`, `JudgeTools.kt`, `JudgeEvidence.kt`, `JudgePrompts.kt`, `StepJudging.kt`, `TestRunComparison.kt`, `TestRunReportExport.kt`, `RunArtifacts.kt`, `IssueStepClipService.kt`, `IssueBugreportService.kt`, `ReportActions.kt`, `IssueDraftBuilder.kt`, `IssueEngineHooks.kt`, `IssueMarkdown.kt`, `TestRunMarkdown.kt` | Run engine, complete step deadline/case budget, run comparison and safe report export, lane activity artifacts, bounded issue clips and on-demand Android bugreports |
 | `testing.tracker` | `TrackerMcpClient.kt`, `SdkTrackerMcpClient.kt`, `TrackerConfig.kt`, `TrackerIssueCreator.kt`, `TrackerTools.kt`, `TrackerPrompts.kt` | The issue-tracker MCP client (official Kotlin SDK client), setup checks, and the one-shot agent job that files an issue |
 | `edition` | `Edition.kt` | `Edition`, `EditionLimits`, `EditionService` |
 | `security` | `SecretStore.kt` | OS-keychain secret storage with a session-only fallback |
-| `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | 49 of the 124 MCP tools (32 authoring, 11 run, 6 issue), merged into `MCP_TOOLS` (`debug/ControlServer.kt:1692`) and the handler maps (`debug/IndagiumToolOperations.kt:339-374`); the external-client approval dialogs |
+| `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
 | `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
 
 Dependency direction. `testing` depends on `model`, `utils`, `capture`, `edition`, `security`, and —
@@ -3180,9 +3181,9 @@ and no separate index is persisted. Ids are prefixed UUIDs unique across the lib
 | `<appDataDir>/testing/library.json` | Suite order, library scripts, shared steps | `{"format":"indagium-test-library","version":1,…}` (`testing/store/TestLibraryCodec.kt:63`) |
 | `<appDataDir>/testing/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `{"format":"indagium-test-suite","version":1,"suite":{…}}` (`:62`); the file name must equal the suite id |
 | `<appDataDir>/testing/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
-| `<appDataDir>/testing/issues/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v1 (`testing/store/IssueCodec.kt:32`); ≤ 4 MB per record, ≤ 1 GiB per attachment |
+| `<appDataDir>/testing/issues/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
 | `<save root>/test-runs/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
-| `<save root>/test-runs/<runId>/lanes/<laneId>/` | `capture/` (recorded `logcat.log`, optional video), `screens/` (step screenshots), `transcript.jsonl` | Raw logcat, PNG, JSON lines with secrets redacted |
+| `<save root>/test-runs/<runId>/lanes/<laneId>/` | `capture/` (recorded `logcat.log`, optional video), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates |
 | `<save root>/test-runs/<runId>/judge.jsonl` | Everything the judge runs of the run said and did, tagged with what each judged | JSON lines, redacted |
 
 `<save root>` is the user's save folder (`AppState.effectiveSaveRootOrNull`); with none configured a
@@ -3318,11 +3319,21 @@ flowchart TB
   carries a summary of the steps already done, **fenced as untrusted data**. A stale run is cut off by
   an **epoch**: `newEpoch()` (`StepSequence.kt:216`) invalidates every earlier run's tool calls
   (`REPLACED_RUN_MESSAGE`).
-- **Budgets.** Each case has a tool-call budget (`caseToolCallLimit`, default 60, 1..500) spent across
-  its segments (`CaseBudget`); each step has `maxToolCalls` (default 15). The three protocol tools
-  (`get_current_step`, `report_observation`, `finish_step`) are *free* for the case budget
-  (`LANE_FREE_TOOL_NAMES`, `testing/run/TestAgentTools.kt:56`) and `finish_step` is never refused by the
-  per-step cap, so an agent that spent its actions can still report.
+- **Current-step examples.** Agents can list and retrieve the active step's golden images and
+  reference logs through lane-scoped example tools; transition replies identify examples on the next
+  step. Image reads have byte and pixel limits, and example calls obey case tool permissions. A saved
+  golden image is reference evidence, not the live device screenshot or coordinate system.
+- **Budgets.** Each lane's case iteration has an atomic paid-dispatch budget (`caseToolCallLimit`, default 60, 1..500)
+  shared across that case's steps, retries and agent restarts. Agent and external lanes use the same guard and
+  accounting rules; separate lanes and repeat iterations receive their own budget. A dispatched call counts even when execution
+  returns an error; protocol calls and actions refused before dispatch are free. Each step also has
+  `maxToolCalls` (default 15). The three protocol tools (`get_current_step`, `report_observation`,
+  `finish_step`) are free for the case budget, so an agent that spent its actions can still report.
+  Exhaustion is settled as an actionable case `ERROR` before a blocked client can finish the case.
+- **Attempt deadline.** Screenshot capture, deterministic checks and judging share the step attempt's
+  remaining deadline. An expiry records `TIMEOUT` exactly once, retains completed checks and available
+  evidence, cancels stale lane evaluation and cannot settle the next step. Cancellation remains distinct
+  from timeout; restarting an agent does not reset the attempt deadline.
 - **Sessions.** Each segment is an `AiSession("testrun:<run>:<lane>:<case>:<iteration>")`
   (`LaneDriver.kt:154`), **never registered in `AiSessionRegistry`**, with a matching
   `AiInvestigationContext`; `deleteClaudeCodeWorkspace()` runs in the segment's `finally`.
@@ -3347,11 +3358,12 @@ scripts only** — shared-step hooks (which need an agent) are recorded as skipp
 an infrastructure problem or a case could not be judged, `FAILED` if any case failed or was blocked,
 `CANCELLED` after a cancel, else `PASSED`.
 
-`AppState.close()` calls `testRunCoordinator.close()` (`ui/AppState.kt:4833`), which cancels every job
-and waits a **bounded** `COORDINATOR_CLOSE_WAIT_MS` = 4 s for them to unwind before cancelling the scope
-(`testing/run/TestRunCoordinator.kt:322-327`). This honours the mirror lifecycle rule (§12.4): nothing a
-run does waits on the EDT (no `invokeAndWait`; the lane recorder has no native surface), so the bounded
-`runBlocking` on the closing thread can only wait on IO work.
+`AppState.close()` calls `testRunCoordinator.close()` (`ui/AppState.kt:4833`), which requests cancellation
+for active runs and their externally dispatched calls. It gives run cleanup up to 4 s, then a separate bounded
+2 s persistence window before cancelling the coordinator scope (`testing/run/TestRunCoordinator.kt`). Natural
+completion also drains still-running paid external calls before final persistence and releasing devices; terminal
+protocol replies such as `finish_step` are preserved. This honours the mirror lifecycle rule (§12.4): nothing a
+run waits on is EDT work, so the bounded `runBlocking` on the closing thread waits only for IO/coroutine cleanup.
 
 ### 26.6 Locks
 
@@ -3401,15 +3413,18 @@ lanes of a run ended a step differently, one **comparison judge** (budget 12) lo
 evidence once all lanes are done (`compareDisagreements`, `testing/run/ComparisonRunner.kt:84`).
 Everything either judge says goes to `judge.jsonl`.
 
-**Status rule — a judge can only downgrade.** `settleWithJudge` (`StepJudging.kt:47`):
+**Status rule — explicit verdicts are mandatory.** Run validation checks every reachable `ScreenJudge`/`AskJudge` check in the selected cases and reachable suite/case hooks. These checks cannot run with judge mode `OFF` or without a configured, usable judge. Steps with no explicit judge checks retain optional-judge behavior.
 
-1. The base status without a judge is `PASS` only when the agent claimed pass **and** no check
-   failed, `BLOCKED` when it claimed blocked, `FAIL` otherwise. A failed check, timeout or block is
-   therefore final.
-2. Only a base `PASS` is revisited: a judge `FAIL` makes it `FAIL`; `INCONCLUSIVE` keeps `PASS` but
-   sets `judgeInconclusive`; `PASS` keeps it.
-3. The step's `ScreenJudge`/`AskJudge` checks take the judge's `PASS`/`FAIL`; an inconclusive judge
-   leaves them `NOT_EVALUATED`.
+1. Deterministic failures remain `FAIL`, even if the agent says `blocked` or an explicit judge is
+   inconclusive. A deterministic pass plus an agent `blocked` claim remains `BLOCKED`.
+2. A conclusive judge `FAIL` can turn a passing base result into `FAIL`; `PASS` preserves it.
+3. For mandatory checks, a judge error, timeout or inconclusive response records the check as
+   `NOT_EVALUATED` and the step as `BLOCKED`; it never returns a verdict from missing evidence.
+   The normal retry and failure policy then applies. Optional judge failures do not change steps
+   without explicit judge checks.
+4. Screenshot capture, deterministic checks and judging share the attempt deadline. A deadline
+   expiry settles `TIMEOUT` exactly once, keeps completed checks and saved evidence, cancels stale
+   evaluations, and cannot settle a later step.
 
 ### 26.8 Issues and the tracker
 
@@ -3440,6 +3455,15 @@ log tab of the lane, through the annotation mutators after the issue lock is rel
   issue's attachments, ≤ 2 MB each).
 - **Token never leaves the JVM.** See §26.9.3.
 
+**Selectable evidence.** The issue inventory retains available attachments when their `include`
+checkbox is off; that checkbox filters delivery rather than owning the file. An on-demand step clip
+uses the failed step interval padded by five seconds on each side, clamped to real video coverage.
+The dialog displays and allows adjustment of the exported bounds while preserving the original
+recording. Android bugreports are collected only after a separate explicit action into an
+issue-owned temporary directory, with progress, cancellation and a five-minute timeout. An output
+is added to the checklist only after its bounded copy succeeds. Issue storage always writes v2 records
+and continues to read older v1 records.
+
 ### 26.9 Security
 
 #### 26.9.1 Custom scripts
@@ -3453,7 +3477,7 @@ command text.**
 | Parameters as environment variables | `HOST_SHELL` scripts run `<shell> <template>`; parameter values and the run context (`DEVICE`, `PACKAGE`, `RUN_DIR`, `CASE_ID`, `STEP_ID`) travel only as the child's environment (`hostSpec`). The template is the author's own text, passed to the shell untouched. Host shell: `/bin/zsh -c` on macOS when present, `/bin/sh -c` elsewhere, PowerShell on Windows (`defaultHostShell`, `:216`) |
 | POSIX-quoted adb exports | `ADB_SHELL` scripts send ONE remote command, `export name='value' …; <template>`, where every value is POSIX-single-quoted (`buildAdbRemoteCommand`, `:163`; `posixSingleQuote`, `:172`) and every name matches `[A-Za-z_][A-Za-z0-9_]*` |
 | Validation | Types: `INT` = `-?\d{1,18}`, `BOOL` = `true`/`false`, `STRING` ≤ 4 KB with no NUL; unknown arguments rejected; required parameters enforced (`validateScriptArgs`, `:183`). Parameter names are lowercase and may not be reserved (`path`, `home`, `shell`, `device`, `run_dir`, `ld_preload`, …: `RESERVED_SCRIPT_PARAM_NAMES`, `testing/model/TestModelRules.kt:19`); a tool name may not shadow a built-in lane tool, an Indagium tool, or start with `tracker_` (`scriptToolNameError`) |
-| Timeout, output cap, process-tree kill | Per-script `timeoutMs` (default 30 s, ≤ 1 h) and `outputCapBytes` (default 64 KB, ≤ 8 MB) bound stdout and stderr *each*; the rest is read and discarded so the child never blocks on a full pipe; on timeout or cancellation `terminateProcessTree` kills the **whole descendant tree** after a 500 ms grace (`testing/script/HostCommandRunner.kt:77-100`) |
+| Timeout, output cap, process-tree kill | Per-script `timeoutMs` (default 30 s, ≤ 1 h) and `outputCapBytes` (default 64 KB, ≤ 8 MB) bound stdout and stderr *each*; the rest is read and discarded so the child never blocks on a full pipe. A bundled native supervisor creates a dedicated POSIX process group or atomically assigns a suspended Windows child to a kill-on-close Job Object before resuming it; startup fails closed if supervision cannot initialize. All exits, errors, timeouts and cancellations close that group/job. Shared process-tree cleanup also kills captured descendants independently of parent liveness (`testing/script/HostCommandRunner.kt`) |
 | Sanitized environment | The child inherits the app's environment minus AppImage runtime variables (`sanitizeAppImageRuntimeForChild`), with explicit values merged on top |
 | `SETUP_TEARDOWN_ONLY` | A script with this permission is never offered to an agent as a tool (`buildLaneTools`, `testing/run/TestAgentTools.kt:128`) |
 
@@ -3462,12 +3486,18 @@ command text.**
 There are two audiences, with two gates:
 
 - **In-app (Indagium's own AI panel and run lanes) — `CONFIRMATION_REQUIRED`.** Policy lives in
-  `CONFIRMATION_REQUIRED_TOOLS` (`debug/IndagiumToolGateway.kt:92`). The feature adds 13 entries:
+  `CONFIRMATION_REQUIRED_TOOLS` (`debug/IndagiumToolGateway.kt:92`). The test-suite tools requiring
+  review include destructive library operations, imports/exports, script execution, run start/cancel,
+  report fixes, draft application, recorder start/apply and tracker delivery. Remote step drafting
+  also shows an argument-aware disclosure of the provider and bounded suite/case context before text
+  leaves the app; local loopback providers do not show an external-send disclosure. The legacy policy
+  names remain stable:
   `delete_test_suite`, `delete_test_case`, `delete_test_script`, `import_test_suite`,
   `export_test_suite`, `set_edition`, `try_test_script`, `run_test_suite`, `cancel_test_run`,
   `rerun_test_step`, `apply_step_fix`, `delete_issue`, `send_issue_to_tracker`. A call is also raised
   to `CONFIRMATION_REQUIRED` *per call* when its arguments send data to an external service
-  (`create_issue_from_step` with `destination: tracker`, `sendsToExternalService`, `:114`). Inside a
+  (`create_issue_from_step` with `destination: tracker`, `draft_test_steps` with a remote provider,
+  `sendsToExternalService`). Inside a
   run, an **`ASK` script** becomes a confirmation card through the lane gateway's
   `extraConfirmationRequired` (names only known at run time); `AUTO` scripts run without asking.
   `ManagedMcpRunRegistry.register` gives a lane's managed endpoint its **own**
@@ -3476,9 +3506,13 @@ There are two audiences, with two gates:
 - **External MCP clients — `PER_CALL_APPROVAL_MCP_TOOLS`.** `CONFIRMATION_REQUIRED` gates only
   Indagium's own AI panel; an external client holding the control token would otherwise run any
   command a script holds with nobody asked. The set (`debug/ExternalToolApproval.kt:22`) is
-  `try_test_script`, `run_test_suite`, `rerun_test_step`, `test_lane_tool_call`,
-  `create_issue_from_step`, `send_issue_to_tracker`. Each call opens a dialog describing *that exact
-  call* — the client, the script and its exact command and arguments, or the suite, cases, lanes with
+  `try_test_script`, `run_test_suite`, `rerun_test_step`, `rerun_failed_test_cases`,
+  `test_lane_tool_call`, `draft_test_steps`, `start_test_recording`, `apply_test_recording`,
+  `import_test_script`, `export_test_script`, `export_test_run_report`,
+  `collect_android_bugreport`, `export_issue_step_clip`, `create_issue_from_step`,
+  `send_issue_to_tracker`. Each call opens a dialog describing *that exact
+  call* — a remote draft's provider, endpoint/account and bounded context; the client, the script and
+  its exact command and arguments; or the suite, cases, lanes with
   devices and every script a run may execute, or the tracker, profile, issue and every attachment the
   agent can read — and waits up to 5 minutes (`DEVICE_AI_APPROVAL_TIMEOUT_MS`,
   `ui/AppState.kt:3010`). **Approval is per call and never remembered for the session**, because each
@@ -3541,8 +3575,9 @@ judge or a tracker is **never trusted as instructions**:
 The structural defences matter more than the wording: an injected instruction can at most influence
 what a *lane agent* does with the tools of its own lane (device input, and the scripts the suite's
 author exposed as `AUTO`/`ASK`); it cannot reach the app's catalogue, the library, the tracker token,
-other lanes, or — through the judge — a verdict stronger than the deterministic evidence (a judge can
-only downgrade, §26.7, and never sees the agent's words at all). Residual risk: an `AUTO` script is
+other lanes, or the blind judge's private tools. A conclusive judge failure can downgrade a passing base
+result; mandatory explicit judge checks block when no verdict is obtained, and deterministic failures remain
+failures (§26.7). The judge never sees the agent's words. Residual risk: an `AUTO` script is
 reachable by any prompt-injected lane agent, which is why the default permission is `ASK`.
 
 ### 26.10 Extension points

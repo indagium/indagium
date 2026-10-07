@@ -17,6 +17,7 @@ import com.indagium.testing.model.TestScript
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.encodeSuiteFile
 import com.indagium.ui.AppState
+import com.indagium.ui.SuiteTab
 import com.indagium.ui.TestsNav
 import com.indagium.ui.TestsWorkspace
 import org.junit.After
@@ -117,6 +118,16 @@ class TestsWorkspaceUiTest {
         rule.waitForIdle()
         assertEquals(TestsNav.Issues, state.testsView.nav)
         rule.onNodeWithText("No issues yet.").assertExists()
+
+        rule.onNodeWithText("Examples for agents").performClick()
+        rule.waitForIdle()
+        assertEquals(TestsNav.AgentExamples, state.testsView.nav)
+        rule.onNodeWithText("No step examples yet. Add a golden screenshot or reference log in a step editor.").assertExists()
+
+        rule.onNodeWithText("Agent profiles").performClick()
+        rule.waitForIdle()
+        assertTrue(state.settingsOpen)
+        assertEquals(com.indagium.ui.SettingsSection.AiProviders, state.requestedSettingsSection)
     }
 
     @Test
@@ -131,9 +142,15 @@ class TestsWorkspaceUiTest {
         state.testsView.selectedSuiteId = suite.id
 
         rule.waitForIdle()
-        rule.onNodeWithText("SETUP HOOKS").assertExists()
-        rule.onNodeWithText("VARIABLES").assertExists()
         rule.onNodeWithText("CASES (2)").assertExists()
+        rule.onNodeWithText("Setup & teardown").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("SETUP HOOKS").assertExists()
+        rule.onNodeWithText("Variables").performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("VARIABLES").assertExists()
+        state.testsView.selectedSuiteTab = SuiteTab.Cases
+        rule.waitForIdle()
 
         state.testsView.selectedCaseId = case.id
         state.testsView.expandedStepId = case.steps.first().id
@@ -143,7 +160,7 @@ class TestsWorkspaceUiTest {
         rule.onNodeWithText("EXAMPLES (2)").assertExists()
         rule.onNodeWithText("ALLOWED TOOLS").assertExists()
         rule.onNodeWithText("Golden screenshot").assertExists()
-        rule.onNodeWithText("Reference log").assertExists()
+        assertTrue(rule.onAllNodesWithText("Reference log").fetchSemanticsNodes().isNotEmpty())
 
         state.testsView.nav = TestsNav.Scripts
         state.testsView.selectedScriptId = script.id
@@ -188,7 +205,12 @@ class TestsWorkspaceUiTest {
         assertButtonDisabled("New case")
         assertButtonDisabled("Duplicate")
         assertButtonDisabled("Run suite…")
-        rule.onNodeWithText("Delete").assertIsEnabled()
+        rule.onAllNodesWithText("Delete")[0].assertIsEnabled()
         rule.onNodeWithText("Export…").assertIsEnabled()
+        rule.onAllNodesWithText("Delete")[0].performClick()
+        rule.waitForIdle()
+        rule.onNodeWithText("Delete suite?").assertExists()
+        rule.onAllNodesWithText("Delete")[1].performClick()
+        rule.waitUntil(timeoutMillis = 5_000) { state.testLibrary.suite(second.id) == null }
     }
 }

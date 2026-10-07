@@ -119,13 +119,39 @@ private fun normalizePath(path: String): String =
  * descendant-kill implementation.
  */
 internal fun Process.terminateProcessTree(grace: Duration) {
-    val descendants = toHandle().descendants().toList().asReversed()
-    descendants.forEach { child -> runCatching { child.destroy() } }
-    runCatching { destroy() }
-    if (!waitForExit(grace)) {
+    val interruptedBeforeCleanup = Thread.interrupted()
+    var interruptedDuringCleanup = false
+    try {
+        val descendants = toHandle().descendants().toList().asReversed()
+        descendants.forEach { child -> runCatching { child.destroy() } }
+        runCatching { destroy() }
+        val deadline = System.nanoTime() + grace.toNanos().coerceAtLeast(0L)
+        while ((isAlive || descendants.any { it.isAlive }) && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(PROCESS_TREE_POLL_MS)
+            } catch (_: InterruptedException) {
+                interruptedDuringCleanup = true
+            }
+        }
+        // The parent may exit while a resistant or detached child keeps running. Always force-kill
+        // every captured descendant after the grace period, independently of the parent's state.
         descendants.forEach { child -> if (child.isAlive) runCatching { child.destroyForcibly() } }
         if (isAlive) runCatching { destroyForcibly() }
-        waitForExit(Duration.ofSeconds(1))
+        val forcedExitDeadline = System.nanoTime() + Duration.ofSeconds(1).toNanos()
+        while ((isAlive || descendants.any { it.isAlive }) && System.nanoTime() < forcedExitDeadline) {
+            try {
+                Thread.sleep(PROCESS_TREE_POLL_MS)
+            } catch (_: InterruptedException) {
+                interruptedDuringCleanup = true
+            }
+        }
+        try {
+            waitForExit(Duration.ofSeconds(1))
+        } catch (_: InterruptedException) {
+            interruptedDuringCleanup = true
+        }
+    } finally {
+        if (interruptedBeforeCleanup || interruptedDuringCleanup) Thread.currentThread().interrupt()
     }
 }
 
@@ -177,6 +203,7 @@ const val DEFAULT_CAPTURE_COMMAND_OUTPUT_LIMIT: Int = 256 * 1024
 
 private const val BOUNDED_OUTPUT_INITIAL_CAPACITY_BYTES = 8 * 1024
 private const val PROCESS_OUTPUT_JOIN_TIMEOUT_MS = 1_000L
+private const val PROCESS_TREE_POLL_MS = 10L
 private const val APPIMAGE_APPDIR_ENV = "APPDIR"
 private const val APPIMAGE_EXECUTABLE_ENV = "APPIMAGE"
 private const val APPIMAGE_ORIGINAL_WORKDIR_ENV = "OWD"

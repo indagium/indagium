@@ -1,12 +1,15 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.model.AiProviderKind
+import com.indagium.model.AiProviderProfile
 import com.indagium.testing.FIXTURE_SERIAL
 import com.indagium.testing.ScriptedAdbRunner
 import com.indagium.testing.logRow
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.newCheckId
 import com.indagium.testing.openFixtureSession
@@ -154,6 +157,7 @@ class TestRunToolsGatewayTest {
         assertEquals("The login screen is visible", steps.first()["observation"].toString().lines().last())
         assertEquals("PASS", steps.first().list("checks").single()["status"])
         assertNotNull(steps.first()["screenshotPath"])
+        assertTrue((report["artifactPaths"] as List<*>).contains(steps.first()["screenshotPath"]))
         assertFalse((report["report"] as Map<*, *>).containsKey("suite"), "the report omits the frozen suite")
 
         val markdown = call("get_test_run_report", "runId" to runId, "format" to "markdown")["markdown"] as String
@@ -238,5 +242,56 @@ class TestRunToolsGatewayTest {
         assertTrue("run_test_suite" in PER_CALL_APPROVAL_MCP_TOOLS)
         assertTrue("test_lane_tool_call" in PER_CALL_APPROVAL_MCP_TOOLS)
         assertTrue("test_lane_tool_call" in SCREEN_IMAGE_TOOL_NAMES)
+    }
+
+    @Test
+    fun remoteDraftingRequiresArgumentAwareDisclosureButLoopbackDoesNot() {
+        val suiteId = createSuite("Draftable step")
+        val targetCase = state.testLibrary.suite(suiteId)!!.cases.single()
+        val args = mapOf("suiteId" to suiteId, "caseId" to targetCase.id, "instruction" to "Add an onboarding check", "profileId" to "draft-profile")
+
+        fun profile(kind: AiProviderKind, baseUrl: String) = AiProviderProfile(
+            id = "draft-profile", displayName = "Draft provider", baseUrl = baseUrl, model = "test-model", kind = kind,
+        )
+
+        state.updateSettings { it.copy(aiProviderProfiles = listOf(profile(AiProviderKind.OPENAI_COMPATIBLE, "https://provider.example/v1"))) }
+        assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy("draft_test_steps", args))
+        val remote = runBlocking { describePerCallApproval(state, "draft_test_steps", args, "Fixture client") }
+        assertNotNull(remote)
+        assertTrue(remote.summary.contains("preview only"))
+        assertTrue(remote.fields.any { it.first == "Destination" && it.second == "provider.example" })
+
+        state.updateSettings { it.copy(aiProviderProfiles = listOf(profile(AiProviderKind.OPENAI_COMPATIBLE, "http://127.0.0.1:1234/v1"))) }
+        assertEquals(IndagiumToolActionPolicy.AUTOMATIC, operations.toolGateway.actionPolicy("draft_test_steps", args))
+        assertEquals(null, runBlocking { describePerCallApproval(state, "draft_test_steps", args, "Fixture client") })
+
+        state.updateSettings { it.copy(aiProviderProfiles = listOf(profile(AiProviderKind.CODEX_ACCOUNT, ""))) }
+        assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy("draft_test_steps", args))
+        val account = runBlocking { describePerCallApproval(state, "draft_test_steps", args, "Fixture client") }
+        assertNotNull(account)
+        assertTrue(account.fields.any { it.first == "Destination" && it.second == "signed-in local CLI account" })
+        assertTrue("draft_test_steps" in PER_CALL_APPROVAL_MCP_TOOLS)
+    }
+
+    @Test
+    fun scriptFileOperationsAndRecorderMutationsHaveExternalPerCallPolicies() {
+        val script = (state.createTestScript(TestScript("", toolName = "fixture_script", commandTemplate = "echo fixture")) as StoreResult.Ok).value
+        val envelope = (state.exportTestScriptEnvelope(script.id) as StoreResult.Ok).value
+        val importApproval = runBlocking {
+            describePerCallApproval(state, "import_test_script", mapOf("text" to envelope), "Fixture client")
+        }
+        val destination = File(dir, "fixture-script.json").absolutePath
+        val exportApproval = runBlocking {
+            describePerCallApproval(state, "export_test_script", mapOf("scriptId" to script.id, "path" to destination), "Fixture client")
+        }
+
+        assertNotNull(importApproval)
+        assertTrue(importApproval.summary.contains("does not run the script"))
+        assertNotNull(exportApproval)
+        assertTrue(exportApproval.fields.any { it.first == "Destination" && it.second == destination })
+        for (tool in listOf("import_test_script", "export_test_script", "start_test_recording", "apply_test_recording")) {
+            assertTrue(tool in PER_CALL_APPROVAL_MCP_TOOLS, "$tool needs external per-call approval")
+            assertEquals(IndagiumToolActionPolicy.CONFIRMATION_REQUIRED, operations.toolGateway.actionPolicy(tool))
+        }
     }
 }

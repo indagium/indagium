@@ -73,10 +73,6 @@ internal class LaneDriver(
     private suspend fun agentLoop(scope: CoroutineScope, seq: StepSequence, agent: LaneAgent, case: TestCase?, iteration: Int, budget: CaseBudget) {
         var restarts = 0
         while (true) {
-            if (budget.remaining() <= 0) {
-                seq.abort(StepStatus.ERROR, "The case's tool-call limit was used up.")
-                return
-            }
             val segment = try {
                 startSegment(scope, seq, agent, case, iteration, budget)
             } catch (invalid: IllegalArgumentException) {
@@ -99,12 +95,10 @@ internal class LaneDriver(
                             seq.abort(StepStatus.ERROR, "The agent stopped ${restarts - 1} time(s) without finishing its step: ${stopReason(segment.run)}")
                             return
                         }
-                        seq.resetStepTimer()
                     }
                 }
             } finally {
                 closeSegment(segment)
-                budget.spend(segment.run)
             }
         }
     }
@@ -124,12 +118,14 @@ internal class LaneDriver(
             }
             when (signal) {
                 Signal.AgentStopped -> return SegmentOutcome.STOPPED
-                is Signal.Sequence -> when (signal.event) {
+                is Signal.Sequence -> when (val event = signal.event) {
                     SequenceEvent.Ended -> return SegmentOutcome.ENDED
                     is SequenceEvent.Moved -> return SegmentOutcome.MOVED
-                    SequenceEvent.TimedOut -> {
-                        // The step is over for this agent. Stop it right away; the sequence may still wait for the user.
-                        segment.run.cancel()
+                    is SequenceEvent.TimedOut -> {
+                        // The step is over for this agent. Watchdog timeouts cancel it immediately. If the
+                        // agent's own finish_step hit the deadline while the user is deciding a PAUSE policy,
+                        // its tool call stays suspended (unable to issue more actions) until that cancellable wait ends.
+                        if (!event.deferAgentCancel) segment.run.cancel()
                         cancelledForTimeout = true
                     }
                 }
@@ -154,18 +150,27 @@ internal class LaneDriver(
         val tabId = "testrun:$runId:$laneId:${seq.spec.caseId}:$iteration"
         val session = AiSession(tabId)
         val remaining = budget.remaining()
+        val laneGateway = seq.gateway(epoch)
+        val laneToolNames = laneGateway.tools.mapTo(HashSet()) { it.name } + LANE_FREE_TOOL_NAMES
+        val guidance = laneBudgetGuidance(budget.limit(), remaining)
         val request = AgentSegmentRequest(
             session = session,
             prompt = lanePrompt(
                 suite, case, seq.spec.caseName, seq.spec.steps, seq.currentIndex, seq.currentAttempt, seq.results(), seq.spec.setup,
+                case?.allowedTools,
             ),
             systemPrompt = LANE_SYSTEM_PROMPT,
             context = AiInvestigationContext(tabId),
-            gateway = seq.gateway(epoch),
-            toolCallLimit = remaining,
-            maxTurns = remaining + seq.spec.steps.size * tuning.turnHeadroomPerStep,
-            freeTools = LANE_FREE_TOOL_NAMES,
+            gateway = laneGateway,
+            // The sequence gateway is the single case-level dispatch gate across retries and agent restarts.
+            // Keep the coordinator's required positive local allowance, but exempt every tool this lane offers
+            // so a confirmation refusal or protocol call cannot spend a competing per-segment allowance.
+            toolCallLimit = remaining.coerceAtLeast(1),
+            maxTurns = (remaining + seq.spec.steps.size * tuning.turnHeadroomPerStep).coerceAtLeast(1),
+            freeTools = laneToolNames,
             confirmationTimeoutMs = confirmationTimeoutMs,
+            budgetGuidance = { guidance },
+            promptPreamble = { lanePromptPreamble(guidance) },
         )
         val run = agent.start(request)
         handle.agentRun = run

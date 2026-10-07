@@ -100,19 +100,11 @@ internal fun readStepLogSlice(file: File, start: Long?, end: Long?, offset: Long
     return StepLogSlice(rows, (next - start).coerceAtLeast(0L), more = rows.size >= wanted && next < upper, totalBytes = upper - start)
 }
 
-private const val MIME_PNG = "image/png"
-private const val MIME_WEBP = "image/webp"
 private const val MIME_JPEG = "image/jpeg"
 
-internal fun mimeForAsset(path: String): String = when (path.substringAfterLast('.', "").lowercase()) {
-    "png" -> MIME_PNG
-    "webp" -> MIME_WEBP
-    else -> MIME_JPEG
-}
-
-/** [bytes] scaled and compressed like a screenshot the agent sees; when the JDK cannot read the format they go as they are with [fallbackMime]. */
-internal fun boundedJudgeImage(bytes: ByteArray, fallbackMime: String): JudgeImage? {
-    if (bytes.isEmpty()) return null
+/** Strictly decode, dimension-check, scale and compress; never send unsafe or undecodable raw bytes as a fallback. */
+internal fun boundedJudgeImage(bytes: ByteArray): JudgeImage? {
+    if (bytes.isEmpty() || bytes.size > com.indagium.testing.store.MAX_GOLDEN_IMAGE_BYTES) return null
     val scaled = runCatching { encodeBoundedDeviceScreen(bytes).bytes }.getOrNull()
-    return if (scaled != null) JudgeImage(scaled, MIME_JPEG) else JudgeImage(bytes, fallbackMime)
+    return scaled?.let { JudgeImage(it, MIME_JPEG) }
 }

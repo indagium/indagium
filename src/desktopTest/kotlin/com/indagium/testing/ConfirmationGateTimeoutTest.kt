@@ -83,4 +83,28 @@ class ConfirmationGateTimeoutTest {
         assertEquals("ran", marker.readText())
         marker.delete()
     }
+
+    @Test
+    fun aDeniedAskDoesNotSpendThePaidCaseDispatchAllowance() {
+        val marker = File.createTempFile("ask-me", ".txt").also { it.delete() }
+        val script = hostScript("ask_me", "printf ran > '${marker.absolutePath}'", ScriptPermission.ASK)
+        val suite = suiteOf(caseOf("Denied ask", step("Try the script, press once, then report", maxToolCalls = 8)))
+        val provider = TurnProvider(
+            listOf(
+                toolTurn("ask_me"),
+                toolTurn("press_key", """{"key":"HOME"}"""),
+                finishTurn("pass", "the button was pressed"),
+                textTurn,
+            ),
+        )
+        val h = RunHarness(TestLibrary(suites = listOf(suite), scripts = listOf(script)), provider).also { harness = it }
+        val config = h.config(suite, toolLimit = 1).copy(confirmationTimeoutMs = SHORT_TIMEOUT_MS)
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        val run = runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        assertFalse(marker.exists(), "the timed-out confirmation does not execute the script")
+        assertEquals(1, h.adb.shellCommands.count { it.firstOrNull() == "input" }, "the one actual paid dispatch is admitted")
+        assertEquals(CaseStatus.PASS, run.lanes.single().cases.single().status, run.toString())
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+    }
 }

@@ -1,9 +1,15 @@
 package com.indagium.ui
 
+import com.indagium.ai.AiInvestigationContext
+import com.indagium.ai.AiRun
+import com.indagium.ai.AiRunEvent
+import com.indagium.ai.AiSession
 import com.indagium.ai.ManagedMcpServerLease
 import com.indagium.ai.defaultAiProviderFactory
 import com.indagium.ai.normalizeAiProviderProfiles
+import com.indagium.debug.IndagiumToolGateway
 import com.indagium.testing.device.TestDeviceSession
+import com.indagium.testing.run.AgentSegmentRequest
 import com.indagium.testing.run.CoordinatorDeps
 import com.indagium.testing.run.EngineTuning
 import com.indagium.testing.run.LaneAgentFactory
@@ -13,9 +19,13 @@ import com.indagium.testing.run.defaultLaneAgentFactory
 import com.indagium.testing.run.laneAccountRunnerFactory
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TestRunStore
+import com.indagium.testing.store.readBoundedTestAsset
 import com.indagium.testing.tracker.TrackerMcpClientFactory
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 
 // Connects the AI test-run coordinator (testing/run, which knows nothing of AppState) to the app: where runs are stored,
@@ -40,6 +50,49 @@ internal fun AppState.productionAgentFactory(overrides: TestRunOverrides): LaneA
     laneAccountRunnerFactory { run, gateway -> ManagedMcpServerLease.start(this, run, gateway) },
 )
 
+/** Drafts steps through an existing profile with an empty MCP gateway and no host tools or device session. */
+internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: String): String {
+    val profile = normalizeAiProviderProfiles(settings.aiProviderProfiles).firstOrNull { it.id == profileId }
+        ?: error("Choose an existing provider profile.")
+    val agent = productionAgentFactory(testRunOverrides).create(profile, aiProviderApiKey(profileId))
+    val tabId = "test-step-draft:${java.util.UUID.randomUUID()}"
+    val session = com.indagium.ai.AiSession(tabId)
+    var run: AiRun? = null
+    try {
+        val gateway = IndagiumToolGateway(emptyList(), emptyMap())
+        val activeRun = agent.start(
+            AgentSegmentRequest(
+                session = session,
+                prompt = prompt,
+                systemPrompt =
+                    "You draft Android QA test steps. Return only the requested JSON. You have no device or tools; " +
+                        "do not claim to have run or observed anything.",
+                context = AiInvestigationContext(tabId),
+                gateway = gateway,
+                toolCallLimit = 1,
+                maxTurns = 2,
+                freeTools = emptySet(),
+                confirmationTimeoutMs = 1_000,
+            ),
+        )
+        run = activeRun
+        withTimeout(TEST_STEP_DRAFT_TIMEOUT_MS) { activeRun.job?.join() }
+        val error = activeRun.history.filterIsInstance<AiRunEvent.Error>().lastOrNull()
+        check(error == null) { "The provider could not draft steps: ${error?.message}" }
+        check(activeRun.job?.isActive != true) { "The provider did not finish the draft request." }
+        return activeRun.history.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString("") { it.text }
+            .also { check(it.isNotBlank()) { "The provider returned no step draft." } }
+    } finally {
+        run?.cancel()
+        withContext(NonCancellable) { withTimeoutOrNull(TEST_STEP_DRAFT_CLEANUP_MS) { run?.job?.join() } }
+        session.deleteClaudeCodeWorkspace()
+        agent.close()
+    }
+}
+
+private const val TEST_STEP_DRAFT_TIMEOUT_MS = 120_000L
+private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
+
 private const val LIVE_CAPTURE_PROBLEM = "is held by the live capture in the main window; stop that capture or choose another device."
 
 /** Builds the app's coordinator. [baseDir] is where run folders go; [onChanged] is called after every change of a run. */
@@ -62,7 +115,7 @@ internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, base
             agentFactory = agentFactory,
             scriptRunner = overrides.scriptRunner ?: TestScriptRunner(),
             tuning = overrides.tuning,
-            goldenImage = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.takeIf { it.isFile }?.readBytes() },
+            goldenImage = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.let(::readBoundedTestAsset) },
             issues = issueStore,
             goldenFile = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath) },
         ),

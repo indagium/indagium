@@ -48,7 +48,11 @@ internal class DeterministicChecks(
     private val scriptContext: () -> ScriptRunContext,
 ) {
     /** Evaluates [checks] in order. [stepLogOffset] is the log marker taken when the step (attempt) began. */
-    suspend fun evaluateAll(checks: List<StepCheck>, stepLogOffset: Long): List<CheckResult> = checks.map { evaluate(it, stepLogOffset) }
+    suspend fun evaluateAll(
+        checks: List<StepCheck>,
+        stepLogOffset: Long,
+        onResult: (CheckResult) -> Unit = {},
+    ): List<CheckResult> = checks.map { evaluate(it, stepLogOffset).also(onResult) }
 
     suspend fun evaluate(check: StepCheck, stepLogOffset: Long): CheckResult {
         val startedNanos = System.nanoTime()

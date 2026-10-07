@@ -8,14 +8,20 @@ import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.decide
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
+import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.MAX_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.RunConfig
+import com.indagium.testing.model.SharedStep
+import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import java.net.URI
+
+private const val MAX_REPORTED_ACTION_CHARS = 80
 
 // Checks a RunConfig against the library, the edition limits and the AI profiles BEFORE anything starts. Every
 // problem is returned as data (a list of messages, plus the limit decision when the edition refused), never thrown, so
@@ -78,6 +84,26 @@ private fun judgeProblems(config: RunConfig, profiles: List<AiProviderProfile>, 
     }
 }
 
+/** Explicit judge assertions must never be accepted as green without a configured, usable judge. */
+private fun explicitJudgeSteps(suite: TestSuite, cases: List<TestCase>, library: TestLibrary, stopAfterStepId: String?): List<String> {
+    val sharedIds = (suite.setup + suite.teardown + cases.flatMap { it.setup + it.teardown })
+        .filterIsInstance<HookItem.Shared>().map { it.sharedStepId }.toSet()
+    val sharedSteps: List<SharedStep> = library.sharedSteps.filter { it.id in sharedIds }
+    return buildList {
+        suite.cases.filter { candidate -> cases.any { it.id == candidate.id } }.forEach { candidate ->
+            val selected = cases.first { it.id == candidate.id }
+            val stopIndex = selected.steps.indexOfFirst { it.id == stopAfterStepId }
+            val steps = if (stopIndex >= 0) selected.steps.take(stopIndex + 1) else selected.steps
+            steps.filter { step -> step.checks.any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge } }
+                .forEach { add("case '${candidate.name}', step '${it.action.take(MAX_REPORTED_ACTION_CHARS)}'") }
+        }
+        sharedSteps.forEach { shared ->
+            shared.steps.filter { step -> step.checks.any { it is StepCheck.ScreenJudge || it is StepCheck.AskJudge } }
+                .forEach { add("shared step '${shared.name}', step '${it.action.take(MAX_REPORTED_ACTION_CHARS)}'") }
+        }
+    }
+}
+
 @Suppress("LongParameterList")
 internal fun validateRun(
     config: RunConfig,
@@ -114,9 +140,20 @@ internal fun validateRun(
     }
     errors += laneProblems(config, profiles, apiKey)
     errors += judgeProblems(config, profiles, apiKey, warnings)
+    errors += explicitJudgeCheckErrors(suite, plan, library, config)
     warnings += deviceSharingWarnings(config.lanes)
     if (suite != null && config.stopAfterStepId != null && plan.cases.none { case -> case.steps.any { it.id == config.stopAfterStepId } }) {
         errors += "Step '${config.stopAfterStepId}' is not in any of the cases to run."
     }
     return RunValidation(suite, plan, errors, warnings, refusal)
+}
+
+private fun explicitJudgeCheckErrors(suite: TestSuite?, plan: CasePlan, library: TestLibrary, config: RunConfig): List<String> {
+    if (suite == null || JudgeMode.parse(config.judgeMode) != JudgeMode.OFF) return emptyList()
+    val assertions = explicitJudgeSteps(suite, plan.cases, library, config.stopAfterStepId)
+    if (assertions.isEmpty()) return emptyList()
+    return listOf(
+        "The selected cases contain explicit ScreenJudge/AskJudge checks (${assertions.joinToString()}); " +
+            "choose a judge mode and a usable judge profile before running.",
+    )
 }

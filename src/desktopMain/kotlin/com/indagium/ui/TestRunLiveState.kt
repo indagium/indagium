@@ -7,6 +7,7 @@ import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.SUITE_SETUP_CASE_ID
 import com.indagium.testing.model.SUITE_TEARDOWN_CASE_ID
@@ -29,6 +30,7 @@ internal const val LIVE_MIN_LANE_WIDTH_DP = 280f
 internal const val LIVE_TOOL_FEED_LINES = 6
 internal const val JUDGE_FEED_LIMIT = 30
 private const val REASONING_EXCERPT_CHARS = 160
+private const val MAX_LIVE_LOGCAT_PREVIEW_CHARS = 800
 
 /** One line of a lane's step checklist: [status] is null while the step has no result yet; [current] marks the step in progress. */
 internal data class LiveStepLine(val number: Int, val action: String, val status: StepStatus?, val current: Boolean)
@@ -49,6 +51,7 @@ internal data class LiveLaneColumn(
     val toolCalls: List<String>,
     /** The newest screenshot of the lane, relative to the run folder. */
     val screenshotPath: String?,
+    val logcatPath: String?,
     val confirmations: List<PendingTestConfirmation>,
     val pause: PausedStepInfo?,
     val error: String?,
@@ -85,6 +88,13 @@ private fun issueLines(lane: LaneResult): List<LiveIssueLine> = lane.cases.flatM
     case.steps.filter { !it.setup }.mapNotNull { step -> step.issueId?.let { LiveIssueLine(it, case.caseName, step.stepNumber, step.action) } }
 }
 
+private fun LaneToolCall.liveLine(): String = buildString {
+    append("$toolName [${status.name.lowercase()}]")
+    append(" — case $caseId, step $stepId, try $attempt")
+    if (argumentsPreview.isNotBlank()) append(" — args: $argumentsPreview")
+    if (resultPreview.isNotBlank()) append(" — result: $resultPreview")
+}.take(MAX_LIVE_LOGCAT_PREVIEW_CHARS)
+
 /**
  * One column per lane, in lane order. [toolCalls] gives a lane's recent tool calls (newest last); [confirmations] and
  * [pauses] are the live cards of the whole coordinator and are filtered to this run and lane here.
@@ -104,8 +114,9 @@ internal fun liveColumns(
         currentCase = lane.currentCase,
         currentStep = lane.currentStepNumber?.let { number -> "Step $number" + (lane.currentStepAction?.takeIf { it.isNotBlank() }?.let { ": $it" } ?: "") },
         steps = stepChecklist(run, lane),
-        toolCalls = toolCalls(lane.laneId).takeLast(LIVE_TOOL_FEED_LINES),
+        toolCalls = (toolCalls(lane.laneId) + lane.toolCalls.takeLast(LIVE_TOOL_FEED_LINES).map { it.liveLine() }).takeLast(LIVE_TOOL_FEED_LINES),
         screenshotPath = latestScreenshot(lane),
+        logcatPath = lane.logPath,
         confirmations = confirmations.filter { it.runId == run.id && it.laneId == lane.laneId },
         pause = pauses.firstOrNull { it.runId == run.id && it.laneId == lane.laneId },
         error = lane.error,

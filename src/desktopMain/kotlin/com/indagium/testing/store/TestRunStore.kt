@@ -25,6 +25,10 @@ const val TEST_RUN_TRANSCRIPT_FILE_NAME = "transcript.jsonl"
 const val TEST_RUN_JUDGE_FILE_NAME = "judge.jsonl"
 const val MAX_RUN_FILE_BYTES = 64L * 1024L * 1024L
 private const val MAX_LISTED_RUNS = 200
+private const val MAX_SUITE_SUMMARIES = 10_000
+private const val RECENT_SUITE_RECORDS = 5
+
+data class StoredSuiteRunHistory(val recentRecords: List<TestRun>, val summaries: List<RunSummary>)
 
 class TestRunStore(private val baseDir: () -> File) {
     @Volatile
@@ -70,4 +74,48 @@ class TestRunStore(private val baseDir: () -> File) {
             .mapNotNull { load(it.name)?.summary() }
             .sortedByDescending { it.createdAt }
     }
+
+    /** Full persisted run snapshots, newest first; bounded by the same on-disk listing limit as [list]. */
+    fun listRecords(): List<TestRun> {
+        val folders = baseDir().listFiles { file -> file.isDirectory && isSafeId(file.name) }.orEmpty()
+        return folders.sortedByDescending { File(it, TEST_RUN_FILE_NAME).lastModified() }
+            .take(MAX_LISTED_RUNS)
+            .mapNotNull { load(it.name) }
+            .sortedByDescending { it.createdAt }
+    }
+
+    /**
+     * Filter a suite before limiting, so unrelated recent runs cannot hide its history. The Runs tab keeps lightweight
+     * summaries; only the five most recent full snapshots and the latest terminal snapshot are retained.
+     */
+    fun listSuiteHistory(suiteId: String): StoredSuiteRunHistory {
+        if (!isSafeId(suiteId)) return StoredSuiteRunHistory(emptyList(), emptyList())
+        val summaries = ArrayList<RunSummary>()
+        val recent = ArrayList<TestRun>()
+        var latestTerminal: TestRun? = null
+        val recordOrder = compareByDescending<TestRun> { it.createdAt }.thenByDescending { it.finishedAt ?: 0L }
+        val folders = baseDir().listFiles { file -> file.isDirectory && isSafeId(file.name) }.orEmpty()
+            .sortedByDescending { File(it, TEST_RUN_FILE_NAME).lastModified() }
+        for (folder in folders) {
+            val run = load(folder.name)
+            if (run?.config?.suiteId == suiteId) {
+                summaries += run.summary()
+                recent += run
+                recent.sortWith(recordOrder)
+                if (recent.size > RECENT_SUITE_RECORDS) recent.removeAt(recent.lastIndex)
+                if (run.isFinished) {
+                    val previousTerminal = latestTerminal
+                    if (previousTerminal == null || recordOrder.compare(run, previousTerminal) < 0) latestTerminal = run
+                }
+                if (summaries.size >= MAX_SUITE_SUMMARIES) break
+            }
+        }
+        val summaryOrder = compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id }
+        val records = (recent + listOfNotNull(latestTerminal)).distinctBy { it.id }.sortedWith(recordOrder)
+        return StoredSuiteRunHistory(records, summaries.sortedWith(summaryOrder))
+    }
+
+    fun listRecordsForSuite(suiteId: String): List<TestRun> = listSuiteHistory(suiteId).recentRecords
+
+    fun listSummariesForSuite(suiteId: String): List<RunSummary> = listSuiteHistory(suiteId).summaries
 }

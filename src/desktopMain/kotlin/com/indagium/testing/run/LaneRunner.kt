@@ -16,6 +16,7 @@ import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.judge
+import com.indagium.testing.store.LaneToolActivityWriter
 import com.indagium.testing.store.TEST_RUN_TRANSCRIPT_FILE_NAME
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
@@ -48,6 +49,10 @@ internal class LaneRunner(
     private val evidence = snapshot.config.evidence
 
     @Volatile private var recorder: CaseRecorder? = null
+
+    @Volatile private var activityWriter: LaneToolActivityWriter? = null
+
+    @Volatile private var transcriptWriter: TranscriptWriter? = null
 
     @Volatile private var cancelled = false
 
@@ -118,13 +123,20 @@ internal class LaneRunner(
 
     private suspend fun execute(session: TestDeviceSession, agent: LaneAgent?, laneDir: File) {
         val runDir = deps.store.runDir(runId)
+        val laneActivityFile = File(laneDir, "tool-activity.jsonl")
+        activityWriter = LaneToolActivityWriter(laneActivityFile)
         val transcript = if (evidence.transcript) TranscriptWriter(File(laneDir, TEST_RUN_TRANSCRIPT_FILE_NAME), deps.wallClock) else null
+        transcriptWriter = transcript
         val env = SequenceEnv(
             session, deps.scriptRunner, snapshot.scripts, runDir, laneDir, suite.targetPackage, evidence, transcript, this,
             wallClock = deps.wallClock,
             judge = judge,
             judgeMode = snapshot.config.judge,
             pauseGate = deps.pauseGate,
+            suiteId = suite.id,
+            goldenImage = deps.goldenImage,
+            goldenFile = deps.goldenFile,
+            externalDispatchAdmitted = deps.externalDispatchAdmitted,
         )
         val driver = LaneDriver(runId, lane.id, suite, deps.tuning, agent, handle, transcript, snapshot.config.confirmationTimeoutMs)
         val hooks = HookRunner(snapshot, env, driver) { step -> recorder?.add(step) }
@@ -132,6 +144,7 @@ internal class LaneRunner(
             it.copy(
                 logPath = session.logFile.relativeTo(runDir).invariantSeparatorsPath,
                 transcriptPath = transcript?.file?.relativeTo(runDir)?.invariantSeparatorsPath,
+                toolActivityPath = laneActivityFile.relativeTo(runDir).invariantSeparatorsPath,
             )
         }
         recordLockedCases()
@@ -166,8 +179,16 @@ internal class LaneRunner(
         val owner = CaseRecorder(CaseResult(id, title, 1, startedAt = now()))
         recorder = owner
         updateLane { it.copy(currentCase = title) }
-        val ok = hooks.run(list, id, 1, id, CaseBudget(snapshot.config.caseToolCallLimit), stopOnFailure, scriptsOnly)
-        owner.finish(if (ok) CaseStatus.PASS else CaseStatus.FAIL)
+        val budget = CaseBudget(snapshot.config.caseToolCallLimit)
+        val ok = hooks.run(list, id, 1, id, budget, stopOnFailure, scriptsOnly)
+        owner.finish(
+            when {
+                budget.exhausted() -> CaseStatus.ERROR
+                ok -> CaseStatus.PASS
+                else -> CaseStatus.FAIL
+            },
+            CASE_BUDGET_EXHAUSTED_NOTE.takeIf { budget.exhausted() },
+        )
         recorder = null
         return ok
     }
@@ -203,8 +224,9 @@ internal class LaneRunner(
         try {
             val setupOk = hooks.run(case.setup, case.id, iteration, "$prefix-setup", budget, stopOnFailure = true)
             if (!setupOk) {
-                owner.addAll(case.steps.mapIndexed { i, step -> skipped(i, step, SETUP_FAILED_NOTE) })
-                owner.finish(CaseStatus.BLOCKED, SETUP_FAILED_NOTE)
+                val note = if (budget.exhausted()) CASE_BUDGET_EXHAUSTED_NOTE else SETUP_FAILED_NOTE
+                owner.addAll(case.steps.mapIndexed { i, step -> skipped(i, step, note) })
+                owner.finish(if (budget.exhausted()) CaseStatus.ERROR else CaseStatus.BLOCKED, note)
             } else {
                 runSteps(env, driver, owner, case, iteration, prefix, budget)
             }
@@ -235,14 +257,30 @@ internal class LaneRunner(
             owner.finish(CaseStatus.PASS, "The case has no steps.")
             return
         }
-        val sequence = StepSequence(env, SequenceSpec(case.id, case.name, case.steps, setup = false, allowedTools = case.allowedTools, evidencePrefix = prefix))
+        val sequence = StepSequence(
+            env,
+            SequenceSpec(
+                case.id,
+                case.name,
+                case.steps,
+                setup = false,
+                allowedTools = case.allowedTools,
+                evidencePrefix = prefix,
+                caseBudget = budget,
+                iteration = iteration,
+            ),
+        )
         driver.drive(sequence, case, iteration, budget)
         val results = sequence.results()
         owner.addAll(case.steps.drop(results.size).mapIndexed { i, step -> skipped(results.size + i, step, STOPPED_NOTE) })
-        owner.finish(caseStatus(results, case.steps.size))
+        owner.finish(
+            caseStatus(results, case.steps.size, budget),
+            CASE_BUDGET_EXHAUSTED_NOTE.takeIf { budget.exhausted() },
+        )
     }
 
-    private fun caseStatus(results: List<StepResult>, stepCount: Int): CaseStatus = when {
+    private fun caseStatus(results: List<StepResult>, stepCount: Int, budget: CaseBudget): CaseStatus = when {
+        budget.exhausted() -> CaseStatus.ERROR
         results.any { it.status == StepStatus.FAIL || it.status == StepStatus.TIMEOUT } -> CaseStatus.FAIL
         results.any { it.status == StepStatus.BLOCKED } -> CaseStatus.BLOCKED
         results.any { it.status == StepStatus.ERROR } -> CaseStatus.ERROR
@@ -260,6 +298,31 @@ internal class LaneRunner(
         val owner = recorder ?: return
         owner.add(if (result.issueRequested && !result.setup) withIssueDraft(owner, result) else result)
     }
+
+    override fun toolCallStarted(call: com.indagium.testing.model.LaneToolCall) {
+        activityWriter?.append("started", call)
+        transcriptWriter?.append("lane_tool_call_started", laneToolCallFields(call))
+        updateLane { lane -> lane.copy(toolCalls = (lane.toolCalls + call).takeLast(MAX_PERSISTED_TOOL_CALLS)) }
+    }
+
+    override fun toolCallFinished(call: com.indagium.testing.model.LaneToolCall) {
+        activityWriter?.append("finished", call)
+        transcriptWriter?.append("lane_tool_call_finished", laneToolCallFields(call))
+        updateLane { lane -> lane.copy(toolCalls = lane.toolCalls.map { if (it.id == call.id) call else it }) }
+    }
+
+    private fun laneToolCallFields(call: com.indagium.testing.model.LaneToolCall) = mapOf(
+        "id" to call.id,
+        "caseId" to call.caseId,
+        "stepId" to call.stepId,
+        "iteration" to call.iteration,
+        "attempt" to call.attempt,
+        "toolName" to call.toolName,
+        "arguments" to call.argumentsPreview,
+        "result" to call.resultPreview,
+        "status" to call.status.name,
+        "durationMs" to call.durationMs,
+    )
 
     /**
      * A step that asked for an issue (CREATE_ISSUE_AND_CONTINUE) gets a LOCAL draft now, while its evidence is on disk. The
@@ -326,3 +389,5 @@ internal class LaneRunner(
         }
     }
 }
+
+private const val MAX_PERSISTED_TOOL_CALLS = 300

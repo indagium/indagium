@@ -20,13 +20,18 @@ import com.indagium.testing.model.summary
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RunPersister
+import com.indagium.testing.store.StoredSuiteRunHistory
 import com.indagium.testing.store.TestRunStore
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -47,7 +52,12 @@ import java.util.concurrent.ConcurrentHashMap
 // assignment; both are leaves. Nothing here touches AppState.stateLock: the owner passes plain lambdas.
 
 const val COORDINATOR_CLOSE_WAIT_MS = 4_000L
+private const val COORDINATOR_FINAL_PERSIST_WAIT_MS = 2_000L
 private const val MAX_FINISHED_RUNS_IN_MEMORY = 20
+
+private class FinishStepCancellationException : CancellationException(
+    "The lane is finishing this step; a still-running paid tool was stopped.",
+)
 
 sealed interface StartRunResult {
     /** The run is under way. [laneIds] are the ids `test_lane_tool_call` and `resume_paused_step` take. */
@@ -87,6 +97,77 @@ private class RunEntry(
     val gate: RunPauseGate,
 ) {
     @Volatile var job: Job? = null
+
+    private val externalCallLock = Any()
+
+    private data class ExternalCall(
+        val laneId: String,
+        val toolName: String,
+        val dispatchedStepId: String? = null,
+        val dispatchedAttempt: Int? = null,
+    )
+
+    private val externalCalls = LinkedHashMap<Job, ExternalCall>()
+    private var cancellationRequested = false
+    private var naturalCompletionRequested = false
+
+    fun registerExternalCall(call: Job, laneId: String, toolName: String): Boolean = synchronized(externalCallLock) {
+        if (cancellationRequested || naturalCompletionRequested || state.current.isFinished) false
+        else externalCalls.put(call, ExternalCall(laneId, toolName)) == null
+    }
+
+    fun unregisterExternalCall(call: Job) {
+        synchronized(externalCallLock) { externalCalls.remove(call) }
+    }
+
+    fun markDispatched(call: Job?, stepId: String?, attempt: Int) {
+        if (call == null) return
+        synchronized(externalCallLock) {
+            externalCalls[call]?.let {
+                externalCalls[call] = it.copy(dispatchedStepId = stepId, dispatchedAttempt = attempt)
+            }
+        }
+    }
+
+    fun requestCancellation() {
+        val calls = synchronized(externalCallLock) {
+            cancellationRequested = true
+            externalCalls.keys.toList()
+        }
+        calls.forEach { it.cancel(CancellationException("The test run is stopping.")) }
+    }
+
+    /** Stop any paid lane work still in flight after a natural finish, but preserve protocol replies such as finish_step. */
+    fun requestNaturalCompletion() {
+        val calls = synchronized(externalCallLock) {
+            naturalCompletionRequested = true
+            externalCalls.filterValues { it.toolName !in LANE_PROTOCOL_TOOL_NAMES }.keys.toList()
+        }
+        calls.forEach { it.cancel(CancellationException("The test run finished while this lane tool was still active.")) }
+    }
+
+    /** Wait for cancellation handlers and terminal protocol replies before persisting and releasing lane devices. */
+    suspend fun drainExternalCalls(timeoutMs: Long): Boolean {
+        val calls = synchronized(externalCallLock) { externalCalls.keys.toList() }
+        return withTimeoutOrNull(timeoutMs) {
+            calls.joinAll()
+            true
+        } ?: false
+    }
+
+    suspend fun cancelDispatchedPaidCallsBeforeFinish(laneId: String, stepId: String?, attempt: Int?): Boolean {
+        val calls = synchronized(externalCallLock) {
+            externalCalls.filterValues {
+                it.laneId == laneId && it.dispatchedStepId == stepId && it.dispatchedAttempt == attempt &&
+                    it.toolName !in LANE_PROTOCOL_TOOL_NAMES
+            }.keys.toList()
+        }
+        calls.forEach { it.cancel(FinishStepCancellationException()) }
+        return withTimeoutOrNull(COORDINATOR_CLOSE_WAIT_MS) {
+            calls.joinAll()
+            true
+        } ?: false
+    }
 }
 
 internal class TestRunCoordinator(
@@ -183,6 +264,7 @@ internal class TestRunCoordinator(
             pauseGate = gate,
             issues = deps.issues,
             goldenFile = deps.goldenFile,
+            externalDispatchAdmitted = entry::markDispatched,
         )
         // ATOMIC: a run cancelled before its first instruction must still reach the finally that frees its devices.
         entry.job = scope.launch(start = CoroutineStart.ATOMIC) {
@@ -190,7 +272,15 @@ internal class TestRunCoordinator(
                 persister.flush()
                 TestRunEngine(state, persister, engineDeps, plan, handles).execute()
             } finally {
-                release(runId, config)
+                withContext(NonCancellable) {
+                    try {
+                        entry.requestNaturalCompletion()
+                        entry.drainExternalCalls(COORDINATOR_CLOSE_WAIT_MS)
+                        persister.flush()
+                    } finally {
+                        release(runId, config)
+                    }
+                }
             }
         }
     }
@@ -235,6 +325,38 @@ internal class TestRunCoordinator(
         return (live + stored.filter { s -> live.none { it.id == s.id } }).sortedByDescending { it.createdAt }
     }
 
+    /** Full run snapshots for suite history. Disk records are loaded first, then the freshest in-memory copy wins per id. */
+    suspend fun listRunRecords(): List<TestRun> {
+        val stored = withContext(Dispatchers.IO) { deps.store.listRecords() }
+        return mergeRunSnapshots(runs.values.map { it.state.current }, stored)
+    }
+
+    /** Same-suite history is selected before the bounded result window, independent of unrelated recent runs. */
+    suspend fun listRunRecordsForSuite(suiteId: String): List<TestRun> {
+        return loadSuiteRunHistory(suiteId).recentRecords
+    }
+
+    /** Full snapshots stay bounded while the Runs tab keeps the complete same-suite lightweight summary list. */
+    suspend fun loadSuiteRunHistory(suiteId: String): StoredSuiteRunHistory {
+        val stored = withContext(Dispatchers.IO) { deps.store.listSuiteHistory(suiteId) }
+        val live = runs.values.map { it.state.current }.filter { it.config.suiteId == suiteId }
+        val mergedRecords = mergeRunSnapshots(live, stored.recentRecords)
+            .sortedWith(compareByDescending<TestRun> { it.createdAt }.thenByDescending { it.finishedAt ?: 0L })
+        val records = (mergedRecords.take(5) + listOfNotNull(mergedRecords.firstOrNull { it.isFinished }))
+            .distinctBy { it.id }
+        val liveSummaries = live.map { it.summary() }
+        val summaries = (liveSummaries + stored.summaries.filter { saved -> live.none { it.id == saved.id } })
+            .sortedWith(compareByDescending<RunSummary> { it.createdAt }.thenByDescending { it.id })
+        return StoredSuiteRunHistory(records, summaries)
+    }
+
+    suspend fun listRunSummariesForSuite(suiteId: String): List<RunSummary> = loadSuiteRunHistory(suiteId).summaries
+
+    suspend fun previousTerminalRunOfSameSuite(current: TestRun): TestRun? {
+        val previous = previousTerminalRunSummaryOfSameSuite(listRunSummariesForSuite(current.suite.id), current) ?: return null
+        return loadRun(previous.id)
+    }
+
     /** The folder of [runId] (its screenshots, logs and transcript live under it). */
     fun runDir(runId: String): java.io.File = deps.store.runDir(runId)
 
@@ -246,6 +368,7 @@ internal class TestRunCoordinator(
     fun cancel(runId: String): Boolean {
         val entry = runs[runId] ?: return false
         if (entry.state.current.isFinished) return false
+        entry.requestCancellation()
         entry.job?.cancel()
         return true
     }
@@ -309,6 +432,7 @@ internal class TestRunCoordinator(
      * Runs a lane tool of an EXTERNAL lane (what a client driving the lane over MCP does). The tool runs against the
      * lane's current case, behind the same per-step guard an agent has. Errors come back as `{ "error": ... }`.
      */
+    @Suppress("ReturnCount") // Each branch returns a distinct actionable refusal before dispatching to an external lane.
     suspend fun laneToolCall(runId: String, laneId: String, tool: String, arguments: Map<String, Any?>): Any? {
         val entry = runs[runId] ?: return mapOf("error" to "Run '$runId' is not running in this session.")
         val handle = entry.handles[laneId] ?: return mapOf("error" to "Run '$runId' has no lane '$laneId'.")
@@ -316,13 +440,39 @@ internal class TestRunCoordinator(
         if (lane?.config?.kind != LaneKind.EXTERNAL) return mapOf("error" to "Lane '$laneId' is driven by an agent; only external lanes accept tool calls.")
         if (lane.status != RunStatus.RUNNING) return mapOf("error" to "Lane '$laneId' is ${lane.status.name.lowercase()}; it cannot take tool calls.")
         val sequence = handle.sequence ?: return mapOf("error" to NO_ACTIVE_CASE_MESSAGE)
-        return sequence.externalGateway().executeSuspending(tool, arguments)
+        if (tool == "finish_step") {
+            val (stepId, attempt) = sequence.currentAttemptIdentity() ?: (null to null)
+            if (!entry.cancelDispatchedPaidCallsBeforeFinish(laneId, stepId, attempt)) {
+                return mapOf("error" to "A paid tool is still stopping; retry finish_step after its cleanup completes.")
+            }
+        }
+        return try {
+            coroutineScope {
+                val call = async(start = CoroutineStart.LAZY) { sequence.externalGateway().executeSuspending(tool, arguments) }
+                if (!entry.registerExternalCall(call, laneId, tool)) {
+                    // A lazy child still belongs to this scope. Cancel it before returning or coroutineScope would wait
+                    // forever for a child that was deliberately never started.
+                    call.cancel(CancellationException("The test run is stopping."))
+                    return@coroutineScope mapOf("error" to "Run '$runId' is stopping; this lane call was not dispatched.")
+                }
+                try {
+                    call.start()
+                    call.await()
+                } finally {
+                    entry.unregisterExternalCall(call)
+                }
+            }
+        } catch (cancelled: FinishStepCancellationException) {
+            mapOf("error" to (cancelled.message ?: "A running tool was stopped to finish the step."))
+        }
     }
 
     override fun close() {
-        val jobs = runs.values.mapNotNull { it.job }
+        val entries = runs.values.toList()
+        entries.forEach { it.requestCancellation() }
+        val jobs = entries.mapNotNull { it.job }
         jobs.forEach { it.cancel() }
-        runBlocking { withTimeoutOrNull(COORDINATOR_CLOSE_WAIT_MS) { jobs.joinAll() } }
+        runBlocking { withTimeoutOrNull(COORDINATOR_CLOSE_WAIT_MS + COORDINATOR_FINAL_PERSIST_WAIT_MS) { jobs.joinAll() } }
         scope.cancel()
     }
 
@@ -331,4 +481,11 @@ internal class TestRunCoordinator(
             "No case is active on this lane right now (it may be starting, running setup or teardown, or between cases). " +
                 "Call get_test_run_status and retry."
     }
+}
+
+/** Prefer a live snapshot when a disk read races the same run's latest persistence write. */
+internal fun mergeRunSnapshots(live: List<TestRun>, stored: List<TestRun>): List<TestRun> {
+    val byId = LinkedHashMap<String, TestRun>()
+    (stored + live).forEach { byId[it.id] = it }
+    return byId.values.sortedByDescending { it.createdAt }
 }

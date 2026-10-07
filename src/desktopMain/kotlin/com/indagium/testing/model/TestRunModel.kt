@@ -153,6 +153,27 @@ data class LaneResult(
     /** The lane's recorded logcat, relative to the run folder. */
     val logPath: String? = null,
     val transcriptPath: String? = null,
+    /** Paid tool calls persisted for the live view and reports, including calls that finish after a step timeout. */
+    val toolCalls: List<LaneToolCall> = emptyList(),
+    /** Relative path to the complete bounded JSONL activity stream; the in-memory cache may hold only its newest calls. */
+    val toolActivityPath: String? = null,
+)
+
+enum class LaneToolCallStatus { RUNNING, SUCCEEDED, FAILED, CANCELLED }
+
+/** A bounded, redacted record keyed to the step identity captured when the paid dispatch was admitted. */
+data class LaneToolCall(
+    val id: String,
+    val caseId: String,
+    val stepId: String,
+    val iteration: Int,
+    val attempt: Int,
+    val toolName: String,
+    val argumentsPreview: String,
+    val resultPreview: String = "",
+    val status: LaneToolCallStatus = LaneToolCallStatus.RUNNING,
+    val startedAt: Long,
+    val durationMs: Long? = null,
 )
 
 /** The frozen inputs: the suite, every library script and the shared steps the suite refers to, as they were at start. */
@@ -197,6 +218,8 @@ data class RunSummary(
     val caseCount: Int,
     val passedSteps: Int,
     val totalSteps: Int,
+    val suiteId: String = "",
+    val repeat: Int = 1,
 )
 
 fun TestRun.summary(): RunSummary {
@@ -211,5 +234,7 @@ fun TestRun.summary(): RunSummary {
         caseCount = lanes.firstOrNull()?.cases?.count { it.caseId != SUITE_SETUP_CASE_ID && it.caseId != SUITE_TEARDOWN_CASE_ID } ?: 0,
         passedSteps = steps.count { it.status == StepStatus.PASS },
         totalSteps = steps.size,
+        suiteId = config.suiteId,
+        repeat = config.repeat,
     )
 }

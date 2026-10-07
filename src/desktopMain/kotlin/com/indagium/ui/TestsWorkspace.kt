@@ -77,6 +77,34 @@ internal fun TestsWorkspace(state: AppState) {
     CompositionLocalProvider(LocalTestsUi provides ui, LocalTestsLimits provides limits) {
         Column(Modifier.fillMaxSize().background(tc.bg).focusRequester(rootFocus).focusable()) {
             TestsHeader(edition.label, library)
+            state.testStepRecordingSession?.let { session ->
+                val recording by session.snapshot.collectAsState()
+                Row(
+                    Modifier.fillMaxWidth().background(tc.warnBg).padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    AppText(
+                        if (recording.active) "Recording accepted input from ${session.deviceSerial} · ${recording.steps.size} step(s)"
+                        else "Recorded draft ready · ${recording.steps.size} step(s)",
+                        color = tc.tx, fontSize = 10.sp, modifier = Modifier.weight(1f),
+                    )
+                    if (recording.active) AppButton("Stop recording", onClick = { state.stopTestStepRecording() }, variant = ButtonVariant.Secondary)
+                    state.testStepRecordingTarget?.let { (suiteId, caseId) ->
+                        AppButton("Review", onClick = {
+                            view.selectedSuiteId = suiteId
+                            view.selectedCaseId = caseId
+                            view.nav = TestsNav.Suites
+                        }, variant = ButtonVariant.Primary)
+                    }
+                    AppButton(
+                        "Discard",
+                        onClick = { state.clearTestStepRecording(session.id) },
+                        enabled = !state.isTestStepRecordingApplying(session.id),
+                        variant = ButtonVariant.Ghost,
+                    )
+                }
+            }
             ui.banner?.let { TestsBannerView(it) { ui.banner = null } }
             limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
@@ -147,6 +175,7 @@ private fun TestsCenter(modifier: Modifier) {
             TestsNav.Scripts -> TestsScriptsScreen()
             TestsNav.Runs -> TestsRunsScreen()
             TestsNav.Issues -> TestsIssuesScreen()
+            TestsNav.AgentExamples -> TestsAgentExamplesScreen()
         }
     }
 }
@@ -239,6 +268,8 @@ private fun TestsNavPane(modifier: Modifier) {
         TestsSectionTitle("Library")
         NavItem("Shared steps", library.sharedSteps.size.toString(), view.nav == TestsNav.SharedSteps) { view.nav = TestsNav.SharedSteps }
         NavItem("Scripts", library.scripts.size.toString(), view.nav == TestsNav.Scripts) { view.nav = TestsNav.Scripts }
+        NavItem("Examples for agents", null, view.nav == TestsNav.AgentExamples) { view.nav = TestsNav.AgentExamples }
+        NavItem("Agent profiles", null, selected = false, subtitle = "Provider settings") { ui.state.openAiProviderSettings() }
         NavItem("Runs", ui.state.testRuns.size.takeIf { it > 0 }?.toString(), view.nav == TestsNav.Runs) {
             view.nav = TestsNav.Runs
             view.selectedRunId = null

@@ -91,6 +91,35 @@ A few worth calling out:
 See [ANALYSIS_PLAYBOOK.md](ANALYSIS_PLAYBOOK.md) for a system-prompt skeleton that teaches an
 agent how to actually investigate a log with these tools.
 
+## AI test-suite workflows
+
+The same server exposes shared authoring, run, report and issue-evidence services. Start with
+[the AI test-suite method index](AVAILABLE_METHODS.md#ai-test-suites) for exact schemas and limits.
+Common workflows include:
+
+- Browse suites and cases, edit steps, or use **draft_test_steps** for a validated preview. Applying a
+  draft is a separate reviewed operation; inserting shared steps and pasted log checks also supports
+  preview, edit and insert at an explicit position.
+- Use **start_test_recording** only on an already-open live mirror to observe accepted input. Retrieve
+  one row's bounded input-time image when needed, edit the ordered actions/expected results, then
+  explicitly apply or discard the preview.
+- Manage scripts with versioned import/export, duplication, actual tool-schema preview and
+  **get_test_script_usage** references. **try_test_script** and lane command execution use the existing
+  per-call approval gates.
+- Start a suite run, read status/report, compare against the preceding terminal run of the same
+  suite, or rerun final failed/blocked/error cases. JSON/Markdown reports and selected-evidence ZIPs
+  are exported locally with safe run-relative paths.
+- Create an issue from a failed step, then separately export its padded step clip or collect an
+  Android bugreport. These artifacts remain selectable in the issue checklist; tracker delivery is a
+  separate approved action.
+
+Explicit screen/ask-judge checks require a usable judge and judge mode before a run starts. A missing,
+failed or inconclusive mandatory verdict blocks the step; deterministic failures remain failures.
+The per-lane case budget covers paid agent and external dispatch attempts, including execution errors,
+while free lane-protocol calls remain available to report outcomes. External clients receive the
+catalog's confirmation/per-call approval for operations that execute commands, observe user input,
+write exports, collect evidence or send information to a remote provider or tracker.
+
 ## Device capture
 
 The current tool set also includes approved operations for a connected Android device. Read-only

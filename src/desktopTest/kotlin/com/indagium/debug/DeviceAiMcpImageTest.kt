@@ -33,4 +33,33 @@ class DeviceAiMcpImageTest {
         assertEquals("c2NyZWVu", image.data)
         assertEquals("image/jpeg", image.mimeType)
     }
+
+    @Test
+    fun recordingContextMcpResultIsAReferenceImageWithoutDeviceCoordinateContract() {
+        val result = toCallToolResult(
+            toolName = "get_test_recording",
+            rawResult = mapOf(
+                "message" to "Saved input-time context",
+                "kind" to "inputTimeContext",
+                "exampleId" to "recording-row-1",
+                "caption" to "Captured at input time before action: Open settings",
+                "imageBase64" to "aW5wdXQtZnJhbWU=",
+                "mimeType" to "image/jpeg",
+            ),
+            textFallback = "unused",
+        )
+
+        assertEquals(2, result.content.size)
+        val text = assertIs<TextContent>(result.content[0]).text
+        val image = assertIs<ImageContent>(result.content[1])
+        assertTrue(text.contains("input-time context"))
+        assertTrue(text.contains("not the current device screen"))
+        assertTrue(text.contains("expected-result oracle"))
+        assertFalse(text.contains("coordinate"))
+        assertFalse(text.contains("aW5wdXQtZnJhbWU="))
+        assertEquals("image/jpeg", image.mimeType)
+        assertEquals("aW5wdXQtZnJhbWU=", image.data)
+        assertFalse("get_test_recording" in SCREEN_IMAGE_TOOL_NAMES)
+        assertTrue("get_test_recording" in IMAGE_RESULT_TOOL_NAMES)
+    }
 }

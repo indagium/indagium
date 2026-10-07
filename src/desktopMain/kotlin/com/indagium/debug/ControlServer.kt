@@ -655,7 +655,7 @@ internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "
 // A test judge's evidence tools (get_step_screenshot, get_example) return images too, for Claude Code and Codex judges that
 // reach the judge-only gateway over the managed MCP server.
 internal val IMAGE_RESULT_TOOL_NAMES: Set<String> =
-    setOf("get_video_frame", "get_step_screenshot", "get_example") + SCREEN_IMAGE_TOOL_NAMES
+    setOf("get_video_frame", "get_step_screenshot", "get_example", "get_step_example", "get_test_recording") + SCREEN_IMAGE_TOOL_NAMES
 
 internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
     val fields = rawResult as? Map<*, *>
@@ -665,7 +665,20 @@ internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: S
     }
     val mimeType = (fields["mimeType"] as? String) ?: "image/png"
     val content = buildList {
-        if (toolName in SCREEN_IMAGE_TOOL_NAMES) {
+        val savedGoldenReference = toolName == "test_lane_tool_call" && fields["kind"] == "goldenScreenshot"
+        val savedReference = toolName in setOf("get_step_example", "get_test_recording") || savedGoldenReference
+        if (savedReference) {
+            val caption = (fields["caption"] as? String)?.takeIf(String::isNotBlank)
+            val exampleId = fields["exampleId"] as? String
+            val label = if (toolName == "get_test_recording") "Recorded input-time context" else "Reference image"
+            add(
+                TextContent(
+                    "$label${exampleId?.let { " $it" }.orEmpty()}${caption?.let { ": $it" }.orEmpty()}. " +
+                        "This is a saved test example and reference context, not the current device screen or an expected-result oracle.",
+                ),
+            )
+        }
+        if (toolName in SCREEN_IMAGE_TOOL_NAMES && !savedReference) {
             val width = (fields["width"] as? Number)?.toInt()
             val height = (fields["height"] as? Number)?.toInt()
             val instructions = fields["coordinateInstructions"] as? String

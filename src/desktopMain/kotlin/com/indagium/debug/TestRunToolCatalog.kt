@@ -24,6 +24,7 @@ private val LANE_ITEM_SCHEMA = ObjectArrayItemSchema(
 
 private val DECISIONS = listOf("retry", "continue", "stop")
 private val REPORT_FORMATS = listOf("json", "markdown")
+private val EXPORT_FORMATS = listOf("json", "markdown", "evidence_zip")
 
 internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
@@ -136,6 +137,38 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         schema(
             "runId" to "string", "laneId" to "string", "caseId" to "string", "stepId" to "string",
             required = listOf("runId", "laneId", "caseId", "stepId"),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "rerun_failed_test_cases",
+        "Prefill and start a new run of the union of cases that failed, blocked, or errored in the source run. " +
+            "Uses the current library after normal validation, " +
+            "and keeps the source run's lanes, repeat count, judge and evidence settings. Asks for confirmation before driving devices.",
+        schema("runId" to "string", required = listOf("runId")),
+    ),
+    IndagiumToolDescriptor(
+        "compare_test_runs",
+        "Compare two terminal runs of the same suite by stable case and step ids. " +
+            "Reports status transitions, changed definitions, and added or removed steps. " +
+            "When previousRunId is omitted, uses the immediately previous terminal run of the same suite.",
+        schema("runId" to "string", "previousRunId" to "string", required = listOf("runId")),
+    ),
+    IndagiumToolDescriptor(
+        "export_test_run_report",
+        "Write a local JSON or Markdown report, or an evidence ZIP containing selected saved run artifacts. Evidence paths must be relative to this run. " +
+            "The ZIP and report include lane tool activity; unsafe, missing, oversized, or out-of-run evidence paths are refused. " +
+            "Asks before writing a local file.",
+        schema(
+            "runId" to "string", "format" to "string", "path" to "string", "evidencePaths" to "array",
+            "overwrite" to "boolean",
+            required = listOf("runId", "format", "path"),
+            enums = mapOf("format" to EXPORT_FORMATS),
+            descriptions = mapOf(
+                "format" to "json, markdown, or evidence_zip.",
+                "path" to "Absolute local destination path.",
+                "evidencePaths" to "For evidence_zip, the selected relative screenshot, video, log, transcript, or lane activity artifact paths.",
+                "overwrite" to "Replace an existing destination only when true (default false).",
+            ),
         ),
     ),
     IndagiumToolDescriptor(

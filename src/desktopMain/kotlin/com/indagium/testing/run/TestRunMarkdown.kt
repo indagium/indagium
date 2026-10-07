@@ -99,6 +99,14 @@ private fun StringBuilder.lane(lane: LaneResult) {
     append(if (lane.config.profileId != null) "Driven by AI profile `${lane.config.profileId}`.\n" else "Driven externally over MCP.\n")
     lane.error?.let { append("Error: ").append(it).append('\n') }
     lane.cases.forEach { case(it) }
+    lane.toolCalls.takeLast(MAX_TOOL_ACTIVITY_IN_MARKDOWN).forEach { call ->
+        append("- Tool `").append(call.toolName).append("` · ").append(call.status.name)
+            .append(" · case `").append(call.caseId).append("`, step `").append(call.stepId).append("`, iteration ")
+            .append(call.iteration).append(", attempt ").append(call.attempt).append('\n')
+        if (call.argumentsPreview.isNotBlank()) append("  - Arguments: `").append(call.argumentsPreview).append("`\n")
+        if (call.resultPreview.isNotBlank()) quote("Tool result", call.resultPreview)
+    }
+    lane.toolActivityPath?.let { append("Full tool activity stream: `").append(it).append("`\n") }
 }
 
 internal fun TestRun.toMarkdown(): String = buildString {
@@ -118,3 +126,4 @@ internal fun TestRun.toMarkdown(): String = buildString {
 }
 
 private const val MAX_CHECK_DETAIL = 400
+private const val MAX_TOOL_ACTIVITY_IN_MARKDOWN = 100

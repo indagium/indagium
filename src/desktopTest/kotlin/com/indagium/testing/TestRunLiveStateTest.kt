@@ -14,6 +14,8 @@ import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.LaneToolCall
+import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepCheck
@@ -113,6 +115,19 @@ class TestRunLiveStateTest {
         val b = columns.last()
         assertEquals(RunStatus.QUEUED, b.status)
         assertTrue(b.steps.isEmpty() && b.screenshotPath == null && b.currentStep == null)
+    }
+
+    @Test
+    fun persistedExternalToolActivityAppearsWithItsOriginalStepIdentity() {
+        val call = LaneToolCall(
+            id = "call-1", caseId = case.id, stepId = second.id, iteration = 2, attempt = 3,
+            toolName = "tap", argumentsPreview = "{\"x\":4}", resultPreview = "{\"ok\":true}",
+            status = LaneToolCallStatus.SUCCEEDED, startedAt = 10L, durationMs = 55L,
+        )
+        val external = LaneResult(laneB.id, laneB, RunStatus.RUNNING, toolCalls = listOf(call), logPath = "lanes/lane-b/logcat.log")
+        val column = liveColumns(run(external), profiles, { emptyList() }, emptyList(), emptyList()).single()
+        assertTrue(column.toolCalls.single().contains("step ${second.id}, try 3"))
+        assertEquals("lanes/lane-b/logcat.log", column.logcatPath)
     }
 
     @Test

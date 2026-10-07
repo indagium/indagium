@@ -31,6 +31,17 @@ internal sealed interface TestsNav {
     data object Runs : TestsNav
 
     data object Issues : TestsNav
+
+    data object AgentExamples : TestsNav
+}
+
+/** Tabs within one suite; stored in workspace state so switching navigation does not reset the active tab. */
+internal enum class SuiteTab(val label: String) {
+    Cases("Cases"),
+    Runs("Runs"),
+    SetupTeardown("Setup & teardown"),
+    AgentInstructions("Agent instructions"),
+    Variables("Variables"),
 }
 
 /**
@@ -40,6 +51,7 @@ internal sealed interface TestsNav {
 internal class TestsViewState {
     var nav: TestsNav by mutableStateOf(TestsNav.Suites)
     var selectedSuiteId: String? by mutableStateOf(null)
+    var selectedSuiteTab: SuiteTab by mutableStateOf(SuiteTab.Cases)
 
     /** Non-null opens the case editor for that case in the centre pane. */
     var selectedCaseId: String? by mutableStateOf(null)

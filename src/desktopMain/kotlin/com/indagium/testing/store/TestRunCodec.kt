@@ -11,6 +11,8 @@ import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
+import com.indagium.testing.model.LaneToolCall
+import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepResult
@@ -40,6 +42,8 @@ import kotlinx.serialization.json.put
 
 const val TEST_RUN_FILE_FORMAT = "indagium-test-run"
 const val TEST_RUN_FILE_VERSION = 1
+private const val MAX_PERSISTED_TOOL_CALLS = 300
+private const val MAX_PERSISTED_TOOL_PREVIEW_CHARS = 2_000
 
 private val prettyJson = Json { prettyPrint = true }
 
@@ -140,6 +144,22 @@ private fun laneResultToJson(lane: LaneResult): JsonObject = buildJsonObject {
     putIfNotNull("currentStepAction", lane.currentStepAction)
     putIfNotNull("logPath", lane.logPath)
     putIfNotNull("transcriptPath", lane.transcriptPath)
+    putIfNotNull("toolActivityPath", lane.toolActivityPath)
+    put("toolCalls", buildJsonArray { lane.toolCalls.forEach { call ->
+        add(buildJsonObject {
+            put("id", call.id)
+            put("caseId", call.caseId)
+            put("stepId", call.stepId)
+            put("iteration", call.iteration)
+            put("attempt", call.attempt)
+            put("toolName", call.toolName)
+            put("argumentsPreview", call.argumentsPreview)
+            put("resultPreview", call.resultPreview)
+            put("status", call.status.name)
+            put("startedAt", call.startedAt)
+            call.durationMs?.let { put("durationMs", it) }
+        })
+    } })
 }
 
 internal fun runToJson(run: TestRun): JsonObject = buildJsonObject {
@@ -266,6 +286,25 @@ private fun decodeLaneResult(o: JsonObject): LaneResult? {
         currentStepAction = o.optStr("currentStepAction"),
         logPath = o.optStr("logPath"),
         transcriptPath = o.optStr("transcriptPath"),
+        toolActivityPath = o.optStr("toolActivityPath"),
+        toolCalls = o.objects("toolCalls").takeLast(MAX_PERSISTED_TOOL_CALLS).mapNotNull { call ->
+            val id = call.str("id").takeIf(::isSafeId) ?: return@mapNotNull null
+            val stepId = call.str("stepId").takeIf(::isSafeId) ?: return@mapNotNull null
+            val caseId = call.str("caseId").takeIf(::isSafeId) ?: return@mapNotNull null
+            LaneToolCall(
+                id = id,
+                caseId = caseId,
+                stepId = stepId,
+                iteration = call.int("iteration", 1).coerceAtLeast(1),
+                attempt = call.int("attempt", 1).coerceAtLeast(1),
+                toolName = call.str("toolName").take(100),
+                argumentsPreview = call.str("argumentsPreview").take(MAX_PERSISTED_TOOL_PREVIEW_CHARS),
+                resultPreview = call.str("resultPreview").take(MAX_PERSISTED_TOOL_PREVIEW_CHARS),
+                status = call.enumOr("status", LaneToolCallStatus.FAILED),
+                startedAt = call.long("startedAt", 0L),
+                durationMs = call.optLong("durationMs"),
+            )
+        },
     )
 }
 

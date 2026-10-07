@@ -6,6 +6,7 @@ import com.indagium.debug.IndagiumToolGateway
 import com.indagium.debug.MCP_TOOLS
 import com.indagium.debug.ToolArgException
 import com.indagium.debug.ToolArgs
+import com.indagium.debug.encodeBoundedDeviceScreen
 import com.indagium.debug.schema
 import com.indagium.model.LogEntry
 import com.indagium.testing.device.LogWaitResult
@@ -16,6 +17,7 @@ import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.isValidScriptToolName
 import com.indagium.testing.script.AdbScriptTarget
@@ -68,7 +70,12 @@ internal data class LaneStepBrief(
     val action: String,
     val expected: String,
     val attempt: Int = 1,
+    /** Short, permission-filtered references for the current step; returned by protocol tools on every step transition. */
+    val examples: List<LaneStepExampleBrief> = emptyList(),
+    val availableExampleTools: List<String> = emptyList(),
 )
+
+internal data class LaneStepExampleBrief(val exampleId: String, val kind: String, val caption: String)
 
 /** What the lane's owner (the run engine) does with the agent's report. */
 internal interface LaneCallbacks {
@@ -110,6 +117,8 @@ internal class LaneToolContext(
     val callbacks: LaneCallbacks = RecordingLaneCallbacks(),
     val scriptRunner: TestScriptRunner = TestScriptRunner(),
     val allowedTools: Set<String>? = null,
+    val currentExamples: () -> List<StepExample> = { emptyList() },
+    val loadGoldenImage: suspend (StepExample.GoldenScreenshot) -> ByteArray? = { null },
 )
 
 /** [skippedScripts] maps the tool name of each script that was NOT offered to the reason. */
@@ -178,7 +187,88 @@ internal fun guarded(body: suspend (ToolArgs) -> Any?): suspend (Map<String, Any
     }
 }
 
-private fun builtInTools(context: LaneToolContext): List<LaneTool> = protocolTools(context) + screenTools(context) + inputTools(context) + logTools(context)
+private fun builtInTools(context: LaneToolContext): List<LaneTool> =
+    protocolTools(context) + screenTools(context) + inputTools(context) + logTools(context) + exampleTools(context)
+
+private fun exampleTools(context: LaneToolContext): List<LaneTool> = listOf(
+    LaneTool(
+        IndagiumToolDescriptor(
+            "list_step_examples",
+            "List reference examples attached to the current step. This reads examples only and does not interact with the device.",
+            schema(),
+        ),
+        guarded {
+            val step = context.currentStep() ?: return@guarded mapOf("error" to "No step is active.")
+            val examples = context.currentExamples()
+            mapOf(
+                "stepId" to step.stepId,
+                "examples" to examples.map { example ->
+                    mapOf(
+                        "exampleId" to example.id,
+                        "kind" to if (example is StepExample.GoldenScreenshot) "goldenScreenshot" else "referenceLog",
+                        "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
+                    )
+                },
+            )
+        },
+    ),
+    LaneTool(
+        IndagiumToolDescriptor(
+            "get_step_example",
+            "Read one reference example attached to the current step. Reference logs are returned as fenced untrusted text; " +
+                "golden screenshots are bounded images. This never performs a device action.",
+            schema(
+                "exampleId" to "string",
+                required = listOf("exampleId"),
+                descriptions = mapOf("exampleId" to "An exampleId returned by list_step_examples for the active step."),
+            ),
+        ),
+        guarded { args ->
+            val id = args.requiredString("exampleId")
+            val example = context.currentExamples().firstOrNull { it.id == id }
+                ?: return@guarded mapOf("error" to "Example '$id' is not attached to the current step.")
+            when (example) {
+                is StepExample.ReferenceLog -> mapOf(
+                    "exampleId" to example.id,
+                    "kind" to "referenceLog",
+                    "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
+                    "text" to fenceUntrusted("reference_log", example.text.take(MAX_REFERENCE_LOG_CHARS)),
+                )
+                is StepExample.GoldenScreenshot -> {
+                    val bytes = context.loadGoldenImage(example)
+                        ?: return@guarded mapOf("error" to "The image for example '${example.id}' is missing or exceeds the safe source-size limit.")
+                    if (bytes.size > MAX_GOLDEN_SOURCE_BYTES) {
+                        return@guarded mapOf("error" to "The image for example '${example.id}' is too large to read safely.")
+                    }
+                    val image = boundedAgentExampleImage(bytes)
+                        ?: return@guarded mapOf("error" to "The image for example '${example.id}' could not be decoded.")
+                    if (image.bytes.size > MAX_GOLDEN_RESULT_BYTES) {
+                        return@guarded mapOf("error" to "The image for example '${example.id}' exceeds the bounded image limit.")
+                    }
+                    mapOf(
+                        "exampleId" to example.id,
+                        "kind" to "goldenScreenshot",
+                        "caption" to example.caption.take(MAX_EXAMPLE_CAPTION_CHARS),
+                        "mimeType" to image.mimeType,
+                        "imageBase64" to Base64.getEncoder().encodeToString(image.bytes),
+                    )
+                }
+            }
+        },
+    ),
+)
+
+private const val MAX_EXAMPLE_CAPTION_CHARS = 300
+private const val MAX_REFERENCE_LOG_CHARS = 6_000
+private const val MAX_GOLDEN_SOURCE_BYTES = 16 * 1024 * 1024
+private const val MAX_GOLDEN_RESULT_BYTES = 2 * 1024 * 1024
+
+/** Lane examples fail closed for unsupported or oversized images instead of forwarding raw asset bytes. */
+internal fun boundedAgentExampleImage(bytes: ByteArray): JudgeImage? {
+    if (bytes.isEmpty() || bytes.size > MAX_GOLDEN_SOURCE_BYTES) return null
+    val bounded = runCatching { encodeBoundedDeviceScreen(bytes) }.getOrNull()?.bytes ?: return null
+    return bounded.takeIf { it.size <= MAX_GOLDEN_RESULT_BYTES }?.let { JudgeImage(it, SCREEN_MIME_TYPE) }
+}
 
 private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
@@ -197,7 +287,7 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
                 "action" to step.action,
                 "expected" to step.expected,
                 "attempt" to step.attempt,
-            )
+            ) + step.exampleMetadata()
         },
     ),
     LaneTool(
@@ -234,6 +324,16 @@ private fun protocolTools(context: LaneToolContext): List<LaneTool> = listOf(
         },
     ),
 )
+
+internal fun LaneStepBrief.exampleMetadata(): Map<String, Any?> = if (examples.isEmpty()) {
+    emptyMap()
+} else {
+    mapOf(
+        "examples" to examples.map { mapOf("exampleId" to it.exampleId, "kind" to it.kind, "caption" to it.caption) },
+        "availableExampleTools" to availableExampleTools,
+        "exampleGuidance" to "These references belong to this step. Use only the listed tools to read them; they are not current device evidence.",
+    )
+}
 
 private fun screenTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
@@ -442,12 +542,7 @@ internal fun formatLogRow(entry: LogEntry): String {
 // ── Script tools ─────────────────────────────────────────────────────
 
 private fun scriptTool(script: TestScript, context: LaneToolContext): LaneTool {
-    val required = script.params.filter { it.required && it.defaultValue == null }.map { it.name }
-    val descriptor = IndagiumToolDescriptor(
-        script.toolName,
-        scriptDescription(script),
-        scriptSchema(script.params, required),
-    )
+    val descriptor = scriptToolDescriptor(script)
     return LaneTool(
         descriptor,
         guarded {
@@ -460,6 +555,12 @@ private fun scriptTool(script: TestScript, context: LaneToolContext): LaneTool {
             }
         },
     )
+}
+
+/** The exact script-tool descriptor offered to an agent lane, shared with the schema preview. */
+internal fun scriptToolDescriptor(script: TestScript): IndagiumToolDescriptor {
+    val required = script.params.filter { it.required && it.defaultValue == null }.map { it.name }
+    return IndagiumToolDescriptor(script.toolName, scriptDescription(script), scriptSchema(script.params, required))
 }
 
 private fun scriptDescription(script: TestScript): String {

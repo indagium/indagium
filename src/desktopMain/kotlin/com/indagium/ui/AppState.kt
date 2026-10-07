@@ -64,12 +64,14 @@ import com.indagium.source.SourceIndexer
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
+import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.withFreshId
 import com.indagium.testing.run.TestRunCoordinator
 import com.indagium.testing.store.ISSUES_DIR_NAME
 import com.indagium.testing.store.IssueStore
@@ -1924,6 +1926,151 @@ class AppState(
         synchronized(testLibraryMirrorLock) { testLibrary = testLibraryStore.library.value }
     }
 
+    internal var testStepRecordingSession by mutableStateOf<TestStepRecordingSession?>(null)
+        private set
+    internal var testStepRecordingTarget by mutableStateOf<Pair<String, String>?>(null)
+        private set
+    private val testStepRecordingLock = Any()
+    private val recordingApplications = mutableSetOf<String>()
+
+    private val testStepRecordingApplyService by lazy {
+        com.indagium.testing.authoring.TestStepRecordingApplyService(
+            preflight = ::recordingTargetPreflight,
+            importImage = ::importTestGoldenImage,
+            resolveImage = ::testGoldenImageFile,
+            insertSteps = ::createTestSteps,
+        )
+    }
+
+    internal fun liveEmbeddedMirrorSerials(): List<String> = synchronized(stateLock) {
+        embeddedMirrorsByTab.values.mapNotNull { handle ->
+            handle.snapshot.value.deviceSerial?.takeIf { handle.snapshot.value.state == com.indagium.capture.mirror.EmbeddedMirrorState.LIVE }
+        }.distinct()
+    }
+
+    @Suppress("ReturnCount") // Preconditions return typed messages before a mirror observer or recording session is created.
+    internal fun startTestStepRecording(serial: String, suiteId: String, caseId: String): StoreResult<TestStepRecordingSession> {
+        if (serial !in liveEmbeddedMirrorSerials()) return StoreResult.Invalid("Open and connect a live mirror for this device before recording.")
+        val library = testLibraryStore.library.value
+        val suite = library.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
+        if (suite.cases.none { it.id == caseId }) return StoreResult.NotFound("case", caseId)
+        when {
+            library.readOnly -> return StoreResult.Invalid(LIBRARY_READ_ONLY_MESSAGE)
+            suite.readOnly -> return StoreResult.Invalid(SUITE_READ_ONLY_MESSAGE)
+        }
+        when (val decision = com.indagium.testing.limits.decide(
+            library,
+            com.indagium.testing.limits.LimitOperation.EditCase(suiteId, caseId),
+            editionService.limits(),
+        )) {
+            is com.indagium.testing.limits.LimitDecision.Refused -> return StoreResult.LimitReached(decision)
+            else -> Unit
+        }
+        val session = TestStepRecordingSession(serial)
+        synchronized(testStepRecordingLock) {
+            if (testStepRecordingSession != null) {
+                return StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")
+            }
+            testStepRecordingSession = session
+            testStepRecordingTarget = suiteId to caseId
+        }
+        session.attach(MirrorInputObservers.observe(serial) { input -> session.accept(input.command, input.frame) })
+        return StoreResult.Ok(session)
+    }
+
+    internal fun stopTestStepRecording(): TestStepRecordingSession? {
+        testStepRecordingSession?.stop()
+        return testStepRecordingSession
+    }
+
+    internal fun testStepRecordingSnapshot(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer available.")
+        return StoreResult.Ok(session.snapshot.value)
+    }
+
+    internal suspend fun stopTestStepRecordingAndDrain(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
+        return StoreResult.Ok(session.stopAndDrain())
+    }
+
+    internal fun updateReviewedTestRecording(
+        sessionId: String,
+        edited: List<Pair<String, String>>,
+        expectedScreenshotIds: Set<String> = emptySet(),
+        expectedRowIds: List<String>? = null,
+    ): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> = synchronized(testStepRecordingLock) {
+        val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+            ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+        if (sessionId in recordingApplications) {
+            return@synchronized StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+        }
+        if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds)) {
+            return@synchronized StoreResult.Invalid("The recording must be stopped and the edited rows and screenshot choices must match its current draft.")
+        }
+        StoreResult.Ok(session.snapshot.value)
+    }
+
+    internal suspend fun applyTestStepRecording(
+        sessionId: String,
+        edited: List<Pair<String, String>>,
+        index: Int? = null,
+        expectedScreenshotIds: Set<String> = emptySet(),
+        expectedRowIds: List<String>? = null,
+    ): StoreResult<List<TestStep>> {
+        val (session, target) = synchronized(testStepRecordingLock) {
+            val active = testStepRecordingSession?.takeIf { it.id == sessionId } ?: return StoreResult.Invalid("That recording session is no longer active.")
+            if (sessionId in recordingApplications) return StoreResult.Invalid("This recording is already being applied.")
+            val selectedTarget = testStepRecordingTarget?.takeIf { it.first.isNotBlank() && it.second.isNotBlank() }
+                ?: return StoreResult.Invalid("The recording target is no longer available.")
+            recordingApplications += sessionId
+            active to selectedTarget
+        }
+        val result = try {
+            if (!session.updateReviewedSteps(edited, expectedScreenshotIds, expectedRowIds)) {
+                return StoreResult.Invalid("Stop recording and send one edited action/result pair and valid screenshot choices in the original row order.")
+            }
+            session.stopAndDrain()
+            testStepRecordingApplyService.apply(session, target.first, target.second, index)
+        } finally {
+            synchronized(testStepRecordingLock) { recordingApplications.remove(sessionId) }
+        }
+        if (result is StoreResult.Ok) clearTestStepRecording(sessionId)
+        return result
+    }
+
+    internal fun isTestStepRecordingApplying(sessionId: String): Boolean = synchronized(testStepRecordingLock) {
+        sessionId in recordingApplications
+    }
+
+    internal fun clearTestStepRecording(expectedSessionId: String? = null, force: Boolean = false): Boolean {
+        val old = synchronized(testStepRecordingLock) {
+            val session = testStepRecordingSession
+            if (expectedSessionId != null && session?.id != expectedSessionId) return false
+            if (!force && session?.id?.let { it in recordingApplications } == true) return false
+            testStepRecordingSession = null
+            testStepRecordingTarget = null
+            session
+        }
+        old?.close()
+        return true
+    }
+
+    private fun recordingTargetPreflight(suiteId: String, caseId: String): StoreResult<Unit> {
+        val library = testLibrary
+        val suite = library.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
+        if (suite.cases.none { it.id == caseId }) return StoreResult.NotFound("case", caseId)
+        if (library.readOnly) return StoreResult.Invalid(LIBRARY_READ_ONLY_MESSAGE)
+        if (suite.readOnly) return StoreResult.Invalid(SUITE_READ_ONLY_MESSAGE)
+        return when (val decision = com.indagium.testing.limits.decide(
+            library,
+            com.indagium.testing.limits.LimitOperation.EditCase(suiteId, caseId),
+            editionService.limits(),
+        )) {
+            is com.indagium.testing.limits.LimitDecision.Refused -> StoreResult.LimitReached(decision)
+            else -> StoreResult.Ok(Unit)
+        }
+    }
+
     private inline fun <T> testStoreOp(op: TestLibraryStore.() -> StoreResult<T>): StoreResult<T> =
         testLibraryStore.op().also { syncTestLibrary() }
 
@@ -1945,6 +2092,8 @@ class AppState(
 
     fun exportTestSuite(suiteId: String): StoreResult<String> = testLibraryStore.exportSuite(suiteId)
 
+    fun testSuiteRequiresExternalAssets(suiteId: String): Boolean = testLibraryStore.suiteRequiresExternalAssets(suiteId)
+
     fun exportTestSuiteToFile(suiteId: String, destination: File): StoreResult<File> =
         testLibraryStore.exportSuiteToFile(suiteId, destination)
 
@@ -1964,6 +2113,36 @@ class AppState(
     fun createTestStep(caseId: String, step: TestStep, atIndex: Int? = null): StoreResult<TestStep> =
         testStoreOp { createStep(caseId, step, atIndex) }
 
+    fun createTestSteps(caseId: String, steps: List<TestStep>, atIndex: Int? = null): StoreResult<List<TestStep>> =
+        testStoreOp { createSteps(caseId, steps, atIndex) }
+
+    /** Resolves every referenced image through the suite asset service before inserting an independent copy. */
+    fun insertSharedSteps(caseId: String, sharedStepId: String, atIndex: Int? = null): StoreResult<List<TestStep>> {
+        val location = testLibrary.findCase(caseId) ?: return StoreResult.NotFound("case", caseId)
+        val shared = testLibrary.sharedStep(sharedStepId) ?: return StoreResult.NotFound("shared step", sharedStepId)
+        val missing = shared.steps.flatMap { it.examples }
+            .filterIsInstance<com.indagium.testing.model.StepExample.GoldenScreenshot>()
+            .firstOrNull { testGoldenImageFile(location.suite.id, it.assetPath)?.isFile != true }
+        if (missing != null) return StoreResult.Invalid(
+            "Shared step '${shared.name}' references missing image '${missing.assetPath}' in suite " +
+                "'${location.suite.name}'. Copy the asset into this suite before inserting.",
+        )
+        return createTestSteps(caseId, shared.steps, atIndex)
+    }
+
+    /** Adds reviewed log checks to the selected step in one validated library update. */
+    fun insertTestChecks(
+        stepId: String,
+        checks: List<com.indagium.testing.model.StepCheck>,
+        atIndex: Int? = null,
+    ): StoreResult<com.indagium.testing.model.TestStep> {
+        if (checks.isEmpty()) return StoreResult.Invalid("At least one check is required.")
+        val found = testLibrary.findStep(stepId) ?: return StoreResult.NotFound("step", stepId)
+        val fresh = checks.map { it.withFreshId(emptyMap()) }
+        val insertion = (atIndex ?: found.step.checks.size).coerceIn(0, found.step.checks.size)
+        return updateTestStep(stepId) { old -> old.copy(checks = old.checks.toMutableList().apply { addAll(insertion, fresh) }) }
+    }
+
     fun updateTestStep(stepId: String, transform: (TestStep) -> TestStep): StoreResult<TestStep> =
         testStoreOp { updateStep(stepId, transform) }
 
@@ -1974,6 +2153,26 @@ class AppState(
     fun moveTestStep(stepId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveStep(stepId, toIndex) }
 
     fun createTestScript(script: TestScript): StoreResult<TestScript> = testStoreOp { createScript(script) }
+
+    internal fun duplicateTestScript(scriptId: String): StoreResult<TestScript> {
+        val source = testLibrary.script(scriptId) ?: return StoreResult.NotFound("script", scriptId)
+        return runCatching { com.indagium.testing.authoring.duplicateTestScript(source, testLibrary.scripts) }
+            .fold({ createTestScript(it) }, { StoreResult.Invalid(it.message ?: "Could not duplicate script.") })
+    }
+
+    internal fun importTestScriptEnvelope(text: String): StoreResult<TestScript> {
+        if (text.toByteArray(Charsets.UTF_8).size > com.indagium.testing.authoring.MAX_TEST_SCRIPT_FILE_BYTES) {
+            return StoreResult.Invalid("Script JSON is limited to 2 MiB.")
+        }
+        val script = runCatching { com.indagium.testing.authoring.decodeTestScriptEnvelope(text, testLibrary.scripts) }
+            .getOrElse { return StoreResult.Invalid(it.message ?: "Could not import script JSON.") }
+        return createTestScript(script)
+    }
+
+    internal fun exportTestScriptEnvelope(scriptId: String): StoreResult<String> {
+        val script = testLibrary.script(scriptId) ?: return StoreResult.NotFound("script", scriptId)
+        return StoreResult.Ok(com.indagium.testing.authoring.encodeTestScriptEnvelope(script))
+    }
 
     fun updateTestScript(scriptId: String, transform: (TestScript) -> TestScript): StoreResult<TestScript> =
         testStoreOp { updateScript(scriptId, transform) }
@@ -2006,6 +2205,33 @@ class AppState(
     // the coordinator's change callback INSIDE testRunMirrorLock so the last assignment is the freshest one. The
     // coordinator is created on first use, after tests had the chance to set [testRunOverrides].
     internal var testRunOverrides: TestRunOverrides = TestRunOverrides()
+    internal val testStepDraftService by lazy {
+        com.indagium.testing.authoring.TestStepDraftService(
+            library = { testLibrary },
+            preflight = { suiteId, caseId ->
+                val lib = testLibrary
+                val suite = lib.suite(suiteId)
+                val case = suite?.cases?.firstOrNull { it.id == caseId }
+                when {
+                    suite == null -> com.indagium.testing.store.StoreResult.NotFound("suite", suiteId)
+                    case == null -> com.indagium.testing.store.StoreResult.NotFound("case", caseId)
+                    lib.readOnly -> com.indagium.testing.store.StoreResult.Invalid(LIBRARY_READ_ONLY_MESSAGE)
+                    suite.readOnly -> com.indagium.testing.store.StoreResult.Invalid(SUITE_READ_ONLY_MESSAGE)
+                    else -> when (val decision = com.indagium.testing.limits.decide(
+                        lib,
+                        com.indagium.testing.limits.LimitOperation.EditCase(suiteId, caseId),
+                        editionService.limits(),
+                    )) {
+                        is com.indagium.testing.limits.LimitDecision.Refused -> com.indagium.testing.store.StoreResult.LimitReached(decision)
+                        else -> com.indagium.testing.store.StoreResult.Ok(Unit)
+                    }
+                }
+            },
+            generate = { profileId, prompt -> generateTestStepDraft(profileId, prompt) },
+            insert = { caseId, steps, index -> createTestSteps(caseId, steps, index) },
+            assetExists = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.isFile == true },
+        )
+    }
     private val testRunCoordinatorDelegate = lazy {
         createTestRunCoordinator(testRunOverrides, ::testRunsBaseDir, ::syncTestRuns)
     }
@@ -4820,6 +5046,7 @@ class AppState(
 
     fun close(forAppDataReset: Boolean = false) {
         if (!closed.compareAndSet(false, true)) return
+        clearTestStepRecording(force = true)
         if (!forAppDataReset) AppLogger.info("app", "Indagium shutting down")
         heapPressureMonitor.stop()
         autosaveScheduler.cancelPending()

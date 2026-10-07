@@ -1,6 +1,10 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.testing.authoring.readTestScriptEnvelope
+import com.indagium.testing.authoring.testScriptSchemaPreview
+import com.indagium.testing.authoring.testScriptUsageReferences
+import com.indagium.testing.authoring.writeTestScriptEnvelope
 import com.indagium.testing.limits.FREE_EDITION_LIMIT_HINT
 import com.indagium.testing.limits.activeCaseIds
 import com.indagium.testing.limits.activeSuiteIds
@@ -13,12 +17,15 @@ import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.previewLogChecks
 import com.indagium.testing.script.ScriptRunOutcome
 import com.indagium.testing.script.scriptArgsFromToolValues
 import com.indagium.testing.script.toToolResult
+import com.indagium.testing.store.IdAllocator
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TEST_SUITE_FILE_FORMAT
 import com.indagium.testing.store.caseToJson
+import com.indagium.testing.store.checkToJson
 import com.indagium.testing.store.scriptToJson
 import com.indagium.testing.store.sharedStepToJson
 import com.indagium.testing.store.stepToJson
@@ -26,8 +33,12 @@ import com.indagium.testing.store.suiteToJson
 import com.indagium.ui.AppState
 import com.indagium.ui.tryTestScript
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
+private const val MAX_PASTED_LOG_CHARS = 100_000
+private const val MAX_RECORDED_SCREEN_CAPTION_CHARS = 240
 // Handlers of the AI test-suite authoring tools (catalogue: TestSuiteToolCatalog.kt), merged into
 // IndagiumToolOperations.operationHandlers. Every handler returns a plain Map, and every expected
 // failure is DATA: { "error": message } for a missing id, an invalid value or a bad argument, and
@@ -44,10 +55,35 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
 
     /**
      * Handlers that wait (a script runs for up to its timeout). They are registered as suspending handlers so the
-     * transport never blocks a request thread on them; today that is `try_test_script` only.
+     * transport never blocks a request thread on them; they include bounded file operations and recording.
      */
     val suspendHandlers: Map<String, suspend (Map<String, Any?>) -> Any?> = mapOf(
         "try_test_script" to suspendTool { a -> tryScript(a) },
+        "draft_test_steps" to suspendTool { a -> draftSteps(a) },
+        "import_test_script" to suspendTool { a -> importScript(a) },
+        "export_test_script" to suspendTool { a -> exportScript(a) },
+        "stop_test_recording" to suspendTool { a ->
+            appState.stopTestStepRecordingAndDrain(a.requiredString("sessionId")).toResult { snapshot -> recordingMap(a.requiredString("sessionId"), snapshot) }
+        },
+        "apply_test_recording" to suspendTool { a ->
+            val rows = a.objects("steps") ?: toolArgError("steps is required.")
+            val pairs = rows.mapIndexed { index, row ->
+                val action = row["action"] as? String ?: toolArgError("steps[$index].action must be a string.")
+                val expected = row["expected"] as? String ?: toolArgError("steps[$index].expected must be a string.")
+                action to expected
+            }
+            val expectedScreens = rows.mapIndexedNotNull { index, row ->
+                if (row["useScreenshotAsExpected"] != true) null
+                else (row["id"] as? String ?: toolArgError("steps[$index].id is required when using its captured image as an expected screenshot."))
+            }.toSet()
+            val rowIds = rows.mapNotNull { it["id"] as? String }.takeIf { ids -> ids.size == rows.size }
+            if (rows.any { it.containsKey("id") } && rowIds == null) {
+                toolArgError("If any steps[].id is sent, send the correct id for every row in its original order.")
+            }
+            appState.applyTestStepRecording(a.requiredString("sessionId"), pairs, a.int("index"), expectedScreens, rowIds).toResult { inserted ->
+                mapOf("sessionId" to a.requiredString("sessionId"), "steps" to inserted.map(::stepResult), "stepIds" to inserted.map { it.id })
+            }
+        },
     )
 
     private val library: TestLibrary get() = appState.testLibrary
@@ -172,7 +208,16 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
         val id = a.requiredString("suiteId")
         val path = a.string("path")
         if (path == null) {
-            return appState.exportTestSuite(id).toResult { mapOf("suiteId" to id, "format" to TEST_SUITE_FILE_FORMAT, "text" to it) }
+            return appState.exportTestSuite(id).toResult {
+                buildMap {
+                    put("suiteId", id)
+                    put("format", TEST_SUITE_FILE_FORMAT)
+                    put("text", it)
+                    if (appState.testSuiteRequiresExternalAssets(id)) {
+                        put("warning", "This metadata-only export requires the suite's external golden screenshot files; the image files are not embedded.")
+                    }
+                }
+            }
         }
         if (library.suite(id) == null) return notFoundMap("suite", id)
         val destination = absoluteFile(path)
@@ -180,7 +225,16 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             return errorMap("$path already exists; send overwrite=true to replace it.")
         }
         return appState.exportTestSuiteToFile(id, destination)
-            .toResult { mapOf("suiteId" to id, "path" to it.absolutePath, "bytes" to it.length()) }
+            .toResult {
+                buildMap {
+                    put("suiteId", id)
+                    put("path", it.absolutePath)
+                    put("bytes", it.length())
+                    if (appState.testSuiteRequiresExternalAssets(id)) {
+                        put("warning", "This export requires the suite's external golden screenshot files; the image files are not embedded.")
+                    }
+                }
+            }
     }
 
     // ── Cases ────────────────────────────────────────────────────────
@@ -229,6 +283,61 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             val id = a.requiredString("stepId")
             appState.moveTestStep(id, a.requiredInt("toIndex")).toResult { stepOrderResult(id) }
         },
+        "insert_shared_steps" to tool { a ->
+            val caseId = a.requiredString("caseId")
+            appState.insertSharedSteps(caseId, a.requiredString("sharedStepId"), a.int("index")).toResult { steps ->
+                mapOf("caseId" to caseId, "steps" to steps.map(::stepResult), "stepIds" to steps.map { it.id })
+            }
+        },
+        "preview_log_checks" to tool { a ->
+            val text = a.requiredString("text")
+            if (text.length > MAX_PASTED_LOG_CHARS) return@tool errorMap("Pasted log text is limited to $MAX_PASTED_LOG_CHARS characters.")
+            val preview = previewLogChecks(text)
+            mapOf("checks" to preview.checks.map { checkToJson(it.check).toPlainMap() }, "warnings" to preview.warnings)
+        },
+        "insert_log_checks" to tool { a -> insertLogChecks(a) },
+        "apply_test_step_draft" to tool { a -> applyStepDraft(a) },
+        "start_test_recording" to tool { a ->
+            val suiteId = a.requiredString("suiteId")
+            val caseId = a.requiredString("caseId")
+            appState.startTestStepRecording(a.requiredString("deviceSerial"), suiteId, caseId).toResult {
+                mapOf("sessionId" to it.id, "suiteId" to suiteId, "caseId" to caseId, "deviceSerial" to it.deviceSerial, "active" to true)
+            }
+        },
+        "get_test_recording" to tool { a ->
+            val id = a.requiredString("sessionId")
+            val rowId = a.string("rowId")
+            appState.testStepRecordingSnapshot(id).toResult { snapshot ->
+                if (rowId != null && snapshot.steps.none { it.id == rowId && it.screenshotJpeg != null }) {
+                    errorMap("No captured input-time image is available for recording row '$rowId'.")
+                } else {
+                    recordingMap(id, snapshot, rowId)
+                }
+            }
+        },
+        "update_test_recording" to tool { a ->
+            val rows = a.objects("steps") ?: toolArgError("steps is required.")
+            val pairs = rows.mapIndexed { index, row ->
+                val action = row["action"] as? String ?: toolArgError("steps[$index].action must be a string.")
+                val expected = row["expected"] as? String ?: toolArgError("steps[$index].expected must be a string.")
+                action to expected
+            }
+            val expectedScreens = rows.mapIndexedNotNull { index, row ->
+                if (row["useScreenshotAsExpected"] != true) null
+                else (row["id"] as? String ?: toolArgError("steps[$index].id is required when using its captured image as an expected screenshot."))
+            }.toSet()
+            val rowIds = rows.mapNotNull { it["id"] as? String }.takeIf { ids -> ids.size == rows.size }
+            if (rows.any { it.containsKey("id") } && rowIds == null) {
+                toolArgError("If any steps[].id is sent, send the correct id for every row in its original order.")
+            }
+            val id = a.requiredString("sessionId")
+            appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds).toResult { recordingMap(id, it) }
+        },
+        "discard_test_recording" to tool { a ->
+            val id = a.requiredString("sessionId")
+            if (!appState.clearTestStepRecording(id)) errorMap("This recording is being applied and cannot be discarded yet.")
+            else mapOf("discarded" to true, "sessionId" to id)
+        },
     )
 
     private fun createStep(a: ToolArgs): Map<String, Any?> {
@@ -271,6 +380,24 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 mapOf("scriptId" to id, "index" to library.scripts.indexOfFirst { it.id == id }, "scriptIds" to library.scripts.map { it.id })
             }
         },
+        "duplicate_test_script" to tool { a -> appState.duplicateTestScript(a.requiredString("scriptId")).toResult { scriptMap(it) } },
+        "get_test_script_schema" to tool { a ->
+            val script = library.script(a.requiredString("scriptId")) ?: return@tool notFoundMap("script", a.requiredString("scriptId"))
+            testScriptSchemaPreview(script)
+        },
+        "get_test_script_usage" to tool { a ->
+            val id = a.requiredString("scriptId")
+            if (library.script(id) == null) return@tool notFoundMap("script", id)
+            val references = testScriptUsageReferences(library, id)
+            mapOf("scriptId" to id, "count" to references.size, "references" to references.map {
+                mapOf(
+                    "kind" to it.kind, "suiteId" to it.suiteId, "suiteName" to it.suiteName,
+                    "caseId" to it.caseId, "caseName" to it.caseName,
+                    "sharedStepId" to it.sharedStepId, "sharedStepName" to it.sharedStepName,
+                    "stepId" to it.stepId, "checkId" to it.checkId, "label" to it.label,
+                )
+            })
+        },
     )
 
     private suspend fun tryScript(a: ToolArgs): Map<String, Any?> {
@@ -292,6 +419,100 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             ) + outcome.result.toToolResult()
             is ScriptRunOutcome.Rejected -> errorMap(outcome.message)
         }
+    }
+
+    private suspend fun draftSteps(a: ToolArgs): Map<String, Any?> {
+        val result = appState.testStepDraftService.create(
+            suiteId = a.requiredString("suiteId"),
+            caseId = a.requiredString("caseId"),
+            profileId = a.requiredString("profileId"),
+            instruction = a.requiredString("instruction"),
+        )
+        return result.toResult { draft ->
+            mapOf(
+                "draftId" to draft.id,
+                "suiteId" to draft.suiteId,
+                "caseId" to draft.caseId,
+                "profileId" to draft.profileId,
+                "steps" to draft.steps.map(::stepResult),
+            )
+        }
+    }
+
+    private fun applyStepDraft(a: ToolArgs): Map<String, Any?> {
+        val steps = parseNewSteps(a, "steps") ?: toolArgError("steps is required; send the reviewed, edited preview.")
+        val draftId = a.requiredString("draftId")
+        return appState.testStepDraftService.apply(draftId, steps, a.int("index")).toResult { inserted ->
+            mapOf("draftId" to draftId, "steps" to inserted.map(::stepResult), "stepIds" to inserted.map { it.id })
+        }
+    }
+
+    private fun recordingMap(
+        id: String,
+        snapshot: com.indagium.testing.authoring.TestStepRecordingSnapshot,
+        imageRowId: String? = null,
+    ): Map<String, Any?> {
+        val imageRow = imageRowId?.let { wanted -> snapshot.steps.firstOrNull { it.id == wanted } }
+        val image = imageRow?.screenshotJpeg
+        return buildMap {
+            put("sessionId", id)
+            put("active", snapshot.active)
+            put("pendingSnapshots", snapshot.pendingSnapshots)
+            put("steps", snapshot.steps.map { row ->
+                mapOf("id" to row.id, "action" to row.action, "expected" to row.expected, "screenContext" to row.screenContext,
+                    "hasScreenshot" to (row.screenshotJpeg != null), "useScreenshotAsExpected" to row.useScreenshotAsExpected)
+            })
+            if (image != null) {
+                put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))
+                put("mimeType", "image/jpeg")
+                put("kind", "inputTimeContext")
+                put("exampleId", imageRow.id)
+                put("caption", "Captured at input time before action: ${imageRow.action}".take(MAX_RECORDED_SCREEN_CAPTION_CHARS))
+                put("message", "Saved input-time context; this is not an expected-result oracle or current device screen.")
+            }
+            put("warnings", snapshot.warnings)
+        }
+    }
+
+    private fun insertLogChecks(a: ToolArgs): Map<String, Any?> {
+        val checks = when {
+            a.has("checks") -> parseChecks(a.objects("checks").orEmpty(), IdAllocator(), "checks")
+            a.has("text") -> {
+                val text = a.requiredString("text")
+                if (text.length > MAX_PASTED_LOG_CHARS) return errorMap("Pasted log text is limited to $MAX_PASTED_LOG_CHARS characters.")
+                previewLogChecks(text).checks.map { it.check }
+            }
+            else -> toolArgError("Send edited checks or pasted log text.")
+        }
+        val stepId = a.requiredString("stepId")
+        return appState.insertTestChecks(stepId, checks, a.int("index")).toResult { step -> stepResult(step) }
+    }
+
+    private suspend fun importScript(a: ToolArgs): Map<String, Any?> {
+        val path = a.string("path")
+        val text = a.string("text")
+        if ((path == null) == (text == null)) toolArgError("Send exactly one of path or text.")
+        val source = if (path != null) withContext(Dispatchers.IO) {
+            runCatching { readTestScriptEnvelope(absoluteFile(path)) }
+        } else Result.success(text.orEmpty())
+        val payload = source.getOrElse { return errorMap("Could not read script JSON: ${it.message}") }
+        return appState.importTestScriptEnvelope(payload).toResult { scriptMap(it) }
+    }
+
+    private suspend fun exportScript(a: ToolArgs): Map<String, Any?> {
+        val id = a.requiredString("scriptId")
+        val text = when (val exported = appState.exportTestScriptEnvelope(id)) {
+            is StoreResult.Ok -> exported.value
+            else -> return exported.toResult { mapOf("text" to it) }
+        }
+        val path = a.string("path") ?: return mapOf("scriptId" to id, "format" to "indagium-test-script", "text" to text)
+        val destination = absoluteFile(path)
+        if (destination.exists() && a.bool("overwrite") != true) return errorMap("$path already exists; send overwrite=true to replace it.")
+        val written = withContext(Dispatchers.IO) { runCatching { writeTestScriptEnvelope(destination, text, overwrite = true) } }
+        return written.fold(
+            { mapOf("scriptId" to id, "path" to destination.absolutePath, "bytes" to it) },
+            { errorMap("Could not export script JSON: ${it.message}") },
+        )
     }
 
     // ── Shared steps ─────────────────────────────────────────────────

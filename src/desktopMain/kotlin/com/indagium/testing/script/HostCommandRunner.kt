@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
+import java.nio.file.Files
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -76,36 +77,49 @@ interface HostCommandRunner {
 class ProcessBuilderHostCommandRunner : HostCommandRunner {
     override suspend fun run(spec: HostCommandSpec): HostCommandResult = withContext(Dispatchers.IO) {
         val startedNanos = System.nanoTime()
-        val builder = ProcessBuilder(spec.command)
-        spec.workingDir?.let { builder.directory(it) }
-        sanitizeAppImageRuntimeForChild(builder.environment())
-        builder.environment().putAll(spec.environment)
-        val process = builder.start()
-        val stdout = BoundedSink(spec.outputCapBytes)
-        val stderr = BoundedSink(spec.outputCapBytes)
-        val readers = listOf(
-            drain(process.inputStream, stdout, "host-command-stdout"),
-            drain(process.errorStream, stderr, "host-command-stderr"),
-        )
-        val writer = feedStdin(process, spec.stdin)
-        var finished = false
+        val statusDirectory = Files.createTempDirectory("indagium-command-status-").toFile()
+        val statusFile = File(statusDirectory, "launch.status")
         try {
-            finished = runInterruptible { process.waitFor(spec.timeoutMs, TimeUnit.MILLISECONDS) }
+            val builder = ProcessBuilder(NativeCommandSupervisor.command(spec, statusFile))
+            spec.workingDir?.let { builder.directory(it) }
+            sanitizeAppImageRuntimeForChild(builder.environment())
+            builder.environment().putAll(spec.environment)
+            val process = builder.start()
+            val stdout = BoundedSink(spec.outputCapBytes)
+            val stderr = BoundedSink(spec.outputCapBytes)
+            val readers = listOf(
+                drain(process.inputStream, stdout, "host-command-stdout"),
+                drain(process.errorStream, stderr, "host-command-stderr"),
+            )
+            val writer = feedStdin(process, spec.stdin)
+            val finished: Boolean
+            try {
+                finished = runInterruptible { process.waitFor(spec.timeoutMs, TimeUnit.MILLISECONDS) }
+            } finally {
+                // The supervisor owns the actual command; stopping it closes its process group or Job Object.
+                if (process.isAlive) process.terminateProcessTree(Duration.ofMillis(TERMINATE_GRACE_MS))
+                readers.forEach { it.join(OUTPUT_READER_JOIN_MS) }
+                writer?.join(OUTPUT_READER_JOIN_MS)
+                closeQuietly(process)
+            }
+            val launchStatus = statusFile.takeIf(File::isFile)?.readText()?.trim()
+            if (launchStatus?.startsWith("error:") == true) {
+                throw IOException("Could not start command '${spec.command.first()}': ${launchStatus.removePrefix("error:")}.")
+            }
+            if (launchStatus != "started") {
+                throw IOException("The native command supervisor did not initialize; refusing to report an unsupervised command result.")
+            }
+            HostCommandResult(
+                exitCode = if (finished) process.exitValue() else TIMED_OUT_EXIT_CODE,
+                stdout = stdout.toByteArray(),
+                stderr = stderr.toByteArray(),
+                timedOut = !finished,
+                truncated = stdout.truncated || stderr.truncated,
+                durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI,
+            )
         } finally {
-            // Timeout, cancellation or normal exit: nothing of this process may outlive the call.
-            if (process.isAlive) process.terminateProcessTree(Duration.ofMillis(TERMINATE_GRACE_MS))
-            readers.forEach { it.join(OUTPUT_READER_JOIN_MS) }
-            writer?.join(OUTPUT_READER_JOIN_MS)
-            closeQuietly(process)
+            statusDirectory.deleteRecursively()
         }
-        HostCommandResult(
-            exitCode = if (finished) process.exitValue() else TIMED_OUT_EXIT_CODE,
-            stdout = stdout.toByteArray(),
-            stderr = stderr.toByteArray(),
-            timedOut = !finished,
-            truncated = stdout.truncated || stderr.truncated,
-            durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI,
-        )
     }
 
     /** Reads [input] on its own daemon thread until end of stream, keeping only what [sink] accepts. */

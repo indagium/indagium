@@ -10,6 +10,7 @@ import com.indagium.testing.model.ScriptParam
 import com.indagium.testing.model.ScriptParamType
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.ScriptTarget
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.newScriptId
 import com.indagium.testing.run.LANE_FREE_TOOL_NAMES
@@ -63,6 +64,7 @@ class TestAgentToolsTest {
     private fun tools(
         scripts: List<TestScript> = emptyList(),
         allowed: Set<String>? = null,
+        examples: List<StepExample> = emptyList(),
         scriptRunner: TestScriptRunner = TestScriptRunner(hostShell = listOf("/bin/sh", "-c")),
     ): LaneTools {
         val lane = runBlocking { openFixtureSession(runner, laneDir) }.also { session = it }
@@ -76,6 +78,7 @@ class TestAgentToolsTest {
                 callbacks = callbacks,
                 scriptRunner = scriptRunner,
                 allowedTools = allowed,
+                currentExamples = { examples },
             ),
         )
     }
@@ -93,7 +96,7 @@ class TestAgentToolsTest {
         assertEquals(BUILT_IN_NAMES, lane.names().toSet(), "built-in lane tools match the names scripts may not take")
         val global = MCP_TOOLS.map { it.name }.toSet()
         assertTrue(lane.names().none { it in global }, "no lane tool is a global tool: ${lane.names().filter { it in global }}")
-        assertEquals(13, lane.names().size)
+        assertEquals(15, lane.names().size)
     }
 
     @Test
@@ -208,6 +211,58 @@ class TestAgentToolsTest {
         assertEquals(2, mcp.content.size)
         assertTrue(assertIs<TextContent>(mcp.content[0]).text.contains("Screenshot dimensions"))
         assertIs<ImageContent>(mcp.content[1])
+    }
+
+    @Test
+    fun savedStepExampleUsesImageContentWithoutTheCurrentScreenCoordinateContract() {
+        assertTrue("get_step_example" in IMAGE_RESULT_TOOL_NAMES)
+        val mcp = toCallToolResult(
+            "get_step_example",
+            mapOf("exampleId" to "example-fixture", "caption" to "Expected home screen", "mimeType" to "image/jpeg", "imageBase64" to "AA=="),
+            "unused",
+        )
+        assertEquals(2, mcp.content.size)
+        val description = assertIs<TextContent>(mcp.content[0]).text
+        assertTrue(description.contains("Expected home screen"))
+        assertTrue(description.contains("not the current device screen"))
+        assertIs<ImageContent>(mcp.content[1])
+        assertFalse(description.contains("coordinates are measured"))
+    }
+
+    @Test
+    fun externalLaneGoldenImageIsRenderedAsAReferenceRatherThanCurrentDeviceScreen() {
+        val result = toCallToolResult(
+            "test_lane_tool_call",
+            mapOf(
+                "kind" to "goldenScreenshot",
+                "exampleId" to "golden-1",
+                "caption" to "Expected receipt",
+                "mimeType" to "image/jpeg",
+                "imageBase64" to "AA==",
+            ),
+            "unused",
+        )
+        val text = assertIs<TextContent>(result.content.first()).text
+        assertTrue(text.contains("golden-1"))
+        assertTrue(text.contains("Expected receipt"))
+        assertTrue(text.contains("saved test example"))
+        assertFalse(text.contains("Current Android device screen"))
+        assertFalse(text.contains("coordinates are measured"))
+        assertIs<ImageContent>(result.content.last())
+    }
+
+    @Test
+    fun currentStepExampleListingAndRetrievalRespectTheCaseAllowList() {
+        val lane = tools(
+            allowed = setOf("get_step_example"),
+            examples = listOf(StepExample.ReferenceLog("reference-1", "D/Checkout: ready", "Checkout log")),
+        )
+        assertFalse("list_step_examples" in lane.names())
+        assertTrue("get_step_example" in lane.names())
+        val result = lane.call("get_step_example", "exampleId" to "reference-1")
+        assertEquals("referenceLog", result["kind"])
+        assertTrue(result["text"].toString().contains("D/Checkout: ready"))
+        assertTrue(lane.call("get_step_example", "exampleId" to "other-step-example")["error"].toString().contains("not attached"))
     }
 
     @Test

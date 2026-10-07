@@ -17,8 +17,6 @@ import java.io.File
 // kind a single judge gets (check results, screenshot, log range); no lane's claim, observation, status or earlier
 // verdict is passed on. Comparisons run when every lane of the run is done, so each lane's results are final.
 
-private const val MIME_PNG = "image/png"
-
 /** One lane's result of the step. [laneNumber] is the 1-based position of the lane in the run. */
 internal class LaneStepResult(val lane: LaneResult, val laneNumber: Int, val result: StepResult)
 
@@ -77,7 +75,10 @@ internal fun comparisonEvidence(runDir: File, target: ComparisonTarget): JudgeEv
 
 private suspend fun loadScreenshot(runDir: File, relativePath: String?): JudgeImage? {
     val file = relativePath?.takeIf { it.isNotBlank() }?.let { File(runDir, it) }?.takeIf { it.isFile } ?: return null
-    return withContext(Dispatchers.IO) { boundedJudgeImage(file.readBytes(), MIME_PNG) }
+    return withContext(Dispatchers.IO) {
+        val bytes = com.indagium.testing.store.readBoundedTestAsset(file) ?: return@withContext null
+        boundedJudgeImage(bytes)
+    }
 }
 
 /** Judges every disagreement of [run]; [record] gets each comparison as it is made. A cancelled run stops here. */

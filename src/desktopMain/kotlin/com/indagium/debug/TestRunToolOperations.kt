@@ -12,14 +12,21 @@ import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.summary
 import com.indagium.testing.run.PauseDecision
 import com.indagium.testing.run.StartRunResult
+import com.indagium.testing.run.TestRunReportFormat
+import com.indagium.testing.run.availableRunArtifactPaths
+import com.indagium.testing.run.compareTestRuns
 import com.indagium.testing.run.toMarkdown
 import com.indagium.testing.store.runToJson
 import com.indagium.ui.AppState
 import com.indagium.ui.ReportActionResult
 import com.indagium.ui.applyStepFix
+import com.indagium.ui.exportTestRunReport
 import com.indagium.ui.markAgentError
+import com.indagium.ui.rerunFailedCases
 import com.indagium.ui.rerunStep
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 // Handlers of the AI test-RUN tools (catalogue: TestRunToolCatalog.kt), merged into IndagiumToolOperations like the
 // authoring tools. Every handler returns a plain Map; every expected failure is DATA, `{ "error": message }`, never an
@@ -45,6 +52,9 @@ internal class TestRunToolOperations(private val appState: AppState) {
         "apply_step_fix" to suspendTool { a -> applyFix(a) },
         "mark_agent_error" to suspendTool { a -> markError(a) },
         "rerun_test_step" to suspendTool { a -> rerunStep(a) },
+        "rerun_failed_test_cases" to suspendTool { a -> rerunFailed(a.requiredString("runId")) },
+        "compare_test_runs" to suspendTool { a -> compareRuns(a) },
+        "export_test_run_report" to suspendTool { a -> exportReport(a) },
     )
 
     private fun tool(body: (ToolArgs) -> Any?): (Map<String, Any?>) -> Any? = { raw ->
@@ -220,11 +230,19 @@ internal class TestRunToolOperations(private val appState: AppState) {
         val format = a.string("format")?.trim()?.lowercase() ?: "json"
         if (format != "json" && format != "markdown") toolArgError("format must be json or markdown.")
         val run = coordinator.loadRun(runId) ?: return errorMap("Run '$runId' was not found.")
+        val artifactPaths = withContext(Dispatchers.IO) { availableRunArtifactPaths(run, coordinator.runDir(run.id)) }
         return if (format == "markdown") {
-            mapOf("runId" to run.id, "format" to "markdown", "status" to run.status.name, "markdown" to run.toMarkdown())
+            mapOf("runId" to run.id, "format" to "markdown", "status" to run.status.name, "markdown" to run.toMarkdown(), "artifactPaths" to artifactPaths)
         } else {
             val plain = runToJson(run).toPlainMap().filterKeys { it !in RUN_JSON_DROPPED_KEYS }
-            mapOf("runId" to run.id, "format" to "json", "status" to run.status.name, "suiteName" to run.suite.name, "report" to plain)
+            mapOf(
+                "runId" to run.id,
+                "format" to "json",
+                "status" to run.status.name,
+                "suiteName" to run.suite.name,
+                "report" to plain,
+                "artifactPaths" to artifactPaths,
+            )
         }
     }
 
@@ -292,6 +310,58 @@ internal class TestRunToolOperations(private val appState: AppState) {
         val started = appState.rerunStep(a.requiredString("runId"), a.requiredString("laneId"), a.requiredString("caseId"), a.requiredString("stepId"))
         val config = (started as? StartRunResult.Started)?.let { coordinator.run(it.runId)?.config }
         return startedMap(config ?: RunConfig("", null, emptyList()), started)
+    }
+
+    private suspend fun rerunFailed(runId: String): Map<String, Any?> {
+        val started = appState.rerunFailedCases(runId)
+        val config = (started as? StartRunResult.Started)?.let { coordinator.run(it.runId)?.config }
+        return startedMap(config ?: RunConfig("", null, emptyList()), started)
+    }
+
+    private suspend fun compareRuns(a: ToolArgs): Map<String, Any?> {
+        val currentId = a.requiredString("runId")
+        val current = coordinator.loadRun(currentId) ?: return errorMap("Run '$currentId' was not found.")
+        val requestedPreviousId = a.string("previousRunId")
+        val previous = if (requestedPreviousId != null) {
+            coordinator.loadRun(requestedPreviousId) ?: return errorMap("Previous run '$requestedPreviousId' was not found.")
+        } else {
+            coordinator.previousTerminalRunOfSameSuite(current)
+                ?: return errorMap("No previous terminal run of suite '${current.suite.name}' is available.")
+        }
+        if (!current.isFinished || !previous.isFinished) return errorMap("Compare requires two terminal runs.")
+        if (previous.suite.id != current.suite.id) return errorMap("Both runs must belong to the same suite.")
+        val rows = compareTestRuns(previous, current).map { row ->
+            mapOf(
+                "caseId" to row.caseId, "caseName" to row.caseName, "stepId" to row.stepId,
+                "presence" to row.presence.name, "casePresence" to row.casePresence.name,
+                "definitionChanged" to row.definitionChanged, "caseDefinitionChanged" to row.caseDefinitionChanged,
+                "suiteDefinitionChanged" to row.suiteDefinitionChanged,
+                "previousAction" to row.previousAction, "currentAction" to row.currentAction,
+                "previousExpected" to row.previousExpected, "currentExpected" to row.currentExpected,
+                "previousStatuses" to row.previousStatuses, "currentStatuses" to row.currentStatuses,
+            )
+        }
+        return mapOf("previousRunId" to previous.id, "runId" to current.id, "changes" to rows)
+    }
+
+    private suspend fun exportReport(a: ToolArgs): Map<String, Any?> {
+        val format = when (a.requiredString("format").lowercase()) {
+            "json" -> TestRunReportFormat.JSON
+            "markdown" -> TestRunReportFormat.MARKDOWN
+            "evidence_zip" -> TestRunReportFormat.EVIDENCE_ZIP
+            else -> toolArgError("format must be json, markdown, or evidence_zip.")
+        }
+        val result = appState.exportTestRunReport(
+            runId = a.requiredString("runId"),
+            destination = a.requiredString("path"),
+            format = format,
+            evidencePaths = a.strings("evidencePaths") ?: emptyList(),
+            overwrite = a.bool("overwrite") ?: false,
+        )
+        return result.fold(
+            onSuccess = { mapOf("path" to it.file.absolutePath, "bytes" to it.bytes, "evidenceFiles" to it.evidenceFiles) },
+            onFailure = { errorMap(it.message ?: "Could not export the run report.") },
+        )
     }
 
     private suspend fun laneToolCall(a: ToolArgs): Any? {

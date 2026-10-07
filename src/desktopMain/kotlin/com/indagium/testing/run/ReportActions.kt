@@ -2,9 +2,11 @@ package com.indagium.testing.run
 
 import com.indagium.ai.AiRunEvent
 import com.indagium.testing.model.CaseResult
+import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.StepFix
+import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
@@ -90,6 +92,32 @@ internal fun rerunConfig(run: TestRun, laneId: String, caseId: String, stepId: S
         ),
     )
 }
+
+/** The original run configuration narrowed to the union of cases that failed, blocked, or errored on any lane/repeat. */
+internal fun rerunFailedCasesConfig(run: TestRun): Result<RunConfig> {
+    val failed = failedCaseIds(run).toList()
+    if (failed.isEmpty()) return Result.failure(IllegalArgumentException("This run has no failed, blocked, or errored cases to re-run."))
+    val currentCaseIds = run.suite.cases.map { it.id }.toSet()
+    val selected = failed.filter { it in currentCaseIds }
+    if (selected.isEmpty()) return Result.failure(IllegalArgumentException("None of the failed cases still exist in the run's suite."))
+    return Result.success(
+        run.config.copy(
+            suiteId = run.suite.id,
+            caseIds = selected,
+            lanes = run.config.lanes.map { it.copy(id = newLaneId()) },
+            stopAfterStepId = null,
+            rerunOf = run.id,
+        ),
+    )
+}
+
+/** Case outcomes after their final step attempt, unioned across lanes and repeats. */
+internal fun failedCaseIds(run: TestRun): Set<String> = run.lanes.flatMap { it.cases }
+    .filter { it.caseId !in setOf("suite-setup", "suite-teardown") }
+    .filter { result ->
+        result.status in setOf(CaseStatus.FAIL, CaseStatus.BLOCKED, CaseStatus.ERROR) ||
+            result.steps.any { it.status in setOf(StepStatus.FAIL, StepStatus.BLOCKED, StepStatus.ERROR, StepStatus.TIMEOUT) }
+    }.mapTo(LinkedHashSet()) { it.caseId }
 
 /** [this] suite without the steps after [stepId] in the case that has it; unchanged for a null id. */
 internal fun TestSuite.truncatedAfter(stepId: String?): TestSuite {

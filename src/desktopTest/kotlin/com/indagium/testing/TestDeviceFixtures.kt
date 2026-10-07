@@ -63,12 +63,19 @@ internal class ScriptedAdbRunner(
     @Volatile
     var shellStdout = ""
 
+    /** Optional blocking seam for proving a caller's coroutine cancellation interrupts screenshot capture. */
+    @Volatile
+    var beforeScreenshot: (() -> Unit)? = null
+
     override fun start(spec: CaptureProcessSpec): RunningCaptureProcess {
         specs += spec
         val command = spec.command
         return when {
             "logcat" in command -> logcat
-            "screencap" in command -> CompletedFakeProcess(png)
+            "screencap" in command -> {
+                beforeScreenshot?.invoke()
+                CompletedFakeProcess(png)
+            }
             "uiautomator" in command -> CompletedFakeProcess(uiDump)
             else -> {
                 shellCommands += command.dropWhile { it != "shell" }.drop(1)

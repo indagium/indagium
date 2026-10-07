@@ -67,6 +67,10 @@ class EmbeddedMirrorLifecycleTest {
         private val decoderCount = AtomicInteger()
 
         @Volatile var attached = false
+
+        @Volatile var snapshotSerial: String? = null
+
+        @Volatile var acceptsInput = false
         val starts = AtomicInteger()
         val stops = AtomicInteger()
         val closes = AtomicInteger()
@@ -84,6 +88,7 @@ class EmbeddedMirrorLifecycleTest {
 
         override fun snapshot() = EmbeddedMirrorSnapshot(
             if (attached) EmbeddedMirrorState.LIVE else EmbeddedMirrorState.DISCONNECTED,
+            deviceSerial = snapshotSerial,
         )
 
         override fun isAlreadyStarted(serial: String) = attached
@@ -92,6 +97,7 @@ class EmbeddedMirrorLifecycleTest {
             if (closeFinished) startsAfterClose.incrementAndGet()
             if (attached) return@synchronized
             attached = true
+            snapshotSerial = serial
             starts.incrementAndGet()
             maxAttachedDecoders.accumulateAndGet(decoderCount.incrementAndGet(), ::maxOf)
             Unit
@@ -106,7 +112,7 @@ class EmbeddedMirrorLifecycleTest {
             decoderCount.set(0)
         }
 
-        override fun send(command: MirrorControlCommand) = false
+        override fun send(command: MirrorControlCommand) = acceptsInput
 
         override fun setLiveAudioEnabled(enabled: Boolean, volume: () -> Float, onDiagnostic: (String) -> Unit) {
             if (enabled) liveAudioEnables.incrementAndGet()
@@ -263,6 +269,33 @@ class EmbeddedMirrorLifecycleTest {
             // The close itself still happens, ordered after the in-flight stop.
             awaitCondition(10_000) { h.backend.closes.get() == 1 }
             assertEquals(1, h.backend.stops.get())
+        }
+    }
+
+    @org.junit.Test(timeout = 15_000)
+    fun acceptedInputUsesCurrentSnapshotIdentityWhenSharedBackendStartIsAlreadyLive() {
+        val edt = Executors.newSingleThreadExecutor { Thread(it, "fake-edt").apply { isDaemon = true } }
+        val backend = LockingFakeBackend(edt, detachDelayMs = 0).apply {
+            attached = true
+            snapshotSerial = "current-device"
+            acceptsInput = true
+        }
+        val handle = EmbeddedMirrorHandle.forBackend(backend)
+        val currentInput = CountDownLatch(1)
+        val staleInput = AtomicInteger()
+        val current = MirrorInputObservers.observe("current-device") { currentInput.countDown() }
+        val stale = MirrorInputObservers.observe("requested-stale") { staleInput.incrementAndGet() }
+        try {
+            // The shared backend reports an already-live stream, so start does not replace its snapshot.
+            handle.start("requested-stale", MirrorStreamOptions())
+            assertTrue(handle.send(MirrorControlCommand.Text("synthetic accepted input")))
+            assertTrue(currentInput.await(2, TimeUnit.SECONDS), "the current device receives the observer event")
+            assertEquals(0, staleInput.get(), "the stale requested serial receives nothing")
+        } finally {
+            current.close()
+            stale.close()
+            handle.close()
+            edt.shutdownNow()
         }
     }
 
