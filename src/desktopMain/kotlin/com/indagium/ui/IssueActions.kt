@@ -8,6 +8,7 @@ import com.indagium.testing.model.IssueSeverity
 import com.indagium.testing.model.IssueSource
 import com.indagium.testing.model.IssueStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.isPendingCaptureArchive
 import com.indagium.testing.model.normalizeTags
 import com.indagium.testing.run.AndroidBugreportCollector
 import com.indagium.testing.run.IssueDraftContext
@@ -16,6 +17,7 @@ import com.indagium.testing.run.IssueStepClipRequest
 import com.indagium.testing.run.buildIssueDraft
 import com.indagium.testing.run.collectAndroidBugreport
 import com.indagium.testing.run.defaultIssueStepClipWindow
+import com.indagium.testing.run.exportIssueCaptureArchive
 import com.indagium.testing.run.toMarkdown
 import com.indagium.testing.run.withIssueId
 import com.indagium.testing.store.StoreResult
@@ -122,6 +124,25 @@ internal suspend fun AppState.collectIssueBugreport(issueId: String, progress: (
         }
     }, progress)
 
+/**
+ * Exports the capture archive an issue wants (the pending, ticked one) from the whole recording of its lane and attaches it, with
+ * [progress] messages; a no-op that succeeds when the issue wants none or already holds it. Shared by the issue editor and every
+ * delivery. A lane that is still recording is exported like a live Save ZIP, a finished one from its run folder.
+ */
+internal suspend fun AppState.attachIssueCaptureArchive(issueId: String, progress: (String) -> Unit = {}): Result<IssueRecord> {
+    val issue = withContext(Dispatchers.IO) { issueStore.load(issueId) }
+        ?: return Result.failure(IllegalArgumentException("Issue '$issueId' was not found."))
+    val run = testRunCoordinator.loadRun(issue.source.runId)
+        ?: return Result.failure(IllegalArgumentException("Run '${issue.source.runId}' was not found."))
+    val runDir = testRunCoordinator.runDir(run.id)
+    val live = testRunCoordinator.liveLaneArchiveExporter(run.id, issue.source.laneId)
+    val laneDir = File(runDir, "lanes/${issue.source.laneId}")
+    return exportIssueCaptureArchive(
+        store = issueStore, issueId = issueId, run = run, runDir = runDir, liveExport = live,
+        notes = { laneNotesOf(run.id, issue.source.laneId, laneDir) }, progress = progress,
+    ).map { it.issue }
+}
+
 /** Explicit padded video-clip export shared by the issue editor and MCP. Blank bounds use the failed-step default. */
 internal suspend fun AppState.exportIssueStepClip(
     issueId: String,
@@ -217,8 +238,18 @@ internal suspend fun AppState.deliverIssue(
     tabId: String? = null,
     openLaneLog: Boolean = false,
     resendToTracker: Boolean = false,
+    progress: (String) -> Unit = {},
 ): IssueActionResult {
-    val record = withContext(Dispatchers.IO) { issueStore.load(issueId) } ?: return IssueActionResult.Failed("Issue '$issueId' was not found.")
+    var record = withContext(Dispatchers.IO) { issueStore.load(issueId) } ?: return IssueActionResult.Failed("Issue '$issueId' was not found.")
+    // The ticked capture archive is part of the evidence every destination hands on, so it is exported before anything is delivered.
+    if (record.draft.attachments.any { it.isPendingCaptureArchive && it.include }) {
+        record = attachIssueCaptureArchive(issueId, progress).getOrElse { failure ->
+            return IssueActionResult.Failed(
+                "The capture archive could not be created: ${failure.message ?: failure::class.simpleName}. " +
+                    "Untick it in the evidence list to go on without it.",
+            )
+        }
+    }
     return when (destination) {
         IssueDestination.LOCAL -> recordDelivery(record, destination, SAVED_MESSAGE)
         IssueDestination.MARKDOWN -> {

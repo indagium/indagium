@@ -388,7 +388,7 @@ observed in the code and enforced by convention and review rather than by toolin
 | `cases` | Similarity index over previously written analysis notes. | `model`, `utils` | `ui`, `ai`, `debug` |
 | `video` | FFmpeg-backed playback and frame grabbing. | `model` | `ui` |
 | `capture` | Device capture adapters, session writing, versioned capture descriptors, ZIP export, and log/video timing records. | `utils` | Compose UI, viewer rendering, AI, and diagnostics UI |
-| `testing` | AI test suites: library model, disk stores, edition limits, script runner, headless device lanes, run engine, judge, issue drafts, tracker client (§26). | `model`, `utils`, `capture`, `edition`, `security`, `ai` (agent launchers), `debug` (gateway type, `schema` DSL) | `ui`, Compose UI |
+| `testing` | AI test suites: library model, disk stores, edition limits, script runner, device lanes that record through real captures, run engine, judge, issue drafts, tracker client (§26). | `model`, `utils`, `capture`, `edition`, `security`, `ai` (agent launchers), `debug` (gateway type, `schema` DSL) | `ui`, Compose UI |
 | `edition` | `Edition`, `EditionLimits` and the `EditionService` that holds the active edition. | — | Everything else |
 | `security` | OS-keychain secret storage with a session-only fallback. | `ai` (log redaction), `testing.script` (the child-process runner) | `ui` |
 | `voice` | Audio capture and the three transcription backends. | — | `ui` |
@@ -524,6 +524,13 @@ index remains beside the raw log and video. The ordinary player then lets log ro
 another, while a later Save ZIP writes the separate flat portable layout. If the application exits before Stop, the recorder marks its directory interrupted; the
 next launcher lists it for recovery. Live recorder/launcher markers are not restored as active
 state, while a finalized descriptor link is durable and reopens as a normal capture-backed tab.
+
+**Test-run lane captures** are the one case where a second controller records beside the user's
+capture. An AI test run records each lane through the same `TabCaptureController`, start path and
+archive code (§26.5.5); `LogTab.testLane` marks such a tab, `AppState.liveCaptureTabId` ignores it, so
+the one-live-capture rule above stays exactly as it was for every manual flow (toolbar, launcher, the
+device AI tools), and a per-device claim under `stateLock` keeps lanes and manual captures off the same
+phone.
 
 On macOS, Windows, and Linux (x86 or ARM), host `adb` and optional `scrcpy` are resolved from the
 normal platform installation. A Linux Flatpak launch uses `flatpak-spawn --host --watch-bus` for
@@ -3104,7 +3111,7 @@ flowchart TB
         coord["run/TestRunCoordinator<br/>own IO scope · device registry"]
         engine["run/ TestRunEngine · LaneScheduler · LaneRunner<br/>LaneDriver · StepSequence"]
         judge["run/ JudgeService · JudgeTools<br/>blind evidence only"]
-        dev["device/TestDeviceSession<br/>standalone CaptureRecorder + adb"]
+        dev["device/TestDeviceSession<br/>LaneCapture seam + adb"]
         script["script/ TestScriptRunner · HostCommandRunner<br/>UntrustedData"]
         tracker["tracker/ TrackerIssueCreator · TrackerTools<br/>TrackerMcpClient"]
     end
@@ -3149,13 +3156,13 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
-| `testing.device` | `TestDeviceSession.kt`, `CaptureLogReader.kt`, `UiTreeParser.kt` | One headless device lane: standalone recorder, adb input/screenshot/UI dump, byte-offset log reading and waiting |
-| `testing.run` | `TestRunCoordinator.kt`, `TestRunEngine.kt`, `LaneScheduler.kt`, `LaneRunner.kt`, `LaneDriver.kt`, `StepSequence.kt`, `HookRunner.kt`, `DeterministicChecks.kt`, `TestAgentTools.kt`, `LaneGateway.kt`, `LaneAgents.kt`, `LanePrompts.kt`, `TestRunValidation.kt`, `TestRunState.kt`, `EngineSupport.kt`, `JudgeService.kt`, `JudgeTools.kt`, `JudgeEvidence.kt`, `JudgePrompts.kt`, `StepJudging.kt`, `TestRunComparison.kt`, `TestRunReportExport.kt`, `RunArtifacts.kt`, `IssueStepClipService.kt`, `IssueBugreportService.kt`, `ReportActions.kt`, `IssueDraftBuilder.kt`, `IssueEngineHooks.kt`, `IssueMarkdown.kt`, `TestRunMarkdown.kt` | Run engine, complete step deadline/case budget, run comparison and safe report export, lane activity artifacts, bounded issue clips and on-demand Android bugreports |
+| `testing.device` | `TestDeviceSession.kt`, `LaneCapture.kt`, `CaptureLogReader.kt`, `UiTreeParser.kt` | One device lane: the `LaneCapture` seam (production: a real capture controller, with or without a tab; engine tests: `StandaloneLaneCapture`, a headless recorder), adb input/screenshot/UI dump, byte-offset log reading and waiting |
+| `testing.run` | `TestRunCoordinator.kt`, `TestRunEngine.kt`, `LaneScheduler.kt`, `LaneRunner.kt`, `LaneDriver.kt`, `StepSequence.kt`, `HookRunner.kt`, `DeterministicChecks.kt`, `TestAgentTools.kt`, `LaneGateway.kt`, `LaneAgents.kt`, `LanePrompts.kt`, `TestRunValidation.kt`, `TestRunState.kt`, `EngineSupport.kt`, `JudgeService.kt`, `JudgeTools.kt`, `JudgeEvidence.kt`, `JudgePrompts.kt`, `StepJudging.kt`, `TestRunComparison.kt`, `TestRunReportExport.kt`, `RunArtifacts.kt`, `LaneMarkerText.kt`, `IssueStepClipService.kt`, `IssueCaptureArchiveService.kt`, `IssueBugreportService.kt`, `ReportActions.kt`, `IssueDraftBuilder.kt`, `IssueEngineHooks.kt`, `IssueMarkdown.kt`, `TestRunMarkdown.kt` | Run engine, complete step deadline/case budget, run comparison and safe report export, lane activity artifacts, bounded issue clips and on-demand Android bugreports |
 | `testing.tracker` | `TrackerMcpClient.kt`, `SdkTrackerMcpClient.kt`, `TrackerConfig.kt`, `TrackerIssueCreator.kt`, `TrackerTools.kt`, `TrackerPrompts.kt` | The issue-tracker MCP client (official Kotlin SDK client), setup checks, and the one-shot agent job that files an issue |
 | `edition` | `Edition.kt` | `Edition`, `EditionLimits`, `EditionService` |
 | `security` | `SecretStore.kt` | OS-keychain secret storage with a session-only fallback |
-| `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
-| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
+| `debug` (new files) | `TestSuiteToolCatalog.kt`, `TestSuiteToolOperations.kt`, `TestSuiteToolParsing.kt`, `TestSuiteToolJson.kt`, `TestRunToolCatalog.kt`, `TestRunToolOperations.kt`, `IssueToolCatalog.kt`, `IssueToolOperations.kt`, `TestRunCaptureArgs.kt`, `ExternalToolApproval.kt`, `ExternalRunApproval.kt`, `ExternalTrackerApproval.kt` | Catalog-driven authoring, run/report and issue evidence operations, merged into `MCP_TOOLS` and parity-checked with their handlers; per-call external-client approvals |
+| `ui` (new files) | `TestsWorkspace.kt`, `TestsSuiteScreen.kt`, `TestsCaseScreen.kt`, `TestsSteps.kt`, `TestsListEditors.kt`, `TestsLibraryScreens.kt`, `TestsTryItPanel.kt`, `TestsWidgets.kt`, `TestsUiState.kt`, `ReorderableColumn.kt`, `TestRunDialog.kt`, `LaneCaptures.kt`, `CaptureMarkerWriter.kt`, `TestRunLiveView.kt`, `TestRunLiveState.kt`, `TestRunReport.kt`, `TestRunStepDetail.kt`, `TestRunUiState.kt`, `TestRunActions.kt`, `TestRunWiring.kt`, `TestScriptTryRun.kt`, `IssueDraftDialog.kt`, `IssueDraftUiState.kt`, `IssueActions.kt`, `IssueNotes.kt`, `IssueTrackerActions.kt`, `TestsIssuesScreen.kt`, `TrackerWiring.kt`, `TestingSettingsSections.kt`, `TestingSettingsCodec.kt` | The Tests workspace (`ActiveSurface.Tests`, `TabRef.Tests`), the run dialog/live view/report, the issue dialog, and the glue (`TestRunWiring.kt`, `TrackerWiring.kt`) that connects `testing/` to `AppState` |
 
 Dependency direction. `testing` depends on `model`, `utils`, `capture`, `edition`, `security`, and —
 for the agent launchers and the gateway type — `ai` and `debug`. It has **no** dependency on `ui`.
@@ -3183,7 +3190,7 @@ and no separate index is persisted. Ids are prefixed UUIDs unique across the lib
 | `<appDataDir>/testing/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
 | `<appDataDir>/testing/issues/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
 | `<save root>/test-runs/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
-| `<save root>/test-runs/<runId>/lanes/<laneId>/` | `capture/` (recorded `logcat.log`, optional video), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates |
+| `<save root>/test-runs/<runId>/lanes/<laneId>/` | `capture/<sessionId>/` (the lane's capture session exactly as a manual capture writes it: `logs/logcat.log`, `mapping/`, optional `video/screen.mkv` with audio, `session.json`, and after the lane the finalized `capture.indagium.json`), `lane-notes.ann` (the lane's notes with every AI marker), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates. The lane's sessions live inside the run folder (not under a capture root) so the report, the step clips and the evidence export find them where they always did, and deleting a run deletes its recordings; `CaptureService` knows them by id for this launch only (§26.5.5) |
 | `<save root>/test-runs/<runId>/judge.jsonl` | Everything the judge runs of the run said and did, tagged with what each judged | JSON lines, redacted |
 
 `<save root>` is the user's save folder (`AppState.effectiveSaveRootOrNull`); with none configured a
@@ -3257,6 +3264,7 @@ leak an edition into each other.
 | Lane tools | **Suspend handlers** only | `IndagiumToolGateway.executeSuspending` (`debug/IndagiumToolGateway.kt:52`): `wait_for_log`, `finish_step` and script tools wait on adb, the log file or a judge, and must not block a Ktor or `Default` thread |
 | Run persistence | `RunPersister` on IO, 1 s debounce (`testing/store/RunPersister.kt`) | `flush()` runs `NonCancellable` so a cancelled run still writes its final file |
 | Device access | `TestDeviceSession` | Input commands serialised by an `inputLock` mutex (`testing/device/TestDeviceSession.kt:101`); every adb call on `Dispatchers.IO` |
+| Lane capture start/stop | `ProductionLaneOpener` / `LaneRunner.release` | Start: `withContext(IO + NonCancellable)` (a cancelled run still gets the opened capture back and its cleanup stops it). Stop: `runInterruptible(IO)` inside `withTimeoutOrNull(LANE_STOP_WAIT_MS = 90 s)`. Never the EDT |
 
 **Lane scheduling.** Lanes are grouped by device serial and each group runs its lanes one after
 another (a device has one recorder and one screen); different groups run in parallel, and a
@@ -3265,16 +3273,19 @@ another (a device has one recorder and one screen); different groups run in para
 `TestRunEngine.runLane` converts any non-cancellation exception into a lane `ERROR`, so one lane
 ending badly never stops another. Cancelling the run cancels every group. The coordinator also keeps a
 device registry (`devicesInUse`, guarded by `registryLock`) so two runs can never share a device, and
-`TestDeviceSession.open` refuses the serial held by the live UI capture
-(`testing/device/TestDeviceSession.kt:353`) — the "one live capture" rule is unchanged.
+the lane's capture start claims its serial in `AppState` (`claimLaneDevice`, §26.5.5), which refuses a
+serial that a manual capture or another lane holds — the "one live capture" rule is unchanged.
 
 #### 26.5.2 Lane lifecycle
 
-`LaneRunner.run` (`testing/run/LaneRunner.kt:60`): build the lane's agent, open the device (a standalone
-`CaptureRecorder` under `<lane>/capture`, `CaptureMirrorMode.DISABLED` — no native mirror surface, so no
-EDT is ever involved), run the **suite setup** hooks, then for each iteration and each
+`LaneRunner.run` (`testing/run/LaneRunner.kt:60`): build the lane's agent, open the device (a real
+capture of the run's recording settings under `<lane>/capture`, with a live tab unless the run asked
+for none, §26.5.5), run the **suite setup** hooks, then for each iteration and each
 case: case setup → the case's steps → case teardown (always) → …, then the suite teardown (always),
-then release the device. A failing setup hook **blocks** what depends on it (cases are not run; their
+then release the lane: its markers are flushed, its recording is stopped and finalized (a lane tab
+stays open as a stopped capture) and the device is released. A recording that ends on its own while
+the lane works (the user stopped or closed the lane's tab, the device went away) fails **that lane**
+with an explanatory `error`; the run and the other lanes go on. A failing setup hook **blocks** what depends on it (cases are not run; their
 steps are `SKIPPED`). Hooks leave their results in pseudo cases (`suite-setup`, `suite-teardown`) or as
 `setup`-flagged step results. Script hooks run directly — no agent, no confirmation: the suite's
 author wrote them and whoever started the run accepted them.
@@ -3351,8 +3362,8 @@ flowchart TB
 
 `TestRunCoordinator.cancel` cancels the run's job (`:246`). The engine's `finally` and each lane's
 `release` run in `withContext(NonCancellable)` on IO: the judge is closed, the final status derived and
-`run.json` flushed (`TestRunEngine.finish`, `:125`); the lane's recorder is stopped, its log deleted when
-logcat evidence was switched off, and its agent closed. **Teardown hooks still run after a cancel, but
+`run.json` flushed (`TestRunEngine.finish`, `:125`); the lane's recorder is stopped and finalized (its tab, if
+any, stays; a headless run without recording settings deletes its log when logcat evidence was switched off), and its agent closed. **Teardown hooks still run after a cancel, but
 scripts only** — shared-step hooks (which need an agent) are recorded as skipped
 (`LaneRunner.kt:146`, `HookRunner.kt:41`). Run status is derived from the lanes: `ERROR` if any lane had
 an infrastructure problem or a case could not be judged, `FAILED` if any case failed or was blocked,
@@ -3364,6 +3375,75 @@ for active runs and their externally dispatched calls. It gives run cleanup up t
 completion also drains still-running paid external calls before final persistence and releasing devices; terminal
 protocol replies such as `finish_step` are preserved. This honours the mirror lifecycle rule (§12.4): nothing a
 run waits on is EDT work, so the bounded `runBlocking` on the closing thread waits only for IO/coroutine cleanup.
+
+#### 26.5.5 Lane captures
+
+Every lane records through a real capture, so everything a person could save by starting a live capture
+and testing by hand is available to a test: logcat (with the device's earlier logs when chosen), screen
+video, device audio, the microphone, the device display, adb buffers and the video quality. The run's
+`RunConfig.capture` carries the recording settings (the saved capture settings, edited for this run
+only, never written back) and `RunConfig.openLaneTabs` whether each lane opens a tab; both are frozen in
+`run.json` (appended last, absent in older files: no recording settings means a headless lane without a
+tab, as before).
+
+```mermaid
+flowchart LR
+    runner["LaneRunner"] --> opener["ProductionLaneOpener<br/>(LaneDeviceOpener)"]
+    opener --> begin["AppState.beginLaneCapture<br/>claimLaneDevice · shared starter"]
+    begin --> start["runCaptureStart<br/>(the one start path of every capture)"]
+    start --> tab["lane tab<br/>testLane · not activated"]
+    start --> ctrl["TabCaptureController<br/>root = lanes/&lt;id&gt;/capture"]
+    runner --> seam["LaneCapture<br/>(AppLaneCapture)"]
+    seam --> ctrl
+    seam --> writer["CaptureMarkerWriter<br/>tab Notes or LaneNotes"]
+```
+
+- **One start path.** `startCaptureTab` (manual) and `beginLaneCapture` (lane) both call
+  `AppState.runCaptureStart`: tool resolution, the old-glibc adaptation, `controller.start`, the empty
+  streaming tab published before adb launches, the log tailer, the heap-pressure pause, the device
+  display route and the lifecycle monitor. They differ only in the `CaptureStartPlan`: a lane's tab is
+  **appended without being activated** (the Tests workspace keeps the focus; only when nothing at all is
+  shown does the new tab become what is shown), takes no launcher's place and does not show the video
+  panel, and a lane without a tab has no in-app mirror (an external scrcpy window still opens). The
+  controller of a lane is created on the lane's own folder, so its session is
+  `lanes/<laneId>/capture/<sessionId>` and every run-folder consumer keeps working.
+- **The manual rule is unchanged.** `LogTab.testLane` (session-only, not in the autosave) marks a lane
+  tab. `AppState.liveCaptureTabId` filters `testLane == null`, so the toolbar, the launcher and the device
+  AI tools never see a lane as "the live capture", and `aiCaptureBinding` refuses a lane tab (the run's own
+  agent drives that device). What keeps a lane and a manual capture, or two lanes, off one phone is a
+  per-device claim in `laneCaptureSerials` (+ `manualCaptureStartSerial` for a manual start that is
+  still resolving), checked and taken in one step under `stateLock`: a lane refuses a serial a manual
+  capture holds and a manual start refuses a serial a lane holds, each with a message naming the other.
+  `captureStartInProgress` is **not** used by lanes, so lanes on different devices start side by side
+  and never block the UI.
+- **Stop, close, cancel.** `AppState.finishLaneCapture` stops through the paths a tab Stop uses:
+  `stopCaptureTab` (mirror `requestStop`, recorder stop, drain, finalization; waits for the controller to be
+  removed, bounded and interruptible) or, for a tabless lane, a stop + `finalizeStopped` job on `ioScope`.
+  The lane's tab stays as an ordinary stopped capture tab. Cancelling a run cancels the lanes, whose
+  `release` runs `NonCancellable`; `AppState.close()` closes the coordinator (bounded, §26.5.4) and then
+  `stopAllLiveCaptures` stops anything left, including the tabless lanes' controllers. The EDT never waits
+  on a lane: it only waits (bounded) for coordinator jobs, and no lane code waits on a mirror lifecycle
+  lock or on the EDT. Closing a lane tab (or pressing Stop in it) makes the recorder leave `RECORDING`,
+  which `AppLaneCapture.lost` turns into the lane's error.
+- **Session lookup.** A lane session is not under a capture root, so it never appears in the launcher's
+  retained list (no unfinished session to recover after a crash, nothing to delete by mistake);
+  `CaptureService.registerLaneSession` makes `retainedSession`/`sessionById` find it by id for this
+  launch, which is all Save ZIP, the marker files and the strip need.
+- **AI "Mark issue".** When a non-setup step ends `FAIL`, `TIMEOUT`, `BLOCKED` or `ERROR`,
+  `LaneRunner.stepRecorded` asks the lane's capture for a marker (`LaneMarkerText.kt`: the label
+  `AI · <case> · step N failed` and a Markdown note of the action, the expected result, the failed checks
+  and the judge's verdict, with everything a device, the agent or the judge said quoted as untrusted;
+  the step's screenshot). `CaptureMarkerWriter` is the one implementation of a press (the button, the
+  `mark_device_issue` tool and the lane all use it): the note and its `indagium:marker` header at once,
+  the screenshot under it, and, after `markerPostMs`, the LogRef of the window; it writes either into a
+  tab's Notes (`TabMarkerNotes`) or into the `LaneNotes` a tabless lane holds. At the end of the lane the
+  notes are written to `lane-notes.ann` so a later issue export has them.
+- **Archive.** `AppLaneCapture.exportArchive` is the capture ZIP of the whole session: while recording
+  it is a live Save ZIP (`controller.export`), afterwards the retained-session export; both through
+  `CaptureArchiveExporter`, with the lane's notes (the tab's current ones while it is open). Lane captures
+  force `markerNotesInSnapshot` so the markers always travel with it. Reopening it ("Bug report / archive")
+  shows the log, the video and the AI markers at the failure (`LaneRunCaptureTest` round-trips it through
+  `CaptureArchiveReader` and `reanchorImportedCaptureNotes`).
 
 ### 26.6 Locks
 
@@ -3381,6 +3461,8 @@ called while holding one that could take another lock, and none is ever held tog
 | `lock` | `testing/store/TranscriptWriter.kt:18` | One JSON line appended at a time |
 | `testLibraryMirrorLock`, `testRunMirrorLock` | `ui/AppState.kt:1911,2013` | The `AppState` mirrors of the library and run flows: the value is read **inside** the lock so the last assignment is the freshest |
 | `mutex` (coroutine `Mutex`) | `testing/run/StepSequence.kt:135` | A sequence's step state; with the `finishing` flag it makes `finish_step` and the watchdog mutually exclusive |
+| `stateLock` (existing) | `laneCaptureSerials`, `manualCaptureStartSerial` in `ui/AppState.kt` | The per-device claim of lane captures; the one place this feature takes `stateLock`, and only in `AppState` (never inside `testing/`). Claim and release are short and call nothing while holding it |
+| `LaneCaptureHandle.stopTablessOnce` (`@Synchronized`), `LaneNotes` (`AtomicReference`) | `ui/LaneCaptures.kt`, `ui/CaptureMarkerWriter.kt` | Leaf: start the one stop job of a tabless lane; compare-and-set of its notes |
 
 `AppState` mirrors the store's `StateFlow` into `mutableStateOf` and exposes thin delegates; the
 library store writes inline on the caller's thread (§26.10).
@@ -3454,6 +3536,22 @@ log tab of the lane, through the annotation mutators after the issue lock is rel
   tracker-tool argument is replaced, inside the JVM, by that attachment's base64 content (only this
   issue's attachments, ≤ 2 MB each).
 - **Token never leaves the JVM.** See §26.9.3.
+
+**The capture archive.** The first item of a failed step's evidence is the **capture archive**
+(`IssueAttachmentKind.CAPTURE_ARCHIVE`, "Capture archive (log + video + audio + notes) .zip"), **checked
+by default**: the whole recording of the lane, exported by the same exporter as a capture tab's Save ZIP
+(the whole log incl. earlier device logs when they were recorded, the whole video, audio, and the notes
+with every AI marker), so Indagium's "Bug report / archive" opens it with the markers at the failure.
+It is far bigger than other evidence, so it has its own handling (`IssueCaptureArchiveService.kt`): the
+draft only carries a **pending** wish (no file; `isPendingCaptureArchive`); it is exported when the issue
+is created or sent (`AppState.deliverIssue` → `attachIssueCaptureArchive`, with progress messages and a
+disk-space check before the export; a failure stops the delivery with the reason and "untick it to go on
+without it"), exported live while the lane still records or from the run folder afterwards, **moved**
+into the issue folder (never a second copy), subject to its own cap (`MAX_ISSUE_CAPTURE_ARCHIVE_BYTES`
+= 16 GiB, not the 1 GiB of other evidence), and a tracker agent only gets its name, size and location,
+never its bytes (`read_issue_attachment` refuses it, `get_issue_draft` lists `path` and
+`uploadable: false`). The other files stay available but are unchecked by default, except the step
+screenshot and the judge verdict.
 
 **Selectable evidence.** The issue inventory retains available attachments when their `include`
 checkbox is off; that checkbox filters delivery rather than owning the file. An on-demand step clip
@@ -3629,6 +3727,19 @@ reachable by any prompt-injected lane agent, which is why the default permission
    sampled is reported as a warning on the result; one that was never sampled is invisible. Scripts must
    not start background processes. `ADB_SHELL` scripts can raise a false warning when the adb client had
    to start the adb server.
+
+8. **Lane captures cost what captures cost.** A lane with a tab, the in-app mirror and video is as
+   heavy as a manual capture, and four devices run at once: with the default capture settings every
+   lane records video (and mirrors it when the device display is "In-app mirror"). Turn the display off
+   or the tab off for big matrices. A lane without a tab has no in-app mirror at all.
+9. **A lane recording is only as durable as the run folder.** Lane sessions are deliberately not in a
+   capture root: they are not offered for recovery after a crash (a lane cut off by an app exit stays an
+   interrupted session in its run folder, readable through the report and the evidence export) and
+   disappear with the run. `evidence.logcat` no longer has an effect on a run that has recording settings
+   (the log is the capture itself and is always kept).
+10. **The archive of an issue is exported late.** A draft issue (also an automatic one) only carries the
+   wish for it; the ZIP is built when the issue is created or sent, so a run folder that was deleted
+   before then can no longer provide it (the delivery fails with that reason; untick the archive to go on).
 
 ---
 

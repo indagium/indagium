@@ -918,7 +918,16 @@ data class LogTab(
     // tabToken()/tabShellFromToken(): a restored tab reopens sourcePath from disk, i.e. the whole
     // log. Do not add it there. Appended last to preserve positional LogTab construction.
     val tailPausedAtRow: Int? = null,
+    // Session-only: set on a capture tab an AI test run opened for one of its lanes (ui/AppState.startLaneCapture). Such a tab is a
+    // real capture tab (logcat tail, mirror, Mark issue, Save ZIP) but it is NOT "the live capture": the manual one-capture rule,
+    // the launcher and the device AI tools ignore it, and a per-device guard keeps it apart from manual captures. It stays set after
+    // the lane ended and the capture stopped. Deliberately ABSENT from AutosaveCodec like captureSessionId: a restored tab is just
+    // an ordinary (stopped) capture tab. Do not add it there. Appended last to preserve positional LogTab construction.
+    val testLane: TestLaneTabRef? = null,
 )
+
+/** Which lane of which AI test run opened a capture tab. */
+data class TestLaneTabRef(val runId: String, val laneId: String)
 
 /** Whether [cached] (a note's row, possibly restored from a `.ann` token, which carries no
  *  [LogEntry.dayOfYear]) is still this tab's row with the same id. The date is ignored so notes saved

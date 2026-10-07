@@ -183,9 +183,8 @@ internal fun TestingSettingsSection(state: AppState) {
             Column {
                 val evidence = testing.evidence
                 EvidenceToggle("Screenshots", evidence.screenshots) { on -> updateEvidence(state) { it.copy(screenshots = on) } }
-                EvidenceToggle("Logcat", evidence.logcat) { on -> updateEvidence(state) { it.copy(logcat = on) } }
                 EvidenceToggle("Agent transcript", evidence.transcript) { on -> updateEvidence(state) { it.copy(transcript = on) } }
-                EvidenceToggle("Video (needs scrcpy)", evidence.video) { on -> updateEvidence(state) { it.copy(video = on) } }
+                EvidenceToggle("Record the screen by default", evidence.video) { on -> updateEvidence(state) { it.copy(video = on) } }
             }
         }
         CompactSetting("Confirmation timeout (minutes)") { ConfirmationTimeout(state, testing) }

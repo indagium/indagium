@@ -270,6 +270,80 @@ class TestRunEngineAccountAgentTest {
         assertTrue(commands.single().contains("mcp_servers.indagium.required=true"))
     }
 
+    /** Like [accountFactory] but the agent is built from the profile the coordinator hands over, which carries the lane's overrides. */
+    private fun overridingFactory(claude: ClaudeCodeProcessFactory?, codex: ((List<String>, Map<String, String>) -> CodexAppServerClient)?) =
+        LaneAgentFactory { chosen, key -> accountFactory(chosen, claude, codex).create(chosen, key) }
+
+    @Test
+    fun aClaudeCodeLaneOverrideBecomesTheModelAndEffortArgumentsOfTheCli() {
+        val profile = AiProviderProfile("claude-lane", "Claude Code", "", "sonnet", kind = AiProviderKind.CLAUDE_CODE_ACCOUNT, reasoningEffort = "low")
+        val commands = CopyOnWriteArrayList<List<String>>()
+        val factory = ClaudeCodeProcessFactory { command: List<String>, _: Path? ->
+            commands += command
+            ScriptedClaudeProcess { """{"type":"result","subtype":"success","result":"Done","session_id":"s1"}""" }
+        }
+        val suite = suiteOf(caseOf("Via Claude", step("Open the app")))
+        val h = RunHarness(libraryOf(suite), profile = profile, agentFactory = overridingFactory(factory, null)).also { harness = it }
+        val config = h.config(suite, agentLane(profile.id).copy(model = "opus", reasoningEffort = "max"))
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val command = commands.first()
+        assertEquals("opus", command[command.indexOf("--model") + 1], command.toString())
+        assertEquals("max", command[command.indexOf("--effort") + 1], command.toString())
+    }
+
+    @Test
+    fun aClaudeCodeLaneWithoutAnOverrideKeepsTheProfilesOwnModelAndEffort() {
+        val profile = AiProviderProfile("claude-lane", "Claude Code", "", "sonnet", kind = AiProviderKind.CLAUDE_CODE_ACCOUNT, reasoningEffort = "low")
+        val commands = CopyOnWriteArrayList<List<String>>()
+        val factory = ClaudeCodeProcessFactory { command: List<String>, _: Path? ->
+            commands += command
+            ScriptedClaudeProcess { """{"type":"result","subtype":"success","result":"Done","session_id":"s1"}""" }
+        }
+        val suite = suiteOf(caseOf("Via Claude", step("Open the app")))
+        val h = RunHarness(libraryOf(suite), profile = profile, agentFactory = overridingFactory(factory, null)).also { harness = it }
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(h.config(suite, agentLane(profile.id))) })
+        runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val command = commands.first()
+        assertEquals("sonnet", command[command.indexOf("--model") + 1])
+        assertEquals("low", command[command.indexOf("--effort") + 1])
+    }
+
+    @Test
+    fun aCodexLaneOverrideBecomesTheModelAndEffortOfTheTurn() {
+        val profile = AiProviderProfile("codex-lane", "Codex", "", "gpt-base", kind = AiProviderKind.CODEX_ACCOUNT)
+        val turnParams = CopyOnWriteArrayList<kotlinx.serialization.json.JsonObject>()
+        val launcher = { _: List<String>, _: Map<String, String> ->
+            val process = ScriptedCodexProcess { process, line ->
+                val message = Json.parseToJsonElement(line).jsonObject
+                val id = message["id"]
+                when (message["method"]?.jsonPrimitive?.content) {
+                    "initialize" -> process.send("""{"id":$id,"result":{"serverInfo":{"name":"codex","version":"1"}}}""")
+                    "thread/start" -> process.send("""{"id":$id,"result":{"thread":{"id":"thread-1"}}}""")
+                    "turn/start" -> {
+                        turnParams += message.getValue("params").jsonObject
+                        process.send("""{"id":$id,"result":{"turn":{"id":"turn-1","threadId":"thread-1","status":{"type":"inProgress"}}}}""")
+                        process.send(
+                            """{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":{"type":"completed"}}}}""",
+                        )
+                    }
+                }
+            }
+            CodexAppServerClient(process)
+        }
+        val suite = suiteOf(caseOf("Via Codex", step("Open the app")))
+        val h = RunHarness(libraryOf(suite), profile = profile, agentFactory = overridingFactory(null, launcher)).also { harness = it }
+        val config = h.config(suite, agentLane(profile.id).copy(model = "gpt-other", reasoningEffort = "xhigh"))
+        val started = assertIs<StartRunResult.Started>(runBlocking { h.coordinator.start(config) })
+        runBlocking { withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) } }
+
+        val params = turnParams.first()
+        assertEquals("gpt-other", params.getValue("model").jsonPrimitive.content)
+        assertEquals("xhigh", params.getValue("effort").jsonPrimitive.content)
+    }
+
     @Test
     fun theSidebarPromptIsUnchangedByDefault() {
         // The default preamble is the exact wording the sidebar always used.

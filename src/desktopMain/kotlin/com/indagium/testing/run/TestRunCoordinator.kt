@@ -14,6 +14,7 @@ import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestSuite
+import com.indagium.testing.model.driverLabel
 import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.newRunId
 import com.indagium.testing.model.summary
@@ -226,13 +227,14 @@ internal class TestRunCoordinator(
     ) {
         val frozenSuite = suite.truncatedAfter(config.stopAfterStepId)
         val plan = validation.plan.truncatedAfter(config.stopAfterStepId)
+        val frozenConfig = config.withEffectiveModels(profiles)
         val initial = TestRun(
             id = runId,
             suite = frozenSuite,
             scripts = library.scripts,
             sharedSteps = referencedSharedSteps(frozenSuite, library),
-            config = config,
-            lanes = config.lanes.map { LaneResult(it.id, it) },
+            config = frozenConfig,
+            lanes = frozenConfig.lanes.map { LaneResult(it.id, it) },
             createdAt = deps.wallClock(),
             warnings = validation.warnings,
         )
@@ -247,8 +249,15 @@ internal class TestRunCoordinator(
         val entry = RunEntry(state, handles, persister, gate)
         runs[runId] = entry
         publish() // The run is listed the moment start() returns, before its job has run a single instruction.
-        val agents = config.lanes.filter { it.kind == LaneKind.AGENT_PROFILE }
-            .associate { it.id to profiles.profileOrNull(it.profileId)?.let { profile -> profile to deps.apiKey(profile.id) } }
+        val agents = config.lanes.filter { it.kind == LaneKind.AGENT_PROFILE }.associate { lane ->
+            lane.id to profiles.profileOrNull(lane.profileId)?.let { profile ->
+                profile.withRunOverrides(lane.model, lane.reasoningEffort) to deps.apiKey(profile.id)
+            }
+        }
+        val laneLabels = frozenConfig.lanes.associate { lane ->
+            val profile = profiles.profileOrNull(lane.profileId)
+            lane.id to lane.driverLabel(profile?.displayName?.ifBlank { null } ?: profile?.kind?.label)
+        }
         val engineDeps = EngineDeps(
             openDevice = deps.openDevice,
             agentFor = { lane ->
@@ -265,6 +274,7 @@ internal class TestRunCoordinator(
             issues = deps.issues,
             goldenFile = deps.goldenFile,
             externalDispatchAdmitted = entry::markDispatched,
+            laneLabel = { lane -> laneLabels[lane.id] ?: lane.driverLabel().ifBlank { "agent" } },
         )
         // ATOMIC: a run cancelled before its first instruction must still reach the finally that frees its devices.
         entry.job = scope.launch(start = CoroutineStart.ATOMIC) {
@@ -290,7 +300,8 @@ internal class TestRunCoordinator(
         if (!config.judgeActive) return null
         val profile = profiles.profileOrNull(config.judgeProfileId) ?: return null
         val key = deps.apiKey(profile.id)
-        return { deps.agentFactory.create(profile, key) }
+        val judgeProfile = profile.withRunOverrides(config.judgeModel, config.judgeReasoningEffort)
+        return { deps.agentFactory.create(judgeProfile, key) }
     }
 
     private fun release(runId: String, config: RunConfig) {
@@ -361,6 +372,15 @@ internal class TestRunCoordinator(
     fun runDir(runId: String): java.io.File = deps.store.runDir(runId)
 
     fun laneConfig(runId: String, laneId: String): LaneConfig? = run(runId)?.lane(laneId)?.config
+
+    /**
+     * How the lane's capture archive is exported while the lane is still recording (a live Save ZIP), or null when it is not
+     * recording any more (its files are final and are exported from the run folder).
+     */
+    internal fun liveLaneArchiveExporter(runId: String, laneId: String): LiveLaneArchiveExporter? {
+        val capture = runs[runId]?.handles?.get(laneId)?.session?.capture?.takeIf { it.isRecording } ?: return null
+        return LiveLaneArchiveExporter { destination -> capture.exportArchive(destination) }
+    }
 
     // ── Controlling ──────────────────────────────────────────────────
 
@@ -481,6 +501,24 @@ internal class TestRunCoordinator(
             "No case is active on this lane right now (it may be starting, running setup or teardown, or between cases). " +
                 "Call get_test_run_status and retry."
     }
+}
+
+/**
+ * [this] with the model and reasoning effort every agent lane and the judge will actually use written into it, so the stored run
+ * says what ran even after the profile is edited. A lane without a usable profile (an external lane) is left as it is.
+ */
+internal fun RunConfig.withEffectiveModels(profiles: List<AiProviderProfile>): RunConfig {
+    val lanes = lanes.map { lane ->
+        val profile = profiles.profileOrNull(lane.profileId)?.takeIf { lane.kind == LaneKind.AGENT_PROFILE } ?: return@map lane
+        val used = profile.withRunOverrides(lane.model, lane.reasoningEffort)
+        lane.copy(model = used.model.takeIf { it.isNotBlank() }, reasoningEffort = used.reasoningEffort)
+    }
+    val judge = profiles.profileOrNull(judgeProfileId)?.takeIf { judgeActive }?.withRunOverrides(judgeModel, judgeReasoningEffort)
+    return copy(
+        lanes = lanes,
+        judgeModel = judge?.model?.takeIf { it.isNotBlank() } ?: judgeModel,
+        judgeReasoningEffort = judge?.reasoningEffort ?: judgeReasoningEffort,
+    )
 }
 
 /** Prefer a live snapshot when a disk read races the same run's latest persistence write. */

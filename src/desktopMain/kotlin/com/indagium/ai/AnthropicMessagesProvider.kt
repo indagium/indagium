@@ -473,7 +473,7 @@ class AnthropicMessagesProvider(
 
         // Reasoning levels offered for thinking-capable models, mapped to token budgets in
         // thinkingBudgetFor. Anthropic exposes no per-model effort list, so this is a fixed set.
-        val THINKING_EFFORTS = listOf("low", "medium", "high")
+        val THINKING_EFFORTS = STANDARD_REASONING_EFFORTS
 
         // Extended thinking is available on Claude 3.7 (matched by the explicit contains() check
         // in supportsExtendedThinking below, since its version number sits before the family name:

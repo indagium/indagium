@@ -13,12 +13,15 @@ import com.indagium.testing.model.MIN_CASE_TOOL_CALL_LIMIT
 // and rerun_test_step act on a finished report.
 
 private val LANE_ITEM_SCHEMA = ObjectArrayItemSchema(
-    props = listOf("profileId" to "string", "deviceSerial" to "string"),
+    props = listOf("profileId" to "string", "deviceSerial" to "string", "model" to "string", "reasoningEffort" to "string"),
     required = listOf("profileId", "deviceSerial"),
     descriptions = mapOf(
         "profileId" to "The id of an AI profile configured in Settings (Claude Code, Codex or an API profile) that drives the lane, " +
             "or \"$EXTERNAL_LANE_PROFILE_ID\" for a lane nobody drives: you drive it yourself with test_lane_tool_call.",
         "deviceSerial" to "Serial of the Android device from list_android_devices. It must not be the device of the live capture tab.",
+        "model" to "Optional: the model this lane uses instead of the profile's own (a model id, or a Claude Code alias such as sonnet).",
+        "reasoningEffort" to "Optional: the reasoning effort this lane uses instead of the profile's own (low, medium, high; Claude Code also " +
+            "xhigh, max; Codex per model). An empty string asks for the model's default effort. Not for an external lane.",
     ),
 )
 
@@ -41,11 +44,12 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         schema(
             "suiteId" to "string", "caseIds" to "array", "lanes" to "array", "repeat" to "integer",
             "caseToolCallLimit" to "integer", "evidence" to "object", "judgeProfileId" to "string", "judgeMode" to "string",
+            "judgeModel" to "string", "judgeReasoningEffort" to "string", "capture" to "object", "openLaneTabs" to "boolean",
             required = listOf("suiteId", "lanes"),
             descriptions = mapOf(
                 "suiteId" to "Id of the suite (list_test_suites).",
                 "caseIds" to "Only these cases (default: every case of the suite).",
-                "lanes" to "One entry per lane: { profileId, deviceSerial }.",
+                "lanes" to "One entry per lane: { profileId, deviceSerial, model?, reasoningEffort? }.",
                 "repeat" to "How often every case is repeated: ${ALLOWED_RUN_REPEATS.joinToString(", ")} (default 1).",
                 "caseToolCallLimit" to "Device-tool calls an agent may spend per case, $MIN_CASE_TOOL_CALL_LIMIT..$MAX_CASE_TOOL_CALL_LIMIT " +
                     "(default $DEFAULT_CASE_TOOL_CALL_LIMIT). The step protocol tools are free.",
@@ -53,6 +57,14 @@ internal val TEST_RUN_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
                 "judgeProfileId" to "The id of the AI profile that judges steps (any kind, like a lane's); needed when judgeMode is not off.",
                 "judgeMode" to "When the judge runs: ${JudgeMode.entries.joinToString(", ") { it.wire }} (default off). failures_only asks it " +
                     "for steps that failed a check or that the agent reported failed or blocked, and for steps with a judge check.",
+                "judgeModel" to "Optional: the model the judge uses instead of its profile's own.",
+                "judgeReasoningEffort" to "Optional: the judge's reasoning effort instead of its profile's own (an empty string asks for the model's default).",
+                "capture" to "What every lane records, like the \"Before start\" options of a manual live capture; each option defaults to the " +
+                    "user's saved capture settings and nothing is saved back: { recordVideo, audio, includeEarlierDeviceLogs, keepDeviceAudio, " +
+                    "microphone (off|default|<microphone id>), deviceDisplay (${CAPTURE_DISPLAY_WORDS.joinToString("|")}), " +
+                    "bufferMode (default|all|custom), buffers (names, for custom), videoQuality (${CAPTURE_QUALITY_WORDS.joinToString("|")}) }.",
+                "openLaneTabs" to "true (default): each lane opens a live capture tab (without taking focus) that stays as a stopped capture " +
+                    "tab afterwards. false: lanes record the same way without a tab.",
             ),
             objectArrays = mapOf("lanes" to LANE_ITEM_SCHEMA),
         ),

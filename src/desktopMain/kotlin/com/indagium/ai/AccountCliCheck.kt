@@ -327,6 +327,3 @@ private fun defaultProfileFor(kind: AiProviderKind): AiProviderProfile = AiProvi
 )
 
 private val json = Json { ignoreUnknownKeys = true }
-
-/** Claude Code CLI `--effort` accepts exactly these documented levels. */
-private val CLAUDE_CODE_REASONING_EFFORTS = listOf("low", "medium", "high", "xhigh", "max")

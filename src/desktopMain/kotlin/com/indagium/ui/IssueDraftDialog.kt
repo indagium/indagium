@@ -129,6 +129,7 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     var clipProgress by remember(ready) { mutableStateOf<String?>(null) }
     var defaultClipWindow by remember(ready) { mutableStateOf<com.indagium.testing.run.IssueStepClipRequest?>(null) }
     var clipAvailability by remember(ready) { mutableStateOf<String?>(null) }
+    var archiveProgress by remember(ready) { mutableStateOf<String?>(null) }
     LaunchedEffect(ready.source) {
         if (ready.source.stepNumber > 0) {
             ui.state.defaultIssueStepClipWindow(ready.source).fold(
@@ -146,7 +147,12 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
     }
 
     suspend fun deliver(issueId: String, openLaneLog: Boolean) {
-        when (val result = ui.state.deliverIssue(issueId, form.destination, copyMarkdown = true, openLaneLog = openLaneLog, resendToTracker = true)) {
+        val delivery = ui.state.deliverIssue(
+            issueId, form.destination, copyMarkdown = true, openLaneLog = openLaneLog, resendToTracker = true,
+            progress = { text -> archiveProgress = text },
+        )
+        archiveProgress = null
+        when (val result = delivery) {
             is IssueActionResult.Done -> {
                 ui.info(result.message)
                 close()
@@ -298,6 +304,7 @@ private fun ColumnScope.IssueForm(ready: DialogLoad.Ready, close: () -> Unit) {
         if (form.linkToCase) TestsHint("A later run of this case marks the issue “still failing” or “passing now”.")
     }
     problem?.let { TestsErrorText(it, Modifier.padding(top = 8.dp)) }
+    archiveProgress?.let { TestsHint(it, Modifier.padding(top = 6.dp)) }
     if (busy && bugreportJob == null && form.destination == IssueDestination.TRACKER) {
         TestsHint("An AI agent is filing the issue in ${ui.state.settings.tracker.displayName}. This can take a minute.", Modifier.padding(top = 6.dp))
     }

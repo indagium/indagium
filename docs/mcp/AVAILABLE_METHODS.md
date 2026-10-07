@@ -331,9 +331,17 @@ or an API profile configured in Settings) or by *you*: an `"external"` lane has 
 `test_lane_tool_call`, which is how a developer's Claude can run, check and debug a suite over MCP. Lanes on
 different devices run **in parallel** (at most 4 devices at once; the rest wait); lanes that share a device
 run one after another, and one lane failing or being cancelled never stops another (cancelling the run stops
-all of them). Every lane opens its own headless device session (it refuses the serial the live capture tab
-uses), runs the suite's setup hooks, then each case (setup, steps, teardown), then the suite's teardown, and
-records the evidence under `<save folder>/test-runs/<runId>/`.
+all of them). Every lane records its device through a **real capture**, the same controller, recorder and
+archive code a manual live capture uses (log, and with the run's `capture` options the screen, device audio, the
+microphone, the device display, buffers and quality). By default it also opens a **live capture tab** per lane in
+the app (`openLaneTabs`, without taking focus), which stays as a stopped capture tab after the lane. A lane refuses
+a serial a manual capture or another lane holds, and a manual capture refuses a serial a lane holds. A lane runs the
+suite's setup hooks, then each case (setup, steps, teardown), then the suite's teardown, and records the evidence
+under `<save folder>/test-runs/<runId>/` (the lane's capture session is `lanes/<laneId>/capture/<sessionId>/`).
+When a non-setup step ends `FAIL`, `TIMEOUT`, `BLOCKED` or `ERROR`, the lane writes an **AI marker** into its
+capture, the same kind of note the Mark issue button writes (`AI · <case> · step N failed`, the action, expected
+result, failed checks and the judge's verdict with everything model- or device-written quoted as untrusted, the
+step's screenshot, the log window around it).
 
 An optional **judge** (`judgeProfileId` + `judgeMode`) is a separate, *blind* AI run (any profile kind, started
 like a lane's agent) with its own judge-only tools: `get_step_brief` (action, expected result, the judge checks,
@@ -355,7 +363,22 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
 
 - `run_test_suite` (`suiteId`, `lanes`; optional `caseIds`, `repeat` 1/3/5, `caseToolCallLimit`
   1..500, `evidence` `{ video, screenshots, logcat, transcript }`, `judgeProfileId` and `judgeMode`
-  `off`|`failures_only`|`every_step`) — each lane is `{ "profileId": <AI profile id or "external">, "deviceSerial": ... }`.
+  `off`|`failures_only`|`every_step`, `judgeModel`, `judgeReasoningEffort`, `capture`, `openLaneTabs`) — each lane is
+  `{ "profileId": <AI profile id or "external">, "deviceSerial": ..., "model"?, "reasoningEffort"? }`. `model` and
+  `reasoningEffort` override the profile's own model and effort for that lane only (an empty `reasoningEffort` asks
+  for the model's default; `low`/`medium`/`high` for OpenAI-compatible, OpenAI and Anthropic profiles, also
+  `xhigh`/`max` for Claude Code, free-form for Codex whose levels depend on the model; refused for an `"external"`
+  lane); `judgeModel` and `judgeReasoningEffort` do the same for the judge. The run records what actually ran
+  (`lanes[].model`/`reasoningEffort` in the answer, status and report). `capture` is what every lane records, like the
+  "Before start" options of a manual live capture; every option defaults to the user's saved capture settings, nothing
+  is saved back and an unknown key is refused: `recordVideo`, `audio`, `includeEarlierDeviceLogs`, `keepDeviceAudio`
+  (booleans), `microphone` (`off`, `default` or a microphone id), `deviceDisplay` (`in_app_mirror`, `scrcpy_window`,
+  `off`), `bufferMode` (`default`|`all`|`custom`) with `buffers` (`main`, `system`, `crash`, `kernel`, `events`,
+  `radio`) and `videoQuality` (`compact`|`balanced`|`detailed`|`smooth`). `openLaneTabs` (default `true`) opens a live
+  capture tab per lane; `false` records the same way without a tab (and without an in-app mirror). With a `capture`
+  the lane's log is the capture itself and is always kept (`evidence.logcat` has no effect; `evidence.video`, when
+  given, decides `capture.recordVideo` unless `capture` sets it). The approval dialog of an external client lists each lane's model and effort, the judge and
+  what is recorded.
   Returns `{ runId, laneIds, lanes, warnings }` at once; the run continues in the background. Refusals come
   back as data, `{ "error", "errors": [...] }` (plus `limit`, the same shape as above, when the edition
   refused): unknown suite or case, a locked suite, a device that is not connected, busy or held by the live
@@ -430,7 +453,14 @@ anything: the title (case, step, failure), the reproduction steps (suite and cas
 and including the failing one), expected (the step's expected result and the checks that failed), actual (check
 results, the judge's reasoning, the agent's observation quoted as untrusted), the judge's notes, labels (the suite's
 tags and `found-by-agent`), the environment (app package, device, agent, run) and the evidence (screenshot, golden
-screenshot, log range, judge verdict, transcript slice, and the lane's whole video when one was recorded).
+screenshot, log range, judge verdict, transcript slice, and the lane's whole video when one was recorded) and, first
+of them, the **capture archive**: the whole recording of the lane as the capture ZIP a capture tab's Save ZIP writes
+(all of the log, the whole video, audio, and the notes with every AI marker; Indagium's "Bug report / archive" opens
+it with the markers at the failure). It is checked by default but only pending in the draft: it is exported (with
+progress and a disk-space check) when the issue is created or sent, moved into the issue folder, not subject to the
+other evidence's size cap, and never sent through a tracker agent as base64 (the agent is told its name, size and
+location). The screenshot and the judge verdict are checked by default; the other single files are available but
+unchecked.
 Severity: judge `app_defect` and a crash in the step's log (`FATAL EXCEPTION`, `Fatal signal`, `ANR`) is
 `CRITICAL`; `app_defect` is `HIGH`; `agent_or_step_problem` is `LOW`; anything else `MEDIUM`.
 

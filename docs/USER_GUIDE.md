@@ -1345,7 +1345,10 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   profile from *Settings → AI providers*, or *External (MCP)* if a developer's AI client will drive it) and
   which connected device it uses. Add several lanes: lanes on **different devices run at the same time** (up to
   four devices at once; the others wait), lanes that share a device run one after another. A device held by the
-  live capture tab is not offered.
+  live capture tab is not offered. Next to the profile, each agent lane has a **model** picker (the profile's own
+  model until you pick another; *Find models* lists what the provider offers, and you can always type a model id)
+  and, for models that have reasoning levels, a **reasoning effort** picker. Leave them alone to use the profile's
+  values. The report and the live view name each lane as *profile · model · effort*.
 - **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. Any reachable
   **Screen judge** or **Ask the judge** check requires a usable judge and a mode other than *No judge*; validation
   happens before the run starts. If such a judge errors or is inconclusive, the check is unresolved and the step is
@@ -1353,10 +1356,18 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   Steps without explicit judge checks keep optional-judge behavior. The judge sees the
   step's expected result, the screenshot taken when the step ended, the log lines written during it and the
   automatic check results — **never what the agent claimed**. It can turn a pass into a fail but never a fail
-  into a pass. Where lanes ended a step differently, it also compares their evidence and explains why.
+  into a pass. Where lanes ended a step differently, it also compares their evidence and explains why. The judge
+  has its own model and reasoning-effort pickers.
+- **Recording** — what every lane records, with the same controls as *Before start* on a new live capture
+  (*Record video to file*, *Capture audio*, *Include earlier device logs*, *Keep sound on the device*, microphone,
+  device display, buffers, video quality). They start from your saved capture settings and change **this run only**.
+  **Open a live tab per lane** (on by default) gives each lane a real capture tab, titled *Test lane — agent ·
+  device*, without taking focus from the Tests workspace; click it (or **Open capture tab** in the live view) to
+  watch the mirror, read the log, add notes or use **Save ZIP**. When the lane ends the capture stops and the tab
+  stays as an ordinary stopped capture. With the box off, lanes record the same way without a tab.
 - **Settings** — repeat each case 1×, 3× or 5×, a **tool-call budget per case** (default 60), and the **evidence
-  to keep**: screenshots, logcat, the agent transcript and optionally screen video (recorded the same way as a
-  live capture's video).
+  to keep**: screenshots and the agent transcript (the log and the screen recording are part of the lane's
+  recording above).
 
 Press **Start**. The **Runs** screen opens on the new run with a **Live** view: each lane's latest screenshot,
 bounded recent logcat, current step and progress, persisted tool activity, the judge feed, **Pause all** (lanes stop
@@ -1389,8 +1400,17 @@ Useful actions on a step:
 - **Create issue…** / **Open issue…** — see below.
 - **Open transcript** — the agent's tool calls and replies, with any secret removed.
 
-Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's `logcat.log`, `screens/`,
-`transcript.jsonl`, `judge.jsonl` and lane tool activity. Live views keep a bounded recent window; saved
+Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's capture session
+(`lanes/<lane>/capture/…`, with its `logcat.log` and video), `screens/`, `transcript.jsonl`, `judge.jsonl` and lane tool
+activity. A lane's capture lives with its run, so deleting the run deletes the recordings.
+
+**Lane capture tabs and your own captures.** A lane tab is not "your" live capture: it never stops you from starting
+a capture of your own, and the toolbar's Capture button and the device AI tools ignore it. What cannot happen is two
+recordings of the same phone: a lane refuses a device you are capturing, and Start capture refuses a device a lane
+is recording (with a message saying so). Stopping or closing a lane's tab during a run ends only that lane, with an
+error that says why; the other lanes carry on. When a step **fails, times out, is blocked or errors**, the lane puts
+an **AI marker** into its capture, exactly like pressing *Mark issue* yourself: a note with the action, the expected
+result, the failed checks and the judge's verdict, the step's screenshot and the log around it. Live views keep a bounded recent window; saved
 activity and evidence remain available to reports and export.
 
 ### Issues
@@ -1398,8 +1418,13 @@ activity and evidence remain available to reports and export.
 A step set to *Create issue, continue* gets a **draft issue** as soon as it fails; any failing step can also
 **Create issue…**. A draft is built only from what the run recorded — a title, the steps to reproduce (setup
 plus the case's steps up to the failing one), expected and actual, the judge's notes, a severity and labels,
-the environment, and selectable evidence (screenshot, golden screenshot, log range, judge verdict, transcript,
-lane activity and saved recording when available). Review and edit it, tick the
+the environment, and selectable evidence. The first item is the **capture archive**, ticked by default: the whole
+recording of the lane (all of the log, the whole video, audio and the notes with every AI marker) as the same ZIP
+*Save ZIP* writes, exported when you create or send the issue (with progress; it needs free disk space, and you can
+untick it). Open it later with *Bug report / archive* on the home screen to see the log, the video and the markers at
+the failure. The single files (screenshot, golden screenshot, log range, judge verdict, transcript) stay available;
+only the screenshot and the judge verdict are ticked by default. A tracker agent is told where the archive is, but
+never sent its contents. Review and edit it, tick the
 evidence you want, then **Send to**:
 
 | Destination | What happens |

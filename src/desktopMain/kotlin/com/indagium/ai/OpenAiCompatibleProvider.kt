@@ -346,7 +346,7 @@ class OpenAiCompatibleProvider(
         // Reasoning levels offered for reasoning-capable models; LM Studio and other
         // llama.cpp-based servers accept this fixed low/medium/high set for gpt-oss's harmony
         // format. There is no per-model discovery for this, unlike Anthropic's model list.
-        val REASONING_EFFORTS = listOf("low", "medium", "high")
+        val REASONING_EFFORTS = STANDARD_REASONING_EFFORTS
         val REASONING_MODEL_REGEX = Regex(
             "gpt-oss|deepseek.*r1|qwq|qwen3|phi-4-reasoning|magistral|reasoning|thinking",
             RegexOption.IGNORE_CASE,

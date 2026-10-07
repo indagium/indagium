@@ -1,10 +1,12 @@
 package com.indagium.testing.store
 
 import com.indagium.testing.model.IssueAttachment
+import com.indagium.testing.model.IssueAttachmentKind
 import com.indagium.testing.model.IssueDraft
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.IssueSource
 import com.indagium.testing.model.IssueStatus
+import com.indagium.testing.model.isPendingCaptureArchive
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newIssueId
 import com.indagium.utils.writeFileAtomically
@@ -16,6 +18,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CancellationException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
@@ -34,6 +37,9 @@ const val ISSUE_FILE_NAME = "issue.json"
 const val ISSUE_ATTACHMENTS_DIR_NAME = "attachments"
 const val MAX_ISSUE_FILE_BYTES = 4L * 1024L * 1024L
 const val MAX_ISSUE_ATTACHMENT_BYTES = 1024L * 1024L * 1024L
+
+/** A lane's whole capture archive (video and audio included) is far bigger than any other evidence; it has its own, higher cap. */
+const val MAX_ISSUE_CAPTURE_ARCHIVE_BYTES = 16L * 1024L * 1024L * 1024L
 private const val MAX_LISTED_ISSUES = 500
 private const val MAX_ATTACHMENT_NAME_CHARS = 100
 private const val ATTACHMENT_COPY_BUFFER_BYTES = 64 * 1024
@@ -149,6 +155,8 @@ class IssueStore(
     fun appendAttachmentStrict(
         issueId: String,
         attachment: IssueAttachment,
+        /** True: a pending attachment of the same kind (see [isPendingCaptureArchive]) is replaced by [attachment] instead of kept. */
+        replacePending: Boolean = false,
         cancellationCheck: () -> Unit = {},
     ): StoreResult<IssueRecord> {
         if (!isSafeId(issueId)) return StoreResult.NotFound("issue", issueId)
@@ -158,7 +166,8 @@ class IssueStore(
             var materialised: Materialised? = null
             try {
                 cancellationCheck()
-                val stored = materialise(issueId, old.draft.attachments + attachment, cancellationCheck)
+                val existing = old.draft.attachments.filterNot { replacePending && it.isPendingCaptureArchive && it.kind == attachment.kind }
+                val stored = materialise(issueId, existing + attachment, cancellationCheck)
                 materialised = stored
                 val added = stored.attachments.lastOrNull()
                 if (stored.warnings.isNotEmpty() || added?.storedPath == null) {
@@ -237,7 +246,8 @@ class IssueStore(
         try {
             for (attachment in attachments) {
                 cancellationCheck()
-                if (attachment.storedPath != null) {
+                // A pending capture archive has nothing to copy yet; it stays a wish on the draft until it is exported.
+                if (attachment.storedPath != null || attachment.isPendingCaptureArchive) {
                     kept += attachment
                     continue
                 }
@@ -273,33 +283,61 @@ class IssueStore(
         val target = File(dir, name)
         val text = attachment.text
         val source = attachment.sourcePath?.let(::File)
+        val limit = if (attachment.kind == IssueAttachmentKind.CAPTURE_ARCHIVE) MAX_ISSUE_CAPTURE_ARCHIVE_BYTES else MAX_ISSUE_ATTACHMENT_BYTES
         return when {
-            text != null -> {
-                val bytes = text.toByteArray(Charsets.UTF_8)
-                if (bytes.size > MAX_ISSUE_ATTACHMENT_BYTES) return null
+            text != null -> writeText(target, text, cancellationCheck)
+            source == null || !source.isFile || source.length() > limit -> null
+            // A multi-gigabyte archive staged inside this very issue folder is moved into place, not copied: no second copy of it.
+            attachment.kind == IssueAttachmentKind.CAPTURE_ARCHIVE && isInside(source, dir.parentFile) -> {
                 cancellationCheck()
-                Files.write(target.toPath(), bytes)
-                bytes.size.toLong()
+                moveInto(source, target)
             }
-            source != null && source.isFile && source.length() <= MAX_ISSUE_ATTACHMENT_BYTES -> {
-                var copied = 0L
-                FileInputStream(source).use { input ->
-                    FileOutputStream(target).use { output ->
-                        val buffer = ByteArray(ATTACHMENT_COPY_BUFFER_BYTES)
-                        while (true) {
-                            cancellationCheck()
-                            val read = input.read(buffer)
-                            if (read < 0) break
-                            copied += read
-                            if (copied > MAX_ISSUE_ATTACHMENT_BYTES) return null
-                            output.write(buffer, 0, read)
-                        }
-                    }
-                }
-                copied
-            }
-            else -> null
+            else -> copyBounded(source, target, limit, cancellationCheck)
         }
+    }
+
+    private fun writeText(target: File, text: String, cancellationCheck: () -> Unit): Long? {
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (bytes.size > MAX_ISSUE_ATTACHMENT_BYTES) return null
+        cancellationCheck()
+        Files.write(target.toPath(), bytes)
+        return bytes.size.toLong()
+    }
+
+    private fun moveInto(source: File, target: File): Long {
+        val size = source.length()
+        try {
+            Files.move(source.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE)
+        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+            Files.move(source.toPath(), target.toPath())
+        }
+        return size
+    }
+
+    /** Copies [source] to [target]; null (the caller removes the partial file) when it grows past [limit]. */
+    private fun copyBounded(source: File, target: File, limit: Long, cancellationCheck: () -> Unit): Long? {
+        var copied = 0L
+        FileInputStream(source).use { input ->
+            FileOutputStream(target).use { output ->
+                val buffer = ByteArray(ATTACHMENT_COPY_BUFFER_BYTES)
+                while (true) {
+                    cancellationCheck()
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    copied += read
+                    if (copied > limit) return null
+                    output.write(buffer, 0, read)
+                }
+            }
+        }
+        return copied
+    }
+
+    private fun isInside(file: File, folder: File?): Boolean {
+        if (folder == null) return false
+        val root = runCatching { folder.canonicalFile }.getOrNull() ?: return false
+        val candidate = runCatching { file.canonicalFile }.getOrNull() ?: return false
+        return candidate.path.startsWith(root.path + File.separator)
     }
 
     /** Deletes files in the attachment folder that no attachment of the record names any more. */

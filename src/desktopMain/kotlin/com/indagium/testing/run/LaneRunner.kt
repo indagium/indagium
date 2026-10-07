@@ -1,5 +1,10 @@
 package com.indagium.testing.run
 
+import com.indagium.capture.CaptureMirrorMode
+import com.indagium.capture.CaptureSettings
+import com.indagium.capture.withMirrorMode
+import com.indagium.testing.device.LaneMarkerOutcome
+import com.indagium.testing.device.LaneMarkerRequest
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
@@ -20,9 +25,19 @@ import com.indagium.testing.store.LaneToolActivityWriter
 import com.indagium.testing.store.TEST_RUN_TRANSCRIPT_FILE_NAME
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.concurrent.CopyOnWriteArrayList
 
 // One lane of a run, start to finish: open the device, run the suite's setup hooks, then every case (per iteration):
 // case setup -> the case's steps -> case teardown (always) -> ..., and the suite's teardown (always), then release the
@@ -32,6 +47,27 @@ import java.io.File
 
 private const val SETUP_FAILED_NOTE = "Setup failed, so the case did not run."
 private const val STOPPED_NOTE = "Skipped because an earlier step stopped the case."
+private const val CAPTURE_LOST_ERROR =
+    "The lane's capture ended before the lane did (its tab was closed or stopped, or the device was disconnected), so the lane stopped."
+
+/** How long a lane waits for the markers it just wrote (their note and screenshot; not the trailing log window) before it stops recording. */
+private const val MARKER_WRITE_WAIT_MS = 15_000L
+
+/** How long the trailing log windows of those markers may delay stopping the recording; the capture clips a window it cannot wait for. */
+private const val MARKER_WINDOW_WAIT_MS = 15_000L
+
+/** The most a lane waits for its recording to stop and finalize; a longer one is left to finish by itself. */
+internal const val LANE_STOP_WAIT_MS = 90_000L
+
+/** A step screenshot is attached to a marker only up to this size. */
+private const val MAX_MARKER_SCREENSHOT_BYTES = 16 * 1024 * 1024
+
+/** The recording a run without capture settings does: logcat, and the screen when video evidence is on, without any display. */
+internal fun headlessCaptureSettings(video: Boolean): CaptureSettings =
+    CaptureSettings(recordVideo = video, includeBufferedLogs = false).withMirrorMode(CaptureMirrorMode.DISABLED)
+
+/** The lane's recording ended on its own. Not a [CancellationException], so it fails the lane's scope instead of just ending a child. */
+private class LaneCaptureLostException : IllegalStateException(CAPTURE_LOST_ERROR)
 
 internal class LaneRunner(
     private val runId: String,
@@ -55,6 +91,11 @@ internal class LaneRunner(
     @Volatile private var transcriptWriter: TranscriptWriter? = null
 
     @Volatile private var cancelled = false
+
+    @Volatile private var captureLost = false
+
+    private val markerScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val markerJobs = CopyOnWriteArrayList<Job>()
 
     private fun now() = deps.wallClock()
 
@@ -80,7 +121,11 @@ internal class LaneRunner(
         }
         handle.session = session
         try {
-            execute(session, agent, laneDir)
+            watchingCapture(session) { execute(session, agent, laneDir) }
+        } catch (lost: LaneCaptureLostException) {
+            captureLost = true
+            cancelled = false
+            updateLane { it.copy(error = lost.message) }
         } catch (stop: CancellationException) {
             cancelled = true
             throw stop
@@ -89,9 +134,36 @@ internal class LaneRunner(
         }
     }
 
+    /** Runs [body] and fails the whole lane (not the run) when the lane's recording ends on its own while it works. */
+    private suspend fun <T> watchingCapture(session: TestDeviceSession, body: suspend () -> T): T = coroutineScope {
+        val watcher = launch {
+            session.capture.lost.await()
+            throw LaneCaptureLostException()
+        }
+        try {
+            body()
+        } finally {
+            watcher.cancel()
+        }
+    }
+
+    private fun openRequest(laneDir: File): LaneOpenRequest {
+        val configured = snapshot.config.capture
+        return LaneOpenRequest(
+            runId = runId,
+            laneId = lane.id,
+            serial = lane.deviceSerial,
+            laneDir = laneDir,
+            agentLabel = if (lane.kind == LaneKind.EXTERNAL) "external" else deps.laneLabel(lane),
+            capture = configured ?: headlessCaptureSettings(evidence.video),
+            // A run without capture settings (an older run file, a test) never had lane tabs; one with them opens a tab unless told not to.
+            openTab = configured != null && snapshot.config.openLaneTabs,
+        )
+    }
+
     @Suppress("TooGenericExceptionCaught") // Opening a device can fail in many ways (adb, recorder, guard); all are reported as a lane error.
     private suspend fun openSession(laneDir: File): TestDeviceSession? = try {
-        deps.openDevice.open(lane.deviceSerial, laneDir, evidence.video)
+        deps.openDevice.open(openRequest(laneDir))
     } catch (stop: CancellationException) {
         cancelled = true
         updateLane { it.copy(status = RunStatus.CANCELLED, finishedAt = now()) }
@@ -104,10 +176,23 @@ internal class LaneRunner(
     private fun failLane(message: String) =
         updateLane { it.copy(status = RunStatus.ERROR, error = message, finishedAt = now(), currentCase = null, currentStepNumber = null) }
 
+    @Suppress("TooGenericExceptionCaught") // Stopping a recording must never keep a lane from ending: whatever it throws is a diagnostic.
     private suspend fun release(session: TestDeviceSession, agent: LaneAgent?) {
-        session.close()
+        // Markers first: their notes are written and their trailing log windows are given a moment, then the recording stops (a tab
+        // stays open as a stopped capture) and the lane is over. The stop is bounded: a recording that will not finish is left to it.
+        withTimeoutOrNull(MARKER_WRITE_WAIT_MS) { markerJobs.joinAll() }
+        markerScope.cancel()
+        runCatching { session.capture.awaitMarkers(MARKER_WINDOW_WAIT_MS) }
+        val stopped = try {
+            withTimeoutOrNull(LANE_STOP_WAIT_MS) { session.close() }
+        } catch (failure: Exception) {
+            transcriptWriter?.append("lane_capture_stop_failed", mapOf("message" to (failure.message ?: failure::class.simpleName)))
+            Unit
+        }
+        if (stopped == null) transcriptWriter?.append("lane_capture_stop_timeout", mapOf("waitedMs" to LANE_STOP_WAIT_MS))
         handle.session = null
-        if (!evidence.logcat) runCatching { session.logFile.delete() }
+        // Without capture settings the lane recorded headlessly for evidence only; with them the log is the capture itself and stays.
+        if (!evidence.logcat && snapshot.config.capture == null) runCatching { session.logFile.delete() }
         agent?.close()
         updateLane { lane ->
             val ended = when {
@@ -297,6 +382,33 @@ internal class LaneRunner(
     override fun stepRecorded(result: StepResult) {
         val owner = recorder ?: return
         owner.add(if (result.issueRequested && !result.setup) withIssueDraft(owner, result) else result)
+        if (!result.setup && result.status in MARKED_STEP_STATUSES) markStepInCapture(owner.caseName, result)
+    }
+
+    /**
+     * Writes a marker for a step that ended badly into the lane's capture, the way the Mark issue button would at this moment: a
+     * note (action, expected, failed checks, judge verdict), the step's screenshot and, once the window has elapsed, the log around it.
+     * It runs beside the lane and never decides a step's outcome.
+     */
+    @Suppress("TooGenericExceptionCaught") // A marker is evidence only: whatever writing it throws is logged in the transcript, nothing more.
+    private fun markStepInCapture(caseName: String, step: StepResult) {
+        val session = handle.session ?: return
+        val runDir = deps.store.runDir(runId)
+        markerJobs += markerScope.launch {
+            try {
+                val screenshot = step.screenshotPath?.let { readBoundedRunArtifact(runDir, it, MAX_MARKER_SCREENSHOT_BYTES) }
+                val request = LaneMarkerRequest(laneMarkerLabel(caseName, step), laneMarkerNote(caseName, step), screenshot)
+                val fields = when (val outcome = session.capture.addMarker(request)) {
+                    is LaneMarkerOutcome.Added -> mapOf("step" to step.stepNumber, "marker" to outcome.markerId, "screenshot" to outcome.screenshotAttached)
+                    is LaneMarkerOutcome.Skipped -> mapOf("step" to step.stepNumber, "skipped" to outcome.reason)
+                }
+                transcriptWriter?.append("lane_marker", fields)
+            } catch (stop: CancellationException) {
+                throw stop
+            } catch (failure: Exception) {
+                transcriptWriter?.append("lane_marker_failed", mapOf("step" to step.stepNumber, "message" to (failure.message ?: failure::class.simpleName)))
+            }
+        }
     }
 
     override fun toolCallStarted(call: com.indagium.testing.model.LaneToolCall) {
@@ -356,6 +468,7 @@ internal class LaneRunner(
     private inner class CaseRecorder(initial: CaseResult) {
         private var result = initial
         val caseId: String = initial.caseId
+        val caseName: String = initial.caseName
         val iteration: Int = initial.iteration
 
         init {

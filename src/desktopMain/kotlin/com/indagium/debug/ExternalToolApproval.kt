@@ -208,9 +208,12 @@ private suspend fun describeRerunFailedCall(appState: AppState, arguments: Map<S
                 "It drives the configured devices and may run scripts.",
         fields = listOfNotNull(
             "Cases" to suite.cases.filter { it.id in selected }.joinToString(", ") { it.name },
-            "Lanes" to config.lanes.joinToString("\n") { laneLine(appState, it.profileId ?: EXTERNAL_LANE_PROFILE_ID, it.deviceSerial) },
+            "Lanes" to config.lanes.joinToString("\n") {
+                laneLine(appState, it.profileId ?: EXTERNAL_LANE_PROFILE_ID, it.deviceSerial, it.model, it.reasoningEffort)
+            },
             "Repeat" to config.repeat.toString(),
-            judgeLine(appState, config.judgeProfileId, config.judgeMode)?.let { "Judge" to it },
+            judgeLine(appState, config.judgeProfileId, config.judgeMode, config.judgeModel, config.judgeReasoningEffort)?.let { "Judge" to it },
+            config.capture?.let { "Recording" to it.recordingSummary(config.openLaneTabs) },
             "Scripts that may run" to scriptLines(appState.testLibrary, suite),
         ),
         allowLabel = "Start run",

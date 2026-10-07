@@ -17,7 +17,12 @@ enum class IssueStatus { DRAFT, SAVED, SENT }
 /** TRACKER: an AI agent files the issue in the issue tracker configured in Settings, through the tracker's MCP tools (testing/tracker). */
 enum class IssueDestination { LOCAL, NOTES, MARKDOWN, TRACKER }
 
-enum class IssueAttachmentKind { VIDEO_CLIP, LOG_RANGE, SCREENSHOT, TRANSCRIPT, JUDGE_VERDICT, GOLDEN, BUGREPORT }
+/**
+ * CAPTURE_ARCHIVE: the whole recording of the lane (log, video, audio, notes with every marker) as the ZIP a manual live capture's
+ * Save ZIP writes. It is far bigger than the other evidence, so a draft only carries a PENDING one (no content yet, see
+ * [IssueAttachment.isPendingCaptureArchive]); the archive is exported when the issue is created or sent. Appended last.
+ */
+enum class IssueAttachmentKind { VIDEO_CLIP, LOG_RANGE, SCREENSHOT, TRANSCRIPT, JUDGE_VERDICT, GOLDEN, BUGREPORT, CAPTURE_ARCHIVE }
 
 /**
  * One piece of evidence. Exactly one of [sourcePath] (an absolute file to copy), [text] (generated text to write as a
@@ -36,6 +41,10 @@ data class IssueAttachment(
     val storedPath: String? = null,
     val note: String = "",
 )
+
+/** A capture archive that is still to be exported: the draft says it is wanted ([IssueAttachment.include]) but no file exists yet. */
+val IssueAttachment.isPendingCaptureArchive: Boolean
+    get() = kind == IssueAttachmentKind.CAPTURE_ARCHIVE && storedPath == null && sourcePath == null && text == null
 
 /** Where the issue was seen. Every part may be unknown. */
 data class IssueEnvironment(

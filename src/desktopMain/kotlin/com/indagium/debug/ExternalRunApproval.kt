@@ -70,16 +70,31 @@ internal fun scriptLines(library: TestLibrary, suite: TestSuite): String {
     return if (more > 0) "$text\n+ $more more" else text
 }
 
-internal fun judgeLine(appState: AppState, judgeProfileId: String?, judgeMode: String): String? {
+/** "model · effort" of an override pair, or an empty string when neither was given (the profile's own values then apply). */
+internal fun overrideText(model: String?, reasoningEffort: String?): String =
+    listOfNotNull(
+        model?.trim()?.takeIf { it.isNotEmpty() },
+        reasoningEffort?.let { if (it.isEmpty()) "default effort" else "$it effort" },
+    ).joinToString(" · ")
+
+internal fun judgeLine(
+    appState: AppState,
+    judgeProfileId: String?,
+    judgeMode: String,
+    judgeModel: String? = null,
+    judgeReasoningEffort: String? = null,
+): String? {
     val mode = JudgeMode.parse(judgeMode) ?: return null
     if (mode == JudgeMode.OFF || judgeProfileId.isNullOrBlank()) return null
     val name = appState.settings.aiProviderProfiles.firstOrNull { it.id == judgeProfileId }?.displayName ?: judgeProfileId
-    return "AI profile $name (${mode.label.lowercase()})"
+    val overrides = overrideText(judgeModel, judgeReasoningEffort).let { if (it.isEmpty()) "" else " · $it" }
+    return "AI profile $name$overrides (${mode.label.lowercase()})"
 }
 
-internal fun laneLine(appState: AppState, profileId: String, serial: String): String {
+internal fun laneLine(appState: AppState, profileId: String, serial: String, model: String? = null, reasoningEffort: String? = null): String {
     val profileName = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId }?.displayName ?: profileId
-    val driver = if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) "driven by you over MCP" else "AI profile $profileName"
+    val overrides = overrideText(model, reasoningEffort).let { if (it.isEmpty()) "" else " · $it" }
+    val driver = if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) "driven by you over MCP" else "AI profile $profileName$overrides"
     return "device ${serial.ifBlank { "(no device)" }} — $driver"
 }
 
@@ -88,12 +103,23 @@ internal fun describeRunSuiteCall(appState: AppState, arguments: Map<String, Any
     val suite = (arguments["suiteId"] as? String)?.let(library::suite) ?: return null
     val laneItems = (arguments["lanes"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
     if (laneItems.isEmpty()) return null
-    val laneLines = laneItems.map { item -> laneLine(appState, (item["profileId"] as? String).orEmpty(), (item["deviceSerial"] as? String).orEmpty()) }
+    val laneLines = laneItems.map { item ->
+        laneLine(
+            appState, (item["profileId"] as? String).orEmpty(), (item["deviceSerial"] as? String).orEmpty(),
+            item["model"] as? String, item["reasoningEffort"] as? String,
+        )
+    }
     val chosen = (arguments["caseIds"] as? List<*>)?.filterIsInstance<String>()
     val caseNames = suite.cases.filter { chosen == null || it.id in chosen }.map { it.name }
     val casesText = if (chosen == null) "All ${suite.cases.size} case(s)" else "${caseNames.size} of ${suite.cases.size} case(s)"
     val shownCases = caseNames.take(MAX_CASE_NAMES_SHOWN).joinToString(", ") + if (caseNames.size > MAX_CASE_NAMES_SHOWN) ", …" else ""
-    val judge = judgeLine(appState, arguments["judgeProfileId"] as? String, (arguments["judgeMode"] as? String).orEmpty())
+    val judge = judgeLine(
+        appState, arguments["judgeProfileId"] as? String, (arguments["judgeMode"] as? String).orEmpty(),
+        arguments["judgeModel"] as? String, arguments["judgeReasoningEffort"] as? String,
+    )
+    val recording = runCatching {
+        parseRunCapture(arguments["capture"], appState.settings.captureSettings).recordingSummary(arguments["openLaneTabs"] as? Boolean ?: true)
+    }.getOrNull()
     return ExternalActionDetails(
         title = "Start a test run?",
         summary = "$clientName wants to run the test suite \"${suite.name}\". The run drives the devices below and may run the scripts listed.",
@@ -103,6 +129,7 @@ internal fun describeRunSuiteCall(appState: AppState, arguments: Map<String, Any
             "Lanes" to laneLines.joinToString("\n"),
             "Repeat" to ((arguments["repeat"] as? Number)?.toInt() ?: 1).toString(),
             judge?.let { "Judge" to it },
+            recording?.let { "Recording" to it },
             "Scripts that may run" to scriptLines(library, suite),
         ),
         allowLabel = "Start run",
@@ -139,8 +166,9 @@ internal suspend fun describeRerunStepCall(appState: AppState, arguments: Map<St
         fields = listOfNotNull(
             "Suite" to suite.name,
             "Case" to "${case.name} (steps 1–$stepNumber of ${case.steps.size})",
-            "Lane" to laneLine(appState, lane.profileId ?: EXTERNAL_LANE_PROFILE_ID, lane.deviceSerial),
-            judgeLine(appState, config.judgeProfileId, config.judgeMode)?.let { "Judge" to it },
+            "Lane" to laneLine(appState, lane.profileId ?: EXTERNAL_LANE_PROFILE_ID, lane.deviceSerial, lane.model, lane.reasoningEffort),
+            judgeLine(appState, config.judgeProfileId, config.judgeMode, config.judgeModel, config.judgeReasoningEffort)?.let { "Judge" to it },
+            config.capture?.let { "Recording" to it.recordingSummary(config.openLaneTabs) },
             "Scripts that may run" to scriptLines(appState.testLibrary, suite),
         ),
         allowLabel = "Start run",

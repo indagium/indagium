@@ -1,6 +1,8 @@
 package com.indagium.testing.tracker
 
 import com.indagium.ai.AiRun
+import com.indagium.testing.model.IssueAttachment
+import com.indagium.testing.model.IssueAttachmentKind
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.MAX_TRACKER_PROMPT_CHARS
 import com.indagium.testing.run.fenceUntrusted
@@ -41,16 +43,33 @@ internal fun trackerPromptPreamble(run: AiRun): String =
         "those tools. Do not use host shell, browser or desktop actions, and do not inspect the local workspace; it is intentionally empty."
 
 /** The request: the user's instructions, then the draft as untrusted data and the attachments that can be uploaded. */
-internal fun trackerPrompt(trackerName: String, userPrompt: String, record: IssueRecord, draftMarkdown: String): String = buildString {
+internal fun trackerPrompt(
+    trackerName: String,
+    userPrompt: String,
+    record: IssueRecord,
+    draftMarkdown: String,
+    /** Where a file that is too big to upload is on the reporter's computer; only the capture archive is ever given by path. */
+    attachmentPath: (IssueAttachment) -> String? = { null },
+): String = buildString {
     append("Tracker: ").append(trackerName.trim().ifEmpty { "issue tracker" }).append('\n')
     append("The user's instructions for creating the issue:\n")
     append(userPrompt.trim().take(MAX_TRACKER_PROMPT_CHARS).ifEmpty { NO_INSTRUCTIONS }).append("\n\n")
     append("The issue to file (severity ").append(record.draft.severity.label()).append("):\n")
     append(fenceUntrusted("issue_draft", draftMarkdown)).append('\n')
-    val files = record.draft.attachments.filter { it.include && it.storedPath != null }
+    val included = record.draft.attachments.filter { it.include && it.storedPath != null }
+    val archives = included.filter { it.kind == IssueAttachmentKind.CAPTURE_ARCHIVE }
+    val files = included - archives.toSet()
     if (files.isNotEmpty()) {
         append("\nAttachments you may upload (use $ATTACHMENT_REFERENCE_PREFIX<file name>):\n")
         files.forEach { append("- ").append(it.fileName).append(" (").append(it.kind.label()).append(", ").append(formatByteSize(it.sizeBytes)).append(")\n") }
+    }
+    if (archives.isNotEmpty()) {
+        append("\nToo big to upload (do not try to read or upload it; refer to it in the issue by this name, size and location):\n")
+        archives.forEach { archive ->
+            append("- ").append(archive.fileName).append(" (").append(archive.kind.label()).append(", ").append(formatByteSize(archive.sizeBytes))
+            attachmentPath(archive)?.let { append(", on the reporter's computer at ").append(it) }
+            append(")\n")
+        }
     }
     append("\nCreate the issue now, then call report_issue_created with its URL and key.")
 }

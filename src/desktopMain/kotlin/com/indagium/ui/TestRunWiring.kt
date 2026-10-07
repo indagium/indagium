@@ -8,7 +8,6 @@ import com.indagium.ai.ManagedMcpServerLease
 import com.indagium.ai.defaultAiProviderFactory
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.debug.IndagiumToolGateway
-import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.run.AgentSegmentRequest
 import com.indagium.testing.run.CoordinatorDeps
 import com.indagium.testing.run.EngineTuning
@@ -97,10 +96,7 @@ private const val LIVE_CAPTURE_PROBLEM = "is held by the live capture in the mai
 
 /** Builds the app's coordinator. [baseDir] is where run folders go; [onChanged] is called after every change of a run. */
 internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, baseDir: () -> File, onChanged: () -> Unit): TestRunCoordinator {
-    val openDevice = overrides.openDevice ?: LaneDeviceOpener { serial, laneDir, recordVideo ->
-        val tools = withContext(Dispatchers.IO) { captureService.toolsForStart(settings.captureSettings) }
-        TestDeviceSession.open(serial, laneDir, tools, recordVideo = recordVideo, isLiveCaptureSerial = { it == liveCaptureSerial() })
-    }
+    val openDevice = overrides.openDevice ?: ProductionLaneOpener(this)
     val agentFactory = productionAgentFactory(overrides)
     val deviceProblem = overrides.deviceProblem ?: { serial -> productionDeviceProblem(serial) }
     return TestRunCoordinator(
@@ -132,6 +128,8 @@ private suspend fun AppState.productionDeviceProblem(serial: String): String? = 
             device == null -> "Device $serial is not connected."
             !device.available -> "Device $serial is not ready (${device.state})."
             serial == liveCaptureSerial() -> "Device $serial $LIVE_CAPTURE_PROBLEM"
+            laneCaptureOnDevice(serial) != null ->
+                "Device $serial is recording for an AI test run (run ${laneCaptureOnDevice(serial)?.runId}); wait for it to finish."
             else -> null
         }
     } catch (failure: Exception) {
