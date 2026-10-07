@@ -196,66 +196,6 @@ val compileWindowsMirrorNative by tasks.registering(Exec::class) {
     }
 }
 
-// Script commands are always launched under a tiny host-native supervisor: POSIX gives the
-// command its own process group, while Windows assigns its suspended process to a kill-on-close
-// Job Object before resuming it. The generated executable is embedded in desktop resources.
-val commandSupervisorOs = if (isWindowsHost) "windows" else if (isMacHost) "macos" else "linux"
-val commandSupervisorSuffix = if (isWindowsHost) ".exe" else ""
-val commandSupervisorOutput = layout.buildDirectory.file(
-    "generated/indagiumNativeResources/desktopMain/resources/native/$commandSupervisorOs/" +
-        "indagium_command_supervisor$commandSupervisorSuffix",
-)
-val compileCommandSupervisorNative by tasks.registering(Exec::class) {
-    val source = if (isWindowsHost) file("native/windows/indagium_command_supervisor.cpp") else file("native/posix/indagium_command_supervisor.c")
-    inputs.file(source)
-    if (isWindowsHost) inputs.file("scripts/compile-windows-command-supervisor.cmd")
-    outputs.file(commandSupervisorOutput)
-    doFirst {
-        val output = commandSupervisorOutput.get().asFile
-        output.parentFile.mkdirs()
-        if (isWindowsHost) {
-            commandLine(
-                "cmd.exe", "/d", "/c",
-                "call \"${file("scripts/compile-windows-command-supervisor.cmd").absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
-            )
-        } else {
-            commandLine(
-                if (isMacHost) "clang" else "cc",
-                "-O2", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                source.absolutePath, "-o", output.absolutePath,
-            )
-        }
-    }
-}
-
-// The same host runner is exercised with a tiny native probe on macOS, Linux, and Windows. It
-// keeps argument quoting, output limits, stdin, exit codes, and process-tree lifetime tests on
-// the supported-platform CI jobs without depending on an installed shell on the host.
-val commandSupervisorProbeOutput = layout.buildDirectory.file(
-    "native-tests/indagium_command_supervisor_probe${if (isWindowsHost) ".exe" else ""}",
-)
-val compileCommandSupervisorProbe by tasks.registering(Exec::class) {
-    val source = if (isWindowsHost) file("native/tests/command_supervisor_probe.cpp") else file("native/tests/command_supervisor_probe.c")
-    inputs.file(source)
-    outputs.file(commandSupervisorProbeOutput)
-    doFirst {
-        val output = commandSupervisorProbeOutput.get().asFile
-        output.parentFile.mkdirs()
-        if (isWindowsHost) {
-            commandLine(
-                "cmd.exe", "/d", "/c",
-                "call \"${file("scripts/compile-windows-command-supervisor.cmd").absolutePath}\" \"${source.absolutePath}\" \"${output.absolutePath}\"",
-            )
-        } else {
-            commandLine(
-                if (isMacHost) "clang" else "cc",
-                "-O2", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                source.absolutePath, "-o", output.absolutePath,
-            )
-        }
-    }
-}
-
 // Focused host-native checks for the custom Annex-B parser and VideoToolbox session lifecycle.
 // These exercise the exact implementation compiled into the packaged dylib, including parameter
 // set reconfiguration and teardown, rather than a Kotlin model of that code.
@@ -553,7 +493,6 @@ tasks.named("compileKotlinDesktop") {
 
 tasks.matching { it.name.contains("ProcessResources", ignoreCase = true) }.configureEach {
     dependsOn(generateLicenseResources)
-    dependsOn(compileCommandSupervisorNative)
     if (isMacHost) {
         dependsOn(compileAppleSpeechNative)
         dependsOn(compileMacMirrorNative)
@@ -808,13 +747,6 @@ tasks.matching { it.name == "runKtlintCheckOverDesktopMainSourceSet" }.configure
 
 tasks.matching { it.name == "desktopProcessResources" || it.name == "desktopTest" }.configureEach {
     dependsOn(validateScrcpyServerAsset)
-}
-
-tasks.withType<org.gradle.api.tasks.testing.Test>().matching { it.name == "desktopTest" }.configureEach {
-    dependsOn(compileCommandSupervisorProbe)
-    doFirst {
-        systemProperty("indagium.commandSupervisorProbe", commandSupervisorProbeOutput.get().asFile.absolutePath)
-    }
 }
 
 // ── Kover ───────────────────────────────────────────────────────────

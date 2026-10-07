@@ -49,6 +49,8 @@ data class ScriptRunResult(
     val timedOut: Boolean,
     val truncated: Boolean,
     val durationMs: Long,
+    /** Notes about the run itself, e.g. that the script left background processes running. */
+    val warnings: List<String> = emptyList(),
 )
 
 /** Either the script ran ([Finished], whatever its exit code) or it could not be run at all ([Rejected]). */
@@ -105,6 +107,7 @@ class TestScriptRunner(
                     timedOut = result.timedOut,
                     truncated = result.truncated,
                     durationMs = result.durationMs,
+                    warnings = result.warnings,
                 ),
             )
         } catch (cancelled: CancellationException) {

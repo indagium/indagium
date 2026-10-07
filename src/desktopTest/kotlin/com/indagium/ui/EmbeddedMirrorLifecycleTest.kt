@@ -227,10 +227,20 @@ class EmbeddedMirrorLifecycleTest {
         }
     }
 
+    /**
+     * A no-op lane job queued AFTER the clicks: the lane is FIFO, so its future completes only once every earlier
+     * start/stop has run or been skipped. This is the deterministic "all clicks have settled" signal; the backend's
+     * own counters are not, because a superseded Connect that began before the later clicks arrived still runs.
+     */
+    private fun awaitLaneIdle(handle: EmbeddedMirrorHandle) {
+        handle.requestSetLiveAudioEnabled(enabled = false).get(15, TimeUnit.SECONDS)
+    }
+
     @org.junit.Test(timeout = 30_000)
     fun rapidDisconnectConnectDisconnectConnectEndsConnected() {
         Harness(detachDelayMs = 300).use { h ->
             h.connectAndWaitUntilAttached()
+            val handle = requireNotNull(h.app.embeddedMirrorFor(h.tabId))
 
             h.onUiThread {
                 h.app.stopEmbeddedMirror(h.tabId)
@@ -239,15 +249,39 @@ class EmbeddedMirrorLifecycleTest {
                 h.app.ensureEmbeddedMirror(h.tabId, autoStart = true)
             }
 
-            val handle = requireNotNull(h.app.embeddedMirrorFor(h.tabId))
-            // The mirror was already LIVE before the clicks, so "LIVE" alone proves nothing: the last
-            // Connect supersedes the Disconnects and must really tear down and re-attach (starts == 2).
-            // 15 s, not 5 s: this failed once only when the whole capture/mirror suite ran in
-            // parallel; under that load the 300 ms detach + lane hops can exceed a tight bound.
-            awaitCondition(15_000) { h.backend.starts.get() == 2 }
-            awaitCondition(15_000) { handle.snapshot.value.state == EmbeddedMirrorState.LIVE }
-            Thread.sleep(300)
+            // Not "starts == 2": depending on how the lane thread interleaves with the four clicks, an
+            // earlier Connect may already have run (and is then restarted by the last one), so the final
+            // count is 2 or 3. Only the settled end state is deterministic: the LAST click (Connect) wins.
+            awaitLaneIdle(handle)
             assertTrue(h.backend.attached, "the LAST click (Connect) must win")
+            assertEquals(EmbeddedMirrorState.LIVE, handle.snapshot.value.state)
+            assertTrue(h.backend.starts.get() >= 2, "the last Connect must really re-attach after the Disconnect (starts=${h.backend.starts.get()})")
+            assertEquals(1, h.backend.maxAttachedDecoders.get())
+        }
+    }
+
+    /**
+     * The interleaving that made the test above flaky, forced: the first Connect runs to completion BEFORE the
+     * second Disconnect/Connect pair is requested. Right then the backend is attached with starts == 2, which looks
+     * final but is not: the later pair must still restart the stream, and the last click still wins.
+     */
+    @org.junit.Test(timeout = 30_000)
+    fun aConnectThatAlreadyRanIsRestartedByLaterClicksAndTheLastClickStillWins() {
+        Harness(detachDelayMs = 100).use { h ->
+            h.connectAndWaitUntilAttached()
+            val handle = requireNotNull(h.app.embeddedMirrorFor(h.tabId))
+
+            h.app.stopEmbeddedMirror(h.tabId)
+            h.app.ensureEmbeddedMirror(h.tabId, autoStart = true)
+            awaitLaneIdle(handle)
+            assertTrue(h.backend.attached)
+            assertEquals(2, h.backend.starts.get(), "an intermediate state that looks final")
+
+            h.app.stopEmbeddedMirror(h.tabId)
+            h.app.ensureEmbeddedMirror(h.tabId, autoStart = true)
+            awaitLaneIdle(handle)
+            assertTrue(h.backend.attached, "the LAST click (Connect) must win")
+            assertEquals(3, h.backend.starts.get())
             assertEquals(1, h.backend.maxAttachedDecoders.get())
         }
     }

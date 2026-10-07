@@ -9,7 +9,6 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
-import java.nio.file.Files
 import java.time.Duration
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
@@ -27,6 +26,12 @@ private const val TERMINATE_GRACE_MS = 500L
 private const val OUTPUT_READER_JOIN_MS = 1_000L
 private const val OUTPUT_INITIAL_CAPACITY_BYTES = 4 * 1024
 private const val NANOS_PER_MILLI = 1_000_000L
+private const val DENSE_SAMPLING_WINDOW_MS = 250L
+private const val DENSE_SAMPLE_INTERVAL_MS = 5L
+private const val SAMPLE_INTERVAL_MS = 50L
+
+/** The warning attached to a result whose command left descendant processes running. */
+const val BACKGROUND_PROCESS_WARNING = "This script left background processes running; scripts must not start background processes."
 
 /**
  * One command to run. [command] is the full argv (no shell is added). [outputCapBytes] bounds stdout and stderr
@@ -51,6 +56,7 @@ data class HostCommandSpec(
 /**
  * [exitCode] is -1 when the process was killed because it timed out ([timedOut]). [truncated] is true when either
  * stream hit the output cap (the rest was read and discarded so the child never blocks on a full pipe).
+ * [warnings] are human-readable notes about the run itself, e.g. [BACKGROUND_PROCESS_WARNING].
  */
 data class HostCommandResult(
     val exitCode: Int,
@@ -59,6 +65,7 @@ data class HostCommandResult(
     val timedOut: Boolean,
     val truncated: Boolean,
     val durationMs: Long,
+    val warnings: List<String> = emptyList(),
 ) {
     fun stdoutText(): String = stdout.toString(Charsets.UTF_8)
 
@@ -77,48 +84,67 @@ interface HostCommandRunner {
 class ProcessBuilderHostCommandRunner : HostCommandRunner {
     override suspend fun run(spec: HostCommandSpec): HostCommandResult = withContext(Dispatchers.IO) {
         val startedNanos = System.nanoTime()
-        val statusDirectory = Files.createTempDirectory("indagium-command-status-").toFile()
-        val statusFile = File(statusDirectory, "launch.status")
+        val builder = ProcessBuilder(spec.command)
+        spec.workingDir?.let { builder.directory(it) }
+        sanitizeAppImageRuntimeForChild(builder.environment())
+        builder.environment().putAll(spec.environment)
+        val process = builder.start()
+        val stdout = BoundedSink(spec.outputCapBytes)
+        val stderr = BoundedSink(spec.outputCapBytes)
+        val readers = listOf(
+            drain(process.inputStream, stdout, "host-command-stdout"),
+            drain(process.errorStream, stderr, "host-command-stderr"),
+        )
+        val writer = feedStdin(process, spec.stdin)
+        val descendants = DescendantTracker(process.toHandle())
+        var finished = false
+        var leftBehind = false
         try {
-            val builder = ProcessBuilder(NativeCommandSupervisor.command(spec, statusFile))
-            spec.workingDir?.let { builder.directory(it) }
-            sanitizeAppImageRuntimeForChild(builder.environment())
-            builder.environment().putAll(spec.environment)
-            val process = builder.start()
-            val stdout = BoundedSink(spec.outputCapBytes)
-            val stderr = BoundedSink(spec.outputCapBytes)
-            val readers = listOf(
-                drain(process.inputStream, stdout, "host-command-stdout"),
-                drain(process.errorStream, stderr, "host-command-stderr"),
-            )
-            val writer = feedStdin(process, spec.stdin)
-            val finished: Boolean
-            try {
-                finished = runInterruptible { process.waitFor(spec.timeoutMs, TimeUnit.MILLISECONDS) }
-            } finally {
-                // The supervisor owns the actual command; stopping it closes its process group or Job Object.
-                if (process.isAlive) process.terminateProcessTree(Duration.ofMillis(TERMINATE_GRACE_MS))
-                readers.forEach { it.join(OUTPUT_READER_JOIN_MS) }
-                writer?.join(OUTPUT_READER_JOIN_MS)
-                closeQuietly(process)
-            }
-            val launchStatus = statusFile.takeIf(File::isFile)?.readText()?.trim()
-            if (launchStatus?.startsWith("error:") == true) {
-                throw IOException("Could not start command '${spec.command.first()}': ${launchStatus.removePrefix("error:")}.")
-            }
-            if (launchStatus != "started") {
-                throw IOException("The native command supervisor did not initialize; refusing to report an unsupervised command result.")
-            }
-            HostCommandResult(
-                exitCode = if (finished) process.exitValue() else TIMED_OUT_EXIT_CODE,
-                stdout = stdout.toByteArray(),
-                stderr = stderr.toByteArray(),
-                timedOut = !finished,
-                truncated = stdout.truncated || stderr.truncated,
-                durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI,
-            )
+            finished = runInterruptible { waitSampling(process, descendants, spec.timeoutMs) }
         } finally {
-            statusDirectory.deleteRecursively()
+            // Timeout or cancellation: the process and every descendant sampled while it ran are stopped. A script that
+            // ended on its own is not touched, but descendants that outlive it are reported as a warning.
+            if (process.isAlive) process.terminateProcessTree(Duration.ofMillis(TERMINATE_GRACE_MS), descendants.handles())
+            leftBehind = descendants.anyAlive()
+            joinWithin(readers + listOfNotNull(writer), OUTPUT_READER_JOIN_MS)
+            closeQuietly(process)
+        }
+        HostCommandResult(
+            exitCode = if (finished) process.exitValue() else TIMED_OUT_EXIT_CODE,
+            stdout = stdout.toByteArray(),
+            stderr = stderr.toByteArray(),
+            timedOut = !finished,
+            truncated = stdout.truncated || stderr.truncated,
+            durationMs = (System.nanoTime() - startedNanos) / NANOS_PER_MILLI,
+            warnings = if (leftBehind) listOf(BACKGROUND_PROCESS_WARNING) else emptyList(),
+        )
+    }
+
+    /**
+     * Waits up to [timeoutMs] for [process], sampling its descendants on the way (a descendant that is re-parented
+     * when its parent exits can no longer be found afterwards). The first moments are sampled densely because
+     * most scripts are short. Returns whether the process exited in time.
+     */
+    private fun waitSampling(process: Process, descendants: DescendantTracker, timeoutMs: Long): Boolean {
+        val startedNanos = System.nanoTime()
+        val deadlineNanos = startedNanos + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (true) {
+            descendants.sample()
+            val now = System.nanoTime()
+            val remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - now)
+            if (remainingMs <= 0) return process.waitFor(0, TimeUnit.MILLISECONDS)
+            val dense = now - startedNanos < TimeUnit.MILLISECONDS.toNanos(DENSE_SAMPLING_WINDOW_MS)
+            val intervalMs = if (dense) DENSE_SAMPLE_INTERVAL_MS else SAMPLE_INTERVAL_MS
+            if (process.waitFor(minOf(intervalMs, remainingMs), TimeUnit.MILLISECONDS)) return true
+        }
+    }
+
+    /** Joins [threads] against ONE shared deadline, so output held open by a leftover process costs [totalMs] once. */
+    private fun joinWithin(threads: List<Thread>, totalMs: Long) {
+        val deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(totalMs)
+        threads.forEach { thread ->
+            val remainingMs = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime())
+            if (remainingMs > 0) thread.join(remainingMs)
         }
     }
 
@@ -175,4 +201,17 @@ private class BoundedSink(private val limit: Int) {
 
     @Synchronized
     fun toByteArray(): ByteArray = bytes.toByteArray()
+}
+
+/** Remembers every descendant seen while the command ran, so survivors can be found after their parent exited. */
+private class DescendantTracker(private val root: ProcessHandle) {
+    private val seen = LinkedHashMap<Long, ProcessHandle>()
+
+    fun sample() {
+        runCatching { root.descendants().forEach { seen.putIfAbsent(it.pid(), it) } }
+    }
+
+    fun handles(): List<ProcessHandle> = seen.values.toList()
+
+    fun anyAlive(): Boolean = seen.values.any { it.isAlive }
 }

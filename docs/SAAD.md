@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 124: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 148: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3477,7 +3477,7 @@ command text.**
 | Parameters as environment variables | `HOST_SHELL` scripts run `<shell> <template>`; parameter values and the run context (`DEVICE`, `PACKAGE`, `RUN_DIR`, `CASE_ID`, `STEP_ID`) travel only as the child's environment (`hostSpec`). The template is the author's own text, passed to the shell untouched. Host shell: `/bin/zsh -c` on macOS when present, `/bin/sh -c` elsewhere, PowerShell on Windows (`defaultHostShell`, `:216`) |
 | POSIX-quoted adb exports | `ADB_SHELL` scripts send ONE remote command, `export name='value' …; <template>`, where every value is POSIX-single-quoted (`buildAdbRemoteCommand`, `:163`; `posixSingleQuote`, `:172`) and every name matches `[A-Za-z_][A-Za-z0-9_]*` |
 | Validation | Types: `INT` = `-?\d{1,18}`, `BOOL` = `true`/`false`, `STRING` ≤ 4 KB with no NUL; unknown arguments rejected; required parameters enforced (`validateScriptArgs`, `:183`). Parameter names are lowercase and may not be reserved (`path`, `home`, `shell`, `device`, `run_dir`, `ld_preload`, …: `RESERVED_SCRIPT_PARAM_NAMES`, `testing/model/TestModelRules.kt:19`); a tool name may not shadow a built-in lane tool, an Indagium tool, or start with `tracker_` (`scriptToolNameError`) |
-| Timeout, output cap, process-tree kill | Per-script `timeoutMs` (default 30 s, ≤ 1 h) and `outputCapBytes` (default 64 KB, ≤ 8 MB) bound stdout and stderr *each*; the rest is read and discarded so the child never blocks on a full pipe. A bundled native supervisor creates a dedicated POSIX process group or atomically assigns a suspended Windows child to a kill-on-close Job Object before resuming it; startup fails closed if supervision cannot initialize. All exits, errors, timeouts and cancellations close that group/job. Shared process-tree cleanup also kills captured descendants independently of parent liveness (`testing/script/HostCommandRunner.kt`) |
+| Timeout, output cap, process-tree kill | Per-script `timeoutMs` (default 30 s, ≤ 1 h) and `outputCapBytes` (default 64 KB, ≤ 8 MB) bound stdout and stderr *each*; the rest is read and discarded so the child never blocks on a full pipe. The script is launched directly (`ProcessBuilder`, no wrapper). While it runs the runner samples its descendants; on timeout or cancellation `terminateProcessTree` stops the script and every sampled or current descendant (SIGTERM, 500 ms grace, then force-kill, whatever the parent's state; `testing/script/HostCommandRunner.kt`, `capture/CaptureProcess.kt`). A descendant still alive when a script ended on its own, or one that survived the force-kill, adds `HostCommandResult.warnings` ("This script left background processes running; scripts must not start background processes."), surfaced in `ScriptRunResult`, the Try-it console, `try_test_script`, hook results and script-check details; the leftover of a script that ended by itself is reported, not killed |
 | Sanitized environment | The child inherits the app's environment minus AppImage runtime variables (`sanitizeAppImageRuntimeForChild`), with explicit values merged on top |
 | `SETUP_TEARDOWN_ONLY` | A script with this permission is never offered to an agent as a tool (`buildLaneTools`, `testing/run/TestAgentTools.kt:128`) |
 
@@ -3621,6 +3621,14 @@ reachable by any prompt-injected lane agent, which is why the default permission
    output, not capability — hence the default `ASK` permission, the setup/teardown-only option, and the
    per-call approval for external clients. `AUTO` should be granted only to scripts the author would let
    any test agent run.
+7. **Detached processes can outlive a script.** Scripts run directly, with no supervisor or OS-level
+   containment (no process group or Job Object). On timeout or cancellation Indagium terminates the
+   script and all its descendants it can find (a snapshot taken then, plus descendants sampled while it
+   ran), but a process that detaches from the script's process tree (a daemon that double-forks or calls
+   `setsid`, or one that was started and re-parented between samples) may survive. A survivor that was
+   sampled is reported as a warning on the result; one that was never sampled is invisible. Scripts must
+   not start background processes. `ADB_SHELL` scripts can raise a false warning when the adb client had
+   to start the adb server.
 
 ---
 

@@ -1315,8 +1315,10 @@ reads, the **parameters** (text, whole number or true/false), and **Runs on** *t
 (adb shell)*. The command receives its parameters **as environment variables** — `$name` in a shell script on
 macOS and Linux — never pasted into the command text, so a value can never change what the command does.
 The command also sees `DEVICE`, `PACKAGE`, `RUN_DIR`, `CASE_ID` and `STEP_ID`. On Windows a computer script runs in
-PowerShell. Every script has a time limit and an output limit, and everything it started is stopped when it
-times out or the run is cancelled.
+PowerShell. Every script has a time limit and an output limit. When it times out or the run is cancelled,
+Indagium stops the script and the processes it started (politely first, then by force). A script must not start
+background processes: one that is still running after the script ended is reported as a warning in the result,
+and a process that detaches itself from the script may keep running.
 
 **Who may start it** is the important setting:
 

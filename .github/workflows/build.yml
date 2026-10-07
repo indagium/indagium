@@ -95,9 +95,6 @@ jobs:
       - name: Validate portable smoke-test compatibility
         run: bash scripts/test-validate-flatpak-install.sh
 
-      - name: Verify native command supervisor
-        run: ./gradlew desktopTest --tests 'com.indagium.testing.HostCommandSupervisorIntegrationTest'
-
       - name: Build, test, and lint
         run: ./gradlew build
 
@@ -207,9 +204,6 @@ jobs:
       - name: Compile Windows D3D11 mirror bridge
         if: startsWith(matrix.os, 'windows')
         run: ./gradlew compileWindowsMirrorNative
-
-      - name: Verify native command supervisor
-        run: ./gradlew desktopTest --tests 'com.indagium.testing.HostCommandSupervisorIntegrationTest'
 
       # The controller uses the host's bundled-by-JavaCV FFmpeg native, so the duration-recovery
       # path must run on every release target rather than only in the macOS-wide verification job.

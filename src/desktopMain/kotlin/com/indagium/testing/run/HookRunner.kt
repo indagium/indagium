@@ -77,7 +77,8 @@ internal class HookRunner(
                 val finished = outcome.result
                 val passed = finished.exitCode == 0 && !finished.timedOut
                 val timedOut = if (finished.timedOut) " (timed out)" else ""
-                val summary = "exit code ${finished.exitCode}$timedOut: ${finished.stdout.trim().take(OUTPUT_EXCERPT_CHARS)}"
+                val warnings = finished.warnings.joinToString("") { " Warning: $it" }
+                val summary = "exit code ${finished.exitCode}$timedOut: ${finished.stdout.trim().take(OUTPUT_EXCERPT_CHARS)}$warnings"
                 record(result(hook.id, number, action, if (passed) StepStatus.PASS else StepStatus.FAIL, summary, startedAt))
                 passed
             }
