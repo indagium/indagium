@@ -109,6 +109,7 @@ internal fun TestsWorkspace(state: AppState) {
             limits.banner?.let { TestsLockedNotice(it, Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) }
             if (library.readOnly) TestsLockedNotice(LIBRARY_READ_ONLY_MESSAGE, Modifier.padding(horizontal = 12.dp, vertical = 6.dp))
             state.testLibraryPersistError?.let { TestsBannerView(TestsBanner(it, isError = true)) { } }
+            state.testStorageStatus?.let { TestsBannerView(TestsBanner(it, isError = false)) { } }
             view.runDialog?.let { target -> TestRunDialog(target) { view.runDialog = null } }
             view.issueDialog?.let { target -> IssueDraftDialog(target) { view.issueDialog = null } }
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {

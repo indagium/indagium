@@ -884,6 +884,7 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         SaveFolderKind.entries.forEach { kind -> SaveFolderSetting(state, kind) }
+        state.testStorageStatus?.let { message -> AppText(message, color = DANGER_RED, fontSize = 11.sp, maxLines = 3) }
     }
     Column(Modifier.settingsAnchor("Storage"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText(
@@ -983,6 +984,7 @@ private fun GeneralSettingsSection(state: AppState, reclaimFocus: () -> Unit) {
  *  assistant reuses it for the folders it offers. */
 @Composable
 internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind) {
+    val locked = kind.affectsTestStorage && state.testRunInProgress
     when (kind) {
         SaveFolderKind.ROOT -> SaveFolderRow(
             label = "Default save folder",
@@ -992,6 +994,8 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind) {
             effectivePath = state.effectiveSaveRootDir.absolutePath,
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ROOT) },
             onReset = { state.resetSaveFolder(SaveFolderKind.ROOT) },
+            enabled = !locked,
+            disabledHint = TEST_RUN_LOCK_HINT,
         )
         SaveFolderKind.ANALYSIS -> SaveFolderRow(
             label = "Analysis artifacts folder",
@@ -1027,11 +1031,46 @@ internal fun SaveFolderSetting(state: AppState, kind: SaveFolderKind) {
             onBrowse = { state.pickSaveFolder(SaveFolderKind.ZIP) },
             onReset = { state.resetSaveFolder(SaveFolderKind.ZIP) },
         )
+        SaveFolderKind.TEST_SUITES -> SaveFolderRow(
+            label = "Test suites folder",
+            tooltip = "Where your AI test suites are kept (library.json, suites/ and golden-screenshot assets/). " +
+                "Changing it loads the suites found there; the old folder is left as it is.",
+            explicitValue = state.settings.testSuitesDir,
+            effectivePath = state.effectiveTestSuitesDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.TEST_SUITES) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.TEST_SUITES) },
+            enabled = !locked,
+            disabledHint = TEST_RUN_LOCK_HINT,
+        )
+        SaveFolderKind.TEST_RUNS -> SaveFolderRow(
+            label = "Test runs folder",
+            tooltip = "Where each AI test run keeps its evidence (run.json, lane recordings, screenshots, transcripts). " +
+                "Changing it lists the runs found there; the old folder is left as it is.",
+            explicitValue = state.settings.testRunsDir,
+            effectivePath = state.effectiveTestRunsDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.TEST_RUNS) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.TEST_RUNS) },
+            enabled = !locked,
+            disabledHint = TEST_RUN_LOCK_HINT,
+        )
+        SaveFolderKind.TEST_ISSUES -> SaveFolderRow(
+            label = "Issues folder",
+            tooltip = "Where the issues made from failed test steps are kept, one folder each with its evidence. " +
+                "Changing it lists the issues found there; the old folder is left as it is.",
+            explicitValue = state.settings.testIssuesDir,
+            effectivePath = state.effectiveTestIssuesDirForDisplay().absolutePath,
+            onBrowse = { state.pickSaveFolder(SaveFolderKind.TEST_ISSUES) },
+            onReset = { state.resetSaveFolder(SaveFolderKind.TEST_ISSUES) },
+            enabled = !locked,
+            disabledHint = TEST_RUN_LOCK_HINT,
+        )
     }
 }
 
+private const val TEST_RUN_LOCK_HINT = "Unavailable while a test run is in progress. Change it after the run has finished."
+
 /**
- * One row of the five-folder Save folders group (GeneralSettingsSection above): a labeled
+ * One row of the Save folders group (GeneralSettingsSection above): a labeled
  * tooltip, the effective path (dimmer with a "(default)" suffix when nothing is explicitly set —
  * [explicitValue] is null), a Browse button, and a Reset button that only shows once the folder
  * has actually been set to something other than its computed default.
@@ -1044,6 +1083,9 @@ internal fun SaveFolderRow(
     effectivePath: String,
     onBrowse: () -> Unit,
     onReset: () -> Unit,
+    // False greys Browse and Reset out (the folder cannot change right now); [disabledHint] is the tooltip that says why.
+    enabled: Boolean = true,
+    disabledHint: String? = null,
 ) {
     val tc = tc()
     Column(Modifier.settingsAnchor(label), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1087,8 +1129,28 @@ internal fun SaveFolderRow(
                 },
                 modifier = Modifier.weight(1f),
             ) { pathText() }
-            AppButton("Browse", onClick = onBrowse)
-            if (explicitValue != null) AppButton("Reset", onClick = onReset)
+            val buttons: @Composable () -> Unit = {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    AppButton("Browse", onClick = onBrowse, enabled = enabled)
+                    if (explicitValue != null) AppButton("Reset", onClick = onReset, enabled = enabled)
+                }
+            }
+            if (!enabled && disabledHint != null) {
+                TooltipArea(
+                    tooltip = {
+                        Box(
+                            Modifier
+                                .background(tc.p2, RoundedCornerShape(4.dp))
+                                .border(0.5.dp, tc.br, RoundedCornerShape(4.dp))
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                        ) {
+                            AppText(disabledHint, color = tc.tx, fontSize = 11.sp, maxLines = 3)
+                        }
+                    },
+                ) { buttons() }
+            } else {
+                buttons()
+            }
         }
     }
 }

@@ -104,6 +104,7 @@ private fun rememberSuiteHistory(suite: TestSuite): Pair<com.indagium.testing.mo
         initialValue = StoredSuiteRunHistory(liveRuns, liveRuns.map { it.summary() }),
         key1 = suite.id,
         key2 = ui.state.testRuns,
+        key3 = ui.state.testRunsFolderEpoch,
     ) {
         value = ui.state.testRunCoordinator.loadSuiteRunHistory(suite.id)
     }

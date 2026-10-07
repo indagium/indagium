@@ -99,6 +99,9 @@ private class RunEntry(
 ) {
     @Volatile var job: Job? = null
 
+    /** The run's job is still going, or has not been started yet and the run is not finished. */
+    fun isLive(): Boolean = job?.isActive ?: !state.current.isFinished
+
     private val externalCallLock = Any()
 
     private data class ExternalCall(
@@ -277,7 +280,7 @@ internal class TestRunCoordinator(
             laneLabel = { lane -> laneLabels[lane.id] ?: lane.driverLabel().ifBlank { "agent" } },
         )
         // ATOMIC: a run cancelled before its first instruction must still reach the finally that frees its devices.
-        entry.job = scope.launch(start = CoroutineStart.ATOMIC) {
+        val job = scope.launch(start = CoroutineStart.ATOMIC) {
             try {
                 persister.flush()
                 TestRunEngine(state, persister, engineDeps, plan, handles).execute()
@@ -293,6 +296,9 @@ internal class TestRunCoordinator(
                 }
             }
         }
+        entry.job = job
+        // The job is still active inside release(), so the owner is told once more when it is truly over (storage switches wait for this).
+        job.invokeOnCompletion { onChanged() }
     }
 
     /** The judge's agent builder, or null when the run has no judge. The judge uses the same launchers as a lane, whatever its profile kind. */
@@ -325,6 +331,18 @@ internal class TestRunCoordinator(
     // ── Reading ──────────────────────────────────────────────────────
 
     fun run(runId: String): TestRun? = runs[runId]?.state?.current
+
+    /** True while any run of this launch has not finished, including its final write to disk. */
+    fun hasActiveRun(): Boolean = runs.values.any { it.isLive() }
+
+    /**
+     * Drops the finished runs from memory (their folders stay on disk). Used when the runs folder changes: those runs belong
+     * to the old folder and must not be looked up in the new one. A run that is still active is kept.
+     */
+    fun forgetFinishedRuns() {
+        runs.entries.removeIf { !it.value.isLive() }
+        publish()
+    }
 
     /** The run from memory, or from disk for a run of an earlier launch. */
     suspend fun loadRun(runId: String): TestRun? = run(runId) ?: withContext(Dispatchers.IO) { deps.store.load(runId) }

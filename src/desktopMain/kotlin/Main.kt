@@ -142,7 +142,7 @@ fun main(args: Array<String>) {
                 restoreOnCreate = true,
                 editionService = editionService,
                 filterBackupsDir = DesktopStorage.filterBackupsDir(),
-                platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
+                platformDefaultSaveRootDir = DesktopStorage.processDefaultSaveRootDir(),
             )
         }
         DisposableEffect(appState) {

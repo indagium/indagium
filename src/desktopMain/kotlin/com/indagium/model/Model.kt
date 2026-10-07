@@ -1363,6 +1363,14 @@ data class AppSettings(
     // "Save ZIP" destination for a stopped/retained capture (AppState.saveRetainedCapture).
     // Defaults to <saveRootDir>/saved-captures. JSON form ONLY.
     val captureZipDir: String? = null,
+    // AI test suites (Settings → General → Storage). "Test suites folder" holds library.json, suites/ and assets/; it
+    // defaults to <saveRootDir>/test-suites. "Test runs folder" holds one folder per run (run.json, lane captures,
+    // screenshots, transcripts); it defaults to <saveRootDir>/test-runs. "Issues folder" holds one folder per issue made
+    // from a failed step; it defaults to <saveRootDir>/test-issues. Changing one switches the app to that folder without
+    // restart and never moves or deletes what is in the old one. JSON form ONLY.
+    val testSuitesDir: String? = null,
+    val testRunsDir: String? = null,
+    val testIssuesDir: String? = null,
     // Last directory a Save/Export dialog actually wrote to (saveAnalysis, exportAnnotationFrames,
     // exportFilteredTxt/Csv, exportCasePreview, downloadSeq3Png, the split prompt…) — what those
     // dialogs open to next time. Kept separate from [defaultSaveDir] so picking a one-off

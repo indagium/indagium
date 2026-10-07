@@ -75,6 +75,21 @@ private fun general() = listOf(
         listOf("zip", "archive", "save folder"),
     ),
     entry(
+        SettingsSection.General, "Test suites folder",
+        "Where your AI test suites are kept: library, suites and golden screenshots.",
+        listOf("tests", "ai tests", "library", "assets", "save folder"),
+    ),
+    entry(
+        SettingsSection.General, "Test runs folder",
+        "Where each AI test run keeps its evidence: run files, recordings, screenshots and transcripts.",
+        listOf("tests", "ai tests", "evidence", "recordings", "save folder"),
+    ),
+    entry(
+        SettingsSection.General, "Issues folder",
+        "Where the issues made from failed test steps are kept, with their evidence.",
+        listOf("tests", "ai tests", "bugs", "tracker", "save folder"),
+    ),
+    entry(
         SettingsSection.General, "Storage",
         "Where Indagium keeps its data, and the temporary data and app data it holds.",
         listOf("app data", "cache", "disk", "space", "appdata"),

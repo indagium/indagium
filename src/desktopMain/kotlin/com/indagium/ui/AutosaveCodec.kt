@@ -669,6 +669,7 @@ internal fun AppSettings.settingsJson(): String = buildJsonObject {
     captureSessionsDir?.let { put("captureSessionsDir", it) }
     captureSnapshotsDir?.let { put("captureSnapshotsDir", it) }
     captureZipDir?.let { put("captureZipDir", it) }
+    putTestFolders(this@settingsJson)
     lastSaveDialogDir?.let { put("lastSaveDialogDir", it) }
     put("homeRecentGridColumns", homeRecentGridColumns)
     put("annotationCopyFormat", annotationCopyFormat.name)
@@ -997,6 +998,9 @@ internal fun settingsFromJson(raw: String): AppSettings? = runCatching {
         captureSessionsDir = o.stringOrNull("captureSessionsDir"),
         captureSnapshotsDir = o.stringOrNull("captureSnapshotsDir"),
         captureZipDir = o.stringOrNull("captureZipDir"),
+        testSuitesDir = o.stringOrNull("testSuitesDir"),
+        testRunsDir = o.stringOrNull("testRunsDir"),
+        testIssuesDir = o.stringOrNull("testIssuesDir"),
         lastSaveDialogDir = o.stringOrNull("lastSaveDialogDir"),
         homeRecentGridColumns = o.intOrDefault("homeRecentGridColumns", DEFAULT_HOME_RECENT_GRID_COLUMNS)
             .coerceIn(MIN_HOME_RECENT_GRID_COLUMNS, MAX_HOME_RECENT_GRID_COLUMNS),

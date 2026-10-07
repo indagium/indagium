@@ -1558,12 +1558,13 @@ rows, so an early count can only mean the loop genuinely stopped.
 | `writeLock` | `ai/CodexAppServerClient.kt:302` | stdio JSON-RPC framing — two writers would interleave lines |
 | `lock` | `cases/CaseSearch.kt:45` | The cached case index and its inverted indexes |
 | `lock` + fair `writeLock` | `testing/store/TestLibraryStore.kt:67-68` | Publishing the next immutable test library / the disk write. **Leaf lock** (§26.6) |
-| `lock` (`ReentrantLock`) | `testing/store/IssueStore.kt:45` | Issue create/update/delete. **Leaf lock** |
+| `lock` (`ReentrantLock`) | `testing/store/IssueStore.kt:69` | Issue create/update/delete. **Leaf lock** |
 | `lock` | `testing/run/TestRunState.kt:18` | Swapping a running test run's immutable snapshot. **Leaf lock** |
 | `lock`, `saveLock` | `testing/store/RunPersister.kt:24-25` | The pending run save, and read-the-run-then-write. **Leaf locks** |
 | `registryLock`, `publishLock` | `testing/run/TestRunCoordinator.kt:99-100` | Devices in use; the published run list. **Leaf locks** |
 | `lock` | `testing/store/TranscriptWriter.kt:18` | One transcript line at a time. **Leaf lock** |
 | `testLibraryMirrorLock`, `testRunMirrorLock` | `ui/AppState.kt:1911,2013` | `AppState`'s mirrors of the library and run flows (the value is read inside the lock). **Leaf locks** |
+| `testStorageLock` | `ui/AppState.kt:1928` | Switching the AI test folders (`reconcileTestStorage`, `initTestStorage`): swapping the `TestLibraryStore` and the pinned `activeTest*Dir` fields. **Leaf lock**; the library mirror and `forgetFinishedRuns()` are touched only after it is released |
 
 **AI test-suite locks.** Every test-suite lock above is a leaf: none is ever held together with
 `stateLock` or either `AutosaveScheduler` lock, nothing is called out of one while it is held, and the
@@ -1725,8 +1726,8 @@ Everything is a plain file under one app-data directory, resolved per OS by
 | `filter-backups/` | Automatic saved-filter backups | Filter-library JSON |
 | `archive-cache/` | Videos extracted from bug-report archives | Raw media, budget-enforced |
 | `captures/` | Retained session directories: `logs/logcat.log`, `mapping/capture-index.jsonl`, `video/screen.mkv`, screenshots, `session.json`, finalized `capture.indagium.json` | Session data and portable-capture source; interrupted sessions are recoverable from the launcher. Exported v3 ZIPs use a separate flat layout and a single sync anchor, not the session index |
-| `testing/` | The AI test-suite library: `library.json` (suite order, scripts, shared steps), `suites/<id>.json`, `assets/<suiteId>/` (golden screenshots), `issues/<id>/` (`issue.json` + `attachments/`) | `indagium-test-library`, `indagium-test-suite`, `indagium-issue`, each a versioned JSON envelope (§26.3) |
-| `<save root>/test-runs/<runId>/` | One AI test run: `run.json` (frozen suite + results), `lanes/<laneId>/{capture,screens,transcript.jsonl}`, `judge.jsonl`. **Not** under `appDataDir`: the save folder is a user setting | `indagium-test-run` v1 JSON, JSON lines (§26.3) |
+| `testing/` | **Legacy** home of the AI test data (library, suites, assets, `issues/`, `runs/`). Now only read once at startup: `migrateLegacyTestStorage` moves it into the three configurable folders (§26.3), and a bare `AppState` with no save root still uses it as its fallback | — |
+| `<save root>/test-suites/`, `<save root>/test-runs/<runId>/`, `<save root>/test-issues/<issueId>/` | The AI test data: the library (`library.json`, `suites/`, `assets/`), one folder per run (`run.json` (frozen suite + results), `lanes/<laneId>/{capture,screens,transcript.jsonl}`, `judge.jsonl`) and one folder per issue. **Not** under `appDataDir`: each is a user setting (`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only) defaulting to a subfolder of the Default save folder | `indagium-test-library`, `indagium-test-suite`, `indagium-issue`, `indagium-test-run`, each a versioned JSON envelope, plus JSON lines (§26.3) |
 | `indagium-debug.log` | Opt-in diagnostic log | Android threadtime text |
 
 #### 13.1.1 The pre-rename directory and the one-time migration
@@ -1817,8 +1818,8 @@ durable `attachedVideo`/capture descriptor link, so the finalized capture can be
 `AppSettings.captureSettings` is persisted in the keyed settings JSON and is applied immediately by
 the Capture section of Settings. `AppSettings.tracker` and `AppSettings.testing` are likewise JSON-only
 (appended last to `settingsJson()`); the issue tracker's access token is **not** part of settings — it
-lives only in the OS keychain (§26.9.3). Test suites, runs and issues are stored under `testing/` and
-`<save root>/test-runs/`, not in the autosave.
+lives only in the OS keychain (§26.9.3). Test suites, runs and issues are stored in the three test folders
+(`testSuitesDir` / `testRunsDir` / `testIssuesDir`, JSON-only, §26.3), not in the autosave.
 
 ### 13.5 Restore is metadata-only
 
@@ -3185,19 +3186,44 @@ and no separate index is persisted. Ids are prefixed UUIDs unique across the lib
 
 | Path | Contents | Format |
 |---|---|---|
-| `<appDataDir>/testing/library.json` | Suite order, library scripts, shared steps | `{"format":"indagium-test-library","version":1,…}` (`testing/store/TestLibraryCodec.kt:63`) |
-| `<appDataDir>/testing/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `{"format":"indagium-test-suite","version":1,"suite":{…}}` (`:62`); the file name must equal the suite id |
-| `<appDataDir>/testing/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
-| `<appDataDir>/testing/issues/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
-| `<save root>/test-runs/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
-| `<save root>/test-runs/<runId>/lanes/<laneId>/` | `capture/<sessionId>/` (the lane's capture session exactly as a manual capture writes it: `logs/logcat.log`, `mapping/`, optional `video/screen.mkv` with audio, `session.json`, and after the lane the finalized `capture.indagium.json`), `lane-notes.ann` (the lane's notes with every AI marker), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates. The lane's sessions live inside the run folder (not under a capture root) so the report, the step clips and the evidence export find them where they always did, and deleting a run deletes its recordings; `CaptureService` knows them by id for this launch only (§26.5.5) |
-| `<save root>/test-runs/<runId>/judge.jsonl` | Everything the judge runs of the run said and did, tagged with what each judged | JSON lines, redacted |
+| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `{"format":"indagium-test-library","version":1,…}` (`testing/store/TestLibraryCodec.kt:63`) |
+| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `{"format":"indagium-test-suite","version":1,"suite":{…}}` (`:62`); the file name must equal the suite id |
+| `<test suites folder>/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
+| `<issues folder>/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
+| `<test runs folder>/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
+| `<test runs folder>/<runId>/lanes/<laneId>/` | `capture/<sessionId>/` (the lane's capture session exactly as a manual capture writes it: `logs/logcat.log`, `mapping/`, optional `video/screen.mkv` with audio, `session.json`, and after the lane the finalized `capture.indagium.json`), `lane-notes.ann` (the lane's notes with every AI marker), `screens/` (step screenshots), `transcript.jsonl`, `tool-activity.jsonl` | Raw logcat, PNG and redacted JSON lines; activity remains complete within its declared cap after the bounded live cache rotates. The lane's sessions live inside the run folder (not under a capture root) so the report, the step clips and the evidence export find them where they always did, and deleting a run deletes its recordings; `CaptureService` knows them by id for this launch only (§26.5.5) |
+| `<test runs folder>/<runId>/judge.jsonl` | Everything the judge runs of the run said and did, tagged with what each judged | JSON lines, redacted |
 
-`<save root>` is the user's save folder (`AppState.effectiveSaveRootOrNull`); with none configured a
-bare `AppState` (tests) falls back to `<testing dir>/runs` (`ui/AppState.kt:2033`). The testing
-directory itself is `DesktopStorage.testingDir()` (`ui/DesktopStorage.kt:373`) and is injected through
-the `AppState` constructor like `customCommandsDir` (`ui/AppState.kt:1834`). Nothing is created until
-a first write.
+**Where the folders come from.** `<test suites folder>`, `<test runs folder>` and `<issues folder>` are
+`AppSettings.testSuitesDir`, `testRunsDir` and `testIssuesDir` (JSON-only; the frozen positional settings decoder is
+untouched). Unset, they default to `<save root>/test-suites`, `/test-runs` and `/test-issues`, where `<save root>` is the
+Default save folder (`AppState.effectiveSaveRootOrNull`, `~/Documents/Indagium` unless `saveRootDir` is set) — resolved by
+`effectiveTestSuitesDir()` / `effectiveTestRunsDir()` / `effectiveTestIssuesDir()` exactly like the other save folders, and
+shown by Settings → General through `SaveFolderKind.TEST_SUITES` / `TEST_RUNS` / `TEST_ISSUES` rows. A bare `AppState` with
+no save root (tests) falls back to the injected `testingDir` (`DesktopStorage.testingDir()`, i.e. `<appDataDir>/testing`):
+the library there, `runs/` and `issues/` inside it, so a bare instance never resolves to a real user folder. A debug-control
+process with an isolated app-data directory keeps its save root inside it (`DesktopStorage.processDefaultSaveRootDir()`).
+Nothing is created until a first write.
+
+**Switching folders at runtime.** `AppState.updateSettings` calls `reconcileTestStorage()` when `saveRootDir` or one of the
+three folders changes. It replaces the `TestLibraryStore` (loaded from the new folder; `testLibrary` is re-mirrored),
+re-points the run and issue stores (`TestRunStore` and `IssueStore` read the folder through a lambda on every use, from the
+pinned `activeTest*Dir` fields), forgets the finished runs held in memory and bumps `testRunsFolderEpoch` /
+`IssueStore.revision` so screens reload. Nothing is moved or deleted in the old folder, like the other save folders. While a
+run is active (`TestRunCoordinator.hasActiveRun()`, true until the run's job has completed, final write included) nothing
+switches: `setSaveFolder` refuses `ROOT` / `TEST_*`, the Settings rows disable Browse and Reset, and a change that arrives
+by other means is held (`testStorageSwitchPending`) and applied from the coordinator's completion callback.
+`testStorageLock` is a leaf lock (§26.6).
+
+**One-time migration.** `AppState.init` (after the saved settings are restored, so the store opens the chosen folder
+first) calls `migrateLegacyTestStorage(testingDir, suites, issues, runs)` (`testing/store/TestStorageLayout.kt`): the old
+`library.json`, `suites/` and `assets/` move to the suites folder only when it has no `library.json`; `issues/` and `runs/`
+move only into an empty or absent folder; a directory present on both sides is merged entry by entry and a file present on
+both sides is never overwritten. Moves use `ATOMIC_MOVE` with a copy-then-delete fallback across file systems; a failed move
+leaves its source in place and is reported once (`AppLogger`, `AppState.testStorageStatus` shown in Settings and the Tests
+tab) and retried at the next start. When data was deliberately left behind, a `.moved-to-save-folders` marker in the old
+directory stops later starts from moving it into a different folder. A layout whose destination equals its source (a bare
+`AppState`) is skipped.
 
 **Codec rules** (all on the kotlinx.serialization *runtime* JSON API — `buildJsonObject` /
 `parseToJsonElement`; the project does not apply the serialization compiler plugin):
@@ -3454,12 +3480,13 @@ called while holding one that could take another lock, and none is ever held tog
 | Lock | Where | Guards |
 |---|---|---|
 | `lock` + fair `writeLock` | `testing/store/TestLibraryStore.kt:67-68` | `lock` only computes and publishes the next immutable `TestLibrary`; `writeLock` covers only the disk write, which re-reads the freshest library once it holds the lock, so an older snapshot can never land on disk after a newer one. The `StateFlow` collector rule: a collector resumed inline runs inside `lock`, so collectors must not call back into the store. `limits()` is read **before** `lock` is taken |
-| `lock` (`ReentrantLock`) | `testing/store/IssueStore.kt:45` | Create/update/delete (a read-modify-write of `issue.json` and the attachment folder). `revision` is bumped **after** the lock is released. The notes destination calls the annotation mutators only after releasing it (`ui/IssueNotes.kt`) |
+| `lock` (`ReentrantLock`) | `testing/store/IssueStore.kt:69` | Create/update/delete (a read-modify-write of `issue.json` and the attachment folder). `revision` is bumped **after** the lock is released. The notes destination calls the annotation mutators only after releasing it (`ui/IssueNotes.kt`) |
 | `lock` | `testing/run/TestRunState.kt:18` | Swapping the immutable `TestRun` snapshot; `changed()` runs outside it and reads `current`, so whichever notification runs last sees the freshest run |
 | `lock`, `saveLock` | `testing/store/RunPersister.kt:24-25` | The pending-save job; and the read-the-run-then-write step, so a later save never writes an older run over a newer one |
 | `registryLock`, `publishLock` | `testing/run/TestRunCoordinator.kt:99-100` | Check-and-register of devices in use; assignment of the published snapshot list |
 | `lock` | `testing/store/TranscriptWriter.kt:18` | One JSON line appended at a time |
 | `testLibraryMirrorLock`, `testRunMirrorLock` | `ui/AppState.kt:1911,2013` | The `AppState` mirrors of the library and run flows: the value is read **inside** the lock so the last assignment is the freshest |
+| `testStorageLock` | `ui/AppState.kt:1928` | Switching the AI test folders (`reconcileTestStorage`, `initTestStorage`): swapping the `TestLibraryStore` and the pinned `activeTest*Dir` fields. **Leaf lock**; the library mirror and `forgetFinishedRuns()` are touched only after it is released |
 | `mutex` (coroutine `Mutex`) | `testing/run/StepSequence.kt:135` | A sequence's step state; with the `finishing` flag it makes `finish_step` and the watchdog mutually exclusive |
 | `stateLock` (existing) | `laneCaptureSerials`, `manualCaptureStartSerial` in `ui/AppState.kt` | The per-device claim of lane captures; the one place this feature takes `stateLock`, and only in `AppState` (never inside `testing/`). Claim and release are short and call nothing while holding it |
 | `LaneCaptureHandle.stopTablessOnce` (`@Synchronized`), `LaneNotes` (`AtomicReference`) | `ui/LaneCaptures.kt`, `ui/CaptureMarkerWriter.kt` | Leaf: start the one stop job of a tabless lane; compare-and-set of its notes |

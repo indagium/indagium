@@ -87,7 +87,7 @@ private fun TestRunList() {
     val ui = LocalTestsUi.current
     val runs = ui.state.testRuns
     val revision = runs.map { "${it.id}:${it.status}" }
-    val summaries by produceState<List<RunSummary>>(emptyList(), revision) { value = ui.state.testRunCoordinator.listRuns() }
+    val summaries by produceState<List<RunSummary>>(emptyList(), revision, ui.state.testRunsFolderEpoch) { value = ui.state.testRunCoordinator.listRuns() }
     TestsScreenScaffold {
         AppText("Runs", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(6.dp))
