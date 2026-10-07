@@ -1,5 +1,6 @@
 package com.indagium.debug
 
+import com.indagium.capture.videoPreset
 import com.indagium.edition.Edition
 import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
@@ -181,6 +182,120 @@ class TestRunToolsGatewayTest {
             ["error"].toString().contains("does not exist"))
         assertTrue(call("run_test_suite", "suiteId" to suiteId)["error"].toString().contains("lanes is required"))
         assertTrue(call("list_test_runs").list("runs").isEmpty())
+    }
+
+    @Test
+    fun theCaptureOptionsAndTheLaneTabChoiceStartFromSavedSettingsAndAreFrozenInTheRun() {
+        val suiteId = createSuite("A")
+        val saved = state.settings.captureSettings
+        val started = call(
+            "run_test_suite", "suiteId" to suiteId, "lanes" to listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL)),
+            "openLaneTabs" to false,
+            "capture" to mapOf(
+                "recordVideo" to false, "audio" to true, "includeEarlierDeviceLogs" to true, "keepDeviceAudio" to true,
+                "microphone" to "default", "deviceDisplay" to "scrcpy_window", "videoQuality" to "smooth",
+                "bufferMode" to "custom", "buffers" to listOf("main", "kernel"),
+            ),
+        )
+        assertEquals(null, started["error"], started.toString())
+        val config = state.testRunCoordinator.run(started["runId"] as String)!!.config
+        val capture = assertNotNull(config.capture)
+        assertEquals(false, config.openLaneTabs)
+        assertEquals(false, capture.recordVideo)
+        assertTrue(capture.audio && capture.includeBufferedLogs && capture.keepDeviceAudio)
+        assertEquals(com.indagium.capture.MICROPHONE_DEFAULT_ID, capture.microphoneDeviceId)
+        assertEquals(com.indagium.capture.CaptureMirrorMode.EXTERNAL, capture.mirrorMode)
+        assertEquals(com.indagium.capture.CaptureVideoPreset.SMOOTH, capture.videoPreset())
+        assertEquals(com.indagium.capture.CaptureBufferMode.CUSTOM, capture.bufferMode)
+        assertEquals(listOf("main", "kernel"), capture.buffers)
+        assertEquals(saved, state.settings.captureSettings, "the run's recording options are never written back to the saved settings")
+        call("cancel_test_run", "runId" to started["runId"])
+    }
+
+    @Test
+    fun withoutACaptureArgumentTheSavedCaptureSettingsAndALaneTabPerLaneApply() {
+        val suiteId = createSuite("A")
+        val (runId, _) = startExternal(suiteId)
+        val config = state.testRunCoordinator.run(runId)!!.config
+        assertEquals(state.settings.captureSettings, config.capture)
+        assertEquals(true, config.openLaneTabs)
+        call("cancel_test_run", "runId" to runId)
+    }
+
+    @Test
+    fun evidenceVideoDecidesWhetherTheScreenIsRecordedUnlessCaptureSaysSo() {
+        val suiteId = createSuite("A")
+        val lanes = listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL))
+        val viaEvidence = call("run_test_suite", "suiteId" to suiteId, "lanes" to lanes, "evidence" to mapOf("video" to false))
+        val first = state.testRunCoordinator.run(viaEvidence["runId"] as String)!!.config
+        assertEquals(false, first.capture?.recordVideo)
+        assertEquals(false, first.evidence.video)
+        call("cancel_test_run", "runId" to viaEvidence["runId"])
+        awaitStatus(viaEvidence["runId"] as String, "CANCELLED", "ERROR")
+
+        val explicit = call(
+            "run_test_suite", "suiteId" to suiteId, "lanes" to lanes,
+            "evidence" to mapOf("video" to false), "capture" to mapOf("recordVideo" to true),
+        )
+        val second = state.testRunCoordinator.run(explicit["runId"] as String)!!.config
+        assertEquals(true, second.capture?.recordVideo, "capture decides when it says so")
+        assertEquals(true, second.evidence.video)
+        call("cancel_test_run", "runId" to explicit["runId"])
+    }
+
+    @Test
+    fun badCaptureOptionsAndLaneOverridesAreRefusedAsDataAndNothingStarts() {
+        val suiteId = createSuite("A")
+        val external = listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL))
+
+        fun refused(vararg args: Pair<String, Any?>) =
+            call("run_test_suite", "suiteId" to suiteId, *args)["error"].toString()
+        assertTrue(refused("lanes" to external, "capture" to mapOf("nope" to true)).contains("no option nope"))
+        assertTrue(refused("lanes" to external, "capture" to mapOf("deviceDisplay" to "hologram")).contains("deviceDisplay"))
+        assertTrue(refused("lanes" to external, "capture" to mapOf("videoQuality" to "ultra")).contains("videoQuality"))
+        assertTrue(refused("lanes" to external, "capture" to mapOf("buffers" to listOf("main", "nope"))).contains("unknown buffer"))
+        assertTrue(refused("lanes" to external, "capture" to mapOf("audio" to "yes please")).contains("audio"))
+        assertTrue(refused("lanes" to external, "openLaneTabs" to "sometimes").contains("openLaneTabs"))
+        assertTrue(
+            refused("lanes" to listOf(mapOf("profileId" to "external", "deviceSerial" to FIXTURE_SERIAL, "model" to "m"))).contains("external lane"),
+        )
+
+        val profile = AiProviderProfile("p-open", "Open", "http://127.0.0.1:1234", "base", kind = AiProviderKind.OPENAI_COMPATIBLE)
+        state.updateSettings { it.copy(aiProviderProfiles = listOf(profile)) }
+        val agentLane = mapOf("profileId" to "p-open", "deviceSerial" to FIXTURE_SERIAL)
+        assertTrue(refused("lanes" to listOf(agentLane + ("reasoningEffort" to "xhigh"))).contains("not offered"))
+        assertTrue(refused("lanes" to listOf(agentLane + ("model" to 5))).contains("model has the wrong type"))
+        assertTrue(
+            refused("lanes" to external, "judgeProfileId" to "p-open", "judgeMode" to "every_step", "judgeReasoningEffort" to "max")
+                .contains("Judge"),
+        )
+        assertTrue(call("list_test_runs").list("runs").isEmpty())
+    }
+
+    @Test
+    fun theApprovalCardListsLaneModelsTheJudgeAndWhatIsRecorded() {
+        val suiteId = createSuite("A")
+        val profile = AiProviderProfile("p-open", "Open model", "http://127.0.0.1:1234", "base", kind = AiProviderKind.OPENAI_COMPATIBLE)
+        state.updateSettings { it.copy(aiProviderProfiles = listOf(profile)) }
+        val details = assertNotNull(
+            describeRunSuiteCall(
+                state,
+                mapOf(
+                    "suiteId" to suiteId,
+                    "lanes" to listOf(mapOf("profileId" to "p-open", "deviceSerial" to FIXTURE_SERIAL, "model" to "big-model", "reasoningEffort" to "high")),
+                    "judgeProfileId" to "p-open", "judgeMode" to "every_step", "judgeModel" to "judge-model", "judgeReasoningEffort" to "",
+                    "capture" to mapOf("recordVideo" to true, "audio" to true, "microphone" to "default", "videoQuality" to "compact"),
+                    "openLaneTabs" to false,
+                ),
+                "A client",
+            ),
+        )
+        val fields = details.fields.toMap()
+        assertTrue(fields.getValue("Lanes").contains("big-model · high effort"), fields.toString())
+        assertTrue(fields.getValue("Judge").contains("judge-model · default effort"), fields.toString())
+        val recording = fields.getValue("Recording")
+        assertTrue(recording.contains("Compact") && recording.contains("device audio") && recording.contains("microphone"), recording)
+        assertTrue(recording.contains("no lane tabs"), recording)
     }
 
     @Test

@@ -86,7 +86,7 @@ internal class TrackerIssueCreator(
         val session = AiSession(tabId)
         val segment = AgentSegmentRequest(
             session = session,
-            prompt = trackerPrompt(request.trackerName, request.instructions, request.record, markdownOf(request)),
+            prompt = trackerPrompt(request.trackerName, request.instructions, request.record, markdownOf(request)) { request.attachmentFile(it)?.absolutePath },
             systemPrompt = TRACKER_SYSTEM_PROMPT,
             context = AiInvestigationContext(tabId),
             gateway = tools.gateway,

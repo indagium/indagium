@@ -1,6 +1,7 @@
 package com.indagium.ui
 
 import com.indagium.capture.CaptureDevice
+import com.indagium.capture.CaptureSettings
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.model.ALLOWED_RUN_REPEATS
 import com.indagium.testing.model.CaseResult
@@ -54,8 +55,17 @@ internal fun deviceChoices(devices: List<CaptureDevice>, liveCaptureSerial: Stri
     devices.filter { it.available && it.serial != liveCaptureSerial }
         .map { DeviceChoice(it.serial, if (it.model == it.serial) it.serial else "${it.model} (${it.serial})") }
 
-/** One lane row of the dialog. [id] is stable so the row can be reordered; it becomes the lane's id in the run. */
-internal data class LaneDraft(val id: String = newLaneId(), val choice: LaneChoice? = null, val deviceSerial: String? = null)
+/**
+ * One lane row of the dialog. [id] is stable so the row can be reordered; it becomes the lane's id in the run. [model] and
+ * [reasoningEffort] override the chosen profile's own for this lane (null: the profile's value, see [LaneConfig.model]).
+ */
+internal data class LaneDraft(
+    val id: String = newLaneId(),
+    val choice: LaneChoice? = null,
+    val deviceSerial: String? = null,
+    val model: String? = null,
+    val reasoningEffort: String? = null,
+)
 
 /**
  * The dialog's inputs as the user left them. The first lane is [choice] + [deviceSerial]; the others are [moreLanes], in
@@ -76,14 +86,29 @@ internal data class RunDialogModel(
     /** From Settings > Testing; the dialog has no control for it. */
     val confirmationTimeoutMs: Long = DEFAULT_CONFIRMATION_TIMEOUT_MS,
     val rerunOf: String? = null,
+    /** The first lane's model / effort overrides ([moreLanes] carry their own). */
+    val firstLaneModel: String? = null,
+    val firstLaneEffort: String? = null,
+    val judgeModel: String? = null,
+    val judgeReasoningEffort: String? = null,
+    /** The recording the lanes do: the saved capture settings, edited for this run only. Null until the dialog has read them. */
+    val capture: CaptureSettings? = null,
+    val openLaneTabs: Boolean = true,
 ) {
     /** Every lane row, first lane first. */
-    fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial)) + moreLanes
+    fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial, firstLaneModel, firstLaneEffort)) + moreLanes
 
     /** The model with [lanes] as its lane rows (at least one: an empty list leaves the model as it is). */
     fun withLanes(lanes: List<LaneDraft>): RunDialogModel {
         val first = lanes.firstOrNull() ?: return this
-        return copy(choice = first.choice, deviceSerial = first.deviceSerial, firstLaneId = first.id, moreLanes = lanes.drop(1))
+        return copy(
+            choice = first.choice,
+            deviceSerial = first.deviceSerial,
+            firstLaneId = first.id,
+            firstLaneModel = first.model,
+            firstLaneEffort = first.reasoningEffort,
+            moreLanes = lanes.drop(1),
+        )
     }
 
     fun addLane(draft: LaneDraft): RunDialogModel = withLanes(allLanes() + draft)
@@ -134,6 +159,8 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             kind = if (chosen.isExternal) LaneKind.EXTERNAL else LaneKind.AGENT_PROFILE,
             profileId = chosen.profileId,
             deviceSerial = checkNotNull(draft.deviceSerial),
+            model = draft.model?.trim()?.takeIf { it.isNotEmpty() && !chosen.isExternal },
+            reasoningEffort = draft.reasoningEffort?.takeIf { !chosen.isExternal },
         )
     }
     val everyCase = selectedCaseIds == allCaseIds.toSet()
@@ -144,11 +171,16 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             lanes = lanes,
             repeat = repeat,
             caseToolCallLimit = toolLimitText.trim().toInt(),
-            evidence = evidence,
+            // The recording section owns "record video"; the evidence flag only says the video is kept as evidence.
+            evidence = capture?.let { evidence.copy(video = it.recordVideo) } ?: evidence,
             judgeProfileId = judgeProfileId?.takeIf { judgeMode != JudgeMode.OFF },
             judgeMode = judgeMode.wire,
             confirmationTimeoutMs = confirmationTimeoutMs,
             rerunOf = rerunOf,
+            judgeModel = judgeModel?.trim()?.takeIf { it.isNotEmpty() && judgeMode != JudgeMode.OFF },
+            judgeReasoningEffort = judgeReasoningEffort?.takeIf { judgeMode != JudgeMode.OFF },
+            capture = capture,
+            openLaneTabs = openLaneTabs,
         ),
     )
 }
@@ -160,6 +192,8 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
             id = newLaneId(),
             choice = choices.firstOrNull { it.profileId == lane.profileId },
             deviceSerial = lane.deviceSerial,
+            model = lane.model,
+            reasoningEffort = lane.reasoningEffort,
         )
     }
     val first = lanes.firstOrNull() ?: allLanes().first()
@@ -177,6 +211,12 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
         firstLaneId = first.id,
         confirmationTimeoutMs = config.confirmationTimeoutMs,
         rerunOf = config.rerunOf,
+        firstLaneModel = first.model,
+        firstLaneEffort = first.reasoningEffort,
+        judgeModel = config.judgeModel,
+        judgeReasoningEffort = config.judgeReasoningEffort,
+        capture = config.capture ?: capture,
+        openLaneTabs = config.openLaneTabs,
     )
 }
 
@@ -194,6 +234,13 @@ internal fun RunDialogModel.withTestingDefaults(testing: TestingSettings, profil
         confirmationTimeoutMs = testing.confirmationTimeoutMs,
     )
 }
+
+/**
+ * The recording a new run dialog starts from: the user's saved capture settings (what a manual live capture would use), with video
+ * also on when Settings > Testing keeps video as default evidence. Edits in the dialog change this run only.
+ */
+internal fun RunDialogModel.withCaptureDefaults(saved: CaptureSettings, testing: TestingSettings): RunDialogModel =
+    copy(capture = saved.copy(recordVideo = saved.recordVideo || testing.evidence.video))
 
 // ── Report ───────────────────────────────────────────────────────────
 

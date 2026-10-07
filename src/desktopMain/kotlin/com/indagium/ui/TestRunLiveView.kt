@@ -23,6 +23,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.TestLaneTabRef
 import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepStatus
@@ -94,6 +95,10 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, tick:
             StatusChip(column.status.label(), runColor(column.status))
         }
         AppText(column.deviceSerial, color = tc.td, fontSize = 10.sp, fontFamily = MONO, maxLines = 1)
+        // The lane's capture tab was opened quietly; this is how to go and look at it (live mirror, markers, Save ZIP).
+        val ui = LocalTestsUi.current
+        val laneTab = ui.state.tabs.firstOrNull { it.testLane == TestLaneTabRef(run.id, column.laneId) }
+        if (laneTab != null) AppButton("Open capture tab", onClick = { ui.state.activateTab(laneTab.id) }, variant = ButtonVariant.Ghost)
         column.currentCase?.let { AppText(it, color = tc.ts, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         if (column.status == RunStatus.RUNNING) {
             column.currentStep?.let { AppText(it, color = tc.tx, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }

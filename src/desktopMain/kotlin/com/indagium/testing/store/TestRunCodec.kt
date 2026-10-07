@@ -1,5 +1,7 @@
 package com.indagium.testing.store
 
+import com.indagium.capture.captureSettingsFromJson
+import com.indagium.capture.captureSettingsToJson
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckResult
@@ -62,6 +64,8 @@ private fun laneConfigToJson(lane: LaneConfig): JsonObject = buildJsonObject {
     put("kind", lane.kind.name)
     putIfNotNull("profileId", lane.profileId)
     put("deviceSerial", lane.deviceSerial)
+    putIfNotNull("model", lane.model)
+    putIfNotNull("reasoningEffort", lane.reasoningEffort)
 }
 
 private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
@@ -84,6 +88,10 @@ private fun configToJson(config: RunConfig): JsonObject = buildJsonObject {
     put("judgeMode", config.judgeMode)
     putIfNotNull("stopAfterStepId", config.stopAfterStepId)
     putIfNotNull("rerunOf", config.rerunOf)
+    putIfNotNull("judgeModel", config.judgeModel)
+    putIfNotNull("judgeReasoningEffort", config.judgeReasoningEffort)
+    config.capture?.let { put("capture", Json.parseToJsonElement(captureSettingsToJson(it))) }
+    put("openLaneTabs", config.openLaneTabs)
 }
 
 private fun checkResultToJson(check: CheckResult): JsonObject = buildJsonObject {
@@ -201,6 +209,8 @@ private fun decodeLaneConfig(o: JsonObject): LaneConfig? {
         kind = o.enumOr("kind", LaneKind.AGENT_PROFILE),
         profileId = o.optStr("profileId"),
         deviceSerial = serial,
+        model = o.optStr("model"),
+        reasoningEffort = o.optStr("reasoningEffort"),
     )
 }
 
@@ -223,6 +233,10 @@ private fun decodeConfig(o: JsonObject): RunConfig {
         judgeMode = o.str("judgeMode", JudgeMode.OFF.wire),
         stopAfterStepId = o.optStr("stopAfterStepId"),
         rerunOf = o.optStr("rerunOf"),
+        judgeModel = o.optStr("judgeModel"),
+        judgeReasoningEffort = o.optStr("judgeReasoningEffort"),
+        capture = (o["capture"] as? JsonObject)?.let { captureSettingsFromJson(it.toString()) },
+        openLaneTabs = o.bool("openLaneTabs", true),
     )
 }
 

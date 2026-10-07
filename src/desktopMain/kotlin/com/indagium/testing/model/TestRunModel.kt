@@ -1,5 +1,7 @@
 package com.indagium.testing.model
 
+import com.indagium.capture.CaptureSettings
+
 // Domain types of an AI test RUN: what was asked for (RunConfig), the frozen copy of what was run (TestRun.suite and
 // friends) and what happened (lane, case and step results). Pure data and immutable: the engine replaces a result by
 // copying it, so a snapshot handed to the UI or written to run.json is never mutated underneath its reader.
@@ -30,13 +32,30 @@ enum class RunStatus { QUEUED, RUNNING, PASSED, FAILED, CANCELLED, ERROR }
 /** AGENT_PROFILE: an AI profile drives the lane. EXTERNAL: nobody does; a client drives it through `test_lane_tool_call`. */
 enum class LaneKind { AGENT_PROFILE, EXTERNAL }
 
-/** [profileId] is the AI profile of an AGENT_PROFILE lane and null for an EXTERNAL one. */
+/**
+ * [profileId] is the AI profile of an AGENT_PROFILE lane and null for an EXTERNAL one. [model] and [reasoningEffort] override the
+ * profile's own model and reasoning effort for this lane only; null means "the profile's value" and an empty [reasoningEffort]
+ * means "the model's default effort" (it overrides a profile that sets one). Both are appended last: older run files have none.
+ */
 data class LaneConfig(
     val id: String = newLaneId(),
     val kind: LaneKind,
     val profileId: String? = null,
     val deviceSerial: String,
+    val model: String? = null,
+    val reasoningEffort: String? = null,
 )
+
+/**
+ * "profile · model · effort" of a lane, for the live view, the report and Markdown. [profileName] is how the profile is called
+ * (null: the lane's profile id); a model or effort the lane does not set is left out, an empty effort reads "default effort".
+ */
+fun LaneConfig.driverLabel(profileName: String? = null): String =
+    listOfNotNull(profileName?.takeIf { it.isNotBlank() } ?: profileId, modelAndEffortLabel().ifEmpty { null }).joinToString(" · ")
+
+/** "model · effort" of a lane, empty when it sets neither. */
+fun LaneConfig.modelAndEffortLabel(): String =
+    listOfNotNull(model?.takeIf { it.isNotBlank() }, reasoningEffort?.takeIf { it.isNotBlank() }?.let { "$it effort" }).joinToString(" · ")
 
 /** What a run keeps as evidence. Logcat is always recorded while the run is live; [logcat] says whether it is kept afterwards. */
 data class EvidenceFlags(
@@ -65,6 +84,17 @@ data class RunConfig(
     val judgeMode: String = JudgeMode.OFF.wire,
     val stopAfterStepId: String? = null,
     val rerunOf: String? = null,
+    /** Overrides of the judge profile's model and reasoning effort (same rules as [LaneConfig.model]). Appended last. */
+    val judgeModel: String? = null,
+    val judgeReasoningEffort: String? = null,
+    /**
+     * What every lane records while it works: the capture settings the run was started with (the user's saved ones, edited for this
+     * run only). Null (an old run file, or a caller that did not choose) means the lane records logcat and, with [EvidenceFlags.video],
+     * the screen with the defaults.
+     */
+    val capture: CaptureSettings? = null,
+    /** True: each lane opens a real live capture tab for the run. False: it records the same way without a tab. */
+    val openLaneTabs: Boolean = true,
 )
 
 /** The judge mode of this config; an unknown text counts as OFF. */

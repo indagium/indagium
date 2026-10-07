@@ -7,6 +7,7 @@ import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.model.IssueSeverity
 import com.indagium.testing.model.IssueStatus
 import com.indagium.testing.model.RecheckOutcome
+import com.indagium.testing.model.isPendingCaptureArchive
 import com.indagium.testing.model.normalizeTags
 import com.indagium.testing.run.formatByteSize
 
@@ -95,7 +96,8 @@ internal fun createLabel(destination: IssueDestination, trackerName: String = "t
 }
 
 /** One line per evidence attachment for the checklist: label and size. */
-internal fun IssueAttachment.checklistLabel(): String = "$label · ${formatByteSize(sizeBytes)}"
+internal fun IssueAttachment.checklistLabel(): String =
+    if (isPendingCaptureArchive) "$label · about ${formatByteSize(sizeBytes)}, exported when the issue is created" else "$label · ${formatByteSize(sizeBytes)}"
 
 internal fun IssueStatus.label(): String = when (this) {
     IssueStatus.DRAFT -> "Draft"

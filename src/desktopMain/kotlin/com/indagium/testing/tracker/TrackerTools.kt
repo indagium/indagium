@@ -6,6 +6,7 @@ import com.indagium.debug.ToolArgException
 import com.indagium.debug.ToolArgs
 import com.indagium.debug.schema
 import com.indagium.testing.model.IssueAttachment
+import com.indagium.testing.model.IssueAttachmentKind
 import com.indagium.testing.model.IssueRecord
 import com.indagium.testing.run.label
 import com.indagium.testing.script.untrustedData
@@ -167,6 +168,12 @@ internal class TrackerTools(
         val attachment = attachments.firstOrNull { it.fileName == name }
             ?: return Loaded.Failed("This issue has no attachment named '$name'; its attachments are ${attachmentNames()}.")
         val file = attachmentFile(attachment) ?: return Loaded.Failed("The file of attachment '$name' is not available.")
+        if (attachment.kind == IssueAttachmentKind.CAPTURE_ARCHIVE) {
+            return Loaded.Failed(
+                "Attachment '$name' is the lane's whole capture archive (${file.length() / BYTES_PER_MB} MB) and is never sent through the agent. " +
+                    "Refer to it in the issue by its name and its location on the reporter's computer (see get_issue_draft).",
+            )
+        }
         if (file.length() > MAX_ATTACHMENT_BYTES) {
             return Loaded.Failed("Attachment '$name' is larger than ${MAX_ATTACHMENT_BYTES / BYTES_PER_MB} MB and cannot be sent through the agent.")
         }
@@ -192,7 +199,19 @@ internal class TrackerTools(
         val environment = draft.environment
         return mapOf(
             "issueId" to record.id,
-            "attachments" to attachments.map { mapOf("name" to it.fileName, "kind" to it.kind.label(), "sizeBytes" to it.sizeBytes, "note" to it.note) },
+            "attachments" to attachments.map { attachment ->
+                buildMap {
+                    put("name", attachment.fileName)
+                    put("kind", attachment.kind.label())
+                    put("sizeBytes", attachment.sizeBytes)
+                    put("note", attachment.note)
+                    if (attachment.kind == IssueAttachmentKind.CAPTURE_ARCHIVE) {
+                        // Far too big to upload: the agent is given where it is, as a reference for the issue text, never its bytes.
+                        put("uploadable", false)
+                        attachmentFile(attachment)?.let { put("path", it.absolutePath) }
+                    }
+                }
+            },
         ) + untrustedData(
             "issue_draft",
             mapOf(

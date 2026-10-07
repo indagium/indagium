@@ -129,6 +129,35 @@ class TrackerIssueCreatorTest {
         assertFalse(answer.toString().contains(dir.absolutePath), "no path of this computer is exposed")
     }
 
+    @Test
+    fun theCaptureArchiveIsGivenToTheAgentByPathAndNeverByContent() {
+        val record = storeIssue(
+            "Crash",
+            listOf(
+                attachment("shot.png", IssueAttachmentKind.SCREENSHOT, ByteArray(10)),
+                attachment("capture-archive.zip", IssueAttachmentKind.CAPTURE_ARCHIVE, ByteArray(3_000) { 1 }),
+            ),
+        )
+        val t = tools(record)
+
+        val entries = run(t, "get_issue_draft")["attachments"] as List<*>
+        val archive = entries.map { it as Map<*, *> }.single { it["name"] == "capture-archive.zip" }
+        assertEquals(false, archive["uploadable"])
+        assertTrue(archive["path"].toString().endsWith("capture-archive.zip"), "a reference for the issue text: $archive")
+        assertFalse(entries.map { it as Map<*, *> }.single { it["name"] == "shot.png" }.containsKey("path"), "small evidence is uploaded, not referenced")
+
+        val refused = run(t, "read_issue_attachment", "name" to "capture-archive.zip")
+        assertTrue(refused["error"].toString().contains("never sent through the agent"), refused.toString())
+        assertFalse(refused.containsKey("base64"))
+        assertTrue(run(t, "read_issue_attachment", "name" to "shot.png").containsKey("base64"))
+
+        val path = store.attachmentFile(record, record.draft.attachments.single { it.kind == IssueAttachmentKind.CAPTURE_ARCHIVE })!!.absolutePath
+        val prompt = trackerPrompt("Jira", USER_PROMPT, record, "# md") { store.attachmentFile(record, it)?.absolutePath }
+        val uploadable = prompt.substringAfter("Attachments you may upload").substringBefore("Too big to upload")
+        assertTrue(uploadable.contains("shot.png") && !uploadable.contains("capture-archive.zip"), prompt)
+        assertTrue(prompt.substringAfter("Too big to upload").contains(path), prompt)
+    }
+
     // ── Attachments: only this issue's, bounded ──────────────────────
 
     @Test

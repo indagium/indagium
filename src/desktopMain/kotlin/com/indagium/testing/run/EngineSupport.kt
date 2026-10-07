@@ -2,9 +2,11 @@ package com.indagium.testing.run
 
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
+import com.indagium.capture.CaptureSettings
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.LaneConfig
+import com.indagium.testing.model.driverLabel
 import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RUN_SAVE_DEBOUNCE_MS
@@ -17,9 +19,29 @@ import java.io.File
 // Seams and small helpers of the run engine: how a lane's device is opened, the engine's timings (shortened by tests),
 // and the tail that copies an agent run's events into the lane's transcript.
 
-/** Opens the headless device lane of one run lane. Production wires adb and the live-capture guard; tests give a fake adb. */
+/**
+ * What a lane's device is opened for: the lane's identity (so its capture tab can name it), where its files go, what to record and
+ * whether a real live capture tab is opened for it.
+ */
+internal class LaneOpenRequest(
+    val runId: String,
+    val laneId: String,
+    val serial: String,
+    val laneDir: File,
+    /** Who drives the lane ("Claude Code · opus · high effort", "external"), for the title of its capture tab. */
+    val agentLabel: String,
+    val capture: CaptureSettings,
+    val openTab: Boolean,
+)
+
+/**
+ * Opens the device lane of one run lane. Production starts a real capture (ui/LaneCaptures.kt); tests give a fake adb. A test that
+ * only cares about the device overrides the three-argument [open]; the engine calls [open] with the whole [LaneOpenRequest].
+ */
 internal fun interface LaneDeviceOpener {
     suspend fun open(serial: String, laneDir: File, recordVideo: Boolean): TestDeviceSession
+
+    suspend fun open(request: LaneOpenRequest): TestDeviceSession = open(request.serial, request.laneDir, request.capture.recordVideo)
 }
 
 internal data class EngineTuning(
@@ -71,10 +93,21 @@ internal class EngineDeps(
     val goldenFile: (suiteId: String, assetPath: String) -> File? = { _, _ -> null },
     /** Marks an external protocol job after its paid dispatch has passed the sequence guard. */
     val externalDispatchAdmitted: (Job?, String?, Int) -> Unit = { _, _, _ -> },
+    /** How a lane is named where a person reads it (its capture tab): the profile's name with the model and effort it runs with. */
+    val laneLabel: (LaneConfig) -> String = { lane -> lane.driverLabel().ifBlank { "agent" } },
 )
 
 /** The first profile with [profileId], or null. */
 internal fun List<AiProviderProfile>.profileOrNull(profileId: String?): AiProviderProfile? = firstOrNull { it.id == profileId }
+
+/**
+ * The profile as one lane (or the judge) of a run uses it: [model] and [reasoningEffort] replace the profile's own when given. A
+ * blank [model] counts as "not given"; an empty [reasoningEffort] is a real choice (the model's default effort).
+ */
+internal fun AiProviderProfile.withRunOverrides(model: String?, reasoningEffort: String?): AiProviderProfile = copy(
+    model = model?.trim()?.takeIf { it.isNotEmpty() } ?: this.model,
+    reasoningEffort = reasoningEffort?.trim() ?: this.reasoningEffort,
+)
 
 private const val MAX_LOGGED_ARGUMENT_CHARS = 2_000
 private const val MAX_LOGGED_RESULT_CHARS = 2_000

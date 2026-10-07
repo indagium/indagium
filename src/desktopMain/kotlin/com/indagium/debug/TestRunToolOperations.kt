@@ -89,7 +89,15 @@ internal class TestRunToolOperations(private val appState: AppState) {
         is StartRunResult.Started -> mapOf(
             "runId" to started.runId,
             "laneIds" to started.laneIds,
-            "lanes" to config.lanes.map { mapOf("laneId" to it.id, "kind" to it.kind.name, "deviceSerial" to it.deviceSerial) },
+            "lanes" to config.lanes.map {
+                buildMap {
+                    put("laneId", it.id)
+                    put("kind", it.kind.name)
+                    put("deviceSerial", it.deviceSerial)
+                    it.model?.let { model -> put("model", model) }
+                    it.reasoningEffort?.let { effort -> put("reasoningEffort", effort) }
+                }
+            },
             "warnings" to started.warnings,
         )
         is StartRunResult.Rejected -> {
@@ -115,19 +123,24 @@ internal class TestRunToolOperations(private val appState: AppState) {
     private fun parseConfig(a: ToolArgs): RunConfig {
         val lanes = (a.objects("lanes") ?: toolArgError("lanes is required.")).mapIndexed { index, item ->
             val where = "lanes[$index]"
-            requireFieldTypes(item, where, strings = setOf("profileId", "deviceSerial"))
+            requireFieldTypes(item, where, strings = setOf("profileId", "deviceSerial", "model", "reasoningEffort"))
             val profileId = (item["profileId"] as? String)?.trim().orEmpty()
             val serial = (item["deviceSerial"] as? String)?.trim().orEmpty()
             if (profileId.isEmpty()) toolArgError("$where.profileId is required (an AI profile id, or \"$EXTERNAL_LANE_PROFILE_ID\").")
             if (serial.isEmpty()) toolArgError("$where.deviceSerial is required.")
+            val model = modelOverride(item["model"])
+            val effort = effortOverride(item["reasoningEffort"])
             if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) {
+                if (model != null || effort != null) toolArgError("$where: an external lane has no AI model, so model and reasoningEffort do not apply.")
                 LaneConfig(kind = LaneKind.EXTERNAL, profileId = null, deviceSerial = serial)
             } else {
-                LaneConfig(kind = LaneKind.AGENT_PROFILE, profileId = profileId, deviceSerial = serial)
+                LaneConfig(kind = LaneKind.AGENT_PROFILE, profileId = profileId, deviceSerial = serial, model = model, reasoningEffort = effort)
             }
         }
         val evidence = a.map["evidence"]?.asObject("evidence")
         val defaults = EvidenceFlags()
+        val videoHint = if (evidence?.get("video") != null) evidence.flag("video", defaults.video) else null
+        val capture = parseRunCapture(a.map["capture"], appState.settings.captureSettings, videoHint)
         return RunConfig(
             suiteId = a.requiredString("suiteId"),
             caseIds = a.strings("caseIds"),
@@ -135,14 +148,32 @@ internal class TestRunToolOperations(private val appState: AppState) {
             repeat = a.int("repeat") ?: 1,
             caseToolCallLimit = a.int("caseToolCallLimit") ?: DEFAULT_CASE_TOOL_CALL_LIMIT,
             evidence = EvidenceFlags(
-                video = evidence.flag("video", defaults.video),
+                video = capture.recordVideo,
                 screenshots = evidence.flag("screenshots", defaults.screenshots),
                 logcat = evidence.flag("logcat", defaults.logcat),
                 transcript = evidence.flag("transcript", defaults.transcript),
             ),
             judgeProfileId = a.string("judgeProfileId")?.trim()?.takeIf { it.isNotEmpty() },
             judgeMode = judgeModeOf(a),
+            judgeModel = modelOverride(a.map["judgeModel"]),
+            judgeReasoningEffort = effortOverride(a.map["judgeReasoningEffort"]),
+            capture = capture,
+            openLaneTabs = a.bool("openLaneTabs") ?: true,
         )
+    }
+
+    /** A model override: absent or blank is "the profile's own model". Whether the profile accepts it is checked by the run's validation. */
+    private fun modelOverride(raw: Any?): String? = when (raw) {
+        null -> null
+        is String -> raw.trim().takeIf { it.isNotEmpty() }
+        else -> toolArgError("model must be a string.")
+    }
+
+    /** An effort override: absent is "the profile's own effort", an empty string is "the model's default effort". */
+    private fun effortOverride(raw: Any?): String? = when (raw) {
+        null -> null
+        is String -> raw.trim().lowercase()
+        else -> toolArgError("reasoningEffort must be a string.")
     }
 
     /** The wire name of the judge mode, or a refusal for an unknown one (the codec would read it as OFF and hide the mistake). */
@@ -199,6 +230,8 @@ internal class TestRunToolOperations(private val appState: AppState) {
         put("laneId", lane.laneId)
         put("kind", lane.config.kind.name)
         put("profileId", lane.config.profileId)
+        lane.config.model?.let { put("model", it) }
+        lane.config.reasoningEffort?.let { put("reasoningEffort", it) }
         put("deviceSerial", lane.config.deviceSerial)
         put("status", lane.status.name)
         lane.error?.let { put("error", it) }

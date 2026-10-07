@@ -1,5 +1,6 @@
 package com.indagium.testing.run
 
+import com.indagium.ai.aiProviderFallbackReasoningEfforts
 import com.indagium.ai.isLoopbackHost
 import com.indagium.ai.validateAiProviderProfile
 import com.indagium.edition.EditionLimits
@@ -22,6 +23,8 @@ import com.indagium.testing.model.TestSuite
 import java.net.URI
 
 private const val MAX_REPORTED_ACTION_CHARS = 80
+private const val MAX_MODEL_OVERRIDE_CHARS = 200
+private const val MAX_EFFORT_OVERRIDE_CHARS = 16
 
 // Checks a RunConfig against the library, the edition limits and the AI profiles BEFORE anything starts. Every
 // problem is returned as data (a list of messages, plus the limit decision when the edition refused), never thrown, so
@@ -54,6 +57,28 @@ internal fun profileProblems(label: String, profile: AiProviderProfile, apiKey: 
     }
 }
 
+/**
+ * The problems of a model / reasoning-effort override of [profile] (a lane's or the judge's), each starting with [label]. The model
+ * is only checked for shape (the provider's own catalog is not asked here); the effort is checked against what the profile's kind
+ * accepts when that is a fixed set. An empty effort is always fine: it asks for the model's default.
+ */
+internal fun overrideProblems(label: String, profile: AiProviderProfile, model: String?, reasoningEffort: String?): List<String> {
+    val problems = ArrayList<String>()
+    if (model != null && (model.length > MAX_MODEL_OVERRIDE_CHARS || model.any { it.isISOControl() })) {
+        problems += "$label: the model must be a single line of at most $MAX_MODEL_OVERRIDE_CHARS characters."
+    }
+    if (!reasoningEffort.isNullOrEmpty()) {
+        val known = aiProviderFallbackReasoningEfforts(profile.kind)
+        val valid = reasoningEffort.length <= MAX_EFFORT_OVERRIDE_CHARS && reasoningEffort.all { it in 'a'..'z' }
+        when {
+            !valid -> problems += "$label: the reasoning effort must be a short lowercase word such as medium."
+            known != null && reasoningEffort !in known ->
+                problems += "$label: the reasoning effort '$reasoningEffort' is not offered by ${profile.kind.label}; use one of ${known.joinToString(", ")}."
+        }
+    }
+    return problems
+}
+
 private fun laneProblems(config: RunConfig, profiles: List<AiProviderProfile>, apiKey: (String) -> String): List<String> {
     val errors = ArrayList<String>()
     if (config.lanes.isEmpty()) errors += "A run needs at least one lane."
@@ -62,9 +87,20 @@ private fun laneProblems(config: RunConfig, profiles: List<AiProviderProfile>, a
         val label = "Lane ${position + 1}"
         if (!seenIds.add(lane.id)) errors += "$label has the same id as another lane."
         if (lane.deviceSerial.isBlank()) errors += "$label needs a device."
-        if (lane.kind == LaneKind.EXTERNAL) continue
+        if (lane.kind == LaneKind.EXTERNAL) {
+            if (lane.model != null || lane.reasoningEffort != null) {
+                errors += "$label: an external lane has no AI model, so a model or reasoning effort cannot be set for it."
+            }
+            continue
+        }
         val profile = profiles.profileOrNull(lane.profileId)
-        if (profile == null) errors += "$label: the AI profile '${lane.profileId}' does not exist." else errors += profileProblems(label, profile, apiKey)
+        if (profile == null) {
+            errors += "$label: the AI profile '${lane.profileId}' does not exist."
+        } else {
+            val effective = profile.withRunOverrides(lane.model, lane.reasoningEffort)
+            errors += overrideProblems(label, profile, lane.model, lane.reasoningEffort)
+            errors += profileProblems(label, effective, apiKey)
+        }
     }
     return errors
 }
@@ -77,10 +113,16 @@ private fun judgeProblems(config: RunConfig, profiles: List<AiProviderProfile>, 
         mode == null -> listOf("judgeMode must be one of ${JudgeMode.entries.joinToString(", ") { it.wire }}.")
         mode == JudgeMode.OFF -> {
             if (profileId != null) warnings += "A judge profile was chosen but the judge mode is off; no judge runs."
+            if (config.judgeModel != null || config.judgeReasoningEffort != null) {
+                warnings += "A judge model or reasoning effort was given but the judge mode is off; they are ignored."
+            }
             emptyList()
         }
         profileId == null -> listOf("The judge mode is ${mode.wire}, so a judge profile is needed.")
-        else -> profiles.profileOrNull(profileId)?.let { profileProblems("Judge", it, apiKey) } ?: listOf("The judge profile '$profileId' does not exist.")
+        else -> profiles.profileOrNull(profileId)?.let { profile ->
+            overrideProblems("Judge", profile, config.judgeModel, config.judgeReasoningEffort) +
+                profileProblems("Judge", profile.withRunOverrides(config.judgeModel, config.judgeReasoningEffort), apiKey)
+        } ?: listOf("The judge profile '$profileId' does not exist.")
     }
 }
 

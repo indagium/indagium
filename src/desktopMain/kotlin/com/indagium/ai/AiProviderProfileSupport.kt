@@ -1,5 +1,6 @@
 package com.indagium.ai
 
+import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
 import com.indagium.model.defaultAiProviderProfile
 import java.net.URI
@@ -14,6 +15,22 @@ enum class AiProviderUrlProblem(val message: String) {
         "Acknowledge that logs, source context, device screen images, and tool results may leave " +
             "this device, and that a plain HTTP (non-HTTPS) endpoint also sends your API key unencrypted.",
     ),
+}
+
+/** The fixed low/medium/high reasoning levels of the OpenAI-compatible and Anthropic providers. */
+internal val STANDARD_REASONING_EFFORTS: List<String> = listOf("low", "medium", "high")
+
+/** Claude Code CLI `--effort` accepts exactly these documented levels. */
+internal val CLAUDE_CODE_REASONING_EFFORTS: List<String> = listOf("low", "medium", "high", "xhigh", "max")
+
+/**
+ * The reasoning levels worth offering for [kind] when no model catalog says better; null when the kind has no fixed set (Codex reports
+ * its levels per model). A profile's HTTP model may expose none at all: the catalog ([LlmModel.reasoningEfforts]) is what decides that.
+ */
+fun aiProviderFallbackReasoningEfforts(kind: AiProviderKind): List<String>? = when (kind) {
+    AiProviderKind.OPENAI_COMPATIBLE, AiProviderKind.OPENAI_API, AiProviderKind.ANTHROPIC_API -> STANDARD_REASONING_EFFORTS
+    AiProviderKind.CLAUDE_CODE_ACCOUNT -> CLAUDE_CODE_REASONING_EFFORTS
+    AiProviderKind.CODEX_ACCOUNT -> null
 }
 
 data class AiProviderUrlValidation(val problem: AiProviderUrlProblem? = null) {

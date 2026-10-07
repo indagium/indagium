@@ -9,6 +9,7 @@ import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.judge
 import com.indagium.testing.model.judgeActive
+import com.indagium.testing.model.modelAndEffortLabel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -96,7 +97,14 @@ private fun StringBuilder.case(case: CaseResult) {
 
 private fun StringBuilder.lane(lane: LaneResult) {
     append("\n### Lane ").append(lane.config.deviceSerial).append(" — ").append(lane.status.name).append('\n')
-    append(if (lane.config.profileId != null) "Driven by AI profile `${lane.config.profileId}`.\n" else "Driven externally over MCP.\n")
+    append(
+        if (lane.config.profileId != null) {
+            "Driven by AI profile `${lane.config.profileId}`" +
+                lane.config.modelAndEffortLabel().let { if (it.isEmpty()) "" else " ($it)" } + ".\n"
+        } else {
+            "Driven externally over MCP.\n"
+        },
+    )
     lane.error?.let { append("Error: ").append(it).append('\n') }
     lane.cases.forEach { case(it) }
     lane.toolCalls.takeLast(MAX_TOOL_ACTIVITY_IN_MARKDOWN).forEach { call ->

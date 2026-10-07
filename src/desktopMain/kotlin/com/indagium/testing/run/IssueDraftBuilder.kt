@@ -250,8 +250,8 @@ internal fun readByteRangeTail(file: File, start: Long?, end: Long?, maxBytes: I
     return text.takeIf { it.isNotBlank() }
 }
 
-private fun textAttachment(kind: IssueAttachmentKind, label: String, fileName: String, text: String) =
-    IssueAttachment(kind, label, fileName, sizeBytes = text.toByteArray(Charsets.UTF_8).size.toLong(), text = text)
+private fun textAttachment(kind: IssueAttachmentKind, label: String, fileName: String, text: String, include: Boolean = true) =
+    IssueAttachment(kind, label, fileName, sizeBytes = text.toByteArray(Charsets.UTF_8).size.toLong(), include = include, text = text)
 
 private fun fileAttachment(kind: IssueAttachmentKind, label: String, fileName: String, file: File, include: Boolean = true, note: String = "") =
     IssueAttachment(kind, label, fileName, sizeBytes = file.length(), include = include, sourcePath = file.absolutePath, note = note)
@@ -265,19 +265,23 @@ private fun goldenOf(step: TestStep): StepExample.GoldenScreenshot? {
 private fun issueAttachments(context: IssueDraftContext, lane: LaneResult, step: StepResult, definition: TestStep, logText: String?): List<IssueAttachment> {
     val runDir = context.runDir
     return buildList {
+        // The whole lane recording leads the list and is wanted by default; the single files below stay available but unchecked
+        // (they are part of it), except the step's screenshot and the judge's verdict, the two small things worth reading first.
+        pendingCaptureArchiveAttachment(runDir, lane)?.let { add(it) }
         step.screenshotPath?.takeIf { it.isNotBlank() }?.let { File(runDir, it) }?.takeIf { it.isFile }?.let { file ->
             add(fileAttachment(IssueAttachmentKind.SCREENSHOT, "Screenshot at the end of the step", "screenshot.${file.extension.ifBlank { "png" }}", file))
         }
         goldenOf(definition)?.let { golden -> context.goldenFile(context.run.suite.id, golden.assetPath) }?.takeIf { it.isFile }?.let { file ->
-            add(fileAttachment(IssueAttachmentKind.GOLDEN, "Expected (golden) screenshot", "expected.${file.extension.ifBlank { "png" }}", file))
+            val name = "expected.${file.extension.ifBlank { "png" }}"
+            add(fileAttachment(IssueAttachmentKind.GOLDEN, "Expected (golden) screenshot", name, file, include = false))
         }
-        logText?.let { add(textAttachment(IssueAttachmentKind.LOG_RANGE, "Log during the step", "log-range.txt", it)) }
+        logText?.let { add(textAttachment(IssueAttachmentKind.LOG_RANGE, "Log during the step", "log-range.txt", it, include = false)) }
         step.judge?.let { judge ->
             val json = prettyJson.encodeToString(JsonElement.serializer(), judgementToJson(judge))
             add(textAttachment(IssueAttachmentKind.JUDGE_VERDICT, "Judge verdict", "judge-verdict.json", json))
         }
         lane.transcriptPath?.let { File(runDir, it) }
             ?.let { readByteRangeTail(it, step.transcriptStartOffset, step.transcriptEndOffset, MAX_ISSUE_TRANSCRIPT_BYTES) }
-            ?.let { add(textAttachment(IssueAttachmentKind.TRANSCRIPT, "Agent transcript during the step", "transcript-slice.jsonl", it)) }
+            ?.let { add(textAttachment(IssueAttachmentKind.TRANSCRIPT, "Agent transcript during the step", "transcript-slice.jsonl", it, include = false)) }
     }
 }

@@ -43,6 +43,7 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.driverLabel
 import com.indagium.testing.run.ComparedStepPresence
 import com.indagium.testing.run.TestRunReportExportProgress
 import com.indagium.testing.run.TestRunReportFormat
@@ -490,12 +491,18 @@ private fun ReportMatrix(run: TestRun, selection: StepSelection?, filters: Set<T
     val rows = remember(run, filters) { filterReportRows(run, filters) }
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         AppText("CASE / STEP", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        val profiles = LocalTestsUi.current.state.settings.aiProviderProfiles
         run.lanes.forEachIndexed { index, lane ->
-            AppText(
-                "LANE ${index + 1} · ${lane.config.deviceSerial}",
-                color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.width(STATUS_COLUMN),
-            )
+            Column(Modifier.width(STATUS_COLUMN)) {
+                AppText(
+                    "LANE ${index + 1} · ${lane.config.deviceSerial}",
+                    color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                )
+                if (lane.config.kind != LaneKind.EXTERNAL) {
+                    val name = profiles.firstOrNull { it.id == lane.config.profileId }?.displayName
+                    AppText(lane.config.driverLabel(name), color = tc.td, fontSize = 8.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
         AppText(
             "JUDGE / CONSENSUS",

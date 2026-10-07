@@ -553,7 +553,23 @@ internal class CaptureService(
     }
 
     fun retainedSession(sessionId: String): CaptureSession? =
-        listSessions().firstOrNull { it.id == sessionId }
+        listSessions().firstOrNull { it.id == sessionId } ?: laneSession(sessionId)
+
+    // The captures of AI test-run lanes live inside their run folder (lanes/<laneId>/capture/<sessionId>), where the run's evidence
+    // is read from, not under a capture root: listing them with the retained sessions would offer a run's evidence for deletion
+    // from the launcher and report an unfinished lane after a crash as a session to recover. They are registered here by id for the
+    // lifetime of this launch instead, so a lane's capture tab can still find its stopped session (Save ZIP, marker files).
+    private val laneSessions = java.util.concurrent.ConcurrentHashMap<String, CaptureSession>()
+
+    /** Registers (or, when it stopped, replaces) a lane's session. */
+    internal fun registerLaneSession(session: CaptureSession) {
+        laneSessions[session.id] = session
+    }
+
+    private fun laneSession(sessionId: String): CaptureSession? = laneSessions[sessionId]
+
+    /** The session with this id as the strip and the marker code need it: a listed one, else a lane's. */
+    internal fun sessionById(sessionId: String): CaptureSession? = sessions.firstOrNull { it.id == sessionId } ?: laneSession(sessionId)
 
     // Addressed by the session's own directory (its parent is the root that actually contains it,
     // whichever of the two [roots] that turned out to be) rather than blindly trying [sessionsRoot]

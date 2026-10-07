@@ -19,7 +19,6 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureExportPreview
 import com.indagium.capture.CaptureExportRequest
 import com.indagium.capture.CaptureExportResult
-import com.indagium.capture.CaptureMarker
 import com.indagium.capture.CaptureMirrorStartRoute
 import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureTimeline
@@ -28,13 +27,9 @@ import com.indagium.capture.CaptureTimelineIndex.CapturePositionKind
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.NativeMediaSupport
 import com.indagium.capture.adaptedToNativeMedia
-import com.indagium.capture.captureLogEntriesForOrdinals
-import com.indagium.capture.markerHeader
-import com.indagium.capture.markerHeadingLine
 import com.indagium.capture.mirror.MirrorStreamOptions
 import com.indagium.capture.mirrorStartRoute
 import com.indagium.capture.nativeMediaAdaptationNotice
-import com.indagium.capture.ordinalRangeForElapsedWindow
 import com.indagium.capture.parseMarkerHeader
 import com.indagium.capture.readScreencapPng
 import com.indagium.cases.CaseIndexer
@@ -193,7 +188,6 @@ import java.awt.datatransfer.Transferable
 import java.io.BufferedInputStream
 import java.io.File
 import java.io.InputStream
-import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
@@ -267,19 +261,6 @@ private const val RECORDING_SCREENCAP_MAX_BYTES = 24 * 1024 * 1024
 
 // How long a fresh marker stays undoable (AppState.markerUndoByTab / undoMarkIssue).
 private const val MARKER_UNDO_WINDOW_MS = 10_000L
-private const val MARKER_MS_PER_SECOND = 1_000.0
-
-/** Everything [AppState.attachMarkerScreenshot]/[AppState.finishMarkerWindow] need that
- *  [AppState.beginMarkerNote] already resolved — the press-time [session]/[settings] snapshot
- *  (never re-read from the live recorder mid-window, so every step of one press agrees on what
- *  "markerPreMs"/"markerPostMs" meant), the marker itself, and its display [ordinal]. */
-private data class MarkerPressContext(
-    val noteId: String,
-    val ordinal: Int,
-    val marker: CaptureMarker,
-    val session: CaptureSession,
-    val settings: com.indagium.capture.CaptureSettings,
-)
 
 // Upper bound on AppState.canonicalPathCache. One entry per distinct source path ever resolved;
 // a large indexed tree is tens of thousands of files, so this holds a couple of full projects and
@@ -2629,6 +2610,24 @@ class AppState(
     internal val captureService: CaptureService get() = captureServiceDelegate.value
     private val captureControllersByTab = mutableMapOf<String, TabCaptureController>()
 
+    /** Test-lane captures (see beginLaneCapture). The devices AI test lanes record right now, by serial, and which lane. Guarded by [stateLock]. */
+    private val laneCaptureSerials = HashMap<String, TestLaneTabRef>()
+
+    /** The serial of a manual capture that is still starting (its controller has no session yet). Guarded by [stateLock]. */
+    private var manualCaptureStartSerial: String? = null
+
+    /** The controllers of lane captures that have no tab, by `<runId>/<laneId>`; tab captures are in [captureControllersByTab]. */
+    private val tablessLaneControllers = ConcurrentHashMap<String, TabCaptureController>()
+
+    /** Test seam: the adb/scrcpy tools a capture start uses. Production resolves them from the capture settings. */
+    internal var captureToolsProvider: (com.indagium.capture.CaptureSettings) -> CaptureTools = { captureService.toolsForStart(it) }
+
+    /** Test seam: whether the bundled native media stack can load (see NativeMediaSupport.kt). */
+    internal var captureMediaSupportProvider: () -> NativeMediaSupport = { captureService.nativeMediaSupportNow() }
+
+    /** Test seam: the controller of a lane capture, recording under the given sessions root. Production uses a real recorder. */
+    internal var laneControllerFactory: (File) -> TabCaptureController = { root -> TabCaptureController(root) }
+
     /** Embedded mirror handles are presentation resources, separate from recorder ownership. */
     private val embeddedMirrorsByTab = mutableMapOf<String, EmbeddedMirrorHandle>()
     private val embeddedMirrorStartJobsByTab = mutableMapOf<String, Job>()
@@ -2766,8 +2765,15 @@ class AppState(
     /** One cancellable, latest-only preview lane per live capture tab. */
     private val capturePreviewJobsByTab = mutableMapOf<String, Job>()
     private val capturePreviewGenerationByTab = mutableMapOf<String, Long>()
+
+    /**
+     * The one live capture of the manual flows (toolbar Capture, the launcher, the device AI tools). The capture tabs an AI test run
+     * opened for its lanes ([LogTab.testLane]) are real live captures too, but they are deliberately NOT this one: they never block a
+     * manual capture or get picked by a tool that means "the user's capture". The per-device guard ([claimLaneDevice]) is what keeps
+     * a lane and a manual capture off the same phone.
+     */
     internal val liveCaptureTabId: String?
-        get() = synchronized(stateLock) { tabs.firstOrNull { it.captureSessionId != null }?.id }
+        get() = synchronized(stateLock) { tabs.firstOrNull { it.captureSessionId != null && it.testLane == null }?.id }
 
     /**
      * Presentation-only access to the controller owned by a live capture tab. The controller
@@ -2782,6 +2788,8 @@ class AppState(
     /** AI/MCP device tools stay pinned to a live capture tab, and recheck adb connectivity on each
      * control request so a disconnect cannot leave stale device consent usable. */
     internal fun aiCaptureBinding(tabId: String): Pair<CaptureSession, CaptureTools> {
+        // A lane's device is driven by the test run's own agent; a second agent on the same phone would fight it for the screen.
+        check(tab(tabId)?.testLane == null) { "This capture belongs to a lane of an AI test run, whose agent drives its device." }
         val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
         val session = controller.selectedSession.value ?: error("The bound capture has no active session")
         val tools = captureService.toolsForStart(session.settings)
@@ -2948,7 +2956,8 @@ class AppState(
             val controller = captureControllerFor(tabId) ?: error("The bound capture tab is no longer live")
             val boundedLabel = label?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_LABEL_MAX_CHARS) ?: MARKER_DEFAULT_LABEL
             val boundedNote = note?.trim()?.takeIf(String::isNotBlank)?.take(MARKER_NOTE_MAX_CHARS)
-            val context = beginMarkerNote(tabId, controller, boundedLabel, boundedNote)
+            val writer = markerWriterFor(tabId, controller)
+            val context = writer.begin(boundedLabel, boundedNote)
                 ?: error(captureScreenshotStatus ?: "Issue marker could not be created")
             val resolvedScreenshotCapability = if (context.settings.markerScreenshot) {
                 resolveScreenshotCapabilityForAi(tabId, controller)
@@ -2957,10 +2966,10 @@ class AppState(
             }
             var afterId = context.noteId
             try {
-                afterId = attachMarkerScreenshot(tabId, controller, context)
+                afterId = writer.attachScreenshot(context) { buttonMarkerShot(tabId, controller, context) }
             } finally {
                 // Keep the marker window durable even when screenshot capture itself throws.
-                finishMarkerWindow(tabId, context, afterId)
+                writer.finishWindow(context, afterId)
             }
             val screenshotAttached = afterId != context.noteId
             buildMap {
@@ -3274,7 +3283,7 @@ class AppState(
      */
     internal fun requestHeapTrim(reason: String) {
         val recording = synchronized(stateLock) {
-            val live = captureControllersByTab.isNotEmpty()
+            val live = captureControllersByTab.isNotEmpty() || tablessLaneControllers.isNotEmpty()
             // A trim that is actually forwarded clears the closed-row tally, whatever asked for it;
             // one skipped for a live capture frees nothing, so the tally keeps counting.
             if (!live) closedRowsSinceTrim = 0L
@@ -3579,10 +3588,63 @@ class AppState(
             return
         }
         ioScope.launch {
-            val context = beginMarkerNote(tabId, controller) ?: return@launch
-            val afterId = attachMarkerScreenshot(tabId, controller, context)
-            finishMarkerWindow(tabId, context, afterId)
+            val writer = markerWriterFor(tabId, controller)
+            val context = writer.begin(MARKER_DEFAULT_LABEL, null) ?: return@launch
+            val afterId = writer.attachScreenshot(context) { buttonMarkerShot(tabId, controller, context) }
+            writer.finishWindow(context, afterId)
         }
+    }
+
+    /** The press writer for [tabId]'s Notes, bound to the live recorder boundary, the strip's status line and (when [undoable]) the Undo affordance. */
+    internal fun markerWriterFor(tabId: String, controller: TabCaptureController, undoable: Boolean = true): CaptureMarkerWriter =
+        CaptureMarkerWriter(
+            target = TabMarkerNotes(this, tabId),
+            boundary = controller::snapshotForExport,
+            liveBoundary = { captureControllerFor(tabId)?.let { live -> runCatching { live.snapshotForExport() }.getOrNull() } },
+            stoppedSession = { sessionId -> captureService.sessionById(sessionId) },
+            status = MarkerStatusSink { captureScreenshotStatus = it },
+            undo = if (undoable) tabMarkerUndo(tabId) else null,
+        )
+
+    private fun tabMarkerUndo(tabId: String) = object : MarkerUndoSink {
+        override fun noteAdded(noteId: String) {
+            markerUndoJobsByTab.remove(tabId)?.cancel()
+            markerUndoByTab[tabId] = MarkerUndoState(noteId = noteId)
+            markerUndoJobsByTab[tabId] = ioScope.launch {
+                delay(MARKER_UNDO_WINDOW_MS)
+                if (markerUndoByTab[tabId]?.noteId == noteId) markerUndoByTab.remove(tabId)
+            }
+        }
+
+        override fun imageAdded(noteId: String, imageBlockId: String, screenshotFile: File?) {
+            val undo = markerUndoByTab[tabId]
+            if (undo?.noteId == noteId) markerUndoByTab[tabId] = undo.copy(imageBlockId = imageBlockId, screenshotFile = screenshotFile)
+        }
+
+        override fun logRefAdded(noteId: String, logRefId: String) {
+            val undo = markerUndoByTab[tabId]
+            if (undo?.noteId == noteId) markerUndoByTab[tabId] = undo.copy(logRefId = logRefId)
+        }
+    }
+
+    /**
+     * The screenshot a Mark issue press attaches: only when the setting allows it AND the device actually supports one. Unlike
+     * [screenshotCapture]'s own button, an unsupported or pending capability here just means the marker has no screenshot, not a failed
+     * press: the Note and its log window are worth keeping either way.
+     */
+    private fun buttonMarkerShot(tabId: String, controller: TabCaptureController, context: MarkerPressContext): MarkerShot? {
+        if (!context.settings.markerScreenshot) return null
+        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.ENABLED) return null
+        val shot = runCatching { controller.screenshotCapture() }.getOrNull() ?: return null
+        // manualOffsetMs matches every other session-elapsed -> video-position conversion.
+        val videoFrame = shot.videoStartElapsedMs?.let { start ->
+            VideoFrameReference(
+                source = VideoSource.LocalFile(shot.videoFile.absolutePath),
+                sourceLabel = "capture.indagium.json/${shot.videoFile.name}",
+                positionMs = (shot.elapsedMs - start + context.session.manualOffsetMs).coerceAtLeast(0L),
+            )
+        }
+        return MarkerShot(shot.bytes, shot.file, videoFrame)
     }
 
     /** Removes the blocks (and screenshot file, if any) a still-undoable Mark issue press added —
@@ -3612,195 +3674,6 @@ class AppState(
         pendingCaptureNotesImport = null
     }
 
-    /** Step 1: resolve the press-time capture-clock boundary, compute the leading (already-on-disk)
-     *  half of the window, and commit the Note. Returns null (having already set
-     *  [captureScreenshotStatus]) when the boundary can't be read — e.g. the controller lost its
-     *  session between the guard in [markIssue] and this coroutine actually running. */
-    private fun beginMarkerNote(
-        tabId: String,
-        controller: TabCaptureController,
-        label: String = MARKER_DEFAULT_LABEL,
-        note: String? = null,
-    ): MarkerPressContext? {
-        val boundary = runCatching { controller.snapshotForExport() }.getOrElse {
-            captureScreenshotStatus = "Mark issue failed: ${it.message ?: it::class.simpleName}"
-            return null
-        }
-        val session = boundary.session
-        val settings = session.settings
-        // Highest existing number + 1, not the count: after a marker in the middle is deleted the
-        // count would hand out a number (id "mN", heading "Marker N") that is still in use.
-        val ordinal = tab(tabId)?.annotations?.blocks.orEmpty()
-            .filterIsInstance<AnnBlock.Note>()
-            .mapNotNull { parseMarkerHeader(it.text)?.id?.removePrefix("m")?.toIntOrNull() }
-            .maxOrNull().let { (it ?: 0) + 1 }
-        val videoStart = session.videoStartElapsedMs
-        val videoMs = videoStart?.let { start ->
-            (boundary.elapsedMs - start + session.manualOffsetMs).takeIf { it >= 0L }
-        }
-        // The leading half [t-preMs, t] is already flushed (boundary.indexLength is exactly the
-        // bound this scan must not read past), so it's resolved synchronously here rather than
-        // waiting for the trailing rescan finishMarkerWindow does after markerPostMs.
-        val leadingRange = ordinalRangeForElapsedWindow(
-            session.indexFile,
-            boundary.indexLength,
-            (boundary.elapsedMs - settings.markerPreMs).coerceAtLeast(0L),
-            boundary.elapsedMs,
-        )
-        val marker = CaptureMarker(
-            id = "m$ordinal",
-            elapsedMs = boundary.elapsedMs,
-            firstOrdinal = leadingRange?.first,
-            lastOrdinal = leadingRange?.last,
-            videoMs = videoMs,
-            label = label,
-            preMs = settings.markerPreMs,
-            postMs = settings.markerPostMs,
-            screenshotPath = if (settings.markerScreenshot) "screenshots/marker-$ordinal.png" else null,
-        )
-        val noteId = "n${System.nanoTime()}"
-        upAnn(tabId) { t ->
-            val text = markerHeader(marker) + "\n" + markerHeadingLine(ordinal, marker.label) + "\n" +
-                (note?.let { "$it\n" } ?: "")
-            t.copy(annotations = t.annotations.copy(blocks = t.annotations.blocks + AnnBlock.Note(noteId, text)))
-        }
-        markerUndoJobsByTab.remove(tabId)?.cancel()
-        markerUndoByTab[tabId] = MarkerUndoState(noteId = noteId)
-        markerUndoJobsByTab[tabId] = ioScope.launch {
-            delay(MARKER_UNDO_WINDOW_MS)
-            if (markerUndoByTab[tabId]?.noteId == noteId) markerUndoByTab.remove(tabId)
-        }
-        return MarkerPressContext(noteId = noteId, ordinal = ordinal, marker = marker, session = session, settings = settings)
-    }
-
-    /** Step 2: attaches a screenshot when the setting allows it AND the device actually supports
-     *  one — unlike [screenshotCapture]'s own button, an unsupported/pending capability here just
-     *  means the marker has no screenshot, not a failed press: the Note and its log window are
-     *  worth keeping either way. Returns the block id the trailing LogRef should insert after —
-     *  the screenshot's if one was added, otherwise the Note's own id. */
-    private suspend fun attachMarkerScreenshot(tabId: String, controller: TabCaptureController, context: MarkerPressContext): String {
-        if (!context.settings.markerScreenshot) return context.noteId
-        if (screenshotCapability(tabId).availability != CaptureScreenshotAvailability.ENABLED) return context.noteId
-        val shot = runCatching { controller.screenshotCapture() }.getOrNull() ?: return context.noteId
-        // manualOffsetMs matches every other session-elapsed -> video-position conversion — see
-        // the matching comment on screenshotCapture()'s own videoFrame above.
-        val videoFrame = shot.videoStartElapsedMs?.let { start ->
-            VideoFrameReference(
-                source = VideoSource.LocalFile(shot.videoFile.absolutePath),
-                sourceLabel = "capture.indagium.json/${shot.videoFile.name}",
-                positionMs = (shot.elapsedMs - start + context.session.manualOffsetMs).coerceAtLeast(0L),
-            )
-        }
-        val provenance = videoFrame?.provenanceLabel ?: "From ${tab(tabId)?.filename ?: "capture"}"
-        if (!markerNoteExists(tabId, context.noteId)) {
-            // Deleted while the screenshot was being taken: don't attach it to whatever is now last.
-            runCatching { shot.file.delete() }
-            return context.noteId
-        }
-        val blockId = addImageBlock(tabId, shot.bytes, provenance, afterId = context.noteId, videoFrame = videoFrame) ?: return context.noteId
-        // The header's path so far is only a hint; record the file the recorder actually wrote, so
-        // deleting the marker can remove it and later snapshots stop shipping it.
-        updateMarkerHeader(tabId, context.noteId) { it.copy(screenshotPath = "screenshots/${shot.file.name}") }
-        val undo = markerUndoByTab[tabId]
-        if (undo?.noteId == context.noteId) {
-            markerUndoByTab[tabId] = undo.copy(imageBlockId = blockId, screenshotFile = shot.file)
-        }
-        return blockId
-    }
-
-    /** Step 3: waits out `markerPostMs`, rescans for the full [t-preMs, t+postMs] window against
-     *  whatever is flushed by then, and appends the LogRef under [afterId]. If the capture stopped
-     *  partway through the wait, the window is clipped to what was actually recorded and a status
-     *  line reports the shortfall — the same "keep what was collected" rule [captureScreenshotStatus]
-     *  already uses for a failed screenshot. */
-    private suspend fun finishMarkerWindow(tabId: String, context: MarkerPressContext, afterId: String) {
-        delay(context.settings.markerPostMs)
-        val liveController = captureControllerFor(tabId)
-        val liveBoundary = liveController?.let { runCatching { it.snapshotForExport() }.getOrNull() }
-        val indexFile: File
-        val logFile: File
-        val indexBytes: Long
-        val actualEndMs: Long
-        if (liveBoundary != null) {
-            indexFile = liveBoundary.session.indexFile
-            logFile = liveBoundary.session.logFile
-            indexBytes = liveBoundary.indexLength
-            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, liveBoundary.elapsedMs)
-        } else {
-            // The controller is gone (Stop won the race) — the session's own files are already
-            // fully flushed by stopCaptureTab's finalization, so read them directly.
-            val stopped = captureService.sessions.firstOrNull { it.id == context.session.id } ?: context.session
-            indexFile = stopped.indexFile
-            logFile = stopped.logFile
-            indexBytes = stopped.indexFile.length()
-            actualEndMs = minOf(context.marker.elapsedMs + context.settings.markerPostMs, stopped.elapsedMs)
-        }
-        val requestedEndMs = context.marker.elapsedMs + context.settings.markerPostMs
-        if (actualEndMs < requestedEndMs) {
-            val collectedSeconds = (actualEndMs - context.marker.elapsedMs).coerceAtLeast(0L) / MARKER_MS_PER_SECOND
-            val requestedSeconds = context.settings.markerPostMs / MARKER_MS_PER_SECOND
-            captureScreenshotStatus = "+%.1f s of %.0f s — capture ended".format(Locale.US, collectedSeconds, requestedSeconds)
-        }
-        val fullRange = ordinalRangeForElapsedWindow(
-            indexFile,
-            indexBytes,
-            (context.marker.elapsedMs - context.settings.markerPreMs).coerceAtLeast(0L),
-            actualEndMs,
-        ) ?: return
-        val tabNow = tab(tabId) ?: return
-        // Deleted during the trailing wait: its LogRef would otherwise be appended at the end.
-        if (!markerNoteExists(tabId, context.noteId)) return
-        val missing = fullRange.filterNot { it in tabNow.rmap }.toSet()
-        val sourceEntries = if (missing.isEmpty()) {
-            null
-        } else {
-            // Tail lag: the live tab hasn't caught up to some rows the recorder already flushed.
-            // Read those straight from the capture log by byte offset and merge with what the tab
-            // already has, so the LogRef shows the whole window regardless of tailing progress.
-            (fullRange.mapNotNull { tabNow.rmap[it] } + captureLogEntriesForOrdinals(indexFile, indexBytes, logFile, missing))
-                .sortedBy { it.id }
-        }
-        val logRefId = addLogRefBlock(tabId, fullRange.toList(), caption = "", afterId = afterId, sourceEntries = sourceEntries)
-        if (logRefId != null) {
-            val undo = markerUndoByTab[tabId]
-            if (undo?.noteId == context.noteId) markerUndoByTab[tabId] = undo.copy(logRefId = logRefId)
-        }
-        rewriteMarkerHeaderRows(tabId, context, fullRange)
-    }
-
-    /**
-     * Re-stamps the marker Note's header with the window that was ACTUALLY collected. Until this
-     * runs the header carries only the leading half ([beginMarkerNote] writes it before the
-     * trailing window exists), which is fine for the live UI — [CaptureMarkerRow] navigates via the
-     * neighbouring LogRef, not the header — but the header is the durable record: Phase 4 rebuilds
-     * `logIds` from its `rows` on import, because a LogRef's own ids are parser ids that restart at
-     * 1 per file. Leaving the leading-only range here would silently drop the `+postMs` half of
-     * every marker that survived a snapshot round-trip.
-     */
-    private fun rewriteMarkerHeaderRows(tabId: String, context: MarkerPressContext, fullRange: IntRange) {
-        updateMarkerHeader(tabId, context.noteId) { it.copy(firstOrdinal = fullRange.first, lastOrdinal = fullRange.last) }
-    }
-
-    /** Rewrites one marker Note's header line from its CURRENT header, so the separate updates
-     *  (screenshot path, collected rows) never overwrite each other with a stale copy. The rest of
-     *  the note — which the user may already have typed under — is kept as is. */
-    private fun updateMarkerHeader(tabId: String, noteId: String, transform: (CaptureMarker) -> CaptureMarker) {
-        upAnn(tabId) { t ->
-            val blocks = t.annotations.blocks.map { block ->
-                if (block !is AnnBlock.Note || block.id != noteId) return@map block
-                val current = parseMarkerHeader(block.text) ?: return@map block
-                val updated = transform(current)
-                if (updated == current) return@map block
-                val body = block.text.substringAfter("\n", missingDelimiterValue = "")
-                block.copy(text = markerHeader(updated) + "\n" + body)
-            }
-            t.copy(annotations = t.annotations.copy(blocks = blocks))
-        }
-    }
-
-    private fun markerNoteExists(tabId: String, noteId: String): Boolean =
-        tab(tabId)?.annotations?.blocks?.any { it.id == noteId } == true
-
     /**
      * Deletes one marker: its Note plus the screenshot and log excerpt written with it (see
      * [markerOwnedBlockIds]), and the screenshot file in the capture session when the session is
@@ -3825,7 +3698,7 @@ class AppState(
     private fun markerScreenshotFile(tabId: String, relativePath: String): File? {
         val tab = tab(tabId) ?: return null
         val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
-        val directory = captureService.sessions.firstOrNull { it.id == sessionId }?.directory ?: return null
+        val directory = captureService.sessionById(sessionId)?.directory ?: return null
         val screenshots = File(directory, "screenshots").canonicalFile
         val file = File(directory, relativePath).canonicalFile
         return file.takeIf { it.parentFile == screenshots && it.isFile }
@@ -4244,7 +4117,7 @@ class AppState(
         val tab = tab(tabId) ?: return null
         captureControllerFor(tabId)?.snapshot?.value?.session?.let { return it.device }
         val sessionId = tab.captureSessionId ?: tab.captureSourceSessionId ?: return null
-        return captureService.sessions.firstOrNull { it.id == sessionId }?.device
+        return captureService.sessionById(sessionId)?.device
     }
 
     /** The remembered mirror/Notes split and detached-window size for a capture tab: this device's
@@ -4502,7 +4375,12 @@ class AppState(
                 captureService.reportError("A capture is already starting")
                 return null
             }
+            laneCaptureSerials[device.serial]?.let { lane ->
+                captureService.reportError(laneHoldsDeviceMessage(device.serial, lane))
+                return null
+            }
             captureStartInProgress = true
+            manualCaptureStartSerial = device.serial
         }
         captureScreenshotStatus = null
         val settings = this.settings.captureSettings.let { base -> settingsOverride?.invoke(base) ?: base }
@@ -4511,39 +4389,56 @@ class AppState(
         // Where Start was pressed: the live tab takes the launcher's place (see publishOpenedTab).
         val originLauncherId = activeLauncherTabId()
         synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+        val plan = CaptureStartPlan(device, settings, controller, tabId, "Capture — ${device.model}", lane = null, originLauncherId)
         ioScope.launch {
-            var published = false
             try {
-                val tools = captureService.toolsForStart(settings)
-                // Old-glibc Linux (see NativeMediaSupport.kt): adapt only the settings THIS launch
-                // uses, never the saved/draft settings above. tools.scrcpy is already resolved, so
-                // the EMBEDDED->EXTERNAL fallback below can tell whether one is actually installed.
-                val mediaSupport = captureService.nativeMediaSupportNow()
-                val adaptedSettings = settings.adaptedToNativeMedia(mediaSupport, tools.scrcpy != null)
-                val startupNotice = nativeMediaAdaptationNotice(settings, adaptedSettings, mediaSupport, tools.scrcpy != null)
-                controller.start(device, adaptedSettings, tools, startupNotice) { session ->
-                    val liveTab = mkTab(
-                        id = tabId,
-                        filename = "Capture — ${device.model}",
-                        logData = emptyList(),
-                        analysis = LogAnalysis(pending = false),
-                        processNameMode = newTabProcessNameMode(),
-                    ).copy(
-                        sourcePath = session.logFile.absolutePath,
-                        tailing = true,
-                        captureSessionId = session.id,
-                        // Deliberately NOT settings.openNewFilesWithUnfiltered: that setting is
-                        // meant for a static file, where "Original" is a genuinely different view
-                        // from "Filtered". A streaming capture tab's Original pane just re-renders
-                        // the same growing feed as Filtered (no filter has been applied yet), so
-                        // honoring the setting would split the strip into two identical panes and
-                        // halve the visible rows for no benefit.
-                        showUnfiltered = false,
-                    )
-                    synchronized(stateLock) {
-                        check(tabs.none { it.captureSessionId != null }) { "A capture is already recording" }
-                        publishOpenedTab(liveTab, originLauncherId)
-                    }
+                runCaptureStart(plan)
+            } catch (failure: java.io.IOException) {
+                captureService.reportError(failure.message ?: "Capture could not start")
+            } catch (failure: IllegalArgumentException) {
+                captureService.reportError(failure.message ?: "Capture could not start")
+            } catch (failure: IllegalStateException) {
+                captureService.reportError(failure.message ?: "Capture could not start")
+            } finally {
+                synchronized(stateLock) { manualCaptureStartSerial = null }
+                captureStartInProgress = false
+            }
+        }
+        return tabId
+    }
+
+    /** What one capture start needs; a manual capture and a test lane's differ only in these. [tabId] null: the capture has no tab. */
+    private class CaptureStartPlan(
+        val device: CaptureDevice,
+        val settings: com.indagium.capture.CaptureSettings,
+        val controller: TabCaptureController,
+        val tabId: String?,
+        val tabTitle: String,
+        /** Non-null: the capture of an AI test lane, not "the live capture" (see [liveCaptureTabId]). */
+        val lane: TestLaneTabRef?,
+        val originLauncherId: String?,
+    )
+
+    /**
+     * The one start path of every capture: resolves the tools, adapts the settings to this system, starts the controller, publishes
+     * the capture's tab before adb is launched (manual: activated, taking the launcher's place; lane: appended without taking focus),
+     * starts the log tailer, applies the heap-pressure pause, opens the device display the settings ask for and registers the
+     * lifecycle monitor. Blocking: call it on IO. On any failure the half-started capture is torn down again and the failure is
+     * rethrown for the caller to report.
+     */
+    private fun runCaptureStart(plan: CaptureStartPlan): CaptureSession {
+        var published = false
+        try {
+            val tools = captureToolsProvider(plan.settings)
+            // Old-glibc Linux (see NativeMediaSupport.kt): adapt only the settings THIS launch uses, never the saved/draft settings.
+            // tools.scrcpy is already resolved, so the EMBEDDED->EXTERNAL fallback can tell whether one is actually installed.
+            val mediaSupport = captureMediaSupportProvider()
+            val adaptedSettings = plan.settings.adaptedToNativeMedia(mediaSupport, tools.scrcpy != null)
+            val startupNotice = nativeMediaAdaptationNotice(plan.settings, adaptedSettings, mediaSupport, tools.scrcpy != null)
+            val session = plan.controller.start(plan.device, adaptedSettings, tools, startupNotice) { started ->
+                val tabId = plan.tabId
+                if (tabId != null) {
+                    publishCaptureTab(plan, tabId, started)
                     published = true
                     // FileTailer captures this offset synchronously before its coroutine is scheduled.
                     // The recorder has already opened an empty log file, so no adb line can precede it.
@@ -4552,47 +4447,75 @@ class AppState(
                     // in-memory view either: pause it straight away (it shows 0 rows and the paused
                     // message; recording proceeds). Runs on this IO coroutine, where the join is fine.
                     if (heapPressure == HeapPressure.CRITICAL) tailCoordinator.pauseTailing(tabId)
-                    // CaptureCard — the only other place that calls ensureEmbeddedMirror — is a
-                    // child of the right sidebar and simply doesn't compose while videoPanelVisible
-                    // is false, so a mirror-enabled capture that starts with the panel hidden would
-                    // otherwise never auto-start its mirror and never surface a setup error either.
-                    // Showing the panel here doesn't touch non-capture tabs: this callback only
-                    // runs for a capture that is starting.
-                    when (adaptedSettings.mirrorStartRoute()) {
-                        CaptureMirrorStartRoute.EMBEDDED -> {
-                            videoPanelVisible = true
-                            ensureEmbeddedMirror(tabId, autoStart = true)
-                        }
-                        CaptureMirrorStartRoute.EXTERNAL -> {
-                            // The recorder owns this one auxiliary process and closes it with the
-                            // session. A launch failure must never tear down log/video capture.
-                            runCatching { controller.openMirror() }
-                                .onFailure { failure ->
-                                    captureService.reportError(
-                                        "External scrcpy mirror could not open: " +
-                                            (failure.message ?: failure::class.simpleName),
-                                    )
-                                }
-                        }
-                        CaptureMirrorStartRoute.NONE -> Unit
-                    }
                 }
-                captureService.updateSessions()
-                closeCaptureLauncherTabs()
-                monitorCaptureLifecycle(tabId, controller)
-            } catch (failure: java.io.IOException) {
-                captureStartFailure(tabId, controller, published, failure)
-            } catch (failure: IllegalArgumentException) {
-                captureStartFailure(tabId, controller, published, failure)
-            } catch (failure: IllegalStateException) {
-                captureStartFailure(tabId, controller, published, failure)
-            } finally {
-                if (!published) synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
-                captureStartInProgress = false
-                if (!published) controller.close()
+                openCaptureDisplay(plan, adaptedSettings)
+            }
+            captureService.updateSessions()
+            if (plan.lane == null) closeCaptureLauncherTabs()
+            plan.tabId?.let { monitorCaptureLifecycle(it, plan.controller) }
+            return session
+        } catch (failure: Throwable) {
+            discardFailedCaptureStart(plan, published)
+            throw failure
+        }
+    }
+
+    /** Publishes the empty streaming tab of a capture that is about to launch adb. */
+    private fun publishCaptureTab(plan: CaptureStartPlan, tabId: String, session: CaptureSession) {
+        val liveTab = mkTab(
+            id = tabId,
+            filename = plan.tabTitle,
+            logData = emptyList(),
+            analysis = LogAnalysis(pending = false),
+            processNameMode = newTabProcessNameMode(),
+        ).copy(
+            sourcePath = session.logFile.absolutePath,
+            tailing = true,
+            captureSessionId = session.id,
+            // Deliberately NOT settings.openNewFilesWithUnfiltered: that setting is
+            // meant for a static file, where "Original" is a genuinely different view
+            // from "Filtered". A streaming capture tab's Original pane just re-renders
+            // the same growing feed as Filtered (no filter has been applied yet), so
+            // honoring the setting would split the strip into two identical panes and
+            // halve the visible rows for no benefit.
+            showUnfiltered = false,
+            testLane = plan.lane,
+        )
+        synchronized(stateLock) {
+            if (plan.lane == null) {
+                check(tabs.none { it.captureSessionId != null && it.testLane == null }) { "A capture is already recording" }
+                publishOpenedTab(liveTab, plan.originLauncherId)
+            } else {
+                // A lane's tab opens quietly: whatever the user is looking at (the Tests workspace) keeps the focus. Only when nothing is
+                // shown at all does the new tab become what is shown.
+                tabs = tabs + liveTab
+                if (activeSurface == null) setActiveSurfaceToTab(liveTab.id)
             }
         }
-        return tabId
+    }
+
+    /** Opens the device display the capture's settings ask for. A display failure never tears down log/video capture. */
+    private fun openCaptureDisplay(plan: CaptureStartPlan, adaptedSettings: com.indagium.capture.CaptureSettings) {
+        when (adaptedSettings.mirrorStartRoute()) {
+            CaptureMirrorStartRoute.EMBEDDED -> {
+                val tabId = plan.tabId ?: return // an in-app mirror needs the capture's tab; a tabless lane has none
+                // CaptureCard — the only other place that calls ensureEmbeddedMirror — is a child of the right sidebar and simply
+                // doesn't compose while videoPanelVisible is false, so a mirror-enabled capture that starts with the panel hidden
+                // would otherwise never auto-start its mirror and never surface a setup error either. A lane's tab does not touch the
+                // panel: the mirror starts anyway and shows when the user opens the tab.
+                if (plan.lane == null) videoPanelVisible = true
+                ensureEmbeddedMirror(tabId, autoStart = true)
+            }
+            CaptureMirrorStartRoute.EXTERNAL -> {
+                // The recorder owns this one auxiliary process and closes it with the session. A launch failure must never tear down
+                // log/video capture.
+                runCatching { plan.controller.openMirror() }.onFailure { failure ->
+                    val message = "External scrcpy mirror could not open: " + (failure.message ?: failure::class.simpleName)
+                    if (plan.lane == null) captureService.reportError(message) else AppLogger.warn("capture", message)
+                }
+            }
+            CaptureMirrorStartRoute.NONE -> Unit
+        }
     }
 
     /** Watches unexpected recorder termination so a disconnected device is finalized automatically. */
@@ -4616,13 +4539,10 @@ class AppState(
         }
     }
 
-    private fun captureStartFailure(
-        tabId: String,
-        controller: TabCaptureController,
-        published: Boolean,
-        failure: Throwable,
-    ): String? {
-        if (published) {
+    /** Removes what a capture start that failed (or was refused after it began) left behind: its tab, its tailer and its controller. */
+    private fun discardFailedCaptureStart(plan: CaptureStartPlan, published: Boolean) {
+        val tabId = plan.tabId
+        if (published && tabId != null) {
             runCatching { tailCoordinator.cancelTailingFor(tabId) }
             synchronized(stateLock) {
                 tabs = tabs.filterNot { it.id == tabId }
@@ -4632,10 +4552,10 @@ class AppState(
                 }
             }
         }
-        runCatching { controller.close() }
-        synchronized(stateLock) { captureControllersByTab.remove(tabId, controller) }
-        captureService.reportError(failure.message ?: "Capture could not start")
-        return null
+        runCatching { plan.controller.close() }
+        synchronized(stateLock) {
+            if (tabId != null) captureControllersByTab.remove(tabId, plan.controller) else tablessLaneControllers.values.remove(plan.controller)
+        }
     }
 
     /** Stops, drains, and finalizes one live capture on IO, attaching it back to the same tab. */
@@ -4715,6 +4635,127 @@ class AppState(
                 if (finalized) requestHeapTrim("capture finalized")
             }
         }
+    }
+
+    // ── Test-lane captures ───────────────────────────────────────────
+    // An AI test run records each lane through the same controller, recorder, mirror and archive code a manual live capture uses
+    // (ui/LaneCaptures.kt wraps this for the run engine). A lane either opens a real capture tab (LogTab.testLane; not activated,
+    // not "the live capture", it stays as a stopped capture tab after the lane) or records without one. The manual one-live-capture
+    // rule is unchanged; what keeps a lane and a manual capture (or two lanes) off the same phone is the per-device claim below.
+
+    /** The lane that records [serial] right now, or null. */
+    internal fun laneCaptureOnDevice(serial: String): TestLaneTabRef? = synchronized(stateLock) { laneCaptureSerials[serial] }
+
+    private fun laneHoldsDeviceMessage(serial: String, lane: TestLaneTabRef) =
+        "Device $serial is recording for an AI test run (run ${lane.runId}, lane ${lane.laneId}); wait for it to finish or choose another device."
+
+    /**
+     * Reserves [serial] for [lane]. Refused with an [IllegalStateException] naming who holds it when a manual capture (live or still
+     * starting) or another lane already does. The check and the claim are one step under [stateLock], and a manual start makes the same
+     * check under the same lock, so the two can never both win.
+     */
+    internal fun claimLaneDevice(serial: String, lane: TestLaneTabRef) {
+        synchronized(stateLock) {
+            laneCaptureSerials[serial]?.let { held ->
+                throw IllegalStateException(
+                    "Device $serial is already recording for another test lane (run ${held.runId}, lane ${held.laneId}); " +
+                        "wait for it to finish or choose another device.",
+                )
+            }
+            check(manualCaptureStartSerial != serial && liveCaptureSerial() != serial) {
+                "Device $serial is held by the live capture in the main window; stop that capture or choose another device."
+            }
+            laneCaptureSerials[serial] = lane
+        }
+    }
+
+    internal fun releaseLaneDevice(serial: String, lane: TestLaneTabRef) {
+        synchronized(stateLock) { if (laneCaptureSerials[serial] == lane) laneCaptureSerials.remove(serial) }
+    }
+
+    /**
+     * Starts the recording of one test lane and returns what stops and drives it. Blocking: call on IO, never on the UI thread. Does not
+     * touch [captureStartInProgress] (that flag serializes manual starts only), so lanes on different devices start side by side.
+     */
+    internal fun beginLaneCapture(request: LaneCaptureStart): LaneCaptureHandle {
+        val serial = request.device.serial
+        claimLaneDevice(serial, request.lane)
+        try {
+            request.captureRoot.mkdirs()
+            val controller = laneControllerFactory(request.captureRoot)
+            val tabId = if (request.openTab) "t${tabCounter.getAndIncrement()}" else null
+            if (tabId != null) {
+                synchronized(stateLock) { captureControllersByTab[tabId] = controller }
+            } else {
+                tablessLaneControllers[laneKeyOf(request.lane)] = controller
+            }
+            // Markers always travel with the lane's archive: the AI marks failed steps, and those notes are the point of the capture.
+            val settings = request.settings.copy(markerNotesInSnapshot = true)
+            val plan = CaptureStartPlan(request.device, settings, controller, tabId, request.title, request.lane, originLauncherId = null)
+            val session = runCaptureStart(plan)
+            captureService.registerLaneSession(session)
+            return LaneCaptureHandle(request.lane, tabId, controller, session, request.device)
+        } catch (failure: Throwable) {
+            releaseLaneDevice(serial, request.lane)
+            throw failure
+        }
+    }
+
+    private fun laneKeyOf(lane: TestLaneTabRef) = "${lane.runId}/${lane.laneId}"
+
+    /**
+     * Stops a lane's recording and finalizes it, waiting at most [waitMs] (interruptible), then lets the device go. A lane's tab stays
+     * open as a stopped capture tab; a tabless lane's controller is closed. Stops go through the same paths as a tab Stop / close, so
+     * the mirror is stopped before the recorder and no thread waits on the EDT or on a mirror lifecycle lock. Blocking: call on IO.
+     */
+    internal fun finishLaneCapture(handle: LaneCaptureHandle, waitMs: Long) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs)
+        try {
+            val tabId = handle.tabId
+            if (tabId != null) {
+                stopCaptureTab(tabId)
+                while (captureControllerFor(tabId) != null && System.nanoTime() < deadline) Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
+            } else {
+                val done = handle.stopTablessOnce { ioScope.launch { stopTablessLaneCapture(handle) } }
+                while (!done.isCompleted && System.nanoTime() < deadline) Thread.sleep(CAPTURE_POLL_INTERVAL_MS)
+            }
+            // The stopped session as the recorder left it; a capture whose tab was closed mid-run was never finalized, so do that now.
+            val onDisk = com.indagium.capture.readCaptureSessionDirectory(handle.session.directory)
+            if (onDisk != null) {
+                captureService.registerLaneSession(onDisk)
+                if (onDisk.status != com.indagium.capture.CaptureStatus.RECORDING &&
+                    !File(onDisk.directory, com.indagium.capture.CAPTURE_DESCRIPTOR_NAME).isFile
+                ) {
+                    runCatching { captureService.finalizeStoppedSession(onDisk) }
+                }
+            }
+        } finally {
+            releaseLaneDevice(handle.device.serial, handle.lane)
+        }
+    }
+
+    private fun stopTablessLaneCapture(handle: LaneCaptureHandle) {
+        try {
+            val stopped = runCatching { handle.controller.stop() }.getOrNull()
+            if (stopped != null) runCatching { handle.controller.finalizeStopped(stopped) }
+        } finally {
+            runCatching { handle.controller.close() }
+            tablessLaneControllers.remove(laneKeyOf(handle.lane), handle.controller)
+        }
+    }
+
+    /** The current Notes of a lane's tab, prepared like a Save ZIP prepares them; null when the tab is gone. */
+    internal fun laneTabNotes(tabId: String): Annotations? = tab(tabId)?.let { it.annotations.preparedForSave(it) }
+
+    /**
+     * The notes of a lane for an archive: its tab's current ones while that tab is open (so what the user added there travels too),
+     * else what the lane wrote into its folder at its end (the markers an AI lane made without a tab, or in a tab since closed).
+     * Reads the disk: call on IO.
+     */
+    internal fun laneNotesOf(runId: String, laneId: String, laneDir: File): Annotations? {
+        val ref = TestLaneTabRef(runId, laneId)
+        val tabId = synchronized(stateLock) { tabs.firstOrNull { it.testLane == ref }?.id }
+        return tabId?.let(::laneTabNotes) ?: readLaneNotesFile(laneDir)
     }
 
     /** Applies a finalized capture to the existing streaming tab without reparsing/opening one. */
@@ -5112,6 +5153,11 @@ class AppState(
             runCatching { close.get((deadlineNanos - System.nanoTime()).coerceAtLeast(0L), TimeUnit.NANOSECONDS) }
         }
         live.forEach { (tabId, controller) -> stopControllerNow(tabId, controller) }
+        // Lane captures without a tab have no mirror and nothing to drain: stop and release their recorders directly.
+        tablessLaneControllers.values.toList().also { tablessLaneControllers.clear() }.forEach { controller ->
+            runCatching { controller.stop() }
+            runCatching { controller.close() }
+        }
         // Recorders whose tab was closed moments ago and whose stop is still waiting behind that tab's
         // mirror close (closeTabsById): their mirror close was awaited above too. The stop is
         // idempotent, so racing the deferred job is safe.

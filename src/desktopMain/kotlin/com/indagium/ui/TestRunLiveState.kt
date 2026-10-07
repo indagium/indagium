@@ -17,6 +17,7 @@ import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.driverLabel
 import com.indagium.testing.run.PausedStepInfo
 import com.indagium.testing.run.PendingTestConfirmation
 
@@ -61,8 +62,8 @@ internal data class LiveLaneColumn(
 
 private fun laneTitle(lane: LaneResult, profiles: List<AiProviderProfile>): String {
     if (lane.config.kind == LaneKind.EXTERNAL) return EXTERNAL_LANE_LABEL
-    val profile = profiles.firstOrNull { it.id == lane.config.profileId } ?: return lane.config.profileId ?: "Agent"
-    return profile.displayName.ifBlank { profile.kind.label }
+    val profile = profiles.firstOrNull { it.id == lane.config.profileId } ?: return lane.config.driverLabel().ifBlank { "Agent" }
+    return lane.config.driverLabel(profile.displayName.ifBlank { profile.kind.label })
 }
 
 /** The case a lane is working on right now: the last case result that has no final status yet. */

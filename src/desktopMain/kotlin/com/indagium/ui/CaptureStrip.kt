@@ -930,7 +930,7 @@ private fun CaptureStoppedStrip(
     onReturnFocus: () -> Unit,
 ) {
     val sessionId = tab.captureSourceSessionId ?: return
-    val session = state.captureService.sessions.firstOrNull { it.id == sessionId }
+    val session = state.captureService.sessionById(sessionId)
     val colors = tc()
     val exportStatus = captureExportStatusFor(
         sessionId, state.captureExportOwner, state.captureExportBusy, state.captureExportResult, state.captureExportError,

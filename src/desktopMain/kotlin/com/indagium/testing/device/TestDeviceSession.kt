@@ -4,11 +4,9 @@ import com.indagium.capture.CaptureDevice
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureProcessRunner
 import com.indagium.capture.CaptureRecorder
-import com.indagium.capture.CaptureSession
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.CaptureTools
 import com.indagium.capture.ProcessBuilderCaptureRunner
-import com.indagium.capture.RecorderState
 import com.indagium.capture.withMirrorMode
 import com.indagium.debug.BoundedDeviceScreenImage
 import com.indagium.debug.DEVICE_KEY_CODES
@@ -31,15 +29,16 @@ import java.io.File
 import java.time.Duration
 import kotlin.math.roundToInt
 
-// One headless device lane of an AI test run. It owns a standalone CaptureRecorder (logcat, optionally video) in
-// its own folder and drives the device through adb alone: no log tab, no mirror window, no AppState and none of its
-// locks. The lane's agent therefore never competes with the live UI capture, which is why a serial the live capture
-// holds is refused at open().
+// One device lane of an AI test run. It records through a [LaneCapture] (production: a real capture controller, with or
+// without a live tab, see ui/LaneCaptures.kt; the engine tests: a standalone CaptureRecorder in the lane's folder) and drives
+// the device through adb alone. This class touches no AppState and none of its locks: the capture implementation owns every
+// UI-side concern. A serial the live capture (or another lane) holds is refused when the capture is opened.
 //
 // Coordinates the agent uses (tap, swipe, UI-tree bounds) are in the pixel space of the LAST screenshot it was
 // given; the session maps them onto physical device pixels with the same rule device_tap uses.
 
-private const val CAPTURE_SUBDIRECTORY = "capture"
+/** The folder of a lane (under the run folder `lanes/<laneId>/`) that holds its capture sessions. */
+const val LANE_CAPTURE_DIRECTORY = "capture"
 private const val INPUT_TIMEOUT_SECONDS = 5L
 private const val LAUNCH_TIMEOUT_SECONDS = 10L
 private const val UI_DUMP_TIMEOUT_SECONDS = 20L
@@ -95,22 +94,21 @@ internal class TestDeviceSession private constructor(
     val serial: String,
     val laneDir: File,
     private val tools: CaptureTools,
-    private val recorder: CaptureRecorder,
-    private val captureSession: CaptureSession,
+    val capture: LaneCapture,
 ) {
-    private val logReader = CaptureLogReader(captureSession.logFile)
+    private val logReader = CaptureLogReader(capture.logFile)
     private val inputLock = Mutex()
 
     @Volatile
     private var space: DeviceScreenCoordinateSpace? = null
 
-    val logFile: File get() = captureSession.logFile
+    val logFile: File get() = capture.logFile
 
     /** False once the logcat recording ended (device unplugged, storage limit): input still works, new log rows stop. */
-    val isRecording: Boolean get() = recorder.snapshot.value.state == RecorderState.RECORDING
+    val isRecording: Boolean get() = capture.isRecording
 
     /** The recorder's own diagnostics (video start failures, adb stderr lines), for a run report. */
-    val diagnostics: List<String> get() = recorder.snapshot.value.diagnostics
+    val diagnostics: List<String> get() = capture.diagnostics
 
     fun adbTarget(): AdbScriptTarget = AdbScriptTarget(tools, serial)
 
@@ -119,7 +117,7 @@ internal class TestDeviceSession private constructor(
     suspend fun screenshot(): SessionScreenshot {
         // readScreen waits on adb's blocking process API. Moving that wait to IO alone does not
         // make a coroutine deadline interrupt it, so use runInterruptible at the blocking edge.
-        val png = runInterruptible(Dispatchers.IO) { recorder.readScreen() }
+        val png = runInterruptible(Dispatchers.IO) { capture.readScreen() }
         val image = encodeBoundedDeviceScreen(png)
         val current = DeviceScreenCoordinateSpace(image.width, image.height, image.sourceWidth, image.sourceHeight)
         space = current
@@ -237,7 +235,7 @@ internal class TestDeviceSession private constructor(
      * The log's size right now, after flushing the recorder's buffers, as a marker to read from later. Rows written
      * after this call have offsets at or beyond it.
      */
-    suspend fun logMarker(): Long = withContext(Dispatchers.IO) { recorder.snapshotForExport(captureSession.id).logLength }
+    suspend fun logMarker(): Long = withContext(Dispatchers.IO) { capture.flushedLogLength() }
 
     /** Complete rows written at or after [offset], at most [limit] (1..500), optionally only those matching [tag] and [regex]. */
     suspend fun readLogSince(offset: Long, limit: Int = DEFAULT_LOG_READ_ROWS, tag: String? = null, regex: String? = null): LogRead =
@@ -325,22 +323,22 @@ internal class TestDeviceSession private constructor(
 
     // ── Lifecycle ────────────────────────────────────────────────────
 
-    /** Stops the recorder (finalizing the log and any video) on an IO thread. Safe to call more than once. */
+    /** Stops the recording (finalizing the log and any video) on an IO thread; interruptible, so a bounded caller can give up. Safe to call more than once. */
     suspend fun close() {
-        withContext(Dispatchers.IO) { closeBlocking() }
+        runInterruptible(Dispatchers.IO) { closeBlocking() }
     }
 
     /** For callers that are already off the UI and request threads (an IO lane's own cleanup, tests). */
     fun closeBlocking() {
-        runCatching { recorder.stop() }
-        runCatching { recorder.close() }
+        capture.stop()
     }
 
     companion object {
         /**
-         * Opens a lane on [serial]: starts a logcat capture (and, with [recordVideo], the embedded screen recording) under
-         * `<laneDir>/capture`. Refused with [IllegalArgumentException] when [isLiveCaptureSerial] says the live UI
-         * capture holds the device. [recorderFactory] is the seam tests use for a recorder with a fast watchdog.
+         * Opens a lane on [serial] with the headless recorder: starts a logcat capture (and, with [recordVideo], the embedded screen
+         * recording) under `<laneDir>/capture`. Refused with [IllegalArgumentException] when [isLiveCaptureSerial] says the live UI
+         * capture holds the device. [recorderFactory] is the seam tests use for a recorder with a fast watchdog. Production lanes use
+         * [forCapture] with a real capture controller instead.
          */
         @Suppress("TooGenericExceptionCaught") // Any start failure must close the half-open recorder, then reach the caller unchanged.
         suspend fun open(
@@ -354,7 +352,7 @@ internal class TestDeviceSession private constructor(
         ): TestDeviceSession = withContext(Dispatchers.IO) {
             require(serial.isNotBlank()) { "Device serial cannot be blank" }
             require(!isLiveCaptureSerial(serial)) { "Device $serial $LIVE_CAPTURE_REFUSAL" }
-            val root = File(laneDir, CAPTURE_SUBDIRECTORY).apply { mkdirs() }
+            val root = File(laneDir, LANE_CAPTURE_DIRECTORY).apply { mkdirs() }
             val recorder = recorderFactory(root, runner)
             val settings = CaptureSettings(recordVideo = recordVideo, includeBufferedLogs = false).withMirrorMode(CaptureMirrorMode.DISABLED)
             val started = try {
@@ -363,7 +361,13 @@ internal class TestDeviceSession private constructor(
                 runCatching { recorder.close() }
                 throw failure
             }
-            TestDeviceSession(serial, laneDir, tools, recorder, started)
+            TestDeviceSession(serial, laneDir, tools, StandaloneLaneCapture(recorder, started))
+        }
+
+        /** A lane on [serial] that records through [capture] (already started), driving the device through [tools]. */
+        fun forCapture(serial: String, laneDir: File, tools: CaptureTools, capture: LaneCapture): TestDeviceSession {
+            require(serial.isNotBlank()) { "Device serial cannot be blank" }
+            return TestDeviceSession(serial, laneDir, tools, capture)
         }
     }
 }
