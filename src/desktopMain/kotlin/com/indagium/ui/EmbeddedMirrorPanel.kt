@@ -234,6 +234,8 @@ internal class EmbeddedMirrorHandle private constructor(
     @Volatile private var closeRequested = false
     private var closeDone = false
 
+    @Volatile private var activeDeviceSerial: String? = null
+
     @Volatile private var laneThread: Thread? = null
 
     /** Non-null only for the macOS mirror-only VideoToolbox/Metal path. */
@@ -355,6 +357,7 @@ internal class EmbeddedMirrorHandle private constructor(
         // redundant. A shared backend's connection state instead reflects the *recording's* own
         // session — already LIVE well before any decoder is ever attached — so it can't be used the
         // same way; SharedRecordingSession.start() has its own "decoder already attached" guard.
+        activeDeviceSerial = serial
         if (backend.isAlreadyStarted(serial)) return
         backend.start(serial, options)
         _snapshot.value = backend.snapshot()
@@ -364,6 +367,7 @@ internal class EmbeddedMirrorHandle private constructor(
     private fun stopNow() {
         backend.stop()
         _snapshot.value = backend.snapshot()
+        activeDeviceSerial = _snapshot.value.deviceSerial?.takeIf { it.isNotBlank() }
         publishSurface()
     }
 
@@ -375,6 +379,7 @@ internal class EmbeddedMirrorHandle private constructor(
         try {
             backend.close()
             _snapshot.value = backend.snapshot()
+            activeDeviceSerial = null
             publishSurface()
         } finally {
             lifecycleLane.shutdown()
@@ -402,7 +407,15 @@ internal class EmbeddedMirrorHandle private constructor(
      * never call from the UI thread — use [requestStop]. Goes through the lane. */
     fun stop() = awaitLifecycle(requestStop())
 
-    fun send(command: MirrorControlCommand): Boolean = backend.send(command)
+    fun send(command: MirrorControlCommand): Boolean {
+        val accepted = backend.send(command)
+        if (accepted) {
+            val snapshot = backend.snapshot()
+            val serial = snapshot.deviceSerial?.takeIf { it.isNotBlank() } ?: activeDeviceSerial
+            MirrorInputObservers.publish(serial, command, snapshot.frame)
+        }
+        return accepted
+    }
 
     /** Whether this mirror's device stream has an audio track to play — see [MirrorBackend.hasLiveAudio]. */
     val hasLiveAudio: Boolean get() = backend.hasLiveAudio

@@ -27,7 +27,7 @@ import com.indagium.ui.ExternalActionDetails
 private const val MAX_SCRIPTS_SHOWN = 12
 private const val MAX_SCRIPT_COMMAND_CHARS = 300
 private const val MAX_CASE_NAMES_SHOWN = 12
-private const val DECLINED_RUN_MESSAGE = "The user declined to start this test run, or did not answer in time; nothing was started."
+internal const val DECLINED_RUN_MESSAGE = "The user declined to start this test run, or did not answer in time; nothing was started."
 private const val DECLINED_LANE_SCRIPT_MESSAGE = "The user declined to run this script, or did not answer in time; nothing was run."
 
 private fun TestScript.where(): String = if (target == ScriptTarget.ADB_SHELL) "on the device" else "on this computer"
@@ -48,7 +48,7 @@ private fun TestSuite.hookAndCheckScripts(): Map<String, MutableSet<String>> {
     return reasons
 }
 
-private fun scriptLines(library: TestLibrary, suite: TestSuite): String {
+internal fun scriptLines(library: TestLibrary, suite: TestSuite): String {
     val fixed = suite.hookAndCheckScripts()
     val lines = ArrayList<String>()
     val shown = LinkedHashSet<String>()
@@ -70,14 +70,14 @@ private fun scriptLines(library: TestLibrary, suite: TestSuite): String {
     return if (more > 0) "$text\n+ $more more" else text
 }
 
-private fun judgeLine(appState: AppState, judgeProfileId: String?, judgeMode: String): String? {
+internal fun judgeLine(appState: AppState, judgeProfileId: String?, judgeMode: String): String? {
     val mode = JudgeMode.parse(judgeMode) ?: return null
     if (mode == JudgeMode.OFF || judgeProfileId.isNullOrBlank()) return null
     val name = appState.settings.aiProviderProfiles.firstOrNull { it.id == judgeProfileId }?.displayName ?: judgeProfileId
     return "AI profile $name (${mode.label.lowercase()})"
 }
 
-private fun laneLine(appState: AppState, profileId: String, serial: String): String {
+internal fun laneLine(appState: AppState, profileId: String, serial: String): String {
     val profileName = appState.settings.aiProviderProfiles.firstOrNull { it.id == profileId }?.displayName ?: profileId
     val driver = if (profileId.equals(EXTERNAL_LANE_PROFILE_ID, ignoreCase = true)) "driven by you over MCP" else "AI profile $profileName"
     return "device ${serial.ifBlank { "(no device)" }} — $driver"

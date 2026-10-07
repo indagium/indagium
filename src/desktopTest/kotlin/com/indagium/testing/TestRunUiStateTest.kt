@@ -5,6 +5,8 @@ import com.indagium.model.AiProviderKind
 import com.indagium.model.AiProviderProfile
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
+import com.indagium.testing.model.CheckResult
+import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
@@ -18,11 +20,14 @@ import com.indagium.testing.model.TestRun
 import com.indagium.ui.LaneChoice
 import com.indagium.ui.MatrixRow
 import com.indagium.ui.RunDialogModel
+import com.indagium.ui.TestRunReportFilter
 import com.indagium.ui.buildMatrix
 import com.indagium.ui.deviceChoices
+import com.indagium.ui.filterReportRows
 import com.indagium.ui.laneChoices
 import com.indagium.ui.progressLine
 import com.indagium.ui.readLogExcerpt
+import com.indagium.ui.reportMetrics
 import com.indagium.ui.toConfig
 import java.io.File
 import kotlin.io.path.createTempDirectory
@@ -81,6 +86,8 @@ class TestRunUiStateTest {
         assertEquals(listOf("case-1", "case-3"), some.caseIds, "suite order, not selection order")
         assertEquals(LaneKind.EXTERNAL, some.lanes.single().kind)
         assertNull(some.lanes.single().profileId)
+        val staleSelection = RunDialogModel("suite-1", setOf("case-1", "deleted-case"), agent, "SER-A").toConfig(all)
+        assertTrue(staleSelection.exceptionOrNull()?.message.orEmpty().contains("no longer exist"))
 
         fun problem(model: RunDialogModel) = model.toConfig(all).exceptionOrNull()?.message.orEmpty()
         val base = RunDialogModel("suite-1", setOf("case-1"), agent, "SER-A")
@@ -150,6 +157,51 @@ class TestRunUiStateTest {
         )
         val iterations = buildMatrix(twice).filterIsInstance<MatrixRow.Case>().filter { it.caseId == case.id }.map { it.iteration }
         assertEquals(listOf(1, 2), iterations, "iteration 3 was not reached by any lane")
+    }
+
+    @Test
+    fun reportFiltersKeepCaseContextAndCountCrossLaneDisagreementAndUnresolvedChecks() {
+        val base = run()
+        val testCase = base.suite.cases.single()
+        val failingDefinition = testCase.steps.last()
+        val laneA = base.lanes.first().copy(cases = base.lanes.first().cases.map { case ->
+            if (case.caseId != testCase.id) case else case.copy(steps = case.steps.map { step ->
+                if (step.stepId == failingDefinition.id) step.copy(
+                    checks = listOf(CheckResult("ask-judge", "askJudge", CheckStatus.NOT_EVALUATED, "Judge could not decide.")),
+                ) else step
+            })
+        })
+        val laneB = base.lanes.last().copy(cases = base.lanes.last().cases.map { case ->
+            if (case.caseId != testCase.id) case else CaseResult(
+                testCase.id,
+                testCase.name,
+                iteration = 1,
+                status = CaseStatus.PASS,
+                steps = listOf(result(testCase.steps.first().id, 1, StepStatus.PASS), result(failingDefinition.id, 2, StepStatus.PASS)),
+            )
+        })
+        val run = base.copy(lanes = listOf(laneA, laneB))
+        val failures = filterReportRows(run, setOf(TestRunReportFilter.FAILURES))
+        val failedSteps = failures.filterIsInstance<MatrixRow.Step>()
+        assertEquals(listOf(failingDefinition.id), failedSteps.map { it.stepId })
+        assertTrue(failures.any { it is MatrixRow.Case && it.caseId == testCase.id }, "filtered steps retain their case header")
+        val disagreements = filterReportRows(run, setOf(TestRunReportFilter.DISAGREEMENTS)).filterIsInstance<MatrixRow.Step>()
+        assertEquals(listOf(failingDefinition.id), disagreements.map { it.stepId })
+        val unresolved = filterReportRows(run, setOf(TestRunReportFilter.UNRESOLVED_JUDGING)).filterIsInstance<MatrixRow.Step>()
+        assertEquals(listOf(failingDefinition.id), unresolved.map { it.stepId }, "NOT_EVALUATED remains visible alongside deterministic FAIL")
+        val metrics = reportMetrics(run)
+        assertEquals(1, metrics.disagreements)
+        assertEquals(1, metrics.unresolvedJudging)
+        val deterministicOnlyLane = laneA.copy(cases = laneA.cases.map { case ->
+            if (case.caseId != testCase.id) case else case.copy(steps = case.steps.map { step ->
+                if (step.stepId == failingDefinition.id) step.copy(
+                    checks = listOf(CheckResult("log-check", "logAppears", CheckStatus.NOT_EVALUATED, "Deadline expired.")),
+                ) else step
+            })
+        })
+        val deterministicOnly = run.copy(lanes = listOf(deterministicOnlyLane, laneB))
+        assertEquals(0, reportMetrics(deterministicOnly).unresolvedJudging)
+        assertTrue(filterReportRows(deterministicOnly, setOf(TestRunReportFilter.UNRESOLVED_JUDGING)).isEmpty())
     }
 
     @Test

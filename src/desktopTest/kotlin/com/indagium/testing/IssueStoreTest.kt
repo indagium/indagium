@@ -16,7 +16,9 @@ import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.decodeIssueFile
 import com.indagium.testing.store.encodeIssueFile
+import com.indagium.utils.writeFileAtomically
 import java.io.File
+import java.io.IOException
 import kotlin.io.path.createTempDirectory
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
@@ -92,16 +94,17 @@ class IssueStoreTest {
     }
 
     @Test
-    fun excludedAttachmentsAndUnreadableSourcesAreNotStoredAndTheLatterWarn() {
+    fun excludedAttachmentsRemainSelectableAndUnreadableSourcesWarn() {
         val excluded = fromFile("skip.png", "x").copy(include = false)
         val missing = IssueAttachment(IssueAttachmentKind.GOLDEN, "Gone", "gone.png", sourcePath = File(root, "nope.png").absolutePath)
 
         val result = ok(store.create(draft(excluded, missing, fromText("keep.txt", "k")), source))
 
-        assertEquals(listOf("keep.txt"), result.value.draft.attachments.map { it.fileName })
+        assertEquals(listOf("skip.png", "gone.png", "keep.txt"), result.value.draft.attachments.map { it.fileName })
         assertEquals(1, result.warnings.size)
         assertTrue(result.warnings.single().startsWith("Gone"), result.warnings.toString())
-        assertFalse(File(store.issueDir(result.value.id), "attachments/skip.png").exists())
+        assertTrue(File(store.issueDir(result.value.id), "attachments/skip.png").exists(), "unchecked evidence remains available for later selection")
+        assertFalse(result.value.draft.attachments[0].include)
     }
 
     @Test
@@ -129,7 +132,7 @@ class IssueStoreTest {
     }
 
     @Test
-    fun updateKeepsIdSourceAndCreationTimeAndRemovesFilesNoLongerIncluded() {
+    fun updateKeepsIdSourceAndCreationTimeAndRetainsFilesWhenUnchecked() {
         val created = ok(store.create(draft(fromFile("a.png", "A"), fromText("b.txt", "B")), source)).value
         val dir = store.issueDir(created.id)
 
@@ -152,13 +155,62 @@ class IssueStoreTest {
         assertEquals(created.createdAt, updated.createdAt)
         assertTrue(updated.updatedAt > created.updatedAt)
         assertEquals(IssueStatus.SAVED, updated.status)
-        assertFalse(File(dir, "attachments/a.png").exists(), "an excluded attachment's file is removed")
+        assertTrue(File(dir, "attachments/a.png").exists(), "an unchecked attachment remains available")
         assertTrue(File(dir, "attachments/b.txt").isFile)
         assertEquals("C", File(dir, "attachments/c.txt").readText(), "a new attachment is copied in")
         val loaded = assertNotNull(store.load(created.id))
-        assertEquals(listOf("b.txt", "c.txt"), loaded.draft.attachments.map { it.fileName })
+        assertEquals(listOf("a.png", "b.txt", "c.txt"), loaded.draft.attachments.map { it.fileName })
+        assertFalse(loaded.draft.attachments.first().include)
+        assertTrue(ok(store.update(created.id) { record ->
+            record.copy(draft = record.draft.copy(attachments = record.draft.attachments.map { it.copy(include = true) }))
+        }).value.draft.attachments.all { it.include }, "reselecting after restart keeps the original bytes")
         assertEquals(RecheckOutcome.STILL_FAILING, loaded.recheck?.outcome)
         assertEquals("Saved locally.", loaded.destinationResults.single().message)
+    }
+
+    @Test
+    fun aFailedRecordWritePreservesOldBytesAndRemovesOnlyNewAssets() {
+        val issuesDir = File(root, "write-failure/issues")
+        val failingStore = IssueStore(
+            issuesDir,
+            recordWriter = { file, record ->
+                if (record.draft.title == "rejected") throw IOException("simulated write failure")
+                writeFileAtomically(file) { it.write(encodeIssueFile(record)) }
+            },
+        )
+        val created = assertIs<StoreResult.Ok<com.indagium.testing.model.IssueRecord>>(
+            failingStore.create(draft(fromText("kept.txt", "original")), source),
+        ).value
+        val original = assertNotNull(failingStore.attachmentFile(created, created.draft.attachments.single())).readText()
+        val result = failingStore.update(created.id) { record ->
+            record.copy(draft = record.draft.copy(title = "rejected", attachments = record.draft.attachments + fromText("new.txt", "staged")))
+        }
+        assertIs<StoreResult.Invalid>(result)
+        assertEquals("original", original)
+        assertEquals("original", File(failingStore.issueDir(created.id), "attachments/kept.txt").readText())
+        assertFalse(File(failingStore.issueDir(created.id), "attachments/new.txt").exists())
+        assertEquals(created, failingStore.load(created.id))
+    }
+
+    @Test
+    fun aLaterCopyFailureCleansEarlierStagedAttachmentsAndLeavesTheRecordUntouched() {
+        val issuesDir = File(root, "copy-failure/issues")
+        val failingStore = IssueStore(
+            issuesDir,
+            attachmentWriter = { dir, name, attachment ->
+                if (name.startsWith("second")) throw IOException("simulated second-copy failure")
+                val bytes = attachment.text?.toByteArray() ?: File(attachment.sourcePath!!).readBytes()
+                File(dir, name).writeBytes(bytes)
+                bytes.size.toLong()
+            },
+        )
+        val created = assertIs<StoreResult.Ok<com.indagium.testing.model.IssueRecord>>(failingStore.create(draft(), source)).value
+        val result = failingStore.update(created.id) { record ->
+            record.copy(draft = record.draft.copy(attachments = listOf(fromText("first.txt", "one"), fromText("second.txt", "two"))))
+        }
+        assertIs<StoreResult.Invalid>(result)
+        assertEquals(created, failingStore.load(created.id))
+        assertEquals(emptyList(), File(failingStore.issueDir(created.id), "attachments").list()?.toList().orEmpty())
     }
 
     @Test
@@ -232,7 +284,7 @@ class IssueStoreTest {
 
         val created = ok(store.create(draft(), source)).value
         val file = File(store.issueDir(created.id), ISSUE_FILE_NAME)
-        file.writeText(encodeIssueFile(created).replace("\"version\": 1", "\"version\": 99"))
+        file.writeText(encodeIssueFile(created).replace("\"version\": 2", "\"version\": 99"))
         val newer = assertNotNull(store.load(created.id))
         assertTrue(newer.readOnly)
         val refused = store.update(created.id) { it.copy(status = IssueStatus.SENT) }

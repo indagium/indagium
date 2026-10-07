@@ -8,6 +8,7 @@ import com.indagium.testing.model.CaseLocation
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepLocation
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
@@ -29,7 +30,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.io.IOException
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
+import java.nio.file.LinkOption
+import java.util.UUID
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -61,6 +65,7 @@ class TestLibraryStore(
     private val rootDir: File,
     private val limits: () -> EditionLimits = { EditionLimits.UNLIMITED },
     private val clock: () -> Long = System::currentTimeMillis,
+    private val copyAsset: (File, File) -> Unit = { source, target -> Files.copy(source.toPath(), target.toPath()) },
 ) {
     private val suitesDir = File(rootDir, TEST_SUITES_DIR_NAME)
     private val libraryFile = File(rootDir, TEST_LIBRARY_FILE_NAME)
@@ -118,17 +123,70 @@ class TestLibraryStore(
     }
 
     /** A deep copy with new ids, placed right after the original. */
+    @Suppress("CyclomaticComplexMethod", "ReturnCount", "TooGenericExceptionCaught") // Stage, revalidate, publish and clean copied assets on refusal.
     fun duplicateSuite(suiteId: String): StoreResult<TestSuite> {
         val lim = limits()
-        return mutate { lib ->
-            libraryFileRejection(lib)?.let { return@mutate it }
-            val index = lib.suites.indexOfFirst { it.id == suiteId }
-            if (index < 0) return@mutate notFound("suite", suiteId)
-            refusal(decide(lib, LimitOperation.DuplicateSuite(suiteId), lim))?.let { return@mutate it }
-            val now = clock()
-            val copy = lib.suites[index].withFreshIds().copy(name = copyName(lib.suites[index].name), createdAt = now, updatedAt = now)
-            val suites = lib.suites.toMutableList().apply { add(index + 1, copy) }
-            Outcome.Apply(lib.copy(suites = suites), copy, Dirty(setOf(copy.id), libraryFile = true))
+        val initial = synchronized(lock) { state.value }
+        libraryFileRejection(initial)?.let { return it.result }
+        val sourceIndex = initial.suites.indexOfFirst { it.id == suiteId }
+        if (sourceIndex < 0) return StoreResult.NotFound("suite", suiteId)
+        val source = initial.suites[sourceIndex]
+        val sharedIds = referencedSharedIds(source)
+        val referencedShared = initial.sharedSteps.filter { it.id in sharedIds }
+        readOnlySuiteRejection(source)?.let { return it.result }
+        refusal(decide(initial, LimitOperation.DuplicateSuite(suiteId), lim))?.let { return it.result }
+        val now = clock()
+        val copy = source.withFreshIds().copy(name = copyName(source.name), createdAt = now, updatedAt = now)
+        val staged = stageSuiteAssets(initial, source, copy.id)
+        if (staged.error != null) return StoreResult.Invalid(staged.error)
+
+        var assetsPublished = false
+        try {
+            staged.stageDir?.let { stage ->
+                val target = checkNotNull(staged.destinationDir)
+                if (Files.exists(target.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                    return StoreResult.Invalid("Could not duplicate suite assets: the destination asset folder already exists.")
+                }
+                try {
+                    Files.move(stage.toPath(), target.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE)
+                } catch (_: AtomicMoveNotSupportedException) {
+                    Files.move(stage.toPath(), target.toPath())
+                }
+                assetsPublished = true
+            }
+            val applied = synchronized(lock) {
+                val current = state.value
+                val liveIndex = current.suites.indexOfFirst { it.id == suiteId }
+                val live = current.suites.getOrNull(liveIndex)
+                val refusal = libraryFileRejection(current)
+                    ?: refusal(decide(current, LimitOperation.DuplicateSuite(suiteId), lim))
+                    ?: live?.let(::readOnlySuiteRejection)
+                when {
+                    refusal != null -> Outcome.Reject(refusal.result)
+                    live == null -> Outcome.Reject(StoreResult.NotFound("suite", suiteId))
+                    live != source -> Outcome.Reject(StoreResult.Invalid("The suite changed while its assets were being copied. Retry duplication."))
+                    current.sharedSteps.filter { it.id in sharedIds } != referencedShared ->
+                        Outcome.Reject(StoreResult.Invalid("A referenced shared step changed while its assets were being copied. Retry duplication."))
+                    else -> {
+                        val suites = current.suites.toMutableList().apply { add(liveIndex + 1, copy) }
+                        val outcome = Outcome.Apply(current.copy(suites = suites), copy, Dirty(setOf(copy.id), libraryFile = true))
+                        state.value = outcome.library
+                        outcome
+                    }
+                }
+            }
+            if (applied is Outcome.Reject) {
+                if (assetsPublished) staged.destinationDir?.deleteRecursively()
+                return applied.result
+            }
+            applied as Outcome.Apply<TestSuite>
+            persist(applied.dirty)
+            return StoreResult.Ok(applied.value)
+        } catch (failure: Exception) {
+            if (assetsPublished) staged.destinationDir?.deleteRecursively()
+            return StoreResult.Invalid("Could not duplicate suite assets: ${failure.message ?: "file operation failed"}. The library was not changed.")
+        } finally {
+            staged.stageDir?.takeIf(File::exists)?.deleteRecursively()
         }
     }
 
@@ -143,9 +201,18 @@ class TestLibraryStore(
 
     /** The suite as a self-contained `indagium-test-suite` file's text. */
     fun exportSuite(suiteId: String): StoreResult<String> {
-        val suite = state.value.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
-        return StoreResult.Ok(encodeSuiteFile(suite))
+        val snapshot = state.value
+        val suite = snapshot.suite(suiteId) ?: return StoreResult.NotFound("suite", suiteId)
+        val assets = referencedGoldenPaths(snapshot, suite).isNotEmpty()
+        return StoreResult.Ok(encodeSuiteFile(suite, externalAssetsRequired = assets))
     }
+
+    /** Whether a metadata-only suite export needs its external golden image files to remain usable. */
+    fun suiteRequiresExternalAssets(suiteId: String): Boolean =
+        synchronized(lock) {
+            val snapshot = state.value
+            snapshot.suite(suiteId)?.let { referencedGoldenPaths(snapshot, it).isNotEmpty() } == true
+        }
 
     fun exportSuiteToFile(suiteId: String, destination: File): StoreResult<File> {
         val text = when (val exported = exportSuite(suiteId)) {
@@ -299,6 +366,24 @@ class TestLibraryStore(
                     CaseEdit.Done(case.copy(steps = steps), withId)
                 }
             }
+        }
+    }
+
+    /** Inserts a reviewed sequence in one case edit with fresh step/check/example ids. */
+    fun createSteps(caseId: String, steps: List<TestStep>, atIndex: Int? = null): StoreResult<List<TestStep>> {
+        if (steps.isEmpty()) return StoreResult.Invalid("At least one step is required.")
+        val copies = steps.map { it.withFreshIds() }
+        return editCase(caseId) { lib, case ->
+            copies.forEachIndexed { index, step ->
+                val problem = validateEntityId("Step", step.id) ?: validateStep(step)
+                if (problem != null) return@editCase CaseEdit.Fail("Step ${index + 1}: $problem")
+                if (lib.findStep(step.id) != null || case.steps.any { existing -> copies.any { it.id == existing.id } }) {
+                    return@editCase CaseEdit.Fail("A step with an inserted id already exists.")
+                }
+            }
+            val insertion = (atIndex ?: case.steps.size).coerceIn(0, case.steps.size)
+            val updated = case.steps.toMutableList().apply { addAll(insertion, copies) }
+            CaseEdit.Done(case.copy(steps = updated), copies)
         }
     }
 
@@ -518,6 +603,64 @@ class TestLibraryStore(
         if (total == 0) return null
         return "$total reference(s) point to scripts or shared steps that are not in this library."
     }
+
+    /** Stage every golden image referenced by [source] and publish the complete directory as one move. */
+    private data class AssetStage(val stageDir: File?, val destinationDir: File?, val error: String? = null)
+
+    @Suppress("ReturnCount", "TooGenericExceptionCaught") // Each failure has an actionable asset error and staged files are removed on any copy failure.
+    private fun stageSuiteAssets(lib: TestLibrary, source: TestSuite, destinationId: String): AssetStage {
+        val paths = referencedGoldenPaths(lib, source)
+        if (paths.isEmpty()) return AssetStage(null, null)
+        val assetsRoot = File(rootDir, TEST_ASSETS_DIR_NAME)
+        if (Files.isSymbolicLink(assetsRoot.toPath())) {
+            return AssetStage(null, null, "Could not duplicate suite: the golden image asset folder must not be a symbolic link.")
+        }
+        val stage = File(assetsRoot, ".stage-${UUID.randomUUID()}")
+        val destination = testAssetDir(rootDir, destinationId)
+        var handedOff = false
+        try {
+            if (Files.exists(destination.toPath(), LinkOption.NOFOLLOW_LINKS)) {
+                return AssetStage(null, null, "Could not duplicate suite assets: the destination asset folder already exists.")
+            }
+            Files.createDirectories(stage.toPath())
+            if (Files.isSymbolicLink(stage.toPath()) || !stage.canonicalFile.toPath().startsWith(assetsRoot.canonicalFile.toPath())) {
+                return AssetStage(null, null, "Could not duplicate suite: staging directory escaped the golden image asset folder.")
+            }
+            val stageRoot = stage.canonicalFile
+            for (path in paths) {
+                val sourceFile = resolveTestAsset(rootDir, source.id, path)
+                    ?: return AssetStage(null, null, "Could not duplicate suite: golden image path '$path' is not a safe relative asset path.")
+                if (!sourceFile.isFile) return AssetStage(null, null, "Could not duplicate suite: referenced golden image '$path' is missing.")
+                val target = File(stage, path).canonicalFile
+                if (target != stageRoot && !target.path.startsWith(stageRoot.path + File.separator)) {
+                    return AssetStage(null, null, "Could not duplicate suite: golden image path '$path' escapes the asset folder.")
+                }
+                Files.createDirectories(target.parentFile.toPath())
+                copyAsset(sourceFile, target)
+            }
+            handedOff = true
+            return AssetStage(stage, destination)
+        } catch (failure: Exception) {
+            stage.deleteRecursively()
+            return AssetStage(null, null, "Could not duplicate suite golden images: ${failure.message ?: "file copy failed"}. The library was not changed.")
+        } finally {
+            if (!handedOff && stage.exists()) stage.deleteRecursively()
+        }
+    }
+
+    private fun referencedGoldenPaths(lib: TestLibrary, suite: TestSuite): List<String> {
+        val steps = suite.cases.flatMap { it.steps }
+        val sharedIds = referencedSharedIds(suite)
+        return (steps + lib.sharedSteps.filter { it.id in sharedIds }.flatMap { it.steps })
+            .flatMap { it.examples }
+            .filterIsInstance<StepExample.GoldenScreenshot>()
+            .map { it.assetPath }
+            .distinct()
+    }
+
+    private fun referencedSharedIds(suite: TestSuite): Set<String> =
+        (suite.setup + suite.teardown + suite.cases.flatMap { it.setup + it.teardown })
+            .filterIsInstance<HookItem.Shared>().map { it.sharedStepId }.toSet()
 
     // ── Disk ─────────────────────────────────────────────────────────
 

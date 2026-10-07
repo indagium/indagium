@@ -145,7 +145,7 @@ internal class JudgeService(
 
     /** The golden image, scaled down like a screenshot; a format the JDK cannot decode (webp) goes to the model as it is. */
     private suspend fun loadExample(example: StepExample.GoldenScreenshot): JudgeImage? = withContext(Dispatchers.IO) {
-        runCatching { goldenImage(suiteId, example.assetPath) }.getOrNull()?.let { bytes -> boundedJudgeImage(bytes, mimeForAsset(example.assetPath)) }
+        runCatching { goldenImage(suiteId, example.assetPath) }.getOrNull()?.let(::boundedJudgeImage)
     }
 
     private companion object {

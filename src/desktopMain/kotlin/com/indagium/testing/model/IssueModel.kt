@@ -17,12 +17,12 @@ enum class IssueStatus { DRAFT, SAVED, SENT }
 /** TRACKER: an AI agent files the issue in the issue tracker configured in Settings, through the tracker's MCP tools (testing/tracker). */
 enum class IssueDestination { LOCAL, NOTES, MARKDOWN, TRACKER }
 
-enum class IssueAttachmentKind { VIDEO_CLIP, LOG_RANGE, SCREENSHOT, TRANSCRIPT, JUDGE_VERDICT, GOLDEN }
+enum class IssueAttachmentKind { VIDEO_CLIP, LOG_RANGE, SCREENSHOT, TRANSCRIPT, JUDGE_VERDICT, GOLDEN, BUGREPORT }
 
 /**
  * One piece of evidence. Exactly one of [sourcePath] (an absolute file to copy), [text] (generated text to write as a
  * file) or [storedPath] (a path relative to the issue's folder, set by the store) says where the content is. [include]
- * is the user's choice in the evidence checklist; the store keeps only included attachments. [note] is extra context
+ * is the user's choice in the evidence checklist; the store retains available attachments even when unchecked. [note] is extra context
  * (a video attachment says where the step starts in it).
  */
 data class IssueAttachment(

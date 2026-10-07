@@ -325,6 +325,7 @@ private val CASE_FIELD_DESCRIPTIONS = mapOf(
     "allowAllTools" to "true removes the allow-list so every lane tool is allowed.",
 )
 
+@Suppress("LongMethod") // Keep authoring schemas together beside their shared item shapes.
 private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "create_test_step",
@@ -364,6 +365,97 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         "move_test_step",
         "Reorder a step inside its case. $MOVE_NOTE Returns the case's step ids in their new order.",
         schema("stepId" to "string", "toIndex" to "integer", required = listOf("stepId", "toIndex")),
+    ),
+    IndagiumToolDescriptor(
+        "draft_test_steps",
+        "Ask an existing provider profile to propose steps for a case. This only returns a short-lived editable preview; " +
+            "it never changes the library or controls a device. Call apply_test_step_draft only after reviewing/editing that preview.",
+        schema(
+            "suiteId" to "string", "caseId" to "string", "profileId" to "string", "instruction" to "string",
+            required = listOf("suiteId", "caseId", "profileId", "instruction"),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "apply_test_step_draft",
+        "Apply a reviewed step-draft preview to its case. Send the edited steps from draft_test_steps; " +
+            "the draft is one-use and revalidated against the current library. Refused for locked/read-only cases.",
+        schema(
+            "draftId" to "string", "steps" to "array", "index" to "integer",
+            required = listOf("draftId", "steps"), objectArrays = mapOf("steps" to STEP_ITEM_SCHEMA),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "start_test_recording",
+        "Start a review-only recording session for accepted user input on an already-open live mirror. " +
+            "This observes mirror commands only; it never sends input or drives a device. Asks for confirmation.",
+        schema("suiteId" to "string", "caseId" to "string", "deviceSerial" to "string", required = listOf("suiteId", "caseId", "deviceSerial")),
+    ),
+    IndagiumToolDescriptor(
+        "get_test_recording",
+        "Read the current recording preview and its warnings. Screen snapshots are bounded; " +
+            "the UI hierarchy is included only when the mirror provides it. " +
+            "Optionally request one captured input-time image by rowId; it is context, not an expected-result oracle or current device screen.",
+        schema("sessionId" to "string", "rowId" to "string", required = listOf("sessionId")),
+    ),
+    IndagiumToolDescriptor(
+        "update_test_recording",
+        "Edit action and expected-result text in a stopped recording preview. Send one row for every recorded step; " +
+            "captured images are input-time context, not expected-result oracles unless useScreenshotAsExpected is explicitly true.",
+        schema(
+            "sessionId" to "string", "steps" to "array", required = listOf("sessionId", "steps"),
+            objectArrays = mapOf(
+                "steps" to ObjectArrayItemSchema(
+                    listOf("id" to "string", "action" to "string", "expected" to "string", "useScreenshotAsExpected" to "boolean"),
+                    required = listOf("action", "expected"),
+                ),
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "stop_test_recording",
+        "Stop observing input and wait briefly for pending bounded screen snapshots to finish. This does not apply the draft.",
+        schema("sessionId" to "string", required = listOf("sessionId")),
+    ),
+    IndagiumToolDescriptor(
+        "apply_test_recording",
+        "Apply a stopped, edited recording preview to its original target case. Send every action and expected result; " +
+            "input-time screen snapshots are not expected-result oracles unless useScreenshotAsExpected is explicitly true. " +
+            "Assets are staged and removed if insertion fails. Asks for confirmation.",
+        schema(
+            "sessionId" to "string", "steps" to "array", "index" to "integer", required = listOf("sessionId", "steps"),
+            objectArrays = mapOf(
+                "steps" to ObjectArrayItemSchema(
+                    listOf("id" to "string", "action" to "string", "expected" to "string", "useScreenshotAsExpected" to "boolean"),
+                    required = listOf("action", "expected"),
+                ),
+            ),
+        ),
+    ),
+    IndagiumToolDescriptor(
+        "discard_test_recording",
+        "Discard a recording preview and detach its observer without changing the test library.",
+        schema("sessionId" to "string", required = listOf("sessionId")),
+    ),
+    IndagiumToolDescriptor(
+        "insert_shared_steps",
+        "Copy the selected shared step's sequence into a case at index (default end). Every step/check/example receives a fresh id; " +
+            "later edits are independent. Golden assets must exist in the target suite.",
+        schema("caseId" to "string", "sharedStepId" to "string", "index" to "integer", required = listOf("caseId", "sharedStepId")),
+    ),
+    IndagiumToolDescriptor(
+        "preview_log_checks",
+        "Parse pasted Android logcat lines into regex-escaped literal LogAppears checks (default wait duration). " +
+            "Preview only; no library mutation. The returned checks can be edited then sent to insert_log_checks.",
+        schema("text" to "string", required = listOf("text")),
+    ),
+    IndagiumToolDescriptor(
+        "insert_log_checks",
+        "Add reviewed checks to an existing step. Send either edited checks or text to parse; " +
+            "checks are inserted at index (default end) and assigned fresh ids.",
+        schema(
+            "stepId" to "string", "checks" to "array", "text" to "string", "index" to "integer",
+            required = listOf("stepId"), objectArrays = mapOf("checks" to CHECK_ITEM_SCHEMA),
+        ),
     ),
 )
 
@@ -405,6 +497,31 @@ private fun scriptTools(): List<IndagiumToolDescriptor> = listOf(
         "move_test_script",
         "Reorder a script in the library. $MOVE_NOTE",
         schema("scriptId" to "string", "toIndex" to "integer", required = listOf("scriptId", "toIndex")),
+    ),
+    IndagiumToolDescriptor(
+        "duplicate_test_script",
+        "Duplicate a library script with a fresh id and unique tool name.",
+        schema("scriptId" to "string", required = listOf("scriptId")),
+    ),
+    IndagiumToolDescriptor(
+        "import_test_script",
+        "Import one versioned Indagium script JSON envelope from text or an absolute file path. A fresh id and unique tool name are assigned.",
+        schema("text" to "string", "path" to "string", required = emptyList()),
+    ),
+    IndagiumToolDescriptor(
+        "export_test_script",
+        "Export one script as a versioned JSON envelope, returning text unless an absolute file path is supplied.",
+        schema("scriptId" to "string", "path" to "string", "overwrite" to "boolean", required = listOf("scriptId")),
+    ),
+    IndagiumToolDescriptor(
+        "get_test_script_schema",
+        "Return the actual tool schema that this script exposes to test lanes.",
+        schema("scriptId" to "string", required = listOf("scriptId")),
+    ),
+    IndagiumToolDescriptor(
+        "get_test_script_usage",
+        "List explicit current-library references to a script in hooks, script-result checks and allowed-tool lists.",
+        schema("scriptId" to "string", required = listOf("scriptId")),
     ),
     IndagiumToolDescriptor(
         "try_test_script",

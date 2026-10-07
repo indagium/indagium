@@ -23,14 +23,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 
 // JSON codec of `<issues dir>/<issueId>/issue.json`:
-//   {"format":"indagium-issue","version":1,"issue":{...}}
+//   {"format":"indagium-issue","version":2,"issue":{...}}
 // Same rules as the other testing codecs: reads are tolerant (unknown keys ignored, a missing or mistyped field takes its
 // default, an unknown enum value falls back to a neutral one), only the envelope is strict. A file written by a NEWER
 // version still decodes but is flagged readOnly so the store never rewrites it and loses fields this build does not know.
 // Only what is stored is written: an attachment's transient source path or inline text never reaches the file.
 
 const val ISSUE_FILE_FORMAT = "indagium-issue"
-const val ISSUE_FILE_VERSION = 1
+const val ISSUE_FILE_VERSION = 2
 
 private val prettyJson = Json { prettyPrint = true }
 

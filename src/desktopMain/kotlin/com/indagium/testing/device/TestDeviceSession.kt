@@ -23,6 +23,7 @@ import com.indagium.model.LogEntry
 import com.indagium.testing.script.AdbScriptTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -115,12 +116,14 @@ internal class TestDeviceSession private constructor(
 
     // ── Screen ───────────────────────────────────────────────────────
 
-    suspend fun screenshot(): SessionScreenshot = withContext(Dispatchers.IO) {
-        val png = recorder.readScreen()
+    suspend fun screenshot(): SessionScreenshot {
+        // readScreen waits on adb's blocking process API. Moving that wait to IO alone does not
+        // make a coroutine deadline interrupt it, so use runInterruptible at the blocking edge.
+        val png = runInterruptible(Dispatchers.IO) { recorder.readScreen() }
         val image = encodeBoundedDeviceScreen(png)
         val current = DeviceScreenCoordinateSpace(image.width, image.height, image.sourceWidth, image.sourceHeight)
         space = current
-        SessionScreenshot(png, image, current)
+        return SessionScreenshot(png, image, current)
     }
 
     /** The coordinate space of the last screenshot, taking one first when the agent has not looked yet. */

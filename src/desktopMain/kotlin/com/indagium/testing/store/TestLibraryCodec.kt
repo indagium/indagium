@@ -267,12 +267,20 @@ internal fun sharedStepToJson(shared: SharedStep): JsonObject = buildJsonObject 
     put("steps", buildJsonArray { shared.steps.forEach { add(stepToJson(it)) } })
 }
 
-fun encodeSuiteFile(suite: TestSuite): String = prettyJson.encodeToString(
+fun encodeSuiteFile(suite: TestSuite, externalAssetsRequired: Boolean = false): String = prettyJson.encodeToString(
     JsonObject.serializer(),
     buildJsonObject {
         put("format", TEST_SUITE_FILE_FORMAT)
         put("version", TEST_SUITE_FILE_VERSION)
         put("suite", suiteToJson(suite))
+        if (externalAssetsRequired) {
+            put("externalAssetsRequired", true)
+            put(
+                "assetWarning",
+                "This metadata-only export references golden screenshot files stored separately under assets/<suiteId>/. " +
+                    "Copy those files with the suite to preserve image checks.",
+            )
+        }
     },
 )
 
@@ -388,7 +396,7 @@ internal fun decodeParam(o: JsonObject): ScriptParam? {
     )
 }
 
-private fun decodeScript(o: JsonObject, ids: IdAllocator): TestScript? {
+internal fun decodeScript(o: JsonObject, ids: IdAllocator): TestScript? {
     val toolName = o.str("toolName").takeIf { it.isNotBlank() } ?: return null
     return TestScript(
         id = ids.next(o["id"], SCRIPT_ID_PREFIX),

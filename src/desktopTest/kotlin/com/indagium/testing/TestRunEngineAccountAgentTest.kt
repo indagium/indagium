@@ -162,7 +162,7 @@ class TestRunEngineAccountAgentTest {
                         managedMcpServerFactory = { run -> ManagedMcpServerLease.start(state, run, request.gateway) },
                         maxToolRounds = request.toolCallLimit,
                         maxTurns = request.maxTurns,
-                        promptPreamble = ::lanePromptPreamble,
+                        promptPreamble = request.promptPreamble,
                         cliCheck = { AccountCliCheck(true, "") },
                         claudeProcessFactory = claude ?: ClaudeCodeProcessFactory { _, _ -> error("not used") },
                         codexLauncher = { command, environment, scope ->

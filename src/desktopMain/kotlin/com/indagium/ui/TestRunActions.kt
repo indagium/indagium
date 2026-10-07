@@ -3,8 +3,13 @@ package com.indagium.ui
 import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.model.StepFix
 import com.indagium.testing.run.StartRunResult
+import com.indagium.testing.run.TestRunReportExportProgress
+import com.indagium.testing.run.TestRunReportExportResult
+import com.indagium.testing.run.TestRunReportFormat
+import com.indagium.testing.run.exportTestRunReport
 import com.indagium.testing.run.findFix
 import com.indagium.testing.run.rerunConfig
+import com.indagium.testing.run.rerunFailedCasesConfig
 import com.indagium.testing.run.withAgentError
 import com.indagium.testing.run.withFix
 import com.indagium.testing.run.withFixApplied
@@ -68,4 +73,41 @@ internal suspend fun AppState.rerunStep(runId: String, laneId: String, caseId: S
     val run = testRunCoordinator.loadRun(runId) ?: return StartRunResult.Rejected(listOf("Run '$runId' was not found."))
     val config = rerunConfig(run, laneId, caseId, stepId).getOrElse { return StartRunResult.Rejected(listOf(it.message ?: "The step cannot be re-run.")) }
     return testRunCoordinator.start(config)
+}
+
+/** Starts a current-library run of the union of cases that failed, blocked, or errored in [runId]. */
+internal suspend fun AppState.rerunFailedCases(runId: String): StartRunResult {
+    val run = testRunCoordinator.loadRun(runId) ?: return StartRunResult.Rejected(listOf("Run '$runId' was not found."))
+    val config = rerunFailedCasesConfig(run).getOrElse { return StartRunResult.Rejected(listOf(it.message ?: "Failed cases cannot be re-run.")) }
+    val selected = config.caseIds.orEmpty()
+    val currentSuite = testLibrary.suite(config.suiteId)
+        ?: return StartRunResult.Rejected(listOf("The suite from run '$runId' was deleted; failed cases cannot be re-run."))
+    val currentIds = currentSuite.cases.map { it.id }.toSet()
+    val missing = selected.filterNot { it in currentIds }
+    if (selected.isEmpty()) return StartRunResult.Rejected(listOf("No failed case remains selected; no run was started."))
+    if (missing.isNotEmpty()) {
+        return StartRunResult.Rejected(
+            listOf("Some failed cases were deleted from the current suite; refresh the run report before retrying."),
+        )
+    }
+    return testRunCoordinator.start(config)
+}
+
+/** Shared local report export used by the Runs UI and MCP catalog. */
+internal suspend fun AppState.exportTestRunReport(
+    runId: String,
+    destination: String,
+    format: TestRunReportFormat,
+    evidencePaths: List<String> = emptyList(),
+    overwrite: Boolean = false,
+    progress: (TestRunReportExportProgress) -> Unit = {},
+): Result<TestRunReportExportResult> {
+    val run = testRunCoordinator.loadRun(runId) ?: return Result.failure(IllegalArgumentException("Run '$runId' was not found."))
+    if (run.status == com.indagium.testing.model.RunStatus.RUNNING || run.status == com.indagium.testing.model.RunStatus.QUEUED) {
+        return Result.failure(IllegalArgumentException("Wait until run '$runId' finishes before exporting its report."))
+    }
+    return exportTestRunReport(
+        run, testRunCoordinator.runDir(runId), java.io.File(destination), format, evidencePaths,
+        overwrite = overwrite, progress = progress,
+    )
 }

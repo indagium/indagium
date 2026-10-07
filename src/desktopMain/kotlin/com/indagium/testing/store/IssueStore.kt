@@ -12,9 +12,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.IOException
 import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import java.util.concurrent.CancellationException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -34,14 +36,20 @@ const val MAX_ISSUE_FILE_BYTES = 4L * 1024L * 1024L
 const val MAX_ISSUE_ATTACHMENT_BYTES = 1024L * 1024L * 1024L
 private const val MAX_LISTED_ISSUES = 500
 private const val MAX_ATTACHMENT_NAME_CHARS = 100
+private const val ATTACHMENT_COPY_BUFFER_BYTES = 64 * 1024
 private const val DEFAULT_ATTACHMENT_NAME = "attachment"
 private const val READ_ONLY_MESSAGE = "This issue was saved by a newer version of Indagium and is read-only here."
 private val UNSAFE_NAME_CHARS = Regex("[^A-Za-z0-9._-]")
 
 /** The result of putting a draft's attachments into the issue folder: what is stored, and what could not be. */
-private class Materialised(val attachments: List<IssueAttachment>, val warnings: List<String>)
+private class Materialised(val attachments: List<IssueAttachment>, val warnings: List<String>, val createdFiles: List<File>)
 
-class IssueStore(private val issuesDir: File, private val clock: () -> Long = System::currentTimeMillis) {
+class IssueStore(
+    private val issuesDir: File,
+    private val recordWriter: ((File, IssueRecord) -> Unit)? = null,
+    private val attachmentWriter: ((File, String, IssueAttachment) -> Long?)? = null,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
     private val lock = ReentrantLock()
     private val revisionState = MutableStateFlow(0)
 
@@ -111,17 +119,67 @@ class IssueStore(private val issuesDir: File, private val clock: () -> Long = Sy
         val result = lock.withLock {
             val old = load(issueId) ?: return@withLock StoreResult.NotFound("issue", issueId)
             if (old.readOnly) return@withLock StoreResult.Invalid(READ_ONLY_MESSAGE)
+            var materialised: Materialised? = null
             try {
                 val changed = transform(old)
                 val stored = materialise(issueId, changed.draft.attachments)
-                removeUnreferencedFiles(issueId, stored.attachments)
+                materialised = stored
                 val record = changed.copy(
                     id = old.id, source = old.source, createdAt = old.createdAt, updatedAt = clock(), readOnly = false,
                     draft = changed.draft.copy(attachments = stored.attachments),
                 )
                 writeRecord(record)
+                // Publish the replacement record before removing old assets. If the atomic record write fails,
+                // the previous record and every file it names remain usable.
+                runCatching { removeUnreferencedFiles(issueId, stored.attachments) }
                 StoreResult.Ok(record, stored.warnings)
             } catch (failure: IOException) {
+                materialised?.createdFiles?.forEach { runCatching { it.delete() } }
+                StoreResult.Invalid("Could not save the issue: ${failure.message}")
+            }
+        }
+        if (result is StoreResult.Ok) bump()
+        return result
+    }
+
+    /**
+     * Adds one newly-created evidence file atomically. Unlike ordinary draft updates, failure to materialise this
+     * attachment aborts before issue.json is replaced, so temporary collection sources can be deleted safely.
+     */
+    fun appendAttachmentStrict(
+        issueId: String,
+        attachment: IssueAttachment,
+        cancellationCheck: () -> Unit = {},
+    ): StoreResult<IssueRecord> {
+        if (!isSafeId(issueId)) return StoreResult.NotFound("issue", issueId)
+        val result = lock.withLock {
+            val old = load(issueId) ?: return@withLock StoreResult.NotFound("issue", issueId)
+            if (old.readOnly) return@withLock StoreResult.Invalid(READ_ONLY_MESSAGE)
+            var materialised: Materialised? = null
+            try {
+                cancellationCheck()
+                val stored = materialise(issueId, old.draft.attachments + attachment, cancellationCheck)
+                materialised = stored
+                val added = stored.attachments.lastOrNull()
+                if (stored.warnings.isNotEmpty() || added?.storedPath == null) {
+                    stored.createdFiles.forEach { runCatching { it.delete() } }
+                    return@withLock StoreResult.Invalid(
+                        stored.warnings.firstOrNull() ?: "${attachment.label}: the attachment could not be stored.",
+                    )
+                }
+                val updated = old.copy(
+                    updatedAt = clock(),
+                    draft = old.draft.copy(attachments = stored.attachments),
+                )
+                cancellationCheck()
+                writeRecord(updated)
+                runCatching { removeUnreferencedFiles(issueId, stored.attachments) }
+                StoreResult.Ok(updated)
+            } catch (cancelled: CancellationException) {
+                materialised?.createdFiles?.forEach { runCatching { it.delete() } }
+                throw cancelled
+            } catch (failure: IOException) {
+                materialised?.createdFiles?.forEach { runCatching { it.delete() } }
                 StoreResult.Invalid("Could not save the issue: ${failure.message}")
             }
         }
@@ -149,7 +207,8 @@ class IssueStore(private val issuesDir: File, private val clock: () -> Long = Sy
 
     private fun writeRecord(record: IssueRecord) {
         val file = File(issueDir(record.id), ISSUE_FILE_NAME)
-        writeFileAtomically(file) { it.write(encodeIssueFile(record)) }
+        val writer = recordWriter
+        if (writer != null) writer(file, record) else writeFileAtomically(file) { it.write(encodeIssueFile(record)) }
     }
 
     private fun attachmentsDir(issueId: String) = File(issueDir(issueId), ISSUE_ATTACHMENTS_DIR_NAME)
@@ -166,36 +225,51 @@ class IssueStore(private val issuesDir: File, private val clock: () -> Long = Sy
         return candidate
     }
 
-    /** Copies or writes what is not stored yet, keeps what is, and leaves out what the user excluded. */
-    private fun materialise(issueId: String, attachments: List<IssueAttachment>): Materialised {
+    /** Copies or writes the available inventory, including unchecked attachments, and keeps what is already stored. */
+    @Suppress("TooGenericExceptionCaught") // Any copy/writer failure must roll back all newly staged issue attachments.
+    private fun materialise(issueId: String, attachments: List<IssueAttachment>, cancellationCheck: () -> Unit = {}): Materialised {
         val dir = attachmentsDir(issueId)
         val kept = ArrayList<IssueAttachment>()
         val warnings = ArrayList<String>()
+        val created = ArrayList<File>()
         val used = HashSet<String>()
-        attachments.filter { it.include && it.storedPath != null }.forEach { used += File(it.storedPath.orEmpty()).name }
-        for (attachment in attachments) {
-            if (!attachment.include) continue
-            if (attachment.storedPath != null) {
-                kept += attachment
-                continue
+        attachments.filter { it.storedPath != null }.forEach { used += File(it.storedPath.orEmpty()).name }
+        try {
+            for (attachment in attachments) {
+                cancellationCheck()
+                if (attachment.storedPath != null) {
+                    kept += attachment
+                    continue
+                }
+                Files.createDirectories(dir.toPath())
+                val name = safeName(attachment.fileName) { it in used || File(dir, it).exists() }
+                val target = File(dir, name)
+                // safeName chose an unused path, so it is safe to remove even if a later write/copy fails partway.
+                created += target
+                val written = writeAttachment(dir, name, attachment, cancellationCheck)
+                if (written == null) {
+                    target.delete()
+                    created.remove(target)
+                    warnings += "${attachment.label}: it could not be attached (the file is missing or too large)."
+                    kept += attachment
+                } else {
+                    used += name
+                    kept += attachment.copy(
+                        storedPath = "$ISSUE_ATTACHMENTS_DIR_NAME/$name", sourcePath = null, text = null, fileName = name, sizeBytes = written,
+                    )
+                }
             }
-            Files.createDirectories(dir.toPath())
-            val name = safeName(attachment.fileName) { it in used || File(dir, it).exists() }
-            val written = writeAttachment(dir, name, attachment)
-            if (written == null) {
-                warnings += "${attachment.label}: it could not be attached (the file is missing or too large)."
-            } else {
-                used += name
-                kept += attachment.copy(
-                    storedPath = "$ISSUE_ATTACHMENTS_DIR_NAME/$name", sourcePath = null, text = null, fileName = name, sizeBytes = written,
-                )
-            }
+        } catch (failure: Exception) {
+            created.forEach { runCatching { it.delete() } }
+            throw failure
         }
-        return Materialised(kept, warnings)
+        return Materialised(kept, warnings, created)
     }
 
     /** Writes one attachment into [dir] as [name]; returns its size, or null when it has no usable content. */
-    private fun writeAttachment(dir: File, name: String, attachment: IssueAttachment): Long? {
+    private fun writeAttachment(dir: File, name: String, attachment: IssueAttachment, cancellationCheck: () -> Unit = {}): Long? {
+        cancellationCheck()
+        attachmentWriter?.let { return it(dir, name, attachment).also { cancellationCheck() } }
         val target = File(dir, name)
         val text = attachment.text
         val source = attachment.sourcePath?.let(::File)
@@ -203,12 +277,26 @@ class IssueStore(private val issuesDir: File, private val clock: () -> Long = Sy
             text != null -> {
                 val bytes = text.toByteArray(Charsets.UTF_8)
                 if (bytes.size > MAX_ISSUE_ATTACHMENT_BYTES) return null
+                cancellationCheck()
                 Files.write(target.toPath(), bytes)
                 bytes.size.toLong()
             }
             source != null && source.isFile && source.length() <= MAX_ISSUE_ATTACHMENT_BYTES -> {
-                Files.copy(source.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                target.length()
+                var copied = 0L
+                FileInputStream(source).use { input ->
+                    FileOutputStream(target).use { output ->
+                        val buffer = ByteArray(ATTACHMENT_COPY_BUFFER_BYTES)
+                        while (true) {
+                            cancellationCheck()
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            copied += read
+                            if (copied > MAX_ISSUE_ATTACHMENT_BYTES) return null
+                            output.write(buffer, 0, read)
+                        }
+                    }
+                }
+                copied
             }
             else -> null
         }

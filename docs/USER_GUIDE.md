@@ -1245,13 +1245,23 @@ real devices** — tapping, typing, reading the screen and the logcat — while 
 from the evidence alone, whether each step did what you expected. Anything that fails can become an
 issue, kept locally or filed in your issue tracker.
 
-Open the **Tests** tab from the toolbar. The left column lists **Suites**, **Shared steps**, **Scripts**,
-**Runs** and **Issues**.
+Open the **Tests** tab from the toolbar. The workspace links **Suites**, **Shared steps**, **Examples for agents**,
+**Agent profiles**, **Scripts**, **Runs** and **Issues**. Examples for agents is an index of examples already
+attached to steps and shared sequences; selecting one opens its owner. Agent profiles opens provider settings.
 
 ### Suites, cases and steps
 
-A **suite** groups the cases of one app. A **case** is one thing to verify and holds ordered **steps**; a step
-is one instruction.
+A **suite** groups the cases of one app. Its compact header is followed by **Cases**, **Runs**, **Setup & teardown**,
+**Agent instructions** and **Variables** tabs. The side summary shows the latest terminal run's outcome counts,
+lane/profile results and disagreements, the five most recent runs, and issues linked to any case in the suite.
+The Runs tab lists the suite's saved history. Each case row shows the latest terminal result for each lane/profile,
+duration, repeat context and linked issues. If that run did not include a case or lane, it says **Not run**; a partial
+or cancelled run does not borrow an older result. These results reload from saved runs after restart.
+
+A **case** is one thing to verify and holds ordered **steps**; a step is one instruction. While editing, use the
+left case navigator to move between cases without returning to the suite table. On a wide window the editor keeps
+steps in the center and allowed tools, examples and contextual guidance in a side panel; on a narrow window that
+panel stacks below the editor.
 
 1. **New suite.** Give it a name, a description, *Instructions for the agent* (context every case shares), the
    **Target package** (for example `com.example.app`) and optional tags. **Setup** and **Teardown** hooks run
@@ -1281,8 +1291,21 @@ A step can carry **checks** that are verified without trusting the agent:
 | **Screen judge** | the judge says the screen matches your description, optionally compared with an example |
 | **Ask the judge** | the judge answers your free-form question about the evidence with a pass |
 
-**Examples** give the judge something to compare against: a **Golden screenshot** (a png, jpg or webp
-copied into Indagium, at most 10 MB) or a **Reference log**.
+**Examples** give agents and the judge reference material: a **Golden screenshot** (a png, jpg or webp copied into
+Indagium, at most 10 MB) or a **Reference log**. The agent receives the current step's examples and can retrieve
+them with lane-scoped example tools; screenshots are decoded and bounded before delivery, and log references are
+returned as fenced text.
+
+The case editor has four authoring helpers. **Draft with AI** uses a selected provider profile and returns a
+validated, editable preview; it does not edit the library or operate a device until you choose **Apply**. **Record
+from device** observes accepted input from a selected live mirror, then converts taps, swipes, keys and text into a
+reviewable ordered draft. It never injects input. Unsupported gestures are called out, and captured screen images
+are labeled as input-time context; they become expected-reference examples only if you explicitly opt in while
+reviewing. Add explicit judge checks separately when you want the judge to evaluate a screen. Enter expected
+results before applying. **Insert shared steps** copies a selected sequence at the chosen
+position with fresh IDs, so later edits are independent; missing referenced images are reported. **Paste log lines**
+parses tag/message pairs into literal, regex-escaped log checks with the default wait duration. Edit the checks and
+choose the insertion position before adding them to the selected step.
 
 ### Scripts: your own tools for the agent
 
@@ -1307,6 +1330,10 @@ times out or the run is cancelled.
 would, and shows its exit code and output. Script output and device text are always shown to the agent as
 **data to read, never as instructions**.
 
+Scripts can also be duplicated with a unique tool name, imported or exported in the versioned script JSON
+format, and previewed as the actual lane tool schema. The usage count opens each current-library hook,
+script-result check or allowed-tool reference.
+
 ### Running
 
 Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
@@ -1317,7 +1344,11 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   which connected device it uses. Add several lanes: lanes on **different devices run at the same time** (up to
   four devices at once; the others wait), lanes that share a device run one after another. A device held by the
   live capture tab is not offered.
-- **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. The judge sees the
+- **Judge** — *No judge*, *Failed steps only* or *Every step*, and the AI profile that judges. Any reachable
+  **Screen judge** or **Ask the judge** check requires a usable judge and a mode other than *No judge*; validation
+  happens before the run starts. If such a judge errors or is inconclusive, the check is unresolved and the step is
+  **Blocked** (then retries and the selected failure policy apply). A deterministic check failure remains **Fail**.
+  Steps without explicit judge checks keep optional-judge behavior. The judge sees the
   step's expected result, the screenshot taken when the step ended, the log lines written during it and the
   automatic check results — **never what the agent claimed**. It can turn a pass into a fail but never a fail
   into a pass. Where lanes ended a step differently, it also compares their evidence and explains why.
@@ -1326,14 +1357,19 @@ Choose **Run suite…** on a suite (or **Run this case**). In the dialog:
   live capture's video).
 
 Press **Start**. The **Runs** screen opens on the new run with a **Live** view: each lane's latest screenshot,
-its recent tool calls, the judge feed, **Pause all** (lanes stop at the next step boundary) and **Stop**.
+bounded recent logcat, current step and progress, persisted tool activity, the judge feed, **Pause all** (lanes stop
+at the next step boundary) and **Stop**. Screenshot capture, deterministic checks and judging share the step
+deadline. Each lane and case repeat has its own paid-call budget shared across the case's steps, retries and agent
+restarts. It counts agent and external-lane dispatch attempts, including failed executions; free protocol calls
+remain available to report the step, but exhaustion ends that case with an actionable error.
 A script that needs permission appears as a card — **Allow once** or **Deny** — and an unanswered card is
 denied after the confirmation timeout (5 minutes by default, *Settings → Testing*). A step set to *Pause for
 me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown scripts.
 
 ### Reading the report
 
-When a run ends, **Runs → (the run)** shows a matrix: one row per case and step, one column per lane, and a
+When a run ends, **Runs → (the run)** shows metric cards and filters for failures, blocked/errors, lane
+disagreements and unresolved judge checks. The matrix has one row per case and step, one column per lane, and a
 judge/consensus column. Click a step to see its **Action** and **Expected** result, what the agent claimed
 and observed, each check's result, the screenshot, the log range and the judge's verdict and reasoning.
 Useful actions on a step:
@@ -1342,19 +1378,26 @@ Useful actions on a step:
   expected text to the suite in your library (the run's own copy is not changed).
 - **Mark as agent error…** — records that the agent, not the app, got it wrong.
 - **Run again up to this step** — starts a new run of the case from its first step through this one.
+- **Re-run failed** — preselects the union of cases whose final result is failed, blocked or errored, and carries
+  over the original lanes, repeat, judge and evidence settings. It runs the current library after validation.
+- **Compare runs** — defaults to the preceding terminal run of the same suite; choose another saved run to compare
+  stable case/step identities, outcome transitions, changed definitions, and added or removed content.
+- **Export report…** — writes JSON or Markdown, or a ZIP of selected saved evidence. Export runs off the UI thread,
+  shows progress, can be cancelled, and only accepts safe paths inside the run's artifact folder.
 - **Create issue…** / **Open issue…** — see below.
 - **Open transcript** — the agent's tool calls and replies, with any secret removed.
 
-Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's `logcat.log`, `screens/`
-and `transcript.jsonl`, and `judge.jsonl`.
+Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's `logcat.log`, `screens/`,
+`transcript.jsonl`, `judge.jsonl` and lane tool activity. Live views keep a bounded recent window; saved
+activity and evidence remain available to reports and export.
 
 ### Issues
 
 A step set to *Create issue, continue* gets a **draft issue** as soon as it fails; any failing step can also
 **Create issue…**. A draft is built only from what the run recorded — a title, the steps to reproduce (setup
 plus the case's steps up to the failing one), expected and actual, the judge's notes, a severity and labels,
-the environment, and the evidence (screenshot, golden screenshot, log range, judge verdict, transcript slice
-and the lane's whole video when recorded; a video over 50 MB starts unticked). Review and edit it, tick the
+the environment, and selectable evidence (screenshot, golden screenshot, log range, judge verdict, transcript,
+lane activity and saved recording when available). Review and edit it, tick the
 evidence you want, then **Send to**:
 
 | Destination | What happens |
@@ -1365,6 +1408,12 @@ evidence you want, then **Send to**:
 | **Tracker** | An AI agent files it in your issue tracker (below) |
 
 Tick **Link to case and re-check on next run** and a later run of that case marks the issue **still failing** or **passing now**.
+
+From an issue created by a run, **Export step clip** starts with the failed-step interval plus five seconds on
+each side, clamped to actual video coverage. Review or adjust the exported bounds; the original recording stays
+available. **Collect Android bugreport** is a separate, explicit action for the source device. It shows progress,
+can be cancelled, and stops after five minutes. A successful archive is added to the attachment checklist without
+being sent automatically. The configured tracker name and endpoint are shown before delivery.
 
 ### Filing issues in your tracker
 
@@ -1399,10 +1448,11 @@ unpackaged build or with `-Dindagium.dev=true`.
 
 ### From an MCP client
 
-Everything above — creating suites, cases, steps, checks and scripts, running a suite, reading the report,
-creating issues and sending them to the tracker — is also available as MCP tools, so a developer's AI client
-can build and run suites too; see [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md#ai-test-suites). An
-external client asks for your approval **for every call** that would run a script or start a run.
+Everything above — authoring previews, script import/schema/usage, runs and comparisons, report export, and issue
+evidence — is also available through shared MCP services; see [mcp/AVAILABLE_METHODS.md](mcp/AVAILABLE_METHODS.md#ai-test-suites).
+An external client asks for approval for each MCP operation whose catalog marks it as confirmation-required or
+per-call gated, including script execution, test runs, recording start, report/evidence export and tracker delivery.
+Drafting with a remote provider also discloses the selected profile and bounded suite/case context before approval.
 
 ---
 

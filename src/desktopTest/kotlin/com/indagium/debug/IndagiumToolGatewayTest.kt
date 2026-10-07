@@ -87,13 +87,19 @@ class IndagiumToolGatewayTest {
             "create_test_case", "update_test_case", "delete_test_case", "duplicate_test_case", "move_test_case",
             "create_test_step", "update_test_step", "delete_test_step", "duplicate_test_step", "move_test_step",
             "list_test_scripts", "create_test_script", "update_test_script", "delete_test_script", "move_test_script",
-            "try_test_script",
+            "duplicate_test_script", "import_test_script", "export_test_script", "get_test_script_schema",
+            "get_test_script_usage", "try_test_script",
+            "draft_test_steps", "apply_test_step_draft", "start_test_recording", "get_test_recording",
+            "update_test_recording", "stop_test_recording", "apply_test_recording", "discard_test_recording",
+            "insert_shared_steps", "preview_log_checks", "insert_log_checks",
             "list_shared_steps", "create_shared_step", "update_shared_step", "delete_shared_step", "move_shared_step",
             "get_edition", "set_edition",
             "run_test_suite", "get_test_run_status", "list_test_runs", "get_test_run_report", "cancel_test_run",
             "resolve_test_confirmation", "resume_paused_step", "test_lane_tool_call",
-            "apply_step_fix", "mark_agent_error", "rerun_test_step",
+            "apply_step_fix", "mark_agent_error", "rerun_test_step", "rerun_failed_test_cases", "compare_test_runs",
+            "export_test_run_report",
             "create_issue_from_step", "list_issues", "get_issue", "update_issue", "delete_issue", "send_issue_to_tracker",
+            "collect_android_bugreport", "export_issue_step_clip",
         )
         assertEquals(expected, operations.toolGateway.tools.map { it.name }.toSet())
         assertEquals(expected.size, operations.toolGateway.tools.size)

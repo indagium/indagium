@@ -25,7 +25,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -235,7 +234,7 @@ private fun StepFixDialog(runId: String, stepId: String, fixRef: String, action:
 private fun rememberBitmap(file: File?): ImageBitmap? {
     val bitmap by produceState<ImageBitmap?>(null, file) {
         value = file?.let { source ->
-            withContext(Dispatchers.IO) { runCatching { org.jetbrains.skia.Image.makeFromEncoded(source.readBytes()).toComposeImageBitmap() }.getOrNull() }
+            withContext(Dispatchers.IO) { decodeBoundedPreviewImage(source) }
         }
     }
     return bitmap

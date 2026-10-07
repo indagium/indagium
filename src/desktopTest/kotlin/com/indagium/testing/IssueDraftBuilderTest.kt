@@ -164,7 +164,7 @@ class IssueDraftBuilderTest {
         assertEquals(
             setOf(
                 IssueAttachmentKind.SCREENSHOT, IssueAttachmentKind.GOLDEN, IssueAttachmentKind.LOG_RANGE, IssueAttachmentKind.JUDGE_VERDICT,
-                IssueAttachmentKind.TRANSCRIPT, IssueAttachmentKind.VIDEO_CLIP,
+                IssueAttachmentKind.TRANSCRIPT,
             ),
             attachments.keys,
         )
@@ -174,10 +174,7 @@ class IssueDraftBuilderTest {
         assertEquals(FIXTURE_LOG_DURING + FIXTURE_CRASH_LINE, log, "exactly the step's byte range of the lane log")
         assertTrue(assertNotNull(attachments.getValue(IssueAttachmentKind.JUDGE_VERDICT).text).contains("\"verdict\": \"FAIL\""))
         assertEquals("{\"kind\":\"tool_call\",\"tool\":\"tap\"}\n", attachments.getValue(IssueAttachmentKind.TRANSCRIPT).text)
-        val video = attachments.getValue(IssueAttachmentKind.VIDEO_CLIP)
-        assertEquals(fixture.videoFile.absolutePath, video.sourcePath)
-        assertTrue(video.include, "a small video is included by default")
-        assertTrue(video.note.contains("01:05") && video.note.contains("12 s"), "the step starts 65 s after the lane started: ${video.note}")
+        assertFalse(IssueAttachmentKind.VIDEO_CLIP in attachments, "the original recording is only attached after explicit step-clip export")
         assertTrue(attachments.values.all { it.sizeBytes > 0 })
     }
 

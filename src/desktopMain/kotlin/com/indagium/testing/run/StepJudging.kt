@@ -16,8 +16,8 @@ import com.indagium.testing.model.TestStep
 //   1. The base status is the one without a judge: PASS when the agent claimed pass and no check failed, BLOCKED when it
 //      claimed blocked, FAIL otherwise. A deterministic failure (a log, script or judge check that failed) is therefore FAIL,
 //      and a judge can never turn a failure, a block or a timeout into a pass.
-//   2. Only a base PASS is revisited: a judge verdict of FAIL makes it FAIL; INCONCLUSIVE keeps PASS but marks the result
-//      judgeInconclusive (the agent's claim and the deterministic checks stand alone); PASS keeps it.
+//   2. Only a base PASS is revisited: a judge verdict of FAIL makes it FAIL; INCONCLUSIVE keeps PASS only when judging
+//      was optional. Explicit judge checks become BLOCKED until a judge supplies a verdict.
 //   3. The step's ScreenJudge and AskJudge checks, NOT_EVALUATED without a judge, take the judge's verdict (PASS or FAIL);
 //      an inconclusive judge leaves them NOT_EVALUATED with the reason in their detail.
 //   No judge: exactly the base status, judge checks NOT_EVALUATED.
@@ -44,11 +44,12 @@ internal fun shouldJudge(mode: JudgeMode, step: TestStep, claim: LaneStepStatus,
     JudgeMode.FAILURES_ONLY -> deterministicFailed || claim != LaneStepStatus.PASS || hasJudgeChecks(step)
 }
 
-internal fun settleWithJudge(base: StepStatus, judgement: StepJudgement?): JudgedStatus {
-    if (judgement == null || base != StepStatus.PASS) return JudgedStatus(base, inconclusive = false)
+internal fun settleWithJudge(base: StepStatus, judgement: StepJudgement?, requiresVerdict: Boolean = false): JudgedStatus {
+    if (base != StepStatus.PASS) return JudgedStatus(base, inconclusive = false)
+    if (judgement == null) return JudgedStatus(if (requiresVerdict) StepStatus.BLOCKED else base, inconclusive = false)
     return when (judgement.verdict) {
         JudgeVerdict.FAIL -> JudgedStatus(StepStatus.FAIL, inconclusive = false)
-        JudgeVerdict.INCONCLUSIVE -> JudgedStatus(base, inconclusive = true)
+        JudgeVerdict.INCONCLUSIVE -> JudgedStatus(if (requiresVerdict) StepStatus.BLOCKED else base, inconclusive = true)
         JudgeVerdict.PASS -> JudgedStatus(base, inconclusive = false)
     }
 }

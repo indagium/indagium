@@ -3,12 +3,14 @@ package com.indagium.testing
 import com.indagium.testing.store.MAX_GOLDEN_IMAGE_BYTES
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.importGoldenImage
+import com.indagium.testing.store.importGoldenImageWithCopier
 import com.indagium.testing.store.resolveTestAsset
 import com.indagium.testing.store.testAssetDir
 import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -52,6 +54,24 @@ class TestAssetsTest {
         assertIs<StoreResult.Invalid>(importGoldenImage(root, suiteId, big))
         assertIs<StoreResult.Ok<String>>(importGoldenImage(root, suiteId, image("a.jpeg")))
         assertIs<StoreResult.Ok<String>>(importGoldenImage(root, suiteId, image("b.webp")))
+    }
+
+    @Test
+    fun partialCopyFailureRemovesOnlyItsPrivateStagingFile() {
+        val dir = testAssetDir(root, suiteId).apply { mkdirs() }
+        val existing = File(dir, "home.png").apply { writeBytes(byteArrayOf(7, 8, 9)) }
+        val source = image("home.png")
+
+        val result = importGoldenImageWithCopier(root, suiteId, source) { _, staging ->
+            java.nio.file.Files.write(staging, byteArrayOf(1, 2))
+            throw java.io.IOException("injected failure after partial write")
+        }
+
+        assertIs<StoreResult.Invalid>(result)
+        assertTrue(result.reason.contains("injected failure"))
+        assertEquals(listOf("home.png"), dir.listFiles().orEmpty().map { it.name })
+        assertEquals(byteArrayOf(7, 8, 9).toList(), existing.readBytes().toList())
+        assertFalse(dir.listFiles().orEmpty().any { it.name.endsWith(".tmp") })
     }
 
     @Test

@@ -25,8 +25,9 @@ internal val ISSUE_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "create_issue_from_step",
         "Create an issue from a step of a test run and send it to a destination. The draft is built from the run alone (nothing is " +
             "invented): a title from the case and step, the reproduction steps (setup, then the case's steps up to the failing one), " +
-            "expected and actual, the judge's notes, a severity, labels and the evidence (screenshot, log range, judge verdict, " +
-            "transcript, the lane's video when one exists), which is copied into the issue. If the engine already made a draft for " +
+            "expected and actual, the judge's notes, a severity, labels and the saved step evidence (screenshot, log range, judge verdict, " +
+            "and transcript), which is copied into the issue. A screen video clip can be exported separately with export_issue_step_clip. " +
+            "If the engine already made a draft for " +
             "the step (onFailure CREATE_ISSUE_AND_CONTINUE) that draft is used. Destinations: local (kept in Indagium, the default), " +
             "notes (a note plus the screenshot is added to the log tab of the lane; pass tabId, or openLaneLog=true to open the " +
             "lane's recorded log as a tab; without either the call answers needsLogTab), markdown (the issue as Markdown comes back " +
@@ -103,5 +104,26 @@ internal val ISSUE_MCP_TOOLS: List<IndagiumToolDescriptor> = listOf(
         "delete_issue",
         "Delete a stored issue and its copied evidence. This cannot be undone. Asks for confirmation inside Indagium's AI panel.",
         schema("issueId" to "string", required = listOf("issueId")),
+    ),
+    IndagiumToolDescriptor(
+        "collect_android_bugreport",
+        "Explicitly collect a bugreport from the Android device that produced this issue. Collection is never automatic, is limited to five minutes, " +
+            "and adds a successful archive as an unchecked attachment so you can choose whether it is sent with the issue.",
+        schema("issueId" to "string", required = listOf("issueId")),
+    ),
+    IndagiumToolDescriptor(
+        "export_issue_step_clip",
+        "Explicitly export a bounded clip of the issue's failed step from its original lane recording. " +
+            "By default it includes five seconds before and after the step, clamped to available video coverage. " +
+            "The source recording is retained; the exported clip is added to the issue checklist with its actual bounds. " +
+            "Optional startMs/endMs override the default source-video millisecond bounds.",
+        schema(
+            "issueId" to "string", "startMs" to "integer", "endMs" to "integer",
+            required = listOf("issueId"),
+            descriptions = mapOf(
+                "startMs" to "Optional clip start in source video milliseconds; omit to use the padded step default.",
+                "endMs" to "Optional clip end in source video milliseconds; omit to use the padded step default.",
+            ),
+        ),
     ),
 )

@@ -97,7 +97,19 @@ internal class HookRunner(
             return false
         }
         if (shared.steps.isEmpty()) return true
-        val sequence = StepSequence(env, SequenceSpec(caseId, shared.name, shared.steps, setup = true, allowedTools = null, evidencePrefix = prefix))
+        val sequence = StepSequence(
+            env,
+            SequenceSpec(
+                caseId,
+                shared.name,
+                shared.steps,
+                setup = true,
+                allowedTools = null,
+                evidencePrefix = prefix,
+                caseBudget = budget,
+                iteration = iteration,
+            ),
+        )
         driver.drive(sequence, null, iteration, budget)
         val results = sequence.results()
         return results.size == shared.steps.size && results.all { it.status == StepStatus.PASS }

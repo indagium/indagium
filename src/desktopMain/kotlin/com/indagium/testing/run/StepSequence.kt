@@ -7,6 +7,8 @@ import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
+import com.indagium.testing.model.LaneToolCall
+import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
@@ -18,16 +20,23 @@ import com.indagium.testing.script.TestScriptRunner
 import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+
+internal const val CASE_BUDGET_EXHAUSTED_NOTE = "The case tool-call budget was exhausted. Increase the case budget and run again."
 
 // The step protocol of one sequence of steps (a case, or the steps of a shared step used as a hook). The lane's agent
 // (or an external client) sees ONLY the current step; `finish_step` is what moves the sequence on:
@@ -55,13 +64,26 @@ private const val SETUP_OVER_MESSAGE = "This setup is finished. Stop now and do 
 internal const val STEP_BUDGET_EXHAUSTED_MESSAGE = "step budget exhausted — call finish_step"
 private const val REPLACED_RUN_MESSAGE = "This agent run was replaced by a new one; stop now."
 private const val TIMEOUT_OBSERVATION = "No result was reported before the step timed out."
+private const val MAX_AGENT_EXAMPLE_SOURCE_BYTES = 16 * 1024 * 1024
+private const val MAX_AGENT_EXAMPLE_CAPTION_CHARS = 300
+
+/** Read an asset with a hard cap that remains effective if the file changes after library validation. */
+internal fun readBoundedExampleAsset(file: File?): ByteArray? {
+    if (file == null || !file.isFile || file.length() !in 1..MAX_AGENT_EXAMPLE_SOURCE_BYTES.toLong()) return null
+    return runCatching {
+        file.inputStream().use { input ->
+            val bytes = input.readNBytes(MAX_AGENT_EXAMPLE_SOURCE_BYTES + 1)
+            bytes.takeIf { it.isNotEmpty() && it.size <= MAX_AGENT_EXAMPLE_SOURCE_BYTES }
+        }
+    }.getOrNull()
+}
 
 internal sealed interface SequenceEvent {
     /** The sequence is over: every step ran, a step stopped the case, or the sequence was aborted. */
     data object Ended : SequenceEvent
 
-    /** The current step outlived its timeout. A running agent is stale from now on (the sequence may still wait for the user). */
-    data object TimedOut : SequenceEvent
+    /** The current step timed out; the driver may pause for user choice before it restarts the agent. */
+    data class TimedOut(val deferAgentCancel: Boolean = false) : SequenceEvent
 
     /** The sequence moved to step [index] without the agent finishing the current one (a timeout or the user's retry). */
     data class Moved(val index: Int) : SequenceEvent
@@ -85,6 +107,10 @@ internal interface SequenceListener {
 
     fun stepRecorded(result: StepResult)
 
+    fun toolCallStarted(call: LaneToolCall) = Unit
+
+    fun toolCallFinished(call: LaneToolCall) = Unit
+
     suspend fun awaitUser(paused: PausedStep): PauseDecision
 }
 
@@ -96,6 +122,8 @@ internal data class SequenceSpec(
     val setup: Boolean,
     val allowedTools: Set<String>?,
     val evidencePrefix: String,
+    val caseBudget: CaseBudget? = null,
+    val iteration: Int = 1,
 )
 
 /** What every sequence of a lane shares. [nanoTime] and [wallClock] are test seams. */
@@ -116,12 +144,25 @@ internal class SequenceEnv(
     val judge: StepJudge? = null,
     val judgeMode: JudgeMode = JudgeMode.OFF,
     val pauseGate: RunPauseGate? = null,
+    val suiteId: String = "",
+    val goldenImage: (suiteId: String, assetPath: String) -> ByteArray? = { _, _ -> null },
+    val goldenFile: (suiteId: String, assetPath: String) -> File? = { _, _ -> null },
+    val externalDispatchAdmitted: (Job?, String?, Int) -> Unit = { _, _, _ -> },
 )
 
 /** What a step's screenshot became: the file kept as evidence (relative to the run folder) and the image the judge looks at. */
 private class Shot(val path: String?, val jpeg: ByteArray?)
 
-private class Evaluation(val step: TestStep, val status: StepStatus, val result: StepResult, val failedChecks: List<String>)
+private class Evaluation(
+    val step: TestStep,
+    val status: StepStatus,
+    val result: StepResult,
+    val failedChecks: List<String>,
+    val stepIndex: Int,
+    val attemptNumber: Int,
+)
+
+private data class ToolAdmission(val refusal: String?, val paid: Boolean, val activity: LaneToolCall?)
 
 private sealed interface Flow {
     data object End : Flow
@@ -141,6 +182,13 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     private val attemptNotes = ArrayList<String>()
     private val checks = DeterministicChecks(env.session, env.scriptRunner, { id -> env.scripts.firstOrNull { it.id == id } }, ::scriptContext)
 
+    /** Paid gateway handlers admitted for the current step and still executing. Guarded by [mutex]. */
+    private var activePaidDispatches = 0
+
+    @Volatile private var lastAttemptShot: Shot? = null
+
+    @Volatile private var lastAttemptChecks: List<CheckResult> = emptyList()
+
     /** Ended / Moved notifications for whoever drives this sequence. Unbounded: a sender never waits. */
     val events = Channel<SequenceEvent>(Channel.UNLIMITED)
 
@@ -153,6 +201,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     @Volatile private var attemptLogOffset = 0L
 
     @Volatile private var attemptTranscriptOffset = 0L
+
+    @Volatile private var lastKnownLogEnd: Long? = null
 
     @Volatile private var firstAttemptWallMs = 0L
 
@@ -178,6 +228,10 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 callbacks = this,
                 scriptRunner = env.scriptRunner,
                 allowedTools = spec.allowedTools,
+                currentExamples = { spec.steps.getOrNull(index)?.examples.orEmpty() },
+                loadGoldenImage = { example ->
+                    withContext(Dispatchers.IO) { readBoundedExampleAsset(env.goldenFile(env.suiteId, example.assetPath)) }
+                },
             ),
         )
     }
@@ -207,7 +261,24 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     fun brief(): LaneStepBrief? {
         if (!active) return null
         val step = spec.steps.getOrNull(index) ?: return null
-        return LaneStepBrief(step.id, spec.caseName, index + 1, spec.steps.size, step.action, step.expected, attempt)
+        val allowedExampleTools = tools.gateway.tools.map { it.name }.filter { it == "list_step_examples" || it == "get_step_example" }
+        return LaneStepBrief(
+            step.id,
+            spec.caseName,
+            index + 1,
+            spec.steps.size,
+            step.action,
+            step.expected,
+            attempt,
+            step.examples.map { example ->
+                LaneStepExampleBrief(
+                    exampleId = example.id,
+                    kind = if (example is com.indagium.testing.model.StepExample.GoldenScreenshot) "goldenScreenshot" else "referenceLog",
+                    caption = example.caption.take(MAX_AGENT_EXAMPLE_CAPTION_CHARS),
+                )
+            },
+            allowedExampleTools,
+        )
     }
 
     // ── Gateway guard ────────────────────────────────────────────────
@@ -215,24 +286,120 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     /** A new agent run is about to take over: tools of any earlier run are refused from now on. */
     fun newEpoch(): Long = epoch.incrementAndGet()
 
-    /** The lane tools behind the sequence's guard: the per-step call cap and, for an agent run, its epoch. */
-    fun gateway(runEpoch: Long?): IndagiumToolGateway = cappedGateway(tools.gateway) { name -> toolRejection(name, runEpoch) }
-
-    private fun toolRejection(tool: String, runEpoch: Long?): String? {
-        if (runEpoch != null && runEpoch != epoch.get()) return REPLACED_RUN_MESSAGE
-        if (ended) return overMessage()
-        if (tool == FINISH_STEP_TOOL) return null
-        val step = spec.steps.getOrNull(index) ?: return null
-        if (tool in LANE_PROTOCOL_TOOL_NAMES) return if (toolCalls.get() >= step.maxToolCalls) STEP_BUDGET_EXHAUSTED_MESSAGE else null
-        return if (toolCalls.incrementAndGet() > step.maxToolCalls) STEP_BUDGET_EXHAUSTED_MESSAGE else null
+    suspend fun currentAttemptIdentity(): Pair<String, Int>? = mutex.withLock {
+        if (!active || ended) null else spec.steps.getOrNull(index)?.id?.let { it to attempt }
     }
+
+    /** The lane tools behind the sequence's guard: the per-step call cap and, for an agent run, its epoch. */
+    fun gateway(runEpoch: Long?): IndagiumToolGateway = cappedGateway(tools.gateway) { name, arguments, execute ->
+        dispatchTool(name, arguments, runEpoch, execute)
+    }
+
+    /** Serializes paid dispatch admission with finish/abort, and keeps finish from overtaking an admitted action. */
+    private suspend fun dispatchTool(tool: String, arguments: Map<String, Any?>, runEpoch: Long?, execute: suspend () -> Any?): Any? {
+        val admission = mutex.withLock { admitToolLocked(tool, arguments, runEpoch) }
+        admission.refusal?.let { return mapOf("error" to it) }
+        val initial = admission.activity
+        if (admission.paid) env.externalDispatchAdmitted(currentCoroutineContext()[Job], initial?.stepId, initial?.attempt ?: 0)
+        if (initial != null) runCatching { env.listener.toolCallStarted(initial) }
+        return executeAdmittedTool(admission, initial, execute)
+    }
+
+    private suspend fun admitToolLocked(tool: String, arguments: Map<String, Any?>, runEpoch: Long?): ToolAdmission {
+        var paidDispatch = false
+        var activity: LaneToolCall? = null
+        val argumentsPreview = laneToolPreview(arguments)
+        val refusal = when {
+            runEpoch != null && runEpoch != epoch.get() -> REPLACED_RUN_MESSAGE
+            ended -> overMessage()
+            tool == FINISH_STEP_TOOL -> null
+            else -> {
+                val step = spec.steps.getOrNull(index)
+                when {
+                    step == null -> null
+                    tool in LANE_PROTOCOL_TOOL_NAMES ->
+                        if (toolCalls.get() >= step.maxToolCalls) STEP_BUDGET_EXHAUSTED_MESSAGE else null
+                    finishing.get() || awaitingUser -> "The step is finishing or paused; wait for the next step before using device or script tools."
+                    toolCalls.get() >= step.maxToolCalls -> STEP_BUDGET_EXHAUSTED_MESSAGE
+                    else -> {
+                        toolCalls.incrementAndGet()
+                        if (spec.caseBudget?.tryDispatch() == false) {
+                            toolCalls.decrementAndGet()
+                            withContext(NonCancellable) { abortLocked(StepStatus.ERROR, CASE_BUDGET_EXHAUSTED_NOTE) }
+                            CASE_BUDGET_EXHAUSTED_MESSAGE
+                        } else {
+                            activePaidDispatches++
+                            paidDispatch = true
+                            null
+                        }
+                    }
+                }
+            }
+        }
+        if (refusal == null) {
+            spec.steps.getOrNull(index)?.let { step ->
+                activity = LaneToolCall(
+                    id = UUID.randomUUID().toString(),
+                    caseId = spec.caseId,
+                    stepId = step.id,
+                    iteration = spec.iteration,
+                    attempt = attempt,
+                    toolName = tool,
+                    argumentsPreview = argumentsPreview,
+                    startedAt = env.wallClock(),
+                )
+            }
+        }
+        return ToolAdmission(refusal, paidDispatch, activity)
+    }
+
+    @Suppress("TooGenericExceptionCaught") // Admitted gateway tools can throw provider/host-specific failures; record them and rethrow.
+    private suspend fun executeAdmittedTool(
+        admission: ToolAdmission,
+        initial: LaneToolCall?,
+        execute: suspend () -> Any?,
+    ): Any? {
+        val startNanos = env.nanoTime()
+        var completed = initial
+        return try {
+            execute().also { result ->
+                val status = if (laneToolResultError(result) == null) LaneToolCallStatus.SUCCEEDED else LaneToolCallStatus.FAILED
+                completed = initial?.completed(status, laneToolPreview(result), elapsedMs(startNanos))
+            }
+        } catch (cancelled: CancellationException) {
+            completed = initial?.completed(LaneToolCallStatus.CANCELLED, "Cancelled while the tool was running.", elapsedMs(startNanos))
+            throw cancelled
+        } catch (failure: Exception) {
+            completed = initial?.completed(
+                LaneToolCallStatus.FAILED,
+                laneToolPreview(mapOf("error" to (failure.message ?: failure::class.simpleName.orEmpty()))),
+                elapsedMs(startNanos),
+            )
+            throw failure
+        } finally {
+            withContext(NonCancellable) {
+                if (admission.paid) mutex.withLock { activePaidDispatches = (activePaidDispatches - 1).coerceAtLeast(0) }
+                completed?.let { call -> runCatching { env.listener.toolCallFinished(call) } }
+            }
+        }
+    }
+
+    private fun LaneToolCall.completed(status: LaneToolCallStatus, preview: String, durationMs: Long): LaneToolCall = copy(
+        resultPreview = preview,
+        status = status,
+        durationMs = durationMs,
+    )
+
+    private fun elapsedMs(startNanos: Long): Long = ((env.nanoTime() - startNanos) / NANOS_PER_MILLI).coerceAtLeast(0L)
+
+    private fun laneToolResultError(result: Any?): Any? = (result as? Map<*, *>)?.get("error")?.takeIf { it.toString().isNotBlank() }
 
     // ── Starting steps ───────────────────────────────────────────────
 
     /** Starts step [stepIndex] (attempt 1); an index past the last step ends the sequence. */
     suspend fun begin(stepIndex: Int) = mutex.withLock { beginLocked(stepIndex) }
 
-    /** Gives the current step a fresh timeout; used when the agent behind it was restarted. */
+    /** Gives the current step a fresh timeout after a user pause. */
     fun resetStepTimer() {
         attemptStartNanos = env.nanoTime()
     }
@@ -251,9 +418,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
 
     private suspend fun startAttemptLocked() {
         attemptLogOffset = runCatching { env.session.logMarker() }.getOrDefault(attemptLogOffset)
+        lastKnownLogEnd = attemptLogOffset
         attemptTranscriptOffset = env.transcript?.sizeBytes ?: 0L
         attemptStartNanos = env.nanoTime()
         toolCalls.set(0)
+        lastAttemptShot = null
+        lastAttemptChecks = emptyList()
         observations.clear()
         active = true
         env.listener.stepStarted(index + 1, spec.steps[index].action, attempt)
@@ -273,12 +443,30 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (active) observations += text.take(MAX_OBSERVATION_CHARS)
     }
 
+    @Suppress("ReturnCount") // Distinct protocol guards refuse without settling a stale step.
     override suspend fun finishStep(status: LaneStepStatus, observation: String): Map<String, Any?> {
+        if (ended) return mapOf("error" to overMessage())
         if (awaitingUser) return mapOf("error" to STEP_PAUSED_MESSAGE)
         if (!finishing.compareAndSet(false, true)) return mapOf("error" to "finish_step is already running; wait for its answer.")
         try {
-            val evaluation = mutex.withLock { evaluateLocked(status, observation) } ?: return mapOf("error" to "No step is active.")
-            val answer = decide(evaluation)
+            if (mutex.withLock { activePaidDispatches > 0 }) {
+                return mapOf("error" to "A device or script tool is still running; wait for its result before finishing the step.")
+            }
+            if (spec.caseBudget?.exhausted() == true) {
+                withContext(NonCancellable) { abort(StepStatus.ERROR, CASE_BUDGET_EXHAUSTED_NOTE) }
+                return mapOf("result" to "case_finished", "error" to CASE_BUDGET_EXHAUSTED_NOTE, "message" to overMessage())
+            }
+            var timedOut = false
+            val evaluation = mutex.withLock {
+                val step = spec.steps.getOrNull(index) ?: return@withLock null
+                val stepIndex = index
+                val attemptNumber = attempt
+                val remaining = (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)
+                val completed = withTimeoutOrNull(remaining) { evaluateLocked(status, observation) }
+                if (completed == null) timedOut = true
+                completed ?: timeoutEvaluationLocked(step.id, stepIndex, attemptNumber, verifyDeadline = false)
+            } ?: return mapOf("error" to "No step is active.")
+            val answer = if (timedOut) respond(settleTimeout(evaluation, cancelAgentBeforePause = false)) else decide(evaluation)
             if (!ended) holdWhilePaused()
             return answer
         } finally {
@@ -287,6 +475,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     private suspend fun decide(evaluation: Evaluation): Map<String, Any?> {
+        if (!mutex.withLock { isCurrentLocked(evaluation) }) return mapOf("error" to overMessage())
         val step = evaluation.step
         if (evaluation.status == StepStatus.PASS) return respond(mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) })
         if (attempt < step.retries + 1) return respond(mutex.withLock { retryLocked(evaluation) })
@@ -333,7 +522,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             "action" to brief.action,
             "expected" to brief.expected,
             "attempt" to brief.attempt,
-        )
+        ) + brief.exampleMetadata()
     }
 
     // ── Evaluating a step ────────────────────────────────────────────
@@ -342,24 +531,38 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!active || ended) return null
         val step = spec.steps[index]
         val shot = captureScreenshot()
-        val automatic = checks.evaluateAll(step.checks, attemptLogOffset)
+        lastAttemptChecks = emptyList()
+        val automatic = checks.evaluateAll(step.checks, attemptLogOffset) { result -> lastAttemptChecks = lastAttemptChecks + result }
         val automaticFailed = automatic.any { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
-        val logEnd = runCatching { env.session.logMarker() }.getOrNull()
+        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
         val judgement = judgeAttempt(step, claim, automatic, automaticFailed, shot, logEnd)
         val results = applyJudgementToChecks(automatic, judgement)
         val failed = results.filter { it.status == CheckStatus.FAIL || it.status == CheckStatus.ERROR }
-        val base = when {
-            claim == LaneStepStatus.PASS && failed.isEmpty() -> StepStatus.PASS
-            claim == LaneStepStatus.BLOCKED -> StepStatus.BLOCKED
-            else -> StepStatus.FAIL
-        }
-        val settled = settleWithJudge(base, judgement)
+        val base = deterministicBaseStatus(claim, failed.isNotEmpty())
+        val settled = settleWithJudge(base, judgement, requiresVerdict = hasJudgeChecks(step))
         if (judgement != null && base == StepStatus.PASS && settled.status == StepStatus.FAIL) {
             attemptNotes += "The judge failed a step the agent reported as passed."
         }
         val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
+        val unresolved = hasJudgeChecks(step) && (judgement == null || judgement.verdict == JudgeVerdict.INCONCLUSIVE)
         val result = buildResult(step, settled.status, claim.name.lowercase(), reported, results, shot.path, logEnd, judgement, settled.inconclusive)
-        return Evaluation(step, settled.status, result, failed.map { it.checkId })
+            .let {
+                if (!unresolved) it else it.copy(
+                    note = listOfNotNull(
+                        it.note,
+                        if (settled.status == StepStatus.BLOCKED) "Explicit judge checks remain unresolved; the step is blocked."
+                        else "Explicit judge checks remain unresolved; deterministic failures still determine the step result.",
+                    ).joinToString(" "),
+                )
+            }
+        return Evaluation(step, settled.status, result, failed.map { it.checkId }, index, attempt)
+    }
+
+    private fun deterministicBaseStatus(claim: LaneStepStatus, hasFailures: Boolean): StepStatus = when {
+        claim == LaneStepStatus.PASS && !hasFailures -> StepStatus.PASS
+        hasFailures -> StepStatus.FAIL
+        claim == LaneStepStatus.BLOCKED -> StepStatus.BLOCKED
+        else -> StepStatus.FAIL
     }
 
     /** Asks the judge about this attempt when the mode says so. The judge is blind: it gets [JudgeEvidence], which has no agent words. */
@@ -450,7 +653,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         return try {
             val shot = env.session.screenshot()
             val path = if (keep) saveScreenshot(shot.png) else null
-            Shot(path, shot.image.bytes.takeIf { env.judge != null })
+            Shot(path, shot.image.bytes.takeIf { env.judge != null }).also { lastAttemptShot = it }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {
@@ -469,6 +672,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     // ── Deciding what comes next ─────────────────────────────────────
 
     private suspend fun retryLocked(evaluation: Evaluation): Flow {
+        if (!isCurrentLocked(evaluation)) return Flow.End
         attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}" +
             (if (evaluation.failedChecks.isNotEmpty()) " (a check failed)" else "") + "."
         attempt++
@@ -477,10 +681,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     /** Records [evaluation] as the step's final result, then moves according to [flow]. Returns where the sequence went. */
-    private suspend fun settleLocked(evaluation: Evaluation, flow: Flow, issue: Boolean): Flow {
+    private suspend fun settleLocked(evaluation: Evaluation, flow: Flow, issue: Boolean, afterRecord: (() -> Unit)? = null): Flow {
+        if (!isCurrentLocked(evaluation)) return Flow.End
         val result = evaluation.result.copy(issueRequested = issue)
         recorded += result
         env.listener.stepRecorded(result)
+        afterRecord?.invoke()
         return when (flow) {
             Flow.End -> flow.also { endLocked() }
             is Flow.Next -> {
@@ -491,8 +697,17 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         }
     }
 
-    private suspend fun pauseFlow(evaluation: Evaluation): Flow {
-        awaitingUser = true
+    private suspend fun pauseFlow(evaluation: Evaluation, onPauseEntered: (() -> Unit)? = null): Flow {
+        val current = mutex.withLock {
+            if (!isCurrentLocked(evaluation)) {
+                false
+            } else {
+                awaitingUser = true
+                onPauseEntered?.invoke()
+                true
+            }
+        }
+        if (!current) return Flow.End
         val decision = try {
             env.listener.awaitUser(
                 PausedStep(spec.caseName, index + 1, evaluation.step.action, evaluation.status, evaluation.result.observation, evaluation.failedChecks),
@@ -501,6 +716,7 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             awaitingUser = false
         }
         return mutex.withLock {
+            if (!isCurrentLocked(evaluation)) return@withLock Flow.End
             when (decision) {
                 PauseDecision.RETRY -> {
                     attemptNotes += "Attempt $attempt ${evaluation.status.name.lowercase()}; the user asked for another attempt."
@@ -525,52 +741,119 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
     }
 
     /** Closes the current step as TIMEOUT when it is due and nothing else is working on it. True when it did. */
+    @Suppress("ReturnCount") // Timeout admission has distinct stale, paused, and in-budget exits under the sequence lock.
     suspend fun checkTimeout(): Boolean {
         if (!active || ended || awaitingUser) return false
-        val step = spec.steps.getOrNull(index) ?: return false
+        if (spec.caseBudget?.exhausted() == true && finishing.compareAndSet(false, true)) {
+            try {
+                abort(StepStatus.ERROR, CASE_BUDGET_EXHAUSTED_NOTE)
+                return true
+            } finally {
+                finishing.set(false)
+            }
+        }
+        val expectedIndex = index
+        val expectedAttempt = attempt
+        val step = spec.steps.getOrNull(expectedIndex) ?: return false
         if (elapsedMs() < step.timeoutMs) return false
         if (!finishing.compareAndSet(false, true)) return false
         try {
-            val evaluation = mutex.withLock { timeoutEvaluationLocked(step) } ?: return false
-            events.trySend(SequenceEvent.TimedOut)
-            val flow = when (step.onFailure) {
-                OnFailure.PAUSE_FOR_USER -> pauseFlow(evaluation)
-                OnFailure.STOP_CASE -> mutex.withLock { settleLocked(evaluation, Flow.End, issue = false) }
-                OnFailure.CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = false) }
-                OnFailure.CREATE_ISSUE_AND_CONTINUE -> mutex.withLock { settleLocked(evaluation, Flow.Next(index + 1), issue = true) }
-            }
-            when (flow) {
-                is Flow.Next -> events.trySend(SequenceEvent.Moved(flow.index))
-                Flow.Redo -> events.trySend(SequenceEvent.Moved(index))
-                Flow.End -> Unit // endLocked already announced it
-            }
+            val evaluation = mutex.withLock {
+                timeoutEvaluationLocked(step.id, expectedIndex, expectedAttempt, verifyDeadline = true)
+            } ?: return false
+            settleTimeout(evaluation, cancelAgentBeforePause = true)
             return true
         } finally {
             finishing.set(false)
         }
     }
 
-    private suspend fun timeoutEvaluationLocked(step: TestStep): Evaluation? {
-        if (!active || ended || elapsedMs() < step.timeoutMs) return null
-        val screenshotPath = captureScreenshot().path
+    private suspend fun timeoutEvaluationLocked(
+        expectedStepId: String,
+        expectedIndex: Int,
+        expectedAttempt: Int,
+        verifyDeadline: Boolean,
+    ): Evaluation? {
+        if (!active || ended || index != expectedIndex || attempt != expectedAttempt) return null
+        val step = spec.steps.getOrNull(index) ?: return null
+        if (step.id != expectedStepId || (verifyDeadline && elapsedMs() < step.timeoutMs)) return null
+        val screenshotPath = lastAttemptShot?.path
         val reported = observations.joinToString("\n").ifBlank { TIMEOUT_OBSERVATION }
-        val result = buildResult(step, StepStatus.TIMEOUT, null, reported, emptyList(), screenshotPath)
+        val completedIds = lastAttemptChecks.mapTo(HashSet()) { it.checkId }
+        val pending = step.checks.filterNot { it.id in completedIds }.map { check ->
+            CheckResult(check.id, check.kindName(), CheckStatus.NOT_EVALUATED, "Evaluation stopped when the step deadline expired.", 0)
+        }
+        val result = buildResult(step, StepStatus.TIMEOUT, null, reported, lastAttemptChecks + pending, screenshotPath, knownLogEnd = lastKnownLogEnd)
             .copy(note = (attemptNotes + "The step timed out after ${step.timeoutMs} ms.").joinToString(" "))
-        return Evaluation(step, StepStatus.TIMEOUT, result, emptyList())
+        return Evaluation(step, StepStatus.TIMEOUT, result, emptyList(), expectedIndex, expectedAttempt)
+    }
+
+    /** Finishes the timeout outcome before notifying the lane driver that its current agent is stale. */
+    private suspend fun settleTimeout(evaluation: Evaluation, cancelAgentBeforePause: Boolean): Flow {
+        val step = evaluation.step
+        if (step.onFailure == OnFailure.PAUSE_FOR_USER) {
+            val flow = pauseFlow(evaluation) {
+                // Invalidate the current lane agent in the same critical section that accepts
+                // the timeout. It may otherwise dispatch against the next step before the
+                // driver receives TimedOut and starts a replacement segment.
+                epoch.incrementAndGet()
+                events.trySend(SequenceEvent.TimedOut(deferAgentCancel = !cancelAgentBeforePause))
+            }
+            when (flow) {
+                is Flow.Next -> events.trySend(SequenceEvent.Moved(flow.index))
+                Flow.Redo -> events.trySend(SequenceEvent.Moved(index))
+                Flow.End -> Unit
+            }
+            return flow
+        }
+        return withContext(NonCancellable) {
+            mutex.withLock {
+                if (!isCurrentLocked(evaluation)) return@withLock Flow.End
+                val requested = when (step.onFailure) {
+                    OnFailure.PAUSE_FOR_USER -> error("Pause policy is handled above")
+                    OnFailure.STOP_CASE -> Flow.End
+                    OnFailure.CONTINUE, OnFailure.CREATE_ISSUE_AND_CONTINUE -> Flow.Next(index + 1)
+                }
+                // This transition happens before LaneDriver can close the old segment. Make its
+                // gateway stale before beginLocked exposes the following step.
+                epoch.incrementAndGet()
+                val settled = settleLocked(
+                    evaluation,
+                    requested,
+                    issue = step.onFailure == OnFailure.CREATE_ISSUE_AND_CONTINUE,
+                    afterRecord = { events.trySend(SequenceEvent.TimedOut()) },
+                )
+                when (settled) {
+                    is Flow.Next -> events.trySend(SequenceEvent.Moved(settled.index))
+                    Flow.Redo -> events.trySend(SequenceEvent.Moved(index))
+                    Flow.End -> Unit
+                }
+                settled
+            }
+        }
     }
 
     // ── Aborting ─────────────────────────────────────────────────────
 
     /** Closes the current step with [status] (the agent could not be kept alive) and ends the sequence. */
-    suspend fun abort(status: StepStatus, note: String) = mutex.withLock {
+    suspend fun abort(status: StepStatus, note: String) = mutex.withLock { abortLocked(status, note) }
+
+    private suspend fun abortLocked(status: StepStatus, note: String) {
+        if (ended) return
         val step = spec.steps.getOrNull(index)
         if (active && step != null) {
-            val result = buildResult(step, status, null, observations.joinToString("\n"), emptyList(), null).copy(note = note)
+            val result = buildResult(
+                step, status, null, observations.joinToString("\n"), emptyList(), null, knownLogEnd = lastKnownLogEnd,
+            ).copy(note = note)
             recorded += result
             env.listener.stepRecorded(result)
         }
         endLocked()
     }
+
+    private fun isCurrentLocked(evaluation: Evaluation): Boolean =
+        !ended && active && index == evaluation.stepIndex && attempt == evaluation.attemptNumber &&
+            spec.steps.getOrNull(index)?.id == evaluation.step.id
 
     private companion object {
         const val FINISH_STEP_TOOL = "finish_step"
@@ -578,5 +861,6 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         const val JUDGE_LANE_LABEL = "Lane"
         const val SCREEN_MIME_TYPE = "image/jpeg"
         const val MAX_OBSERVATION_CHARS = 2_000
+        const val CASE_BUDGET_EXHAUSTED_MESSAGE = "The case's paid tool-call limit is exhausted; no further device or script tools may run."
     }
 }

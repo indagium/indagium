@@ -24,6 +24,7 @@ internal fun IssueAttachmentKind.label(): String = when (this) {
     IssueAttachmentKind.TRANSCRIPT -> "Agent transcript"
     IssueAttachmentKind.JUDGE_VERDICT -> "Judge verdict"
     IssueAttachmentKind.GOLDEN -> "Expected screenshot"
+    IssueAttachmentKind.BUGREPORT -> "Android bugreport"
 }
 
 /** "12 B", "3 KB" or "4.5 MB". */

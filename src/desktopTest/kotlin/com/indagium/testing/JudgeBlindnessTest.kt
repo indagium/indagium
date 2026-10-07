@@ -1,7 +1,9 @@
 package com.indagium.testing
 
 import com.indagium.ai.LlmRole
+import com.indagium.edition.EditionLimits
 import com.indagium.testing.model.CheckStatus
+import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeMode
 import com.indagium.testing.model.JudgeVerdict
@@ -12,17 +14,21 @@ import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
+import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.newCheckId
 import com.indagium.testing.model.newExampleId
+import com.indagium.testing.model.newHookId
+import com.indagium.testing.model.newSharedStepId
 import com.indagium.testing.model.newStepId
 import com.indagium.testing.run.JUDGE_TOOL_CALL_BUDGET
 import com.indagium.testing.run.LaneStepStatus
 import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.settleWithJudge
 import com.indagium.testing.run.shouldJudge
+import com.indagium.testing.run.validateRun
 import com.indagium.testing.store.TEST_RUN_JUDGE_FILE_NAME
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -35,7 +41,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private const val AWAIT_MS = 15_000L
@@ -151,16 +156,79 @@ class JudgeBlindnessTest {
     }
 
     @Test
-    fun withoutAJudgeTheJudgeChecksStayNotEvaluatedAsBefore() {
+    fun explicitJudgeChecksCannotRunWithoutAConfiguredJudge() {
         val agent = AutoAgentProvider(listOf("pass" to "fine")) { answered -> if (answered == 0) current.get().emitLog("Login ok") }
-        val judge = ScriptedJudgeProvider()
-        val (_, run) = start(suite(judgedStep()), agent, judge, mode = JudgeMode.OFF, judgeProfileId = null)
+        val suite = suite(judgedStep())
+        val h = RunHarness(
+            libraryOf(suite),
+            profile = profileOf(LANE_A_PROFILE_ID),
+            agentFactory = agentsByProfile(mapOf(LANE_A_PROFILE_ID to agent)),
+            tuning = FAST_TUNING,
+        ).also { harness = it; current.set(it) }
+        val result = runBlocking {
+            h.coordinator.start(h.config(suite, agentLane(LANE_A_PROFILE_ID)).copy(judgeMode = JudgeMode.OFF.wire, judgeProfileId = null))
+        }
+        val rejected = assertIs<StartRunResult.Rejected>(result)
+        assertTrue(rejected.errors.any { it.contains("explicit ScreenJudge/AskJudge") }, rejected.errors.toString())
+        assertTrue(agent.requests.isEmpty(), "validation happens before the agent starts")
+    }
 
+    @Test
+    fun judgeValidationIncludesReachableSharedHooksAndOnlySelectedSteps() {
+        val shared = com.indagium.testing.model.SharedStep(newSharedStepId(), "Authentication", steps = listOf(judgedStep()))
+        val withHook = caseOf("Uses shared setup", step("Check home"), setup = listOf(HookItem.Shared(newHookId(), shared.id)))
+        val suite = suiteOf(withHook)
+        val library = TestLibrary(suites = listOf(suite), sharedSteps = listOf(shared))
+        val config = RunConfig(suite.id, listOf(withHook.id), listOf(externalLane()))
+
+        val hooked = validateRun(config, library, EditionLimits.UNLIMITED, emptyList()) { "" }
+        assertTrue(hooked.errors.any { it.contains("explicit ScreenJudge/AskJudge") && it.contains("Authentication") }, hooked.errors.toString())
+
+        val earlier = step("Stop before the explicit check")
+        val later = judgedStep()
+        val selected = caseOf("Selected", earlier, later)
+        val unselected = caseOf("Unselected but judged", judgedStep())
+        val trimmedSuite = suiteOf(selected, unselected)
+        val trimmedLibrary = TestLibrary(suites = listOf(trimmedSuite))
+        val trimmed = RunConfig(
+            trimmedSuite.id,
+            listOf(selected.id),
+            listOf(externalLane()),
+            stopAfterStepId = earlier.id,
+        )
+        val accepted = validateRun(trimmed, trimmedLibrary, EditionLimits.UNLIMITED, emptyList()) { "" }
+        assertFalse(accepted.errors.any { it.contains("explicit ScreenJudge/AskJudge") }, accepted.errors.toString())
+    }
+
+    @Test
+    fun anInconclusiveJudgeBlocksExplicitJudgeChecksButOptionalJudgingStillPasses() {
+        val judge = ScriptedJudgeProvider { JudgeAnswer("inconclusive", "unknown", "The screenshot is unclear.") }
+        val judgeOnly = judgedStep().copy(checks = listOf(screenJudge, askJudge))
+        val (_, checkedRun) = start(suite(judgeOnly), AutoAgentProvider(listOf("pass" to "fine")), judge)
+        val checked = checkedRun.steps().single()
+        assertEquals(StepStatus.BLOCKED, checked.status)
+        assertEquals(listOf(CheckStatus.NOT_EVALUATED, CheckStatus.NOT_EVALUATED), checked.checks.map { it.status })
+        assertTrue(checked.note.orEmpty().contains("explicit judge checks remain unresolved", ignoreCase = true), checked.note.orEmpty())
+
+        val (_, optionalRun) = start(suite(step("No explicit judge check")), AutoAgentProvider(listOf("pass" to "fine")), judge)
+        val optional = optionalRun.steps().single()
+        assertEquals(StepStatus.PASS, optional.status)
+        assertTrue(optional.judgeInconclusive)
+    }
+
+    @Test
+    fun deterministicFailureStaysFailWhenTheAgentBlocksAndExplicitJudgeIsInconclusive() {
+        val judge = ScriptedJudgeProvider { JudgeAnswer("inconclusive", "unknown", "The screenshot is unclear.") }
+        val checks = listOf(logAppears("must not appear", withinMs = 100), screenJudge)
+        val deterministicFailure = TestStep(newStepId(), "Check unavailable message", "Message appears", checks = checks, retries = 0)
+        val (_, run) = start(suite(deterministicFailure), AutoAgentProvider(listOf("blocked" to "Cannot continue")), judge)
         val result = run.steps().single()
-        assertEquals(StepStatus.PASS, result.status)
-        assertEquals(listOf(CheckStatus.PASS, CheckStatus.NOT_EVALUATED, CheckStatus.NOT_EVALUATED), result.checks.map { it.status })
-        assertNull(result.judge)
-        assertTrue(judge.requests.isEmpty())
+
+        assertEquals(StepStatus.FAIL, result.status)
+        assertEquals(CheckStatus.FAIL, result.checks.first().status)
+        assertEquals(CheckStatus.NOT_EVALUATED, result.checks.last().status)
+        assertEquals(JudgeVerdict.INCONCLUSIVE, assertNotNull(result.judge).verdict)
+        assertTrue(result.note.orEmpty().contains("deterministic failures still determine"))
     }
 
     // ── Verdict rules ───────────────────────────────────────────────
@@ -269,10 +337,12 @@ class JudgeBlindnessTest {
         assertTrue(shouldJudge(JudgeMode.FAILURES_ONLY, plain, LaneStepStatus.BLOCKED, false))
 
         assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, null).status)
+        assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.PASS, null, requiresVerdict = true).status)
         assertEquals(StepStatus.FAIL, settleWithJudge(StepStatus.PASS, fail).status)
         assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, pass).status)
         assertTrue(settleWithJudge(StepStatus.PASS, unsure).inconclusive)
         assertEquals(StepStatus.PASS, settleWithJudge(StepStatus.PASS, unsure).status)
+        assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.PASS, unsure, requiresVerdict = true).status)
         assertEquals(StepStatus.FAIL, settleWithJudge(StepStatus.FAIL, pass).status)
         assertEquals(StepStatus.BLOCKED, settleWithJudge(StepStatus.BLOCKED, pass).status)
         assertFalse(settleWithJudge(StepStatus.FAIL, unsure).inconclusive)

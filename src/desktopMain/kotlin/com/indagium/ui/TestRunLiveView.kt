@@ -18,7 +18,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.toComposeImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -32,6 +31,8 @@ import com.indagium.testing.model.judgeActive
 import com.indagium.testing.run.PauseDecision
 import com.indagium.testing.run.PausedStepInfo
 import com.indagium.testing.run.PendingTestConfirmation
+import com.indagium.testing.run.readBoundedRunArtifact
+import com.indagium.testing.run.resolveRunArtifact
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -69,7 +70,7 @@ internal fun TestRunLiveView(run: TestRun, runDir: File, tick: Int) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             columns.chunked(perRow).forEach { rowColumns ->
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    rowColumns.forEach { LaneColumn(run, it, runDir, Modifier.weight(1f)) }
+                    rowColumns.forEach { LaneColumn(run, it, runDir, tick, Modifier.weight(1f)) }
                     repeat(perRow - rowColumns.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
@@ -81,7 +82,7 @@ internal fun TestRunLiveView(run: TestRun, runDir: File, tick: Int) {
 // ── One lane ─────────────────────────────────────────────────────────
 
 @Composable
-private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, modifier: Modifier) {
+private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, tick: Int, modifier: Modifier) {
     val tc = tc()
     Column(modifier.background(tc.p, CORNER_MD).padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -99,6 +100,7 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, modif
         }
         column.error?.let { TestsErrorText(it) }
         Thumbnail(column.screenshotPath, runDir)
+        LaneLogcatPreview(column.logcatPath, runDir, tick)
         column.steps.forEach { StepLine(it) }
         if (column.toolCalls.isNotEmpty()) {
             AppText("LATEST TOOL CALLS", color = tc.td, fontSize = 9.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp))
@@ -111,6 +113,39 @@ private fun LaneColumn(run: TestRun, column: LiveLaneColumn, runDir: File, modif
         column.pause?.let { PauseCard(run.id, it) }
     }
 }
+
+@Composable
+private fun LaneLogcatPreview(relativePath: String?, runDir: File, tick: Int) {
+    if (relativePath == null) return
+    val tc = tc()
+    val preview by produceState<String?>(null, relativePath, tick) {
+        value = withContext(Dispatchers.IO) { readBoundedLaneLogcat(runDir, relativePath) }
+    }
+    preview?.takeIf(String::isNotBlank)?.let { text ->
+        Column(Modifier.fillMaxWidth().padding(top = 4.dp).background(tc.p, CORNER_SM).padding(6.dp)) {
+            AppText("LIVE LOGCAT · LAST LINES", color = tc.td, fontSize = 8.sp, fontWeight = FontWeight.SemiBold)
+            AppText(text, color = tc.ts, fontSize = 9.sp, fontFamily = MONO, maxLines = 6, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+private fun readBoundedLaneLogcat(runDir: File, relativePath: String): String? = runCatching {
+    val file = resolveRunArtifact(runDir, relativePath) ?: return@runCatching null
+    java.io.RandomAccessFile(file, "r").use { input ->
+        val length = input.length()
+        val start = (length - MAX_LIVE_LOGCAT_BYTES).coerceAtLeast(0L)
+        input.seek(start)
+        val bytes = ByteArray((length - start).toInt())
+        input.readFully(bytes)
+        bytes.toString(Charsets.UTF_8).lineSequence().toList().takeLast(LIVE_LOGCAT_LINES).joinToString("\n").takeLast(MAX_LIVE_LOGCAT_CHARS)
+    }
+}.getOrNull()
+
+private const val MAX_LIVE_LOGCAT_BYTES = 32 * 1024L
+private const val LIVE_LOGCAT_LINES = 16
+private const val MAX_LIVE_LOGCAT_CHARS = 4_000
+private const val MAX_LIVE_SCREENSHOT_BYTES = 16 * 1024 * 1024
+private const val MAX_LIVE_SCREENSHOT_PIXELS = 36_000_000L
 
 @Composable
 private fun StepLine(line: LiveStepLine) {
@@ -136,8 +171,11 @@ private fun Thumbnail(relativePath: String?, runDir: File) {
     if (relativePath == null) return
     val bitmap by produceState<ImageBitmap?>(null, relativePath) {
         value = withContext(Dispatchers.IO) {
-            val file = File(runDir, relativePath).takeIf { it.isFile }
-            file?.let { runCatching { org.jetbrains.skia.Image.makeFromEncoded(it.readBytes()).toComposeImageBitmap() }.getOrNull() }
+            readBoundedRunArtifact(runDir, relativePath, MAX_LIVE_SCREENSHOT_BYTES)?.let { bytes ->
+                runCatching {
+                    decodeBoundedPreviewImage(bytes, MAX_LIVE_SCREENSHOT_PIXELS)
+                }.getOrNull()
+            }
         }
     }
     bitmap?.let {

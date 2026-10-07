@@ -3,6 +3,7 @@ package com.indagium.testing
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.ScriptPermission
 import com.indagium.testing.model.StepCheck
+import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.newCheckId
@@ -11,7 +12,10 @@ import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TestLibraryStore
 import com.indagium.testing.store.decodeSuiteFile
 import com.indagium.testing.store.encodeSuiteFile
+import com.indagium.testing.store.testAssetDir
 import java.io.File
+import java.io.IOException
+import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -305,6 +309,7 @@ class TestLibraryStoreTest {
         val dir = tempTestingDir()
         val store = newStore(dir)
         val original = store.importSuite(encodeSuiteFile(fullSuite())).ok()
+        File(testAssetDir(dir, original.id), "golden/home.png").also { it.parentFile.mkdirs(); it.writeBytes(byteArrayOf(1, 2, 3)) }
         val other = store.createSuite("Other").ok()
 
         val copy = store.duplicateSuite(original.id).ok()
@@ -316,6 +321,146 @@ class TestLibraryStoreTest {
         val copyIds = copy.cases.flatMap { c -> listOf(c.id) + c.steps.map { it.id } + c.steps.flatMap { s -> s.checks.map { it.id } } }
         assertTrue(originalIds.intersect(copyIds.toSet()).isEmpty())
         assertTrue(suiteFile(dir, copy.id).isFile)
+    }
+
+    @Test
+    fun duplicatingASuiteCopiesGoldenImagesBeforePublishingTheNewSuite() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        store.updateStep(step.id) {
+            it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-one", "nested/reference.png")))
+        }.ok()
+        val source = File(testAssetDir(dir, suite.id), "nested/reference.png")
+        source.parentFile.mkdirs()
+        source.writeBytes(byteArrayOf(1, 2, 3, 4))
+
+        val copy = store.duplicateSuite(suite.id).ok()
+
+        val copiedExample = copy.cases.single().steps.single().examples.single() as StepExample.GoldenScreenshot
+        assertEquals("nested/reference.png", copiedExample.assetPath)
+        assertNotEquals("ex-one", copiedExample.id)
+        assertEquals(source.readBytes().toList(), File(testAssetDir(dir, copy.id), copiedExample.assetPath).readBytes().toList())
+        assertEquals(copy, TestLibraryStore(dir).library.value.suite(copy.id))
+    }
+
+    @Test
+    fun missingGoldenImageRefusesSuiteDuplicationWithoutChangingTheLibrary() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        store.updateStep(step.id) {
+            it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-one", "missing.png")))
+        }.ok()
+        val before = store.library.value
+
+        val result = store.duplicateSuite(suite.id)
+
+        assertIs<StoreResult.Invalid>(result)
+        assertTrue((result as StoreResult.Invalid).reason.contains("missing.png"))
+        assertEquals(before, store.library.value)
+        assertTrue(File(dir, "assets").listFiles().orEmpty().none { it.name.startsWith(".stage-") })
+    }
+
+    @Test
+    fun goldenImageCopyFailureLeavesLibraryAndAssetTreeUnchanged() {
+        val dir = tempTestingDir()
+        val store = TestLibraryStore(dir, copyAsset = { _, _ -> throw IOException("simulated disk failure") })
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        store.updateStep(step.id) { it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-one", "golden.png"))) }.ok()
+        File(testAssetDir(dir, suite.id), "golden.png").also { it.parentFile.mkdirs(); it.writeBytes(byteArrayOf(8)) }
+        val before = store.library.value
+
+        val result = store.duplicateSuite(suite.id)
+
+        assertIs<StoreResult.Invalid>(result)
+        assertTrue((result as StoreResult.Invalid).reason.contains("disk failure"))
+        assertEquals(before, store.library.value)
+        assertEquals(listOf(suite.id), File(dir, "assets").listFiles().orEmpty().map { it.name })
+    }
+
+    @Test
+    fun duplicateCopiesAssetsOutsideTheLibraryLockAndRevalidatesBeforePublishing() {
+        val dir = tempTestingDir()
+        val started = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val store = TestLibraryStore(dir, copyAsset = { source, target ->
+            started.countDown()
+            check(release.await(5, TimeUnit.SECONDS))
+            Files.copy(source.toPath(), target.toPath())
+        })
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        store.updateStep(step.id) { it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-one", "golden.png"))) }.ok()
+        File(testAssetDir(dir, suite.id), "golden.png").also { it.parentFile.mkdirs(); it.writeBytes(byteArrayOf(8)) }
+        val executor = Executors.newFixedThreadPool(2)
+        try {
+            val duplication = executor.submit<StoreResult<TestSuite>> { store.duplicateSuite(suite.id) }
+            assertTrue(started.await(5, TimeUnit.SECONDS))
+            val edit = executor.submit<StoreResult<TestSuite>> { store.updateSuite(suite.id) { it.copy(description = "changed during staging") } }
+            assertEquals("changed during staging", edit.get(2, TimeUnit.SECONDS).ok().description)
+            release.countDown()
+            val rejected = assertIs<StoreResult.Invalid>(duplication.get(5, TimeUnit.SECONDS))
+            assertTrue(rejected.reason.contains("changed while"), rejected.reason)
+            assertEquals(listOf(suite.id), store.library.value.suites.map { it.id })
+            assertTrue(File(dir, "assets").listFiles().orEmpty().none { it.name.startsWith(".stage-") || it.name != suite.id })
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun duplicationRejectsGoldenAssetTraversalAndSymlinkEscape() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        store.updateStep(step.id) { it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-one", "../outside.png"))) }.ok()
+        assertTrue(assertIs<StoreResult.Invalid>(store.duplicateSuite(suite.id)).reason.contains("safe relative"))
+
+        val safe = "golden.png"
+        store.updateStep(step.id) { it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-two", safe))) }.ok()
+        val outside = File(dir, "outside.png").also { it.writeBytes(byteArrayOf(1)) }
+        val suiteAssetDir = testAssetDir(dir, suite.id)
+        suiteAssetDir.mkdirs()
+        val link = File(suiteAssetDir, safe).toPath()
+        val linked = runCatching { Files.createSymbolicLink(link, outside.toPath()) }.isSuccess
+        org.junit.Assume.assumeTrue("This host permits creating symbolic links", linked && Files.isSymbolicLink(link))
+
+        val result = assertIs<StoreResult.Invalid>(store.duplicateSuite(suite.id))
+        assertTrue(result.reason.contains("safe relative"), result.reason)
+        assertEquals(listOf(suite.id), store.library.value.suites.map { it.id })
+    }
+
+    @Test
+    fun duplicationRejectsASymlinkedSuiteAssetDirectory() {
+        val dir = tempTestingDir()
+        val store = newStore(dir)
+        val suite = store.createSuite("Golden").ok()
+        val case = store.createCase(suite.id, plainCase("image", steps = 1)).ok()
+        val step = store.library.value.findCase(case.id)!!.case.steps.single()
+        val safe = "golden.png"
+        store.updateStep(step.id) { it.copy(examples = listOf(StepExample.GoldenScreenshot("ex-dir", safe))) }.ok()
+        val outside = File(dir, "outside-assets").also { it.mkdirs() }
+        File(outside, safe).writeBytes(byteArrayOf(9))
+        val assetDirectory = testAssetDir(dir, suite.id)
+        assetDirectory.parentFile.mkdirs()
+        runCatching { assetDirectory.deleteRecursively() }
+        val linked = runCatching { Files.createSymbolicLink(assetDirectory.toPath(), outside.toPath()) }.isSuccess
+        org.junit.Assume.assumeTrue("This host permits creating symbolic links", linked && Files.isSymbolicLink(assetDirectory.toPath()))
+
+        val result = assertIs<StoreResult.Invalid>(store.duplicateSuite(suite.id))
+        assertTrue(result.reason.contains("safe relative"), result.reason)
+        assertEquals(listOf(suite.id), store.library.value.suites.map { it.id })
     }
 
     @Test

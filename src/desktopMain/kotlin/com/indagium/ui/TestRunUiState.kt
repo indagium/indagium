@@ -22,6 +22,7 @@ import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestingSettings
+import com.indagium.testing.model.hasUnresolvedJudgeOutcome
 import com.indagium.testing.model.moveById
 import com.indagium.testing.model.newLaneId
 import com.indagium.testing.run.deviceSharingWarnings
@@ -74,6 +75,7 @@ internal data class RunDialogModel(
     val firstLaneId: String = newLaneId(),
     /** From Settings > Testing; the dialog has no control for it. */
     val confirmationTimeoutMs: Long = DEFAULT_CONFIRMATION_TIMEOUT_MS,
+    val rerunOf: String? = null,
 ) {
     /** Every lane row, first lane first. */
     fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial)) + moreLanes
@@ -112,8 +114,11 @@ private fun laneProblem(draft: LaneDraft, label: String): String? {
 internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig> {
     val drafts = allLanes()
     val laneProblem = drafts.withIndex().firstNotNullOfOrNull { (i, draft) -> laneProblem(draft, if (drafts.size == 1) "" else "Lane ${i + 1}") }
+    val unknownCases = selectedCaseIds - allCaseIds.toSet()
     val problem = when {
         selectedCaseIds.isEmpty() -> "Choose at least one case."
+        unknownCases.isNotEmpty() -> "Some selected cases no longer exist in this suite: ${unknownCases.joinToString()}. " +
+            "Refresh the suite and choose current cases."
         laneProblem != null -> laneProblem
         repeat !in ALLOWED_RUN_REPEATS -> "Repeat must be ${ALLOWED_RUN_REPEATS.joinToString(", ")}."
         toolLimitText.trim().toIntOrNull() !in MIN_CASE_TOOL_CALL_LIMIT..MAX_CASE_TOOL_CALL_LIMIT ->
@@ -131,7 +136,7 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             deviceSerial = checkNotNull(draft.deviceSerial),
         )
     }
-    val everyCase = selectedCaseIds.containsAll(allCaseIds)
+    val everyCase = selectedCaseIds == allCaseIds.toSet()
     return Result.success(
         RunConfig(
             suiteId = suiteId,
@@ -143,7 +148,35 @@ internal fun RunDialogModel.toConfig(allCaseIds: List<String>): Result<RunConfig
             judgeProfileId = judgeProfileId?.takeIf { judgeMode != JudgeMode.OFF },
             judgeMode = judgeMode.wire,
             confirmationTimeoutMs = confirmationTimeoutMs,
+            rerunOf = rerunOf,
         ),
+    )
+}
+
+/** Prefills a rerun dialog from the original run while assigning new lane ids for this new run. */
+internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneChoice>): RunDialogModel {
+    val lanes = config.lanes.map { lane ->
+        LaneDraft(
+            id = newLaneId(),
+            choice = choices.firstOrNull { it.profileId == lane.profileId },
+            deviceSerial = lane.deviceSerial,
+        )
+    }
+    val first = lanes.firstOrNull() ?: allLanes().first()
+    return copy(
+        suiteId = config.suiteId,
+        selectedCaseIds = config.caseIds?.toSet() ?: selectedCaseIds,
+        choice = first.choice,
+        deviceSerial = first.deviceSerial,
+        repeat = config.repeat,
+        toolLimitText = config.caseToolCallLimit.toString(),
+        evidence = config.evidence,
+        moreLanes = lanes.drop(1),
+        judgeProfileId = config.judgeProfileId,
+        judgeMode = JudgeMode.parse(config.judgeMode) ?: JudgeMode.OFF,
+        firstLaneId = first.id,
+        confirmationTimeoutMs = config.confirmationTimeoutMs,
+        rerunOf = config.rerunOf,
     )
 }
 
@@ -233,6 +266,71 @@ internal sealed interface MatrixRow {
         val caseId: String = "",
         val iteration: Int = 1,
     ) : MatrixRow
+}
+
+internal enum class TestRunReportFilter(val label: String) {
+    FAILURES("Failures"),
+    BLOCKED_OR_ERROR("Blocked / error"),
+    DISAGREEMENTS("Disagreements"),
+    UNRESOLVED_JUDGING("Unresolved judging"),
+}
+
+internal data class TestRunReportMetrics(
+    val passedCases: Int,
+    val failedCases: Int,
+    val blockedOrErrorCases: Int,
+    val disagreements: Int,
+    val unresolvedJudging: Int,
+    val caseIterations: Int,
+)
+
+/** Metrics count final case/step outcomes; earlier retries remain visible in each step's attempts count. */
+internal fun reportMetrics(run: TestRun): TestRunReportMetrics {
+    val caseResults = run.lanes.flatMap { it.cases }.filter { it.caseId !in setOf(SUITE_SETUP_CASE_ID, SUITE_TEARDOWN_CASE_ID) }
+    val stepRows = buildMatrix(run).filterIsInstance<MatrixRow.Step>()
+    val results = run.lanes.flatMap { lane -> lane.cases.flatMap { it.steps } }
+    return TestRunReportMetrics(
+        passedCases = caseResults.count { it.status == CaseStatus.PASS },
+        failedCases = caseResults.count { it.status == CaseStatus.FAIL },
+        blockedOrErrorCases = caseResults.count { it.status in setOf(CaseStatus.BLOCKED, CaseStatus.ERROR) },
+        disagreements = stepRows.count { consensusFor(run, it).tone == ConsensusTone.DISAGREE },
+        unresolvedJudging = results.count { it.hasUnresolvedJudgeOutcome() },
+        caseIterations = caseResults.map { it.caseId to it.iteration }.distinct().size,
+    )
+}
+
+/** Keeps matching rows and their case headers so a filtered report remains navigable. Multiple filters are ORed. */
+internal fun filterReportRows(run: TestRun, filters: Set<TestRunReportFilter>): List<MatrixRow> {
+    val rows = buildMatrix(run)
+    if (filters.isEmpty()) return rows
+    val matchingSteps = rows.filterIsInstance<MatrixRow.Step>().filter { row ->
+        val results = row.cells.mapNotNull { it.result }
+        filters.any { filter ->
+            when (filter) {
+                TestRunReportFilter.FAILURES -> results.any { it.status in setOf(StepStatus.FAIL, StepStatus.TIMEOUT) }
+                TestRunReportFilter.BLOCKED_OR_ERROR -> results.any { it.status in setOf(StepStatus.BLOCKED, StepStatus.ERROR) }
+                TestRunReportFilter.DISAGREEMENTS -> consensusFor(run, row).tone == ConsensusTone.DISAGREE
+                TestRunReportFilter.UNRESOLVED_JUDGING -> results.any { it.hasUnresolvedJudgeOutcome() }
+            }
+        }
+    }
+    val matchingKeys = matchingSteps.map { it.caseId to it.iteration }.toSet()
+    return rows.filter { row ->
+        when (row) {
+            is MatrixRow.Step -> row in matchingSteps
+            is MatrixRow.Case -> {
+                (row.caseId to row.iteration) in matchingKeys || filters.any { filter ->
+                    when (filter) {
+                        TestRunReportFilter.FAILURES -> row.cells.any { it.status == com.indagium.testing.model.CaseStatus.FAIL }
+                        TestRunReportFilter.BLOCKED_OR_ERROR -> row.cells.any {
+                            it.status in setOf(com.indagium.testing.model.CaseStatus.BLOCKED, com.indagium.testing.model.CaseStatus.ERROR)
+                        }
+                        TestRunReportFilter.DISAGREEMENTS, TestRunReportFilter.UNRESOLVED_JUDGING -> false
+                    }
+                }
+            }
+        }
+    }
 }
 
 private fun List<com.indagium.testing.model.LaneResult>.caseOf(laneIndex: Int, caseId: String, iteration: Int): CaseResult? =

@@ -10,6 +10,7 @@ import com.indagium.testing.store.IssueStore
 import com.indagium.testing.store.RUN_SAVE_DEBOUNCE_MS
 import com.indagium.testing.store.TestRunStore
 import com.indagium.testing.store.TranscriptWriter
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import java.io.File
 
@@ -49,6 +50,7 @@ const val JUDGE_TIMEOUT_MS = 60_000L
 const val JUDGE_TURN_HEADROOM = 4
 
 /** Everything the engine needs from its owner. */
+@Suppress("LongParameterList") // This is the lane engine's explicit dependency bundle.
 internal class EngineDeps(
     val openDevice: LaneDeviceOpener,
     /** The agent of an AGENT_PROFILE lane. Not called for an EXTERNAL lane. May throw [IllegalStateException] to refuse. */
@@ -67,6 +69,8 @@ internal class EngineDeps(
     val issues: IssueStore? = null,
     /** The file of a golden-screenshot example (suite id, asset path), or null; its image becomes evidence of an issue. */
     val goldenFile: (suiteId: String, assetPath: String) -> File? = { _, _ -> null },
+    /** Marks an external protocol job after its paid dispatch has passed the sequence guard. */
+    val externalDispatchAdmitted: (Job?, String?, Int) -> Unit = { _, _, _ -> },
 )
 
 /** The first profile with [profileId], or null. */
@@ -149,14 +153,25 @@ internal class TranscriptTail(
 /** A case's share of the tool-call limit, spent across the agent runs (restarts) that serve it. */
 internal class CaseBudget(private val limit: Int) {
     private var used = 0
+    private var wasExceeded = false
 
     @Synchronized
     fun remaining(): Int = limit - used
 
+    fun limit(): Int = limit
+
     @Synchronized
-    fun spend(run: AiRun) {
-        used += run.toolCallBudget.snapshot().totalUsed
+    fun tryDispatch(): Boolean {
+        if (used >= limit) {
+            wasExceeded = true
+            return false
+        }
+        used++
+        return true
     }
+
+    @Synchronized
+    fun exhausted(): Boolean = wasExceeded
 }
 
 internal fun TestRunStore.relativeToRun(runId: String, file: File): String = file.relativeTo(runDir(runId)).invariantSeparatorsPath

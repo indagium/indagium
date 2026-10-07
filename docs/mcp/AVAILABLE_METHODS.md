@@ -259,6 +259,11 @@ and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `g
 (`assetPath` relative to the suite's asset folder; the image itself is not uploaded over MCP) or
 `referenceLog` (`text`), with an optional `caption`. Both accept an optional `id`.
 
+When a lane enters a step, its prompt, `get_current_step`, and next/redo replies identify whether that step has
+examples and which example tools are permitted. `list_step_examples` returns only the current step's captions and
+IDs; `get_step_example` reads only an attached example. Golden images are bounded and returned as image content,
+and reference logs are fenced untrusted text. Case `allowedTools` remains enforced.
+
 ### Scripts and shared steps
 
 - `list_test_scripts`, `create_test_script` (`toolName`, `commandTemplate`; optional `description`,
@@ -285,6 +290,39 @@ and `stdoutContains`) and `askJudge` (`text`). Example entries have a `type`: `g
   `{ "type": "script", "scriptId": ..., "args": {...} }`.
 
 
+### Authoring previews and script management
+
+These operations share the same services as the Tests UI. Previews do not mutate the library; applying a draft
+or recording is a separate confirmation-required call.
+
+- `draft_test_steps` (suiteId, caseId, profileId, instruction) asks a configured profile to propose steps
+  through a restricted drafting gateway. It returns a short-lived editable preview and does not operate a device
+  or update the library. Sending context to a remote provider requires approval naming the profile and bounded
+  suite/case context.
+- `apply_test_step_draft` (draftId, edited steps, optional index) applies the reviewed steps once and
+  revalidates them against the current case and edition limits.
+- `insert_shared_steps` (caseId, sharedStepId, optional index) deep-copies the sequence at the selected
+  position with fresh IDs and resolves golden assets through the suite asset service.
+- `preview_log_checks` (text) parses Android logcat into editable LogAppears checks with regex-escaped literal
+  messages and the default wait duration. `insert_log_checks` (stepId, edited checks or text, optional index)
+  inserts the reviewed checks with fresh IDs.
+- `start_test_recording` (suiteId, caseId, deviceSerial) observes accepted input on an already-open live
+  mirror; it never injects input. `get_test_recording` (sessionId, optional rowId) returns the preview and
+  warnings; supplying one rowId returns only that row's bounded input-time image as MCP image content.
+  `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
+  and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
+  `stop_test_recording`, `discard_test_recording`, and `apply_test_recording` stop/drain, discard without
+  library mutation, or apply the reviewed preview at an optional index to its original case.
+- `duplicate_test_script` (scriptId) assigns a fresh id and unique tool name. `import_test_script` accepts
+  exactly one of text or path; `export_test_script` accepts scriptId and optional path/overwrite. Both use the
+  versioned script JSON envelope. `get_test_script_schema` returns the actual lane tool schema, and
+  `get_test_script_usage` lists each explicit current-library hook, script-result check, and allowed-tool
+  reference for navigation.
+
+The case-level paid-dispatch guard is authoritative for agent and external lanes. Paid attempts count even when
+execution errors; protocol tools are free. Exhaustion is an actionable case ERROR and cannot be bypassed by
+calling finish_step immediately after a rejected dispatch.
+
 ### Running a suite
 
 A **run** drives one Android device per **lane**. A lane is driven either by an AI profile (Claude Code, Codex
@@ -303,12 +341,13 @@ the automatic check results, example captions; never the agent's claim or observ
 `app_defect`|`agent_or_step_problem`|`unknown`, optional `suggestedStepFix` `{ action?, expected?, note? }`). It has a
 budget of 8 evidence calls (submitting is free) and 60 seconds, and runs inline inside `finish_step`. `judgeMode`
 `every_step` judges every step after its automatic checks; `failures_only` judges steps whose automatic checks
-failed or that the agent reported as `fail`/`blocked`, and every step that has a `screenJudge`/`askJudge` check
-(those checks are `NOT_EVALUATED` without a judge and take the judge's verdict with one). **Final step status**:
-the status without a judge is `PASS` only when the agent claimed pass and no check failed, `BLOCKED` when it
-claimed blocked, `FAIL` otherwise; with a judge only a `PASS` is revisited: a `fail` verdict makes it `FAIL`, an
-`inconclusive` one (or a judge that timed out or failed) keeps it and sets `judgeInconclusive`, and a judge
-can never turn a failure into a pass. When the lanes of a run ended a step differently (status or judge
+failed or that the agent reported as `fail`/`blocked`, and every step that has a `screenJudge`/`askJudge` check.
+Before execution, selected cases and reachable shared hooks are validated: explicit judge checks refuse judge mode
+`off` or a missing/unusable judge. An error, timeout or inconclusive answer records the explicit check as
+`NOT_EVALUATED` and the step as `BLOCKED`, then follows retry and failure policy. Deterministic failures remain
+`FAIL`; the judge cannot turn a failure into a pass. Steps without explicit judge checks retain optional-judge
+behavior. Screenshot, deterministic checks and judging share the full attempt deadline. When the lanes of a run
+ended a step differently (status or judge
 verdict), one comparison judge (budget 12) looks at every lane's own evidence once all lanes are done and
 stores a comparison (`comparisons[]`: a verdict per lane, classification, explanation, `suggestedStepFix`) in the
 report. What the judges said is in `judge.jsonl` next to `run.json`.
@@ -334,7 +373,7 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for a judge check nobody judged),
   the step's `judge` verdict (`id`, `verdict`, `reasoning`, `classification`, `suggestedFix`), `judgeInconclusive`,
   `agentError`, the run's `comparisons` and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
-  lane's `logcat.log`) and the transcript range, all relative to the run folder. Agent, observation and
+  lane's `logcat.log`), transcript range, tool activity path and artifact paths, all relative to the run folder. Agent, observation and
   script text in a report is untrusted data.
 - `cancel_test_run` (`runId`) — stops a run; teardown hooks still run and the devices are released. Asks for
   confirmation inside the AI panel.
@@ -356,6 +395,16 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   step (a step only makes sense in the state the earlier steps leave); returns like `run_test_suite`. Asks for
   confirmation inside the AI panel; every call from an external MCP client waits for the user to allow it in a
   dialog that shows the case, the lane's device and the scripts that may run.
+- `rerun_failed_test_cases` (`runId`) — starts a new run of cases whose final result is failed, blocked or
+  errored. It retains the source run's lane, repeat, judge and evidence configuration and validates selections
+  against the current library before starting.
+- `compare_test_runs` (`runId`, optional `previousRunId`) — compares terminal runs of the same stable suite.
+  Without `previousRunId` it chooses the immediately preceding terminal run, not an active run or a same-name suite.
+  It matches stable case/step identities and reports outcome transitions, changed definitions, and added/removed
+  content.
+- `export_test_run_report` (`runId`, `format` `json`|`markdown`|`evidence_zip`, absolute `path`,
+  optional `evidencePaths`, `overwrite`) — writes a local report or selected-artifact ZIP with progress and
+  cancellation. Evidence paths must remain inside the run; unsafe, missing and oversized files are refused.
 - `test_lane_tool_call` (`runId`, `laneId`, `tool`; optional `arguments` object) — drives an **external** lane:
   runs one lane tool (`get_current_step`, `take_screenshot`, `dump_ui_tree`, `tap`, `swipe`, `press_key`,
   `input_text`, `launch_app`, `open_url`, `wait_for_log`, `read_log_since_step`, `report_observation`,
@@ -402,6 +451,13 @@ Severity: judge `app_defect` and a crash in the step's log (`FATAL EXCEPTION`, `
   list, and the evidence is not changed.
 - `delete_issue` (`issueId`) — removes the issue and its copied evidence; asks for confirmation inside the AI panel
   and cannot be undone.
+- `export_issue_step_clip` (`issueId`; optional `startMs`, `endMs`) — explicitly exports the failed step's
+  recording interval padded by five seconds on each side and clamped to available video coverage. Supplying bounds
+  adjusts the interval; the original recording is retained, and the saved clip is added to the issue attachment
+  checklist with its actual bounds.
+- `collect_android_bugreport` (`issueId`) — explicitly collects a bugreport from the source Android device.
+  Collection is never automatic, shows progress, can be cancelled, and times out after five minutes. A successful
+  archive is copied into issue-owned storage as an unchecked attachment.
 
 ### Issue tracker
 
