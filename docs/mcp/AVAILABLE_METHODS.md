@@ -337,7 +337,7 @@ microphone, the device display, buffers and quality). By default it also opens a
 the app (`openLaneTabs`, without taking focus), which stays as a stopped capture tab after the lane. A lane refuses
 a serial a manual capture or another lane holds, and a manual capture refuses a serial a lane holds. A lane runs the
 suite's setup hooks, then each case (setup, steps, teardown), then the suite's teardown, and records the evidence
-under `<save folder>/test-runs/<runId>/` (the lane's capture session is `lanes/<laneId>/capture/<sessionId>/`).
+under `<Test runs folder>/<runId>/` (default `<save folder>/test-runs/<runId>/`; the lane's capture session is `lanes/<laneId>/capture/<sessionId>/`).
 When a non-setup step ends `FAIL`, `TIMEOUT`, `BLOCKED` or `ERROR`, the lane writes an **AI marker** into its
 capture, the same kind of note the Mark issue button writes (`AI · <case> · step N failed`, the action, expected
 result, failed checks and the judge's verdict with everything model- or device-written quoted as untrusted, the
@@ -447,7 +447,7 @@ remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CRE
 ### Issues from failed steps
 
 A step set to `CREATE_ISSUE_AND_CONTINUE` gets a **draft issue** the moment it fails (status `DRAFT`, kept under
-`<testing folder>/issues/<issueId>/` with its evidence copied next to it); the step's result carries its `issueId`.
+`<Issues folder>/<issueId>/` (default `<save folder>/test-issues/<issueId>/`) with its evidence copied next to it); the step's result carries its `issueId`.
 Any other non-passing step can become an issue on demand. A draft is built from the run alone and never invents
 anything: the title (case, step, failure), the reproduction steps (suite and case setup, then the case's steps up to
 and including the failing one), expected (the step's expected result and the checks that failed), actual (check

@@ -63,17 +63,24 @@ import com.indagium.source.sourceConfigurationFingerprint
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestScript
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.model.withFreshId
 import com.indagium.testing.run.TestRunCoordinator
+import com.indagium.testing.store.DEFAULT_TEST_ISSUES_FOLDER_NAME
+import com.indagium.testing.store.DEFAULT_TEST_RUNS_FOLDER_NAME
+import com.indagium.testing.store.DEFAULT_TEST_SUITES_FOLDER_NAME
 import com.indagium.testing.store.ISSUES_DIR_NAME
 import com.indagium.testing.store.IssueStore
+import com.indagium.testing.store.LEGACY_TEST_RUNS_DIR_NAME
 import com.indagium.testing.store.StoreResult
 import com.indagium.testing.store.TestLibraryStore
+import com.indagium.testing.store.TestStorageMigrationReport
 import com.indagium.testing.store.importGoldenImage
+import com.indagium.testing.store.migrateLegacyTestStorage
 import com.indagium.testing.store.resolveTestAsset
 import com.indagium.update.ReleaseInfo
 import com.indagium.update.RuntimePackage
@@ -569,13 +576,28 @@ internal const val MIN_PORT = 1
 internal const val MAX_PORT = 65535
 internal const val DEFAULT_MCP_PORT = 8991
 
-// The five save folders in Settings → General → Storage (see AppState.pickSaveFolder/
+// The save folders in Settings → General → Storage (see AppState.pickSaveFolder/
 // resetSaveFolder and SettingsDialog.kt's SaveFolderRow). ANALYSIS is what used to be the app's
 // only "Default save folder" — the label moved to ROOT when that folder became the shared parent
-// the other four default under (see AppSettings.saveRootDir's own doc), but the settings key
+// the other ones default under (see AppSettings.saveRootDir's own doc), but the settings key
 // (defaultSaveDir) and this enum's historical default-parameter position on pickSaveFolder() both
-// stayed put so no existing caller needed to change.
-internal enum class SaveFolderKind { ROOT, ANALYSIS, SESSIONS, SNAPSHOTS, ZIP }
+// stayed put so no existing caller needed to change. TEST_SUITES / TEST_RUNS / TEST_ISSUES are the AI test-suite
+// folders; they and ROOT (which moves their defaults) are the kinds that cannot change while a test run is active.
+private const val TEST_FOLDER_CHANGE_REFUSED_MESSAGE =
+    "A test run is in progress. Change the test folders after it has finished."
+private const val TEST_FOLDER_SWITCH_DEFERRED_MESSAGE =
+    "A test run is in progress; the test folders switch to the new location when it has finished."
+
+internal enum class SaveFolderKind(val affectsTestStorage: Boolean = false) {
+    ROOT(affectsTestStorage = true),
+    ANALYSIS,
+    SESSIONS,
+    SNAPSHOTS,
+    ZIP,
+    TEST_SUITES(affectsTestStorage = true),
+    TEST_RUNS(affectsTestStorage = true),
+    TEST_ISSUES(affectsTestStorage = true),
+}
 
 // One entry in the editor catalog offered by the Settings → Source code editor-choice dropdown.
 // [id] is the stable key persisted in AppSettings.editorChoice; [candidates] are command templates
@@ -1815,9 +1837,11 @@ class AppState(
     // Lets saved-profile migration tests provide the current bundled executable independently of
     // the host running the test; production still requires the real bundled path to exist.
     private val bundledCodexExecutableProvider: () -> String? = LocalAccountCli::bundledCodexExecutable,
-    // Where the AI test-suite library lives (testing/store/TestLibraryStore.kt). Injectable like
-    // customCommandsDir/notesDir; a bare AppState() in tests resolves it under the sandboxed
-    // user.home build.gradle.kts sets for every test run, and nothing is written until a mutation.
+    // The LEGACY home of the AI test data (<app data>/testing) and the fallback of the three test folders when no save
+    // root is known: with a save root the folders are the "Test suites folder" / "Test runs folder" / "Issues folder"
+    // settings (see effectiveTestSuitesDir). Injectable like customCommandsDir/notesDir; a bare AppState() in tests
+    // resolves it under the sandboxed user.home build.gradle.kts sets for every test run, and nothing is written until a
+    // mutation. Data found here is moved to the resolved folders once (testing/store/TestStorageLayout.kt).
     private val testingDir: File = DesktopStorage.testingDir(),
     // The edition that sets the test-suite limits. Defaults to Unlimited; Main.kt resolves the real
     // one from -Dindagium.edition / INDAGIUM_EDITION. A per-AppState instance, never a global.
@@ -1889,16 +1913,38 @@ class AppState(
     internal var sourceFolderInfoEditorTarget by mutableStateOf<String?>(null)
 
     // ── AI test suites ──────────────────────────────────────────────
-    // The library is disk-backed by TestLibraryStore (its own leaf locks — never held together with
-    // stateLock, and the store never calls back into AppState). [testLibrary] mirrors the store's
-    // StateFlow for Compose: it is refreshed after every delegate below, reading the flow's value
-    // INSIDE testLibraryMirrorLock so the last assignment is always the freshest one even when several
-    // threads (UI, MCP) mutate at once. No collector is involved, so there is no async lag to test around.
-    private val testLibraryStore = TestLibraryStore(testingDir, limits = { editionService.limits() })
+    // The library is disk-backed by TestLibraryStore (its own leaf locks — never held together with stateLock, and the
+    // store never calls back into AppState). [testLibrary] mirrors the store's StateFlow for Compose: it is refreshed
+    // after every delegate below, reading the flow's value INSIDE testLibraryMirrorLock so the last assignment is always
+    // the freshest one even when several threads (UI, MCP) mutate at once. No collector is involved, so there is no async
+    // lag to test around. The store is created by initTestStorage() once the saved settings are restored (so it opens the
+    // folder the user chose, never a default first) and replaced by reconcileTestStorage() when a folder setting changes.
+    @Volatile private lateinit var testLibraryStore: TestLibraryStore
     private val testLibraryMirrorLock = Any()
 
+    // The folders the stores use RIGHT NOW. They follow the settings through reconcileTestStorage(), which never switches
+    // them while a test run is active: a run writes under these folders until it is over. testStorageLock is a leaf lock
+    // (nothing that takes stateLock is called while holding it).
+    private val testStorageLock = Any()
+
+    @Volatile private var activeTestSuitesDir: File = testingDir
+
+    @Volatile private var activeTestRunsDir: File = File(testingDir, LEGACY_TEST_RUNS_DIR_NAME)
+
+    @Volatile private var activeTestIssuesDir: File = File(testingDir, ISSUES_DIR_NAME)
+
+    @Volatile private var testStorageSwitchPending = false
+
+    /** Bumped whenever the runs folder changed, so a screen that lists runs reloads. */
+    var testRunsFolderEpoch by mutableStateOf(0)
+        private set
+
+    /** The last thing worth telling the user about the test folders (a move that failed, a switch waiting for a run), or null. */
+    var testStorageStatus by mutableStateOf<String?>(null)
+        private set
+
     /** The test library in the user's order; observe this from composables. Mutate through the delegates below. */
-    var testLibrary by mutableStateOf(testLibraryStore.library.value)
+    var testLibrary by mutableStateOf(TestLibrary())
         private set
 
     /** The last failure to write the test library to disk, or null. */
@@ -2179,14 +2225,14 @@ class AppState(
 
     fun moveSharedStep(sharedId: String, toIndex: Int): StoreResult<Unit> = testStoreOp { moveSharedStep(sharedId, toIndex) }
 
-    /** Copies [source] into the suite's asset folder; the returned name is the golden-screenshot example's `assetPath`. */
+    /** Copies [source] into the suite's asset folder (inside the Test suites folder); the returned name is the golden-screenshot example's `assetPath`. */
     internal fun importTestGoldenImage(suiteId: String, source: File): StoreResult<String> {
         if (testLibrary.suite(suiteId) == null) return StoreResult.NotFound("suite", suiteId)
-        return importGoldenImage(testingDir, suiteId, source)
+        return importGoldenImage(activeTestSuitesDir, suiteId, source)
     }
 
     /** The image file a golden-screenshot example points at, or null when its path does not stay inside the asset folder. */
-    internal fun testGoldenImageFile(suiteId: String, assetPath: String): File? = resolveTestAsset(testingDir, suiteId, assetPath)
+    internal fun testGoldenImageFile(suiteId: String, assetPath: String): File? = resolveTestAsset(activeTestSuitesDir, suiteId, assetPath)
 
     // ── AI test runs ────────────────────────────────────────────────
     // The run coordinator (testing/run/TestRunCoordinator.kt) owns every run of this launch on its own scope; nothing
@@ -2222,7 +2268,7 @@ class AppState(
         )
     }
     private val testRunCoordinatorDelegate = lazy {
-        createTestRunCoordinator(testRunOverrides, ::testRunsBaseDir, ::syncTestRuns)
+        createTestRunCoordinator(testRunOverrides, { activeTestRunsDir }, ::syncTestRuns)
     }
     internal val testRunCoordinator: TestRunCoordinator get() = testRunCoordinatorDelegate.value
     private val testRunMirrorLock = Any()
@@ -2234,18 +2280,17 @@ class AppState(
     private fun syncTestRuns() {
         if (!testRunCoordinatorDelegate.isInitialized()) return
         synchronized(testRunMirrorLock) { testRuns = testRunCoordinator.runsFlow.value }
+        if (testStorageSwitchPending) reconcileTestStorage()
+        if (testStorageStatus == TEST_FOLDER_CHANGE_REFUSED_MESSAGE && !isTestRunActive()) testStorageStatus = null
     }
 
-    // The issues made from failed steps live in their own folders under <testing dir>/issues (testing/store/IssueStore.kt).
+    // The issues made from failed steps live in their own folders under the Issues folder (testing/store/IssueStore.kt).
     // The store has its own leaf lock (never held together with stateLock); the notes destination calls the annotation
-    // mutators only after it released it (IssueNotes.kt).
-    internal val issueStore = IssueStore(File(testingDir, ISSUES_DIR_NAME))
+    // mutators only after it released it (IssueNotes.kt). It reads the folder on every use, so a folder switch needs no new store.
+    internal val issueStore = IssueStore({ activeTestIssuesDir })
 
     /** What is known about the issue tracker's stored token (ui/TrackerWiring.kt refreshes it on IO). Never holds the token itself. */
     internal var trackerStatus by mutableStateOf(TrackerStatus())
-
-    /** `<save root>/test-runs`, or `<testing dir>/runs` when no save root is configured (a bare test AppState). */
-    private fun testRunsBaseDir(): File = effectiveSaveRootOrNull()?.let { File(it, "test-runs") } ?: File(testingDir, "runs")
 
     /** The serial of the device the live capture tab records, or null (no live capture, or one that is still starting). */
     internal fun liveCaptureSerial(): String? =
@@ -5089,6 +5134,7 @@ class AppState(
         AppLogger.setFailureReporter { reason -> debugLoggingError = reason }
         debugLoggingError = AppLogger.configure(settings.debugLoggingEnabled, settings.debugLogFilePath)
         AppLogger.info("app", "Indagium started (v${BuildInfo.APP_VERSION})")
+        initTestStorage()
     }
 
     // ── Helpers ─────────────────────────────────────────────────────
@@ -5609,8 +5655,13 @@ class AppState(
         settings = next
         if (next.theme != prev.theme) recomputeTidMapColorsForThemeChange()
         if (next.customIssueRules != prev.customIssueRules) recomputeIssueAnalysis(next.customIssueRules)
+        if (testFolderSettingsChanged(prev, next)) reconcileTestStorage()
         autosaveNow()
     }
+
+    private fun testFolderSettingsChanged(prev: AppSettings, next: AppSettings): Boolean =
+        prev.saveRootDir != next.saveRootDir || prev.testSuitesDir != next.testSuitesDir ||
+            prev.testRunsDir != next.testRunsDir || prev.testIssuesDir != next.testIssuesDir
 
     /** Rebuilds cached issue anchors off the UI thread after Settings changes. */
     private fun recomputeIssueAnalysis(rules: List<CustomIssueRule>) {
@@ -11374,7 +11425,7 @@ class AppState(
      *  unlike [effectiveSaveRootOrNull], this reflects the real platform default even when
      *  [platformDefaultSaveRootDir] wasn't injected, since showing a path in Settings never
      *  touches disk. Actual writes always go through [effectiveSaveRootOrNull] instead. */
-    internal val effectiveSaveRootDir: File get() = effectiveSaveRootOrNull() ?: DesktopStorage.defaultSaveRootDir()
+    internal val effectiveSaveRootDir: File get() = effectiveSaveRootOrNull() ?: DesktopStorage.processDefaultSaveRootDir()
 
     /** Where analysis notes/exports are written — see [activeNotesDir]. An explicit, existing
      *  [AppSettings.defaultSaveDir] always wins (a configured-but-currently-missing folder falls
@@ -11417,6 +11468,118 @@ class AppState(
      *  specific session to fall back to — falls back to `<save root>/saved-captures` instead. */
     internal fun effectiveCaptureZipDirForDisplay(): File =
         effectiveCaptureZipDir(fallback = File(effectiveSaveRootDir, "saved-captures"))
+
+    // ── AI test folders (Settings → General → Storage) ──────────────────────────────
+    // Same resolution as the folders above: the explicit setting, else a subfolder of the save root. With no save root known
+    // (a bare test AppState) they fall back to the pre-setting layout under [testingDir], so nothing resolves to a real
+    // user folder. The stores use the resolved folders through reconcileTestStorage() below, not these functions directly.
+    internal fun effectiveTestSuitesDir(): File =
+        settings.testSuitesDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, DEFAULT_TEST_SUITES_FOLDER_NAME) }
+            ?: testingDir
+
+    internal fun effectiveTestRunsDir(): File =
+        settings.testRunsDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, DEFAULT_TEST_RUNS_FOLDER_NAME) }
+            ?: File(testingDir, LEGACY_TEST_RUNS_DIR_NAME)
+
+    internal fun effectiveTestIssuesDir(): File =
+        settings.testIssuesDir?.let(::File)
+            ?: effectiveSaveRootOrNull()?.let { File(it, DEFAULT_TEST_ISSUES_FOLDER_NAME) }
+            ?: File(testingDir, ISSUES_DIR_NAME)
+
+    /** Display-only counterparts: what Settings shows, always under [effectiveSaveRootDir]. */
+    internal fun effectiveTestSuitesDirForDisplay(): File =
+        settings.testSuitesDir?.let(::File) ?: File(effectiveSaveRootDir, DEFAULT_TEST_SUITES_FOLDER_NAME)
+
+    internal fun effectiveTestRunsDirForDisplay(): File =
+        settings.testRunsDir?.let(::File) ?: File(effectiveSaveRootDir, DEFAULT_TEST_RUNS_FOLDER_NAME)
+
+    internal fun effectiveTestIssuesDirForDisplay(): File =
+        settings.testIssuesDir?.let(::File) ?: File(effectiveSaveRootDir, DEFAULT_TEST_ISSUES_FOLDER_NAME)
+
+    /** The folders the test stores use right now (they trail the settings only while a run is active). */
+    internal fun activeTestFolders(): Triple<File, File, File> = Triple(activeTestSuitesDir, activeTestRunsDir, activeTestIssuesDir)
+
+    /** True while a test run of this launch is going, including its final write to disk. */
+    internal fun isTestRunActive(): Boolean = testRunCoordinatorDelegate.isInitialized() && testRunCoordinator.hasActiveRun()
+
+    /** Compose-observable "a run is going", for disabling the folder rows; [isTestRunActive] is the exact check. */
+    internal val testRunInProgress: Boolean get() = testRuns.any { !it.isFinished }
+
+    /** Opens the stores at the resolved folders once the saved settings are restored, after moving data an earlier build left behind. */
+    private fun initTestStorage() {
+        val suites = effectiveTestSuitesDir()
+        val runs = effectiveTestRunsDir()
+        val issues = effectiveTestIssuesDir()
+        runCatching { migrateLegacyTestStorage(testingDir, suites, issues, runs) }
+            .onSuccess(::reportTestStorageMigration)
+            .onFailure { AppLogger.warn("test-storage", "Moving the old AI test data failed; it was left in ${testingDir.path}", it) }
+        synchronized(testStorageLock) {
+            activeTestSuitesDir = suites
+            activeTestRunsDir = runs
+            activeTestIssuesDir = issues
+            testLibraryStore = TestLibraryStore(suites, limits = { editionService.limits() })
+        }
+        syncTestLibrary()
+    }
+
+    private fun reportTestStorageMigration(report: TestStorageMigrationReport) {
+        report.moved.forEach { AppLogger.info("test-storage", "Moved $it") }
+        report.kept.forEach { AppLogger.info("test-storage", it) }
+        report.failed.forEach { AppLogger.warn("test-storage", "Could not move $it; it was left in place") }
+        if (report.failed.isNotEmpty()) {
+            testStorageStatus = "${report.failed.size} item(s) of the AI test data could not be moved out of ${testingDir.path} " +
+                "and were left there (details in the debug log)."
+        }
+    }
+
+    /**
+     * Points the test stores at the folders the settings now name, without a restart: the library is reloaded from the new
+     * Test suites folder (and [testLibrary] re-mirrored), the run and issue stores follow their folders. Nothing is moved or
+     * deleted in the old folders. While a test run is active nothing switches (a run writes under its folders until it is
+     * over); the switch is remembered and applied when the run ends.
+     */
+    private fun reconcileTestStorage() {
+        val suites = effectiveTestSuitesDir()
+        val runs = effectiveTestRunsDir()
+        val issues = effectiveTestIssuesDir()
+        var suitesChanged = false
+        var runsChanged = false
+        var issuesChanged = false
+        synchronized(testStorageLock) {
+            suitesChanged = !sameFolder(suites, activeTestSuitesDir)
+            runsChanged = !sameFolder(runs, activeTestRunsDir)
+            issuesChanged = !sameFolder(issues, activeTestIssuesDir)
+            if (!suitesChanged && !runsChanged && !issuesChanged) {
+                testStorageSwitchPending = false
+                if (testStorageStatus == TEST_FOLDER_SWITCH_DEFERRED_MESSAGE) testStorageStatus = null
+                return
+            }
+            if (isTestRunActive()) {
+                testStorageSwitchPending = true
+                testStorageStatus = TEST_FOLDER_SWITCH_DEFERRED_MESSAGE
+                return
+            }
+            testStorageSwitchPending = false
+            if (testStorageStatus == TEST_FOLDER_SWITCH_DEFERRED_MESSAGE) testStorageStatus = null
+            if (suitesChanged) {
+                activeTestSuitesDir = suites
+                testLibraryStore = TestLibraryStore(suites, limits = { editionService.limits() })
+            }
+            if (runsChanged) activeTestRunsDir = runs
+            if (issuesChanged) activeTestIssuesDir = issues
+        }
+        if (suitesChanged) syncTestLibrary()
+        if (runsChanged) {
+            if (testRunCoordinatorDelegate.isInitialized()) testRunCoordinator.forgetFinishedRuns()
+            testRunsFolderEpoch += 1
+        }
+        if (issuesChanged) issueStore.folderChanged()
+        AppLogger.info("test-storage", "AI test folders now: suites=${suites.path} runs=${runs.path} issues=${issues.path}")
+    }
+
+    private fun sameFolder(a: File, b: File): Boolean = a.absoluteFile.toPath().normalize() == b.absoluteFile.toPath().normalize()
 
     /** Where a Save/Export dialog starts: the last place ANY such dialog actually saved to, or the
      *  effective analysis folder the first time — deliberately never [AppSettings.defaultSaveDir]
@@ -12598,7 +12761,7 @@ class AppState(
         committed?.let { autoExportAnnotations(it.tab, it.exportTarget) }
     }
 
-    /** Browse for one of the five save folders in Settings → General → Storage. Defaults to
+    /** Browse for one of the save folders in Settings → General → Storage. Defaults to
      *  [SaveFolderKind.ANALYSIS], the historical no-arg behavior ("Default save folder" before it
      *  was renamed — see [SaveFolderKind]'s own doc), so every existing call site kept working
      *  unchanged; only the CaptureSnapshotPopover's "Choose folder…" needs its own kind. */
@@ -12607,7 +12770,7 @@ class AppState(
         setSaveFolder(kind, chosen.absolutePath)
     }
 
-    /** Clears one of the five save folders back to its computed default. Only shown in Settings
+    /** Clears one of the save folders back to its computed default. Only shown in Settings
      *  when that folder is explicitly set — see SettingsDialog's SaveFolderRow. */
     internal fun resetSaveFolder(kind: SaveFolderKind) {
         setSaveFolder(kind, null)
@@ -12619,9 +12782,20 @@ class AppState(
         SaveFolderKind.SESSIONS -> settings.captureSessionsDir
         SaveFolderKind.SNAPSHOTS -> settings.captureSnapshotsDir
         SaveFolderKind.ZIP -> settings.captureZipDir
+        SaveFolderKind.TEST_SUITES -> settings.testSuitesDir
+        SaveFolderKind.TEST_RUNS -> settings.testRunsDir
+        SaveFolderKind.TEST_ISSUES -> settings.testIssuesDir
     }
 
-    private fun setSaveFolder(kind: SaveFolderKind, value: String?) {
+    /**
+     * Sets one save folder, or clears it with null. Returns false (and says why in [testStorageStatus]) when a test run is
+     * active and [kind] would move the test folders.
+     */
+    internal fun setSaveFolder(kind: SaveFolderKind, value: String?): Boolean {
+        if (kind.affectsTestStorage && isTestRunActive()) {
+            testStorageStatus = TEST_FOLDER_CHANGE_REFUSED_MESSAGE
+            return false
+        }
         updateSettings {
             when (kind) {
                 SaveFolderKind.ROOT -> it.copy(saveRootDir = value)
@@ -12629,8 +12803,12 @@ class AppState(
                 SaveFolderKind.SESSIONS -> it.copy(captureSessionsDir = value)
                 SaveFolderKind.SNAPSHOTS -> it.copy(captureSnapshotsDir = value)
                 SaveFolderKind.ZIP -> it.copy(captureZipDir = value)
+                SaveFolderKind.TEST_SUITES -> it.copy(testSuitesDir = value)
+                SaveFolderKind.TEST_RUNS -> it.copy(testRunsDir = value)
+                SaveFolderKind.TEST_ISSUES -> it.copy(testIssuesDir = value)
             }
         }
+        return true
     }
 
     fun pickSourceFolder() {

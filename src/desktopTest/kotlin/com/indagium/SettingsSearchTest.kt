@@ -43,6 +43,7 @@ class SettingsSearchTest {
                 listOf(
                     "Default save folder", "Analysis artifacts folder", "Capture sessions folder",
                     "Snapshots folder", "Saved captures folder (Save ZIP)",
+                    "Test suites folder", "Test runs folder", "Issues folder",
                 ),
             ),
             found.toString(),

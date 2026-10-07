@@ -27,6 +27,29 @@ class SaveFoldersEffectivePathTest {
         assertEquals(File(platformRoot, "captures"), state.effectiveCaptureSessionsDir())
         assertEquals(File(platformRoot, "snapshots"), state.effectiveCaptureSnapshotsDir())
         assertEquals(File(platformRoot, "saved-captures"), state.effectiveCaptureZipDirForDisplay())
+        assertEquals(File(platformRoot, "test-suites"), state.effectiveTestSuitesDirForDisplay())
+        assertEquals(File(platformRoot, "test-runs"), state.effectiveTestRunsDirForDisplay())
+        assertEquals(File(platformRoot, "test-issues"), state.effectiveTestIssuesDirForDisplay())
+    }
+
+    @Test
+    fun theTestFoldersDefaultUnderTheSaveRootAndFollowItWhenOnlyTheUnsetOnesMove() {
+        val dir = createTempDirectory("openlog-save-folders-test-folders").toFile()
+        val rootA = File(dir, "root-a")
+        val mine = File(dir, "my-runs")
+        val state = AppState(autosaveFile = File(dir, "state.cache"), platformDefaultSaveRootDir = rootA)
+        state.updateSettings { it.copy(testRunsDir = mine.absolutePath) }
+
+        assertEquals(File(rootA, "test-suites"), state.effectiveTestSuitesDir())
+        assertEquals(mine, state.effectiveTestRunsDir())
+        assertEquals(File(rootA, "test-issues"), state.effectiveTestIssuesDir())
+
+        val rootB = File(dir, "root-b")
+        state.updateSettings { it.copy(saveRootDir = rootB.absolutePath) }
+
+        assertEquals(File(rootB, "test-suites"), state.effectiveTestSuitesDirForDisplay())
+        assertEquals(mine, state.effectiveTestRunsDirForDisplay())
+        assertEquals(File(rootB, "test-issues"), state.effectiveTestIssuesDirForDisplay())
     }
 
     @Test
@@ -89,5 +112,21 @@ class SaveFoldersEffectivePathTest {
         assertEquals(File("."), state.effectiveCaptureSnapshotsDir())
         val sessionParent = File(dir, "some-session-dir")
         assertEquals(sessionParent, state.effectiveCaptureZipDir(fallback = sessionParent))
+    }
+
+    @Test
+    fun withNoSaveRootTheTestFoldersFallBackToTheInjectedTestingDirectory() {
+        val dir = createTempDirectory("openlog-save-folders-test-fallback").toFile()
+        val testing = File(dir, "testing")
+        val state = AppState(autosaveFile = File(dir, "state.cache"), testingDir = testing)
+
+        assertEquals(testing, state.effectiveTestSuitesDir())
+        assertEquals(File(testing, "runs"), state.effectiveTestRunsDir())
+        assertEquals(File(testing, "issues"), state.effectiveTestIssuesDir())
+    }
+
+    @Test
+    fun theProcessDefaultSaveRootIsThePlatformDefaultWhenNoIsolatedAppDataDirIsInstalled() {
+        assertEquals(com.indagium.ui.DesktopStorage.defaultSaveRootDir(), com.indagium.ui.DesktopStorage.processDefaultSaveRootDir())
     }
 }

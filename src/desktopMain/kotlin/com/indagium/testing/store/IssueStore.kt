@@ -23,7 +23,7 @@ import java.util.concurrent.CancellationException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-// The issues of AI test runs, one folder each under [issuesDir]:
+// The issues of AI test runs, one folder each under the Issues folder ([issuesDirProvider], evaluated on every use):
 //   <issueId>/issue.json              the IssueRecord, written atomically (issue-codec: IssueCodec.kt)
 //   <issueId>/attachments/<name>      the copied evidence (screenshot, log range, judge verdict, optional video ...)
 // [lock] is a LEAF lock: it serialises create/update/delete (a read-modify-write of issue.json and the attachment folder)
@@ -51,11 +51,21 @@ private val UNSAFE_NAME_CHARS = Regex("[^A-Za-z0-9._-]")
 private class Materialised(val attachments: List<IssueAttachment>, val warnings: List<String>, val createdFiles: List<File>)
 
 class IssueStore(
-    private val issuesDir: File,
+    /** Evaluated on every use: the Issues folder is a user setting that can change while the app runs. */
+    private val issuesDirProvider: () -> File,
     private val recordWriter: ((File, IssueRecord) -> Unit)? = null,
     private val attachmentWriter: ((File, String, IssueAttachment) -> Long?)? = null,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
+    constructor(
+        issuesDir: File,
+        recordWriter: ((File, IssueRecord) -> Unit)? = null,
+        attachmentWriter: ((File, String, IssueAttachment) -> Long?)? = null,
+        clock: () -> Long = System::currentTimeMillis,
+    ) : this({ issuesDir }, recordWriter, attachmentWriter, clock)
+
+    private val issuesDir: File get() = issuesDirProvider()
+
     private val lock = ReentrantLock()
     private val revisionState = MutableStateFlow(0)
 
@@ -211,6 +221,9 @@ class IssueStore(
     private fun bump() {
         revisionState.value = revisionState.value + 1
     }
+
+    /** Tells a screen that lists the issues to reload because [issuesDirProvider] now points at another folder. */
+    fun folderChanged() = bump()
 
     // ── Disk ─────────────────────────────────────────────────────────
 

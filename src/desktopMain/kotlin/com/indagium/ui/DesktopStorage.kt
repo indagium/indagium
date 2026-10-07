@@ -231,6 +231,7 @@ internal fun migrationOutcomeSummary(outcome: MigrationOutcome?): String = when 
 
 object DesktopStorage {
     private const val APP_DIR_NAME = "Indagium"
+    private const val DEBUG_SAVE_ROOT_DIR_NAME = "save-root"
     private const val LEGACY_APP_DIR_NAME = "openLog2"
 
     // This is deliberately process-local and is only installed by Main.kt after it has observed
@@ -369,7 +370,12 @@ object DesktopStorage {
 
     fun customCommandsDir(): File = File(appDataDir(), "custom-ai-commands")
 
-    /** AI test suites: `library.json` plus one `suites/<id>.json` per suite (see testing/store/TestLibraryStore.kt). */
+    /**
+     * The LEGACY home of the AI test data (`library.json`, `suites/`, `assets/`, `issues/`, `runs/`). The folders are now
+     * the "Test suites folder", "Test runs folder" and "Issues folder" settings, by default subfolders of the Default save
+     * folder; this directory is only where an earlier build kept them (migrated once, see
+     * testing/store/TestStorageLayout.kt) and the fallback of an AppState that has no save root (a bare test instance).
+     */
     fun testingDir(): File = File(appDataDir(), "testing")
 
     /** Locally installed, explicitly user-downloaded speech models. Never contains recordings. */
@@ -405,6 +411,14 @@ object DesktopStorage {
         val parent = if (documents.isDirectory) documents else File(userHome)
         return File(parent, APP_DIR_NAME)
     }
+
+    /**
+     * The Default save folder an AppState starts with. A debug-control process with an isolated app-data directory keeps
+     * it inside that directory, so no file of such a run (captures, AI test data, exports) lands in the user's real
+     * Documents folder; every other process uses [defaultSaveRootDir].
+     */
+    fun processDefaultSaveRootDir(): File =
+        debugAppDataDirOverride?.let { File(it, DEBUG_SAVE_ROOT_DIR_NAME) } ?: defaultSaveRootDir()
 
     /**
      * Wires the real [appDataDir] / [legacyAppDataDir] and runs the one-time copy. Call first in

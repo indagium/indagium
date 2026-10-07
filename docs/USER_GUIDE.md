@@ -1019,11 +1019,12 @@ One directory holds everything Indagium stores:
 | `voice-models/` | Downloaded Whisper models |
 | `archive-cache/` | Videos extracted from bug-report archives |
 | `control-token` | Bearer token for the MCP control server |
-| `testing/` | Your AI test suites (`library.json`, `suites/`, golden-screenshot `assets/`) and the issues made from failed steps (`issues/`) |
 | `indagium-debug.log` | Diagnostic log — only when you turn it on |
 
-AI test **runs** (their results, screenshots, logcat and agent transcripts) are written under your save
-folder in `test-runs/`, not here.
+AI test suites, test runs and issues are **not** here: they live in your save folders (*Settings → General*), by
+default `<Default save folder>/test-suites`, `/test-runs` and `/test-issues` (`~/Documents/Indagium` unless you chose
+another Default save folder). Each can be moved to a folder of your choice; see [30. AI test suites](#30-ai-test-suites).
+Older versions kept the suites and issues in a `testing/` folder here; the first start of a newer version moves them.
 
 **What is never stored:** AI API keys (memory only, for one launch), AI conversations (cleared on
 restart), voice recordings and transcripts. The one secret Indagium does keep is the issue tracker's access
@@ -1249,6 +1250,22 @@ Open the **Tests** tab from the toolbar. The workspace links **Suites**, **Share
 **Agent profiles**, **Scripts**, **Runs** and **Issues**. Examples for agents is an index of examples already
 attached to steps and shared sequences; selecting one opens its owner. Agent profiles opens provider settings.
 
+**Where the test data is kept.** Three folders in *Settings → General*, each with *Browse* (and *Reset* once you chose
+your own), by default subfolders of your *Default save folder* (for example `…/Documents/Indagium/test-suites  (default)`):
+
+| Setting | Default | Holds |
+|---|---|---|
+| **Test suites folder** | `<Default save folder>/test-suites` | `library.json`, `suites/` and the golden-screenshot `assets/` |
+| **Test runs folder** | `<Default save folder>/test-runs` | one folder per run |
+| **Issues folder** | `<Default save folder>/test-issues` | one folder per issue, with its evidence |
+
+Changing a folder takes effect at once, without a restart: the Tests tab shows the suites, runs and issues found in the
+new folder. Nothing is moved or deleted in the old folder, so copy it over yourself if you want to bring the data along.
+While a test run is going the three buttons (and the *Default save folder* buttons, which move these defaults) are
+disabled; change them after the run has finished. Data an earlier build kept in the `testing/` folder of the app data
+directory is moved into these folders the first time the new version starts, without overwriting anything that is already
+there; anything that cannot be moved stays where it was and Indagium tells you once.
+
 ### Suites, cases and steps
 
 A **suite** groups the cases of one app. Its compact header is followed by **Cases**, **Runs**, **Setup & teardown**,
@@ -1400,7 +1417,7 @@ Useful actions on a step:
 - **Create issue…** / **Open issue…** — see below.
 - **Open transcript** — the agent's tool calls and replies, with any secret removed.
 
-Everything is kept under `<save folder>/test-runs/<run>/`: `run.json`, each lane's capture session
+Everything is kept under `<Test runs folder>/<run>/` (by default `<save folder>/test-runs/<run>/`): `run.json`, each lane's capture session
 (`lanes/<lane>/capture/…`, with its `logcat.log` and video), `screens/`, `transcript.jsonl`, `judge.jsonl` and lane tool
 activity. A lane's capture lives with its run, so deleting the run deletes the recordings.
 

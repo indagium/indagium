@@ -176,7 +176,7 @@ fun App(
         AppState(
             restoreOnCreate = true,
             filterBackupsDir = DesktopStorage.filterBackupsDir(),
-            platformDefaultSaveRootDir = DesktopStorage.defaultSaveRootDir(),
+            platformDefaultSaveRootDir = DesktopStorage.processDefaultSaveRootDir(),
         )
     },
     onLicenseDeclined: () -> Unit = {},
