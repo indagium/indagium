@@ -94,13 +94,16 @@ internal class TestDeviceSession private constructor(
     private val tools: CaptureTools,
     val capture: LaneCapture,
 ) {
-    private val logReader = CaptureLogReader(capture.logFile)
+    private val logReader = CaptureLogReader(capture.readLogFile)
     private val inputLock = Mutex()
 
     @Volatile
     private var space: DeviceScreenCoordinateSpace? = null
 
     val logFile: File get() = capture.logFile
+
+    /** Live source while a manual capture is borrowed; otherwise the lane's own file. */
+    internal val readLogFile: File get() = capture.readLogFile
 
     /** False once the logcat recording ended (device unplugged, storage limit): input still works, new log rows stop. */
     val isRecording: Boolean get() = capture.isRecording

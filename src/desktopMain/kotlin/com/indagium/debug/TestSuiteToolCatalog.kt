@@ -407,8 +407,9 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "start_test_recording",
-        "Start a review-only recording session for accepted user input on an already-open live mirror. " +
-            "This observes mirror commands only; it never sends input or drives a device. Asks for confirmation.",
+        "Start or reuse a local capture for the selected connected device, connect its embedded mirror, and begin a review-only " +
+            "recording session for accepted user input. This observes mirror commands only; it never sends input or drives a device. " +
+            "Asks for confirmation.",
         schema("suiteId" to "string", "caseId" to "string", "deviceSerial" to "string", required = listOf("suiteId", "caseId", "deviceSerial")),
     ),
     IndagiumToolDescriptor(

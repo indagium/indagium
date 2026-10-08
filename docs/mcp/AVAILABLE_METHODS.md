@@ -311,8 +311,10 @@ or recording is a separate confirmation-required call.
 - `preview_log_checks` (text) parses Android logcat into editable LogAppears checks with regex-escaped literal
   messages and the default wait duration. `insert_log_checks` (stepId, edited checks or text, optional index)
   inserts the reviewed checks with fresh IDs.
-- `start_test_recording` (suiteId, caseId, deviceSerial) observes accepted input on an already-open live
-  mirror; it never injects input. `get_test_recording` (sessionId, optional rowId) returns the preview, video timeline
+- `start_test_recording` (suiteId, caseId, deviceSerial) asynchronously validates the case and connected device, then starts or
+  reuses the configured local capture and connects its embedded mirror before observing accepted input; it never injects input.
+  A different-device capture or a lane claim is reported instead of being stopped or replaced. Stopping the recording ends input
+  observation but leaves the capture live for review or a later same-device test lane. `get_test_recording` (sessionId, optional rowId) returns the preview, video timeline
   availability/duration/gaps/cap warning, and warnings; each row reports `durationMs`, `tappedElement`, legacy `package`/`activity`, and explicit `beforeApp`,
   `beforeActivity`, `afterApp`, and `afterActivity` fields (each may be unavailable). Before/after screenshots are
   independently timed and may exist without app/activity context when a later slow probe overlaps input. A mirror

@@ -48,12 +48,12 @@ internal const val EXTERNAL_LANE_LABEL = "External (MCP)"
 internal fun laneChoices(profiles: List<AiProviderProfile>): List<LaneChoice> =
     profiles.map { LaneChoice(it.id, "${it.displayName.ifBlank { it.kind.label }} · ${it.kind.label}") } + LaneChoice(null, EXTERNAL_LANE_LABEL)
 
-internal data class DeviceChoice(val serial: String, val label: String)
+internal data class DeviceChoice(val serial: String, val label: String, val sharesLiveCapture: Boolean = false)
 
-/** The ready devices a lane may use: never the one the live capture tab holds. */
+/** Ready devices a lane may use. A live manual capture is offered because the lane can borrow it safely. */
 internal fun deviceChoices(devices: List<CaptureDevice>, liveCaptureSerial: String?): List<DeviceChoice> =
-    devices.filter { it.available && it.serial != liveCaptureSerial }
-        .map { DeviceChoice(it.serial, if (it.model == it.serial) it.serial else "${it.model} (${it.serial})") }
+    devices.filter { it.available }
+        .map { DeviceChoice(it.serial, if (it.model == it.serial) it.serial else "${it.model} (${it.serial})", it.serial == liveCaptureSerial) }
 
 /**
  * One lane row of the dialog. [id] is stable so the row can be reordered; it becomes the lane's id in the run. [model] and
@@ -65,6 +65,7 @@ internal data class LaneDraft(
     val deviceSerial: String? = null,
     val model: String? = null,
     val reasoningEffort: String? = null,
+    val modelWasDiscovered: Boolean = false,
 )
 
 /**
@@ -94,9 +95,12 @@ internal data class RunDialogModel(
     /** The recording the lanes do: the saved capture settings, edited for this run only. Null until the dialog has read them. */
     val capture: CaptureSettings? = null,
     val openLaneTabs: Boolean = true,
+    val firstLaneModelWasDiscovered: Boolean = false,
+    val judgeModelWasDiscovered: Boolean = false,
 ) {
     /** Every lane row, first lane first. */
-    fun allLanes(): List<LaneDraft> = listOf(LaneDraft(firstLaneId, choice, deviceSerial, firstLaneModel, firstLaneEffort)) + moreLanes
+    fun allLanes(): List<LaneDraft> =
+        listOf(LaneDraft(firstLaneId, choice, deviceSerial, firstLaneModel, firstLaneEffort, firstLaneModelWasDiscovered)) + moreLanes
 
     /** The model with [lanes] as its lane rows (at least one: an empty list leaves the model as it is). */
     fun withLanes(lanes: List<LaneDraft>): RunDialogModel {
@@ -107,6 +111,7 @@ internal data class RunDialogModel(
             firstLaneId = first.id,
             firstLaneModel = first.model,
             firstLaneEffort = first.reasoningEffort,
+            firstLaneModelWasDiscovered = first.modelWasDiscovered,
             moreLanes = lanes.drop(1),
         )
     }
@@ -213,6 +218,7 @@ internal fun RunDialogModel.withRunConfig(config: RunConfig, choices: List<LaneC
         rerunOf = config.rerunOf,
         firstLaneModel = first.model,
         firstLaneEffort = first.reasoningEffort,
+        firstLaneModelWasDiscovered = first.modelWasDiscovered,
         judgeModel = config.judgeModel,
         judgeReasoningEffort = config.judgeReasoningEffort,
         capture = config.capture ?: capture,

@@ -191,8 +191,6 @@ private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
 /** A little longer than the service's own timeout (180 s), so the service answers first with its message. */
 private const val RECORDING_REWRITE_TIMEOUT_MS = 190_000L
 
-private const val LIVE_CAPTURE_PROBLEM = "is held by the live capture in the main window; stop that capture or choose another device."
-
 /** Builds the app's coordinator. [baseDir] is where run folders go; [onChanged] is called after every change of a run. */
 internal fun AppState.createTestRunCoordinator(overrides: TestRunOverrides, baseDir: () -> File, onChanged: () -> Unit): TestRunCoordinator {
     val openDevice = overrides.openDevice ?: ProductionLaneOpener(this)
@@ -226,7 +224,8 @@ private suspend fun AppState.productionDeviceProblem(serial: String): String? = 
         when {
             device == null -> "Device $serial is not connected."
             !device.available -> "Device $serial is not ready (${device.state})."
-            serial == liveCaptureSerial() -> "Device $serial $LIVE_CAPTURE_PROBLEM"
+            testStepRecordingSession?.let { it.deviceSerial == serial && it.snapshot.value.active } == true ->
+                "Device $serial has an active test-step recording. Stop recording steps before starting the AI test run."
             laneCaptureOnDevice(serial) != null ->
                 "Device $serial is recording for an AI test run (run ${laneCaptureOnDevice(serial)?.runId}); wait for it to finish."
             else -> null

@@ -33,6 +33,9 @@ internal interface LaneCapture {
     /** The recorded raw logcat of the session. */
     val logFile: File
 
+    /** The file run-time checks read while recording; borrowed captures may read the manual source while keeping a local copy. */
+    val readLogFile: File get() = logFile
+
     /** The folder of the capture session (`logs/`, `video/`, `session.json`, ...). */
     val sessionDirectory: File
 
