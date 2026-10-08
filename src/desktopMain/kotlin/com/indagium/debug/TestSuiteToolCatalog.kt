@@ -392,8 +392,9 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     ),
     IndagiumToolDescriptor(
         "get_test_recording",
-        "Read the current recording preview and its warnings. Screen snapshots are bounded; " +
-            "the UI hierarchy is included only when the mirror provides it. " +
+        "Read the current recording preview and its warnings. Screen snapshots are bounded. Each row also carries best-effort " +
+            "screen context that an adb probe read while recording: tappedElement (what a tap landed on), package, activity and " +
+            "durationMs. A probe can fail or miss a fast input, so any of these may be null; the mirror itself exposes no UI hierarchy. " +
             "Optionally request one captured input-time image by rowId; it is context, not an expected-result oracle or current device screen.",
         schema("sessionId" to "string", "rowId" to "string", required = listOf("sessionId")),
     ),

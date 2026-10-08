@@ -4,6 +4,8 @@ import com.indagium.debug.DEVICE_KEY_CODES
 import com.indagium.debug.IndagiumToolDescriptor
 import com.indagium.debug.IndagiumToolGateway
 import com.indagium.debug.MCP_TOOLS
+import com.indagium.debug.SWIPE_DURATION_MAX_MS
+import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.ToolArgException
 import com.indagium.debug.ToolArgs
 import com.indagium.debug.encodeBoundedDeviceScreen
@@ -407,7 +409,8 @@ private fun inputTools(context: LaneToolContext): List<LaneTool> = listOf(
     LaneTool(
         IndagiumToolDescriptor(
             "swipe",
-            "Swipe from x1, y1 to x2, y2 (pixels of the latest screenshot) over durationMs (50..2000, default 350).",
+            "Swipe from x1, y1 to x2, y2 (pixels of the latest screenshot) " +
+                "over durationMs ($SWIPE_DURATION_MIN_MS..$SWIPE_DURATION_MAX_MS, default $DEFAULT_SWIPE_DURATION_MS).",
             schema(
                 "x1" to "integer", "y1" to "integer", "x2" to "integer", "y2" to "integer", "durationMs" to "integer",
                 required = listOf("x1", "y1", "x2", "y2"),

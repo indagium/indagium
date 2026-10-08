@@ -459,8 +459,13 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             put("active", snapshot.active)
             put("pendingSnapshots", snapshot.pendingSnapshots)
             put("steps", snapshot.steps.map { row ->
+                val screen = row.before ?: row.after
                 mapOf("id" to row.id, "action" to row.action, "expected" to row.expected, "screenContext" to row.screenContext,
-                    "hasScreenshot" to (row.screenshotJpeg != null), "useScreenshotAsExpected" to row.useScreenshotAsExpected)
+                    "hasScreenshot" to (row.screenshotJpeg != null), "useScreenshotAsExpected" to row.useScreenshotAsExpected,
+                    "durationMs" to row.durationMs, "package" to screen?.packageName, "activity" to screen?.activity,
+                    "tappedElement" to row.tappedElement?.let {
+                        mapOf("text" to it.text, "contentDesc" to it.contentDesc, "resourceId" to it.resourceId, "className" to it.className)
+                    })
             })
             if (image != null) {
                 put("imageBase64", java.util.Base64.getEncoder().encodeToString(image))

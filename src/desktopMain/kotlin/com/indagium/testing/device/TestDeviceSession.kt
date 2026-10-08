@@ -41,8 +41,6 @@ import kotlin.math.roundToInt
 const val LANE_CAPTURE_DIRECTORY = "capture"
 private const val INPUT_TIMEOUT_SECONDS = 5L
 private const val LAUNCH_TIMEOUT_SECONDS = 10L
-private const val UI_DUMP_TIMEOUT_SECONDS = 20L
-private const val MAX_UI_DUMP_BYTES = 4 * 1024 * 1024
 private const val ADB_ERROR_MESSAGE_MAX_CHARS = 500
 private const val LOG_POLL_INTERVAL_MS = 100L
 private const val MAX_LOG_WAIT_MS = 10 * 60 * 1000L
@@ -201,7 +199,7 @@ internal class TestDeviceSession private constructor(
      * screen size changed since (rotation), so the conversion is never stale.
      */
     suspend fun dumpUiTree(): UiTreeSnapshot {
-        val result = adb(listOf("exec-out", "uiautomator", "dump", "/dev/tty"), UI_DUMP_TIMEOUT_SECONDS, MAX_UI_DUMP_BYTES)
+        val result = adb(UI_DUMP_COMMAND, UI_DUMP_TIMEOUT_SECONDS, MAX_UI_DUMP_BYTES)
         check(!result.timedOut) { "The UI dump timed out" }
         val parsed = parseUiAutomatorDump(result.stdoutText())
             ?: error("The device returned no UI hierarchy: ${(result.stderrText() + result.stdoutText()).trim().take(ADB_ERROR_MESSAGE_MAX_CHARS)}")
