@@ -60,6 +60,7 @@ import com.indagium.source.SourceIndexer
 import com.indagium.source.SourceMatch
 import com.indagium.source.SourceStructureParser
 import com.indagium.source.sourceConfigurationFingerprint
+import com.indagium.testing.authoring.RecordingScreenProbe
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.TestCase
@@ -1998,10 +1999,13 @@ class AppState(
             else -> Unit
         }
         // GPU mirror paths publish no CPU pixels with an input, so the session falls back to adb on its own image worker.
-        val session = TestStepRecordingSession(
-            serial,
-            screencap = { captureService.toolsForStart(settings.captureSettings).readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) },
+        val screencap = { captureService.toolsForStart(settings.captureSettings).readScreencapPng(serial, RECORDING_SCREENCAP_MAX_BYTES) }
+        // The probe reads the UI hierarchy, top activity and an image over adb on the session's own worker; it never touches the mirror.
+        val probe = RecordingScreenProbe(
+            adb = { arguments, timeout, limit -> captureService.toolsForStart(settings.captureSettings).runAdb(serial, arguments, timeout, limit) },
+            screencap = screencap,
         )
+        val session = TestStepRecordingSession(serial, screencap = screencap, screenProbe = probe::read)
         synchronized(testStepRecordingLock) {
             if (testStepRecordingSession != null) {
                 return StoreResult.Invalid("A recording session already exists. Review or discard it before starting another.")

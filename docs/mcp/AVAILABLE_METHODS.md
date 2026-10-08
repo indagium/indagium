@@ -309,7 +309,8 @@ or recording is a separate confirmation-required call.
   inserts the reviewed checks with fresh IDs.
 - `start_test_recording` (suiteId, caseId, deviceSerial) observes accepted input on an already-open live
   mirror; it never injects input. `get_test_recording` (sessionId, optional rowId) returns the preview and
-  warnings; supplying one rowId returns only that row's bounded input-time image as MCP image content.
+  warnings; each row also reports `durationMs`, `tappedElement`, `package` and `activity` from a best-effort adb probe
+  read while recording (any may be null); supplying one rowId returns only that row's bounded input-time image as MCP image content.
   `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
   and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
   `stop_test_recording`, `discard_test_recording`, and `apply_test_recording` stop/drain, discard without

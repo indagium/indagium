@@ -2473,8 +2473,8 @@ internal fun requireDeviceTapCoordinates(x: Int, y: Int, width: Int, height: Int
     }
 }
 
-private const val SWIPE_DURATION_MIN_MS = 50
-private const val SWIPE_DURATION_MAX_MS = 2_000
+internal const val SWIPE_DURATION_MIN_MS = 50
+internal const val SWIPE_DURATION_MAX_MS = 2_000
 
 internal fun requireDeviceSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Int, width: Int, height: Int) {
     require(width > 0 && height > 0 && x1 in 0 until width && y1 in 0 until height && x2 in 0 until width && y2 in 0 until height) {

@@ -1,10 +1,14 @@
+@file:Suppress("MagicNumber") // Fixture coordinates, timestamps and sizes, not tunable constants.
+
 package com.indagium.testing
 
 import com.indagium.capture.mirror.MirrorControlCommand
 import com.indagium.capture.mirror.MirrorFrame
 import com.indagium.capture.mirror.MirrorKeyAction
 import com.indagium.capture.mirror.MirrorTouchAction
+import com.indagium.testing.authoring.RecordedInputKind
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.authoring.recordingApplyBlockedReason
 import kotlinx.coroutines.runBlocking
 import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
@@ -63,7 +67,7 @@ class TestStepRecordingSessionTest {
     }
 
     @Test
-    fun unsupportedMultiTouchAndLongDragWarnInsteadOfInventingTaps() {
+    fun unsupportedMultiTouchWarnsAndASlowDragKeepsItsDuration() {
         val session = TestStepRecordingSession("fixture-device")
         session.accept(touch(MirrorTouchAction.DOWN, 1, 10, 10))
         session.accept(touch(MirrorTouchAction.DOWN, 2, 20, 20))
@@ -76,7 +80,9 @@ class TestStepRecordingSessionTest {
         assertEquals(1, snapshot.steps.size)
         assertTrue(snapshot.steps.single().action.startsWith("Swipe"))
         assertTrue(snapshot.warnings.any { "Multi-touch" in it })
-        assertTrue(snapshot.warnings.any { "long swipe" in it })
+        assertTrue(snapshot.warnings.none { "not preserved" in it || "long swipe" in it }, "the old blanket warning is gone")
+        assertEquals(890L, snapshot.steps.single().durationMs)
+        assertTrue(snapshot.steps.single().action.endsWith("over 890 ms"))
         session.close()
     }
 
@@ -254,6 +260,94 @@ class TestStepRecordingSessionTest {
         val drained = session.stopAndDrain()
         assertEquals(3, calls.get(), "inputs beyond the queue limit are recorded without any adb read")
         assertEquals(3, drained.steps.count { it.screenshotJpeg != null })
+        session.close()
+    }
+
+    // ── Swipe duration and path ──
+
+    private fun swipe(session: TestStepRecordingSession, downAt: Long, upAt: Long, moves: Int = 1) {
+        session.accept(touch(MirrorTouchAction.DOWN, 1, 10, 20), nowMs = downAt)
+        repeat(moves) { session.accept(touch(MirrorTouchAction.MOVE, 1, 30 + it % 60, 60 + it % 100), nowMs = downAt + 1) }
+        session.accept(touch(MirrorTouchAction.UP, 1, 90, 180), frame(), nowMs = upAt)
+    }
+
+    @Test
+    fun aSwipeKeepsItsDurationInTheActionAndTheRow() {
+        val session = TestStepRecordingSession("fixture-device")
+        swipe(session, downAt = 1_000, upAt = 2_200)
+        val row = session.snapshot.value.steps.single()
+        assertEquals("Swipe from (10%, 10%) to (90%, 90%) over 1200 ms", row.action)
+        assertEquals(1_200L, row.durationMs)
+        assertEquals(RecordedInputKind.SWIPE, row.kind)
+        assertTrue(session.snapshot.value.warnings.isEmpty())
+        session.close()
+    }
+
+    @Test
+    fun aDragAboveTheLaneLimitIsClampedWithAPreciseWarning() {
+        val session = TestStepRecordingSession("fixture-device")
+        swipe(session, downAt = 1_000, upAt = 4_400)
+        val snapshot = session.snapshot.value
+        val row = snapshot.steps.single()
+        assertEquals(2_000L, row.durationMs)
+        assertTrue(row.action.endsWith("over 2000 ms"))
+        assertEquals(listOf("Step 1: recorded drag took 3400 ms; replay uses 2000 ms."), snapshot.warnings)
+        session.close()
+    }
+
+    @Test
+    fun aVeryShortSwipeClampsToTheLaneMinimumWithoutAWarning() {
+        val session = TestStepRecordingSession("fixture-device")
+        swipe(session, downAt = 1_000, upAt = 1_020)
+        val snapshot = session.snapshot.value
+        assertEquals(50L, snapshot.steps.single().durationMs)
+        assertTrue(snapshot.steps.single().action.endsWith("over 50 ms"))
+        assertTrue(snapshot.warnings.isEmpty())
+        session.close()
+    }
+
+    @Test
+    fun gesturePathSamplesStayBoundedAndKeepStartAndEnd() {
+        val session = TestStepRecordingSession("fixture-device")
+        swipe(session, downAt = 1_000, upAt = 1_500, moves = 5_000)
+        val path = session.snapshot.value.steps.single().gesturePath
+        assertTrue(path.size in 3..10, "path had ${path.size} points")
+        assertEquals(10 to 20, path.first().x to path.first().y)
+        assertEquals(90 to 180, path.last().x to path.last().y)
+        assertTrue(path.all { it.screenWidth == 100 && it.screenHeight == 200 })
+        session.close()
+    }
+
+    @Test
+    fun tapsAndKeysCarryTheirKindDurationAndPoint() {
+        val session = TestStepRecordingSession("fixture-device")
+        session.accept(touch(MirrorTouchAction.DOWN, 1, 50, 100), nowMs = 1_000)
+        session.accept(touch(MirrorTouchAction.UP, 1, 50, 100), nowMs = 1_090)
+        session.accept(MirrorControlCommand.Key(MirrorKeyAction.DOWN, 4), nowMs = 2_000)
+        session.accept(MirrorControlCommand.Back(MirrorKeyAction.UP), nowMs = 3_000)
+        val steps = session.snapshot.value.steps
+        assertEquals(RecordedInputKind.TAP, steps[0].kind)
+        assertEquals(90L, steps[0].durationMs)
+        assertEquals(listOf(50 to 100), steps[0].gesturePath.map { it.x to it.y })
+        assertEquals(RecordedInputKind.BACK, steps[1].kind)
+        assertEquals(RecordedInputKind.BACK, steps[2].kind)
+        assertEquals(listOf(1_090L, 2_000L, 3_000L), steps.map { it.inputAtMs })
+        assertEquals(listOf(1_000L, 2_000L, 3_000L), steps.map { it.inputStartMs })
+        session.close()
+    }
+
+    // ── Review hints ──
+
+    @Test
+    fun applyIsExplainedByTheStepsStillMissingExpected() {
+        val session = TestStepRecordingSession("fixture-device")
+        repeat(8) { session.accept(MirrorControlCommand.Text("input $it"), nowMs = 1_000L + it) }
+        session.stop()
+        assertEquals("Fill in Expected for steps 1, 2, 3, 4, 5, 6 and 2 more.", recordingApplyBlockedReason(session.snapshot.value))
+        assertTrue(session.updateReviewedSteps(List(8) { "input $it" to if (it == 1 || it == 4) "" else "done" }))
+        assertEquals("Fill in Expected for steps 2, 5.", recordingApplyBlockedReason(session.snapshot.value))
+        assertTrue(session.updateReviewedSteps(List(8) { "input $it" to "done" }))
+        assertNull(recordingApplyBlockedReason(session.snapshot.value))
         session.close()
     }
 }

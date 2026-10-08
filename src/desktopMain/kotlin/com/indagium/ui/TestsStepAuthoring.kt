@@ -37,6 +37,8 @@ import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.authoring.contextHint
+import com.indagium.testing.authoring.recordingApplyBlockedReason
 import com.indagium.testing.model.SharedStep
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.TestCase
@@ -365,6 +367,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val applying = working || ui.state.isTestStepRecordingApplying(session.id)
+    val applyBlockedReason = recordingApplyBlockedReason(snapshot)
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
         AppText(if (snapshot.active) "Recording device input…" else "Review recorded steps", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(5.dp))
@@ -386,6 +389,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 TestsLabeled("Expected result") {
                     CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying, multiline = true, placeholder = "Required before applying")
                 }
+                row.contextHint()?.let { TestsHint("Screen context: $it") }
                 row.screenContext?.let { TestsHint(if (row.screenshotJpeg != null) "$it This is an input-time preview before the action, not an expected result." else it) }
                 row.screenshotJpeg?.let { bytes ->
                     RecordedScreenshotPreview(bytes)
@@ -402,7 +406,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
             if (snapshot.pendingSnapshots > 0) TestsHint("Finishing ${snapshot.pendingSnapshots} bounded screen snapshot(s)…")
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
                 AppButton("Discard", onClick = onDismiss, enabled = !ui.state.isTestStepRecordingApplying(session.id), variant = ButtonVariant.Ghost)
-                AppButton(
+                HintedButton(
                     if (working) "Applying…" else "Apply recorded steps",
                     onClick = {
                         working = true
@@ -424,7 +428,8 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                             }
                         }
                     },
-                    enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && snapshot.pendingSnapshots == 0 && snapshot.steps.isNotEmpty() && snapshot.steps.all { it.action.isNotBlank() && it.expected.isNotBlank() },
+                    enabled = !working && !ui.state.isTestStepRecordingApplying(session.id) && applyBlockedReason == null,
+                    disabledHint = applyBlockedReason ?: "This recording is being applied.",
                     variant = ButtonVariant.Primary,
                 )
             }
