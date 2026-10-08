@@ -1,6 +1,7 @@
 package com.indagium.testing.authoring
 
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.CancellationException
@@ -17,6 +18,7 @@ internal class RewriteGeneration(
     val gateway: IndagiumToolGateway,
     val toolCallLimit: Int,
     val maxTurns: Int,
+    val onUsage: (AiUsageStats) -> Unit = {},
 )
 
 /**
@@ -66,7 +68,10 @@ internal class RecordingRewriteService(
             gateway = rewriteTools.gateway,
             toolCallLimit = toolLimit,
             maxTurns = toolLimit + REWRITE_TURN_HEADROOM,
+            onUsage = session::updateRewriteUsage,
         )
+        if (!session.beginRewriteUsageAttempt()) return StoreResult.Invalid("The recording changed while the rewrite was starting.")
+        var completed = false
         return try {
             val response = withTimeout(timeoutMs) { generate(request) }
             val proposal = parseRewriteResponse(response, inputs.size)
@@ -74,7 +79,8 @@ internal class RecordingRewriteService(
             if (!session.applyRewrite(rows.map { it.id }, rewritten, proposal.notes)) {
                 return StoreResult.Invalid("The recording changed while it was being rewritten; nothing was applied. Rewrite it again.")
             }
-            StoreResult.Ok(RecordingRewrite(session.id, profileId, session.snapshot.value.steps, proposal.notes))
+            completed = true
+            StoreResult.Ok(RecordingRewrite(session.id, profileId, session.snapshot.value.steps, proposal.notes, session.snapshot.value.rewriteUsage))
         } catch (timeout: TimeoutCancellationException) {
             val detail = timeout.message?.let { " ($it)" }.orEmpty()
             StoreResult.Invalid("The rewrite timed out$detail. Try another provider profile or a shorter recording.")
@@ -82,6 +88,8 @@ internal class RecordingRewriteService(
             throw cancelled
         } catch (failure: Exception) {
             StoreResult.Invalid(failure.message ?: "Could not rewrite the recording.")
+        } finally {
+            session.finishRewriteUsageAttempt(completed)
         }
     }
 

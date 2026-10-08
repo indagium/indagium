@@ -32,6 +32,13 @@ internal fun interface StepJudge {
     suspend fun judge(site: JudgeSite, evidence: JudgeEvidence): StepJudgement
 }
 
+/** A judge implementation that reports a final usage snapshot even when its caller is cancelled. */
+internal interface UsageReportingStepJudge : StepJudge {
+    suspend fun judge(site: JudgeSite, evidence: JudgeEvidence, onUsage: (com.indagium.model.AiUsageStats) -> Unit): StepJudgement
+
+    override suspend fun judge(site: JudgeSite, evidence: JudgeEvidence): StepJudgement = judge(site, evidence) {}
+}
+
 /** The status of a step after its judgement, and whether the judge could not decide. */
 internal data class JudgedStatus(val status: StepStatus, val inconclusive: Boolean)
 

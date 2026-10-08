@@ -4,6 +4,12 @@ The running app's `tools/list` response is authoritative for exact schemas. This
 version-controlled map of what an AI can do and how to prompt it. Most read methods require
 `tabId`; start with `list_tabs` and use the returned id, never a filename.
 
+AI usage objects use `toolCalls` for admitted tool-handler invocations and optional `inputTokens`,
+`outputTokens`, `totalTokens`, `cacheCreationTokens`, `cachedInputTokens`,
+`cachedInputIncludedInInput`, and `reasoningOutputTokens`. Unknown metrics are omitted (not zero); `partial`
+marks known but incomplete usage. Cached-input counts remain a provider-reported subset/separate metric and are
+not added a second time. No cost is estimated.
+
 For automated end-to-end verification, launch a dedicated process with both
 `INDAGIUM_DEBUG_CONTROL=<port>` and
 `INDAGIUM_DEBUG_APP_DATA_DIR=<canonical-empty-temp-directory>`. The app-data directory must be an
@@ -303,7 +309,9 @@ or recording is a separate confirmation-required call.
 - `draft_test_steps` (suiteId, caseId, profileId, instruction, optional model, reasoningEffort) asks a configured profile to propose steps
   through a restricted drafting gateway. It returns a short-lived editable preview and does not operate a device
   or update the library. Sending context to a remote provider requires approval naming the profile and bounded
-  suite/case context.
+  suite/case context. The response includes `latestUsage` for this attempt and `creationUsage` for authoring-session
+  attempts so far. Neither is persisted to the library until the preview is applied; case details then retain the
+  accumulated applied usage.
 - `apply_test_step_draft` (draftId, edited steps, optional index) applies the reviewed steps once and
   revalidates them against the current case and edition limits.
 - `insert_shared_steps` (caseId, sharedStepId, optional index) deep-copies the sequence at the selected
@@ -319,11 +327,17 @@ or recording is a separate confirmation-required call.
   `beforeActivity`, `afterApp`, and `afterActivity` fields (each may be unavailable). Before/after screenshots are
   independently timed and may exist without app/activity context when a later slow probe overlaps input. A mirror
   image appears as a raw input preview with uncertain timing. Supplying one rowId returns that row's bounded image as
-  MCP image content with source, acquisition interval, and verification metadata.
+  MCP image content with source, acquisition interval, and verification metadata. It also returns `excludedSourceInputIds`,
+  `latestRewriteUsage`, `rewriteSessionUsage` and `rewriteAttempts` when available.
   `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
   and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
-  `stop_test_recording`, `discard_test_recording`, and `apply_test_recording` stop/drain, discard without
-  library mutation, or apply the reviewed preview at an optional index to its original case.
+  `remove_test_recording_steps` (sessionId, rowIds) excludes selected stopped review rows while preserving raw history;
+  removing an AI-rewritten row excludes every source input it represents. Removal waits for all snapshots to drain and is
+  refused during rewrite/apply. `restore_test_recording_inputs` clears exclusions and restores the full raw review (also
+  undoing the rewrite); `restore_test_recording_raw` undoes only the rewrite and keeps exclusions. `stop_test_recording`,
+  `discard_test_recording`, and `apply_test_recording` stop/drain, discard without library mutation, or apply the reviewed
+  preview at an optional index to its original case. An empty review cannot be applied or rewritten. Rewrites use only
+  retained inputs even if the full video timeline shows removed actions.
   `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note) asks a configured profile to
   turn a stopped recording into readable steps. The provider reads the recorded inputs, screen elements, screenshots,
   and (when captured) video storyboards through a read-only gateway (`get_recorded_input`, `get_recorded_screen`, `get_recorded_ui`,
@@ -429,13 +443,16 @@ report. What the judges said is in `judge.jsonl` next to `run.json`.
   `warnings`, every lane with its status, the case and step it is on and its case results so far,
   `pendingConfirmations` (cards an in-app agent waits on), `pausedLanes` (a step with `onFailure`
   `PAUSE_FOR_USER` failed), `paused` (the run was paused from the live view; there is no tool to pause a run),
-  the number of `comparisons` and a `summary` (`passedSteps`, `totalSteps`, `cases`).
+  the number of `comparisons`, per-case `agentUsage`, `judgeUsage`, `externalToolCalls` and combined `usage`, per-lane
+  `usage`, and a `summary` (`passedSteps`, `totalSteps`, `cases`) plus run `usage`. Tool counts are independent of the
+  bounded recent activity history.
 - `list_test_runs` — the runs of this session and the stored ones, newest first.
 - `get_test_run_report` (`runId`; optional `format` `json`|`markdown`) — per lane and case every step with its
   status (`PASS`, `FAIL`, `BLOCKED`, `TIMEOUT`, `SKIPPED`, `ERROR`), `attempts`, the agent's `agentClaim` and
   `observation`, the check results (`PASS`, `FAIL`, `ERROR`, or `NOT_EVALUATED` for a judge check nobody judged),
   the step's `judge` verdict (`id`, `verdict`, `reasoning`, `classification`, `suggestedFix`), `judgeInconclusive`,
-  `agentError`, the run's `comparisons` and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
+  `agentError`, per-step judge-attempt usage, per-case agent and inline-judge usage, per-lane and run usage, the run's
+  comparison usage, and the evidence: `screenshotPath`, `logStartOffset`/`logEndOffset` (bytes in the
   lane's `logcat.log`), transcript range, tool activity path and artifact paths, all relative to the run folder. Agent, observation and
   script text in a report is untrusted data.
 - `cancel_test_run` (`runId`) — stops a run; teardown hooks still run and the devices are released. Asks for

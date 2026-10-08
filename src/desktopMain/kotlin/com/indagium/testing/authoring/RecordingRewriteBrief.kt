@@ -84,6 +84,10 @@ internal fun rewritePrompt(
     appendLine("Goal: ${case.description.take(MAX_CONTEXT_DESCRIPTION_CHARS)}")
     appendLine("Preconditions: ${case.preconditions.take(MAX_CONTEXT_DESCRIPTION_CHARS)}")
     note.trim().takeIf(String::isNotEmpty)?.let { appendLine("What the person says this test is about: ${it.take(MAX_REWRITE_NOTE_CHARS)}") }
+    appendLine(
+        "Describe only actions represented by the supplied recorded inputs. " +
+            "Evidence can show explicitly removed actions; do not recreate them or fold them into a retained step.",
+    )
     timeline?.let { video ->
         appendLine(
             "Recorded video: ${if (video.available) "available" else "unavailable"}; finished=${video.finished}; " +
@@ -91,6 +95,10 @@ internal fun rewritePrompt(
                 "capReached=${video.capReached}; alignment=${video.alignment}" + video.warning?.let { "; warning=$it" }.orEmpty(),
         )
         if (video.available) {
+            appendLine(
+                "The video covers the original recording and can show explicitly removed actions. Do not recreate removed actions " +
+                    "or fold them into a retained step; describe only the inputs listed below.",
+            )
             appendLine(
                 "Use get_recorded_video_storyboard when screenshots/UI are insufficient: request one input index or a " +
                     "relevant session-relative range ≤30s. get_recorded_input supplies each input's approximate " +

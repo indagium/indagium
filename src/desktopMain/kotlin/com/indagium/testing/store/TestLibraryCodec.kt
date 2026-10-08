@@ -200,6 +200,7 @@ internal fun caseToJson(case: TestCase): JsonObject = buildJsonObject {
     put("setup", buildJsonArray { case.setup.forEach { add(hookToJson(it)) } })
     put("teardown", buildJsonArray { case.teardown.forEach { add(hookToJson(it)) } })
     case.allowedTools?.let { tools -> put("allowedTools", buildJsonArray { tools.forEach { add(JsonPrimitive(it)) } }) }
+    case.creationUsage?.let { put("creationUsage", aiUsageToJson(it)) }
     put("steps", buildJsonArray { case.steps.forEach { add(stepToJson(it)) } })
 }
 
@@ -352,6 +353,7 @@ private fun decodeCase(o: JsonObject, ids: IdAllocator): TestCase = TestCase(
     teardown = o.objects("teardown").mapNotNull { decodeHook(it, ids) },
     steps = o.objects("steps").map { decodeStep(it, ids) },
     allowedTools = (o["allowedTools"] as? JsonArray)?.let { o.strings("allowedTools").toCollection(LinkedHashSet()) },
+    creationUsage = decodeAiUsage(o["creationUsage"]),
 )
 
 internal fun decodeHook(o: JsonObject, ids: IdAllocator): HookItem? {

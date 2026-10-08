@@ -246,6 +246,43 @@ class RewriteRecordingToolsTest {
     }
 
     @Test
+    fun mcpRemovalExcludesSourcesOnRewriteAndRestoreReturnsTheOriginalRows() {
+        val session = record()
+        val recorded = session.snapshot.value.steps
+
+        val removed = call("remove_test_recording_steps", "sessionId" to session.id, "rowIds" to listOf(recorded[1].id))
+        assertNull(removed["error"], removed.toString())
+        assertEquals(false, removed["rewritten"])
+        assertEquals(listOf(recorded[0].id, recorded[2].id), (removed["steps"] as List<*>).map { (it as Map<*, *>)["id"] })
+        assertEquals(listOf(recorded[1].id), removed["excludedSourceInputIds"])
+
+        val badRow = call("remove_test_recording_steps", "sessionId" to session.id, "rowIds" to listOf("missing-row"))
+        assertTrue("current stopped preview" in badRow["error"].toString(), badRow.toString())
+        val badSession = call("restore_test_recording_inputs", "sessionId" to "missing-session")
+        assertTrue("no longer active" in badSession["error"].toString(), badSession.toString())
+
+        val response = """{"steps":[
+            {"action":"Search","expected":"Search is ready","sourceInputs":[1]},
+            {"action":"Submit","expected":"Results appear","sourceInputs":[2]}
+        ]}"""
+        scripted(answer(response))
+        val rewrite = call("rewrite_test_recording", "sessionId" to session.id, "profileId" to PROFILE_ID)
+        assertNull(rewrite["error"], rewrite.toString())
+        assertEquals(true, rewrite["rewritten"])
+        assertEquals(listOf(recorded[0].id, recorded[2].id), (rewrite["steps"] as List<*>).flatMap { row ->
+            ((row as Map<*, *>)["sourceInputIds"] as? List<*>)?.filterIsInstance<String>().orEmpty()
+        })
+        assertEquals(listOf(recorded[1].id), rewrite["excludedSourceInputIds"])
+
+        val restored = call("restore_test_recording_inputs", "sessionId" to session.id)
+        assertNull(restored["error"], restored.toString())
+        assertEquals(false, restored["rewritten"])
+        assertEquals(emptyList<String>(), restored["excludedSourceInputIds"])
+        assertEquals(recorded.map { it.id }, (restored["steps"] as List<*>).map { (it as Map<*, *>)["id"] })
+        assertEquals(recorded, session.snapshot.value.rawSteps)
+    }
+
+    @Test
     fun theRewriteToolReadsEditsApplyAndGetShowTheRewrittenRows() {
         val session = record()
         scripted(answer(VALID_SHOP_REWRITE))

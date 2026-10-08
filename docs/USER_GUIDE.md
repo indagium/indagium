@@ -1319,7 +1319,9 @@ returned as fenced text.
 
 The case editor has four authoring helpers. **Draft with AI** remembers its own provider, model and reasoning effort
 (initially the selected profile) and returns a validated, editable preview; it does not edit the library or operate a
-device until you choose **Apply**. **Record from device** discovers connected devices each time you start. Choose one
+device until you choose **Apply**. The preview shows the latest attempt's tool/token usage and the authoring-session
+total; after Apply, the case keeps accumulated creation usage in its editor. Older and manually authored cases show usage
+as unavailable. **Record from device** discovers connected devices each time you start. Choose one
 when several are available; Indagium starts or reuses its capture, connects the embedded mirror, and keeps the Tests
 workspace in front while it connects. The capture remains live after recording stops so you can reuse it for a run.
 It observes accepted input, then converts taps, swipes, keys and text into a reviewable ordered draft. It never injects
@@ -1340,9 +1342,15 @@ interval separate from the full UI/activity probe: a fast image can still be use
 input, but it will not be labeled with that later app or activity. The app/activity before and after an input are reported
 separately and may be unavailable. A slow swipe keeps its duration. To get steps a person can read:
 
-1. **Record from device**, perform the test on the mirror, then **Stop and review**.
+1. **Record from device**, perform the test on the mirror, then **Stop and review**. Wait for the bounded screen snapshots
+   to finish before removing inputs. Use **Remove** to exclude an unnecessary raw row or rewritten step; removing a
+   rewritten step excludes every input it represents. The source history and evidence stay in the session, and **Restore
+   removed inputs** returns to the full raw review. If all rows are removed, restore inputs or keep a row before rewriting
+   or applying. The video still covers the full original timeline and can show removed actions; the rewrite is told not to
+   recreate them or fold them into a retained step.
 2. Under **Rewrite with AI**, the last provider, model and reasoning effort used for a rewrite are preselected
-   (initially the selected profile). Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
+   (initially the selected profile). The rewrite panel shows the latest attempt and session usage; known usage from a
+   failed or cancelled attempt remains visible. Optionally say what the test was about, and press **Rewrite**. **Cancel** stops it. The chosen provider receives the
    recorded inputs, the screen text, the text you typed and screenshots from the device. Known password text is
    masked in action descriptions and hidden from the AI; password-edit video windows are withheld when they can be
    identified. The video timeline is copied from the mirror's existing stream
@@ -1449,7 +1457,10 @@ me* shows **Retry**, **Continue** and **Stop**. Cancelling still runs teardown s
 
 ### Reading the report
 
-When a run ends, **Runs → (the run)** shows metric cards and filters for failures, blocked/errors, lane
+When a run ends, **Runs → (the run)** shows total tool calls and reported tokens, with a partial marker when a provider
+or cancellation leaves usage incomplete. The report also shows per-lane and per-case agent/inline-judge breakdowns;
+external MCP cases show their uncapped tool count with token usage unavailable. Comparison-judge usage is included in the
+run total and on each comparison. Older runs show usage as unavailable. The screen also has metric cards and filters for failures, blocked/errors, lane
 disagreements and unresolved judge checks. The matrix has one row per case and step, one column per lane, and a
 judge/consensus column. Click a step to see its **Action** and **Expected** result, what the agent claimed
 and observed, each check's result, the screenshot, the log range and the judge's verdict and reasoning.

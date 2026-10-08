@@ -108,7 +108,7 @@ private fun describeRewriteRecordingCall(appState: AppState, arguments: Map<Stri
     val suite = appState.testLibrary.suite(target.first) ?: return null
     val testCase = suite.cases.firstOrNull { it.id == target.second } ?: return null
     val destination = remoteDestination(profile) ?: return null
-    val recorded = snapshot.rawSteps ?: snapshot.steps
+    val recorded = (snapshot.rawSteps ?: snapshot.steps).filterNot { it.id in snapshot.excludedSourceInputIds }
     val model = (arguments["model"] as? String)?.takeIf(String::isNotBlank) ?: profile.model
     return ExternalActionDetails(
         title = "Send a recording to an AI provider?",

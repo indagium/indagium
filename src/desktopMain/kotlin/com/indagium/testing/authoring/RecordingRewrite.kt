@@ -2,6 +2,7 @@ package com.indagium.testing.authoring
 
 import com.indagium.debug.parseChecks
 import com.indagium.debug.toPlainMap
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.IdAllocator
@@ -32,7 +33,13 @@ private const val SCREEN_REF_PREFIX = "after-of-input-"
 private const val STEPS_KEY = "steps"
 
 /** What a finished rewrite hands back: the rows now in the session and what the AI said about its choices. */
-data class RecordingRewrite(val sessionId: String, val profileId: String, val steps: List<RecordedTestStep>, val notes: String)
+data class RecordingRewrite(
+    val sessionId: String,
+    val profileId: String,
+    val steps: List<RecordedTestStep>,
+    val notes: String,
+    val usage: AiUsageStats? = null,
+)
 
 /** One recorded input as the AI sees it: [number] is 1-based, [before] / [after] the screen states the probe attached (or null). */
 internal class RewriteInput(

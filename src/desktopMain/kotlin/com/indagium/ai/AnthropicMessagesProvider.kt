@@ -26,7 +26,15 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+
+private fun safeTokenTotal(vararg values: Long?): Long? {
+    if (values.any { it == null }) return null
+    return values.filterNotNull().fold(0L) { total, value ->
+        if (value > 0L && total > Long.MAX_VALUE - value) Long.MAX_VALUE else total + value
+    }
+}
 
 /** Native transport for Anthropic's streaming Messages API. */
 class AnthropicMessagesProvider(
@@ -224,7 +232,9 @@ class AnthropicMessagesProvider(
         when (root["type"]?.jsonPrimitive?.contentOrNull) {
             "message_start" -> {
                 val usage = (root["message"] as? JsonObject)?.get("usage") as? JsonObject
-                state.inputTokens = usage?.get("input_tokens")?.jsonPrimitive?.intOrNull
+                state.inputTokens = usage?.get("input_tokens")?.jsonPrimitive?.longOrNull
+                state.cacheCreationInputTokens = usage?.get("cache_creation_input_tokens")?.jsonPrimitive?.longOrNull
+                state.cachedInputTokens = usage?.get("cache_read_input_tokens")?.jsonPrimitive?.longOrNull
                 emptyList()
             }
 
@@ -236,15 +246,18 @@ class AnthropicMessagesProvider(
 
             "message_delta" -> {
                 val usage = root["usage"] as? JsonObject
-                state.outputTokens = usage?.get("output_tokens")?.jsonPrimitive?.intOrNull
+                state.outputTokens = usage?.get("output_tokens")?.jsonPrimitive?.longOrNull
                 if (usage == null) {
                     emptyList()
                 } else {
                     listOf(
                         LlmStreamEvent.Usage(
-                            promptTokens = state.inputTokens ?: 0,
-                            completionTokens = state.outputTokens ?: 0,
-                            totalTokens = (state.inputTokens ?: 0) + (state.outputTokens ?: 0),
+                            promptTokens = state.inputTokens,
+                            completionTokens = state.outputTokens,
+                            totalTokens = safeTokenTotal(state.inputTokens, state.outputTokens, state.cacheCreationInputTokens, state.cachedInputTokens),
+                            cachedInputTokens = state.cachedInputTokens,
+                            cachedInputIncludedInPrompt = false,
+                            cacheCreationInputTokens = state.cacheCreationInputTokens,
                         ),
                     )
                 }
@@ -429,8 +442,10 @@ class AnthropicMessagesProvider(
     private data class StreamState(
         val toolCalls: MutableMap<Int, ToolCallAccumulator> = sortedMapOf(),
         val reasoning: MutableMap<Int, ReasoningAccumulator> = sortedMapOf(),
-        var inputTokens: Int? = null,
-        var outputTokens: Int? = null,
+        var inputTokens: Long? = null,
+        var outputTokens: Long? = null,
+        var cacheCreationInputTokens: Long? = null,
+        var cachedInputTokens: Long? = null,
         var terminal: Boolean = false,
     )
 

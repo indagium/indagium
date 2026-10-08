@@ -211,6 +211,12 @@ internal sealed interface AiRunEvent {
 
     data class ToolRequested(val call: LlmToolCall) : AiRunEvent
 
+    /** Emitted once when the actual gateway handler is entered; denied and over-budget requests are not counted. */
+    data class ToolExecutionStarted(val call: LlmToolCall) : AiRunEvent
+
+    /** Marks an API request whose usage may or may not arrive before the stream ends. */
+    data class UsageRequestStarted(val requestId: String) : AiRunEvent
+
     data class ToolCompleted(
         val call: LlmToolCall,
         val resultPreview: String,
@@ -224,12 +230,16 @@ internal sealed interface AiRunEvent {
 
     /** Forwarded from the active provider when it reports usage. */
     data class Usage(
-        val inputTokens: Int,
-        val outputTokens: Int,
-        val totalTokens: Int,
-        val cachedInputTokens: Int? = null,
-        val cachedInputIncludedInInput: Boolean = true,
-        val reasoningOutputTokens: Int? = null,
+        val inputTokens: Long?,
+        val outputTokens: Long?,
+        val totalTokens: Long?,
+        val cachedInputTokens: Long? = null,
+        val cachedInputIncludedInInput: Boolean? = true,
+        val reasoningOutputTokens: Long? = null,
+        val cacheCreationInputTokens: Long? = null,
+        /** Identifies a provider request for providers that send cumulative snapshots during a stream. */
+        val requestId: String? = null,
+        val aggregation: AiUsageAggregation = AiUsageAggregation.REQUEST_SNAPSHOT,
     ) : AiRunEvent
 
     data class Error(val message: String) : AiRunEvent
@@ -352,6 +362,7 @@ internal class AiAgentRunner(
                 var completed = false
                 var failed = false
                 var assistantRecorded = false
+                val requestId = UUID.randomUUID().toString()
 
                 fun recordAssistantMessage() {
                     if (!assistantRecorded && (assistantText.isNotEmpty() || toolCalls.isNotEmpty() || reasoning.isNotEmpty())) {
@@ -366,6 +377,7 @@ internal class AiAgentRunner(
                 }
 
                 try {
+                    run.emit(AiRunEvent.UsageRequestStarted(requestId))
                     provider.streamChat(
                         LlmRequest(
                             model = model,
@@ -395,6 +407,12 @@ internal class AiAgentRunner(
                                     inputTokens = event.promptTokens,
                                     outputTokens = event.completionTokens,
                                     totalTokens = event.totalTokens,
+                                    cachedInputTokens = event.cachedInputTokens,
+                                    cachedInputIncludedInInput = event.cachedInputIncludedInPrompt,
+                                    reasoningOutputTokens = event.reasoningOutputTokens,
+                                    cacheCreationInputTokens = event.cacheCreationInputTokens,
+                                    requestId = requestId,
+                                    aggregation = AiUsageAggregation.REQUEST_SNAPSHOT,
                                 ),
                             )
                         }

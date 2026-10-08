@@ -122,7 +122,15 @@ sealed interface LlmStreamEvent {
      * (including LM Studio) only include this on the request's final chunk, and only when asked
      * via `stream_options.include_usage` - so it may never arrive for a given provider.
      */
-    data class Usage(val promptTokens: Int, val completionTokens: Int, val totalTokens: Int) : LlmStreamEvent
+    data class Usage(
+        val promptTokens: Long?,
+        val completionTokens: Long?,
+        val totalTokens: Long?,
+        val cachedInputTokens: Long? = null,
+        val cachedInputIncludedInPrompt: Boolean? = true,
+        val cacheCreationInputTokens: Long? = null,
+        val reasoningOutputTokens: Long? = null,
+    ) : LlmStreamEvent
 
     /** A failed request or an unusable terminal response. Cancellation is never represented here. */
     data class Error(val message: String) : LlmStreamEvent

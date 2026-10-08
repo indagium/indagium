@@ -110,7 +110,7 @@ target.
 | Test source files | 380 Kotlin files in `src/desktopTest` (369 `*Test.kt` files) |
 | Test Kotlin lines | 101,251 |
 | Packages | 16 (`model`, `utils`, `ui`, `source`, `cases`, `ai`, `debug`, `diagram3`, `video`, `voice`, `update`, `singleinstance`, `capture`, `testing`, `edition`, `security`) |
-| MCP/automation tools exposed | 150: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
+| MCP/automation tools exposed | 152: `MCP_TOOLS` (`debug/ControlServer.kt:767`) plus the test-suite, test-run and issue catalogues appended at `debug/ControlServer.kt:1692`; tool schemas evolve with the application |
 
 ### 2.3 Technology stack
 
@@ -3410,6 +3410,17 @@ completion also drains still-running paid external calls before final persistenc
 protocol replies such as `finish_step` are preserved. This honours the mirror lifecycle rule (§12.4): nothing a
 run waits on is EDT work, so the bounded `runBlocking` on the closing thread waits only for IO/coroutine cleanup.
 
+**AI usage accounting.** `AiRunEvent.ToolExecutionStarted` counts one admitted tool-handler invocation independently
+of the run's bounded event replay; request denials and duplicate start/result lifecycle events do not add calls. API
+providers register a request before streaming, then report replaceable cumulative snapshots for that request; account
+agents report cumulative run snapshots. `AiUsageAccumulator` merges sparse/out-of-order updates without adding repeated
+snapshots and sums distinct requests. Provider-omitted or incomplete metrics stay null; `partial` marks missing reports,
+cancellation, failed runs or saturated Long totals. Cached input stays a reported subset/separate field and is never added
+again to provider totals. `AiUsageStats` is persisted in the library case's applied creation provenance and in run case,
+step-judge and comparison leaves; lane/run totals derive from those leaves rather than re-adding nested summaries. The
+nullable appended JSON fields preserve old files as unavailable instead of implying zero usage. Reports and MCP expose the
+same scopes, including external-lane tool counts with token metrics unavailable.
+
 #### 26.5.5 Lane captures
 
 Every lane records through a real capture, so everything a person could save by starting a live capture
@@ -3880,6 +3891,8 @@ refuse while it is set), then calls the service with **no lock held**:
    `get_recorded_screen` (image result), `get_recorded_ui`, and, when captured, `get_recorded_video_storyboard` (one real
    image result through HTTP and MCP); device text travels inside the
    `untrusted_data` envelope. The answer is the assistant text after the last tool call.
+   The brief numbers only retained raw inputs. The video still covers the complete timeline and may show removed actions;
+   it explicitly tells the model not to recreate those actions or fold them into retained steps.
 3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action; expected result must be
    non-blank unless `reviewReason` explains what needs review (a null, missing, empty or whitespace-only
    reason is treated as absent when expected is present; a blank expected requires either an optional step with a
@@ -3902,6 +3915,22 @@ refuse while it is set), then calls the service with **no lock held**:
    source input and is **off** until the reviewer ticks it. Rows marked for review preserve the original
    gesture description and have no generated expectation or checks until edited. Re-running always starts from `rawSteps`;
    `restoreRaw` (UI "Undo rewrite", MCP `restore_test_recording_raw`) puts them back with their ids.
+
+**Review deletion.** After Stop and a complete screenshot/probe drain, Remove can exclude a raw row or rewritten row. The
+immutable raw chronology/evidence stays in `rawSteps`; `excludedSourceInputIds` names removed source inputs. A removed
+rewritten row excludes every raw source it represented. Apply and each later rewrite see only retained inputs, and the
+existing ordered one-to-one source coverage check still rejects gaps. Undo rewrite restores only non-excluded raw rows;
+Restore removed inputs clears exclusions and returns to the complete raw review. Removing every row is allowed as a review
+state, but Apply and Rewrite explain that the person must restore inputs or keep at least one row. Removal/restoration are
+refused during recording, while screen snapshots are pending, or during rewrite/apply so screen evidence chronology cannot
+be reassigned across an excluded timing boundary.
+
+**Authoring usage.** Draft and rewrite views retain latest-attempt and session totals, including known partial usage from
+failed/cancelled attempts. A draft or rewrite does not mutate the case library; applying it stores the applied usage on the
+case, and later applied authoring usage accumulates there. Run leaves persist agent usage per case occurrence (including
+restarts/retries and hooks), inline judge totals, external tool counts, and comparison-judge usage. Lane/run rollups derive
+from those leaves. JSON/Markdown exports and run MCP status/report expose the same data; absent providers report tokens as
+unavailable, and partial totals are marked instead of guessed.
 
 **Apply.** `toTestSteps` turns a rewritten row into a `TestStep` with the readable action/expected, the
 AI's checks, a `ReferenceLog` example "Recorded input (hint; prefer what is on screen)" listing the raw

@@ -4,6 +4,8 @@ import com.indagium.ai.AiInvestigationContext
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
+import com.indagium.ai.aiUsageFromHistory
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.JudgeClassification
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.JudgeVerdict
@@ -26,7 +28,7 @@ private const val ENDED_WITHOUT_ANSWER = "The judge ended without submitting a v
 private const val SESSION_PREFIX = "testjudge"
 
 /** One finished judge run: its answer, or why it has none. */
-private class JudgeOutcome(val submission: JudgeSubmission?, val failure: String?, val durationMs: Long)
+private class JudgeOutcome(val submission: JudgeSubmission?, val failure: String?, val durationMs: Long, val usage: AiUsageStats?)
 
 internal class JudgeService(
     private val runId: String,
@@ -38,11 +40,24 @@ internal class JudgeService(
     private val wallClock: () -> Long,
 ) : AutoCloseable {
     /** The judge of one lane's steps. */
-    fun forLane(laneId: String): StepJudge = StepJudge { site, evidence -> judgeStep(laneId, site, evidence) }
+    fun forLane(laneId: String): StepJudge = object : UsageReportingStepJudge {
+        override suspend fun judge(site: JudgeSite, evidence: JudgeEvidence): StepJudgement = judgeStep(laneId, site, evidence)
 
-    suspend fun judgeStep(laneId: String, site: JudgeSite, evidence: JudgeEvidence): StepJudgement {
+        override suspend fun judge(
+            site: JudgeSite,
+            evidence: JudgeEvidence,
+            onUsage: (AiUsageStats) -> Unit,
+        ): StepJudgement = judgeStep(laneId, site, evidence, onUsage)
+    }
+
+    suspend fun judgeStep(
+        laneId: String,
+        site: JudgeSite,
+        evidence: JudgeEvidence,
+        onUsage: (AiUsageStats) -> Unit = {},
+    ): StepJudgement {
         val label = "$laneId:${site.evidencePrefix}-s${site.stepNumber}-a${site.attempt}"
-        val outcome = runJudge(evidence, label, JUDGE_TOOL_CALL_BUDGET, JUDGE_SYSTEM_PROMPT, judgePrompt(evidence))
+        val outcome = runJudge(evidence, label, JUDGE_TOOL_CALL_BUDGET, JUDGE_SYSTEM_PROMPT, judgePrompt(evidence), onUsage)
         val submission = outcome.submission
         return StepJudgement(
             verdict = submission?.verdict ?: JudgeVerdict.INCONCLUSIVE,
@@ -52,16 +67,25 @@ internal class JudgeService(
             judgedAt = wallClock(),
             durationMs = outcome.durationMs,
             error = outcome.failure,
+            usage = outcome.usage,
         )
     }
 
     /** The judgement of a step the lanes disagreed on. [evidence] has one entry per lane; [site] names the step. */
-    suspend fun compare(caseId: String, iteration: Int, stepId: String, evidence: JudgeEvidence): JudgeComparison {
+    suspend fun compare(
+        caseId: String,
+        iteration: Int,
+        stepId: String,
+        evidence: JudgeEvidence,
+        comparisonId: String = com.indagium.testing.model.newComparisonId(),
+        onUsage: (AiUsageStats) -> Unit = {},
+    ): JudgeComparison {
         val label = "compare:$caseId-i$iteration-s${evidence.stepNumber}"
-        val outcome = runJudge(evidence, label, COMPARISON_TOOL_CALL_BUDGET, COMPARISON_SYSTEM_PROMPT, comparisonPrompt(evidence))
+        val outcome = runJudge(evidence, label, COMPARISON_TOOL_CALL_BUDGET, COMPARISON_SYSTEM_PROMPT, comparisonPrompt(evidence), onUsage)
         val submission = outcome.submission
         val verdicts = submission?.laneVerdicts ?: evidence.lanes.associate { it.laneId to JudgeVerdict.INCONCLUSIVE }
         return JudgeComparison(
+            id = comparisonId,
             caseId = caseId,
             iteration = iteration,
             stepId = stepId,
@@ -73,6 +97,7 @@ internal class JudgeService(
             suggestedFix = submission?.fix,
             judgedAt = wallClock(),
             error = outcome.failure,
+            usage = outcome.usage,
         )
     }
 
@@ -81,7 +106,14 @@ internal class JudgeService(
     // ── One judge run ────────────────────────────────────────────────
 
     @Suppress("TooGenericExceptionCaught", "LongParameterList") // Whatever starting the judge throws means "no verdict".
-    private suspend fun runJudge(evidence: JudgeEvidence, label: String, budget: Int, systemPrompt: String, prompt: String): JudgeOutcome {
+    private suspend fun runJudge(
+        evidence: JudgeEvidence,
+        label: String,
+        budget: Int,
+        systemPrompt: String,
+        prompt: String,
+        onUsage: (AiUsageStats) -> Unit = {},
+    ): JudgeOutcome {
         val started = wallClock()
         val tools = JudgeTools(evidence, ::loadExample)
         val tabId = "$SESSION_PREFIX:$runId:$label"
@@ -104,21 +136,34 @@ internal class JudgeService(
             agent.start(request)
         } catch (failure: Exception) {
             session.deleteClaudeCodeWorkspace()
-            return JudgeOutcome(null, "The judge could not start: ${failure.message ?: failure::class.simpleName}", wallClock() - started)
+            return JudgeOutcome(null, "The judge could not start: ${failure.message ?: failure::class.simpleName}", wallClock() - started, null)
         }
         val tail = transcript?.let { TranscriptTail(run, it, mapOf("judge" to label)) }
+        var submission: JudgeSubmission? = null
+        var failure: String? = null
+        var cleanupComplete = false
+        var usage: AiUsageStats? = null
         try {
-            val submission = awaitSubmission(run, tools)
-            val failure = if (submission != null) null else failureOf(run)
-            return JudgeOutcome(submission, failure, wallClock() - started)
+            submission = awaitSubmission(run, tools)
+            failure = if (submission != null) null else failureOf(run)
         } finally {
             withContext(NonCancellable) {
                 run.cancel()
-                withTimeoutOrNull(tuning.agentCancelWaitMs) { run.job?.join() }
+                cleanupComplete = withTimeoutOrNull(tuning.agentCancelWaitMs) {
+                    run.job?.join()
+                    run.job?.isCompleted == true
+                } ?: false
                 tail?.close()
                 session.deleteClaudeCodeWorkspace()
+                val history = run.history
+                usage = aiUsageFromHistory(
+                    history,
+                    partial = !cleanupComplete || submission == null || history.any { it == AiRunEvent.Cancelled || it is AiRunEvent.Error },
+                )
+                runCatching { usage?.let(onUsage) }
             }
         }
+        return JudgeOutcome(submission, failure, wallClock() - started, usage)
     }
 
     /** The submitted answer, or null when the judge's run ended without one or [EngineTuning.judgeTimeoutMs] passed. */

@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.indagium.model.summaryLabel
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
 import com.indagium.testing.store.StoreResult
@@ -91,6 +92,10 @@ private fun CaseEditorContents(suite: TestSuite, case: TestCase, editable: Boole
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f)) {
                     CaseMetadata(case, editable, onDelete)
+                    case.creationUsage?.let { usage ->
+                        Spacer(Modifier.height(4.dp))
+                        AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 9.sp)
+                    }
                     CaseDetails(case, editable)
                     CaseAuthoringActions(suite.id, case, editable)
                     StepListSection(caseStepOps(ui, suite, case, editable))
@@ -102,6 +107,10 @@ private fun CaseEditorContents(suite: TestSuite, case: TestCase, editable: Boole
         } else {
             Column(Modifier.fillMaxWidth()) {
                 CaseMetadata(case, editable, onDelete)
+                case.creationUsage?.let { usage ->
+                    Spacer(Modifier.height(4.dp))
+                    AppText("AI step creation · ${usage.summaryLabel()}", color = tc().td, fontSize = 9.sp)
+                }
                 CaseDetails(case, editable)
                 CaseContextPanel(case, editable)
                 CaseAuthoringActions(suite.id, case, editable)

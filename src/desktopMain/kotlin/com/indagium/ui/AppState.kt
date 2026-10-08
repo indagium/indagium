@@ -1977,6 +1977,7 @@ class AppState(
             importImage = ::importTestGoldenImage,
             resolveImage = ::testGoldenImageFile,
             insertSteps = ::createTestSteps,
+            insertStepsWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
         )
     }
 
@@ -2204,6 +2205,38 @@ class AppState(
         StoreResult.Ok(session.snapshot.value)
     }
 
+    internal fun removeTestRecordingRows(sessionId: String, rowIds: Set<String>): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> =
+        synchronized(testStepRecordingLock) {
+            val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+                ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+            when {
+                sessionId in recordingApplications -> StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+                sessionId in recordingRewrites -> StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+                session.snapshot.value.active -> StoreResult.Invalid("Stop the recording before removing reviewed steps.")
+                session.snapshot.value.pendingSnapshots > 0 -> StoreResult.Invalid(
+                    "Wait for captured screen snapshots to finish before removing reviewed steps.",
+                )
+                !session.removeReviewedRows(rowIds) -> StoreResult.Invalid("Select one or more rows from the current stopped preview to remove.")
+                else -> StoreResult.Ok(session.snapshot.value)
+            }
+        }
+
+    internal fun restoreRemovedTestRecordingInputs(sessionId: String): StoreResult<com.indagium.testing.authoring.TestStepRecordingSnapshot> =
+        synchronized(testStepRecordingLock) {
+            val session = testStepRecordingSession?.takeIf { it.id == sessionId }
+                ?: return@synchronized StoreResult.Invalid("That recording session is no longer active.")
+            when {
+                sessionId in recordingApplications -> StoreResult.Invalid("This recording is already being applied; its reviewed rows are frozen.")
+                sessionId in recordingRewrites -> StoreResult.Invalid("This recording is being rewritten; wait for it to finish or cancel it.")
+                session.snapshot.value.active -> StoreResult.Invalid("Stop the recording before restoring removed inputs.")
+                session.snapshot.value.pendingSnapshots > 0 -> StoreResult.Invalid(
+                    "Wait for captured screen snapshots to finish before restoring removed inputs.",
+                )
+                !session.restoreExcludedInputs() -> StoreResult.Invalid("This recording has no removed inputs to restore.")
+                else -> StoreResult.Ok(session.snapshot.value)
+            }
+        }
+
     internal suspend fun applyTestStepRecording(
         sessionId: String,
         edited: List<Pair<String, String>>,
@@ -2354,8 +2387,12 @@ class AppState(
     fun createTestStep(caseId: String, step: TestStep, atIndex: Int? = null): StoreResult<TestStep> =
         testStoreOp { createStep(caseId, step, atIndex) }
 
-    fun createTestSteps(caseId: String, steps: List<TestStep>, atIndex: Int? = null): StoreResult<List<TestStep>> =
-        testStoreOp { createSteps(caseId, steps, atIndex) }
+    fun createTestSteps(
+        caseId: String,
+        steps: List<TestStep>,
+        atIndex: Int? = null,
+        creationUsage: com.indagium.model.AiUsageStats? = null,
+    ): StoreResult<List<TestStep>> = testStoreOp { createSteps(caseId, steps, atIndex, creationUsage) }
 
     /** Resolves every referenced image through the suite asset service before inserting an independent copy. */
     fun insertSharedSteps(caseId: String, sharedStepId: String, atIndex: Int? = null): StoreResult<List<TestStep>> {
@@ -2471,6 +2508,10 @@ class AppState(
             generate = { profileId, prompt, model, effort -> generateTestStepDraft(profileId, prompt, model, effort) },
             insert = { caseId, steps, index -> createTestSteps(caseId, steps, index) },
             assetExists = { suiteId, assetPath -> testGoldenImageFile(suiteId, assetPath)?.isFile == true },
+            generateWithUsage = { profileId, prompt, model, effort, onUsage ->
+                generateTestStepDraft(profileId, prompt, model, effort, onUsage)
+            },
+            insertWithUsage = { caseId, steps, index, usage -> createTestSteps(caseId, steps, index, usage) },
         )
     }
     private val testRunCoordinatorDelegate = lazy {

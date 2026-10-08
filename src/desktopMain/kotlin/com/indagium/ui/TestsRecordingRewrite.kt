@@ -20,6 +20,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.model.WorkflowAiSelection
+import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepRecordingSession
 import com.indagium.testing.authoring.TestStepRecordingSnapshot
@@ -30,8 +31,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 // "Rewrite with AI" in the recording review: pick a profile (and optionally a model and reasoning effort), say what the test is
-// about, and the raw taps and swipes become readable steps with expected results. The raw rows stay on the session, so "Undo
-// rewrite" brings them back and a second rewrite always starts from them. Nothing reaches the case until "Apply recorded steps".
+// about, and the raw taps and swipes become readable steps with expected results. Removed inputs remain recoverable; Undo rewrite
+// restores only kept inputs, while Restore removed inputs resets the preview to the full raw recording.
 
 private val NOTE_MIN_HEIGHT = 44.dp
 private val NOTE_MAX_HEIGHT = 110.dp
@@ -61,6 +62,10 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             "screen text, typed text (passwords are hidden) and screenshots from the device. Nothing is added to the case until you apply.",
         maxLines = 4,
     )
+    if (snapshot.excludedSourceInputIds.isNotEmpty()) {
+        Spacer(Modifier.height(4.dp))
+        TestsHint("${snapshot.excludedSourceInputIds.size} recorded input(s) excluded from rewrite and apply.")
+    }
     Spacer(Modifier.height(6.dp))
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -102,13 +107,29 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
         )
     }
     error?.let { TestsErrorText(it) }
+    snapshot.rewriteUsage?.let { usage ->
+        TestsHint("Latest rewrite attempt · ${usage.summaryLabel()}")
+    }
+    snapshot.rewriteUsageTotal?.let { usage ->
+        if (snapshot.rewriteAttemptCount > 1) TestsHint("Rewrite session total (${snapshot.rewriteAttemptCount} attempts) · ${usage.summaryLabel()}")
+    }
     Spacer(Modifier.height(8.dp))
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-        if (snapshot.rawSteps != null) {
+        if (snapshot.rewriteApplied) {
             AppButton(
                 "Undo rewrite",
                 onClick = { error = ui.state.restoreTestStepRecordingRaw(session.id).takeIf { it !is StoreResult.Ok }?.userMessage() },
-                enabled = !busy,
+                enabled = !busy && snapshot.pendingSnapshots == 0,
+                variant = ButtonVariant.Ghost,
+            )
+        }
+        if (snapshot.excludedSourceInputIds.isNotEmpty()) {
+            AppButton(
+                "Restore removed inputs",
+                onClick = {
+                    error = ui.state.restoreRemovedTestRecordingInputs(session.id).takeIf { it !is StoreResult.Ok }?.userMessage()
+                },
+                enabled = !busy && snapshot.pendingSnapshots == 0,
                 variant = ButtonVariant.Ghost,
             )
         }
@@ -116,7 +137,7 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
         HintedButton(
             when {
                 rewriting -> "Rewriting…"
-                snapshot.rawSteps != null -> "Rewrite again"
+                snapshot.rewriteApplied -> "Rewrite again"
                 else -> "Rewrite"
             },
             onClick = {
@@ -134,8 +155,9 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
                     }
                 }
             },
-            enabled = !busy && !blocked && profile != null,
+            enabled = !busy && !blocked && snapshot.steps.isNotEmpty() && profile != null,
             disabledHint = when {
+                snapshot.steps.isEmpty() -> "Restore removed inputs or keep at least one step before rewriting."
                 profile == null -> "Configure a provider profile in Settings first."
                 blocked -> "Waiting for ${snapshot.pendingSnapshots} screen snapshot(s) to finish."
                 else -> "A rewrite or an apply is already running."
@@ -143,7 +165,7 @@ internal fun RecordingRewriteSection(session: TestStepRecordingSession, case: Te
             variant = ButtonVariant.Primary,
         )
     }
-    if (snapshot.rawSteps != null && snapshot.rewriteNotes.isNotBlank()) {
+    if (snapshot.rewriteApplied && snapshot.rewriteNotes.isNotBlank()) {
         Spacer(Modifier.height(6.dp))
         TestsHint("AI notes: ${snapshot.rewriteNotes}", maxLines = 6)
     }

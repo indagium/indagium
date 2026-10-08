@@ -81,6 +81,7 @@ internal class AiToolExecutionCoordinator(
         }
 
         val result = try {
+            run.emit(AiRunEvent.ToolExecutionStarted(call))
             val rawResult = toolGateway.executeSuspending(call.name, prepared.arguments)
             AiToolExecutionResult.from(rawResult, maxToolResultChars, AiEvidenceExtractor.from(call.name, rawResult))
         } catch (cancelled: CancellationException) {

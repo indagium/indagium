@@ -3,6 +3,8 @@ package com.indagium.testing.run
 import com.indagium.capture.CaptureMirrorMode
 import com.indagium.capture.CaptureSettings
 import com.indagium.capture.withMirrorMode
+import com.indagium.model.AiUsageStats
+import com.indagium.model.sumAiUsage
 import com.indagium.testing.device.LaneMarkerOutcome
 import com.indagium.testing.device.LaneMarkerRequest
 import com.indagium.testing.device.TestDeviceSession
@@ -223,7 +225,10 @@ internal class LaneRunner(
             goldenFile = deps.goldenFile,
             externalDispatchAdmitted = deps.externalDispatchAdmitted,
         )
-        val driver = LaneDriver(runId, lane.id, suite, deps.tuning, agent, handle, transcript, snapshot.config.confirmationTimeoutMs)
+        val driver = LaneDriver(
+            runId, lane.id, suite, deps.tuning, agent, handle, transcript, snapshot.config.confirmationTimeoutMs,
+            onAgentUsage = { segmentId, usage -> recorder?.agentUsage(segmentId, usage) },
+        )
         val hooks = HookRunner(snapshot, env, driver) { step -> recorder?.add(step) }
         updateLane {
             it.copy(
@@ -415,12 +420,17 @@ internal class LaneRunner(
         activityWriter?.append("started", call)
         transcriptWriter?.append("lane_tool_call_started", laneToolCallFields(call))
         updateLane { lane -> lane.copy(toolCalls = (lane.toolCalls + call).takeLast(MAX_PERSISTED_TOOL_CALLS)) }
+        if (lane.kind == LaneKind.EXTERNAL) recorder?.externalToolCall(call.id)
     }
 
     override fun toolCallFinished(call: com.indagium.testing.model.LaneToolCall) {
         activityWriter?.append("finished", call)
         transcriptWriter?.append("lane_tool_call_finished", laneToolCallFields(call))
         updateLane { lane -> lane.copy(toolCalls = lane.toolCalls.map { if (it.id == call.id) call else it }) }
+    }
+
+    override fun judgeUsage(usage: AiUsageStats) {
+        recorder?.judgeUsage(usage)
     }
 
     private fun laneToolCallFields(call: com.indagium.testing.model.LaneToolCall) = mapOf(
@@ -466,7 +476,9 @@ internal class LaneRunner(
 
     /** The result of the case being run, published to the run state on every change. */
     private inner class CaseRecorder(initial: CaseResult) {
-        private var result = initial
+        private var result = if (lane.kind == LaneKind.EXTERNAL) initial.copy(externalToolCalls = 0L) else initial
+        private val agentSegments = LinkedHashMap<String, AiUsageStats>()
+        private val externalToolCallIds = HashSet<String>()
         val caseId: String = initial.caseId
         val caseName: String = initial.caseName
         val iteration: Int = initial.iteration
@@ -492,6 +504,26 @@ internal class LaneRunner(
         @Synchronized
         fun note(text: String) {
             result = result.copy(note = listOfNotNull(result.note, text).joinToString(" "))
+            publish()
+        }
+
+        @Synchronized
+        fun agentUsage(segmentId: String, usage: AiUsageStats) {
+            agentSegments[segmentId] = usage
+            result = result.copy(agentUsage = sumAiUsage(agentSegments.values.toList()))
+            publish()
+        }
+
+        @Synchronized
+        fun judgeUsage(usage: AiUsageStats) {
+            result = result.copy(judgeUsage = sumAiUsage(listOf(result.judgeUsage, usage)))
+            publish()
+        }
+
+        @Synchronized
+        fun externalToolCall(callId: String) {
+            if (!externalToolCallIds.add(callId)) return
+            result = result.copy(externalToolCalls = externalToolCallIds.size.toLong())
             publish()
         }
 

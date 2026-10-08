@@ -29,6 +29,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
 /**
@@ -180,9 +181,13 @@ class OpenAiCompatibleProvider(
             (root["usage"] as? JsonObject)?.let { usage ->
                 add(
                     LlmStreamEvent.Usage(
-                        promptTokens = usage["prompt_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-                        completionTokens = usage["completion_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
-                        totalTokens = usage["total_tokens"]?.jsonPrimitive?.intOrNull ?: 0,
+                        promptTokens = usage["prompt_tokens"]?.jsonPrimitive?.longOrNull,
+                        completionTokens = usage["completion_tokens"]?.jsonPrimitive?.longOrNull,
+                        totalTokens = usage["total_tokens"]?.jsonPrimitive?.longOrNull,
+                        cachedInputTokens = (usage["prompt_tokens_details"] as? JsonObject)
+                            ?.get("cached_tokens")?.jsonPrimitive?.longOrNull,
+                        reasoningOutputTokens = (usage["completion_tokens_details"] as? JsonObject)
+                            ?.get("reasoning_tokens")?.jsonPrimitive?.longOrNull,
                     ),
                 )
             }

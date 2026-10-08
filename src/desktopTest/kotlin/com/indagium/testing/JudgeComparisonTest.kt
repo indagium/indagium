@@ -1,6 +1,11 @@
 package com.indagium.testing
 
+import com.indagium.ai.LlmProvider
+import com.indagium.ai.LlmRequest
 import com.indagium.ai.LlmRole
+import com.indagium.ai.LlmStreamEvent
+import com.indagium.ai.ModelDiscoveryResult
+import com.indagium.ai.ProviderCapabilities
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.JudgeClassification
@@ -17,6 +22,10 @@ import com.indagium.testing.model.TestSuite
 import com.indagium.testing.run.StartRunResult
 import com.indagium.testing.run.comparisonTargets
 import com.indagium.testing.store.TEST_RUN_JUDGE_FILE_NAME
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.buildJsonObject
@@ -138,6 +147,53 @@ class JudgeComparisonTest {
             "no comparison judge was started",
         )
         assertEquals(CaseStatus.PASS, run.lanes[0].cases.single().status)
+    }
+
+    @Test
+    fun cancellingAComparisonPreservesItsKnownPartialUsage() = runBlocking {
+        val comparisonStarted = CompletableDeferred<Unit>()
+        val blockingJudge = object : LlmProvider {
+            override val capabilities = ProviderCapabilities(streaming = true, toolCalls = true, modelDiscovery = false)
+
+            override suspend fun listModels(): ModelDiscoveryResult = ModelDiscoveryResult.Unavailable("not used")
+
+            override fun streamChat(request: LlmRequest): Flow<LlmStreamEvent> = flow {
+                val prompt = request.messages.first { it.role == LlmRole.USER }.content.orEmpty()
+                if (prompt.startsWith("Compare")) {
+                    comparisonStarted.complete(Unit)
+                    emit(LlmStreamEvent.Usage(promptTokens = 11, completionTokens = 4, totalTokens = 15))
+                    awaitCancellation()
+                }
+                emit(LlmStreamEvent.Completed)
+            }
+        }
+        val suite = suite()
+        val farm = DeviceFarm()
+        val h = RunHarness(
+            libraryOf(suite),
+            extraProfiles = listOf(profileOf(LANE_A_PROFILE_ID), profileOf(LANE_B_PROFILE_ID), judgeProfile),
+            agentFactory = agentsByProfile(
+                mapOf(
+                    LANE_A_PROFILE_ID to AutoAgentProvider(listOf("pass" to "lane A")),
+                    LANE_B_PROFILE_ID to AutoAgentProvider(listOf("fail" to "lane B")),
+                    JUDGE_PROFILE_ID to blockingJudge,
+                ),
+            ),
+            openDevice = farm.opener,
+        ).also { harness = it }
+        val config = h.config(suite, agentLane(LANE_A_PROFILE_ID, "SER-A"), agentLane(LANE_B_PROFILE_ID, "SER-B"))
+            .copy(judgeProfileId = JUDGE_PROFILE_ID, judgeMode = JudgeMode.EVERY_STEP.wire)
+        val started = assertIs<StartRunResult.Started>(h.coordinator.start(config))
+
+        withTimeout(AWAIT_MS) { comparisonStarted.await() }
+        assertTrue(h.coordinator.cancel(started.runId))
+        val cancelled = withTimeout(AWAIT_MS) { assertNotNull(h.coordinator.awaitFinished(started.runId)) }
+        val comparison = cancelled.comparisons.single()
+
+        assertTrue(comparison.error.orEmpty().contains("cancelled"))
+        assertEquals(15L, comparison.usage?.totalTokens)
+        assertEquals(11L, comparison.usage?.inputTokens)
+        assertTrue(comparison.usage?.partial == true)
     }
 
     // ── Who disagrees (pure) ────────────────────────────────────────
