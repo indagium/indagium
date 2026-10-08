@@ -7,6 +7,7 @@ import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestRun
 import com.indagium.testing.model.TestStep
+import com.indagium.testing.model.newComparisonId
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -84,6 +85,35 @@ private suspend fun loadScreenshot(runDir: File, relativePath: String?): JudgeIm
 /** Judges every disagreement of [run]; [record] gets each comparison as it is made. A cancelled run stops here. */
 internal suspend fun compareDisagreements(run: TestRun, runDir: File, judge: JudgeService, record: (JudgeComparison) -> Unit) {
     for (target in comparisonTargets(run)) {
-        record(judge.compare(target.case.id, target.iteration, target.step.id, comparisonEvidence(runDir, target)))
+        val id = newComparisonId()
+        var partial = JudgeComparison(
+            id = id,
+            caseId = target.case.id,
+            iteration = target.iteration,
+            stepId = target.step.id,
+            stepNumber = target.stepNumber,
+            action = target.step.action,
+            verdicts = emptyMap(),
+            error = "Comparison judge is running.",
+        )
+        record(partial)
+        try {
+            val result = judge.compare(
+                target.case.id,
+                target.iteration,
+                target.step.id,
+                comparisonEvidence(runDir, target),
+                comparisonId = id,
+                onUsage = { usage ->
+                    partial = partial.copy(error = "Comparison judge was interrupted.", usage = usage)
+                    record(partial)
+                },
+            )
+            record(result)
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            partial = partial.copy(error = "Comparison judge was cancelled.", usage = partial.usage?.copy(partial = true))
+            record(partial)
+            throw cancelled
+        }
     }
 }

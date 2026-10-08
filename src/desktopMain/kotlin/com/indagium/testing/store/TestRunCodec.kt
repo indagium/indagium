@@ -20,6 +20,7 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.isSafeId
 import com.indagium.testing.model.newLaneId
 import kotlinx.serialization.json.Json
@@ -137,6 +138,9 @@ private fun caseResultToJson(case: CaseResult): JsonObject = buildJsonObject {
     put("startedAt", case.startedAt)
     putIfNotNull("finishedAt", case.finishedAt)
     putIfNotNull("note", case.note)
+    case.agentUsage?.let { put("agentUsage", aiUsageToJson(it)) }
+    case.judgeUsage?.let { put("judgeUsage", aiUsageToJson(it)) }
+    case.externalToolCalls?.let { put("externalToolCalls", it) }
 }
 
 private fun laneResultToJson(lane: LaneResult): JsonObject = buildJsonObject {
@@ -168,6 +172,7 @@ private fun laneResultToJson(lane: LaneResult): JsonObject = buildJsonObject {
             call.durationMs?.let { put("durationMs", it) }
         })
     } })
+    lane.aiUsage()?.let { put("usage", aiUsageToJson(it)) }
 }
 
 internal fun runToJson(run: TestRun): JsonObject = buildJsonObject {
@@ -178,6 +183,7 @@ internal fun runToJson(run: TestRun): JsonObject = buildJsonObject {
     putIfNotNull("finishedAt", run.finishedAt)
     putIfNotNull("error", run.error)
     put("warnings", buildJsonArray { run.warnings.forEach { add(JsonPrimitive(it)) } })
+    run.aiUsage()?.let { put("usage", aiUsageToJson(it)) }
     put("config", configToJson(run.config))
     put("suite", suiteToJson(run.suite))
     put("scripts", buildJsonArray { run.scripts.forEach { add(scriptToJson(it)) } })
@@ -283,6 +289,9 @@ private fun decodeCaseResult(o: JsonObject): CaseResult = CaseResult(
     startedAt = o.long("startedAt", 0L),
     finishedAt = o.optLong("finishedAt"),
     note = o.optStr("note"),
+    agentUsage = decodeAiUsage(o["agentUsage"]),
+    judgeUsage = decodeAiUsage(o["judgeUsage"]),
+    externalToolCalls = o.optLong("externalToolCalls")?.takeIf { it >= 0L },
 )
 
 private fun decodeLaneResult(o: JsonObject): LaneResult? {

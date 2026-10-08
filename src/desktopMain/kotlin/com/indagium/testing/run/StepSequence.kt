@@ -1,6 +1,7 @@
 package com.indagium.testing.run
 
 import com.indagium.debug.IndagiumToolGateway
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.device.TestDeviceSession
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
@@ -110,6 +111,8 @@ internal interface SequenceListener {
     fun toolCallStarted(call: LaneToolCall) = Unit
 
     fun toolCallFinished(call: LaneToolCall) = Unit
+
+    fun judgeUsage(usage: AiUsageStats) = Unit
 
     suspend fun awaitUser(paused: PausedStep): PauseDecision
 }
@@ -611,7 +614,12 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
         if (!shouldJudge(env.judgeMode, step, claim, automaticFailed)) return null
         val site = JudgeSite(spec.caseId, spec.evidencePrefix, step.id, index + 1, attempt)
         val judgement = try {
-            judge.judge(site, judgeEvidence(step, automatic, shot, logEnd))
+            val evidence = judgeEvidence(step, automatic, shot, logEnd)
+            if (judge is UsageReportingStepJudge) {
+                judge.judge(site, evidence, env.listener::judgeUsage)
+            } else {
+                judge.judge(site, evidence).also { judgement -> judgement.usage?.let(env.listener::judgeUsage) }
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (failure: Exception) {

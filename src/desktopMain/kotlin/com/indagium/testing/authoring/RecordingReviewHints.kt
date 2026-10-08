@@ -59,7 +59,11 @@ fun RecordedTestStep.contextHint(): String? {
  */
 fun recordingApplyBlockedReason(snapshot: TestStepRecordingSnapshot): String? {
     if (snapshot.active) return "Stop the recording first."
-    if (snapshot.steps.isEmpty()) return "No input was recorded."
+    if (snapshot.steps.isEmpty()) return if (snapshot.excludedSourceInputIds.isNotEmpty()) {
+        "No steps remain. Restore removed inputs or keep at least one step before applying."
+    } else {
+        "No input was recorded."
+    }
     if (snapshot.pendingSnapshots > 0) return "Waiting for ${snapshot.pendingSnapshots} screen snapshot(s) to finish."
     val issues = snapshot.steps.mapIndexed { index, row ->
         (index + 1) to recordingRowIssues(row)

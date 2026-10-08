@@ -1,5 +1,6 @@
 package com.indagium.debug
 
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.DEFAULT_CASE_TOOL_CALL_LIMIT
 import com.indagium.testing.model.EXTERNAL_LANE_PROFILE_ID
 import com.indagium.testing.model.EvidenceFlags
@@ -9,6 +10,7 @@ import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.summary
 import com.indagium.testing.run.PauseDecision
 import com.indagium.testing.run.StartRunResult
@@ -33,6 +35,20 @@ import kotlinx.coroutines.withContext
 // exception. Everything that waits on the disk or on a run is a suspending handler so no request thread blocks.
 
 private val RUN_JSON_DROPPED_KEYS = setOf("suite", "scripts", "sharedSteps")
+
+private fun usageMap(usage: AiUsageStats?): Map<String, Any?>? = usage?.let {
+    buildMap {
+        it.toolCalls?.let { value -> put("toolCalls", value) }
+        it.inputTokens?.let { value -> put("inputTokens", value) }
+        it.outputTokens?.let { value -> put("outputTokens", value) }
+        it.totalTokens?.let { value -> put("totalTokens", value) }
+        it.cacheCreationTokens?.let { value -> put("cacheCreationTokens", value) }
+        it.cachedInputTokens?.let { value -> put("cachedInputTokens", value) }
+        it.cachedInputIncludedInInput?.let { value -> put("cachedInputIncludedInInput", value) }
+        it.reasoningOutputTokens?.let { value -> put("reasoningOutputTokens", value) }
+        put("partial", it.partial)
+    }
+}
 
 internal class TestRunToolOperations(private val appState: AppState) {
     private val coordinator get() = appState.testRunCoordinator
@@ -224,6 +240,7 @@ internal class TestRunToolOperations(private val appState: AppState) {
             },
         )
         put("summary", run.summary().let { mapOf("passedSteps" to it.passedSteps, "totalSteps" to it.totalSteps, "cases" to it.caseCount) })
+        usageMap(run.aiUsage())?.let { put("usage", it) }
     }
 
     private fun laneMap(lane: LaneResult): Map<String, Any?> = buildMap {
@@ -234,16 +251,24 @@ internal class TestRunToolOperations(private val appState: AppState) {
         lane.config.reasoningEffort?.let { put("reasoningEffort", it) }
         put("deviceSerial", lane.config.deviceSerial)
         put("status", lane.status.name)
+        usageMap(lane.aiUsage())?.let { put("usage", it) }
         lane.error?.let { put("error", it) }
         lane.currentCase?.let { put("currentCase", it) }
         lane.currentStepNumber?.let { put("currentStep", mapOf("number" to it, "action" to lane.currentStepAction)) }
         put(
             "cases",
             lane.cases.map { case ->
-                mapOf(
-                    "caseId" to case.caseId, "name" to case.caseName, "iteration" to case.iteration, "status" to case.status?.name,
-                    "steps" to case.steps.map { it.status.name },
-                )
+                buildMap {
+                    put("caseId", case.caseId)
+                    put("name", case.caseName)
+                    put("iteration", case.iteration)
+                    put("status", case.status?.name)
+                    put("steps", case.steps.map { it.status.name })
+                    usageMap(case.agentUsage)?.let { put("agentUsage", it) }
+                    usageMap(case.judgeUsage)?.let { put("judgeUsage", it) }
+                    case.externalToolCalls?.let { put("externalToolCalls", it) }
+                    usageMap(case.aiUsage())?.let { put("usage", it) }
+                }
             },
         )
     }
@@ -254,6 +279,7 @@ internal class TestRunToolOperations(private val appState: AppState) {
                 "runId" to it.id, "suiteName" to it.suiteName, "status" to it.status.name, "createdAt" to it.createdAt,
                 "finishedAt" to it.finishedAt, "lanes" to it.laneCount, "cases" to it.caseCount,
                 "passedSteps" to it.passedSteps, "totalSteps" to it.totalSteps,
+                "usage" to usageMap(it.usage),
             )
         },
     )

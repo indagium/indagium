@@ -5,6 +5,7 @@ import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
 import com.indagium.ai.ManagedMcpServerLease
+import com.indagium.ai.aiUsageFromHistory
 import com.indagium.ai.defaultAiProviderFactory
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.debug.IndagiumToolGateway
@@ -29,6 +30,7 @@ import com.indagium.testing.store.readBoundedTestAsset
 import com.indagium.testing.tracker.TrackerMcpClientFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
@@ -81,6 +83,7 @@ internal class AgentTextRequest(
     val maxTurns: Int,
     val timeoutMs: Long,
     val wording: AgentTextWording,
+    val onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
 )
 
 private val STEP_DRAFT_WORDING = AgentTextWording(
@@ -91,7 +94,13 @@ private val STEP_DRAFT_WORDING = AgentTextWording(
 )
 
 /** Drafts steps through an existing profile with an empty MCP gateway and no host tools or device session. */
-internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: String, model: String? = null, reasoningEffort: String? = null): String =
+internal suspend fun AppState.generateTestStepDraft(
+    profileId: String,
+    prompt: String,
+    model: String? = null,
+    reasoningEffort: String? = null,
+    onUsage: (com.indagium.model.AiUsageStats) -> Unit = {},
+): String =
     runAgentForText(
         AgentTextRequest(
             profileId = profileId,
@@ -106,6 +115,7 @@ internal suspend fun AppState.generateTestStepDraft(profileId: String, prompt: S
             maxTurns = 2,
             timeoutMs = TEST_STEP_DRAFT_TIMEOUT_MS,
             wording = STEP_DRAFT_WORDING,
+            onUsage = onUsage,
         ),
     )
 
@@ -131,6 +141,7 @@ internal suspend fun AppState.generateRecordingRewrite(request: RewriteGeneratio
         maxTurns = request.maxTurns,
         timeoutMs = RECORDING_REWRITE_TIMEOUT_MS,
         wording = RECORDING_REWRITE_WORDING,
+        onUsage = request.onUsage,
     ),
 )
 
@@ -166,14 +177,27 @@ internal suspend fun AppState.runAgentForText(request: AgentTextRequest): String
             ),
         )
         run = activeRun
-        withTimeout(request.timeoutMs) { activeRun.job?.join() }
+        withTimeout(request.timeoutMs) {
+            val job = activeRun.job
+            while (job?.isActive == true) {
+                request.onUsage(aiUsageFromHistory(activeRun.history, partial = true))
+                delay(AGENT_USAGE_POLL_INTERVAL_MS)
+            }
+            job?.join()
+        }
         val error = activeRun.history.filterIsInstance<AiRunEvent.Error>().lastOrNull()
         check(error == null) { "${request.wording.failure}: ${error?.message}" }
         check(activeRun.job?.isActive != true) { request.wording.unfinished }
         return finalAnswerText(activeRun.history).also { check(it.isNotBlank()) { request.wording.empty } }
     } finally {
         run?.cancel()
-        withContext(NonCancellable) { withTimeoutOrNull(TEST_STEP_DRAFT_CLEANUP_MS) { run?.job?.join() } }
+        withContext(NonCancellable) {
+            withTimeoutOrNull(TEST_STEP_DRAFT_CLEANUP_MS) { run?.job?.join() }
+            run?.let { activeRun ->
+                val successful = activeRun.history.any { it == AiRunEvent.Done }
+                request.onUsage(aiUsageFromHistory(activeRun.history, partial = !successful))
+            }
+        }
         session.deleteClaudeCodeWorkspace()
         agent.close()
     }
@@ -187,6 +211,7 @@ internal fun finalAnswerText(history: List<AiRunEvent>): String {
 
 private const val TEST_STEP_DRAFT_TIMEOUT_MS = 120_000L
 private const val TEST_STEP_DRAFT_CLEANUP_MS = 2_000L
+private const val AGENT_USAGE_POLL_INTERVAL_MS = 120L
 
 /** A little longer than the service's own timeout (180 s), so the service answers first with its message. */
 private const val RECORDING_REWRITE_TIMEOUT_MS = 190_000L

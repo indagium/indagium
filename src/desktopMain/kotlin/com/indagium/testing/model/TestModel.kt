@@ -1,5 +1,6 @@
 package com.indagium.testing.model
 
+import com.indagium.model.AiUsageStats
 import java.util.UUID
 
 // Domain types of the AI test-suites feature. Pure data, UI-free and immutable: every container's
@@ -185,6 +186,8 @@ data class TestCase(
     val teardown: List<HookItem> = emptyList(),
     val steps: List<TestStep> = emptyList(),
     val allowedTools: Set<String>? = null,
+    /** Usage of AI-created steps, kept only when the reviewed draft is applied; absent on manual/legacy cases. */
+    val creationUsage: AiUsageStats? = null,
 )
 
 /**

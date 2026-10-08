@@ -1296,7 +1296,9 @@ private fun AiRunCard(
 ) {
     val colors = tc()
     val assistantText = events.filterIsInstance<AiRunEvent.AssistantDelta>().joinToString(separator = "") { it.text }
-    val traceEvents = events.filter { it !is AiRunEvent.AssistantDelta && it !is AiRunEvent.Usage }
+    val traceEvents = events.filter {
+        it !is AiRunEvent.AssistantDelta && it !is AiRunEvent.Usage && it !is AiRunEvent.ToolExecutionStarted && it !is AiRunEvent.UsageRequestStarted
+    }
     val pendingConfirmationCount = events.filterIsInstance<AiRunEvent.ConfirmationRequired>()
         .count { run.isConfirmationPending(it.confirmation.id) }
     val usage = events.filterIsInstance<AiRunEvent.Usage>().lastOrNull()
@@ -1467,23 +1469,22 @@ private fun usageTokenLines(usage: AiRunEvent.Usage): List<String> = buildList {
     add(
         buildString {
             append("Input: ")
-            append(usage.inputTokens)
-            append(" tokens")
-            usage.cachedInputTokens?.takeIf { it > 0 && usage.cachedInputIncludedInInput }?.let { cached ->
+            append(usage.inputTokens?.let { "$it tokens" } ?: "unavailable")
+            usage.cachedInputTokens?.takeIf { it > 0 && usage.cachedInputIncludedInInput == true }?.let { cached ->
                 append(" (")
                 append(cached)
                 append(" cached)")
             }
         },
     )
-    usage.cachedInputTokens?.takeIf { it > 0 && !usage.cachedInputIncludedInInput }?.let { cached ->
-        add("Cached input: $cached tokens (separate from total)")
+    usage.cachedInputTokens?.takeIf { it > 0 && usage.cachedInputIncludedInInput == false }?.let { cached ->
+        add("Cached input: $cached tokens (reported separately from input)")
     }
+    usage.cacheCreationInputTokens?.takeIf { it > 0 }?.let { created -> add("Cache creation input: $created tokens") }
     add(
         buildString {
             append("Output: ")
-            append(usage.outputTokens)
-            append(" tokens")
+            append(usage.outputTokens?.let { "$it tokens" } ?: "unavailable")
             usage.reasoningOutputTokens?.takeIf { it > 0 }?.let { reasoning ->
                 append(" (")
                 append(reasoning)
@@ -1491,7 +1492,7 @@ private fun usageTokenLines(usage: AiRunEvent.Usage): List<String> = buildList {
             }
         },
     )
-    add("Total: ${usage.totalTokens} tokens")
+    add("Total: ${usage.totalTokens?.let { "$it tokens" } ?: "unavailable"}")
 }
 
 private fun clockTimeLabel(epochMs: Long): String =

@@ -4,6 +4,8 @@ import com.indagium.ai.AiInvestigationContext
 import com.indagium.ai.AiRun
 import com.indagium.ai.AiRunEvent
 import com.indagium.ai.AiSession
+import com.indagium.ai.aiUsageFromHistory
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestSuite
@@ -11,11 +13,15 @@ import com.indagium.testing.store.TranscriptWriter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+
+private const val MIN_USAGE_POLL_INTERVAL_MS = 50L
 
 // Drives one StepSequence to its end.
 //   EXTERNAL lane: nothing runs; a client drives the sequence through `test_lane_tool_call` and the watchdog closes
@@ -44,6 +50,7 @@ internal class LaneDriver(
     private val handle: LaneHandle,
     private val transcript: TranscriptWriter?,
     private val confirmationTimeoutMs: Long,
+    private val onAgentUsage: (segmentId: String, usage: AiUsageStats) -> Unit = { _, _ -> },
 ) {
     /** Runs [seq] from its first step until it ends. [case] is null for the steps of a shared-step hook. */
     suspend fun drive(seq: StepSequence, case: TestCase?, iteration: Int, budget: CaseBudget) {
@@ -82,6 +89,17 @@ internal class LaneDriver(
                 seq.abort(StepStatus.ERROR, "The agent could not be started: ${invalid.message}")
                 return
             }
+            val usageJob = scope.launch {
+                var observedSize = -1
+                while (segment.job.isActive) {
+                    val history = segment.run.history
+                    if (history.size != observedSize) {
+                        observedSize = history.size
+                        onAgentUsage(segment.run.id, aiUsageFromHistory(history, partial = true))
+                    }
+                    delay(tuning.transcriptPollMs.coerceAtLeast(MIN_USAGE_POLL_INTERVAL_MS))
+                }
+            }
             try {
                 when (awaitOutcome(seq, segment)) {
                     SegmentOutcome.ENDED -> {
@@ -98,7 +116,12 @@ internal class LaneDriver(
                     }
                 }
             } finally {
-                closeSegment(segment)
+                withContext(NonCancellable) {
+                    closeSegment(segment)
+                    usageJob.cancelAndJoin()
+                    val history = segment.run.history
+                    onAgentUsage(segment.run.id, aiUsageFromHistory(history, partial = history.none { it == AiRunEvent.Done }))
+                }
             }
         }
     }

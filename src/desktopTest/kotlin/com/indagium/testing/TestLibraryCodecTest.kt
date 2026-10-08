@@ -1,5 +1,6 @@
 package com.indagium.testing
 
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.HookItem
 import com.indagium.testing.model.OnFailure
 import com.indagium.testing.model.ScriptPermission
@@ -93,6 +94,19 @@ class TestLibraryCodecTest {
         assertNull(decoded.cases[0].allowedTools)
         assertEquals(emptySet(), decoded.cases[1].allowedTools)
         assertEquals(setOf("tap", "swipe"), decoded.cases[2].allowedTools)
+    }
+
+    @Test
+    fun caseCreationUsageRoundTripsAndOlderCasesRemainUnavailable() {
+        val suite = fullSuite()
+        val usage = AiUsageStats(toolCalls = 3, inputTokens = 120, outputTokens = 40, totalTokens = 160, partial = true)
+        val withUsage = suite.copy(cases = suite.cases.map { it.copy(creationUsage = usage) })
+
+        val decoded = decodeSuiteFile(encodeSuiteFile(withUsage)).getOrThrow().suite
+
+        assertEquals(withUsage, decoded)
+        assertTrue(decoded.cases.all { it.creationUsage == usage })
+        assertTrue(decodeSuiteFile(encodeSuiteFile(suite)).getOrThrow().suite.cases.all { it.creationUsage == null })
     }
 
     @Test

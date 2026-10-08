@@ -1,5 +1,7 @@
 package com.indagium.testing.model
 
+import com.indagium.model.AiUsageStats
+
 // Domain types of the blind judge: what a run asks of it (JudgeMode), what it answers for one step (StepJudgement) and
 // what it concludes where several lanes disagree (JudgeComparison). Pure data. The judge never sees the agent's claim or
 // observation, so nothing here refers to them.
@@ -59,6 +61,8 @@ data class StepJudgement(
     val durationMs: Long = 0L,
     val error: String? = null,
     val fixApplied: Boolean = false,
+    /** Usage of this single judge attempt; CaseResult.judgeUsage holds the aggregate across retries. */
+    val usage: AiUsageStats? = null,
 )
 
 /**
@@ -79,4 +83,6 @@ data class JudgeComparison(
     val judgedAt: Long = 0L,
     val error: String? = null,
     val fixApplied: Boolean = false,
+    /** Usage of the single comparison-judge run. */
+    val usage: AiUsageStats? = null,
 )

@@ -7,6 +7,8 @@ import com.indagium.capture.mirror.MirrorTouchAction
 import com.indagium.debug.SWIPE_DURATION_MAX_MS
 import com.indagium.debug.SWIPE_DURATION_MIN_MS
 import com.indagium.debug.encodeBoundedDeviceScreen
+import com.indagium.model.AiUsageStats
+import com.indagium.model.sumAiUsage
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestStep
@@ -87,6 +89,16 @@ data class TestStepRecordingSnapshot(
     val rawSteps: List<RecordedTestStep>? = null,
     val rewriteNotes: String = "",
     val videoTimeline: RecordedVideoTimelineSummary? = null,
+    /** Source input ids deliberately removed from review. Original rows and evidence remain in [rawSteps]. */
+    val excludedSourceInputIds: Set<String> = emptySet(),
+    /** True only while [steps] contains AI-proposed rows; rawSteps can also hold history after a user removal. */
+    val rewriteApplied: Boolean = false,
+    /** Latest rewrite attempt and session total; null before any rewrite has started. */
+    val rewriteUsage: AiUsageStats? = null,
+    val rewriteUsageTotal: AiUsageStats? = null,
+    val rewriteUsagePending: AiUsageStats? = null,
+    val rewriteAttemptCount: Int = 0,
+    val rewriteInProgress: Boolean = false,
 )
 
 private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
@@ -145,6 +157,9 @@ class TestStepRecordingSession internal constructor(
     private var subscription: Closeable? = subscription
     private var videoSubscription: Closeable? = null
     private var applicationReserved = false
+    private var completedRewriteUsage: AiUsageStats? = null
+    private var pendingRewriteUsage: AiUsageStats? = null
+    private var rewriteUsageAppliedThroughAttempt: Int = 0
     private val queuedScreenshots = AtomicInteger()
     private val disposed = AtomicBoolean(false)
     private val screenshotWorker = ThreadPoolExecutor(
@@ -231,8 +246,29 @@ class TestStepRecordingSession internal constructor(
     }
 
     fun replaceSteps(steps: List<RecordedTestStep>): Boolean = synchronized(lock) {
-        if (applicationReserved) return@synchronized false
-        mutableSnapshot.value = mutableSnapshot.value.copy(steps = steps.take(MAX_RECORDED_STEPS))
+        val current = mutableSnapshot.value
+        if (applicationReserved || current.active || current.rewriteInProgress || steps.map { it.id } != current.steps.map { it.id }) return@synchronized false
+        mutableSnapshot.value = current.copy(
+            steps = steps.take(MAX_RECORDED_STEPS),
+            rawSteps = current.rawSteps?.let { syncRawReviewRows(it, current.steps, steps) },
+        )
+        true
+    }
+
+    /** Removes reviewed rows without discarding their recorded source inputs or evidence. */
+    fun removeReviewedRows(rowIds: Set<String>): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        if (!reviewMutationAvailable(current) || rowIds.isEmpty()) return@synchronized false
+        val visibleIds = current.steps.mapTo(HashSet()) { it.id }
+        if (!visibleIds.containsAll(rowIds)) return@synchronized false
+        val removed = current.steps.filter { it.id in rowIds }
+        val sourceIds = removed.flatMap { row -> row.sourceInputIds.ifEmpty { listOf(row.id) } }.toSet()
+        val raw = current.rawSteps ?: current.steps
+        mutableSnapshot.value = current.copy(
+            steps = current.steps.filterNot { it.id in rowIds },
+            rawSteps = raw,
+            excludedSourceInputIds = current.excludedSourceInputIds + sourceIds,
+        )
         true
     }
 
@@ -243,13 +279,71 @@ class TestStepRecordingSession internal constructor(
             current.active -> "Stop the recording first."
             applicationReserved -> "This recording is being applied."
             current.pendingSnapshots > 0 -> "Waiting for ${current.pendingSnapshots} screen snapshot(s) to finish."
-            (current.rawSteps ?: current.steps).isEmpty() -> "No input was recorded."
+            (current.rawSteps ?: current.steps).none { it.id !in current.excludedSourceInputIds } ->
+                "No recorded inputs remain. Restore removed inputs or keep at least one step before rewriting."
             else -> null
         }
     }
 
-    /** The recorded rows an AI rewrite starts from: always the raw ones, also after an earlier rewrite. */
-    internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) { mutableSnapshot.value.let { it.rawSteps ?: it.steps } }
+    /** The recorded rows an AI rewrite starts from: raw inputs minus explicit user exclusions. */
+    internal fun rewriteRows(): List<RecordedTestStep> = synchronized(lock) {
+        mutableSnapshot.value.let { current ->
+            (current.rawSteps ?: current.steps).filterNot { it.id in current.excludedSourceInputIds }
+        }
+    }
+
+    internal fun beginRewriteUsageAttempt(): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        if (current.active || current.pendingSnapshots > 0 || applicationReserved || current.rewriteInProgress) return@synchronized false
+        completedRewriteUsage = sumAiUsage(listOf(completedRewriteUsage, current.rewriteUsage))
+        if (current.rewriteAttemptCount > rewriteUsageAppliedThroughAttempt) {
+            pendingRewriteUsage = sumAiUsage(listOf(pendingRewriteUsage, current.rewriteUsage))
+        }
+        mutableSnapshot.value = current.copy(
+            rewriteUsage = AiUsageStats(partial = true),
+            rewriteUsageTotal = completedRewriteUsage,
+            rewriteUsagePending = pendingRewriteUsage,
+            rewriteAttemptCount = current.rewriteAttemptCount + 1,
+            rewriteInProgress = true,
+        )
+        true
+    }
+
+    internal fun updateRewriteUsage(usage: AiUsageStats) = synchronized(lock) {
+        val current = mutableSnapshot.value
+        mutableSnapshot.value = current.copy(
+            rewriteUsage = usage,
+            rewriteUsageTotal = sumAiUsage(listOf(completedRewriteUsage, usage)),
+            rewriteUsagePending = if (current.rewriteAttemptCount > rewriteUsageAppliedThroughAttempt) {
+                sumAiUsage(listOf(pendingRewriteUsage, usage))
+            } else {
+                pendingRewriteUsage
+            },
+        )
+    }
+
+    internal fun finishRewriteUsageAttempt(completed: Boolean) = synchronized(lock) {
+        val current = mutableSnapshot.value
+        val latest = (current.rewriteUsage ?: AiUsageStats(partial = true)).let { usage ->
+            if (completed) usage else usage.copy(partial = true)
+        }
+        mutableSnapshot.value = current.copy(
+            rewriteUsage = latest,
+            rewriteUsageTotal = sumAiUsage(listOf(completedRewriteUsage, latest)),
+            rewriteUsagePending = if (current.rewriteAttemptCount > rewriteUsageAppliedThroughAttempt) {
+                sumAiUsage(listOf(pendingRewriteUsage, latest))
+            } else {
+                pendingRewriteUsage
+            },
+            rewriteInProgress = false,
+        )
+    }
+
+    internal fun markRewriteUsageApplied(attemptCount: Int) = synchronized(lock) {
+        rewriteUsageAppliedThroughAttempt = maxOf(rewriteUsageAppliedThroughAttempt, attemptCount)
+        pendingRewriteUsage = null
+        mutableSnapshot.value = mutableSnapshot.value.copy(rewriteUsagePending = null)
+    }
 
     /**
      * Swaps the recorded rows for [rewritten], keeping them as [TestStepRecordingSnapshot.rawSteps]. False (nothing changes)
@@ -258,19 +352,43 @@ class TestStepRecordingSession internal constructor(
     internal fun applyRewrite(rawIds: List<String>, rewritten: List<RecordedTestStep>, notes: String): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         val raw = current.rawSteps ?: current.steps
-        if (current.active || applicationReserved || rewritten.isEmpty() || raw.map { it.id } != rawIds) return@synchronized false
-        mutableSnapshot.value = current.copy(steps = rewritten.take(MAX_RECORDED_STEPS), rawSteps = raw, rewriteNotes = notes)
+        val included = raw.filterNot { it.id in current.excludedSourceInputIds }
+        if (current.active || applicationReserved || rewritten.isEmpty() || included.map { it.id } != rawIds) return@synchronized false
+        mutableSnapshot.value = current.copy(steps = rewritten.take(MAX_RECORDED_STEPS), rawSteps = raw, rewriteNotes = notes, rewriteApplied = true)
         true
     }
 
-    /** Puts the recorded rows back exactly as they were before the rewrite (same ids). False when there is nothing to restore. */
+    /** Puts the non-excluded recorded rows back (same ids). Exclusions remain explicit and recoverable separately. */
     fun restoreRaw(): Boolean = synchronized(lock) {
         val current = mutableSnapshot.value
         val raw = current.rawSteps
-        if (raw == null || current.active || applicationReserved) return@synchronized false
-        mutableSnapshot.value = current.copy(steps = raw, rawSteps = null, rewriteNotes = "")
+        if (raw == null || !current.rewriteApplied) return@synchronized false
+        if (current.active || current.rewriteInProgress || applicationReserved) return@synchronized false
+        mutableSnapshot.value = current.copy(
+            steps = raw.filterNot { it.id in current.excludedSourceInputIds },
+            rewriteNotes = "",
+            rewriteApplied = false,
+        )
         true
     }
+
+    /** Restores the full raw review and clears exclusions; this is the recovery path for removed source inputs. */
+    fun restoreExcludedInputs(): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value
+        if (!reviewMutationAvailable(current) || current.excludedSourceInputIds.isEmpty()) return@synchronized false
+        val raw = current.rawSteps ?: current.steps
+        mutableSnapshot.value = current.copy(
+            steps = raw,
+            rawSteps = current.rawSteps,
+            excludedSourceInputIds = emptySet(),
+            rewriteNotes = "",
+            rewriteApplied = false,
+        )
+        true
+    }
+
+    private fun reviewMutationAvailable(current: TestStepRecordingSnapshot): Boolean =
+        !current.active && current.pendingSnapshots == 0 && !applicationReserved && !current.rewriteInProgress
 
     fun updateReviewedSteps(
         actionsAndExpected: List<Pair<String, String>>,
@@ -280,7 +398,7 @@ class TestStepRecordingSession internal constructor(
     ): Boolean = synchronized(lock) {
         val old = mutableSnapshot.value.steps
         if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides)) return@synchronized false
-        mutableSnapshot.value = mutableSnapshot.value.copy(steps = old.mapIndexed { index, row ->
+        val edited = old.mapIndexed { index, row ->
             val optional = optionalOverrides[row.id]?.first ?: row.optional
             val condition = if (optionalOverrides.containsKey(row.id)) optionalOverrides[row.id]?.second?.trim()?.takeIf(String::isNotEmpty) else row.condition
             row.copy(
@@ -291,8 +409,21 @@ class TestStepRecordingSession internal constructor(
                 reviewReason = row.reviewReason.takeIf { actionsAndExpected[index].second.isBlank() },
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
-        })
+        }
+        val current = mutableSnapshot.value
+        mutableSnapshot.value = current.copy(
+            steps = edited,
+            rawSteps = current.rawSteps?.takeUnless { current.rewriteApplied }?.let { syncRawReviewRows(it, old, edited) } ?: current.rawSteps,
+        )
         true
+    }
+
+    private fun syncRawReviewRows(raw: List<RecordedTestStep>, old: List<RecordedTestStep>, edited: List<RecordedTestStep>): List<RecordedTestStep> {
+        val editedById = edited.associateBy { it.id }
+        val oldIds = old.mapTo(HashSet()) { it.id }
+        return raw.map { source ->
+            if (source.id !in oldIds) source else editedById[source.id] ?: source
+        }
     }
 
     private fun validReviewUpdate(
@@ -301,14 +432,17 @@ class TestStepRecordingSession internal constructor(
         expectedScreenshotIds: Set<String>,
         expectedRowIds: List<String>?,
         optionalOverrides: Map<String, Pair<Boolean, String?>>,
-    ): Boolean = !mutableSnapshot.value.active && !applicationReserved && actionsAndExpected.size == old.size &&
-        expectedScreenshotIds.all { id -> old.any { it.id == id } } &&
-        optionalOverrides.keys.all { id -> old.any { it.id == id } } &&
-        old.mapIndexed { index, row -> row to actionsAndExpected[index].second }.all { (row, expected) ->
-            val (optional, condition) = optionalOverrides[row.id] ?: (row.optional to row.condition)
-            recordingRowIssues(row, expected, optional, condition, requireExpected = false).isEmpty()
-        } &&
-        (expectedRowIds == null || expectedRowIds == old.map { it.id })
+    ): Boolean {
+        val current = mutableSnapshot.value
+        return !current.active && !applicationReserved && !current.rewriteInProgress && actionsAndExpected.size == old.size &&
+            expectedScreenshotIds.all { id -> old.any { it.id == id } } &&
+            optionalOverrides.keys.all { id -> old.any { it.id == id } } &&
+            old.mapIndexed { index, row -> row to actionsAndExpected[index].second }.all { (row, expected) ->
+                val (optional, condition) = optionalOverrides[row.id] ?: (row.optional to row.condition)
+                recordingRowIssues(row, expected, optional, condition, requireExpected = false).isEmpty()
+            } &&
+            (expectedRowIds == null || expectedRowIds == old.map { it.id })
+    }
 
     fun stop(): TestStepRecordingSnapshot {
         val detached = synchronized(lock) {

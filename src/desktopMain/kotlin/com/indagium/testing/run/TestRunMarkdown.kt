@@ -1,5 +1,6 @@
 package com.indagium.testing.run
 
+import com.indagium.model.summaryLabel
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.JudgeComparison
 import com.indagium.testing.model.LaneResult
@@ -7,6 +8,7 @@ import com.indagium.testing.model.StepFix
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.judge
 import com.indagium.testing.model.judgeActive
 import com.indagium.testing.model.modelAndEffortLabel
@@ -55,6 +57,7 @@ private fun StringBuilder.step(result: StepResult) {
         if (result.judgeInconclusive) append(" — the step status is the agent's claim and the checks alone")
         append('\n')
         judge.error?.let { append("    - Judge problem: ").append(it).append('\n') }
+        judge.usage?.let { append("    - Judge attempt usage: ").append(it.summaryLabel()).append('\n') }
         judge.reasoning.takeIf { it.isNotBlank() }?.let { append("    - Reasoning: ").append(it.trim().replace('\n', ' ')).append('\n') }
         judge.suggestedFix?.let { fix -> appendFix(fix, judge.fixApplied, judge.id) }
     }
@@ -83,6 +86,7 @@ private fun StringBuilder.comparison(run: TestRun, comparison: JudgeComparison) 
     })
     append(" (").append(comparison.classification.name.lowercase()).append(")\n")
     comparison.error?.let { append("  - Judge problem: ").append(it).append('\n') }
+    comparison.usage?.let { append("  - Judge usage: ").append(it.summaryLabel()).append('\n') }
     comparison.explanation.takeIf { it.isNotBlank() }?.let { append("  - ").append(it.trim().replace('\n', ' ')).append('\n') }
     comparison.suggestedFix?.let { appendFix(it, comparison.fixApplied, comparison.id) }
 }
@@ -91,12 +95,18 @@ private fun StringBuilder.case(case: CaseResult) {
     append("\n#### ").append(case.caseName)
     if (case.iteration > 1) append(" (run ").append(case.iteration).append(')')
     append(" — ").append(case.status?.name ?: "running").append('\n')
+    case.agentUsage?.let { append("- Agent usage: ").append(it.summaryLabel()).append('\n') }
+    case.judgeUsage?.let { append("- Inline judge usage: ").append(it.summaryLabel()).append('\n') }
+    case.externalToolCalls?.let {
+        append("- External MCP actor usage: ").append(if (it == 0L) "Tools 0" else "Tools $it · Tokens unavailable · Partial").append('\n')
+    }
     case.note?.let { append(it).append('\n') }
     case.steps.forEach { step(it) }
 }
 
 private fun StringBuilder.lane(lane: LaneResult) {
     append("\n### Lane ").append(lane.config.deviceSerial).append(" — ").append(lane.status.name).append('\n')
+    lane.aiUsage()?.let { append("Lane usage: ").append(it.summaryLabel()).append('\n') }
     append(
         if (lane.config.profileId != null) {
             "Driven by AI profile `${lane.config.profileId}`" +
@@ -123,6 +133,7 @@ internal fun TestRun.toMarkdown(): String = buildString {
     append("- Run id: `").append(id).append("`\n")
     append("- Started: ").append(format(startedAt)).append(" · finished: ").append(format(finishedAt)).append('\n')
     append("- Repeat: ").append(config.repeat).append(" · tool-call limit per case: ").append(config.caseToolCallLimit).append('\n')
+    append("- AI usage total: ").append(aiUsage()?.summaryLabel() ?: "unavailable").append('\n')
     if (config.judgeActive) append("- Judge: AI profile `").append(config.judgeProfileId).append("`, mode ").append(config.judge.wire).append('\n')
     warnings.forEach { append("- Warning: ").append(it).append('\n') }
     error?.let { append("- Error: ").append(it).append('\n') }

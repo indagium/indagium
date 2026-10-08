@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -35,7 +36,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.indagium.ai.normalizeAiProviderProfiles
 import com.indagium.capture.CaptureDevice
+import com.indagium.model.AiUsageStats
 import com.indagium.model.WorkflowAiSelection
+import com.indagium.model.summaryLabel
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepRecordingSession
@@ -51,6 +54,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 private data class StepInsertionPoint(val label: String, val index: Int)
 
@@ -228,6 +232,9 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
     val catalog = remember { ModelCatalog() }
     var prompt by remember { mutableStateOf(case.description.takeIf(String::isNotBlank) ?: "") }
     var draft by remember { mutableStateOf<TestStepDraft?>(null) }
+    var attemptUsage by remember { mutableStateOf<AiUsageStats?>(null) }
+    var sessionUsage by remember { mutableStateOf<AiUsageStats?>(null) }
+    val authoringSessionId = remember(case.id) { UUID.randomUUID().toString() }
     val editableSteps = remember(draft?.id) { mutableStateListOf<TestStep>().apply { draft?.steps?.let(::addAll) } }
     var working by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -244,6 +251,7 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
     fun discardPreview() {
         job?.cancel()
         draft?.let { ui.state.testStepDraftService.discard(it.id) }
+        ui.state.testStepDraftService.discardAuthoringSession(authoringSessionId)
         onDismiss()
     }
 
@@ -251,6 +259,7 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
         onDispose {
             job?.cancel()
             draft?.let { ui.state.testStepDraftService.discard(it.id) }
+            ui.state.testStepDraftService.discardAuthoringSession(authoringSessionId)
         }
     }
 
@@ -262,6 +271,11 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
             AppText("Draft steps with AI", color = tc.tx, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(6.dp))
             TestsHint("Generation only creates this preview. It has no device controls and does not change the library until you apply it.")
+            if (attemptUsage != null) {
+                Spacer(Modifier.height(5.dp))
+                AppText("Latest attempt · ${attemptUsage?.summaryLabel()}", color = tc.td, fontSize = 9.sp)
+            }
+            sessionUsage?.let { AppText("Creation session total · ${it.summaryLabel()}", color = tc.td, fontSize = 9.sp) }
             Spacer(Modifier.height(12.dp))
             if (draft == null) {
                 TestsLabeled("Provider profile") {
@@ -311,6 +325,8 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                                 try {
                                     when (val result = ui.state.testStepDraftService.create(
                                         suiteId, case.id, selected.id, prompt, selection.modelId, selection.reasoningEffort,
+                                        authoringSessionId = authoringSessionId,
+                                        onUsage = { latest, total -> attemptUsage = latest; sessionUsage = total },
                                     )) {
                                         is StoreResult.Ok -> draft = result.value
                                         else -> error = result.userMessage()
@@ -326,6 +342,11 @@ private fun TestStepDraftDialog(suiteId: String, case: TestCase, onDismiss: () -
                 }
             } else {
                 AppText("Review and edit ${editableSteps.size} proposed step(s).", color = tc.ts, fontSize = 11.sp)
+                draft?.creationUsage?.let { usage ->
+                    Spacer(Modifier.height(4.dp))
+                    AppText("Creation session total · ${usage.summaryLabel()}", color = tc.td, fontSize = 9.sp)
+                }
+                draft?.latestUsage?.let { usage -> AppText("Latest draft attempt · ${usage.summaryLabel()}", color = tc.td, fontSize = 9.sp) }
                 TestsDropdown(
                     selectedLabel = insertion.label,
                     options = insertionPoints,
@@ -452,6 +473,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
     var error by remember { mutableStateOf<String?>(null) }
     val rewriting = ui.state.isTestStepRecordingRewriting(session.id)
     val applying = working || ui.state.isTestStepRecordingApplying(session.id)
+    val editable = !snapshot.active && !applying && !rewriting
     val applyBlockedReason = recordingApplyBlockedReason(snapshot)
     Column(Modifier.fillMaxWidth().background(tc.p, CORNER_MD).border(1.dp, tc.br, CORNER_MD).padding(14.dp).heightIn(max = 600.dp).verticalScroll(rememberScrollState())) {
         AppText(if (snapshot.active) "Recording device input…" else "Review recorded steps", color = tc.tx, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
@@ -464,79 +486,105 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                 AppButton("Stop and review", onClick = { session.stop() }, variant = ButtonVariant.Primary)
             }
         }
-        if (snapshot.steps.isEmpty()) TestsHint("No accepted mirror input recorded yet.")
-        if (!snapshot.active && snapshot.steps.isNotEmpty()) RecordingRewriteSection(session, case, snapshot, locked = applying)
+        if (snapshot.steps.isEmpty()) {
+            TestsHint(
+                if (snapshot.excludedSourceInputIds.isNotEmpty()) {
+                    "No steps remain in review. Restore removed inputs to bring the original recording back."
+                } else {
+                    "No accepted mirror input recorded yet."
+                },
+            )
+        }
+        if (!snapshot.active && snapshot.pendingSnapshots > 0) {
+            TestsHint("Wait for the recorded screen snapshots to finish before removing or restoring inputs.")
+        }
+        if (!snapshot.active) RecordingRewriteSection(session, case, snapshot, locked = applying)
         snapshot.steps.forEachIndexed { index, row ->
-            Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
-                AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
-                TestsLabeled("Action") {
-                    CommitTextField(row.action, { text -> updateRecorded(session, index) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, placeholder = "Recorded action")
-                }
-                TestsLabeled("Expected result") {
-                    CommitTextField(
-                        row.expected,
-                        { text ->
-                            updateRecorded(session, index) { it.copy(expected = text) }
-                            StoreResult.Ok(Unit)
-                        },
-                        enabled = !applying && !rewriting,
-                        multiline = true,
-                        placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
-                    )
-                }
-                CheckRow(checked = row.optional, onToggle = {
-                    updateRecorded(session, index) {
-                        if (it.optional) it.copy(optional = false, condition = null)
-                        else it.copy(optional = true)
-                    }
-                }, enabled = !applying && !rewriting) {
-                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
-                }
-                if (row.optional) {
-                    TestsLabeled("Perform only when") {
-                        CommitTextField(
-                            row.condition.orEmpty(),
-                            { text ->
-                                updateRecorded(session, index) { it.copy(condition = text) }
-                                StoreResult.Ok(Unit)
+            key(row.id) {
+                Column(Modifier.fillMaxWidth().background(tc.p2, CORNER_MD).padding(8.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                        AppText("STEP ${index + 1}", color = tc.ac, fontSize = 9.sp, fontWeight = FontWeight.SemiBold)
+                        AppButton(
+                            "Remove",
+                            onClick = {
+                                when (val result = ui.state.removeTestRecordingRows(session.id, setOf(row.id))) {
+                                    is StoreResult.Ok -> error = null
+                                    else -> error = result.userMessage()
+                                }
                             },
-                            enabled = !applying && !rewriting,
-                            multiline = true,
-                            placeholder = "Describe the visible condition, such as an ad is playing",
+                            enabled = !applying && !rewriting && !snapshot.active && snapshot.pendingSnapshots == 0,
+                            variant = ButtonVariant.Ghost,
                         )
                     }
-                }
-                if (row.sourceInputIds.isNotEmpty()) {
-                    RecordedInputsList(row, snapshot.rawSteps.orEmpty())
-                    if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
-                }
-                row.contextHint()?.let { TestsHint("Screen context: $it") }
-                row.screenContext?.let { TestsHint(it) }
-                row.reviewReason?.let {
-                    if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
-                }
-                row.screenshotJpeg?.let { bytes ->
-                    val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
-                    val caption = when {
-                        row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
-                        row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
-                        else -> "Image: raw input preview from $source; acquisition interval recorded."
+                    TestsLabeled("Action") {
+                        CommitTextField(row.action, { text -> updateRecorded(session, row.id) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = editable, placeholder = "Recorded action")
                     }
-                    TestsHint(caption)
-                    RecordedScreenshotPreview(bytes)
-                    CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
-                        updateRecorded(session, index) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
-                    }, enabled = !applying && !rewriting) {
-                        val label = if (row.screenshotVerifiedMoment == "after") {
-                            "Use this verified after screenshot as an expected screenshot (review first)"
-                        } else {
-                            "Use this raw input preview as an expected screenshot (review first)"
+                    TestsLabeled("Expected result") {
+                        CommitTextField(
+                            row.expected,
+                            { text ->
+                                updateRecorded(session, row.id) { it.copy(expected = text) }
+                                StoreResult.Ok(Unit)
+                            },
+                            enabled = editable,
+                            multiline = true,
+                            placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying",
+                        )
+                    }
+                    CheckRow(checked = row.optional, onToggle = {
+                        updateRecorded(session, row.id) {
+                            if (it.optional) it.copy(optional = false, condition = null)
+                            else it.copy(optional = true)
                         }
-                        AppText(label, color = tc.ts, fontSize = 9.sp)
+                    }, enabled = editable) {
+                        AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
+                    }
+                    if (row.optional) {
+                        TestsLabeled("Perform only when") {
+                            CommitTextField(
+                                row.condition.orEmpty(),
+                                { text ->
+                                    updateRecorded(session, row.id) { it.copy(condition = text) }
+                                    StoreResult.Ok(Unit)
+                                },
+                                enabled = editable,
+                                multiline = true,
+                                placeholder = "Describe the visible condition, such as an ad is playing",
+                            )
+                        }
+                    }
+                    if (row.sourceInputIds.isNotEmpty()) {
+                        RecordedInputsList(row, snapshot.rawSteps.orEmpty())
+                        if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
+                    }
+                    row.contextHint()?.let { TestsHint("Screen context: $it") }
+                    row.screenContext?.let { TestsHint(it) }
+                    row.reviewReason?.let {
+                        if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
+                    }
+                    row.screenshotJpeg?.let { bytes ->
+                        val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
+                        val caption = when {
+                            row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
+                            row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
+                            else -> "Image: raw input preview from $source; acquisition interval recorded."
+                        }
+                        TestsHint(caption)
+                        RecordedScreenshotPreview(bytes)
+                        CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
+                            updateRecorded(session, row.id) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
+                        }, enabled = editable) {
+                            val label = if (row.screenshotVerifiedMoment == "after") {
+                                "Use this verified after screenshot as an expected screenshot (review first)"
+                            } else {
+                                "Use this raw input preview as an expected screenshot (review first)"
+                            }
+                            AppText(label, color = tc.ts, fontSize = 9.sp)
+                        }
                     }
                 }
+                Spacer(Modifier.height(6.dp))
             }
-            Spacer(Modifier.height(6.dp))
         }
         snapshot.warnings.forEach { TestsErrorText(it) }
         error?.let { TestsErrorText(it) }
@@ -588,7 +636,11 @@ private fun RecordedScreenshotPreview(bytes: ByteArray) {
     bitmap?.let { Image(it, contentDescription = "Input-time screenshot context", contentScale = ContentScale.Fit, modifier = Modifier.heightIn(max = 180.dp)) }
 }
 
-private fun updateRecorded(session: TestStepRecordingSession, index: Int, transform: (RecordedTestStep) -> RecordedTestStep) {
+private fun updateRecorded(session: TestStepRecordingSession, rowId: String, transform: (RecordedTestStep) -> RecordedTestStep) {
     val current = session.snapshot.value.steps.toMutableList()
-    current.getOrNull(index)?.let { current[index] = transform(it); session.replaceSteps(current) }
+    val index = current.indexOfFirst { it.id == rowId }
+    if (index >= 0) {
+        current[index] = transform(current[index])
+        session.replaceSteps(current)
+    }
 }

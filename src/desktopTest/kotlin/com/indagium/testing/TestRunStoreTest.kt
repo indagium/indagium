@@ -1,10 +1,13 @@
 package com.indagium.testing
 
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.CaseResult
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckResult
 import com.indagium.testing.model.CheckStatus
 import com.indagium.testing.model.EvidenceFlags
+import com.indagium.testing.model.JudgeComparison
+import com.indagium.testing.model.JudgeVerdict
 import com.indagium.testing.model.LaneConfig
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
@@ -12,6 +15,7 @@ import com.indagium.testing.model.LaneToolCall
 import com.indagium.testing.model.LaneToolCallStatus
 import com.indagium.testing.model.RunConfig
 import com.indagium.testing.model.RunStatus
+import com.indagium.testing.model.StepJudgement
 import com.indagium.testing.model.StepResult
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
@@ -124,6 +128,47 @@ class TestRunStoreTest {
         assertEquals(run, loaded)
         val text = File(store.runDir(run.id), TEST_RUN_FILE_NAME).readText()
         assertEquals("indagium-test-run", Json.parseToJsonElement(text).jsonObject["format"]?.let { (it as kotlinx.serialization.json.JsonPrimitive).content })
+    }
+
+    @Test
+    fun authoringAgentJudgeExternalAndComparisonUsageSurviveRunJsonAndOldDefaultsStayNull() {
+        val oldRun = sampleRun()
+        val oldRoundTrip = decodeRunFile(encodeRunFile(oldRun)).getOrThrow()
+        assertNull(oldRoundTrip.lanes.first().cases.single().agentUsage)
+        assertNull(oldRoundTrip.lanes.first().cases.single().judgeUsage)
+        assertNull(oldRoundTrip.lanes.first().cases.single().externalToolCalls)
+
+        val base = sampleRun()
+        val lane = base.lanes.first()
+        val case = lane.cases.single()
+        val step = case.steps.single().copy(
+            judge = StepJudgement(verdict = JudgeVerdict.PASS, usage = AiUsageStats(inputTokens = 6, outputTokens = 2, totalTokens = 8)),
+        )
+        val usageRun = base.copy(
+            lanes = base.lanes.map { result ->
+                if (result.laneId != lane.laneId) result else result.copy(
+                    cases = listOf(case.copy(
+                        steps = listOf(step),
+                        agentUsage = AiUsageStats(toolCalls = 4, inputTokens = 90, outputTokens = 20, totalTokens = 110, partial = true),
+                        judgeUsage = AiUsageStats(toolCalls = 1, inputTokens = 6, outputTokens = 2, totalTokens = 8),
+                        externalToolCalls = 12,
+                    )),
+                )
+            },
+            comparisons = listOf(
+                JudgeComparison(
+                    caseId = case.caseId,
+                    iteration = 2,
+                    stepId = step.stepId,
+                    stepNumber = 1,
+                    action = step.action,
+                    verdicts = emptyMap(),
+                    usage = AiUsageStats(toolCalls = 2, inputTokens = 25, outputTokens = 5, totalTokens = 30),
+                ),
+            ),
+        )
+
+        assertEquals(usageRun, decodeRunFile(encodeRunFile(usageRun)).getOrThrow())
     }
 
     @Test

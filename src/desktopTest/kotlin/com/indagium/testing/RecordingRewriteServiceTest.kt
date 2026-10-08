@@ -2,10 +2,12 @@
 
 package com.indagium.testing
 
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.authoring.RecordingRewrite
 import com.indagium.testing.authoring.RecordingRewriteService
 import com.indagium.testing.authoring.RewriteGeneration
 import com.indagium.testing.authoring.TestStepRecordingSession
+import com.indagium.testing.authoring.TestStepRecordingSnapshot
 import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitKind
 import com.indagium.testing.model.StepCheck
@@ -101,6 +103,37 @@ class RecordingRewriteServiceTest {
     }
 
     @Test
+    fun exclusionsRemainOutOfRepeatRewriteAndCoverageIsRequiredForEveryRetainedInput() = runBlocking {
+        val session = session()
+        val original = session.snapshot.value.steps
+        assertTrue(session.removeReviewedRows(setOf(original[1].id)))
+        val afterRemoval = session.snapshot.value
+        val incomplete = service(generate = {
+            """{"steps":[{"action":"Search","expected":"Search is ready","sourceInputs":[1]}]}"""
+        }).run(session)
+        assertTrue(invalid(incomplete).contains("input 2"))
+        assertRejectedRewritePreservesReview(afterRemoval, session.snapshot.value)
+        assertEquals(afterRemoval.excludedSourceInputIds, session.snapshot.value.excludedSourceInputIds)
+
+        val seen = mutableListOf<RewriteGeneration>()
+        val valid = service(generate = { seen += it; """{"steps":[
+            {"action":"Search","expected":"Search field is ready","sourceInputs":[1]},
+            {"action":"Submit","expected":"Results appear","sourceInputs":[2]}
+        ]}""" }).run(session)
+        assertIs<StoreResult.Ok<RecordingRewrite>>(valid)
+        val prompt = seen.single().prompt
+        assertTrue("1. [TAP]" in prompt && "2. [KEY]" in prompt, prompt)
+        assertTrue("Do not recreate" in prompt || "do not recreate" in prompt, prompt)
+        assertEquals(listOf(original[0].id, original[2].id), session.snapshot.value.steps.flatMap { it.sourceInputIds })
+        assertEquals(setOf(original[1].id), session.snapshot.value.excludedSourceInputIds)
+
+        assertTrue(session.restoreRaw())
+        assertEquals(listOf(original[0].id, original[2].id), session.snapshot.value.steps.map { it.id })
+        assertTrue(session.restoreExcludedInputs())
+        assertEquals(original, session.snapshot.value.steps)
+    }
+
+    @Test
     fun markdownFencedJsonAndChatterAroundTheObjectAreAccepted() = runBlocking {
         val fenced = "```json\n$VALID_SHOP_REWRITE\n```"
         val chatter = "Here is the rewrite:\n$VALID_SHOP_REWRITE\nLet me know if you want changes."
@@ -170,8 +203,22 @@ class RecordingRewriteServiceTest {
         val before = session.snapshot.value
         val reason = invalid(service(generate = { response }).run(session))
         reasonParts.forEach { assertTrue(it in reason, "'$it' missing from: $reason") }
-        assertEquals(before, session.snapshot.value, "a rejected answer is never applied partially")
+        assertRejectedRewritePreservesReview(before, session.snapshot.value)
         assertNull(session.snapshot.value.rawSteps)
+    }
+
+    private fun assertRejectedRewritePreservesReview(before: TestStepRecordingSnapshot, after: TestStepRecordingSnapshot) {
+        val reviewAfterAttempt = after.copy(
+            rewriteUsage = before.rewriteUsage,
+            rewriteUsageTotal = before.rewriteUsageTotal,
+            rewriteUsagePending = before.rewriteUsagePending,
+            rewriteAttemptCount = before.rewriteAttemptCount,
+            rewriteInProgress = before.rewriteInProgress,
+        )
+        assertEquals(before, reviewAfterAttempt, "a rejected answer preserves rows, evidence and exclusions")
+        assertEquals(before.rewriteAttemptCount + 1, after.rewriteAttemptCount)
+        assertFalse(after.rewriteInProgress)
+        assertTrue(after.rewriteUsage?.partial == true, "the failed attempt keeps its unknown usage visible")
     }
 
     @Test
@@ -265,10 +312,13 @@ class RecordingRewriteServiceTest {
     @Test
     fun aProviderFailureLeavesTheRecordingAsItWas() = runBlocking {
         val session = session()
-        val before = session.snapshot.value
+        val before = session.snapshot.value.steps
         val reason = invalid(service(generate = { error("The provider could not rewrite the recording: boom") }).run(session))
         assertTrue("boom" in reason)
-        assertEquals(before, session.snapshot.value)
+        assertEquals(before, session.snapshot.value.steps)
+        assertEquals(1, session.snapshot.value.rewriteAttemptCount)
+        assertFalse(session.snapshot.value.rewriteInProgress)
+        assertTrue(session.snapshot.value.rewriteUsage?.partial == true)
     }
 
     // ── Timeout and cancel ───────────────────────────────────────────
@@ -276,21 +326,24 @@ class RecordingRewriteServiceTest {
     @Test
     fun aSlowProviderTimesOutWithAnActionableMessage() = runBlocking {
         val session = session()
-        val before = session.snapshot.value
+        val before = session.snapshot.value.steps
         val reason = invalid(service(timeoutMs = 20, generate = { awaitCancellation() }).run(session))
         assertTrue("timed out" in reason, reason)
-        assertEquals(before, session.snapshot.value)
+        assertEquals(before, session.snapshot.value.steps)
+        assertTrue(session.snapshot.value.rewriteUsage?.partial == true)
+        assertNull(session.snapshot.value.rewriteUsage?.inputTokens)
     }
 
     @Test
     fun cancellingTheCallerCancelsTheProviderAndChangesNothing() = runBlocking {
         val session = session()
-        val before = session.snapshot.value
+        val before = session.snapshot.value.steps
         val entered = CompletableDeferred<Unit>()
         val cancelled = CompletableDeferred<Unit>()
         val request = async {
-            service(generate = {
+            service(generate = { generation ->
                 try {
+                    generation.onUsage(AiUsageStats(inputTokens = 23L, outputTokens = 7L, totalTokens = 30L))
                     entered.complete(Unit)
                     awaitCancellation()
                 } finally {
@@ -302,7 +355,11 @@ class RecordingRewriteServiceTest {
         request.cancelAndJoin()
         withTimeout(2_000) { cancelled.await() }
         assertTrue(request.isCancelled)
-        assertEquals(before, session.snapshot.value)
+        assertEquals(before, session.snapshot.value.steps)
+        assertFalse(session.snapshot.value.rewriteInProgress)
+        assertEquals(23L, session.snapshot.value.rewriteUsage?.inputTokens)
+        assertEquals(30L, session.snapshot.value.rewriteUsage?.totalTokens)
+        assertTrue(session.snapshot.value.rewriteUsage?.partial == true)
     }
 
     @Test
@@ -350,7 +407,7 @@ class RecordingRewriteServiceTest {
         assertTrue("Stop the recording" in invalid(service.run(active)))
 
         val empty = TestStepRecordingSession("fixture-device").also { sessions += it; it.stop() }
-        assertTrue("No input was recorded" in invalid(service.run(empty)))
+        assertTrue("No recorded inputs remain" in invalid(service.run(empty)))
 
         val applying = session()
         assertTrue(applying.freezeReviewedSnapshotForApply() != null)

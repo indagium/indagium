@@ -190,11 +190,13 @@ internal class AccountAgentRunner(
                         is CodexAppServerEvent.TokenUsageUpdated -> if (event.threadId == null || event.threadId == thread.id) {
                             run.emit(
                                 AiRunEvent.Usage(
-                                    inputTokens = event.total.inputTokens.toInt(),
-                                    outputTokens = event.total.outputTokens.toInt(),
-                                    totalTokens = event.total.totalTokens.toInt(),
-                                    cachedInputTokens = event.total.cachedInputTokens.toInt(),
-                                    reasoningOutputTokens = event.total.reasoningOutputTokens.toInt(),
+                                    inputTokens = event.total.inputTokens,
+                                    outputTokens = event.total.outputTokens,
+                                    totalTokens = event.total.totalTokens,
+                                    cachedInputTokens = event.total.cachedInputTokens,
+                                    reasoningOutputTokens = event.total.reasoningOutputTokens,
+                                    requestId = thread.id,
+                                    aggregation = AiUsageAggregation.RUN_CUMULATIVE,
                                 ),
                             )
                         }
@@ -285,9 +287,14 @@ internal class AccountAgentRunner(
                             AiRunEvent.Usage(
                                 inputTokens = usage.inputTokens,
                                 outputTokens = usage.outputTokens,
-                                totalTokens = usage.inputTokens + usage.outputTokens,
+                                totalTokens = listOf(usage.inputTokens, usage.outputTokens, usage.cacheCreationInputTokens, usage.cacheReadInputTokens)
+                                    .takeIf { it.all { count -> count != null } }
+                                    ?.fold(0L) { total, count -> if (total > Long.MAX_VALUE - count!!) Long.MAX_VALUE else total + count },
                                 cachedInputTokens = usage.cacheReadInputTokens,
                                 cachedInputIncludedInInput = false,
+                                cacheCreationInputTokens = usage.cacheCreationInputTokens,
+                                requestId = session.claudeCodeSessionId,
+                                aggregation = AiUsageAggregation.RUN_CUMULATIVE,
                             ),
                         )
                     }

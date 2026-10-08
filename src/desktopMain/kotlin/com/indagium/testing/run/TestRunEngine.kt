@@ -119,7 +119,15 @@ internal class TestRunEngine(
     /** Every lane is done: the steps they disagreed on go to the comparison judge, one at a time. */
     private suspend fun compareLanes(judge: JudgeService) {
         val run = state.current
-        compareDisagreements(run, deps.store.runDir(run.id), judge) { comparison -> state.update { it.copy(comparisons = it.comparisons + comparison) } }
+        compareDisagreements(run, deps.store.runDir(run.id), judge) { comparison ->
+            state.update { current ->
+                val index = current.comparisons.indexOfFirst { it.id == comparison.id }
+                current.copy(
+                    comparisons = if (index < 0) current.comparisons + comparison else
+                        current.comparisons.mapIndexed { position, old -> if (position == index) comparison else old },
+                )
+            }
+        }
     }
 
     private suspend fun finish(cancelled: Boolean) {

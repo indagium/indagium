@@ -14,8 +14,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.io.FileNotFoundException
 import java.io.IOException
@@ -69,10 +69,10 @@ data class ClaudeCodeRequest(
 
 /** Token accounting the CLI's terminal `"result"` line reports for the whole run so far. */
 data class ClaudeCodeUsage(
-    val inputTokens: Int,
-    val outputTokens: Int,
-    val cacheCreationInputTokens: Int,
-    val cacheReadInputTokens: Int,
+    val inputTokens: Long?,
+    val outputTokens: Long?,
+    val cacheCreationInputTokens: Long?,
+    val cacheReadInputTokens: Long?,
 )
 
 enum class ClaudeCodeErrorKind {
@@ -207,10 +207,10 @@ class ClaudeCodeStreamParser {
     private fun parseUsage(root: JsonObject): ClaudeCodeUsage? {
         val usage = root["usage"] as? JsonObject ?: return null
         return ClaudeCodeUsage(
-            inputTokens = usage.int("input_tokens"),
-            outputTokens = usage.int("output_tokens"),
-            cacheCreationInputTokens = usage.int("cache_creation_input_tokens"),
-            cacheReadInputTokens = usage.int("cache_read_input_tokens"),
+            inputTokens = usage.long("input_tokens"),
+            outputTokens = usage.long("output_tokens"),
+            cacheCreationInputTokens = usage.long("cache_creation_input_tokens"),
+            cacheReadInputTokens = usage.long("cache_read_input_tokens"),
         )
     }
 
@@ -218,7 +218,7 @@ class ClaudeCodeStreamParser {
 
     private fun JsonObject.boolean(key: String): Boolean? = (this[key] as? JsonPrimitive)?.booleanOrNull
 
-    private fun JsonObject.int(key: String): Int = (this[key] as? JsonPrimitive)?.intOrNull ?: 0
+    private fun JsonObject.long(key: String): Long? = (this[key] as? JsonPrimitive)?.longOrNull
 
     private fun JsonObject.errorMessage(): String? = string("error") ?: string("message")
         ?: (this["error"] as? JsonObject)?.string("message")

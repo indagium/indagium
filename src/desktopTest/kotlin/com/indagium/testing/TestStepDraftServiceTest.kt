@@ -1,5 +1,7 @@
 package com.indagium.testing
 
+import com.indagium.model.AiUsageStats
+import com.indagium.testing.authoring.TestStepDraft
 import com.indagium.testing.authoring.TestStepDraftService
 import com.indagium.testing.model.TestCase
 import com.indagium.testing.model.TestLibrary
@@ -20,6 +22,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class TestStepDraftServiceTest {
@@ -98,6 +101,101 @@ class TestStepDraftServiceTest {
         releaseInsert.countDown()
         assertTrue(first.await() is StoreResult.Ok)
         assertEquals(1, inserts.get())
+    }
+
+    @Test
+    fun draftUsageShowsLatestAndSessionTotalAndAppliesEachAttemptOnlyOnce() {
+        val applied = mutableListOf<AiUsageStats?>()
+        val attempt = AtomicInteger()
+        val sessionId = "dialog-session"
+        val service = TestStepDraftService(
+            library = ::library,
+            preflight = { _, _ -> StoreResult.Ok(Unit) },
+            generate = { _, _, _, _ -> error("usage-aware generator is used") },
+            insert = { _, steps, _ -> StoreResult.Ok(steps) },
+            assetExists = { _, _ -> true },
+            generateWithUsage = { _, _, _, _, report ->
+                val number = attempt.incrementAndGet()
+                report(AiUsageStats(toolCalls = 1, inputTokens = number * 10L, outputTokens = number.toLong(), totalTokens = number * 11L))
+                """{"steps":[{"action":"Add attempt $number","expected":"It appears"}]}"""
+            },
+            insertWithUsage = { _, steps, _, usage -> applied += usage; StoreResult.Ok(steps) },
+        )
+
+        val first = runBlocking {
+            assertIs<StoreResult.Ok<TestStepDraft>>(
+                service.create("suite-1", "case-1", "profile", "Add first", authoringSessionId = sessionId),
+            ).value
+        }
+        val second = runBlocking {
+            assertIs<StoreResult.Ok<TestStepDraft>>(
+                service.create("suite-1", "case-1", "profile", "Add second", authoringSessionId = sessionId),
+            ).value
+        }
+        assertEquals(10L, first.latestUsage?.inputTokens)
+        assertEquals(10L, first.creationUsage?.inputTokens)
+        assertEquals(20L, second.latestUsage?.inputTokens)
+        assertEquals(30L, second.creationUsage?.inputTokens)
+
+        assertIs<StoreResult.Ok<List<TestStep>>>(service.apply(second.id, second.steps))
+        assertIs<StoreResult.Ok<List<TestStep>>>(service.apply(first.id, first.steps))
+        assertEquals(30L, applied[0]?.inputTokens, "applying the latest preview includes both session attempts")
+        assertNull(applied[1], "an older preview cannot attach an already applied attempt again")
+    }
+
+    @Test
+    fun concurrentDraftAppliesReserveUsagePerAuthoringSession() = runBlocking {
+        val sessionId = "dialog-session"
+        val applied = java.util.Collections.synchronizedList(mutableListOf<AiUsageStats?>())
+        val applyCount = AtomicInteger()
+        val insertEntered = CountDownLatch(1)
+        val releaseInsert = CountDownLatch(1)
+        val attempts = AtomicInteger()
+        val service = TestStepDraftService(
+            library = ::library,
+            preflight = { _, _ -> StoreResult.Ok(Unit) },
+            generate = { _, _, _, _ -> error("usage-aware generator is used") },
+            insert = { _, steps, _ -> StoreResult.Ok(steps) },
+            assetExists = { _, _ -> true },
+            generateWithUsage = { _, _, _, _, report ->
+                val number = attempts.incrementAndGet()
+                report(AiUsageStats(toolCalls = 1, inputTokens = number.toLong(), outputTokens = 1, totalTokens = number + 1L))
+                """{"steps":[{"action":"Attempt $number","expected":"It appears"}]}"""
+            },
+            insertWithUsage = { _, steps, _, usage ->
+                applied += usage
+                if (applyCount.incrementAndGet() == 1) {
+                    insertEntered.countDown()
+                    check(releaseInsert.await(2, TimeUnit.SECONDS))
+                }
+                StoreResult.Ok(steps)
+            },
+        )
+        val first = assertIs<StoreResult.Ok<com.indagium.testing.authoring.TestStepDraft>>(
+            service.create("suite-1", "case-1", "profile", "Add first", authoringSessionId = sessionId),
+        ).value
+        val second = assertIs<StoreResult.Ok<com.indagium.testing.authoring.TestStepDraft>>(
+            service.create("suite-1", "case-1", "profile", "Add second", authoringSessionId = sessionId),
+        ).value
+
+        val firstApply = async(Dispatchers.IO) { service.apply(first.id, first.steps) }
+        assertTrue(insertEntered.await(2, TimeUnit.SECONDS))
+        val rejected = service.apply(second.id, second.steps)
+        assertTrue(rejected is StoreResult.Invalid && "being applied" in rejected.reason)
+        releaseInsert.countDown()
+        assertIs<StoreResult.Ok<List<TestStep>>>(firstApply.await())
+        assertIs<StoreResult.Ok<List<TestStep>>>(service.apply(second.id, second.steps))
+
+        assertEquals(1L, applied[0]?.inputTokens)
+        assertEquals(2L, applied[1]?.inputTokens, "the second preview applies only its new attempt after reservation release")
+    }
+
+    @Test
+    fun absentProviderUsageIsRetainedAsPartialInsteadOfBeingReportedAsZero() = runBlocking {
+        val result = service().create("suite-1", "case-1", "profile", "Add a step")
+        val draft = assertIs<StoreResult.Ok<com.indagium.testing.authoring.TestStepDraft>>(result).value
+        assertEquals(null, draft.creationUsage?.totalTokens)
+        assertTrue(draft.creationUsage?.partial == true)
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.indagium.debug
 
 import com.indagium.edition.Edition
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.authoring.RecordedTestStep
 import com.indagium.testing.authoring.readTestScriptEnvelope
 import com.indagium.testing.authoring.testScriptSchemaPreview
@@ -40,6 +41,20 @@ import java.io.File
 
 private const val MAX_PASTED_LOG_CHARS = 100_000
 private const val MAX_RECORDED_SCREEN_CAPTION_CHARS = 240
+
+private fun usageResultMap(usage: AiUsageStats?): Map<String, Any?>? = usage?.let {
+    buildMap {
+        it.toolCalls?.let { value -> put("toolCalls", value) }
+        it.inputTokens?.let { value -> put("inputTokens", value) }
+        it.outputTokens?.let { value -> put("outputTokens", value) }
+        it.totalTokens?.let { value -> put("totalTokens", value) }
+        it.cacheCreationTokens?.let { value -> put("cacheCreationTokens", value) }
+        it.cachedInputTokens?.let { value -> put("cachedInputTokens", value) }
+        it.cachedInputIncludedInInput?.let { value -> put("cachedInputIncludedInInput", value) }
+        it.reasoningOutputTokens?.let { value -> put("reasoningOutputTokens", value) }
+        put("partial", it.partial)
+    }
+}
 // Handlers of the AI test-suite authoring tools (catalogue: TestSuiteToolCatalog.kt), merged into
 // IndagiumToolOperations.operationHandlers. Every handler returns a plain Map, and every expected
 // failure is DATA: { "error": message } for a missing id, an invalid value or a bad argument, and
@@ -348,6 +363,16 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             val optionalOverrides = recordingOptionalOverrides(rows)
             appState.updateReviewedTestRecording(id, pairs, expectedScreens, rowIds, optionalOverrides).toResult { recordingMap(id, it) }
         },
+        "remove_test_recording_steps" to tool { a ->
+            val ids = a.strings("rowIds")?.toSet() ?: toolArgError("rowIds must be an array of recording row ids.")
+            if (ids.isEmpty()) toolArgError("rowIds must name at least one current recording row.")
+            val id = a.requiredString("sessionId")
+            appState.removeTestRecordingRows(id, ids).toResult { recordingMap(id, it) }
+        },
+        "restore_test_recording_inputs" to tool { a ->
+            val id = a.requiredString("sessionId")
+            appState.restoreRemovedTestRecordingInputs(id).toResult { recordingMap(id, it) }
+        },
         "restore_test_recording_raw" to tool { a ->
             val id = a.requiredString("sessionId")
             appState.restoreTestStepRecordingRaw(id).toResult { recordingMap(id, it) }
@@ -456,7 +481,10 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
                 "caseId" to draft.caseId,
                 "profileId" to draft.profileId,
                 "steps" to draft.steps.map(::stepResult),
-            )
+            ) + listOfNotNull(
+                usageResultMap(draft.latestUsage)?.let { "latestUsage" to it },
+                usageResultMap(draft.creationUsage)?.let { "creationUsage" to it },
+            ).toMap()
         }
     }
 
@@ -493,8 +521,13 @@ internal class TestSuiteToolOperations(private val appState: AppState) {
             put("sessionId", id)
             put("active", snapshot.active)
             put("pendingSnapshots", snapshot.pendingSnapshots)
-            put("rewritten", snapshot.rawSteps != null)
-            if (snapshot.rawSteps != null) put("rewriteNotes", snapshot.rewriteNotes)
+            put("rewritten", snapshot.rewriteApplied)
+            put("excludedSourceInputIds", snapshot.excludedSourceInputIds.sorted())
+            usageResultMap(snapshot.rewriteUsage)?.let { put("latestRewriteUsage", it) }
+            usageResultMap(snapshot.rewriteUsageTotal)?.let { put("rewriteSessionUsage", it) }
+            put("rewriteAttempts", snapshot.rewriteAttemptCount)
+            put("rewriteInProgress", snapshot.rewriteInProgress)
+            if (snapshot.rewriteApplied) put("rewriteNotes", snapshot.rewriteNotes)
             put("steps", snapshot.steps.map(::recordingStepMap))
             snapshot.videoTimeline?.let { timeline ->
                 put(

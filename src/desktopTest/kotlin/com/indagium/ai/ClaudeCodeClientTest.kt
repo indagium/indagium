@@ -187,10 +187,10 @@ class ClaudeCodeClientTest {
 
         val final = assertIs<ClaudeCodeEvent.Final>(events.last())
         val usage = requireNotNull(final.usage)
-        assertEquals(120, usage.inputTokens)
-        assertEquals(30, usage.outputTokens)
-        assertEquals(40, usage.cacheCreationInputTokens)
-        assertEquals(5, usage.cacheReadInputTokens)
+        assertEquals(120L, usage.inputTokens)
+        assertEquals(30L, usage.outputTokens)
+        assertEquals(40L, usage.cacheCreationInputTokens)
+        assertEquals(5L, usage.cacheReadInputTokens)
     }
 
     @Test

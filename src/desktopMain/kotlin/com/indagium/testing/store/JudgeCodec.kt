@@ -38,6 +38,7 @@ internal fun judgementToJson(judgement: StepJudgement): JsonObject = buildJsonOb
     put("durationMs", judgement.durationMs)
     judgement.error?.let { put("error", it) }
     put("fixApplied", judgement.fixApplied)
+    judgement.usage?.let { put("usage", aiUsageToJson(it)) }
 }
 
 internal fun decodeJudgement(o: JsonObject): StepJudgement = StepJudgement(
@@ -50,6 +51,7 @@ internal fun decodeJudgement(o: JsonObject): StepJudgement = StepJudgement(
     durationMs = o.long("durationMs", 0L),
     error = o.optStr("error"),
     fixApplied = o.bool("fixApplied", false),
+    usage = decodeAiUsage(o["usage"]),
 )
 
 internal fun comparisonToJson(comparison: JudgeComparison): JsonObject = buildJsonObject {
@@ -66,6 +68,7 @@ internal fun comparisonToJson(comparison: JudgeComparison): JsonObject = buildJs
     put("judgedAt", comparison.judgedAt)
     comparison.error?.let { put("error", it) }
     put("fixApplied", comparison.fixApplied)
+    comparison.usage?.let { put("usage", aiUsageToJson(it)) }
 }
 
 internal fun decodeComparison(o: JsonObject): JudgeComparison? {
@@ -88,5 +91,6 @@ internal fun decodeComparison(o: JsonObject): JudgeComparison? {
         judgedAt = o.long("judgedAt", 0L),
         error = o.optStr("error"),
         fixApplied = o.bool("fixApplied", false),
+        usage = decodeAiUsage(o["usage"]),
     )
 }

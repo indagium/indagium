@@ -174,11 +174,22 @@ internal class TranscriptTail(
                 append("confirmation", mapOf("tool" to event.confirmation.call.name, "description" to event.confirmation.description))
             is AiRunEvent.Error -> append("error", mapOf("message" to event.message))
             is AiRunEvent.Status -> append("status", mapOf("text" to event.text))
-            is AiRunEvent.Usage ->
-                append("usage", mapOf("input" to event.inputTokens, "output" to event.outputTokens, "total" to event.totalTokens))
+            is AiRunEvent.Usage -> append(
+                "usage",
+                mapOf(
+                    "input" to event.inputTokens,
+                    "output" to event.outputTokens,
+                    "total" to event.totalTokens,
+                    "cachedInput" to event.cachedInputTokens,
+                    "cachedInputIncludedInInput" to event.cachedInputIncludedInInput,
+                    "cacheCreationInput" to event.cacheCreationInputTokens,
+                    "reasoningOutput" to event.reasoningOutputTokens,
+                    "aggregation" to event.aggregation.name,
+                ),
+            )
             AiRunEvent.Cancelled -> append("cancelled")
             AiRunEvent.Done -> append("done")
-            is AiRunEvent.AssistantDelta -> Unit
+            is AiRunEvent.AssistantDelta, is AiRunEvent.ToolExecutionStarted, is AiRunEvent.UsageRequestStarted -> Unit
         }
     }
 }

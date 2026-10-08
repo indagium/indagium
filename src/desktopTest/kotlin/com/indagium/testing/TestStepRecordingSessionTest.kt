@@ -134,6 +134,94 @@ class TestStepRecordingSessionTest {
     }
 
     @Test
+    fun removedRawInputsAreExcludedFromRewriteAndCanBeRestored() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device")
+        session.accept(MirrorControlCommand.Text("first"))
+        session.accept(MirrorControlCommand.Text("second"))
+        session.accept(MirrorControlCommand.Text("third"))
+        val original = session.stopAndDrain().steps
+
+        assertTrue(session.removeReviewedRows(setOf(original[1].id)))
+        assertEquals(listOf(original[0], original[2]), session.snapshot.value.steps)
+        assertEquals(listOf(original[0], original[2]), session.rewriteRows())
+        assertEquals(setOf(original[1].id), session.snapshot.value.excludedSourceInputIds)
+        assertFalse(session.restoreRaw(), "removal history must not be confused with an AI rewrite")
+
+        assertTrue(session.restoreExcludedInputs())
+        assertEquals(original, session.snapshot.value.steps)
+        assertTrue(session.snapshot.value.excludedSourceInputIds.isEmpty())
+        assertEquals(original, session.rewriteRows())
+        session.close()
+    }
+
+    @Test
+    fun deletingARewrittenRowExcludesEverySourceInputAndRawRestoreKeepsTheExclusion() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device")
+        session.accept(MirrorControlCommand.Text("first"))
+        session.accept(MirrorControlCommand.Text("second"))
+        session.accept(MirrorControlCommand.Text("third"))
+        val raw = session.stopAndDrain().steps
+        val merged = raw[0].copy(id = "rewritten-row", sourceInputIds = listOf(raw[0].id, raw[1].id))
+        val final = raw[2].copy(id = "rewritten-final", sourceInputIds = listOf(raw[2].id))
+        assertTrue(session.applyRewrite(raw.map { it.id }, listOf(merged, final), "merged"))
+
+        assertTrue(session.removeReviewedRows(setOf(merged.id)))
+        assertEquals(setOf(raw[0].id, raw[1].id), session.snapshot.value.excludedSourceInputIds)
+        assertEquals(listOf(raw[2].id), session.rewriteRows().map { it.id })
+        assertTrue(session.restoreRaw())
+        assertEquals(listOf(raw[2].id), session.snapshot.value.steps.map { it.id })
+        assertEquals(setOf(raw[0].id, raw[1].id), session.snapshot.value.excludedSourceInputIds)
+        assertTrue(session.restoreExcludedInputs())
+        assertEquals(raw, session.snapshot.value.steps)
+        session.close()
+    }
+
+    @Test
+    fun removalWaitsForPendingImagesSoAnExcludedInputCannotDisappearFromEvidenceChronology() = runBlocking {
+        val encoderStarted = CountDownLatch(1)
+        val releaseEncoder = CountDownLatch(1)
+        val session = TestStepRecordingSession(
+            "fixture-device",
+            snapshotEncoder = { encoderStarted.countDown(); releaseEncoder.await(2, TimeUnit.SECONDS); byteArrayOf(1, 2, 3) },
+        )
+        session.accept(MirrorControlCommand.Text("first"), frame())
+        session.accept(MirrorControlCommand.Text("middle"), frame())
+        session.accept(MirrorControlCommand.Text("last"), frame())
+        assertTrue(encoderStarted.await(2, TimeUnit.SECONDS))
+        session.stop()
+        val beforeDrain = session.snapshot.value
+        assertTrue(beforeDrain.pendingSnapshots > 0)
+        assertFalse(session.removeReviewedRows(setOf(beforeDrain.steps[1].id)))
+        assertEquals(beforeDrain.steps.map { it.id }, session.snapshot.value.steps.map { it.id })
+
+        releaseEncoder.countDown()
+        val drained = session.stopAndDrain()
+        val firstEvidence = drained.steps[0].screenshotJpeg
+        val middleId = drained.steps[1].id
+        val lastEvidence = drained.steps[2].screenshotJpeg
+        assertNotNull(firstEvidence)
+        assertNotNull(lastEvidence)
+        assertTrue(session.removeReviewedRows(setOf(middleId)))
+        assertTrue(session.snapshot.value.steps.first().screenshotJpeg!!.contentEquals(firstEvidence))
+        assertTrue(session.snapshot.value.steps.last().screenshotJpeg!!.contentEquals(lastEvidence))
+        session.close()
+    }
+
+    @Test
+    fun deletingEveryRowShowsRecoveryHintAndApplyRefusal() = runBlocking {
+        val session = TestStepRecordingSession("fixture-device")
+        session.accept(MirrorControlCommand.Text("only input"))
+        val rows = session.stopAndDrain().steps
+        assertTrue(session.removeReviewedRows(rows.map { it.id }.toSet()))
+        val snapshot = session.snapshot.value
+
+        assertEquals("No steps remain. Restore removed inputs or keep at least one step before applying.", recordingApplyBlockedReason(snapshot))
+        assertEquals("No recorded inputs remain. Restore removed inputs or keep at least one step before rewriting.", session.rewriteBlockedReason())
+        assertTrue(session.toTestSteps { "unused.jpg" }.isEmpty())
+        session.close()
+    }
+
+    @Test
     fun adbPreviewTimingCoversCaptureOnlyAndCanBecomeEligibleAfterEvidence() = runBlocking {
         val times = ArrayDeque(listOf(1_010L, 1_020L))
         val session = TestStepRecordingSession(

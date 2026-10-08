@@ -22,6 +22,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertTrue
 
@@ -141,11 +142,56 @@ class AnthropicMessagesProviderTest {
             listOf(
                 LlmStreamEvent.TextDelta("Hello"),
                 LlmStreamEvent.TextDelta(" world"),
-                LlmStreamEvent.Usage(promptTokens = 12, completionTokens = 7, totalTokens = 19),
+                LlmStreamEvent.Usage(
+                    promptTokens = 12,
+                    completionTokens = 7,
+                    totalTokens = null,
+                    cachedInputIncludedInPrompt = false,
+                ),
                 LlmStreamEvent.Completed,
             ),
             events,
         )
+    }
+
+    @Test
+    fun repeatedMessageDeltaUsageIsCumulativeWithinOneRequestAndIncludesSeparateCacheMetrics() = runBlocking {
+        val events = provider(
+            sse(
+                """
+                message_start {"message":{"usage":{"input_tokens":12,"cache_creation_input_tokens":5,"cache_read_input_tokens":7}}}
+                message_delta {"delta":{"stop_reason":null},"usage":{"output_tokens":3}}
+                message_delta {"delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":8}}
+                message_stop {}
+                """.trimIndent(),
+            ),
+        ).use { it.streamChat(request()).toList().filterIsInstance<LlmStreamEvent.Usage>() }
+
+        assertEquals(listOf(27L, 32L), events.map { it.totalTokens })
+        assertEquals(listOf(3L, 8L), events.map { it.completionTokens })
+        assertEquals(7L, events.last().cachedInputTokens)
+        assertEquals(5L, events.last().cacheCreationInputTokens)
+
+        val aggregate = AiUsageAccumulator().apply {
+            accept(AiRunEvent.UsageRequestStarted("anthropic-request"))
+            events.forEach { event ->
+                accept(
+                    AiRunEvent.Usage(
+                        inputTokens = event.promptTokens,
+                        outputTokens = event.completionTokens,
+                        totalTokens = event.totalTokens,
+                        cacheCreationInputTokens = event.cacheCreationInputTokens,
+                        cachedInputTokens = event.cachedInputTokens,
+                        cachedInputIncludedInInput = event.cachedInputIncludedInPrompt,
+                        requestId = "anthropic-request",
+                    ),
+                )
+            }
+        }.snapshot()
+        assertEquals(32L, aggregate.totalTokens, "stream snapshots for the same HTTP request replace instead of summing")
+        assertEquals(7L, aggregate.cachedInputTokens)
+        assertEquals(5L, aggregate.cacheCreationTokens)
+        assertFalse(aggregate.partial)
     }
 
     @Test

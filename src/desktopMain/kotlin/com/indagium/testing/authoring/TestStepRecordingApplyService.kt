@@ -1,5 +1,6 @@
 package com.indagium.testing.authoring
 
+import com.indagium.model.AiUsageStats
 import com.indagium.testing.model.TestStep
 import com.indagium.testing.store.StoreResult
 import kotlinx.coroutines.CancellationException
@@ -14,6 +15,8 @@ internal class TestStepRecordingApplyService(
     private val importImage: (suiteId: String, source: File) -> StoreResult<String>,
     private val resolveImage: (suiteId: String, assetPath: String) -> File?,
     private val insertSteps: (caseId: String, steps: List<TestStep>, index: Int?) -> StoreResult<List<TestStep>>,
+    private val insertStepsWithUsage: (caseId: String, steps: List<TestStep>, index: Int?, usage: AiUsageStats?) -> StoreResult<List<TestStep>> =
+        { targetCaseId, steps, insertion, _ -> insertSteps(targetCaseId, steps, insertion) },
 ) {
     private val applyingSessionIds = ConcurrentHashMap.newKeySet<String>()
 
@@ -33,7 +36,10 @@ internal class TestStepRecordingApplyService(
                 frozeSnapshot = true
                 if (snapshot.active) return@withContext StoreResult.Invalid("Stop recording before applying its draft.")
                 if (snapshot.pendingSnapshots > 0) return@withContext StoreResult.Invalid("Wait for captured screen snapshots to finish before applying.")
-                if (snapshot.steps.isEmpty() || snapshot.steps.any { recordingRowIssues(it).isNotEmpty() }) {
+                if (snapshot.steps.isEmpty()) {
+                    return@withContext StoreResult.Invalid("No steps remain to apply. Restore removed inputs or add a reviewed step first.")
+                }
+                if (snapshot.steps.any { recordingRowIssues(it).isNotEmpty() }) {
                     return@withContext StoreResult.Invalid("Add an action and expected result to every required step, and a condition to each optional step.")
                 }
                 when (val allowed = preflight(suiteId, caseId)) {
@@ -58,8 +64,8 @@ internal class TestStepRecordingApplyService(
                             temporary.delete()
                         }
                     }
-                    when (val inserted = insertSteps(caseId, steps, index)) {
-                        is StoreResult.Ok -> inserted
+                    when (val inserted = insertStepsWithUsage(caseId, steps, index, snapshot.rewriteUsagePending)) {
+                        is StoreResult.Ok -> inserted.also { session.markRewriteUsageApplied(snapshot.rewriteAttemptCount) }
                         else -> {
                             copied.forEach { resolveImage(suiteId, it)?.delete() }
                             inserted

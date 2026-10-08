@@ -385,7 +385,8 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
     IndagiumToolDescriptor(
         "draft_test_steps",
         "Ask an existing provider profile to propose steps for a case. This only returns a short-lived editable preview; " +
-            "it never changes the library or controls a device. Call apply_test_step_draft only after reviewing/editing that preview.",
+            "it never changes the library or controls a device. The response includes latest-attempt and creation-session usage; " +
+            "usage is saved to the case only after Apply. Call apply_test_step_draft only after reviewing/editing that preview.",
         schema(
             "suiteId" to "string", "caseId" to "string", "profileId" to "string", "instruction" to "string",
             "model" to "string", "reasoningEffort" to "string",
@@ -417,12 +418,13 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
         "Read the current recording preview and its warnings. Screen snapshots are bounded. Each row also carries best-effort " +
             "screen context that an adb probe read while recording: tappedElement (what a tap landed on), package, activity and " +
             "durationMs. A probe can fail or miss a fast input, so any of these may be null; the mirror itself exposes no UI hierarchy. " +
-            "Optionally request one captured input-time image by rowId; it is context, not an expected-result oracle or current device screen.",
+            "The response also includes source exclusions and latest/session rewrite usage when available. Optionally request one " +
+            "captured input-time image by rowId; it is context, not an expected-result oracle or current device screen.",
         schema("sessionId" to "string", "rowId" to "string", required = listOf("sessionId")),
     ),
     IndagiumToolDescriptor(
         "update_test_recording",
-        "Edit action, expected-result text and optional condition in a stopped recording preview. Send one row for every recorded step; " +
+        "Edit action, expected-result text and optional condition in a stopped recording preview. Send one row for every current review row; " +
             "an optional row requires a condition and may have blank expected text. Captured images are context unless explicitly selected.",
         schema(
             "sessionId" to "string", "steps" to "array", required = listOf("sessionId", "steps"),
@@ -433,6 +435,19 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
                 ),
             ),
         ),
+    ),
+    IndagiumToolDescriptor(
+        "remove_test_recording_steps",
+        "Remove one or more rows from a stopped recording review. Removed raw inputs remain in immutable session history and are " +
+            "excluded from Apply and future rewrites; removing a rewritten row excludes every raw input it represents. " +
+            "Use restore_test_recording_inputs to restore the full raw review.",
+        schema("sessionId" to "string", "rowIds" to "array", required = listOf("sessionId", "rowIds")),
+    ),
+    IndagiumToolDescriptor(
+        "restore_test_recording_inputs",
+        "Restore all removed recording inputs and show the full raw review again. This clears exclusions and undoes the current rewrite; " +
+            "refused while recording, applying or rewriting.",
+        schema("sessionId" to "string", required = listOf("sessionId")),
     ),
     IndagiumToolDescriptor(
         "stop_test_recording",
@@ -461,7 +476,7 @@ private fun stepTools(): List<IndagiumToolDescriptor> = listOf(
             "\"Open YouTube\", \"Search for 'lofi'\") instead of raw taps and swipes. It reads the recorded inputs, the screens and the " +
             "screen elements the recorder stored, so screenshots, screen text and typed text (passwords are hidden) go to the provider. " +
             "The rewritten rows replace the recording's rows for review; the raw rows are kept (restore_test_recording_raw returns " +
-            "them) and nothing is added to the library until apply_test_recording. Every recorded input is covered by exactly one " +
+            "them) and nothing is added to the library until apply_test_recording. Every remaining input is covered by exactly one " +
             "step; an invalid answer changes nothing. Asks for approval for a remote provider.",
         schema(
             "sessionId" to "string", "profileId" to "string", "model" to "string", "reasoningEffort" to "string", "note" to "string",

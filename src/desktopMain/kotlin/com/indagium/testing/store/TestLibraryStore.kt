@@ -1,6 +1,8 @@
 package com.indagium.testing.store
 
 import com.indagium.edition.EditionLimits
+import com.indagium.model.AiUsageStats
+import com.indagium.model.sumAiUsage
 import com.indagium.testing.limits.LimitDecision
 import com.indagium.testing.limits.LimitOperation
 import com.indagium.testing.limits.decide
@@ -370,7 +372,7 @@ class TestLibraryStore(
     }
 
     /** Inserts a reviewed sequence in one case edit with fresh step/check/example ids. */
-    fun createSteps(caseId: String, steps: List<TestStep>, atIndex: Int? = null): StoreResult<List<TestStep>> {
+    fun createSteps(caseId: String, steps: List<TestStep>, atIndex: Int? = null, creationUsage: AiUsageStats? = null): StoreResult<List<TestStep>> {
         if (steps.isEmpty()) return StoreResult.Invalid("At least one step is required.")
         val copies = steps.map { it.withFreshIds() }
         return editCase(caseId) { lib, case ->
@@ -383,7 +385,8 @@ class TestLibraryStore(
             }
             val insertion = (atIndex ?: case.steps.size).coerceIn(0, case.steps.size)
             val updated = case.steps.toMutableList().apply { addAll(insertion, copies) }
-            CaseEdit.Done(case.copy(steps = updated), copies)
+            val usage = if (creationUsage == null) case.creationUsage else sumAiUsage(listOf(case.creationUsage, creationUsage))
+            CaseEdit.Done(case.copy(steps = updated, creationUsage = usage), copies)
         }
     }
 

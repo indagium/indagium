@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.indagium.model.summaryLabel
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.LaneKind
 import com.indagium.testing.model.LaneResult
@@ -43,6 +44,7 @@ import com.indagium.testing.model.RunStatus
 import com.indagium.testing.model.RunSummary
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.driverLabel
 import com.indagium.testing.run.ComparedStepPresence
 import com.indagium.testing.run.TestRunReportExportProgress
@@ -205,6 +207,7 @@ private fun RunReport(run: TestRun, runDir: File) {
         StatusChip(run.status.label(), runColor(run.status))
     }
     AppText("Started ${formatRunTime(run.startedAt ?: run.createdAt)} · finished ${formatRunTime(run.finishedAt)}", color = tc.td, fontSize = 10.sp)
+    AppText("AI usage · ${run.aiUsage()?.summaryLabel() ?: "Unavailable"}", color = tc.td, fontSize = 10.sp)
     run.warnings.forEach { TestsLockedNotice(it, Modifier.padding(top = 6.dp)) }
     run.error?.let { TestsErrorText(it) }
     ReportMetrics(run)
@@ -437,6 +440,17 @@ private fun LaneProgress(run: TestRun, lane: LaneResult, runDir: File) {
         AppText(run.progressLine(lane.laneId), color = tc.ts, fontSize = 11.sp, maxLines = 2)
     }
     lane.error?.let { TestsErrorText(it) }
+    lane.aiUsage()?.let { usage -> AppText("Lane AI usage · ${usage.summaryLabel()}", color = tc.td, fontSize = 10.sp) }
+    lane.cases.forEach { case ->
+        val scopes = listOfNotNull(
+            case.agentUsage?.let { "agent ${it.summaryLabel()}" },
+            case.judgeUsage?.let { "judge ${it.summaryLabel()}" },
+            case.externalToolCalls?.let { calls ->
+                "external ${if (calls == 0L) "Tools 0" else "Tools $calls · Tokens unavailable · Partial"}"
+            },
+        )
+        if (scopes.isNotEmpty()) AppText("${case.caseName} · ${scopes.joinToString(" · ")}", color = tc.td, fontSize = 9.sp)
+    }
     if (lane.toolCalls.isNotEmpty()) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             AppText("${lane.toolCalls.size} recent tool activities", color = tc.td, fontSize = 10.sp, modifier = Modifier.weight(1f))

@@ -1,6 +1,8 @@
 package com.indagium.testing.model
 
 import com.indagium.capture.CaptureSettings
+import com.indagium.model.AiUsageStats
+import com.indagium.model.sumAiUsage
 
 // Domain types of an AI test RUN: what was asked for (RunConfig), the frozen copy of what was run (TestRun.suite and
 // friends) and what happened (lane, case and step results). Pure data and immutable: the engine replaces a result by
@@ -166,6 +168,12 @@ data class CaseResult(
     val startedAt: Long = 0L,
     val finishedAt: Long? = null,
     val note: String? = null,
+    /** Agent tool/model usage for this case occurrence, including its setup and teardown hooks. */
+    val agentUsage: AiUsageStats? = null,
+    /** Sum of each inline blind-judge attempt for this case occurrence. */
+    val judgeUsage: AiUsageStats? = null,
+    /** Uncapped external-lane tool starts. The caller's model tokens are not visible to Indagium. */
+    val externalToolCalls: Long? = null,
 )
 
 data class LaneResult(
@@ -237,6 +245,17 @@ data class TestRun(
             ?.firstOrNull { it.stepId == stepId && !it.setup }
 }
 
+/** Sum of the non-overlapping agent and inline-judge scopes of this case occurrence. */
+fun CaseResult.aiUsage(): AiUsageStats? = sumAiUsage(
+    listOf(agentUsage, judgeUsage, externalToolCalls?.takeIf { it > 0L }?.let { AiUsageStats(toolCalls = it, partial = true) }),
+)
+
+/** Sum of case occurrences and suite hooks in this lane; no cached-history-derived counts are involved. */
+fun LaneResult.aiUsage(): AiUsageStats? = sumAiUsage(cases.map(CaseResult::aiUsage))
+
+/** Run total from leaf case scopes plus comparison judges. Lane/case rollups are intentionally not re-added. */
+fun TestRun.aiUsage(): AiUsageStats? = sumAiUsage(lanes.flatMap { lane -> lane.cases.map { it.aiUsage() } } + comparisons.map { it.usage })
+
 /** A one-line view of a run for lists. */
 data class RunSummary(
     val id: String,
@@ -250,6 +269,7 @@ data class RunSummary(
     val totalSteps: Int,
     val suiteId: String = "",
     val repeat: Int = 1,
+    val usage: AiUsageStats? = null,
 )
 
 fun TestRun.summary(): RunSummary {
@@ -266,5 +286,6 @@ fun TestRun.summary(): RunSummary {
         totalSteps = steps.size,
         suiteId = config.suiteId,
         repeat = config.repeat,
+        usage = aiUsage(),
     )
 }

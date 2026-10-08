@@ -1,6 +1,8 @@
 package com.indagium.testing
 
 import com.indagium.ai.LlmRole
+import com.indagium.ai.LlmStreamEvent
+import com.indagium.ai.LlmToolCall
 import com.indagium.edition.EditionLimits
 import com.indagium.testing.model.CaseStatus
 import com.indagium.testing.model.CheckStatus
@@ -13,6 +15,7 @@ import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.StepStatus
 import com.indagium.testing.model.TestLibrary
 import com.indagium.testing.model.TestRun
+import com.indagium.testing.model.aiUsage
 import com.indagium.testing.model.newHookId
 import com.indagium.testing.model.newSharedStepId
 import com.indagium.testing.run.PauseDecision
@@ -65,6 +68,36 @@ class TestRunEngineTest {
     }.also { check(condition()) { what } }
 
     // ── Pass path ───────────────────────────────────────────────────
+
+    @Test
+    fun runPersistsProviderUsageAndAdmittedToolCountOnTheCaseAndRun() {
+        val suite = suiteOf(caseOf("Usage", step("Open the app")))
+        val finishWithUsage: Turn = {
+            emit(LlmStreamEvent.Usage(120L, 50L, 170L))
+            emit(LlmStreamEvent.ToolCall(LlmToolCall("usage-finish", "finish_step", """{"status":"pass","observation":"ok"}""")))
+            emit(LlmStreamEvent.Completed)
+        }
+        val goodbyeWithUsage: Turn = {
+            emit(LlmStreamEvent.Usage(20L, 10L, 30L))
+            emit(LlmStreamEvent.TextDelta("Done."))
+            emit(LlmStreamEvent.Completed)
+        }
+        val h = harness(suite, listOf(finishWithUsage, goodbyeWithUsage))
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Usage")
+        val caseUsage = assertNotNull(result.agentUsage)
+        val runUsage = assertNotNull(run.aiUsage())
+
+        assertEquals(1L, caseUsage.toolCalls, "finish_step is counted once when its handler is entered")
+        assertEquals(140L, caseUsage.inputTokens)
+        assertEquals(60L, caseUsage.outputTokens)
+        assertEquals(200L, caseUsage.totalTokens)
+        assertEquals(caseUsage, runUsage, "the run total derives from the case leaf without re-adding lane summaries")
+        val reloaded = assertNotNull(h.store.load(run.id))
+        assertEquals(caseUsage, reloaded.caseResult("Usage").agentUsage)
+        assertEquals(runUsage, reloaded.aiUsage())
+    }
 
     @Test
     fun aCaseThatPassesEveryStepPassesTheRunAndLeavesEvidence() {
