@@ -514,7 +514,7 @@ class TestLibraryStoreTest {
     @Test
     fun importRejectsGarbageAndFilesFromANewerVersion() {
         val store = newStore()
-        val newer = encodeSuiteFile(fullSuite()).replace("\"version\": 1", "\"version\": 9")
+        val newer = encodeSuiteFile(fullSuite()).replace("\"version\": 2", "\"version\": 9")
 
         assertIs<StoreResult.Invalid>(store.importSuite("not json"))
         assertIs<StoreResult.Invalid>(store.importSuite("""{"format":"indagium-test-library","version":1}"""))
@@ -538,7 +538,7 @@ class TestLibraryStoreTest {
         val suite = fullSuite().copy(id = "suite-future")
         val file = suiteFile(dir, suite.id)
         file.parentFile.mkdirs()
-        val newerText = encodeSuiteFile(suite).replace("\"version\": 1", "\"version\": 5").replace("\"name\": \"Smoke\"", "\"name\": \"Smoke\", \"fancy\": 1")
+        val newerText = encodeSuiteFile(suite).replace("\"version\": 2", "\"version\": 5").replace("\"name\": \"Smoke\"", "\"name\": \"Smoke\", \"fancy\": 1")
         file.writeText(newerText)
         val store = newStore(dir)
 

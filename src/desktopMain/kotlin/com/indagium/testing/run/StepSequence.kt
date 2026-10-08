@@ -278,6 +278,8 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 )
             },
             allowedExampleTools,
+            optional = step.optional,
+            condition = step.condition,
         )
     }
 
@@ -457,16 +459,35 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
                 return mapOf("result" to "case_finished", "error" to CASE_BUDGET_EXHAUSTED_NOTE, "message" to overMessage())
             }
             var timedOut = false
+            var skipRefusal: String? = null
             val evaluation = mutex.withLock {
                 val step = spec.steps.getOrNull(index) ?: return@withLock null
+                if (status == LaneStepStatus.SKIPPED) {
+                    if (!step.optional) {
+                        skipRefusal = "A required step cannot be skipped."
+                        return@withLock null
+                    }
+                    if (observation.isBlank()) {
+                        skipRefusal = "Explain what you checked before skipping this optional step."
+                        return@withLock null
+                    }
+                }
                 val stepIndex = index
                 val attemptNumber = attempt
                 val remaining = (step.timeoutMs - elapsedMs()).coerceAtLeast(0L)
-                val completed = withTimeoutOrNull(remaining) { evaluateLocked(status, observation) }
+                val completed = withTimeoutOrNull(remaining) {
+                    if (status == LaneStepStatus.SKIPPED) skippedEvaluationLocked(step, observation) else evaluateLocked(status, observation)
+                }
                 if (completed == null) timedOut = true
                 completed ?: timeoutEvaluationLocked(step.id, stepIndex, attemptNumber, verifyDeadline = false)
-            } ?: return mapOf("error" to "No step is active.")
-            val answer = if (timedOut) respond(settleTimeout(evaluation, cancelAgentBeforePause = false)) else decide(evaluation)
+            }
+            skipRefusal?.let { return mapOf("error" to it) }
+            val currentEvaluation = evaluation ?: return mapOf("error" to "No step is active.")
+            val answer = when {
+                timedOut -> respond(settleTimeout(currentEvaluation, cancelAgentBeforePause = false))
+                status == LaneStepStatus.SKIPPED -> respond(mutex.withLock { settleLocked(currentEvaluation, Flow.Next(index + 1), issue = false) })
+                else -> decide(currentEvaluation)
+            }
             if (!ended) holdWhilePaused()
             return answer
         } finally {
@@ -521,11 +542,22 @@ internal class StepSequence(private val env: SequenceEnv, val spec: SequenceSpec
             "stepCount" to brief.stepCount,
             "action" to brief.action,
             "expected" to brief.expected,
+            "optional" to brief.optional,
+            "condition" to brief.condition,
             "attempt" to brief.attempt,
         ) + brief.exampleMetadata()
     }
 
     // ── Evaluating a step ────────────────────────────────────────────
+
+    /** A condition-unmet optional action advances without checks, judging, retries or a screenshot capture. */
+    private suspend fun skippedEvaluationLocked(step: TestStep, observation: String): Evaluation? {
+        if (!active || ended) return null
+        val logEnd = runCatching { env.session.logMarker() }.getOrNull().also { if (it != null) lastKnownLogEnd = it }
+        val reported = (observations + observation).filter(String::isNotBlank).joinToString("\n")
+        val result = buildResult(step, StepStatus.SKIPPED, "skipped", reported, emptyList(), null, logEnd)
+        return Evaluation(step, StepStatus.SKIPPED, result, emptyList(), index, attempt)
+    }
 
     private suspend fun evaluateLocked(claim: LaneStepStatus, observation: String): Evaluation? {
         if (!active || ended) return null

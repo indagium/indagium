@@ -7,6 +7,8 @@ import com.indagium.testing.model.ScriptTarget
 import com.indagium.testing.model.StepCheck
 import com.indagium.testing.model.StepExample
 import com.indagium.testing.model.TestCase
+import com.indagium.testing.store.TEST_LIBRARY_FILE_VERSION
+import com.indagium.testing.store.TEST_SUITE_FILE_VERSION
 import com.indagium.testing.store.decodeLibraryFile
 import com.indagium.testing.store.decodeSuiteFile
 import com.indagium.testing.store.encodeLibraryFile
@@ -33,7 +35,7 @@ class TestLibraryCodecTest {
     fun suiteFileUsesTheDocumentedEnvelope() {
         val root = rootOf(encodeSuiteFile(fullSuite()))
         assertEquals("indagium-test-suite", (root["format"] as JsonPrimitive).content)
-        assertEquals(1, (root["version"] as JsonPrimitive).content.toInt())
+        assertEquals(TEST_SUITE_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
         assertTrue(root["suite"] is JsonObject)
     }
 
@@ -41,7 +43,7 @@ class TestLibraryCodecTest {
     fun libraryFileUsesTheDocumentedEnvelope() {
         val root = rootOf(encodeLibraryFile(listOf("suite-a"), listOf(sampleScript()), listOf(sampleSharedStep())))
         assertEquals("indagium-test-library", (root["format"] as JsonPrimitive).content)
-        assertEquals(1, (root["version"] as JsonPrimitive).content.toInt())
+        assertEquals(TEST_LIBRARY_FILE_VERSION, (root["version"] as JsonPrimitive).content.toInt())
         assertEquals(1, (root["suiteOrder"] as JsonArray).size)
         assertEquals(1, (root["scripts"] as JsonArray).size)
         assertEquals(1, (root["sharedSteps"] as JsonArray).size)
@@ -160,6 +162,27 @@ class TestLibraryCodecTest {
     }
 
     @Test
+    fun optionalConditionsAndBlankExpectedRoundTripInSuitesAndSharedSteps() {
+        val base = fullSuite()
+        val optionalStep = base.cases.first().steps.first().copy(
+            expected = "",
+            optional = true,
+            condition = "A Skip ad button is visible",
+        )
+        val suite = base.copy(cases = listOf(base.cases.first().copy(steps = listOf(optionalStep))))
+        val decodedSuite = decodeSuiteFile(encodeSuiteFile(suite)).getOrThrow().suite
+        assertEquals(true, decodedSuite.cases.single().steps.single().optional)
+        assertEquals("A Skip ad button is visible", decodedSuite.cases.single().steps.single().condition)
+        assertEquals("", decodedSuite.cases.single().steps.single().expected)
+
+        val shared = sampleSharedStep().copy(steps = listOf(optionalStep.copy(id = "step-shared-optional")))
+        val decodedShared = decodeLibraryFile(encodeLibraryFile(emptyList(), emptyList(), listOf(shared))).getOrThrow().sharedSteps.single()
+        assertEquals(true, decodedShared.steps.single().optional)
+        assertEquals("A Skip ad button is visible", decodedShared.steps.single().condition)
+        assertEquals("", decodedShared.steps.single().expected)
+    }
+
+    @Test
     fun unknownKeysAreIgnoredAtEveryLevel() {
         val suite = fullSuite()
         val root = rootOf(encodeSuiteFile(suite))
@@ -179,7 +202,7 @@ class TestLibraryCodecTest {
 
     @Test
     fun aNewerSuiteFileVersionStillDecodesButIsFlaggedReadOnly() {
-        val root = rootOf(encodeSuiteFile(fullSuite())).withKey("version", JsonPrimitive(2))
+        val root = rootOf(encodeSuiteFile(fullSuite())).withKey("version", JsonPrimitive(TEST_SUITE_FILE_VERSION + 1))
 
         val decoded = decodeSuiteFile(root.toString()).getOrThrow()
 

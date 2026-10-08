@@ -403,20 +403,47 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                     CommitTextField(row.action, { text -> updateRecorded(session, index) { it.copy(action = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, placeholder = "Recorded action")
                 }
                 TestsLabeled("Expected result") {
-                    CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = "Required before applying")
+                    CommitTextField(row.expected, { text -> updateRecorded(session, index) { it.copy(expected = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = if (row.optional) "May be blank for an optional action" else "Required before applying")
+                }
+                CheckRow(checked = row.optional, onToggle = {
+                    updateRecorded(session, index) {
+                        if (it.optional) it.copy(optional = false, condition = null)
+                        else it.copy(optional = true)
+                    }
+                }, enabled = !applying && !rewriting) {
+                    AppText("Optional: skip when its condition is absent", color = tc.ts, fontSize = 9.sp)
+                }
+                if (row.optional) {
+                    TestsLabeled("Perform only when") {
+                        CommitTextField(row.condition.orEmpty(), { text -> updateRecorded(session, index) { it.copy(condition = text) }; StoreResult.Ok(Unit) }, enabled = !applying && !rewriting, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
+                    }
                 }
                 if (row.sourceInputIds.isNotEmpty()) {
                     RecordedInputsList(row, snapshot.rawSteps.orEmpty())
                     if (row.checks.isNotEmpty()) TestsHint("${row.checks.size} check(s) proposed by the AI will be added to this step.")
                 }
                 row.contextHint()?.let { TestsHint("Screen context: $it") }
-                row.screenContext?.let { TestsHint(if (row.screenshotJpeg != null) "$it This is an input-time preview before the action, not an expected result." else it) }
+                row.screenContext?.let { TestsHint(it) }
+                row.reviewReason?.let {
+                    if (row.expected.isBlank()) TestsErrorText("Review required: $it") else TestsHint("Recording note: $it")
+                }
                 row.screenshotJpeg?.let { bytes ->
+                    val source = row.screenshotSource?.name?.lowercase()?.replace('_', ' ') ?: "unknown source"
+                    val caption = when {
+                        row.screenshotVerifiedMoment != null -> "Image: verified ${row.screenshotVerifiedMoment} evidence from $source."
+                        row.screenshotTimingUncertain -> "Image: raw input preview from $source; timing uncertain."
+                        else -> "Image: raw input preview from $source; acquisition interval recorded."
+                    }
+                    TestsHint(caption)
                     RecordedScreenshotPreview(bytes)
                     CheckRow(checked = row.useScreenshotAsExpected, onToggle = {
                         updateRecorded(session, index) { it.copy(useScreenshotAsExpected = !it.useScreenshotAsExpected) }
                     }, enabled = !applying && !rewriting) {
-                        val label = if (row.sourceInputIds.isNotEmpty()) "Use the screen after these inputs as an expected screenshot (review first)" else "Use this input-time image as an expected screenshot (review first)"
+                        val label = if (row.screenshotVerifiedMoment == "after") {
+                            "Use this verified after screenshot as an expected screenshot (review first)"
+                        } else {
+                            "Use this raw input preview as an expected screenshot (review first)"
+                        }
                         AppText(label, color = tc.ts, fontSize = 9.sp)
                     }
                 }
@@ -442,6 +469,7 @@ private fun TestStepRecordingPanel(session: TestStepRecordingSession, case: Test
                                     case.steps.indexOfFirst { it.id == ui.view.expandedStepId }.takeIf { it >= 0 }?.plus(1),
                                     reviewed.filter { it.useScreenshotAsExpected }.map { it.id }.toSet(),
                                     reviewed.map { it.id },
+                                    reviewed.associate { it.id to (it.optional to it.condition) },
                                 )) {
                                     is StoreResult.Ok -> { ui.report(result); onDismiss() }
                                     else -> error = result.userMessage()

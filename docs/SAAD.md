@@ -1154,7 +1154,7 @@ session; regeneration is disabled (`requestGenerate` is a no-op) until the sessi
 | `video/VideoPlayerController.kt` | FFmpeg decode loop on a dedicated thread, audio via `javax.sound.sampled` |
 | `capture/CaptureRecorder.kt` | Per-session adb logcat process lifecycle, the embedded video recording session (`EmbeddedDeviceSession`), append-only log/index writing, screenshots, watchdog, disk limits, and interruption recovery |
 | `capture/StreamingMkvWriter.kt` | Live-readable Matroska muxer (FFmpeg `avformat`) that `EmbeddedDeviceSession` writes recorded H.264/Opus packets into directly |
-| `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta protocol parser, the recording-side packet pump/reconnect/PTS-continuity owner, and the bounded decoder fan-out + mirror-side Annex-B re-flattening |
+| `capture/mirror/ScrcpyPacketReader.kt` / `EmbeddedDeviceSession.kt` / `EmbeddedMirrorRuntime.kt` / `MirrorVideoPacket.kt` / `ScrcpyStreamAdapters.kt` | scrcpy v4.1 frame-meta parser, recording and mirror packet observers, CPU/native decoder fan-out, bounded feeds, and mirror-side Annex-B re-flattening |
 | `capture/CaptureArchive.kt` / `CaptureTimelineIndex.kt` | Versioned descriptor, ZIP snapshot export/finalization, asset validation, and index-assisted range/synchronization-anchor generation |
 | `capture/CaptureTools.kt` / `CaptureSettingsCodec.kt` | Cross-platform adb resolution/validation (host `scrcpy` only for the separate native mirror window) and keyed capture-settings persistence |
 | `voice/VoiceInputController.kt` + backends | Dictation state machine; Whisper JNI, Apple Speech JNI, Windows helper process |
@@ -3153,7 +3153,7 @@ two entry points; both reach the engine through `TestRunCoordinator` and the lib
 | Package | Files (all under `src/desktopMain/kotlin/com/indagium/`) | Role |
 |---|---|---|
 | `testing.model` | `TestModel.kt`, `TestModelRules.kt`, `TestRunModel.kt`, `JudgeModel.kt`, `IssueModel.kt`, `TestingSettings.kt` | Immutable domain types: library (suites, cases, steps, checks, examples, scripts, shared steps, hooks, variables), run (config, lanes, case/step results, `StepJudgement`, `JudgeComparison`), issue (draft, record, attachments), and the tracker/testing settings. Pure helpers: `moveById`, name validators, deep copies with fresh ids |
-| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordingScreenProbe.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (with its screen-context probe and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
+| `testing.authoring` | `TestStepDraftService.kt`, `TestStepRecordingSession.kt`, `RecordedVideoTimeline.kt`, `RecordingScreenProbe.kt`, `RecordingStateAttachment.kt`, `RecordingReviewHints.kt`, `RecordingRewrite.kt`, `RecordingRewriteBrief.kt`, `RecordingRewriteTools.kt`, `RecordingRewriteService.kt`, `TestStepRecordingApplyService.kt`, `TestScriptLibraryService.kt` | Shared UI/MCP draft, recording (screen probe, bounded video timeline and AI rewrite, §26.12), insertion, script import/export/schema and explicit-reference usage operations; previews are validated and do not mutate until applied |
 | `testing.store` | `TestLibraryStore.kt`, `TestLibraryCodec.kt`, `TestLibraryValidation.kt`, `TestAssets.kt`, `TestRunStore.kt`, `TestRunCodec.kt`, `JudgeCodec.kt`, `RunPersister.kt`, `TranscriptWriter.kt`, `LaneToolActivityWriter.kt`, `IssueStore.kt`, `IssueCodec.kt`, `StoreResult.kt` | Disk-backed library, run and issue stores with versioned JSON envelopes; bounded full-suite result snapshots with lightweight history summaries; debounced run saver; redacted transcript/activity appenders |
 | `testing.limits` | `TestLimits.kt` | `decide(library, operation, limits)` — the one pure function every caller consults for edition limits |
 | `testing.script` | `TestScriptRunner.kt`, `HostCommandRunner.kt`, `UntrustedData.kt` | Builds and runs a `TestScript`'s command safely; the bounded, cancellable child-process runner; the `untrusted_data` envelope |
@@ -3180,14 +3180,17 @@ and no separate index is persisted. Ids are prefixed UUIDs unique across the lib
 `jdg-`, `cmp-`; `issue-`), so a case or step is found by id alone (`TestLibrary.findCase/findStep`,
 `testing/model/TestModel.kt:233,241`). A step's checks are a sealed type —
 `LogAppears`, `LogAbsent`, `ScreenJudge`, `ScriptResult`, `AskJudge` — and its examples
-`GoldenScreenshot` or `ReferenceLog` (`testing/model/TestModel.kt:113,146`).
+`GoldenScreenshot` or `ReferenceLog` (`testing/model/TestModel.kt:113,146`). A step is required by default; an optional step
+must have a condition that describes when to perform it. Only an optional step can settle as `SKIPPED`, which does not fail
+the case; expected text may be blank only for a conditioned optional step. Library and suite envelopes write schema v2 and
+read v1 with required-step defaults, so older files remain readable and a newer writer cannot silently discard conditions.
 
 **Storage layout.**
 
 | Path | Contents | Format |
 |---|---|---|
-| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `{"format":"indagium-test-library","version":1,…}` (`testing/store/TestLibraryCodec.kt:63`) |
-| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `{"format":"indagium-test-suite","version":1,"suite":{…}}` (`:62`); the file name must equal the suite id |
+| `<test suites folder>/library.json` | Suite order, library scripts, shared steps | `indagium-test-library` v2 (reads v1 with required steps as the default) (`testing/store/TestLibraryCodec.kt`) |
+| `<test suites folder>/suites/<suiteId>.json` | One suite with its cases, steps, checks, examples | `indagium-test-suite` v2 (reads v1 with required steps as the default) (`:62`); the file name must equal the suite id |
 | `<test suites folder>/assets/<suiteId>/` | Golden-screenshot images (png/jpg/webp, ≤ 10 MB); a suite stores only a *relative* `assetPath` | Raw images (`testing/store/TestAssets.kt`) |
 | `<issues folder>/<issueId>/issue.json` + `attachments/` | One issue and its copied evidence | `indagium-issue` v2 writes and v1/v2 reads (`testing/store/IssueCodec.kt`); v2 preserves newer attachment kinds such as Android bugreports; ≤ 4 MB per record, ≤ 1 GiB per attachment |
 | `<test runs folder>/<runId>/run.json` | The run: a **frozen** suite snapshot, the library scripts and shared steps it used, config, per-lane results, comparisons | `indagium-test-run` v1 (`testing/store/TestRunCodec.kt:41`); ≤ 64 MB |
@@ -3776,15 +3779,45 @@ into review rows. The mirror carries no UI hierarchy, so the session adds its ow
 optional AI step turns the raw rows into readable steps.
 
 **Screen-context probe.** With a `screenProbe` set (`AppState.startTestStepRecording`), a single separate
-worker (`RecordingScreenProbe`) reads the UI hierarchy (`uiautomator dump`, the command shared with
-`TestDeviceSession`), the top activity (`dumpsys activity activities`) and an adb screenshot, once when
-recording starts and once ~800 ms after the last input (latest-wins: a waiting probe is replaced, so at
-most one runs and one waits). A probe state is attached to a row only when its wall-clock window proves it
-(`attachScreenStates`): after-state of the last input that ended before the probe started, before-state of
-the next input only if that began after the probe finished; otherwise it is unknown, never guessed. The
-element under a tap is resolved from the row's before-state. States live in a bounded map on the session
-(`MAX_RECORDED_STEPS + 1` states, 48 MB of images). The session `lock` is a leaf: no adb work runs under
-it.
+worker (`RecordingScreenProbe`) captures the screenshot first, then reads the UI hierarchy
+(`uiautomator dump`, shared with `TestDeviceSession`) and top activity (`dumpsys activity activities`).
+The screenshot's acquisition interval brackets only screenshot capture; JPEG encoding is outside that
+interval. A session-owned callback retains this image before the slower hierarchy/activity commands
+finish, so it can survive a drain timeout. The complete probe has its own interval. One probe runs and
+one latest-wins request waits (including the initial probe and the probe ~800 ms after the last input).
+ADB preview capture also records a separate acquisition interval. A mirror frame is retained as a raw
+input preview, but its presentation timestamp is not mapped to wall time and cannot establish before or
+after evidence.
+
+**Recorded video timeline.** A recording subscribes to the selected mirror's existing H.264 packet observer. Shared-recording
+and standalone mirrors tee packets before decode, so native GPU and CPU/Compose paths use the same compressed stream without
+a second encoder or device capture mode. The packet callback only enqueues bounded packet data; it does no muxing, disk IO,
+or decoding and runs outside the recording session lock. A worker remuxes packets with `StreamingMkvWriter` into temporary
+MKV segments and writes a JSONL timing index containing source PTS, receipt wall/monotonic times, session-relative time,
+keyframe, dimensions, epoch and segment PTS. Config/keyframe pre-roll is bounded and may predate Record (for example, a
+static launcher); the recording duration cap still starts at Record. Reconnects or changed stream config start separate
+segments. Gaps and absent/unusable initial video remain visible in the timeline summary. Capture stops at ten minutes,
+128 MiB, 40,000 indexed packets, or its bounded queue limit; device input recording continues.
+
+The rewrite can request an input-centered storyboard or a session-relative range up to 30 seconds. It decodes at most six
+actual frames into one portrait-readable contact sheet. Actual decoded MKV times map through packet-receipt metadata to
+inputs; this is approximate host alignment, not device capture wall time. A held predecessor keeps its true age, and a seek
+request is never reported as the returned frame's timestamp. Range coverage is evaluated independently for each input, so
+a safe frame in a gap can be the after-state of one input and the before-state of the next. When input or observed screen
+evidence indicates password editing, video is withheld from pre-roll through a proven exit to another screen, or through the
+frozen recording end when no exit is proven. Rewrites wait for the writer to drain; cancellation/discard closes without
+blocking the UI and removes temporary files after any active decode completes.
+
+Screenshot and UI/activity evidence are matched independently (`attachEvidenceWindows` and
+`attachScreenStates`). An image can prove a before/after relation using its own acquisition interval
+even when the later hierarchy/activity read overlaps an input; in that case the image does not carry
+the later app or activity. UI/activity facts come only from a complete probe interval eligible for that
+side. Every interval must fit strictly inside the relevant gap: equality, overlap, reversed intervals,
+and probes that touch or cross any input are rejected. The latest eligible candidate is selected, so a
+newer contaminated probe cannot hide an older valid one. The element under a tap is resolved only from
+that input's before UI state. Probe and preview data live in bounded session storage
+(`MAX_RECORDED_STEPS + 1` rows, 48 MB of images); adb work stays off the UI thread and outside the
+session lock, with bounded queue, cancellation, and drain behavior.
 
 **Typed text and passwords.** If the screen read before or after a typing run shows a focused password
 node (or a password node when nothing reports focus), the whole run (consecutive typed/pasted rows with
@@ -3799,23 +3832,42 @@ refuse while it is set), then calls the service with **no lock held**:
 
 1. Preflight (case exists, library/suite writable, edition limits), then the brief
    (`RecordingRewriteBrief.kt`): suite and case text and the user's note as plain instructions; the numbered
-   raw inputs (kind, action, tapped element, app/screen before and after, held time, images available) in
-   untrusted-data fences, chunked below the fence clip.
+   raw inputs (kind, action, tapped element, app/activity before and after, held time, approximate session-relative video
+   interval when available, separately resolved before/after images with stable IDs, UI availability, and raw preview
+   provenance) in untrusted-data fences, chunked below the fence clip. The precise target of a tap comes from pre-action
+   evidence; a trustworthy transition may support a broad observed action such as opening YouTube without naming a specific
+   control. Its expected result comes from post-action evidence. The prompt directs the model to read only available evidence
+   needed to resolve uncertainty; identical capture IDs can be read once and reused across adjacent inputs. Screenshot/video
+   pixels, UI labels and app text are untrusted observations; onscreen instructions are never followed. Missing or uncertain
+   evidence requires a review reason; an uncertain mirror preview is never presented as verified before/after evidence.
 2. One agent run through the lane launchers (`AppState.runAgentForText`, shared with the step draft; an
    in-app model over HTTP, or Claude Code/Codex through the managed MCP lease), with the profile after
-   `withRunOverrides(model, effort)`, a tool budget of `min(3 x inputs, 60)` and a 180 s timeout. Its gateway
-   (`RecordingRewriteTools`) is read-only and holds only `get_recorded_input`, `get_recorded_screen`
-   (image result, in `IMAGE_RESULT_TOOL_NAMES`) and `get_recorded_ui`; device text travels inside the
+   `withRunOverrides(model, effort)`, a budget of three tool calls per input without video or four with video (capped at 60),
+   and a 180 s timeout. Its gateway (`RecordingRewriteTools`) is read-only and holds only `get_recorded_input`,
+   `get_recorded_screen` (image result), `get_recorded_ui`, and, when captured, `get_recorded_video_storyboard` (one real
+   image result through HTTP and MCP); device text travels inside the
    `untrusted_data` envelope. The answer is the assistant text after the last tool call.
-3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action and expected;
+3. `parseRewriteResponse` validates the JSON: at most 20 steps; non-blank action; expected result must be
+   non-blank unless `reviewReason` explains what needs review (a null, missing, empty or whitespace-only
+   reason is treated as absent when expected is present; a blank expected requires either an optional step with a
+   non-blank condition or a substantive review reason, and
+   a wrong type or non-empty reason over 500 characters is invalid);
    `sourceInputs` ascending, consecutive, non-overlapping and covering every input exactly once in order;
    an optional `expectedScreenshot` of the form `after-of-input-N` with N among the step's inputs; checks
    through the draft's parser and `validateStep`, with script checks and example references refused. An
-   invalid answer is an error with the reason and **changes nothing**.
+   invalid answer is an error with the reason and **changes nothing**. A tap or long press with neither a
+   resolved target nor successful input-centered video inspection or a trustworthy before screenshot is forced into review
+   even if the model claims confidence: its recorded gesture remains unchanged, expected text and checks are cleared, and Apply
+   waits for a person to fill the expected result. A video-inspected transition may support a broad action/result, never a
+   named UI control from the destination alone. A conditional incidental action (such as dismissing a visible ad) stays
+   separate from required actions, must include a condition, and may have blank expected text; when absent it records
+   `SKIPPED` without failing the case or running expectation checks. An unresolved gesture cannot be made optional to avoid
+   review.
 4. `TestStepRecordingSession.applyRewrite` swaps the rows in one step, keeping the recorded rows as
    `rawSteps` (refused if the recording is being applied or its recorded rows changed). Each new row keeps
-   `sourceInputIds`; its candidate expected screenshot is the after-image of its last (or named) source
-   input and is **off** until the reviewer ticks it. Re-running always starts from `rawSteps`;
+   `sourceInputIds`; its candidate expected screenshot is an eligible after-image of its last (or named)
+   source input and is **off** until the reviewer ticks it. Rows marked for review preserve the original
+   gesture description and have no generated expectation or checks until edited. Re-running always starts from `rawSteps`;
    `restoreRaw` (UI "Undo rewrite", MCP `restore_test_recording_raw`) puts them back with their ids.
 
 **Apply.** `toTestSteps` turns a rewritten row into a `TestStep` with the readable action/expected, the

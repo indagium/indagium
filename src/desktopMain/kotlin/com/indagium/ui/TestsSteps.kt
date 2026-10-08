@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -132,7 +135,10 @@ private fun StepCard(step: TestStep, row: ReorderRowScope, ops: StepListOps) {
 
 @Composable
 private fun StepEditor(step: TestStep, ops: StepListOps) {
+    val ui = LocalTestsUi.current
     val update: ((TestStep) -> TestStep) -> StoreResult<*> = { transform -> ops.update(step.id, transform) }
+    var configuringOptional by remember(step.id, step.optional) { mutableStateOf(false) }
+    var optionalCondition by remember(step.id, step.condition) { mutableStateOf(step.condition.orEmpty()) }
     Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         TestsLabeled("Action") {
             CommitTextField(
@@ -143,8 +149,40 @@ private fun StepEditor(step: TestStep, ops: StepListOps) {
         TestsLabeled("Expected result") {
             CommitTextField(
                 step.expected, { text -> update { it.copy(expected = text) } },
-                enabled = ops.editable, multiline = true, placeholder = "What should be true afterwards",
+                enabled = ops.editable, multiline = true,
+                placeholder = if (step.optional) "What should be true when this optional action runs" else "What should be true afterwards",
             )
+        }
+        CheckRow(checked = step.optional || configuringOptional, onToggle = {
+            if (step.optional) {
+                update { it.copy(optional = false, condition = null) }
+            } else {
+                configuringOptional = !configuringOptional
+                optionalCondition = step.condition.orEmpty()
+            }
+        }, enabled = ops.editable) {
+            AppText("Optional: skip when its condition is absent", color = tc().ts, fontSize = 11.sp)
+        }
+        if (step.optional) {
+            TestsLabeled("Perform only when") {
+                CommitTextField(
+                    step.condition.orEmpty(), { text -> update { it.copy(condition = text) } },
+                    enabled = ops.editable, multiline = true, placeholder = "Describe the visible condition, such as an ad is playing",
+                )
+            }
+        } else if (configuringOptional) {
+            TestsLabeled("Perform only when") {
+                CommitTextField(optionalCondition, { text -> optionalCondition = text; StoreResult.Ok(Unit) }, enabled = ops.editable,
+                    multiline = true, placeholder = "Describe the visible condition, such as an ad is playing")
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                AppButton("Save condition", enabled = ops.editable && optionalCondition.isNotBlank(), onClick = {
+                    val result = update { it.copy(optional = true, condition = optionalCondition.trim()) }
+                    ui.report(result)
+                    if (result is StoreResult.Ok) configuringOptional = false
+                }, variant = ButtonVariant.Secondary)
+                AppButton("Cancel", onClick = { configuringOptional = false }, variant = ButtonVariant.Ghost)
+            }
         }
         ChecksEditor(step, ops)
         ExamplesEditor(step, ops)

@@ -31,12 +31,14 @@ import kotlin.math.max
 data class RecordedTestStep(
     val action: String,
     val expected: String = "",
+    val optional: Boolean = false,
+    val condition: String? = null,
     val screenContext: String? = null,
     val screenshotJpeg: ByteArray? = null,
-    /** The pre-action frame becomes an oracle only after an explicit review choice. */
+    /** A recorded preview becomes an oracle only after an explicit review choice. */
     val useScreenshotAsExpected: Boolean = false,
     val id: String = UUID.randomUUID().toString(),
-    /** True when the image came from an adb screencap taken just after the input, not from the mirror's own pre-action frame. */
+    /** Legacy source flag: true when the image came from adb rather than a mirror frame. */
     val screenshotFromAdb: Boolean = false,
     /** How long the touch lasted. For a swipe this is the value replay uses (clamped to the lane swipe range). */
     val durationMs: Long? = null,
@@ -57,6 +59,19 @@ data class RecordedTestStep(
     val sourceHint: String? = null,
     /** Checks the rewrite proposed for this step; they become the applied step's checks. */
     val checks: List<StepCheck> = emptyList(),
+    /** Why a rewrite step needs a person to supply or confirm missing screen evidence. */
+    val reviewReason: String? = null,
+    /** The screenshot selected as eligible before/after evidence, separate from the raw input preview above. */
+    val beforeScreenshot: RecordingScreenshotEvidence? = null,
+    val afterScreenshot: RecordingScreenshotEvidence? = null,
+    /** Acquisition metadata for [screenshotJpeg], when it came from an adb screencap. */
+    val screenshotSource: RecordingScreenshotSource? = null,
+    val screenshotAcquiredAtMs: Long? = null,
+    val screenshotAcquisitionFinishedAtMs: Long? = null,
+    /** Mirror frame presentation timestamps are not mapped to wall clock, so raw mirror previews stay uncertain. */
+    val screenshotTimingUncertain: Boolean = true,
+    /** The screenshot is only verified for this moment when selected from eligible evidence. Raw previews use "input". */
+    val screenshotVerifiedMoment: String? = null,
 )
 
 /**
@@ -71,11 +86,13 @@ data class TestStepRecordingSnapshot(
     val pendingSnapshots: Int = 0,
     val rawSteps: List<RecordedTestStep>? = null,
     val rewriteNotes: String = "",
+    val videoTimeline: RecordedVideoTimelineSummary? = null,
 )
 
 private const val MAX_RECORDING_SNAPSHOT_PIXELS = 4_000_000L
 private const val MAX_RECORDING_SNAPSHOT_BYTES = 2 * 1024 * 1024
 private const val MAX_RECORDING_SNAPSHOT_DIMENSION = 1_280
+private const val VIDEO_DRAIN_TIMEOUT_MS = 12_000L
 
 /**
  * Converts accepted mirror inputs to an ordered, review-only step draft. It never starts a device or sends input.
@@ -96,8 +113,11 @@ class TestStepRecordingSession internal constructor(
     private val drainTimeoutMs: Long = SNAPSHOT_DRAIN_TIMEOUT_MS,
     private val screencap: (() -> ByteArray)? = null,
     private val screenProbe: (() -> RecordingScreenState?)? = null,
+    private val screenProbeWithScreenshot: (((RecordingScreenshotEvidence) -> Unit) -> RecordingScreenState?)? = null,
     private val settleDelayMs: Long = PROBE_SETTLE_MS,
     private val probeDrainTimeoutMs: Long = PROBE_DRAIN_TIMEOUT_MS,
+    private val wallClockMs: () -> Long = System::currentTimeMillis,
+    internal val videoTimeline: RecordedVideoTimeline? = null,
 ) : Closeable {
     val id: String = UUID.randomUUID().toString()
 
@@ -123,6 +143,7 @@ class TestStepRecordingSession internal constructor(
     private var suppressingMultiTouch = false
     private val lock = Any()
     private var subscription: Closeable? = subscription
+    private var videoSubscription: Closeable? = null
     private var applicationReserved = false
     private val queuedScreenshots = AtomicInteger()
     private val disposed = AtomicBoolean(false)
@@ -146,6 +167,7 @@ class TestStepRecordingSession internal constructor(
     private val probeStopped = CountDownLatch(1)
     private val probeDisposed = AtomicBoolean(false)
     private val screenStates = LinkedHashMap<Int, RecordingScreenState>()
+    private val probeScreenshots = ArrayList<RecordingScreenshotEvidence>()
     private var nextStateSeq = 1
     private var stateImageBytes = 0L
     private val probeWorker = ThreadPoolExecutor(
@@ -159,7 +181,18 @@ class TestStepRecordingSession internal constructor(
     )
 
     init {
-        if (screenProbe != null) requestProbe(delayMs = 0L)
+        if (videoTimeline != null) mutableSnapshot.value = mutableSnapshot.value.copy(videoTimeline = videoTimeline.summary())
+        if (screenProbe != null || screenProbeWithScreenshot != null) requestProbe(delayMs = 0L)
+    }
+
+    /** Connects the existing mirror stream's packet tap; observer delivery only enqueues bytes. */
+    fun attachVideoSubscription(subscription: Closeable) {
+        val reject = synchronized(lock) {
+            if (!mutableSnapshot.value.active || videoSubscription != null) {
+                true
+            } else { videoSubscription = subscription; false }
+        }
+        if (reject) subscription.close()
     }
 
     internal fun accept(command: MirrorControlCommand, frame: MirrorFrame? = null, nowMs: Long = System.currentTimeMillis()) = synchronized(lock) {
@@ -243,13 +276,19 @@ class TestStepRecordingSession internal constructor(
         actionsAndExpected: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String> = emptySet(),
         expectedRowIds: List<String>? = null,
+        optionalOverrides: Map<String, Pair<Boolean, String?>> = emptyMap(),
     ): Boolean = synchronized(lock) {
         val old = mutableSnapshot.value.steps
-        if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds)) return@synchronized false
+        if (!validReviewUpdate(old, actionsAndExpected, expectedScreenshotIds, expectedRowIds, optionalOverrides)) return@synchronized false
         mutableSnapshot.value = mutableSnapshot.value.copy(steps = old.mapIndexed { index, row ->
+            val optional = optionalOverrides[row.id]?.first ?: row.optional
+            val condition = if (optionalOverrides.containsKey(row.id)) optionalOverrides[row.id]?.second?.trim()?.takeIf(String::isNotEmpty) else row.condition
             row.copy(
                 action = actionsAndExpected[index].first,
                 expected = actionsAndExpected[index].second,
+                optional = optional,
+                condition = condition,
+                reviewReason = row.reviewReason.takeIf { actionsAndExpected[index].second.isBlank() },
                 useScreenshotAsExpected = row.id in expectedScreenshotIds,
             )
         })
@@ -261,8 +300,14 @@ class TestStepRecordingSession internal constructor(
         actionsAndExpected: List<Pair<String, String>>,
         expectedScreenshotIds: Set<String>,
         expectedRowIds: List<String>?,
+        optionalOverrides: Map<String, Pair<Boolean, String?>>,
     ): Boolean = !mutableSnapshot.value.active && !applicationReserved && actionsAndExpected.size == old.size &&
         expectedScreenshotIds.all { id -> old.any { it.id == id } } &&
+        optionalOverrides.keys.all { id -> old.any { it.id == id } } &&
+        old.mapIndexed { index, row -> row to actionsAndExpected[index].second }.all { (row, expected) ->
+            val (optional, condition) = optionalOverrides[row.id] ?: (row.optional to row.condition)
+            recordingRowIssues(row, expected, optional, condition, requireExpected = false).isEmpty()
+        } &&
         (expectedRowIds == null || expectedRowIds == old.map { it.id })
 
     fun stop(): TestStepRecordingSnapshot {
@@ -278,9 +323,13 @@ class TestStepRecordingSession internal constructor(
                 probeStopped.countDown()
                 probeWorker.shutdown()
             }
-            oldSubscription
+            val oldVideoSubscription = videoSubscription
+            videoSubscription = null
+            oldSubscription to oldVideoSubscription
         }
-        detached?.close()
+        detached.first?.close()
+        detached.second?.close()
+        videoTimeline?.stop()
         return mutableSnapshot.value
     }
 
@@ -310,11 +359,24 @@ class TestStepRecordingSession internal constructor(
                 warn("The last screen context could not be read before recording stopped; those steps keep fewer screen details.")
             }
         }
+        val videoDrained = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            videoTimeline?.awaitFinished(VIDEO_DRAIN_TIMEOUT_MS) ?: true
+        }
+        synchronized(lock) {
+            val summary = videoTimeline?.summary()
+            mutableSnapshot.value = mutableSnapshot.value.copy(videoTimeline = summary)
+            summary?.warning?.let { message ->
+                val warnings = mutableSnapshot.value.warnings
+                if (message !in warnings) mutableSnapshot.value = mutableSnapshot.value.copy(warnings = (warnings + message).takeLast(MAX_RECORDED_WARNINGS))
+            }
+            if (!videoDrained) warn("The recorded video timeline could not finish draining before timeout; its available coverage may be shorter.")
+        }
         return mutableSnapshot.value
     }
 
     override fun close() {
         stop()
+        videoTimeline?.close()
         disposed.set(true)
         probeDisposed.set(true)
         val discarded = screenshotWorker.shutdownNow().size
@@ -340,19 +402,22 @@ class TestStepRecordingSession internal constructor(
         val rewritten = row.sourceInputIds.isNotEmpty()
         val context = row.screenContext?.takeIf(String::isNotBlank)
         val assetPath = row.screenshotJpeg?.takeIf { row.useScreenshotAsExpected }?.let(assetPathFor)
+        val screenshotSource = row.screenshotSource?.name?.lowercase()?.replace('_', ' ')
         val examples = buildList {
             when {
                 rewritten -> row.sourceHint?.takeIf(String::isNotBlank)?.let {
                     add(StepExample.ReferenceLog(newExampleId(), caption = REWRITE_HINT_CAPTION, text = it))
                 }
                 context != null ->
-                    add(StepExample.ReferenceLog(newExampleId(), caption = "Input-time screen context (before this action)", text = context))
+                    add(StepExample.ReferenceLog(newExampleId(), caption = "Recorded input context; see source timing", text = context))
             }
             if (assetPath != null && row.useScreenshotAsExpected) {
                 val caption = when {
-                    rewritten -> "Reviewed expected screenshot; the screen after the recorded inputs of this step"
-                    row.screenshotFromAdb -> "Reviewed expected screenshot; read through adb just after the input"
-                    else -> "Reviewed expected screenshot; captured at input time"
+                    rewritten -> "Reviewed expected screenshot; verified after evidence from ${screenshotSource ?: "screen probe"}"
+                    row.screenshotVerifiedMoment != null ->
+                        "Reviewed expected screenshot; verified ${row.screenshotVerifiedMoment} evidence from ${screenshotSource ?: "screen probe"}"
+                    row.screenshotTimingUncertain -> "Reviewed expected screenshot; uncertain raw input preview from ${screenshotSource ?: "mirror"}"
+                    else -> "Reviewed expected screenshot; raw input preview from ${screenshotSource ?: "adb"}"
                 }
                 add(StepExample.GoldenScreenshot(newExampleId(), caption = caption, assetPath = assetPath))
             }
@@ -363,6 +428,8 @@ class TestStepRecordingSession internal constructor(
             expected = row.expected,
             checks = row.checks,
             examples = examples,
+            optional = row.optional,
+            condition = row.condition,
         )
     }
 
@@ -485,10 +552,10 @@ class TestStepRecordingSession internal constructor(
         }
         val index = current.steps.size
         val screenshotContext = when {
-            frame != null -> "$context UI hierarchy isn't exposed by the mirror; a bounded screen snapshot is captured when supported."
+            frame != null -> "$context UI hierarchy isn't exposed by the mirror; the raw mirror preview has uncertain acquisition timing."
             screencap != null ->
-                "$context UI hierarchy isn't exposed by the mirror; the screen image is read through adb just after the input, " +
-                    "so it may already show the result of this action."
+                "$context UI hierarchy isn't exposed by the mirror; a raw input preview is read through adb after the action, " +
+                    "with its acquisition interval recorded."
             else -> "$context Screenshot frame unavailable; UI hierarchy isn't exposed by the mirror."
         }
         val recorded = RecordedTestStep(
@@ -504,7 +571,7 @@ class TestStepRecordingSession internal constructor(
         requestProbe(settleDelayMs)
         when {
             frame != null -> scheduleSnapshot(recorded.id, fromAdb = false) { snapshotEncoder(frame) }
-            screencap != null -> scheduleSnapshot(recorded.id, fromAdb = true) { encodeRecordingScreencap(screencap.invoke()) }
+            screencap != null -> scheduleSnapshot(recorded.id, fromAdb = true) { screencap.invoke() }
             else -> warn(NO_FRAME_WARNING)
         }
     }
@@ -520,7 +587,10 @@ class TestStepRecordingSession internal constructor(
         try {
             screenshotWorker.execute {
                 try {
-                    val bytes = if (fromAdb) runCatching(produce).getOrNull() else produce()
+                    val acquiredAt = if (fromAdb) wallClockMs() else null
+                    val capturedBytes = if (fromAdb) runCatching(produce).getOrNull() else produce()
+                    val acquisitionFinishedAt = if (fromAdb) wallClockMs() else null
+                    val bytes = if (fromAdb) capturedBytes?.let(::encodeRecordingScreencap) else capturedBytes
                     synchronized(lock) {
                         if (disposed.get()) return@synchronized
                         val rows = mutableSnapshot.value.steps.toMutableList()
@@ -528,8 +598,17 @@ class TestStepRecordingSession internal constructor(
                             warn(if (fromAdb) NO_FRAME_WARNING else "A screen frame exceeded the image size limits and was omitted.")
                         } else {
                             val index = rows.indexOfFirst { it.id == recordedId }
-                            if (index >= 0) rows[index] = rows[index].copy(screenshotJpeg = bytes, screenshotFromAdb = fromAdb)
-                            mutableSnapshot.value = mutableSnapshot.value.copy(steps = rows, pendingSnapshots = (pendingCount() - 1).coerceAtLeast(0))
+                            if (index >= 0) {
+                                rows[index] = rows[index].copy(
+                                    screenshotJpeg = bytes,
+                                    screenshotFromAdb = fromAdb,
+                                    screenshotSource = if (fromAdb) RecordingScreenshotSource.ADB_INPUT else RecordingScreenshotSource.MIRROR_INPUT,
+                                    screenshotAcquiredAtMs = acquiredAt,
+                                    screenshotAcquisitionFinishedAtMs = acquisitionFinishedAt,
+                                    screenshotTimingUncertain = !fromAdb,
+                                )
+                                publishRows(rows)
+                            }
                         }
                     }
                 } finally {
@@ -551,7 +630,7 @@ class TestStepRecordingSession internal constructor(
      * that is already reading is left alone and followed by exactly one more. Does no adb work itself.
      */
     private fun requestProbe(delayMs: Long) {
-        if (screenProbe == null || probeDisposed.get() || probeStopped.count == 0L) return
+        if ((screenProbe == null && screenProbeWithScreenshot == null) || probeDisposed.get() || probeStopped.count == 0L) return
         var launch = false
         synchronized(probeLock) {
             probeSettleUntilNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delayMs)
@@ -579,7 +658,14 @@ class TestStepRecordingSession internal constructor(
                 break
             }
             synchronized(probeLock) { probeWanted = false }
-            deliverProbe(runCatching { screenProbe?.invoke() }.getOrNull())
+            val separateScreenshotReader = screenProbeWithScreenshot
+            val storesScreenshotSeparately = separateScreenshotReader != null
+            val state = if (separateScreenshotReader != null) {
+                runCatching { separateScreenshotReader.invoke(::deliverProbeScreenshot) }.getOrNull()
+            } else {
+                runCatching { screenProbe?.invoke() }.getOrNull()
+            }
+            deliverProbe(state, storesScreenshotSeparately)
             running = synchronized(probeLock) {
                 if (!probeWanted || probeDisposed.get()) probeRunning = false
                 probeRunning
@@ -614,14 +700,32 @@ class TestStepRecordingSession internal constructor(
         mutableSnapshot.value = mutableSnapshot.value.copy(pendingSnapshots = pendingCount())
     }
 
-    private fun deliverProbe(state: RecordingScreenState?) = synchronized(lock) {
+    private fun deliverProbeScreenshot(evidence: RecordingScreenshotEvidence) = synchronized(lock) {
+        if (probeDisposed.get()) return@synchronized
+        when {
+            probeScreenshots.size >= MAX_RECORDED_STEPS + 1 -> warn("Screen context for later inputs was skipped: the probe limit was reached.")
+            stateImageBytes + evidence.jpeg.size > MAX_STATE_IMAGE_BYTES ->
+                warn("Screen images for later inputs were skipped: the recording image budget is used up.")
+            else -> {
+                probeScreenshots += evidence
+                stateImageBytes += evidence.jpeg.size
+                publishRows(mutableSnapshot.value.steps)
+            }
+        }
+    }
+
+    private fun deliverProbe(state: RecordingScreenState?, screenshotStoredSeparately: Boolean = false) = synchronized(lock) {
         if (probeDisposed.get()) return@synchronized
         if (state == null || state.nodes.isEmpty()) warn(PROBE_FAILED_WARNING)
+        val image = state?.screenshotJpeg.takeUnless { screenshotStoredSeparately }
+        val hasScreenContext = state != null && (
+            !state.packageName.isNullOrBlank() || !state.activity.isNullOrBlank() || state.nodes.isNotEmpty()
+        )
         when {
             state == null -> Unit
+            !hasScreenContext && image == null -> Unit
             screenStates.size >= MAX_RECORDED_STEPS + 1 -> warn("Screen context for later inputs was skipped: the probe limit was reached.")
             else -> {
-                val image = state.screenshotJpeg
                 val withinBudget = image == null || stateImageBytes + image.size <= MAX_STATE_IMAGE_BYTES
                 if (!withinBudget) warn("Screen images for later inputs were skipped: the recording image budget is used up.")
                 val stored = state.copy(seq = nextStateSeq++, screenshotJpeg = image.takeIf { withinBudget })
@@ -645,19 +749,72 @@ class TestStepRecordingSession internal constructor(
     }
 
     private fun withScreenContext(rows: List<RecordedTestStep>): Pair<List<RecordedTestStep>, List<Int>> {
-        if (screenStates.isEmpty()) return rows to emptyList()
         val recorded = rows.indices.filter { rows[it].kind != null }
-        val windows = screenStates.values.map { ProbeWindow(it.seq, it.startedAt, it.finishedAt) }
-        val attached = attachScreenStates(recorded.map { InputWindow(rows[it].inputStartMs, rows[it].inputAtMs) }, windows)
+        val inputWindows = recorded.map { InputWindow(rows[it].inputStartMs, rows[it].inputAtMs) }
+        val windows = screenStates.values
+            .filter { !it.packageName.isNullOrBlank() || !it.activity.isNullOrBlank() || it.nodes.isNotEmpty() }
+            .map { ProbeWindow(it.seq, it.startedAt, it.finishedAt) }
+        val attached = attachScreenStates(inputWindows, windows)
+
+        val probeEvidence = buildList {
+            addAll(probeScreenshots)
+            screenStates.values.forEach { state ->
+                val bytes = state.screenshotJpeg ?: return@forEach
+                add(
+                    RecordingScreenshotEvidence(
+                        jpeg = bytes,
+                        source = RecordingScreenshotSource.SCREEN_PROBE,
+                        acquiredAtMs = state.screenshotStartedAt ?: state.startedAt,
+                        acquisitionFinishedAtMs = state.screenshotFinishedAt ?: state.finishedAt,
+                        timingUncertain = false,
+                    ),
+                )
+            }
+        }
+        val adbEvidence = buildList {
+            rows.forEach { row ->
+                if (row.screenshotJpeg != null && row.screenshotSource == RecordingScreenshotSource.ADB_INPUT &&
+                    row.screenshotAcquiredAtMs != null && row.screenshotAcquisitionFinishedAtMs != null
+                ) {
+                    add(
+                        RecordingScreenshotEvidence(
+                            jpeg = row.screenshotJpeg,
+                            source = RecordingScreenshotSource.ADB_INPUT,
+                            acquiredAtMs = row.screenshotAcquiredAtMs,
+                            acquisitionFinishedAtMs = row.screenshotAcquisitionFinishedAtMs,
+                            timingUncertain = false,
+                        ),
+                    )
+                }
+            }
+        }
+
+        fun screenshotAttachments(evidence: List<RecordingScreenshotEvidence>): List<RowAttachment> =
+            attachEvidenceWindows(
+                inputWindows,
+                evidence.mapIndexedNotNull { index, item ->
+                    val start = item.acquiredAtMs ?: return@mapIndexedNotNull null
+                    val finish = item.acquisitionFinishedAtMs ?: return@mapIndexedNotNull null
+                    EvidenceWindow(index, start, finish)
+                },
+            )
+        val probeScreens = screenshotAttachments(probeEvidence)
+        val adbScreens = screenshotAttachments(adbEvidence)
         val result = rows.toMutableList()
         val passwordEvidence = BooleanArray(rows.size)
         recorded.forEachIndexed { slot, index ->
             val before = attached[slot].beforeSeq?.let(screenStates::get)
             val after = attached[slot].afterSeq?.let(screenStates::get)
+            val beforeScreenshot = probeScreens[slot].beforeSeq?.let(probeEvidence::getOrNull)
+                ?: adbScreens[slot].beforeSeq?.let(adbEvidence::getOrNull)
+            val afterScreenshot = probeScreens[slot].afterSeq?.let(probeEvidence::getOrNull)
+                ?: adbScreens[slot].afterSeq?.let(adbEvidence::getOrNull)
             result[index] = rows[index].copy(
                 before = before?.ref(),
                 after = after?.ref(),
                 tappedElement = tappedElementFor(rows[index], before),
+                beforeScreenshot = beforeScreenshot,
+                afterScreenshot = afterScreenshot,
             )
             passwordEvidence[index] = before?.passwordFieldLikelyEdited() == true || after?.passwordFieldLikelyEdited() == true
         }

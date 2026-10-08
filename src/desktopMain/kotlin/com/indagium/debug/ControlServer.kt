@@ -643,8 +643,8 @@ private const val EXTERNAL_APPROVAL_NOTE =
 
 // Screen reads and video frames are returned as real MCP image content rather than base64 text.
 // When `rawResult` is the Map a handler returns on success (carrying a non-null imageBase64),
-// reply with an ImageContent block instead of default TextContent(JSON); errors and all other
-// operations retain the text fallback.
+// reply with an ImageContent block instead of default TextContent(JSON); recording rewrites also keep
+// their provenance metadata in a small leading text block so account agents can see timing and certainty.
 //
 // [IMAGE_RESULT_TOOL_NAMES] is the set of tools whose success result becomes image content;
 // [SCREEN_IMAGE_TOOL_NAMES] are the ones among them that also get a leading text block with the
@@ -655,7 +655,15 @@ internal val SCREEN_IMAGE_TOOL_NAMES: Set<String> = setOf("get_device_screen", "
 // A test judge's evidence tools (get_step_screenshot, get_example) return images too, for Claude Code and Codex judges that
 // reach the judge-only gateway over the managed MCP server; so does a recording rewrite's get_recorded_screen.
 internal val IMAGE_RESULT_TOOL_NAMES: Set<String> =
-    setOf("get_video_frame", "get_step_screenshot", "get_example", "get_step_example", "get_test_recording", "get_recorded_screen") +
+    setOf(
+        "get_video_frame",
+        "get_step_screenshot",
+        "get_example",
+        "get_step_example",
+        "get_test_recording",
+        "get_recorded_screen",
+        "get_recorded_video_storyboard",
+    ) +
         SCREEN_IMAGE_TOOL_NAMES
 
 internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: String): CallToolResult {
@@ -666,41 +674,103 @@ internal fun toCallToolResult(toolName: String, rawResult: Any?, textFallback: S
     }
     val mimeType = (fields["mimeType"] as? String) ?: "image/png"
     val content = buildList {
-        val savedGoldenReference = toolName == "test_lane_tool_call" && fields["kind"] == "goldenScreenshot"
-        val savedReference = toolName in setOf("get_step_example", "get_test_recording") || savedGoldenReference
-        if (savedReference) {
-            val caption = (fields["caption"] as? String)?.takeIf(String::isNotBlank)
-            val exampleId = fields["exampleId"] as? String
-            val label = if (toolName == "get_test_recording") "Recorded input-time context" else "Reference image"
-            add(
-                TextContent(
-                    "$label${exampleId?.let { " $it" }.orEmpty()}${caption?.let { ": $it" }.orEmpty()}. " +
-                        "This is a saved test example and reference context, not the current device screen or an expected-result oracle.",
-                ),
-            )
-        }
-        if (toolName in SCREEN_IMAGE_TOOL_NAMES && !savedReference) {
-            val width = (fields["width"] as? Number)?.toInt()
-            val height = (fields["height"] as? Number)?.toInt()
-            val instructions = fields["coordinateInstructions"] as? String
-            add(
-                TextContent(
-                    text = buildString {
-                        append(fields["message"] as? String ?: "Current Android device screen")
-                        if (width != null && height != null) append(" Screenshot dimensions: $width×$height pixels.")
-                        append(' ')
-                        append(
-                            instructions ?: "Tap and swipe coordinates are measured from this returned image's " +
-                                "top-left and mapped to physical device pixels.",
-                        )
-                    },
-                ),
-            )
-        }
+        savedReferenceContent(toolName, fields)?.let(::add)
+        screenImageContext(toolName, fields)?.let(::add)
+        if (toolName == "get_recorded_screen") add(recordedScreenMetadata(fields))
+        if (toolName == "get_recorded_video_storyboard") add(recordedVideoMetadata(fields))
         add(ImageContent(data = imageBase64, mimeType = mimeType))
     }
     return CallToolResult(content = content)
 }
+
+private fun recordedVideoMetadata(fields: Map<*, *>): TextContent {
+    val message = (fields["message"] as? String).orEmpty()
+    val frames = (fields["frames"] as? List<*>)?.mapNotNull { it as? Map<*, *> }.orEmpty()
+    val frameSummary = frames.joinToString("; ") { frame ->
+        val actual = frame["actualMs"]
+        val input = frame["inputNumber"]?.let { " input $it" }.orEmpty()
+        val relation = frame["relation"]?.toString().orEmpty()
+        val age = frame["ageMs"]?.let { ", age ${it}ms" }.orEmpty()
+        "actual ${actual}ms$input $relation$age"
+    }
+    val covered = (fields["coveredInputs"] as? List<*>)?.joinToString(", ").orEmpty()
+    val inputWindow = (fields["inputWindowMs"] as? List<*>)?.takeIf { it.size == 2 }?.joinToString("–").orEmpty()
+    val requestedRange = (fields["requestedRangeMs"] as? List<*>)?.takeIf { it.size == 2 }?.joinToString("–").orEmpty()
+    val timebase = fields["timebase"] as? String
+    return TextContent(buildString {
+        append(message)
+        if (inputWindow.isNotBlank()) {
+            append(" Selected input interval: session-relative ")
+                .append(inputWindow)
+                .append("ms (approximate host packet-receipt mapping).")
+        }
+        if (requestedRange.isNotBlank()) append(" Requested range: session-relative ").append(requestedRange).append("ms.")
+        if (timebase != null && inputWindow.isBlank()) append(" Timebase: ").append(timebase).append('.')
+        if (frameSummary.isNotBlank()) append(" Frames: ").append(frameSummary).append('.')
+        if (covered.isNotBlank()) append(" Input-centered before/after coverage: ").append(covered).append('.')
+    })
+}
+
+private fun savedReferenceContent(toolName: String, fields: Map<*, *>): TextContent? {
+    val savedGoldenReference = toolName == "test_lane_tool_call" && fields["kind"] == "goldenScreenshot"
+    val savedReference = toolName in setOf("get_step_example", "get_test_recording") || savedGoldenReference
+    if (!savedReference) return null
+    val caption = (fields["caption"] as? String)?.takeIf(String::isNotBlank)
+    val exampleId = fields["exampleId"] as? String
+    val label = if (toolName == "get_test_recording") "Recorded input-time context" else "Reference image"
+    val context = if (toolName == "get_test_recording") {
+        recordedInputImageContext(fields)
+    } else {
+        SAVED_TEST_REFERENCE_CONTEXT
+    }
+    return TextContent("$label${exampleId?.let { " $it" }.orEmpty()}${caption?.let { ": $it" }.orEmpty()}. $context")
+}
+
+private fun recordedInputImageContext(fields: Map<*, *>): String {
+    return when (val verifiedFor = fields["verifiedFor"] as? String) {
+        "before", "after" ->
+            "Verified $verifiedFor screenshot evidence; it remains an opt-in candidate until " +
+                "the reviewer selects it, and is not the current device screen."
+        else -> if (fields["timingUncertain"] == true) {
+            "Raw input preview with uncertain timing; it is not verified before/after evidence or the current device " +
+                "screen."
+        } else {
+            "Raw input preview with a recorded acquisition interval; consult its timing before treating it as " +
+                "before/after evidence. It is not the current device screen."
+        }
+    }
+}
+
+private fun screenImageContext(toolName: String, fields: Map<*, *>): TextContent? {
+    val isSavedReference =
+        toolName in setOf("get_step_example", "get_test_recording") ||
+            (toolName == "test_lane_tool_call" && fields["kind"] == "goldenScreenshot")
+    if (toolName !in SCREEN_IMAGE_TOOL_NAMES || isSavedReference) return null
+    val width = (fields["width"] as? Number)?.toInt()
+    val height = (fields["height"] as? Number)?.toInt()
+    val instructions = fields["coordinateInstructions"] as? String
+    return TextContent(
+        text = buildString {
+            append(fields["message"] as? String ?: "Current Android device screen")
+            if (width != null && height != null) append(" Screenshot dimensions: $width×$height pixels.")
+            append(' ')
+            append(
+                instructions ?: "Tap and swipe coordinates are measured from this returned image's " +
+                    "top-left and mapped to physical device pixels.",
+            )
+        },
+    )
+}
+
+private fun recordedScreenMetadata(fields: Map<*, *>): TextContent {
+    val metadata = fields.entries
+        .filter { it.key != "imageBase64" }
+        .associate { it.key.toString() to it.value }
+    return TextContent(Json.encode(metadata))
+}
+
+private const val SAVED_TEST_REFERENCE_CONTEXT =
+    "This is a saved test example and reference context, not the current device screen or an expected-result oracle."
 
 private fun bearerToken(rawHeader: String?): String? = rawHeader
     ?.takeIf { it.startsWith(AUTH_SCHEME_PREFIX) }

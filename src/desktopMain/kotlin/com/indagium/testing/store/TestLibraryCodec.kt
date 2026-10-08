@@ -61,8 +61,8 @@ import kotlinx.serialization.json.put
 
 const val TEST_SUITE_FILE_FORMAT = "indagium-test-suite"
 const val TEST_LIBRARY_FILE_FORMAT = "indagium-test-library"
-const val TEST_SUITE_FILE_VERSION = 1
-const val TEST_LIBRARY_FILE_VERSION = 1
+const val TEST_SUITE_FILE_VERSION = 2
+const val TEST_LIBRARY_FILE_VERSION = 2
 
 // The `type` values of the polymorphic entries. A reader skips an entry of any other type, so a caller
 // that must not lose input silently (the MCP authoring tools) checks against these first.
@@ -185,6 +185,8 @@ internal fun stepToJson(step: TestStep): JsonObject = buildJsonObject {
     put("retries", step.retries)
     put("maxToolCalls", step.maxToolCalls)
     put("onFailure", step.onFailure.name)
+    put("optional", step.optional)
+    step.condition?.let { put("condition", it) }
     put("checks", buildJsonArray { step.checks.forEach { add(checkToJson(it)) } })
     put("examples", buildJsonArray { step.examples.forEach { add(exampleToJson(it)) } })
 }
@@ -336,6 +338,8 @@ private fun decodeStep(o: JsonObject, ids: IdAllocator): TestStep = TestStep(
     retries = o.int("retries", DEFAULT_STEP_RETRIES),
     maxToolCalls = o.int("maxToolCalls", DEFAULT_STEP_MAX_TOOL_CALLS),
     onFailure = o.enumOr("onFailure", OnFailure.STOP_CASE),
+    optional = o.bool("optional", false),
+    condition = o.optStr("condition"),
 )
 
 private fun decodeCase(o: JsonObject, ids: IdAllocator): TestCase = TestCase(

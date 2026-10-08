@@ -244,10 +244,14 @@ entries are active.
 ### Steps
 
 - `create_test_step` (`caseId`, `action`; optional `expected`, `timeoutMs`, `retries`, `maxToolCalls`,
-  `onFailure`, `checks`, `examples`, `index`) — `maxToolCalls` (1..100, default 15) is the step's
+  `onFailure`, `optional`, `condition`, `checks`, `examples`, `index`) — `optional` defaults to false;
+  when true, `condition` must explain when to perform it. Recording Apply requires expected text on required
+  steps; a conditioned optional step may leave it blank. Existing general API behavior for blank expected text
+  remains unchanged. `maxToolCalls` (1..100, default 15) is the step's
   lane-tool call budget; `onFailure` is `STOP_CASE` (default), `CONTINUE`,
   `CREATE_ISSUE_AND_CONTINUE` or `PAUSE_FOR_USER`. Refused when the case or its suite is locked.
-- `update_test_step` (`stepId`; any of the create fields) — `checks` and `examples` **replace the whole
+- `update_test_step` (`stepId`; any of the create fields) — setting `optional:false` clears its condition;
+  `checks` and `examples` **replace the whole
   ordered lists**: send every entry you want to keep, re-sending an entry's `id` keeps its identity.
 - `delete_test_step` (`stepId`), `duplicate_test_step` (`stepId`; deep copy with new ids placed after the
   original), `move_test_step` (`stepId`, `toIndex`; returns the case's `stepIds` order).
@@ -308,18 +312,39 @@ or recording is a separate confirmation-required call.
   messages and the default wait duration. `insert_log_checks` (stepId, edited checks or text, optional index)
   inserts the reviewed checks with fresh IDs.
 - `start_test_recording` (suiteId, caseId, deviceSerial) observes accepted input on an already-open live
-  mirror; it never injects input. `get_test_recording` (sessionId, optional rowId) returns the preview and
-  warnings; each row also reports `durationMs`, `tappedElement`, `package` and `activity` from a best-effort adb probe
-  read while recording (any may be null); supplying one rowId returns only that row's bounded input-time image as MCP image content.
+  mirror; it never injects input. `get_test_recording` (sessionId, optional rowId) returns the preview, video timeline
+  availability/duration/gaps/cap warning, and warnings; each row reports `durationMs`, `tappedElement`, legacy `package`/`activity`, and explicit `beforeApp`,
+  `beforeActivity`, `afterApp`, and `afterActivity` fields (each may be unavailable). Before/after screenshots are
+  independently timed and may exist without app/activity context when a later slow probe overlaps input. A mirror
+  image appears as a raw input preview with uncertain timing. Supplying one rowId returns that row's bounded image as
+  MCP image content with source, acquisition interval, and verification metadata.
   `update_test_recording` (sessionId, steps) edits the stopped preview. Each step carries action, expected text,
   and optional useScreenshotAsExpected; a captured frame is context unless explicitly opted in.
   `stop_test_recording`, `discard_test_recording`, and `apply_test_recording` stop/drain, discard without
   library mutation, or apply the reviewed preview at an optional index to its original case.
   `rewrite_test_recording` (sessionId, profileId, optional model, reasoningEffort, note) asks a configured profile to
-  turn a stopped recording into readable steps with expected results. The provider reads the recorded inputs, screen
-  elements and screenshots through a read-only gateway (`get_recorded_input`, `get_recorded_screen`,
-  `get_recorded_ui`; typed passwords are hidden and never sent) and every input must land in exactly one step, or
-  nothing changes. The rewritten rows replace the recording's rows for review (`rewritten`, `rewriteNotes`, and
+  turn a stopped recording into readable steps. The provider reads the recorded inputs, screen elements, screenshots,
+  and (when captured) video storyboards through a read-only gateway (`get_recorded_input`, `get_recorded_screen`, `get_recorded_ui`,
+  `get_recorded_video_storyboard`; typed passwords are hidden
+  and never sent). `get_recorded_screen` accepts `moment: before|after` for eligible evidence or `moment: input` for a raw
+  preview with source and acquisition timing; uncertain mirror timing is never verified as before/after. Every input must
+  land in exactly one step, or nothing changes. `get_recorded_video_storyboard` accepts either a 1-based `index` for an
+  input-centered sequence or `startMs` plus `endMs` for a session-relative range no longer than 30 seconds. It returns a
+  single MCP image content block containing up to six decoded, timestamp-labelled frames, plus frame times, ages and any
+  input coverage. `get_recorded_input` reports each input's approximate session-relative `videoInputStartMs` and
+  `videoInputEndMs` when video exists, so a caller can request a relevant range. The selected interval or requested range is
+  repeated in image metadata; the first range frame may show a held predecessor. The frame time is mapped from packet receipt
+  approximately; pre-roll can predate the session, and missing
+  segments/reconnects are reported. Known password-edit windows are withheld. An observed video transition can support a
+  broad action and result such as opening YouTube from the launcher, but cannot identify a specific control from the
+  destination screen alone. The rewrite brief marks available screenshots, UI readings and timeline summary, and shared
+  capture IDs let the provider reuse one image across
+  adjacent inputs. It reads only available evidence needed to resolve uncertainty; a missing reading is not retried. A
+  supported step omits `reviewReason` or sets it to null; empty and whitespace-only values are treated as absent. A blank
+  expected result is allowed only for an optional step with a non-blank condition, or a required step with a substantive
+  `reviewReason`. Wrong types and non-empty reasons over 500 characters are
+  invalid. The
+  rewritten rows replace the recording's rows for review (`rewritten`, `rewriteNotes`, and
   `sourceInputIds` per row in `get_test_recording`); sending the recording to a remote provider requires approval.
   `restore_test_recording_raw` (sessionId) puts the recorded rows back exactly (same row ids); it needs no approval.
   Both are refused while the recording is being applied or rewritten, and a later `apply_test_recording` is refused
@@ -455,6 +480,11 @@ deterministic checks (`logAppears`, `logAbsent`, `scriptResult`) and the judge, 
 remain, then applies `onFailure` (`STOP_CASE` ends the case, `CONTINUE` and `CREATE_ISSUE_AND_CONTINUE` move on,
 `PAUSE_FOR_USER` waits for `resume_paused_step` or the user). A step that outlives its `timeoutMs` is closed as
 `TIMEOUT` and an agent run is restarted at the next step with a summary of the earlier ones.
+
+An optional step's `get_current_step` result includes its condition. If that condition is absent, report `SKIPPED` with
+an observation explaining why. Only an optional step can be skipped; a required-step skip is refused. A valid skip records
+`SKIPPED` and advances without screenshot checks, judging, retries or case failure. If the condition is present, perform
+the action and report its real result normally.
 
 ### Issues from failed steps
 

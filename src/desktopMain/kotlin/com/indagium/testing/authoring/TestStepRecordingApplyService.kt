@@ -33,8 +33,8 @@ internal class TestStepRecordingApplyService(
                 frozeSnapshot = true
                 if (snapshot.active) return@withContext StoreResult.Invalid("Stop recording before applying its draft.")
                 if (snapshot.pendingSnapshots > 0) return@withContext StoreResult.Invalid("Wait for captured screen snapshots to finish before applying.")
-                if (snapshot.steps.isEmpty() || snapshot.steps.any { it.action.isBlank() || it.expected.isBlank() }) {
-                    return@withContext StoreResult.Invalid("Add an action and expected result to every recorded step before applying.")
+                if (snapshot.steps.isEmpty() || snapshot.steps.any { recordingRowIssues(it).isNotEmpty() }) {
+                    return@withContext StoreResult.Invalid("Add an action and expected result to every required step, and a condition to each optional step.")
                 }
                 when (val allowed = preflight(suiteId, caseId)) {
                     is StoreResult.Ok -> Unit

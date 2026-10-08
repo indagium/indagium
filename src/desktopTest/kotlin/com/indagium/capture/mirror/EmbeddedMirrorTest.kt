@@ -33,6 +33,18 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class EmbeddedMirrorTest {
+    private companion object {
+        const val OBSERVER_WIDTH = 320
+        const val OBSERVER_HEIGHT = 240
+        const val SCRCPY_CONFIG_FLAG = 1L shl 62
+        const val SCRCPY_KEY_FRAME_FLAG = 1L shl 61
+        const val SPS_NAL_HEADER = 0x67
+        const val SPS_FIXTURE_BYTE = 0x01
+        const val IDR_NAL_HEADER = 0x65
+        const val IDR_FIXTURE_BYTE = 0x02
+        const val UNSIGNED_BYTE_MASK = 0xff
+    }
+
     @Test
     fun coordinateMapperAccountsForFitLetterboxAndRotation() {
         val mapper = MirrorCoordinateMapper(1_000, 1_000, 2_000, 1_000)
@@ -249,6 +261,216 @@ class EmbeddedMirrorTest {
             runtime.close()
         }
     }
+
+    @Test
+    fun videoObserversTapCpuNativeAndSharedPacketRoutesWithoutStartingAnotherEncoder() {
+        assertStandaloneVideoPacketsObserved(native = false)
+        assertStandaloneVideoPacketsObserved(native = true)
+    }
+
+    @Test
+    fun restartedRuntimeDropsPreviousGopAndRejectsPacketsFromRetiredPump() {
+        val retiredStream = DelayedPacketInputStream(
+            mirrorPacketHeaderAndMeta(),
+            mirrorPacketPayload(keyFramePtsUs = 111),
+        )
+        val transport = EmbeddedMirrorTransport { serial, _ ->
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream =
+                    if (serial == "old-device") retiredStream else ByteArrayInputStream(mirrorPacketStream(keyFramePtsUs = 900))
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                input.readBytes()
+            }
+        }
+        val runtime = EmbeddedMirrorRuntime(transport, decoder, maxReconnectAttempts = 0)
+        val observed = CopyOnWriteArrayList<MirrorVideoPacket>()
+        try {
+            runtime.start("old-device")
+            assertTrue(retiredStream.waitingForPayload.await(2, TimeUnit.SECONDS), "old pump did not reach its packet boundary")
+
+            runtime.start("new-device")
+            await { runtime.snapshot().state == EmbeddedMirrorState.FAILED }
+            val subscription = runtime.addVideoPacketListener(observed::add)
+            assertEquals(listOf(900L, 901L), observed.map { it.sourcePtsUs })
+
+            retiredStream.releasePayload.countDown()
+            assertTrue(retiredStream.finished.await(2, TimeUnit.SECONDS), "retired pump did not drain its delayed stream")
+
+            val latePackets = CopyOnWriteArrayList<MirrorVideoPacket>()
+            val lateSubscription = runtime.addVideoPacketListener(latePackets::add)
+            try {
+                assertEquals(listOf(900L, 901L), observed.map { it.sourcePtsUs })
+                assertEquals(listOf(900L, 901L), latePackets.map { it.sourcePtsUs })
+            } finally {
+                subscription.close()
+                lateSubscription.close()
+            }
+        } finally {
+            retiredStream.releasePayload.countDown()
+            runtime.close()
+        }
+    }
+
+    @Test
+    fun reconnectInvalidatesReplayBeforeLiveButKeepsExistingPacketObserver() {
+        val reconnectedStream = DelayedPacketInputStream(
+            mirrorPacketHeaderAndMeta(),
+            mirrorPacketPayload(keyFramePtsUs = 900),
+        )
+        val opened = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            val connectionNumber = opened.getAndIncrement()
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = if (connectionNumber == 0) {
+                    ByteArrayInputStream(mirrorPacketStream(keyFramePtsUs = 100))
+                } else {
+                    reconnectedStream
+                }
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val decoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                input.readBytes()
+            }
+        }
+        val runtime = EmbeddedMirrorRuntime(
+            transport = transport,
+            decoder = decoder,
+            maxReconnectAttempts = 1,
+            reconnectDelay = Duration.ofMillis(1),
+        )
+        val allPackets = CopyOnWriteArrayList<MirrorVideoPacket>()
+        val allSubscription = runtime.addVideoPacketListener(allPackets::add)
+        var reconnectSubscription: java.io.Closeable? = null
+        try {
+            runtime.start("reconnect-test")
+            await {
+                runtime.snapshot().state == EmbeddedMirrorState.LIVE &&
+                    runtime.snapshot().reconnectAttempt == 1 &&
+                    reconnectedStream.waitingForPayload.count == 0L
+            }
+            assertTrue(allPackets.any { it.keyFrame && it.sourcePtsUs == 101L })
+
+            val reconnectPackets = CopyOnWriteArrayList<MirrorVideoPacket>()
+            reconnectSubscription = runtime.addVideoPacketListener(reconnectPackets::add)
+            assertTrue(reconnectPackets.isEmpty(), "a new subscriber during reconnect must not replay the prior connection's GOP")
+
+            reconnectedStream.releasePayload.countDown()
+            await { reconnectPackets.any { it.keyFrame && it.sourcePtsUs == 901L } }
+            assertTrue(allPackets.any { it.keyFrame && it.sourcePtsUs == 901L }, "the existing recorder observer keeps receiving new epochs")
+        } finally {
+            reconnectedStream.releasePayload.countDown()
+            reconnectSubscription?.close()
+            allSubscription.close()
+            runtime.close()
+        }
+    }
+
+    private fun assertStandaloneVideoPacketsObserved(native: Boolean) {
+        val observed = CopyOnWriteArrayList<MirrorVideoPacket>()
+        val stream = mirrorPacketStream()
+        val openedConnections = AtomicInteger()
+        val transport = EmbeddedMirrorTransport { _, _ ->
+            openedConnections.incrementAndGet()
+            object : EmbeddedMirrorConnection {
+                override val videoInput: InputStream = ByteArrayInputStream(stream)
+                override val audioInput: InputStream? = null
+
+                override fun sendControl(bytes: ByteArray) = Unit
+
+                override fun close() = Unit
+            }
+        }
+        val cpuDecoder = object : H264Decoder {
+            override fun decode(input: InputStream, onFrame: (MirrorFrame) -> Unit) {
+                input.readBytes()
+            }
+        }
+        val decodedPackets = CopyOnWriteArrayList<BoundedScrcpyPacketFeed.Packet>()
+        val packetDecoder = DirectH264Decoder { feed, _ ->
+            while (true) {
+                val packet = feed.nextPacket() ?: break
+                decodedPackets += packet
+            }
+        }
+        val runtime = if (native) {
+            EmbeddedMirrorRuntime(
+                transport = transport,
+                directDecoder = packetDecoder,
+                onDirectFrame = {},
+                maxReconnectAttempts = 0,
+            )
+        } else {
+            EmbeddedMirrorRuntime(transport = transport, decoder = cpuDecoder, maxReconnectAttempts = 0)
+        }
+        val subscription = runtime.addVideoPacketListener { observed += it }
+        try {
+            runtime.start("observer-test")
+            await { runtime.snapshot().state == EmbeddedMirrorState.FAILED }
+
+            assertEquals(listOf(true, false), observed.map { it.config })
+            assertTrue(observed[1].keyFrame)
+            assertTrue(observed.all { it.width == OBSERVER_WIDTH && it.height == OBSERVER_HEIGHT })
+            assertTrue(observed.all { it.connectionEpoch == 1L })
+            assertTrue(observed.all { it.receivedAtMs > 0L && it.receivedAtNanos > 0L })
+            assertEquals(1, openedConnections.get(), "the packet observer shares the live stream")
+            if (native) {
+                val observedConfig = observed.single { it.config }
+                val observedKeyFrame = observed.single { it.keyFrame }
+                val decoderConfigs = decodedPackets.filter { it.config }
+                assertTrue(decoderConfigs.isNotEmpty(), "the native decoder receives H.264 config")
+                assertTrue(decoderConfigs.all { it.data.contentEquals(observedConfig.data) }, "config replay must keep original bytes")
+                assertTrue(
+                    decodedPackets.any { it.keyFrame && it.data.contentEquals(observedKeyFrame.data) },
+                    "the native decoder receives the observed key frame",
+                )
+                assertTrue(decodedPackets.none { !it.config && !it.keyFrame }, "no unrelated picture is present in the fixture")
+            }
+        } finally {
+            subscription.close()
+            runtime.close()
+        }
+    }
+
+    private fun mirrorPacketStream(keyFramePtsUs: Long = 0): ByteArray = ByteArrayOutputStream().also { bytes ->
+        DataOutputStream(bytes).apply {
+            write(mirrorPacketHeaderAndMeta())
+            write(mirrorPacketPayload(keyFramePtsUs))
+        }
+    }.toByteArray()
+
+    private fun mirrorPacketHeaderAndMeta(): ByteArray = ByteArrayOutputStream().also { bytes ->
+        DataOutputStream(bytes).apply {
+            writeInt(ScrcpyCodecIds.H264)
+            writeInt(0x80000000.toInt())
+            writeInt(OBSERVER_WIDTH)
+            writeInt(OBSERVER_HEIGHT)
+        }
+    }.toByteArray()
+
+    private fun mirrorPacketPayload(keyFramePtsUs: Long): ByteArray = ByteArrayOutputStream().also { bytes ->
+        DataOutputStream(bytes).apply {
+            writeLong(SCRCPY_CONFIG_FLAG or keyFramePtsUs)
+            writeInt(2)
+            write(byteArrayOf(SPS_NAL_HEADER.toByte(), SPS_FIXTURE_BYTE.toByte()))
+            writeLong(SCRCPY_KEY_FRAME_FLAG or (keyFramePtsUs + 1))
+            writeInt(2)
+            write(byteArrayOf(IDR_NAL_HEADER.toByte(), IDR_FIXTURE_BYTE.toByte()))
+        }
+    }.toByteArray()
 
     // Regression test for the "stop() blocks callers under its lock" bug: AdbScrcpyConnection.close()
     // runs synchronous adb subprocess cleanup and can take real wall-clock time. stop() used to call
@@ -663,6 +885,40 @@ class EmbeddedMirrorTest {
             Thread.sleep(10)
         }
         assertTrue(condition(), "condition was not met before timeout")
+    }
+
+    private class DelayedPacketInputStream(prefix: ByteArray, payload: ByteArray) : InputStream() {
+        private val prefixInput = ByteArrayInputStream(prefix)
+        private val payloadInput = ByteArrayInputStream(payload)
+        val waitingForPayload = CountDownLatch(1)
+        val releasePayload = CountDownLatch(1)
+        val finished = CountDownLatch(1)
+
+        override fun read(): Int {
+            val single = ByteArray(1)
+            val count = read(single, 0, single.size)
+            return if (count < 0) -1 else single[0].toInt() and UNSIGNED_BYTE_MASK
+        }
+
+        override fun read(buffer: ByteArray, off: Int, len: Int): Int {
+            if (len == 0) return 0
+            val prefixCount = prefixInput.read(buffer, off, len)
+            if (prefixCount >= 0) return prefixCount
+            waitingForPayload.countDown()
+            try {
+                releasePayload.await()
+            } catch (interrupted: InterruptedException) {
+                Thread.currentThread().interrupt()
+                finished.countDown()
+                return -1
+            }
+            val payloadCount = payloadInput.read(buffer, off, len)
+            if (payloadCount < 0) finished.countDown()
+            return payloadCount
+        }
+
+        /** A retired transport may finish a read that had already begun when close was requested. */
+        override fun close() = Unit
     }
 
     private class TestSocket(val requestedPort: Int, eof: Boolean = false) : Socket() {

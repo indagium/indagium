@@ -3,6 +3,9 @@ package com.indagium.testing.authoring
 /** When one probe ran: [seq] identifies its stored state, the times are wall-clock milliseconds. */
 internal data class ProbeWindow(val seq: Int, val startedAt: Long, val finishedAt: Long)
 
+/** One independently timed screenshot or UI/activity reading. */
+internal data class EvidenceWindow(val id: Int, val startedAt: Long, val finishedAt: Long)
+
 /** The probe states attached to one recorded input; null means unknown, never a guess. */
 internal data class RowAttachment(val beforeSeq: Int? = null, val afterSeq: Int? = null)
 
@@ -10,33 +13,56 @@ internal data class RowAttachment(val beforeSeq: Int? = null, val afterSeq: Int?
 internal data class InputWindow(val startMs: Long, val endMs: Long)
 
 /**
- * Decides which probe state describes the screen before and after each input.
- *
- * - A probe is the **after** state of the last input that began before the probe's `startedAt`, provided that input had
- *   ended by then (a probe that started mid-gesture saw a moving screen and attaches to nothing). When several probes
- *   follow the same input, the latest-started one (the most settled screen) wins.
- * - The same probe is the **before** state of the next input, but only when that input began after the probe's
- *   `finishedAt`; if it began while the probe was still reading, the screen the probe saw is unknown.
- * - A probe that started before the first input is therefore only the first input's before state.
+ * Attaches evidence only when its complete read interval falls strictly between two inputs. This also means a probe that
+ * started before a gesture and finished during it, or finished exactly when the next input began, is never treated as a
+ * before/after state. In each gap the latest fully eligible reading wins; a newer overlapping read cannot hide an earlier
+ * valid one.
  *
  * [inputs] are in recorded order; the result has one entry per input.
  */
 internal fun attachScreenStates(inputs: List<InputWindow>, probes: List<ProbeWindow>): List<RowAttachment> {
-    val after = arrayOfNulls<Int>(inputs.size)
-    val before = arrayOfNulls<Int>(inputs.size)
-    val latestPerInput = HashMap<Int, ProbeWindow>()
-    probes.forEach { probe ->
-        val input = inputs.indexOfLast { it.startMs < probe.startedAt }
-        if (input >= 0 && inputs[input].endMs >= probe.startedAt) return@forEach
-        val best = latestPerInput[input]
-        if (best == null || probe.startedAt > best.startedAt || (probe.startedAt == best.startedAt && probe.seq > best.seq)) {
-            latestPerInput[input] = probe
+    val windows = probes.map { EvidenceWindow(it.seq, it.startedAt, it.finishedAt) }
+    return attachEvidenceWindows(inputs, windows)
+}
+
+internal fun attachEvidenceWindows(inputs: List<InputWindow>, windows: List<EvidenceWindow>): List<RowAttachment> {
+    if (inputs.isEmpty()) return emptyList()
+    val prefixMaxEnd = LongArray(inputs.size)
+    var latestEnd = Long.MIN_VALUE
+    inputs.indices.forEach { index ->
+        latestEnd = maxOf(latestEnd, inputs[index].endMs)
+        prefixMaxEnd[index] = latestEnd
+    }
+    val suffixMinStart = LongArray(inputs.size)
+    var earliestStart = Long.MAX_VALUE
+    inputs.indices.reversed().forEach { index ->
+        earliestStart = minOf(earliestStart, inputs[index].startMs)
+        suffixMinStart[index] = earliestStart
+    }
+    // Slot 0 is before input 1, slot n is after input n, and each middle slot is the open gap between adjacent inputs.
+    val bestPerGap = arrayOfNulls<EvidenceWindow>(inputs.size + 1)
+    windows.forEach { window ->
+        if (window.finishedAt < window.startedAt) return@forEach
+        // Prefix/suffix bounds require separation from every input, including overlapping/non-monotonic windows.
+        val gap = when {
+            window.finishedAt < suffixMinStart[0] -> 0
+            window.startedAt > prefixMaxEnd[inputs.lastIndex] -> inputs.size
+            else -> (1 until inputs.size).firstOrNull { gapIndex ->
+                window.startedAt > prefixMaxEnd[gapIndex - 1] && window.finishedAt < suffixMinStart[gapIndex]
+            } ?: return@forEach
+        }
+        val best = bestPerGap[gap]
+        if (best == null || window.startedAt > best.startedAt || (window.startedAt == best.startedAt && window.id > best.id)) {
+            bestPerGap[gap] = window
         }
     }
-    latestPerInput.forEach { (input, probe) ->
-        if (input >= 0) after[input] = probe.seq
-        val next = input + 1
-        if (next < inputs.size && inputs[next].startMs > probe.finishedAt) before[next] = probe.seq
+    val before = arrayOfNulls<Int>(inputs.size)
+    val after = arrayOfNulls<Int>(inputs.size)
+    bestPerGap.forEachIndexed { gap, window ->
+        if (window != null) {
+            if (gap > 0) after[gap - 1] = window.id
+            if (gap < inputs.size) before[gap] = window.id
+        }
     }
     return inputs.indices.map { RowAttachment(before[it], after[it]) }
 }

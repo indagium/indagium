@@ -100,6 +100,55 @@ class TestRunEngineTest {
         assertEquals(run.suite, stored.suite)
     }
 
+    @Test
+    fun anAbsentConditionalAdCanBeSkippedWithoutFailingTheCase() {
+        val optionalAd = step("Skip the ad", expected = "").copy(
+            optional = true,
+            condition = "A visible Skip ad button appears.",
+        )
+        val suite = suiteOf(caseOf("Watch video", optionalAd, step("Pause playback", "The player shows paused state")))
+        val h = harness(suite, listOf(finishTurn("skipped", "No Skip ad button was visible"), finishTurn("pass", "Paused indicator is visible"), textTurn))
+
+        val run = h.runToEnd(suite)
+        val result = run.caseResult("Watch video")
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(CaseStatus.PASS, result.status)
+        assertEquals(listOf(StepStatus.SKIPPED, StepStatus.PASS), result.steps.map { it.status })
+        assertEquals("No Skip ad button was visible", result.steps.first().observation)
+        val prompt = h.provider.requests.first().messages.joinToString("\n") { it.content.orEmpty() }
+        assertTrue("Optional condition: A visible Skip ad button appears." in prompt, prompt)
+    }
+
+    @Test
+    fun anOptionalActionThatIsPresentAndFailsStillFailsTheCase() {
+        val optionalAd = step("Skip the ad", expected = "The ad is dismissed").copy(
+            optional = true,
+            condition = "A visible Skip ad button appears.",
+        )
+        val suite = suiteOf(caseOf("Watch video", optionalAd))
+        val h = harness(suite, listOf(finishTurn("fail", "Skip ad was visible but tapping it did not dismiss the ad"), textTurn))
+
+        val run = h.runToEnd(suite)
+
+        assertEquals(RunStatus.FAILED, run.status, run.toString())
+        assertEquals(CaseStatus.FAIL, run.caseResult("Watch video").status)
+        assertEquals(StepStatus.FAIL, run.caseResult("Watch video").steps.single().status)
+    }
+
+    @Test
+    fun aRequiredStepCannotBeSkippedButCanStillPassAfterTheRefusal() {
+        val suite = suiteOf(caseOf("Open app", step("Open the app")))
+        val h = harness(suite, listOf(finishTurn("skipped", "The app was not found"), finishTurn("pass", "The app opened"), textTurn))
+
+        val run = h.runToEnd(suite)
+
+        assertEquals(RunStatus.PASSED, run.status, run.toString())
+        assertEquals(StepStatus.PASS, run.caseResult("Open app").steps.single().status)
+        val transcript = File(h.store.runDir(run.id), assertNotNull(run.lanes.single().transcriptPath)).readText()
+        assertTrue("required step cannot be skipped" in transcript.lowercase(), transcript)
+    }
+
     private fun h(): RunHarness = checkNotNull(harness)
 
     @Test

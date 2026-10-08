@@ -42,7 +42,10 @@ class DeviceAiMcpImageTest {
                 "message" to "Saved input-time context",
                 "kind" to "inputTimeContext",
                 "exampleId" to "recording-row-1",
-                "caption" to "Captured at input time before action: Open settings",
+                "caption" to "Uncertain raw input preview for: Open settings",
+                "source" to "mirror_input",
+                "timingUncertain" to true,
+                "verifiedFor" to null,
                 "imageBase64" to "aW5wdXQtZnJhbWU=",
                 "mimeType" to "image/jpeg",
             ),
@@ -53,8 +56,8 @@ class DeviceAiMcpImageTest {
         val text = assertIs<TextContent>(result.content[0]).text
         val image = assertIs<ImageContent>(result.content[1])
         assertTrue(text.contains("input-time context"))
-        assertTrue(text.contains("not the current device screen"))
-        assertTrue(text.contains("expected-result oracle"))
+        assertTrue(text.contains("current device screen"))
+        assertTrue(text.contains("not verified before/after evidence"))
         assertFalse(text.contains("coordinate"))
         assertFalse(text.contains("aW5wdXQtZnJhbWU="))
         assertEquals("image/jpeg", image.mimeType)

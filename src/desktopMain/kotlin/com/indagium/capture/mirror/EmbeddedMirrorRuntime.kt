@@ -22,6 +22,7 @@ import java.nio.ByteOrder
 import java.time.Duration
 import java.util.ArrayDeque
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -176,6 +177,16 @@ internal class EmbeddedMirrorRuntime(
     private var connection: EmbeddedMirrorConnection? = null
     private var worker: Thread? = null
     private var stopping = false
+    private val videoObserverLock = Any()
+    private val videoPacketListeners = CopyOnWriteArrayList<(MirrorVideoPacket) -> Unit>()
+    private val recentVideoPackets = ArrayDeque<MirrorVideoPacket>()
+    private val videoSequence = AtomicLong(0)
+    private val videoConnectionEpoch = AtomicLong(0)
+    private var videoObserverGeneration = 0L
+    private var videoObserverConnectionEpoch: Long? = null
+    private var recentVideoBytes = 0L
+    private var latestVideoConfig: MirrorVideoPacket? = null
+    private var waitingForRecentKeyFrame = true
 
     // Terminal: set by close() under [lock]; a start() after it is a no-op, so a start racing a close
     // can never open a fresh adb forward + scrcpy server that nothing will ever tear down.
@@ -196,16 +207,21 @@ internal class EmbeddedMirrorRuntime(
     /** Starts asynchronously; [snapshot] is CONNECTING immediately and never blocks on ADB. */
     fun start(deviceSerial: String, options: MirrorStreamOptions = MirrorStreamOptions()) {
         require(deviceSerial.isNotBlank()) { "device serial cannot be blank" }
-        val previousConnection = synchronized(lock) {
+        val (runId, previousConnection) = synchronized(lock) {
             if (closed) return
             val previous = detachLocked()
             stopping = false
             val runId = generation.incrementAndGet()
             publishLocked(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
-            worker = thread(name = "embedded-mirror-$deviceSerial", isDaemon = true) {
-                runSession(runId, deviceSerial, options)
+            runId to previous
+        }
+        clearRecentVideoPackets(runId)
+        synchronized(lock) {
+            if (isCurrentLocked(runId)) {
+                worker = thread(name = "embedded-mirror-$deviceSerial", isDaemon = true) {
+                    runSession(runId, deviceSerial, options)
+                }
             }
-            previous
         }
         // Closing a real AdbScrcpyConnection runs `adb forward --remove`/`adb shell rm`
         // synchronously and can take real wall-clock time; doing that while still holding [lock]
@@ -218,18 +234,121 @@ internal class EmbeddedMirrorRuntime(
     fun stop() {
         val threadToJoin: Thread?
         val previousConnection: EmbeddedMirrorConnection?
-        synchronized(lock) {
+        val stoppedGeneration = synchronized(lock) {
             stopping = true
-            generation.incrementAndGet()
+            val stoppedGeneration = generation.incrementAndGet()
             threadToJoin = worker
             previousConnection = detachLocked()
             publishLocked(EmbeddedMirrorSnapshot())
+            stoppedGeneration
         }
+        clearRecentVideoPackets(stoppedGeneration)
         runCatching { previousConnection?.close() }
         if (threadToJoin !== Thread.currentThread()) threadToJoin?.join(MIRROR_STOP_JOIN_MS)
     }
 
     fun pollFrame(): MirrorFrame? = frameBuffer.pollLatest()
+
+    /** A bounded, best-effort compressed video tap that leaves the live decoder and its transport untouched. */
+    fun addVideoPacketListener(listener: (MirrorVideoPacket) -> Unit): Closeable {
+        synchronized(videoObserverLock) {
+            videoPacketListeners += listener
+            val activeGeneration = generation.get()
+            if (videoObserverGeneration == activeGeneration) {
+                recentVideoPackets.forEach { packet -> runCatching { listener(packet) } }
+            }
+        }
+        return Closeable { videoPacketListeners.remove(listener) }
+    }
+
+    private fun publishVideoPacket(runId: Long, packet: BoundedScrcpyPacketFeed.Packet): Unit = publishVideoPacket(
+        runId,
+        MirrorVideoPacket(
+            sourcePtsUs = packet.ptsUs,
+            config = packet.config,
+            keyFrame = packet.keyFrame,
+            data = packet.data,
+            width = packet.width,
+            height = packet.height,
+            receivedAtMs = packet.receivedAtMs,
+            receivedAtNanos = packet.enqueuedNs,
+            connectionEpoch = packet.connectionEpoch,
+            sequence = 0,
+        )
+    )
+
+    private fun publishVideoPacket(runId: Long, packet: MirrorVideoPacket): Unit = synchronized(videoObserverLock) {
+        if (generation.get() != runId || videoObserverGeneration != runId ||
+            videoObserverConnectionEpoch != packet.connectionEpoch
+        ) {
+            return
+        }
+        val observed = packet.copy(sequence = videoSequence.incrementAndGet())
+        when {
+            observed.config -> {
+                recentVideoPackets.clear()
+                recentVideoBytes = 0
+                latestVideoConfig = observed
+                waitingForRecentKeyFrame = true
+                rememberVideoPacket(observed)
+            }
+            observed.keyFrame -> {
+                recentVideoPackets.clear()
+                recentVideoBytes = 0
+                latestVideoConfig?.let(::rememberVideoPacket)
+                waitingForRecentKeyFrame = false
+                rememberVideoPacket(observed)
+            }
+            !waitingForRecentKeyFrame -> rememberVideoPacket(observed)
+        }
+        videoPacketListeners.forEach { listener -> runCatching { listener(observed) } }
+    }
+
+    /** Must be called without [lock]; observer callbacks and lifecycle locks never nest. */
+    private fun clearRecentVideoPackets(runId: Long) = synchronized(videoObserverLock) {
+        if (generation.get() != runId) return@synchronized
+        clearRecentVideoPacketsLocked(runId, null)
+    }
+
+    /** Invalidates replay state before LIVE is published for each new transport connection. */
+    private fun beginVideoConnection(runId: Long): Long? {
+        val epoch = videoConnectionEpoch.incrementAndGet()
+        synchronized(videoObserverLock) {
+            if (generation.get() != runId) return null
+            clearRecentVideoPacketsLocked(runId, epoch)
+        }
+        return epoch
+    }
+
+    private fun clearRecentVideoPacketsLocked(runId: Long, connectionEpoch: Long?) {
+        recentVideoPackets.clear()
+        recentVideoBytes = 0
+        latestVideoConfig = null
+        waitingForRecentKeyFrame = true
+        videoObserverGeneration = runId
+        videoObserverConnectionEpoch = connectionEpoch
+    }
+
+    private fun rememberVideoPacket(packet: MirrorVideoPacket) {
+        if (packet.data.size > MAX_RECENT_VIDEO_BYTES) {
+            recentVideoPackets.clear()
+            recentVideoBytes = 0
+            waitingForRecentKeyFrame = true
+            return
+        }
+        if (recentVideoBytes + packet.data.size > MAX_RECENT_VIDEO_BYTES || recentVideoPackets.size >= MAX_RECENT_VIDEO_PACKETS) {
+            recentVideoPackets.clear()
+            recentVideoBytes = 0
+            waitingForRecentKeyFrame = true
+            latestVideoConfig?.takeIf { it.data.size <= MAX_RECENT_VIDEO_BYTES }?.let { config ->
+                recentVideoPackets.addLast(config)
+                recentVideoBytes += config.data.size
+            }
+            return
+        }
+        recentVideoPackets.addLast(packet)
+        recentVideoBytes += packet.data.size
+    }
 
     fun send(command: MirrorControlCommand): Boolean {
         val active = synchronized(lock) {
@@ -294,9 +413,15 @@ internal class EmbeddedMirrorRuntime(
             }
             var opened: EmbeddedMirrorConnection? = null
             try {
-                opened = transport.open(serial, options)
-                if (!publishLiveOrAbort(runId, opened, attempt)) return
-                when (pumpVideo(runId, opened)) {
+                val openedConnection = transport.open(serial, options)
+                opened = openedConnection
+                val connectionEpoch = beginVideoConnection(runId)
+                if (connectionEpoch == null) {
+                    runCatching { openedConnection.close() }
+                    return
+                }
+                if (!publishLiveOrAbort(runId, openedConnection, attempt)) return
+                when (pumpVideo(runId, openedConnection, connectionEpoch)) {
                     VideoPumpOutcome.ABORTED -> return
                     VideoPumpOutcome.STREAM_ENDED -> throw IllegalStateException("mirror video stream ended")
                 }
@@ -368,9 +493,13 @@ internal class EmbeddedMirrorRuntime(
      * superseded. Split out of [runSession] to keep it under detekt's cyclomatic-complexity/
      * long-method/return-count thresholds; control flow and every branch are unchanged — this is
      * exactly the body that used to sit inline in [runSession]. */
-    private fun pumpVideo(runId: Long, opened: EmbeddedMirrorConnection): VideoPumpOutcome {
+    private fun pumpVideo(runId: Long, opened: EmbeddedMirrorConnection, connectionEpoch: Long): VideoPumpOutcome {
         if (directDecoder != null) {
-            val packetFeed = BoundedScrcpyPacketFeed(opened.videoInput)
+            val packetFeed = BoundedScrcpyPacketFeed(
+                opened.videoInput,
+                connectionEpoch = connectionEpoch,
+                onPacket = { packet -> publishVideoPacket(runId, packet) },
+            )
             try {
                 if (directFallbackActive.get()) {
                     val fallback = directFallbackDecoder
@@ -423,7 +552,11 @@ internal class EmbeddedMirrorRuntime(
             // Keep the established bounded Annex-B path for Compose on nonnative
             // platforms. The packet-preserving fan-out is only needed by the direct
             // VideoToolbox route and its same-socket fallback.
-            val composeFeed = BoundedScrcpyAnnexBFeed(opened.videoInput)
+            val composeFeed = BoundedScrcpyAnnexBFeed(
+                opened.videoInput,
+                connectionEpoch = connectionEpoch,
+                onPacket = { packet -> publishVideoPacket(runId, packet) },
+            )
             try {
                 requireNotNull(decoder).decode(composeFeed.input) { frame ->
                     if (isCurrent(runId)) {
@@ -503,6 +636,8 @@ internal class EmbeddedMirrorRuntime(
 
     companion object {
         private const val MIRROR_STOP_JOIN_MS = 1_000L
+        private const val MAX_RECENT_VIDEO_BYTES = 8L * 1024 * 1024
+        private const val MAX_RECENT_VIDEO_PACKETS = 180
     }
 }
 

@@ -16,6 +16,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.time.Duration
+import java.util.ArrayDeque
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
@@ -73,6 +74,16 @@ internal class EmbeddedDeviceSession(
     // reconnects even though nothing may be listening at all for most of a capture's lifetime.
     private val connectionListeners = CopyOnWriteArrayList<(EmbeddedMirrorSnapshot, Long) -> Unit>()
     private var connectionSnapshotVersion = 0L
+    private val videoObserverLock = Any()
+    private val videoPacketListeners = CopyOnWriteArrayList<(MirrorVideoPacket) -> Unit>()
+    private val recentVideoPackets = ArrayDeque<MirrorVideoPacket>()
+    private val videoSequence = AtomicLong(0)
+    private val videoConnectionEpoch = AtomicLong(0)
+    private var videoObserverGeneration = 0L
+    private var videoObserverConnectionEpoch: Long? = null
+    private var recentVideoBytes = 0L
+    private var latestVideoConfigPacket: MirrorVideoPacket? = null
+    private var waitingForRecentVideoKeyFrame = true
 
     /** Registers [listener] for every future connection-state change and immediately replays the
      * current one. The returned [Closeable] unregisters it. */
@@ -81,6 +92,18 @@ internal class EmbeddedDeviceSession(
         val (snapshot, version) = synchronized(lock) { connectionSnapshotValue to connectionSnapshotVersion }
         runCatching { listener(snapshot, version) }
         return Closeable { connectionListeners.remove(listener) }
+    }
+
+    /** Subscribes to the packet stream already being written to the capture, with a bounded config/GOP pre-roll. */
+    fun addVideoPacketListener(listener: (MirrorVideoPacket) -> Unit): Closeable {
+        synchronized(videoObserverLock) {
+            videoPacketListeners += listener
+            val activeGeneration = generation.get()
+            if (videoObserverGeneration == activeGeneration) {
+                recentVideoPackets.forEach { packet -> runCatching { listener(packet) } }
+            }
+        }
+        return Closeable { videoPacketListeners.remove(listener) }
     }
 
     // Video PTS bookkeeping — survives reconnects, protected by [lock].
@@ -177,20 +200,36 @@ internal class EmbeddedDeviceSession(
     }
 
     fun start(deviceSerial: String, options: MirrorStreamOptions) {
-        // Published before the worker thread is even created (not inside the same synchronized
-        // block as before): publishConnectionSnapshot() itself briefly takes [lock] and then calls
-        // external listeners *without* holding it — see that function's doc — so a fast/synchronous
-        // fake transport in a test could otherwise have the worker thread publish LIVE before this
-        // CONNECTING publish ran, if both raced inside one lock scope.
-        publishConnectionSnapshot(EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial))
-        audioRequestedFlag = options.audio
-        isStopped = false
+        val (runId, retiredWorker, retiredConnection) = synchronized(lock) {
+            stopping = false
+            audioRequestedFlag = options.audio
+            isStopped = false
+            val runId = generation.incrementAndGet()
+            val retiredWorker = worker
+            val retiredConnection = currentConnection
+            worker = null
+            currentConnection = null
+            Triple(runId, retiredWorker, retiredConnection)
+        }
+        retiredWorker?.interrupt()
+        clearRecentVideoPackets(runId)
+        runCatching { retiredConnection?.close() }
+        // Publish outside [lock], before starting the worker, so a fast fake transport cannot
+        // publish LIVE before CONNECTING while listeners never run inside the lifecycle lock.
+        if (!publishConnectionSnapshotIfCurrent(
+                runId,
+                EmbeddedMirrorSnapshot(EmbeddedMirrorState.CONNECTING, deviceSerial = deviceSerial),
+            )
+        ) {
+            return
+        }
+        if (!isCurrent(runId)) return
         startMicrophoneIfRequested()
         synchronized(lock) {
-            stopping = false
-            val runId = generation.incrementAndGet()
-            worker = thread(name = "embedded-recording-$deviceSerial", isDaemon = true) {
-                runSession(runId, deviceSerial, options)
+            if (!stopping && generation.get() == runId) {
+                worker = thread(name = "embedded-recording-$deviceSerial", isDaemon = true) {
+                    runSession(runId, deviceSerial, options)
+                }
             }
         }
     }
@@ -199,14 +238,16 @@ internal class EmbeddedDeviceSession(
         isStopped = true
         val threadToJoin: Thread?
         val connectionToClose: EmbeddedMirrorConnection?
-        synchronized(lock) {
+        val stoppedGeneration = synchronized(lock) {
             stopping = true
-            generation.incrementAndGet()
+            val stoppedGeneration = generation.incrementAndGet()
             threadToJoin = worker
             worker = null
             connectionToClose = currentConnection
             currentConnection = null
+            stoppedGeneration
         }
+        clearRecentVideoPackets(stoppedGeneration)
         publishConnectionSnapshot(EmbeddedMirrorSnapshot())
         runCatching { connectionToClose?.close() }
         if (threadToJoin !== Thread.currentThread()) threadToJoin?.join(STOP_JOIN_MS)
@@ -448,6 +489,31 @@ internal class EmbeddedDeviceSession(
         return openedConnection
     }
 
+    private fun prepareLiveConnection(
+        runId: Long,
+        connection: EmbeddedMirrorConnection,
+        serial: String,
+        attempt: Int,
+    ): Long? {
+        val streamEpoch = beginVideoConnection(runId)
+        if (streamEpoch == null || !publishConnectionSnapshotIfCurrent(
+                runId,
+                EmbeddedMirrorSnapshot(EmbeddedMirrorState.LIVE, deviceSerial = serial, reconnectAttempt = attempt),
+            )
+        ) {
+            closeAcceptedConnectionIfStillOwned(connection)
+            return null
+        }
+        return streamEpoch
+    }
+
+    private fun closeAcceptedConnectionIfStillOwned(connection: EmbeddedMirrorConnection) {
+        val detached = synchronized(lock) {
+            currentConnection?.takeIf { it === connection }?.also { currentConnection = null }
+        }
+        runCatching { detached?.close() }
+    }
+
     private fun runSession(runId: Long, serial: String, options: MirrorStreamOptions) {
         var attempt = 0
         var nativeFailure = false
@@ -461,13 +527,7 @@ internal class EmbeddedDeviceSession(
             try {
                 val openedConnection = openAndAcceptConnection(runId, serial, options) ?: return
                 connection = openedConnection
-                if (!publishConnectionSnapshotIfCurrent(
-                        runId,
-                        EmbeddedMirrorSnapshot(EmbeddedMirrorState.LIVE, deviceSerial = serial, reconnectAttempt = attempt),
-                    )
-                ) {
-                    return
-                }
+                val streamEpoch = prepareLiveConnection(runId, openedConnection, serial, attempt) ?: return
                 // Only a reconnect *after* the muxer already has real video is a genuine
                 // interruption worth offsetting/reporting: if the very first connection attempt(s)
                 // failed before ever reaching a keyframe, nothing was recorded yet, so there is no
@@ -506,7 +566,7 @@ internal class EmbeddedDeviceSession(
                             }
                     }
                 }
-                pumpVideo(runId, openedConnection, options.audio)
+                pumpVideo(runId, openedConnection, options.audio, streamEpoch)
                 if (!isCurrent(runId)) return
                 // A clean EOF without stop() is a real drop — fall through and reconnect.
                 attempt++
@@ -555,7 +615,12 @@ internal class EmbeddedDeviceSession(
         }
     }
 
-    private fun pumpVideo(runId: Long, connection: EmbeddedMirrorConnection, audioRequested: Boolean) {
+    private fun pumpVideo(
+        runId: Long,
+        connection: EmbeddedMirrorConnection,
+        audioRequested: Boolean,
+        streamEpoch: Long,
+    ) {
         val reader = ScrcpyPacketReader(CountingInputStream(connection.videoInput, pathStats.video))
         when (val header = reader.readHeader()) {
             is ScrcpyStreamHeader.Codec -> pathStats.video.headerRead(header.id)
@@ -565,6 +630,7 @@ internal class EmbeddedDeviceSession(
         var pendingConfig: ByteArray? = null
         while (isCurrent(runId)) {
             val event = reader.readNext() ?: return
+            if (!isCurrent(runId) || !isCurrentVideoConnection(runId, streamEpoch)) return
             pathStats.video.event(event)
             when (event) {
                 is ScrcpyStreamEvent.SessionMeta -> {
@@ -572,15 +638,111 @@ internal class EmbeddedDeviceSession(
                     pendingHeight = event.height
                 }
                 is ScrcpyStreamEvent.Packet -> {
+                    val receivedAtNanos = System.nanoTime()
+                    val receivedAtMs = System.currentTimeMillis()
                     feedDecoder(event)
                     if (event.config) {
                         pendingConfig = handleConfigPacket(event.data, pendingConfig, audioRequested)
+                        publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
                     } else {
+                        publishVideoPacket(runId, event, receivedAtNanos, receivedAtMs, streamEpoch)
                         pendingConfig = writeVideoFrame(event, pendingConfig)
                     }
                 }
             }
         }
+    }
+
+    /** Tee original compressed access units to an independent bounded observer; no decoder or device work runs here. */
+    private fun publishVideoPacket(
+        runId: Long,
+        event: ScrcpyStreamEvent.Packet,
+        receivedAtNanos: Long,
+        receivedAtMs: Long,
+        epoch: Long,
+    ): Unit =
+        synchronized(videoObserverLock) {
+            if (generation.get() != runId || videoObserverGeneration != runId ||
+                videoObserverConnectionEpoch != epoch
+            ) {
+                return
+            }
+            val packet = MirrorVideoPacket(
+                sourcePtsUs = event.ptsUs,
+                config = event.config,
+                keyFrame = event.keyFrame,
+                data = event.data,
+                width = pendingWidth,
+                height = pendingHeight,
+                receivedAtMs = receivedAtMs,
+                receivedAtNanos = receivedAtNanos,
+                connectionEpoch = epoch,
+                sequence = videoSequence.incrementAndGet(),
+            )
+            when {
+                packet.config -> {
+                    recentVideoPackets.clear()
+                    recentVideoBytes = 0
+                    latestVideoConfigPacket = packet
+                    waitingForRecentVideoKeyFrame = true
+                    rememberRecentVideoPacket(packet)
+                }
+                packet.keyFrame -> {
+                    recentVideoPackets.clear()
+                    recentVideoBytes = 0
+                    latestVideoConfigPacket?.let(::rememberRecentVideoPacket)
+                    waitingForRecentVideoKeyFrame = false
+                    rememberRecentVideoPacket(packet)
+                }
+                !waitingForRecentVideoKeyFrame -> rememberRecentVideoPacket(packet)
+            }
+            videoPacketListeners.forEach { listener -> runCatching { listener(packet) } }
+        }
+
+    /** Invalidates only replay state; already-attached recording timelines retain their earlier packets. */
+    private fun beginVideoConnection(runId: Long): Long? {
+        val epoch = videoConnectionEpoch.incrementAndGet()
+        synchronized(videoObserverLock) {
+            if (generation.get() != runId) return null
+            clearRecentVideoPacketsLocked(runId, epoch)
+        }
+        return epoch
+    }
+
+    private fun isCurrentVideoConnection(runId: Long, epoch: Long): Boolean = synchronized(videoObserverLock) {
+        generation.get() == runId && videoObserverGeneration == runId && videoObserverConnectionEpoch == epoch
+    }
+
+    /** Must be called without [lock]; observer callbacks and lifecycle locks never nest. */
+    private fun clearRecentVideoPackets(runId: Long) = synchronized(videoObserverLock) {
+        if (generation.get() != runId) return@synchronized
+        clearRecentVideoPacketsLocked(runId, null)
+    }
+
+    private fun clearRecentVideoPacketsLocked(runId: Long, epoch: Long?) {
+        recentVideoPackets.clear()
+        recentVideoBytes = 0
+        latestVideoConfigPacket = null
+        waitingForRecentVideoKeyFrame = true
+        videoObserverGeneration = runId
+        videoObserverConnectionEpoch = epoch
+    }
+
+    private fun rememberRecentVideoPacket(packet: MirrorVideoPacket) {
+        if (packet.data.size > MAX_RECENT_VIDEO_BYTES || recentVideoBytes + packet.data.size > MAX_RECENT_VIDEO_BYTES ||
+            recentVideoPackets.size >= MAX_RECENT_VIDEO_PACKETS
+        ) {
+            recentVideoPackets.clear()
+            recentVideoBytes = 0
+            waitingForRecentVideoKeyFrame = true
+            latestVideoConfigPacket?.takeIf { it.data.size <= MAX_RECENT_VIDEO_BYTES }?.let { config ->
+                recentVideoPackets.addLast(config)
+                recentVideoBytes += config.data.size
+            }
+            return
+        }
+        recentVideoPackets.addLast(packet)
+        recentVideoBytes += packet.data.size
     }
 
     /** Returns the still-pending config to carry forward (null once consumed by [handleConfigPacket]
@@ -942,6 +1104,8 @@ internal class EmbeddedDeviceSession(
         const val OPUS_SAMPLE_RATE_HZ = 48_000
         const val OPUS_CHANNELS = 2
         const val NO_VIDEO_ANCHOR = Long.MIN_VALUE
+        const val MAX_RECENT_VIDEO_BYTES = 8L * 1024 * 1024
+        const val MAX_RECENT_VIDEO_PACKETS = 180
 
         // Android's audio MediaCodec setup (AudioEncoder.encode()) goes through an extra async
         // callback-registration round trip that video's SurfaceEncoder doesn't, so audio's config

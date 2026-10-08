@@ -6,6 +6,7 @@ const val MAX_SCRIPT_TOOL_NAME_CHARS = 41
 const val MAX_ID_CHARS = 128
 const val COPY_NAME_SUFFIX = " (copy)"
 const val MAX_TAG_CHARS = 40
+const val MAX_STEP_CONDITION_CHARS = 2_000
 
 private val SAFE_ID_REGEX = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,${MAX_ID_CHARS - 1}}$")
 private val SCRIPT_TOOL_NAME_REGEX = Regex("^[a-z][a-z0-9_]{1,40}$")
